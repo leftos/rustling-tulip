@@ -20,10 +20,31 @@ fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// One pane (leaf) of a grid as the layout builders read and rebuild it: its
+/// id, the session it shows and the host of that session (`None` is this
+/// daemon).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaneRef {
+    pub pane_id: String,
+    pub session_id: Option<String>,
+    pub host: Option<String>,
+}
+
+impl PaneRef {
+    fn to_node(&self) -> GridNode {
+        GridNode::Pane {
+            pane_id: self.pane_id.clone(),
+            session_id: self.session_id.clone(),
+            host: self.host.clone(),
+        }
+    }
+}
+
 fn placeholder() -> GridNode {
     GridNode::Pane {
         pane_id: String::new(),
         session_id: None,
+        host: None,
     }
 }
 
@@ -41,6 +62,7 @@ fn clamp_ratio(ratio: f32) -> f32 {
 pub fn make_tab(
     name: Option<String>,
     initial_session_id: Option<String>,
+    initial_host: Option<String>,
     existing: &[TabEntry],
 ) -> TabEntry {
     let id = new_id();
@@ -52,6 +74,7 @@ pub fn make_tab(
             grid: GridNode::Pane {
                 pane_id,
                 session_id: initial_session_id,
+                host: initial_host,
             },
         },
         created_at: Utc::now(),
@@ -138,21 +161,25 @@ pub fn pane_exists(node: &GridNode, target: &str) -> bool {
     }
 }
 
-/// Walk all panes (leaves) in left-then-right order and return their
-/// (`pane_id`, `session_id`) tuples.
-pub fn collect_panes(node: &GridNode) -> Vec<(String, Option<String>)> {
+/// Walk all panes (leaves) in left-then-right order and return them.
+pub fn collect_panes(node: &GridNode) -> Vec<PaneRef> {
     let mut out = Vec::new();
     collect_in(node, &mut out);
     out
 }
 
-fn collect_in(node: &GridNode, out: &mut Vec<(String, Option<String>)>) {
+fn collect_in(node: &GridNode, out: &mut Vec<PaneRef>) {
     match node {
         GridNode::Pane {
             pane_id,
             session_id,
+            host,
         } => {
-            out.push((pane_id.clone(), session_id.clone()));
+            out.push(PaneRef {
+                pane_id: pane_id.clone(),
+                session_id: session_id.clone(),
+                host: host.clone(),
+            });
         }
         GridNode::Split { first, second, .. } => {
             collect_in(first, out);
@@ -161,18 +188,35 @@ fn collect_in(node: &GridNode, out: &mut Vec<(String, Option<String>)>) {
     }
 }
 
-/// Split the pane with id `target` along `direction`. The new (empty or
-/// session-seeded) pane occupies `place`; the existing pane occupies the
-/// other side. Returns the new pane's id.
+/// A fresh pane with a new id, showing `session_id` on `host` (`None` is this
+/// daemon), for [`split_pane`] and [`split_tab_pane`].
+pub(crate) fn new_pane(session_id: Option<String>, host: Option<String>) -> GridNode {
+    GridNode::Pane {
+        pane_id: new_id(),
+        session_id,
+        host,
+    }
+}
+
+/// Split the pane with id `target` along `direction`. `new_pane` (made by
+/// [`new_pane`]) occupies `place`; the existing pane occupies the other side.
+/// Returns the new pane's id.
 pub fn split_pane(
     node: &mut GridNode,
     target: &str,
     direction: SplitDirection,
     place: SplitPlace,
-    new_session_id: Option<String>,
+    new_pane: GridNode,
 ) -> anyhow::Result<String> {
-    let new_pane_id = new_id();
-    if split_in(node, target, direction, place, new_session_id, &new_pane_id) {
+    let GridNode::Pane {
+        pane_id: new_pane_id,
+        ..
+    } = &new_pane
+    else {
+        return Err(anyhow!("the new node of a split must be a pane"));
+    };
+    let new_pane_id = new_pane_id.clone();
+    if split_in(node, target, direction, place, &mut Some(new_pane)) {
         Ok(new_pane_id)
     } else {
         Err(anyhow!("pane not found: {target}"))
@@ -184,15 +228,13 @@ fn split_in(
     target: &str,
     direction: SplitDirection,
     place: SplitPlace,
-    new_session_id: Option<String>,
-    new_pane_id: &str,
+    new_pane: &mut Option<GridNode>,
 ) -> bool {
     if matches!(node, GridNode::Pane { pane_id, .. } if pane_id == target) {
-        let existing = std::mem::replace(node, placeholder());
-        let new_pane = GridNode::Pane {
-            pane_id: new_pane_id.to_string(),
-            session_id: new_session_id,
+        let Some(new_pane) = new_pane.take() else {
+            return false;
         };
+        let existing = std::mem::replace(node, placeholder());
         let (first, second) = match place {
             SplitPlace::First => (Box::new(new_pane), Box::new(existing)),
             SplitPlace::Second => (Box::new(existing), Box::new(new_pane)),
@@ -206,24 +248,10 @@ fn split_in(
         return true;
     }
     if let GridNode::Split { first, second, .. } = node {
-        if split_in(
-            first,
-            target,
-            direction,
-            place,
-            new_session_id.clone(),
-            new_pane_id,
-        ) {
+        if split_in(first, target, direction, place, new_pane) {
             return true;
         }
-        return split_in(
-            second,
-            target,
-            direction,
-            place,
-            new_session_id,
-            new_pane_id,
-        );
+        return split_in(second, target, direction, place, new_pane);
     }
     false
 }
@@ -288,61 +316,71 @@ pub fn set_pane_ratio(grid: &mut GridNode, split_path: &[u8], ratio: f32) -> any
     Ok(())
 }
 
-/// Replace a pane's session reference without altering topology.
+/// Replace a pane's session reference (the session and its host) without
+/// altering topology.
 pub fn replace_pane_session(
     grid: &mut GridNode,
     target: &str,
     session_id: Option<String>,
+    host: Option<String>,
 ) -> anyhow::Result<()> {
-    if replace_session_in(grid, target, session_id) {
+    if replace_session_in(grid, target, session_id, host) {
         Ok(())
     } else {
         Err(anyhow!("pane not found: {target}"))
     }
 }
 
-fn replace_session_in(node: &mut GridNode, target: &str, sid: Option<String>) -> bool {
+fn replace_session_in(
+    node: &mut GridNode,
+    target: &str,
+    sid: Option<String>,
+    new_host: Option<String>,
+) -> bool {
     match node {
         GridNode::Pane {
             pane_id,
             session_id,
+            host,
         } if pane_id == target => {
             *session_id = sid;
+            *host = new_host;
             true
         }
         GridNode::Pane { .. } => false,
         GridNode::Split { first, second, .. } => {
-            if replace_session_in(first, target, sid.clone()) {
+            if replace_session_in(first, target, sid.clone(), new_host.clone()) {
                 true
             } else {
-                replace_session_in(second, target, sid)
+                replace_session_in(second, target, sid, new_host)
             }
         }
     }
 }
 
-/// Swap the session bindings of two existing panes without changing topology
-/// or pane ids.
+/// Swap the session bindings (each session with its host) of two existing
+/// panes without changing topology or pane ids.
 pub fn swap_pane_sessions(grid: &mut GridNode, first: &str, second: &str) -> anyhow::Result<()> {
     if first == second {
         return Ok(());
     }
-    let first_session = match pane_session(grid, first) {
-        PaneSessionLookup::Found(session_id) => session_id,
+    let (first_session, first_host) = match pane_session(grid, first) {
+        PaneSessionLookup::Found(session_id, host) => (session_id, host),
         PaneSessionLookup::Missing => return Err(anyhow!("pane not found: {first}")),
     };
-    let second_session = match pane_session(grid, second) {
-        PaneSessionLookup::Found(session_id) => session_id,
+    let (second_session, second_host) = match pane_session(grid, second) {
+        PaneSessionLookup::Found(session_id, host) => (session_id, host),
         PaneSessionLookup::Missing => return Err(anyhow!("pane not found: {second}")),
     };
-    replace_pane_session(grid, first, second_session)?;
-    replace_pane_session(grid, second, first_session)?;
+    replace_pane_session(grid, first, second_session, second_host)?;
+    replace_pane_session(grid, second, first_session, first_host)?;
     Ok(())
 }
 
 enum PaneSessionLookup {
     Missing,
-    Found(Option<String>),
+    /// The pane's session and that session's host.
+    Found(Option<String>, Option<String>),
 }
 
 fn pane_session(node: &GridNode, target: &str) -> PaneSessionLookup {
@@ -350,40 +388,36 @@ fn pane_session(node: &GridNode, target: &str) -> PaneSessionLookup {
         GridNode::Pane {
             pane_id,
             session_id,
-        } if pane_id == target => PaneSessionLookup::Found(session_id.clone()),
+            host,
+        } if pane_id == target => PaneSessionLookup::Found(session_id.clone(), host.clone()),
         GridNode::Pane { .. } => PaneSessionLookup::Missing,
         GridNode::Split { first, second, .. } => match pane_session(first, target) {
-            PaneSessionLookup::Found(session_id) => PaneSessionLookup::Found(session_id),
+            found @ PaneSessionLookup::Found(..) => found,
             PaneSessionLookup::Missing => pane_session(second, target),
         },
     }
 }
 
-/// Collect the ids of every pane in `grid` bound to `session_id`, in
-/// left-to-right order. Used by the session-removal auto-close to know which
-/// panes to close.
+/// Collect the ids of every local pane (no `host`) in `grid` bound to
+/// `session_id`, in left-to-right order. Used by the session-removal
+/// auto-close to know which panes to close; a pane of another daemon's
+/// session with the same id is not this daemon's session and stays.
 #[must_use]
 pub fn panes_for_session(grid: &GridNode, session_id: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_panes_for_session(grid, session_id, &mut out);
-    out
+    panes_where(grid, &|host, sid| host.is_none() && sid == Some(session_id))
 }
 
-fn collect_panes_for_session(grid: &GridNode, session_id: &str, out: &mut Vec<String>) {
-    match grid {
-        GridNode::Pane {
-            pane_id,
-            session_id: sid,
-        } => {
-            if sid.as_deref() == Some(session_id) {
-                out.push(pane_id.clone());
-            }
-        }
-        GridNode::Split { first, second, .. } => {
-            collect_panes_for_session(first, session_id, out);
-            collect_panes_for_session(second, session_id, out);
-        }
-    }
+/// Collect the ids of every pane in `grid` whose (`host`, `session_id`)
+/// satisfies `matches`, in left-to-right order.
+fn panes_where(
+    grid: &GridNode,
+    matches: &dyn Fn(Option<&str>, Option<&str>) -> bool,
+) -> Vec<String> {
+    collect_panes(grid)
+        .into_iter()
+        .filter(|pane| matches(pane.host.as_deref(), pane.session_id.as_deref()))
+        .map(|pane| pane.pane_id)
+        .collect()
 }
 
 /// Deep-copy a layout's tabs with fresh tab + pane ids but the same session
@@ -418,9 +452,12 @@ pub fn clone_tabs_fresh_ids(tabs: &[TabEntry]) -> Vec<TabEntry> {
 
 fn clone_grid_fresh_pane_ids(grid: &GridNode) -> GridNode {
     match grid {
-        GridNode::Pane { session_id, .. } => GridNode::Pane {
+        GridNode::Pane {
+            session_id, host, ..
+        } => GridNode::Pane {
             pane_id: new_id(),
             session_id: session_id.clone(),
+            host: host.clone(),
         },
         GridNode::Split {
             direction,
@@ -443,18 +480,46 @@ pub struct SessionCloseResult {
     pub removed_tab_ids: Vec<String>,
 }
 
-/// Close every pane bound to `session_id` across `tabs`: a closed pane's
-/// sibling fills its space, and a tab emptied of its last pane is removed.
-/// Mutates `tabs` in place and reports what changed so the caller can broadcast
-/// scoped tab events. This is the auto-close behavior on session removal.
+/// Close every local pane (no `host`) bound to `session_id` across `tabs`:
+/// the auto-close behavior on session removal. See [`close_panes_where`].
 pub fn close_session_panes(tabs: &mut Vec<TabEntry>, session_id: &str) -> SessionCloseResult {
+    close_panes_where(tabs, &|grid| panes_for_session(grid, session_id))
+}
+
+/// Close every pane of `host` across `tabs` whose session is in
+/// `session_ids`, or every pane of `host` when `all` is set: what a removal
+/// does to a local session's panes, applied to another daemon's sessions.
+/// See [`close_panes_where`].
+pub fn forget_host_panes(
+    tabs: &mut Vec<TabEntry>,
+    host: &str,
+    session_ids: &[String],
+    all: bool,
+) -> SessionCloseResult {
+    let matches = |pane_host: Option<&str>, sid: Option<&str>| {
+        pane_host == Some(host)
+            && (all || sid.is_some_and(|sid| session_ids.iter().any(|id| id == sid)))
+    };
+    close_panes_where(tabs, &|grid| panes_where(grid, &matches))
+}
+
+/// Close, across `tabs`, the panes `select` picks from each grid (by pane id,
+/// [`panes_where`] for a predicate over `host` and `session_id`): a closed
+/// pane's sibling fills its space, a tab emptied of its last pane is removed,
+/// and a surviving tab untouched since its pick is rebuilt. Mutates `tabs` in
+/// place and reports what changed so the caller can broadcast scoped tab
+/// events; a tab with no selected pane is not reported.
+fn close_panes_where(
+    tabs: &mut Vec<TabEntry>,
+    select: &dyn Fn(&GridNode) -> Vec<String>,
+) -> SessionCloseResult {
     let mut updated = Vec::new();
     let mut removed_tab_ids = Vec::new();
     for tab in tabs.iter_mut() {
         let Some(grid) = tab.grid_mut() else {
             continue;
         };
-        let pane_ids = panes_for_session(grid, session_id);
+        let pane_ids = select(grid);
         if pane_ids.is_empty() {
             continue;
         }
@@ -469,7 +534,7 @@ pub fn close_session_panes(tabs: &mut Vec<TabEntry>, session_id: &str) -> Sessio
                 Err(err) => {
                     // Ids were just collected from this grid and closed in
                     // order, so a not-found here is unexpected — log and skip.
-                    tracing::warn!(?err, %pane_id, "close_session_panes: pane vanished");
+                    tracing::warn!(?err, %pane_id, "close_panes_where: pane vanished");
                 }
             }
         }
@@ -487,16 +552,21 @@ pub fn close_session_panes(tabs: &mut Vec<TabEntry>, session_id: &str) -> Sessio
     }
 }
 
-/// Clear every pane whose `session_id` is not in `keep`. Used on daemon
-/// startup to drop dangling references to sessions that did not survive the
-/// restart. Returns true if at least one pane was modified.
+/// Clear every local pane (no `host`) whose `session_id` is not in `keep`.
+/// Used on daemon startup to drop dangling references to sessions that did not
+/// survive the restart; a pane of another daemon's session is not this
+/// daemon's to judge and stays as it is. Returns true if at least one pane was
+/// modified.
 pub fn prune_sessions_not_in(
     grid: &mut GridNode,
     keep: &std::collections::HashSet<String>,
 ) -> bool {
     match grid {
-        GridNode::Pane { session_id, .. } => {
-            if let Some(id) = session_id.as_deref()
+        GridNode::Pane {
+            session_id, host, ..
+        } => {
+            if host.is_none()
+                && let Some(id) = session_id.as_deref()
                 && !keep.contains(id)
             {
                 *session_id = None;
@@ -524,7 +594,8 @@ pub fn has_any_session(grid: &GridNode) -> bool {
     }
 }
 
-/// Rebind every pane bound to `old` across `tabs` to `new`, in place. Used by
+/// Rebind every local pane (no `host`) bound to `old` across `tabs` to `new`,
+/// in place. Used by
 /// abandoned-session resume: the fresh session takes over the slot(s) the
 /// abandoned one occupied instead of orphaning into the sidebar. Topology is
 /// untouched. Returns clones of the tabs whose grids changed so the caller can
@@ -544,8 +615,10 @@ pub fn rebind_session(tabs: &mut [TabEntry], old: &str, new: &str) -> Vec<TabEnt
 
 fn rebind_grid(grid: &mut GridNode, old: &str, new: &str) -> bool {
     match grid {
-        GridNode::Pane { session_id, .. } => {
-            if session_id.as_deref() == Some(old) {
+        GridNode::Pane {
+            session_id, host, ..
+        } => {
+            if host.is_none() && session_id.as_deref() == Some(old) {
                 *session_id = Some(new.to_string());
                 true
             } else {
@@ -651,13 +724,16 @@ fn insert_in(node: &mut GridNode, target: &str, edge: PaneDropEdge, source: Grid
                     GridNode::Pane { pane_id, .. } => pane_id.clone(),
                     GridNode::Split { .. } => return,
                 };
-                let src_sid = match source {
-                    GridNode::Pane { session_id, .. } => session_id,
-                    GridNode::Split { .. } => None,
+                let (src_sid, src_host) = match source {
+                    GridNode::Pane {
+                        session_id, host, ..
+                    } => (session_id, host),
+                    GridNode::Split { .. } => (None, None),
                 };
                 *node = GridNode::Pane {
                     pane_id: dst_pane_id,
                     session_id: src_sid,
+                    host: src_host,
                 };
             }
             PaneDropEdge::Left | PaneDropEdge::Right | PaneDropEdge::Top | PaneDropEdge::Bottom => {
@@ -703,24 +779,17 @@ fn insert_in(node: &mut GridNode, target: &str, edge: PaneDropEdge, source: Grid
 
 /// Build a balanced split tree from a list of leaves laid out along
 /// `direction`. Returns `None` for an empty input.
-pub fn build_balanced(
-    panes: &[(String, Option<String>)],
-    direction: SplitDirection,
-) -> Option<GridNode> {
+pub fn build_balanced(panes: &[PaneRef], direction: SplitDirection) -> Option<GridNode> {
     if panes.is_empty() {
         return None;
     }
     Some(build_balanced_inner(panes, direction))
 }
 
-fn build_balanced_inner(panes: &[(String, Option<String>)], direction: SplitDirection) -> GridNode {
+fn build_balanced_inner(panes: &[PaneRef], direction: SplitDirection) -> GridNode {
     debug_assert!(!panes.is_empty(), "caller guards against empty input");
     if panes.len() == 1 {
-        let (pid, sid) = &panes[0];
-        return GridNode::Pane {
-            pane_id: pid.clone(),
-            session_id: sid.clone(),
-        };
+        return panes[0].to_node();
     }
     let n = panes.len();
     let mid = n / 2;
@@ -814,11 +883,7 @@ fn auto_cols(n: usize, aspect: Option<f32>) -> u32 {
 /// when `aspect` (the pane area's width over its height) is known,
 /// [`auto_grid_cols`] otherwise — so callers can pass an automatic layout
 /// straight through.
-pub fn build_grid(
-    panes: &[(String, Option<String>)],
-    cols: u32,
-    aspect: Option<f32>,
-) -> Option<GridNode> {
+pub fn build_grid(panes: &[PaneRef], cols: u32, aspect: Option<f32>) -> Option<GridNode> {
     if panes.is_empty() {
         return None;
     }
@@ -875,9 +940,9 @@ pub fn rearrange_grid(grid: &GridNode, layout: RearrangeLayout) -> anyhow::Resul
     if all_panes.is_empty() {
         return Err(anyhow!("cannot rearrange an empty grid"));
     }
-    let bound: Vec<(String, Option<String>)> = all_panes
+    let bound: Vec<PaneRef> = all_panes
         .iter()
-        .filter(|(_, session_id)| session_id.is_some())
+        .filter(|pane| pane.session_id.is_some())
         .cloned()
         .collect();
     let panes = if bound.is_empty() { all_panes } else { bound };
@@ -889,10 +954,7 @@ pub fn rearrange_grid(grid: &GridNode, layout: RearrangeLayout) -> anyhow::Resul
 /// "Rearrange panes" path and "Move panes to a new tab" so a requested
 /// layout means the same shape in both. Returns `None` only for an empty
 /// `panes` slice.
-fn build_for_layout(
-    panes: &[(String, Option<String>)],
-    layout: RearrangeLayout,
-) -> Option<GridNode> {
+fn build_for_layout(panes: &[PaneRef], layout: RearrangeLayout) -> Option<GridNode> {
     match layout {
         RearrangeLayout::Horizontal | RearrangeLayout::Balanced => {
             build_balanced(panes, SplitDirection::Horizontal)
@@ -981,15 +1043,9 @@ pub fn split_tab_pane(
     target: &str,
     direction: SplitDirection,
     place: SplitPlace,
-    new_session_id: Option<String>,
+    new_pane: GridNode,
 ) -> anyhow::Result<String> {
-    let new_pane_id = split_pane(
-        grid_or_err_mut(tab)?,
-        target,
-        direction,
-        place,
-        new_session_id,
-    )?;
+    let new_pane_id = split_pane(grid_or_err_mut(tab)?, target, direction, place, new_pane)?;
     reapply_if_untouched(tab);
     Ok(new_pane_id)
 }
@@ -1143,14 +1199,24 @@ pub fn swap_panes(tabs: &mut [TabEntry], swap: &PaneSwap<'_>) -> anyhow::Result<
         touch(tab);
         return Ok(vec![MovedTab::Updated(tab.clone())]);
     }
-    let src_session = pane_session_at(tabs, swap.src_tab_id, swap.src_pane_id)?;
-    let dst_session = pane_session_at(tabs, swap.dst_tab_id, swap.dst_pane_id)?;
+    let (src_session, src_host) = pane_session_at(tabs, swap.src_tab_id, swap.src_pane_id)?;
+    let (dst_session, dst_host) = pane_session_at(tabs, swap.dst_tab_id, swap.dst_pane_id)?;
     let src_tab = find_tab_mut(tabs, swap.src_tab_id)?;
-    replace_pane_session(grid_or_err_mut(src_tab)?, swap.src_pane_id, dst_session)?;
+    replace_pane_session(
+        grid_or_err_mut(src_tab)?,
+        swap.src_pane_id,
+        dst_session,
+        dst_host,
+    )?;
     touch(src_tab);
     let src = src_tab.clone();
     let dst_tab = find_tab_mut(tabs, swap.dst_tab_id)?;
-    replace_pane_session(grid_or_err_mut(dst_tab)?, swap.dst_pane_id, src_session)?;
+    replace_pane_session(
+        grid_or_err_mut(dst_tab)?,
+        swap.dst_pane_id,
+        src_session,
+        src_host,
+    )?;
     touch(dst_tab);
     Ok(vec![
         MovedTab::Updated(src),
@@ -1158,19 +1224,19 @@ pub fn swap_panes(tabs: &mut [TabEntry], swap: &PaneSwap<'_>) -> anyhow::Result<
     ])
 }
 
-/// The session bound to `pane_id` in `tab_id`, or the error naming the missing
-/// tab, the tab without a grid, or the missing pane.
+/// The session bound to `pane_id` in `tab_id` and that session's host, or the
+/// error naming the missing tab, the tab without a grid, or the missing pane.
 fn pane_session_at(
     tabs: &[TabEntry],
     tab_id: &str,
     pane_id: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<(Option<String>, Option<String>)> {
     let tab = tabs
         .iter()
         .find(|tab| tab.id == tab_id)
         .with_context(|| format!("unknown tab: {tab_id}"))?;
     match pane_session(grid_or_err(tab)?, pane_id) {
-        PaneSessionLookup::Found(session_id) => Ok(session_id),
+        PaneSessionLookup::Found(session_id, host) => Ok((session_id, host)),
         PaneSessionLookup::Missing => Err(anyhow!("pane not found: {pane_id}")),
     }
 }
@@ -1187,7 +1253,7 @@ pub fn merge_tabs(
     if tab_ids.len() < 2 {
         return Err(anyhow!("merge requires at least two tabs"));
     }
-    let mut collected: Vec<(String, Option<String>)> = Vec::new();
+    let mut collected: Vec<PaneRef> = Vec::new();
     for id in tab_ids {
         let entry = tabs
             .iter()
@@ -1245,18 +1311,23 @@ pub fn extract_to_new_tab(
     }
     let source = find_tab_mut(tabs, source_tab_id)?;
     let source_grid = grid_or_err_mut(source)?;
-    let mut extracted: Vec<(String, Option<String>)> = Vec::with_capacity(pane_ids.len());
+    let mut extracted: Vec<PaneRef> = Vec::with_capacity(pane_ids.len());
     let mut source_empty = false;
     for pid in pane_ids {
         let (node, empty) = extract_pane(source_grid, pid)?;
         let GridNode::Pane {
             pane_id,
             session_id,
+            host,
         } = node
         else {
             return Err(anyhow!("extracted node is not a pane: {pid}"));
         };
-        extracted.push((pane_id, session_id));
+        extracted.push(PaneRef {
+            pane_id,
+            session_id,
+            host,
+        });
         if empty {
             source_empty = true;
             break;
@@ -1329,6 +1400,25 @@ mod tests {
         GridNode::Pane {
             pane_id: id.to_string(),
             session_id: sid.map(str::to_string),
+            host: None,
+        }
+    }
+
+    /// A pane showing session `sid` of `host`, another daemon.
+    fn foreign_pane(id: &str, sid: &str, host: &str) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_string(),
+            session_id: Some(sid.to_string()),
+            host: Some(host.to_string()),
+        }
+    }
+
+    /// A local pane as the layout builders take it.
+    fn local(id: &str, sid: Option<&str>) -> PaneRef {
+        PaneRef {
+            pane_id: id.to_string(),
+            session_id: sid.map(str::to_string),
+            host: None,
         }
     }
 
@@ -1344,8 +1434,8 @@ mod tests {
     #[test]
     fn restore_tab_reinserts_snapshot_at_index() {
         let mut tabs = vec![
-            make_tab(Some("A".to_string()), None, &[]),
-            make_tab(Some("B".to_string()), None, &[]),
+            make_tab(Some("A".to_string()), None, None, &[]),
+            make_tab(Some("B".to_string()), None, None, &[]),
         ];
         let restored = TabEntry {
             id: "restored".to_string(),
@@ -1367,7 +1457,7 @@ mod tests {
 
     #[test]
     fn restore_tab_rejects_duplicate_id() {
-        let existing = make_tab(Some("A".to_string()), None, &[]);
+        let existing = make_tab(Some("A".to_string()), None, None, &[]);
         let mut tabs = vec![existing.clone()];
         let err = restore_tab(&mut tabs, existing, 0).expect_err("duplicate id");
 
@@ -1376,7 +1466,7 @@ mod tests {
 
     #[test]
     fn restore_tab_snapshot_replaces_live_tab() {
-        let original = make_tab(Some("Original".to_string()), None, &[]);
+        let original = make_tab(Some("Original".to_string()), None, None, &[]);
         let mut tabs = vec![original.clone()];
         let replacement = TabEntry {
             id: original.id.clone(),
@@ -1403,7 +1493,7 @@ mod tests {
             "p1",
             Horizontal,
             SplitPlace::Second,
-            Some("s2".into()),
+            new_pane(Some("s2".into()), None),
         )
         .expect("split");
         let GridNode::Split {
@@ -1417,16 +1507,25 @@ mod tests {
         };
         assert_eq!(direction, Horizontal);
         assert!((ratio - DEFAULT_RATIO).abs() < f32::EPSILON);
-        assert!(matches!(&*first, GridNode::Pane { pane_id, session_id }
+        assert!(matches!(&*first, GridNode::Pane { pane_id, session_id, .. }
                           if pane_id == "p1" && session_id.as_deref() == Some("s1")));
-        assert!(matches!(&*second, GridNode::Pane { pane_id, session_id }
-                           if pane_id == &new_id && session_id.as_deref() == Some("s2")));
+        assert!(
+            matches!(&*second, GridNode::Pane { pane_id, session_id, .. }
+                           if pane_id == &new_id && session_id.as_deref() == Some("s2"))
+        );
     }
 
     #[test]
     fn split_pane_first_place_puts_new_pane_first() {
         let mut grid = pane("p1", None);
-        let new_id = split_pane(&mut grid, "p1", Vertical, SplitPlace::First, None).expect("split");
+        let new_id = split_pane(
+            &mut grid,
+            "p1",
+            Vertical,
+            SplitPlace::First,
+            new_pane(None, None),
+        )
+        .expect("split");
         let GridNode::Split { first, second, .. } = grid else {
             panic!("expected Split");
         };
@@ -1437,7 +1536,13 @@ mod tests {
     #[test]
     fn split_pane_unknown_target_errors() {
         let mut grid = pane("p1", None);
-        let err = split_pane(&mut grid, "missing", Horizontal, SplitPlace::Second, None);
+        let err = split_pane(
+            &mut grid,
+            "missing",
+            Horizontal,
+            SplitPlace::Second,
+            new_pane(None, None),
+        );
         assert!(err.is_err());
     }
 
@@ -1458,7 +1563,7 @@ mod tests {
         );
         let empty = close_pane(&mut grid, "p1").expect("close");
         assert!(!empty);
-        assert!(matches!(grid, GridNode::Pane { pane_id, session_id }
+        assert!(matches!(grid, GridNode::Pane { pane_id, session_id, .. }
                           if pane_id == "p2" && session_id.as_deref() == Some("s2")));
     }
 
@@ -1510,12 +1615,12 @@ mod tests {
     #[test]
     fn replace_pane_session_finds_target() {
         let mut grid = split(Horizontal, 0.5, pane("p1", None), pane("p2", Some("s2")));
-        replace_pane_session(&mut grid, "p2", None).expect("replace");
+        replace_pane_session(&mut grid, "p2", None, None).expect("replace");
         let GridNode::Split { second, .. } = &grid else {
             panic!("expected Split");
         };
         assert!(
-            matches!(&**second, GridNode::Pane { session_id: None, pane_id } if pane_id == "p2")
+            matches!(&**second, GridNode::Pane { session_id: None, pane_id, .. } if pane_id == "p2")
         );
     }
 
@@ -1538,6 +1643,7 @@ mod tests {
                 path: "src/a.rs".to_string(),
                 against: None,
                 worktree_path: None,
+                host: None,
             },
             created_at: Utc::now(),
             picked_layout: None,
@@ -1629,7 +1735,7 @@ mod tests {
         assert_eq!(tabs[1].id, "C");
         // B collapsed to just the surviving pane.
         let b_panes = collect_panes(tabs[0].grid().expect("B has a grid"));
-        assert_eq!(b_panes, vec![("b2".to_string(), Some("keep".to_string()))]);
+        assert_eq!(b_panes, vec![local("b2", Some("keep"))]);
     }
 
     #[test]
@@ -1680,18 +1786,15 @@ mod tests {
         // Panes bound to old now point at new; other bindings + topology intact.
         assert_eq!(
             collect_panes(tabs[0].grid().expect("A grid")),
-            vec![("a1".to_string(), Some("new".to_string()))]
+            vec![local("a1", Some("new"))]
         );
         assert_eq!(
             collect_panes(tabs[1].grid().expect("B grid")),
-            vec![
-                ("b1".to_string(), Some("new".to_string())),
-                ("b2".to_string(), Some("other".to_string())),
-            ]
+            vec![local("b1", Some("new")), local("b2", Some("other")),]
         );
         assert_eq!(
             collect_panes(tabs[2].grid().expect("C grid")),
-            vec![("c1".to_string(), Some("other".to_string()))]
+            vec![local("c1", Some("other"))]
         );
     }
 
@@ -1710,13 +1813,13 @@ mod tests {
         assert_eq!(cloned.len(), 1);
         assert_ne!(cloned[0].id, "orig", "tab id is fresh");
         let panes = collect_panes(cloned[0].grid().expect("cloned grid"));
-        let sessions: Vec<_> = panes.iter().map(|(_, sid)| sid.clone()).collect();
+        let sessions: Vec<_> = panes.iter().map(|pane| pane.session_id.clone()).collect();
         assert_eq!(
             sessions,
             vec![Some("s1".to_string()), Some("s2".to_string())],
             "same session bindings"
         );
-        let pane_ids: Vec<_> = panes.iter().map(|(pid, _)| pid.clone()).collect();
+        let pane_ids: Vec<_> = panes.iter().map(|pane| pane.pane_id.clone()).collect();
         assert!(!pane_ids.contains(&"p1".to_string()), "pane ids are fresh");
         assert!(!pane_ids.contains(&"p2".to_string()), "pane ids are fresh");
     }
@@ -1734,10 +1837,255 @@ mod tests {
         assert!(prune_sessions_not_in(&mut grid, &keep));
         assert!(!prune_sessions_not_in(&mut grid, &keep));
         let panes = collect_panes(&grid);
-        let by_pane: std::collections::HashMap<_, _> = panes.into_iter().collect();
+        let by_pane: std::collections::HashMap<_, _> = panes
+            .into_iter()
+            .map(|pane| (pane.pane_id, pane.session_id))
+            .collect();
         assert_eq!(by_pane.get("p1"), Some(&Some("s-live".to_string())));
         assert_eq!(by_pane.get("p2"), Some(&None));
         assert_eq!(by_pane.get("p3"), Some(&None));
+    }
+
+    #[test]
+    fn prune_sessions_not_in_keeps_foreign_panes() {
+        let mut grid = split(
+            Horizontal,
+            0.5,
+            pane("p1", Some("s-dead")),
+            foreign_pane("p2", "s-remote", "ssh:devbox"),
+        );
+        let keep = std::collections::HashSet::new();
+        assert!(prune_sessions_not_in(&mut grid, &keep));
+        assert_eq!(
+            collect_panes(&grid),
+            vec![
+                local("p1", None),
+                PaneRef {
+                    pane_id: "p2".to_string(),
+                    session_id: Some("s-remote".to_string()),
+                    host: Some("ssh:devbox".to_string()),
+                },
+            ],
+            "a session of another daemon is not this daemon's to prune"
+        );
+    }
+
+    #[test]
+    fn close_session_panes_leaves_foreign_panes_with_the_same_id() {
+        let mut tabs = vec![
+            grid_tab(
+                "A",
+                split(
+                    Horizontal,
+                    0.5,
+                    pane("a1", Some("s")),
+                    foreign_pane("a2", "s", "tailnet:laptop"),
+                ),
+            ),
+            grid_tab("B", foreign_pane("b1", "s", "tailnet:laptop")),
+        ];
+
+        let result = close_session_panes(&mut tabs, "s");
+
+        assert_eq!(result.removed_tab_ids, [] as [String; 0]);
+        assert_eq!(result.updated.len(), 1);
+        assert_eq!(result.updated[0].id, "A");
+        assert_eq!(tabs.len(), 2, "the foreign-only tab survives");
+        assert_eq!(
+            tabs[0].grid(),
+            Some(&foreign_pane("a2", "s", "tailnet:laptop"))
+        );
+        assert_eq!(
+            tabs[1].grid(),
+            Some(&foreign_pane("b1", "s", "tailnet:laptop"))
+        );
+    }
+
+    /// Tab A mixes a local pane and panes of two hosts; tab B holds only
+    /// `ssh:devbox` panes.
+    fn mixed_host_tabs() -> Vec<TabEntry> {
+        vec![
+            grid_tab(
+                "A",
+                split(
+                    Horizontal,
+                    0.5,
+                    pane("a1", Some("s1")),
+                    split(
+                        Vertical,
+                        0.5,
+                        foreign_pane("a2", "s1", "ssh:devbox"),
+                        foreign_pane("a3", "s1", "tailnet:laptop"),
+                    ),
+                ),
+            ),
+            grid_tab(
+                "B",
+                split(
+                    Horizontal,
+                    0.5,
+                    foreign_pane("b1", "s2", "ssh:devbox"),
+                    foreign_pane("b2", "s3", "ssh:devbox"),
+                ),
+            ),
+        ]
+    }
+
+    fn pane_ids(tab: &TabEntry) -> Vec<String> {
+        collect_panes(tab.grid().expect("a grid tab"))
+            .into_iter()
+            .map(|pane| pane.pane_id)
+            .collect()
+    }
+
+    #[test]
+    fn forget_host_panes_closes_only_that_hosts_listed_sessions() {
+        let mut tabs = mixed_host_tabs();
+
+        let result = forget_host_panes(
+            &mut tabs,
+            "ssh:devbox",
+            &["s1".to_string(), "s2".to_string()],
+            false,
+        );
+
+        assert_eq!(result.removed_tab_ids, [] as [String; 0]);
+        let updated: Vec<&str> = result.updated.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(updated, ["A", "B"]);
+        assert_eq!(
+            pane_ids(&tabs[0]),
+            ["a1", "a3"],
+            "the local and laptop panes stay"
+        );
+        assert_eq!(pane_ids(&tabs[1]), ["b2"], "s3 was not listed");
+
+        let again = forget_host_panes(
+            &mut tabs,
+            "ssh:devbox",
+            &["s1".to_string(), "s2".to_string()],
+            false,
+        );
+        assert!(
+            again.updated.is_empty() && again.removed_tab_ids.is_empty(),
+            "forgetting again matches nothing and reports nothing"
+        );
+    }
+
+    #[test]
+    fn forget_host_panes_all_closes_every_pane_of_the_host() {
+        let mut tabs = mixed_host_tabs();
+
+        let result = forget_host_panes(&mut tabs, "ssh:devbox", &[], true);
+
+        assert_eq!(result.removed_tab_ids, ["B".to_string()]);
+        let updated: Vec<&str> = result.updated.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(updated, ["A"]);
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(pane_ids(&tabs[0]), ["a1", "a3"]);
+    }
+
+    #[test]
+    fn rearrange_and_clone_keep_pane_hosts() {
+        let grid = split(
+            Horizontal,
+            0.5,
+            pane("p1", Some("s1")),
+            split(
+                Vertical,
+                0.5,
+                foreign_pane("p2", "s2", "ssh:devbox"),
+                foreign_pane("p3", "s3", "tailnet:laptop"),
+            ),
+        );
+        let hosts = |grid: &GridNode| -> Vec<Option<String>> {
+            collect_panes(grid)
+                .into_iter()
+                .map(|pane| pane.host)
+                .collect()
+        };
+        let expected = vec![
+            None,
+            Some("ssh:devbox".to_string()),
+            Some("tailnet:laptop".to_string()),
+        ];
+
+        let rearranged = rearrange_grid(&grid, RearrangeLayout::Vertical).expect("rearrange");
+        assert_eq!(hosts(&rearranged), expected, "rearrange");
+
+        let cloned = clone_tabs_fresh_ids(&[grid_tab("T", grid.clone())]);
+        assert_eq!(hosts(cloned[0].grid().expect("a grid")), expected, "clone");
+
+        let mut tabs = vec![grid_tab("T1", grid.clone()), grid_tab("T2", grid)];
+        let merged = merge_tabs(
+            &mut tabs,
+            &["T1".to_string(), "T2".to_string()],
+            None,
+            MergeLayout::TileHorizontal,
+        )
+        .expect("merge");
+        let merged_hosts = hosts(merged.grid().expect("a grid"));
+        assert_eq!(merged_hosts[..3], expected[..], "merge");
+        assert_eq!(merged_hosts[3..], expected[..], "merge");
+
+        let extracted = extract_to_new_tab(
+            &mut tabs,
+            &merged.id,
+            &["p3".to_string()],
+            None,
+            Some(RearrangeLayout::Horizontal),
+        )
+        .expect("extract");
+        assert_eq!(
+            hosts(extracted.new_tab.grid().expect("a grid")),
+            [Some("tailnet:laptop".to_string())],
+            "extract"
+        );
+    }
+
+    #[test]
+    fn swap_pane_sessions_moves_the_host_with_the_session() {
+        let mut grid = split(
+            Horizontal,
+            0.5,
+            pane("p1", Some("s1")),
+            foreign_pane("p2", "s2", "ssh:devbox"),
+        );
+        swap_pane_sessions(&mut grid, "p1", "p2").expect("swap");
+        assert_eq!(
+            collect_panes(&grid),
+            vec![
+                PaneRef {
+                    pane_id: "p1".to_string(),
+                    session_id: Some("s2".to_string()),
+                    host: Some("ssh:devbox".to_string()),
+                },
+                local("p2", Some("s1")),
+            ]
+        );
+
+        let mut tabs = vec![
+            grid_tab("A", pane("a1", Some("s1"))),
+            grid_tab("B", foreign_pane("b1", "s2", "ssh:devbox")),
+        ];
+        swap_panes(
+            &mut tabs,
+            &PaneSwap {
+                src_tab_id: "A",
+                src_pane_id: "a1",
+                dst_tab_id: "B",
+                dst_pane_id: "b1",
+            },
+        )
+        .expect("swap across tabs");
+        assert_eq!(
+            tabs[0].grid(),
+            Some(&GridNode::Pane {
+                pane_id: "a1".to_string(),
+                session_id: Some("s2".to_string()),
+                host: Some("ssh:devbox".to_string()),
+            })
+        );
+        assert_eq!(tabs[1].grid(), Some(&pane("b1", Some("s1"))));
     }
 
     #[test]
@@ -1763,8 +2111,10 @@ mod tests {
         );
         let (extracted, empty) = extract_pane(&mut grid, "p1").expect("extract");
         assert!(!empty);
-        assert!(matches!(extracted, GridNode::Pane { pane_id, session_id }
-                              if pane_id == "p1" && session_id.as_deref() == Some("s1")));
+        assert!(
+            matches!(extracted, GridNode::Pane { pane_id, session_id, .. }
+                              if pane_id == "p1" && session_id.as_deref() == Some("s1"))
+        );
         assert!(matches!(grid, GridNode::Pane { pane_id, .. } if pane_id == "p2"));
     }
 
@@ -1916,7 +2266,7 @@ mod tests {
             pane("src", Some("ss")),
         )
         .expect("insert");
-        assert!(matches!(grid, GridNode::Pane { pane_id, session_id }
+        assert!(matches!(grid, GridNode::Pane { pane_id, session_id, .. }
                           if pane_id == "dst" && session_id.as_deref() == Some("ss")));
     }
 
@@ -1935,12 +2285,12 @@ mod tests {
         );
         swap_pane_sessions(&mut grid, "left", "bottom-right").expect("swap");
         assert!(matches!(&grid, GridNode::Split { first, second, .. }
-            if matches!(&**first, GridNode::Pane { pane_id, session_id }
+            if matches!(&**first, GridNode::Pane { pane_id, session_id, .. }
                 if pane_id == "left" && session_id.as_deref() == Some("s-bottom"))
             && matches!(&**second, GridNode::Split { first, second, .. }
-                if matches!(&**first, GridNode::Pane { pane_id, session_id }
+                if matches!(&**first, GridNode::Pane { pane_id, session_id, .. }
                     if pane_id == "top-right" && session_id.as_deref() == Some("s-top"))
-                && matches!(&**second, GridNode::Pane { pane_id, session_id }
+                && matches!(&**second, GridNode::Pane { pane_id, session_id, .. }
                     if pane_id == "bottom-right" && session_id.as_deref() == Some("s-left")))));
     }
 
@@ -1953,11 +2303,7 @@ mod tests {
 
     #[test]
     fn build_balanced_three_panes_left_leans() {
-        let panes = vec![
-            ("a".to_string(), None),
-            ("b".to_string(), None),
-            ("c".to_string(), None),
-        ];
+        let panes = vec![local("a", None), local("b", None), local("c", None)];
         let tree = build_balanced(&panes, Horizontal).expect("non-empty");
         // 3-pane balanced: mid=1 → first=a, second=(b,c)
         let GridNode::Split { first, second, .. } = tree else {
@@ -2030,7 +2376,10 @@ mod tests {
         assert_eq!(tabs[0].name, "Merged");
         let panes = collect_panes(grid_or_err(&tabs[0]).expect("grid"));
         assert_eq!(
-            panes.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            panes
+                .iter()
+                .map(|pane| pane.pane_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["a1", "b1", "b2"]
         );
     }
@@ -2142,11 +2491,14 @@ mod tests {
             panic!("expected vertical Split at grid root");
         };
         assert_eq!(*direction, Vertical);
-        let first_row: Vec<String> = collect_panes(first).into_iter().map(|(p, _)| p).collect();
+        let first_row: Vec<String> = collect_panes(first)
+            .into_iter()
+            .map(|pane| pane.pane_id)
+            .collect();
         assert_eq!(first_row, vec!["p0".to_string(), "p1".to_string()]);
         let all: Vec<String> = collect_panes(new_grid)
             .into_iter()
-            .map(|(p, _)| p)
+            .map(|pane| pane.pane_id)
             .collect();
         assert_eq!(all, vec!["p0", "p1", "p2", "p3"]);
     }
@@ -2206,8 +2558,12 @@ mod tests {
 
     #[test]
     fn build_grid_six_panes_three_cols_two_rows() {
-        let panes: Vec<(String, Option<String>)> = (0..6)
-            .map(|i| (format!("p{i}"), Some(format!("s{i}"))))
+        let panes: Vec<PaneRef> = (0..6)
+            .map(|i| PaneRef {
+                pane_id: format!("p{i}"),
+                session_id: Some(format!("s{i}")),
+                host: None,
+            })
             .collect();
         let tree = build_grid(&panes, 3, None).expect("non-empty");
         // Top-level: vertical split between row1 and row2.
@@ -2226,7 +2582,7 @@ mod tests {
         assert_eq!(
             row_panes
                 .iter()
-                .map(|(p, _)| p.as_str())
+                .map(|pane| pane.pane_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["p0", "p1", "p2"]
         );
@@ -2234,7 +2590,7 @@ mod tests {
         assert_eq!(
             row2_panes
                 .iter()
-                .map(|(p, _)| p.as_str())
+                .map(|pane| pane.pane_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["p3", "p4", "p5"]
         );
@@ -2250,18 +2606,19 @@ mod tests {
 
     #[test]
     fn build_grid_short_last_row() {
-        let panes: Vec<(String, Option<String>)> =
-            (0..5).map(|i| (format!("p{i}"), None)).collect();
+        let panes: Vec<PaneRef> = (0..5).map(|i| local(&format!("p{i}"), None)).collect();
         let tree = build_grid(&panes, 3, None).expect("non-empty");
         // 5 panes / 3 cols = 2 rows; row 1 = [p0,p1,p2], row 2 = [p3,p4].
-        let all: Vec<String> = collect_panes(&tree).into_iter().map(|(p, _)| p).collect();
+        let all: Vec<String> = collect_panes(&tree)
+            .into_iter()
+            .map(|pane| pane.pane_id)
+            .collect();
         assert_eq!(all, vec!["p0", "p1", "p2", "p3", "p4"]);
     }
 
     #[test]
     fn build_grid_auto_picks_cols_when_zero() {
-        let panes: Vec<(String, Option<String>)> =
-            (0..9).map(|i| (format!("p{i}"), None)).collect();
+        let panes: Vec<PaneRef> = (0..9).map(|i| local(&format!("p{i}"), None)).collect();
         let tree = build_grid(&panes, 0, None).expect("non-empty");
         // ceil(sqrt(9)) = 3 → 3 rows of 3.
         let GridNode::Split { first, .. } = &tree else {
@@ -2273,8 +2630,7 @@ mod tests {
 
     #[test]
     fn build_grid_auto_uses_the_aspect_when_given() {
-        let panes: Vec<(String, Option<String>)> =
-            (0..3).map(|i| (format!("p{i}"), None)).collect();
+        let panes: Vec<PaneRef> = (0..3).map(|i| local(&format!("p{i}"), None)).collect();
         let tall = build_grid(&panes, 0, Some(0.5)).expect("non-empty");
         let square = build_grid(&panes, 0, None).expect("non-empty");
         assert_eq!(
@@ -2292,7 +2648,7 @@ mod tests {
 
     #[test]
     fn build_grid_single_pane_returns_leaf() {
-        let panes = vec![("only".to_string(), Some("s".to_string()))];
+        let panes = vec![local("only", Some("s"))];
         let tree = build_grid(&panes, 0, None).expect("non-empty");
         assert!(matches!(tree, GridNode::Pane { pane_id, .. } if pane_id == "only"));
     }
@@ -2316,12 +2672,12 @@ mod tests {
             },
         )
         .expect("rearrange");
-        let panes_after: Vec<(String, Option<String>)> = collect_panes(&rearranged);
+        let panes_after: Vec<PaneRef> = collect_panes(&rearranged);
         assert_eq!(panes_after.len(), 2);
-        assert_eq!(panes_after[0].0, "p1");
-        assert_eq!(panes_after[0].1.as_deref(), Some("s1"));
-        assert_eq!(panes_after[1].0, "p2");
-        assert_eq!(panes_after[1].1.as_deref(), Some("s2"));
+        assert_eq!(panes_after[0].pane_id, "p1");
+        assert_eq!(panes_after[0].session_id.as_deref(), Some("s1"));
+        assert_eq!(panes_after[1].pane_id, "p2");
+        assert_eq!(panes_after[1].session_id.as_deref(), Some("s2"));
     }
 
     #[test]
@@ -2340,8 +2696,8 @@ mod tests {
         .expect("rearrange");
         let panes_after = collect_panes(&rearranged);
         assert_eq!(panes_after.len(), 2);
-        assert_eq!(panes_after[0].0, "p1");
-        assert_eq!(panes_after[1].0, "p2");
+        assert_eq!(panes_after[0].pane_id, "p1");
+        assert_eq!(panes_after[1].pane_id, "p2");
     }
 
     #[test]
@@ -2375,19 +2731,15 @@ mod tests {
     }
 
     /// Panes `ids`, each bound to the session `s-<id>`.
-    fn bound(ids: &[&str]) -> Vec<(String, Option<String>)> {
+    fn bound(ids: &[&str]) -> Vec<PaneRef> {
         ids.iter()
-            .map(|id| ((*id).to_string(), Some(format!("s-{id}"))))
+            .map(|id| local(id, Some(&format!("s-{id}"))))
             .collect()
     }
 
     /// A tab laid out per `layout` over `panes` and marked untouched since
     /// that pick.
-    fn picked_tab(
-        id: &str,
-        panes: &[(String, Option<String>)],
-        layout: RearrangeLayout,
-    ) -> TabEntry {
+    fn picked_tab(id: &str, panes: &[PaneRef], layout: RearrangeLayout) -> TabEntry {
         let grid = build_for_layout(panes, layout).expect("non-empty panes");
         TabEntry {
             picked_layout: Some(layout),
@@ -2447,11 +2799,15 @@ mod tests {
             "b",
             Vertical,
             SplitPlace::Second,
-            Some("s-c".to_string()),
+            new_pane(Some("s-c".to_string()), None),
         )
         .expect("split");
         let mut panes = bound(&["a", "b"]);
-        panes.push((new_id, Some("s-c".to_string())));
+        panes.push(PaneRef {
+            pane_id: new_id,
+            session_id: Some("s-c".to_string()),
+            host: None,
+        });
         assert_eq!(
             grid_of(&tab),
             &build_balanced(&panes, Horizontal).expect("grid")
@@ -2466,10 +2822,20 @@ mod tests {
             aspect: None,
         };
         let mut tab = picked_tab("T", &bound(&["a", "b", "c"]), three_cols);
-        let new_id =
-            split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        let new_id = split_tab_pane(
+            &mut tab,
+            "c",
+            Horizontal,
+            SplitPlace::Second,
+            new_pane(None, None),
+        )
+        .expect("split");
         let mut panes = bound(&["a", "b", "c"]);
-        panes.push((new_id, None));
+        panes.push(PaneRef {
+            pane_id: new_id,
+            session_id: None,
+            host: None,
+        });
         let three_plus_one = build_grid(&panes, 3, None).expect("grid");
         assert_ne!(
             three_plus_one,
@@ -2487,10 +2853,20 @@ mod tests {
             aspect: None,
         };
         let mut tab = picked_tab("T", &bound(&["a", "b", "c", "d"]), auto);
-        let new_id =
-            split_tab_pane(&mut tab, "d", Horizontal, SplitPlace::Second, None).expect("split");
+        let new_id = split_tab_pane(
+            &mut tab,
+            "d",
+            Horizontal,
+            SplitPlace::Second,
+            new_pane(None, None),
+        )
+        .expect("split");
         let mut panes = bound(&["a", "b", "c", "d"]);
-        panes.push((new_id, None));
+        panes.push(PaneRef {
+            pane_id: new_id,
+            session_id: None,
+            host: None,
+        });
         assert_eq!(auto_grid_cols(4), 2);
         assert_eq!(auto_grid_cols(5), 3);
         assert_eq!(grid_of(&tab), &build_grid(&panes, 3, None).expect("grid"));
@@ -2511,10 +2887,20 @@ mod tests {
             &build_grid(&bound(&["a", "b", "c"]), 1, None).expect("grid"),
             "three panes in an area half as wide as tall hold one column"
         );
-        let new_id =
-            split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        let new_id = split_tab_pane(
+            &mut tab,
+            "c",
+            Horizontal,
+            SplitPlace::Second,
+            new_pane(None, None),
+        )
+        .expect("split");
         let mut panes = bound(&["a", "b", "c"]);
-        panes.push((new_id, None));
+        panes.push(PaneRef {
+            pane_id: new_id,
+            session_id: None,
+            host: None,
+        });
         assert_eq!(
             best_fit_grid_cols(4, 0.5),
             1,
@@ -2540,10 +2926,20 @@ mod tests {
             aspect: None,
         };
         let mut tab = picked_tab("T", &bound(&["a", "b", "c"]), two_cols);
-        let new_id =
-            split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        let new_id = split_tab_pane(
+            &mut tab,
+            "c",
+            Horizontal,
+            SplitPlace::Second,
+            new_pane(None, None),
+        )
+        .expect("split");
         let mut panes = bound(&["a", "b", "c"]);
-        panes.push((new_id, None));
+        panes.push(PaneRef {
+            pane_id: new_id,
+            session_id: None,
+            host: None,
+        });
         assert_eq!(
             grid_of(&tab),
             &build_grid(&panes, 2, None).expect("grid"),
@@ -2562,10 +2958,20 @@ mod tests {
             aspect: Some(0.5),
         };
         let mut tab = picked_tab("T", &bound(&["a", "b", "c"]), tall_auto);
-        let empty_id =
-            split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        let empty_id = split_tab_pane(
+            &mut tab,
+            "c",
+            Horizontal,
+            SplitPlace::Second,
+            new_pane(None, None),
+        )
+        .expect("split");
         let mut panes = bound(&["a", "b", "c"]);
-        panes.push((empty_id.clone(), None));
+        panes.push(PaneRef {
+            pane_id: empty_id.clone(),
+            session_id: None,
+            host: None,
+        });
         assert_eq!(
             collect_panes(grid_of(&tab)).len(),
             4,
@@ -2599,10 +3005,14 @@ mod tests {
             &empty_id,
             Horizontal,
             SplitPlace::Second,
-            Some("s-d".to_string()),
+            new_pane(Some("s-d".to_string()), None),
         )
         .expect("split");
-        panes.push((new_id, Some("s-d".to_string())));
+        panes.push(PaneRef {
+            pane_id: new_id,
+            session_id: Some("s-d".to_string()),
+            host: None,
+        });
         assert_eq!(
             grid_of(&tab),
             &build_grid(&panes, 0, Some(1.6)).expect("grid"),
@@ -2623,7 +3033,14 @@ mod tests {
                 aspect: Some(0.5),
             },
         );
-        split_tab_pane(&mut tab, "c", Horizontal, SplitPlace::Second, None).expect("split");
+        split_tab_pane(
+            &mut tab,
+            "c",
+            Horizontal,
+            SplitPlace::Second,
+            new_pane(None, None),
+        )
+        .expect("split");
         assert_eq!(collect_panes(grid_of(&tab)).len(), 4);
 
         let two_cols = RearrangeLayout::Grid {
@@ -2657,7 +3074,7 @@ mod tests {
     #[test]
     fn close_session_panes_rebuilds_untouched_tabs_only() {
         let mut panes = bound(&["b", "c", "d"]);
-        panes.insert(0, ("a".to_string(), Some("doomed".to_string())));
+        panes.insert(0, local("a", Some("doomed")));
         let grid = build_balanced(&panes, Horizontal).expect("grid");
         let mut tabs = vec![
             picked_tab("picked", &panes, RearrangeLayout::Horizontal),
@@ -2710,8 +3127,14 @@ mod tests {
             "T",
             build_balanced(&bound(&["a", "b"]), Horizontal).expect("grid"),
         );
-        let new_id =
-            split_tab_pane(&mut tab, "b", Vertical, SplitPlace::Second, None).expect("split");
+        let new_id = split_tab_pane(
+            &mut tab,
+            "b",
+            Vertical,
+            SplitPlace::Second,
+            new_pane(None, None),
+        )
+        .expect("split");
         assert_eq!(
             grid_of(&tab),
             &split(
@@ -2738,9 +3161,9 @@ mod tests {
         };
         assert!(reapply_if_untouched(&mut tab));
         let expected = vec![
-            ("a".to_string(), Some("s-a".to_string())),
-            ("e".to_string(), None),
-            ("b".to_string(), Some("s-b".to_string())),
+            local("a", Some("s-a")),
+            local("e", None),
+            local("b", Some("s-b")),
         ];
         assert_eq!(collect_panes(grid_of(&tab)), expected);
         assert_eq!(
@@ -2959,11 +3382,8 @@ mod tests {
 
     #[test]
     fn a_same_binding_replace_keeps_the_picked_layout_and_returns_no_events() {
-        let both_empty = vec![("a".to_string(), None), ("b".to_string(), None)];
-        let same_session = vec![
-            ("a".to_string(), Some("s-1".to_string())),
-            ("b".to_string(), Some("s-1".to_string())),
-        ];
+        let both_empty = vec![local("a", None), local("b", None)];
+        let same_session = vec![local("a", Some("s-1")), local("b", Some("s-1"))];
         for panes in [both_empty, same_session] {
             let mut tabs = vec![picked_tab("T", &panes, RearrangeLayout::Horizontal)];
             let before = grid_of(&tabs[0]).clone();
@@ -3167,9 +3587,9 @@ mod tests {
         assert_eq!(
             collect_panes(grid_of(&tabs[0])),
             vec![
-                ("a".to_string(), Some("s-c".to_string())),
-                ("b".to_string(), Some("s-b".to_string())),
-                ("c".to_string(), Some("s-a".to_string())),
+                local("a", Some("s-c")),
+                local("b", Some("s-b")),
+                local("c", Some("s-a")),
             ]
         );
         assert_eq!(tabs[0].picked_layout, None, "a swap touches the tab");

@@ -259,6 +259,7 @@ mod tests {
             protocol_version: 22,
             supported_versions: vec![22],
             features: Vec::new(),
+            daemon_id: None,
         }
     }
 

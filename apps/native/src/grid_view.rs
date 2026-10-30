@@ -928,6 +928,7 @@ impl RootView {
         let msg = ClientMessage::SplitPane {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
+            host: None,
             direction,
             place: if before {
                 SplitPlace::First
@@ -1224,6 +1225,7 @@ impl RootView {
             GridNode::Pane {
                 pane_id,
                 session_id,
+                ..
             } => self.render_pane(tab_id, pane_id, session_id.as_deref(), cx),
             GridNode::Split {
                 direction,

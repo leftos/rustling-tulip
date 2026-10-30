@@ -63,6 +63,7 @@ pub fn welcome(protocol_version: u32) -> DaemonMessage {
         protocol_version,
         supported_versions: vec![protocol_version],
         features: daemon_features(),
+        daemon_id: None,
     }
 }
 
@@ -852,6 +853,7 @@ pub fn pane(id: &str, session: Option<&str>) -> GridNode {
     GridNode::Pane {
         pane_id: id.to_owned(),
         session_id: session.map(str::to_owned),
+        host: None,
     }
 }
 

@@ -17,6 +17,7 @@ mod cli_pair;
 mod cli_screen;
 mod cli_shutdown;
 mod conversations;
+mod daemon_id;
 mod dashboard;
 mod detach;
 mod devices;

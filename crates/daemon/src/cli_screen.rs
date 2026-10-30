@@ -460,6 +460,7 @@ mod tests {
                 protocol_version: 22,
                 supported_versions: vec![22],
                 features,
+                daemon_id: None,
             })
             .expect("the welcome serializes")
         };

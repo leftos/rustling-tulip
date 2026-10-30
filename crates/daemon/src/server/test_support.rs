@@ -140,6 +140,7 @@ pub(super) fn build_test_hub(
         state,
         sessions,
         auth_token: "test-token".to_string(),
+        daemon_id: "test-daemon-id".to_string(),
         proof_key: tracer_protocol::daemon_proof_key("test-token"),
         tailnet_handshake_timeout: TAILNET_HANDSHAKE_TIMEOUT,
         attention_tx,
@@ -540,11 +541,31 @@ pub(super) async fn only_update(
     }
 }
 
+/// A pane of this daemon (no `host`) as the layout builders take it.
+pub(super) fn local_pane(id: &str, sid: Option<&str>) -> crate::tabs::PaneRef {
+    crate::tabs::PaneRef {
+        pane_id: id.to_string(),
+        session_id: sid.map(str::to_string),
+        host: None,
+    }
+}
+
 /// Seed `client_id` with one tab whose grid is two empty panes side by
 /// side, so a move has a source and a destination pane to aim at.
 pub(super) fn seed_two_pane_layout(hub: &Hub, client_id: &str) {
     let grid = crate::tabs::build_balanced(
-        &[("p1".to_string(), None), ("p2".to_string(), None)],
+        &[
+            crate::tabs::PaneRef {
+                pane_id: "p1".to_string(),
+                session_id: None,
+                host: None,
+            },
+            crate::tabs::PaneRef {
+                pane_id: "p2".to_string(),
+                session_id: None,
+                host: None,
+            },
+        ],
         protocol::SplitDirection::Horizontal,
     )
     .expect("two panes build a grid");

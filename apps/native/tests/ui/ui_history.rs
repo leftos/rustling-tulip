@@ -405,6 +405,7 @@ fn clicking_a_detail_file_opens_its_diff_against_the_commit(cx: &mut TestAppCont
         path,
         against,
         worktree_path,
+        host: None,
     } = &opens[0]
     else {
         panic!("filtered to diff tabs");

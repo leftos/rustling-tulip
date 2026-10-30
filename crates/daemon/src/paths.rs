@@ -319,6 +319,13 @@ pub fn devices_file(dirs: &Dirs) -> PathBuf {
     dirs.config.join("devices.json")
 }
 
+/// This daemon's stable id: `<config>/daemon-id`, a bare UUID with no newline
+/// (see [`crate::daemon_id`]).
+#[must_use]
+pub fn daemon_id_file(dirs: &Dirs) -> PathBuf {
+    dirs.config.join("daemon-id")
+}
+
 /// The summarizer's spend ledger: `<config>/summarizer-spend.json`, the
 /// current local day's billed spend (see [`crate::summarizer::ledger`]).
 #[must_use]

@@ -529,6 +529,7 @@ fn pane_is_bound(grid: &GridNode, pane_id: &str) -> bool {
         GridNode::Pane {
             pane_id: id,
             session_id,
+            ..
         } => id == pane_id && session_id.is_some(),
         GridNode::Split { first, second, .. } => {
             pane_is_bound(first, pane_id) || pane_is_bound(second, pane_id)
@@ -745,6 +746,7 @@ fn unbound_drop(
             tab_id,
             pane_id,
             session_id: session,
+            host: None,
         };
         return Some((PaneDropEdge::Replace, LeafDrop::Send(Box::new(message))));
     };
@@ -754,6 +756,7 @@ fn unbound_drop(
         direction,
         place,
         new_session_id: session,
+        host: None,
         request_id,
     };
     Some((edge, LeafDrop::Send(Box::new(message))))

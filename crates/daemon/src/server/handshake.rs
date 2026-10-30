@@ -125,7 +125,7 @@ async fn read_hello<R: Inbound>(
         client_id = client_id.as_deref().unwrap_or("(legacy)"),
         "handshake negotiated protocol version"
     );
-    let _ = out_tx.send(welcome_message(negotiated));
+    let _ = out_tx.send(welcome_message(negotiated, &hub.daemon_id));
     Ok(Handshake {
         negotiated_version: negotiated,
         client_id,
@@ -204,12 +204,13 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
     protocol::FEATURE_DEVICE_BLOCK,
+    protocol::FEATURE_DAEMON_ID,
     FEATURE_SCREEN_DUMP,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
-/// version this daemon speaks, and [`DAEMON_FEATURES`].
-fn welcome_message(negotiated: u32) -> DaemonMessage {
+/// version this daemon speaks, [`DAEMON_FEATURES`] and this daemon's stable id.
+fn welcome_message(negotiated: u32, daemon_id: &str) -> DaemonMessage {
     DaemonMessage::Welcome {
         protocol_version: negotiated,
         supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
@@ -217,6 +218,7 @@ fn welcome_message(negotiated: u32) -> DaemonMessage {
             .iter()
             .map(|feature| (*feature).to_owned())
             .collect(),
+        daemon_id: Some(daemon_id.to_owned()),
     }
 }
 
@@ -473,11 +475,11 @@ mod tests {
     }
     #[test]
     fn welcome_carries_the_daemon_features_and_the_negotiated_version() {
-        let welcome = welcome_message(22);
+        let welcome = welcome_message(22, TEST_DAEMON_ID);
         assert!(
             matches!(
                 &welcome,
-                DaemonMessage::Welcome { protocol_version: 22, supported_versions, features }
+                DaemonMessage::Welcome { protocol_version: 22, supported_versions, features, .. }
                     if supported_versions == SUPPORTED_PROTOCOL_VERSIONS
                         && features == DAEMON_FEATURES
             ),
@@ -487,7 +489,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_agent_commands() {
-        let welcome = welcome_message(22);
+        let welcome = welcome_message(22, TEST_DAEMON_ID);
         assert!(
             matches!(
                 &welcome,
@@ -716,7 +718,7 @@ mod tests {
 
     #[test]
     fn welcome_advertises_device_pairing() {
-        let welcome = welcome_message(22);
+        let welcome = welcome_message(22, TEST_DAEMON_ID);
         assert!(
             matches!(
                 &welcome,
@@ -729,12 +731,39 @@ mod tests {
 
     #[test]
     fn welcome_lists_device_block() {
-        let welcome = welcome_message(22);
+        let welcome = welcome_message(22, TEST_DAEMON_ID);
         assert!(
             matches!(
                 &welcome,
                 DaemonMessage::Welcome { features, .. }
                     if features.iter().any(|f| f == protocol::FEATURE_DEVICE_BLOCK)
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    const TEST_DAEMON_ID: &str = "0b9f4a52-6c7d-4e1f-8a3b-5c2d1e0f9a87";
+
+    #[test]
+    fn welcome_carries_the_daemon_id() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { daemon_id: Some(id), .. } if id == TEST_DAEMON_ID
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_daemon_id_feature() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_DAEMON_ID)
             ),
             "{welcome:?}"
         );
