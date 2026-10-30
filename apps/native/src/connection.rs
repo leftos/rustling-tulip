@@ -84,24 +84,20 @@ pub struct Footer {
     pub dot: DotKind,
     /// The short state text ("3 sessions", "disconnected", …).
     pub label: String,
-    /// The local daemon's port, only while the connection is open; never
-    /// set on a remote host.
+    /// This PC's daemon's port, only while the connection is open.
     pub port: Option<u16>,
-    /// A remote host's short name; `None` on the local daemon.
-    pub host: Option<String>,
     /// The label, followed by " — <reason>" when the state carries one.
     pub tooltip: String,
 }
 
 impl Footer {
     /// The footer pill's text: `daemon · <label>`, with ` · :<port>` while
-    /// open, on the local daemon; `<host> · <label>` on a remote host.
+    /// open.
     #[must_use]
     pub fn pill(&self) -> String {
-        match (&self.host, self.port) {
-            (Some(host), _) => format!("{host} · {}", self.label),
-            (None, Some(port)) => format!("daemon · {} · :{port}", self.label),
-            (None, None) => format!("daemon · {}", self.label),
+        match self.port {
+            Some(port) => format!("daemon · {} · :{port}", self.label),
+            None => format!("daemon · {}", self.label),
         }
     }
 }
@@ -164,13 +160,6 @@ impl Connection {
     #[must_use]
     pub fn target(&self) -> &Target {
         &self.target
-    }
-
-    /// Whether Stop is offered: only the local daemon's process is ever
-    /// stopped from here.
-    #[must_use]
-    pub fn can_stop(&self) -> bool {
-        self.target.is_local()
     }
 
     #[must_use]
@@ -278,12 +267,10 @@ impl Connection {
         }
     }
 
-    /// The user stopped the daemon: no reconnect until a Restart. Ignored on
-    /// a remote host, which [`Connection::can_stop`] never offers.
+    /// The user stopped This PC's daemon: no reconnect until a Restart.
+    /// Only This PC's connection is ever stopped.
     pub fn stop(&mut self) {
-        if self.can_stop() {
-            self.stop_requested = true;
-        }
+        self.stop_requested = true;
     }
 
     /// Why the connection is closed, failed or rejected; `None` otherwise.
@@ -323,10 +310,7 @@ impl Connection {
         };
         Footer {
             dot,
-            port: self
-                .port
-                .filter(|_| self.is_open() && self.target.is_local()),
-            host: self.target.short_name().map(str::to_owned),
+            port: self.port.filter(|_| self.is_open()),
             label,
             tooltip,
         }
@@ -557,14 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_pill_shows_short_name_without_port() {
-        let footer = open_remote().footer(3);
-        assert_eq!(footer.port, None);
-        assert_eq!(footer.pill(), "box · 3 sessions");
-        let mut closed = open_remote();
-        closed.on_closed("dropped".to_owned());
-        assert_eq!(closed.footer(3).pill(), "box · disconnected");
-
+    fn pill_shows_the_port_only_while_open() {
         assert_eq!(open(20).footer(3).pill(), "daemon · 3 sessions · :51418");
         assert_eq!(Connection::new().footer(0).pill(), "daemon · starting…");
     }
@@ -610,7 +587,6 @@ mod tests {
         let footer = conn.footer(0);
         assert_eq!(footer.label, "not paired");
         assert_eq!(footer.dot, DotKind::Err);
-        assert_eq!(footer.pill(), "box · not paired");
         assert_eq!(footer.tooltip, "not paired — device not approved");
         assert!(!conn.is_open(), "a pairing connection is not open");
     }
@@ -630,22 +606,6 @@ mod tests {
         );
         assert_eq!(conn.restart(), RestartAction::FreshConnect);
         assert_eq!(conn.state(), &State::Connecting);
-    }
-
-    #[test]
-    fn remote_stop_is_unavailable() {
-        assert!(
-            Connection::new().can_stop(),
-            "Stop stays on the local daemon"
-        );
-        let mut conn = open_remote();
-        assert!(!conn.can_stop());
-        conn.stop();
-        assert_eq!(
-            conn.on_closed("dropped".to_owned()),
-            Some(HALF_SECOND),
-            "a Stop must not end the reconnects to a remote host"
-        );
     }
 
     #[test]

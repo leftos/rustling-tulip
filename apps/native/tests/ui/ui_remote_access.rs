@@ -299,27 +299,6 @@ fn waiting_count_badges_the_remote_access_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn waiting_requests_are_forgotten_on_a_remote_target(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = opened(cx, &dir);
-    open_page(&mut h);
-    fold(&mut h, &[request("r1", false)]);
-    h.click_on("settings-waiting-approve-r1");
-    assert!(h.root(|root, _| root.pairing_dialog_open()));
-    h.set_connection(remote());
-    reload(&mut h);
-    assert_eq!(waiting_rows(&mut h), [], "the rows are forgotten");
-    assert_eq!(h.root(|root, _| root.pairing_badge()), None);
-    assert!(!h.root(|root, _| root.pairing_dialog_open()));
-    h.keys("ctrl-,");
-    assert!(
-        !h.root(|root, _| root.settings_tab_labels())
-            .contains(&"Remote access"),
-        "the page and its rows are hidden"
-    );
-}
-
-#[gpui::test]
 fn remote_access_tab_follows_worktrees(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

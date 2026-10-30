@@ -1000,14 +1000,6 @@ pub struct RootView {
     /// The arrangement the chooser picked, applied to the daemon's next tab
     /// list.
     pending_arrangement: Option<layout_chooser::Arrangement>,
-    /// The import modal, while open.
-    import_modal: Option<layout_chooser::ImportChooser>,
-    /// The import a remote host's first session list offered, shown on the
-    /// next tab list.
-    pending_import: Option<layout_chooser::ImportOffer>,
-    /// True from `Welcome` until the connection's first `Sessions`: only that
-    /// list can offer an import; a later one is a resync.
-    awaiting_initial_sessions: bool,
     /// Worktree cleanups that failed, one per session; the head is shown.
     cleanup_failed: cleanup_failed::CleanupQueue,
     /// The cleanup-failed dialog's keyboard focus.
@@ -1195,12 +1187,6 @@ impl RootView {
             .detach();
         }
         root
-    }
-
-    /// The daemon This PC's connection is on, or is trying to reach.
-    #[must_use]
-    pub fn connection_target(&self) -> &target::Target {
-        self.conn().target()
     }
 
     /// Follows the window's activation and bounds. Ctrl stays down in the
@@ -1411,9 +1397,6 @@ impl RootView {
             layout_chooser: None,
             chooser_focus: cx.focus_handle(),
             pending_arrangement: None,
-            import_modal: None,
-            pending_import: None,
-            awaiting_initial_sessions: false,
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
             cleanup_focus: cx.focus_handle(),
             opener: open,
@@ -2309,7 +2292,6 @@ impl RootView {
             || self.run_confirm.is_some()
             || self.notices.has_modal()
             || self.layout_chooser.is_some()
-            || self.import_modal.is_some()
             || !self.cleanup_failed.is_empty()
             || self.exit.is_some()
             || self.open_in_main(Overlay::PaneClose)
@@ -2494,10 +2476,8 @@ impl RootView {
     /// Drops the font overrides and the sidebar folds of tabs the daemon no
     /// longer lists, once it has listed any: before the first full list
     /// nothing is known to be gone, so an update for one tab prunes nothing.
-    /// A remote host's tab list prunes nothing: the saved entries are the
-    /// local daemon's.
     fn prune_tab_font_sizes(&mut self) {
-        if !self.tabs.is_loaded() || !self.conn().target().is_local() {
+        if !self.tabs.is_loaded() {
             return;
         }
         let live: HashSet<&str> = self.tabs.tabs().iter().map(|tab| tab.id.as_str()).collect();
@@ -2509,13 +2489,9 @@ impl RootView {
     }
 
     /// Drops the source-control pin and collapse state of `host`'s repos
-    /// its registry snapshot no longer lists, saving when any went. The
-    /// first connection's list prunes nothing while it holds a remote
-    /// target: the saved entries without a host prefix are the local
-    /// daemon's.
+    /// its registry snapshot no longer lists, saving when any went.
     fn prune_source_control(&mut self, host: &HostKey, repos: &[RepoEntry]) {
-        let local_target = *host != HostKey::Local || self.conn().target().is_local();
-        if local_target && self.sidebar.prune_source_control(host, repos) {
+        if self.sidebar.prune_source_control(host, repos) {
             self.save_ui();
         }
     }
@@ -3247,9 +3223,7 @@ impl RootView {
         }
         self.sync_dashboard_watch();
         self.sync_dashboard_repaint(cx);
-        // The saved active tab is the local daemon's; a remote host's tab
-        // ids are neither remembered nor saved.
-        if self.conn().target().is_local() && self.sidebar.set_active_tab(self.tabs.active_id()) {
+        if self.sidebar.set_active_tab(self.tabs.active_id()) {
             self.save_ui();
         }
         if self
@@ -3629,14 +3603,15 @@ impl RootView {
         let pairing_input = device_pairing_view::PairingInput::of(&event);
         match event {
             NetEvent::State(conn) => {
-                // Everything the old target's daemon sent goes before the
-                // new target's state does, so the notices the rest of this
-                // arm raises survive it.
-                let moved = self
-                    .conn_of(host)
-                    .is_some_and(|old| old.target() != conn.target());
+                // A remote host's old address's slice goes before its new
+                // state does; This PC's target never moves.
+                let moved = *host != HostKey::Local
+                    && self
+                        .conn_of(host)
+                        .is_some_and(|old| old.target() != conn.target());
                 if moved {
-                    self.clear_host_slice(host, conn.target(), window, cx);
+                    tracing::info!(?host, "the host's address changed");
+                    self.clear_remote_slice(host, window, cx);
                 }
                 // A remote host's disconnect clears nothing: its slice stays
                 // as it last stood. Its agents go with the connection.
@@ -3808,7 +3783,7 @@ impl RootView {
         // snapshot changed is read from the old one.
         let (moved, exit_discard, finished) = self.before_fold(host, &msg);
         self.fold_sidebar(host, &msg, cx);
-        self.on_import_message(host, &msg, window, cx);
+        self.record_host_session_count(host, &msg);
         if let Some(discard) = exit_discard {
             self.send_to(host, discard);
         }
@@ -4164,80 +4139,6 @@ impl RootView {
         self.reset_devices(window, cx);
         self.ask_pending_devices();
         self.ask_devices();
-        self.awaiting_initial_sessions = true;
-    }
-
-    /// The connection moved to another daemon (this PC's or a tailnet
-    /// host's): nothing the old daemon sent stays on screen or takes a
-    /// click, no drag goes on, and the exit dialog opened for it closes.
-    /// Sends nothing to either daemon and saves nothing; the new daemon's
-    /// lists fill the view again, and back on this PC its saved tab shows.
-    fn clear_host_slice(
-        &mut self,
-        host: &HostKey,
-        target: &target::Target,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::info!("connection target changed: clearing the old daemon's state");
-        if *host != HostKey::Local {
-            self.clear_remote_slice(host, window, cx);
-            return;
-        }
-        if self.popout_restore == PopoutRestore::Waiting {
-            tracing::info!(
-                "left the boot target before the saved pop-outs reopened; \
-                 they stay saved and reopen nowhere this launch"
-            );
-            self.popout_restore = PopoutRestore::Skipped;
-        }
-        self.pane_ui.close = None;
-        self.pane_ui.move_panes = None;
-        self.pane_ui.menu = None;
-        self.drag = None;
-        self.reset_host(host, window, cx);
-        self.sidebar.clear_host(host);
-        let restored_active = if target.is_local() {
-            self.sidebar.ui_state().active_tab_id.clone()
-        } else {
-            None
-        };
-        self.tabs.clear_for_switch(restored_active);
-        self.panes.clear();
-        self.chat = chat_view::ChatPanes::new(self.chat.wall_clock());
-        self.sessions_loaded = false;
-        self.seen_sessions.remove(host);
-        self.last_focused_session = None;
-        self.last_active_tab = None;
-        self.retries = RetryGate::default();
-        self.renaming = None;
-        self.wanted_session = None;
-        self.show_sc_host(&HostKey::Local);
-        self.sc = ScModel::default();
-        self.sc_picker_open = false;
-        self.changes.writes = sc_writes::ScWrites::default();
-        self.changes.file_menu = None;
-        self.stash.model = stashes::StashModel::default();
-        self.history = history::HistoryModel::default();
-        self.diff_tabs.clear();
-        self.diff_opens = diff_tab::DiffOpens::default();
-        self.viewer_tabs.clear();
-        self.viewer_opens = viewer_tab::ViewerOpens::default();
-        self.reset_dashboard_for_target(host);
-        self.session_history.forget(host);
-        self.recover_requests.clear();
-        self.recover_batches.clear();
-        self.close_recover_on_overlay(window, cx);
-        self.reset_pairing(window, cx);
-        self.reset_devices(window, cx);
-        self.close_device_pairing(window, cx);
-        self.branch_cache = BranchCache::default();
-        self.end_drag(window, cx);
-        self.clear_drag_state();
-        if self.exit.is_some() {
-            self.close_exit_dialog(window, cx);
-        }
-        cx.notify();
     }
 
     /// Forgets everything remote host `host`'s daemon sent: its sessions,
@@ -4307,7 +4208,6 @@ impl RootView {
         self.tabs.clear_layout_requests();
         self.pending_arrangement = None;
         self.close_layout_chooser(window, cx);
-        self.reset_import(window, cx);
         self.reset_cleanup_failed(window, cx);
         self.reset_worktrees(window, cx);
     }
@@ -4378,11 +4278,6 @@ impl RootView {
         self.seen_sessions
             .get(host)
             .is_some_and(|seen| seen.contains(id))
-    }
-
-    /// How many sessions `host`'s connection has had a snapshot of.
-    pub(crate) fn seen_count(&self, host: &HostKey) -> usize {
-        self.seen_sessions.get(host).map_or(0, HashSet::len)
     }
 
     /// A session's snapshot: every pane showing it refreshes, the size it
@@ -4499,7 +4394,7 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        if self.on_layout_chooser_key(ks, window, cx) || self.on_import_key(ks, window, cx) {
+        if self.on_layout_chooser_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -5023,7 +4918,6 @@ impl Render for RootView {
             .children(self.undo_layer(window, cx))
             .children(self.run_confirm_layer(cx))
             .children(self.layout_chooser_layer(cx))
-            .children(self.import_layer(cx))
             .children(self.exit_layer(cx))
             .children(delete_over)
             .children(self.cleanup_failed_layer(window, cx))

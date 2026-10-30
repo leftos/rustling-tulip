@@ -1,19 +1,15 @@
 //! The first-connect layout chooser: its modal, its keys, and the
-//! arrangement it chose laid over the daemon's answer; and the import modal
-//! a tailnet host's changed session count opens, which shares its picker.
-//! The models are in [`crate::layout_chooser`].
+//! arrangement it chose laid over the daemon's answer. The model is in
+//! [`crate::layout_chooser`].
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke, SharedString, Stateful,
     Window, div, prelude::*, px,
 };
-use protocol::{ClientMessage, ClonableLayout, DaemonMessage, TabEntry};
+use protocol::{ClientMessage, ClonableLayout, TabEntry};
 
 use crate::RootView;
-use crate::layout_chooser::{
-    Control, FALLBACK_ASPECT, ImportChooser, ImportControl, ImportOffer, ImportOutcome,
-    LayoutChooser, Mode, arrangement_messages, import_intro, import_offer,
-};
+use crate::layout_chooser::{Control, FALLBACK_ASPECT, LayoutChooser, Mode, arrangement_messages};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::close_button;
@@ -25,8 +21,6 @@ const TITLE: &str = "Set up this window";
 const INTRO: &str = "This is a new client. Sessions are shared with every connected window, but each curates its own tabs. How should this window start?";
 const LAYOUT_LABEL: &str = "Layout";
 const MAX_LABEL: &str = "Max sessions per tab";
-const IMPORT_TITLE: &str = "Import remote sessions";
-const IMPORT_REPLACES: &str = "Opening them or starting empty replaces this window's tabs on this host. Sessions keep running.";
 
 impl RootView {
     /// Whether the first-connect layout chooser is open.
@@ -36,18 +30,10 @@ impl RootView {
     }
 
     /// The open chooser's controls in the keyboard's order: selector and
-    /// label; while the import modal is open, its controls, the picker's
-    /// among them.
+    /// label.
     #[must_use]
     pub fn layout_chooser_controls(&self) -> Vec<(String, String)> {
         let aspect = self.pane_area_aspect();
-        if let Some(import) = &self.import_modal {
-            return import
-                .controls()
-                .iter()
-                .map(|control| (control.selector(), import.label(control, aspect)))
-                .collect();
-        }
         let Some(chooser) = &self.layout_chooser else {
             return Vec::new();
         };
@@ -211,264 +197,6 @@ impl RootView {
         .child(div().flex().flex_col().gap(px(6.0)).children(options));
         Some(backdrop("layout-chooser", panel, &theme(cx)))
     }
-
-    /// A press of a picker control, in whichever modal shows the picker.
-    fn press_picker_control(
-        &mut self,
-        control: &Control,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.import_modal.is_some() {
-            self.press_import_control(&ImportControl::Picker(control.clone()), window, cx);
-        } else {
-            self.press_layout_control(control, window, cx);
-        }
-    }
-
-    /// Whether the import modal is open.
-    #[must_use]
-    pub fn import_modal_open(&self) -> bool {
-        self.import_modal.is_some()
-    }
-
-    /// What a daemon message means for the import offer: a remote host's
-    /// first session list after `Welcome` is compared with the count
-    /// recorded for the host; every session list on a remote host then
-    /// records its count; `LayoutInitRequired` drops the offer for the
-    /// chooser; the next tab list opens it unless it answers our own
-    /// arrangement; a new or removed session records the host's live count.
-    /// Only the layout home's connection (`HostKey::Local`) takes part:
-    /// another host's messages leave the offer and the counts alone.
-    pub(crate) fn on_import_message(
-        &mut self,
-        host: &HostKey,
-        msg: &DaemonMessage,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if *host != HostKey::Local {
-            return;
-        }
-        match msg {
-            DaemonMessage::Sessions { sessions } => {
-                let initial = std::mem::take(&mut self.awaiting_initial_sessions);
-                let host = self.host_count_key();
-                let recorded = host
-                    .as_deref()
-                    .and_then(|host| self.sidebar.host_session_count(host));
-                let offer = import_offer(host.is_some(), initial, sessions.len(), recorded);
-                if offer.is_some() {
-                    self.pending_import = offer;
-                }
-                if let Some(host) = &host
-                    && self.record_host_session_count(host, sessions.len())
-                {
-                    self.save_ui();
-                }
-            }
-            DaemonMessage::LayoutInitRequired { .. } => self.pending_import = None,
-            DaemonMessage::Tabs { .. } => {
-                if let Some(offer) = self.pending_import.take()
-                    && self.pending_arrangement.is_none()
-                {
-                    self.open_import_modal(offer, window, cx);
-                }
-            }
-            DaemonMessage::SessionUpdated { .. } | DaemonMessage::SessionRemoved { .. } => {
-                if !self.awaiting_initial_sessions
-                    && let Some(host) = self.host_count_key()
-                    && self.record_host_session_count(&host, self.seen_count(&HostKey::Local))
-                {
-                    self.schedule_ui_save(cx);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// The connected remote host's session-count key; `None` on this PC.
-    fn host_count_key(&self) -> Option<String> {
-        self.conn().target().host_key()
-    }
-
-    /// Records `count` under `host`, the connected host's session-count
-    /// key, while that host is a saved host, so a forgotten one records
-    /// nothing; returns whether the recorded count changed, so the caller
-    /// saves.
-    fn record_host_session_count(&mut self, host: &str, count: usize) -> bool {
-        let target = self.conn().target();
-        let saved = self
-            .sidebar
-            .ui_state()
-            .saved_hosts
-            .iter()
-            .any(|saved| saved.is_for(target));
-        let count = u32::try_from(count).unwrap_or(u32::MAX);
-        saved && self.sidebar.set_host_session_count(host, count)
-    }
-
-    /// Whether the import modal holds the keyboard.
-    #[must_use]
-    pub fn import_modal_focused(&self, window: &Window) -> bool {
-        self.import_modal.is_some() && self.chooser_focus.is_focused(window)
-    }
-
-    /// Opens the import modal for `offer`, on Keep.
-    pub(crate) fn open_import_modal(
-        &mut self,
-        offer: ImportOffer,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::info!(
-            incoming = offer.incoming,
-            recorded = offer.recorded,
-            "the remote host's session count changed: offering the import"
-        );
-        self.import_modal = Some(ImportChooser::new(offer));
-        if self.exit.is_none() {
-            self.chooser_focus.focus(window);
-        }
-        cx.notify();
-    }
-
-    /// Closes the import modal, when it is open, and hands the keyboard
-    /// back.
-    pub(crate) fn close_import_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.import_modal.take().is_none() {
-            return;
-        }
-        if self.exit.is_none() {
-            self.after_notice_closed(window, cx);
-        }
-        cx.notify();
-    }
-
-    /// A new connection: no offer held, no first list awaited, and the
-    /// modal closed.
-    pub(crate) fn reset_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pending_import = None;
-        self.awaiting_initial_sessions = false;
-        self.close_import_modal(window, cx);
-    }
-
-    /// A key while the import modal is open; returns whether it was. Tab
-    /// and Shift+Tab move the focus, Enter and Space press the focused
-    /// control, and Esc keeps the layout.
-    pub(crate) fn on_import_key(
-        &mut self,
-        keystroke: &Keystroke,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(import) = &mut self.import_modal else {
-            return false;
-        };
-        match keystroke.key.as_str() {
-            "tab" => {
-                import.move_focus(!keystroke.modifiers.shift);
-                cx.notify();
-            }
-            "enter" | "space" => {
-                let control = import.focused();
-                self.press_import_control(&control, window, cx);
-            }
-            "escape" => self.press_import_control(&ImportControl::Keep, window, cx),
-            _ => {}
-        }
-        true
-    }
-
-    /// Presses `control`; Keep closes the modal and sends nothing, Open all
-    /// and Start empty go to the daemon, keeping the arrangement for its
-    /// answer.
-    fn press_import_control(
-        &mut self,
-        control: &ImportControl,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let aspect = self.pane_area_aspect();
-        let Some(import) = &mut self.import_modal else {
-            return;
-        };
-        match import.press(control, aspect) {
-            Some(ImportOutcome::Keep) => {
-                tracing::info!("import: keeping the layout");
-                self.close_import_modal(window, cx);
-            }
-            Some(ImportOutcome::Send((kind, arrangement))) => {
-                tracing::info!(?kind, ?arrangement, "import: chosen");
-                self.send_to(&HostKey::Local, ClientMessage::InitLayout { kind });
-                self.pending_arrangement = arrangement;
-                self.close_import_modal(window, cx);
-            }
-            None => {}
-        }
-        cx.notify();
-    }
-
-    /// The import modal over a backdrop that takes every click beneath it.
-    pub(crate) fn import_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let t = theme(cx);
-        let import = self.import_modal.as_ref()?;
-        let aspect = self.pane_area_aspect();
-        let focused = import.focused();
-        let focused_picker = match &focused {
-            ImportControl::Picker(control) => Some(control),
-            _ => None,
-        };
-        let mut options: Vec<AnyElement> = Vec::new();
-        for control in [
-            ImportControl::Keep,
-            ImportControl::OpenAll,
-            ImportControl::Empty,
-        ] {
-            let pressed = control.clone();
-            let row = option_row_element(
-                control.selector(),
-                import.label(&control, aspect),
-                control.detail(),
-                RowMarks {
-                    focused: control == focused,
-                    selected: import.is_selected(&control),
-                },
-                &t,
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.press_import_control(&pressed, window, cx);
-            }));
-            options.push(row.into_any_element());
-            if control == ImportControl::OpenAll && import.expanded() {
-                let picker = picker(import.picker(), focused_picker, aspect, cx);
-                options.push(picker.into_any_element());
-            }
-        }
-        let close = close_button("import-close", false, &theme(cx)).on_click(cx.listener(
-            |this, _: &ClickEvent, window, cx| {
-                this.press_import_control(&ImportControl::Keep, window, cx);
-            },
-        ));
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.0))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(IMPORT_TITLE))
-            .child(close);
-        let panel = modal_panel(crate::fonts::ui_text_size(cx), "import-panel", &theme(cx))
-            .track_focus(&self.chooser_focus)
-            .child(header)
-            .child(
-                div()
-                    .text_color(gpui::rgb(t.muted))
-                    .child(import_intro(import.offer())),
-            )
-            .child(div().text_color(gpui::rgb(t.muted)).child(IMPORT_REPLACES))
-            .child(div().flex().flex_col().gap(px(6.0)).children(options));
-        Some(backdrop("import-modal", panel, &theme(cx)))
-    }
 }
 
 /// An option of the chooser: its name over its muted detail, filled while
@@ -552,7 +280,7 @@ fn picker_button(
         button.bg(gpui::rgb(t.selected_bg))
     })
     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-        this.press_picker_control(&pressed, window, cx);
+        this.press_layout_control(&pressed, window, cx);
     }))
 }
 

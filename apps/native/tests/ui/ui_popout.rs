@@ -10,9 +10,8 @@ use gpui::{
     size,
 };
 use protocol::{AttentionReason, ClientMessage, DaemonMessage, SplitDirection, TabEntry};
-use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{
-    Connection, OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
+    OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
 };
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
@@ -3742,15 +3741,6 @@ fn s1_and_s2() -> Fixture {
     fixture
 }
 
-/// An open connection to a tailnet host.
-fn on_a_tailnet_host() -> Connection {
-    let mut conn = Connection::for_target(Target::tailnet("box.tail1234.ts.net", None));
-    conn.on_connecting();
-    conn.on_socket_open(8787);
-    conn.on_welcome(support::PROTOCOL, support::daemon_features());
-    conn
-}
-
 #[gpui::test]
 fn closing_all_windows_keeps_the_saved_popouts(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -3865,29 +3855,6 @@ fn a_restore_does_not_raise_an_inactive_main_window(cx: &mut TestAppContext) {
     assert!(
         !h.cx.update(|window, _| window.is_window_active()),
         "the main window, not in front when the restore began, is not raised"
-    );
-}
-
-#[gpui::test]
-fn switching_host_before_the_restore_keeps_the_saved_popouts(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    seed_ui(&dir, &json!({ "popouts": [saved_pane("t1", "p1")] }));
-    let mut h = Harness::open(cx, &dir);
-
-    h.set_connection(on_a_tailnet_host());
-    // The host's layout happens to use the same ids as this PC's.
-    h.load(&Fixture::single(session("s1").build()));
-
-    assert_eq!(
-        h.window_count(),
-        1,
-        "nothing saved on this PC reopens on the host"
-    );
-    let_the_save_run(&mut h);
-    assert_eq!(
-        saved_ui(&dir)["popouts"],
-        json!([saved_pane("t1", "p1")]),
-        "the saved list is left as it was"
     );
 }
 
