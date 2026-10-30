@@ -27,7 +27,7 @@ pub use activity::{
     MINUTE_COLUMNS, OpenCall, SubagentNode,
 };
 pub use screen_rules::{
-    LineMatcher, ReadySignal, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
+    LineMatcher, ReadySignal, RuleError, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
 };
 
 use chrono::{DateTime, Utc};

@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- `rustling-tulipd screen <session id>` prints how the app read a session's screen, rule by rule, with the screen itself, and `--fixture <path>` saves it.
+
 ### Fixed
 
 - A session on a branch whose worktree folder you deleted by hand now starts, and Recreate from base works there, instead of failing with "already used by worktree".

@@ -18,6 +18,7 @@ mod hooks;
 pub(crate) mod live_devices;
 mod pairing;
 mod recovery;
+mod screen;
 mod settings;
 mod summarizer;
 pub(crate) use self::recovery::RecoveryClaims;
@@ -840,6 +841,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         m @ (ClientMessage::WatchDashboard { .. } | ClientMessage::GetSessionDetail { .. }) => {
             dashboard::handle(hub, m, ctx).await;
         }
+        m @ ClientMessage::DumpScreen { .. } => screen::handle(hub, m, ctx),
         m @ (ClientMessage::SetSummarizerSettings { .. }
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,

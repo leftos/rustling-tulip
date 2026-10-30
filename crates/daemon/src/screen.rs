@@ -169,10 +169,6 @@ impl Screen {
     }
 
     /// The rows below the last rule row, trailing empty rows dropped.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no screen rule reads this region yet")
-    )]
     #[must_use]
     pub fn after_last_horizontal_rule(&self) -> Vec<String> {
         let rows = self.rows();

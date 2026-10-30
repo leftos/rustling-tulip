@@ -196,10 +196,15 @@ fn authorize_device(
 /// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
 /// A feature joins only once the daemon fully honours it, since a client that
 /// sees it listed offers the capability to the user.
+/// The `screen` subcommand's dump: a daemon listing it answers `DumpScreen`
+/// with a session's grid and the trace of its screen rules over it.
+const FEATURE_SCREEN_DUMP: &str = "screen_dump";
+
 const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_AGENT_COMMANDS,
     protocol::FEATURE_DEVICE_PAIRING,
     protocol::FEATURE_DEVICE_BLOCK,
+    FEATURE_SCREEN_DUMP,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every

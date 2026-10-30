@@ -2,8 +2,9 @@
 //! shows.
 //!
 //! A plugin hands the daemon its rule table as data
-//! ([`agent_api::ScreenRules`]); [`CompiledRules::compile`] compiles its
-//! patterns once, and [`CompiledRules::read`] evaluates the table over the
+//! ([`agent_api::ScreenRules`]); [`CompiledRules::try_compile`] checks the
+//! whole table and compiles its patterns once, refusing the table outright
+//! when any rule is unsound, and [`CompiledRules::read`] evaluates it over the
 //! regions [`Screen`] reads back, by priority: the highest-priority rule whose
 //! matcher hits its region, and none of whose guards does, decides the
 //! reading. An overlay rule keeps whatever state the session already has,
@@ -11,12 +12,13 @@
 //! agent session's status watcher ([`crate::pty_state::watch`]) and the
 //! plain-shell watcher ([`crate::pty_state::watch_plain_shell`]) read its
 //! screen through the rules of the session's agent ([`rules_for`]).
+//! [`CompiledRules::explain`] traces the same evaluation rule by rule.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use agent_api::{LineMatcher, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
+use agent_api::{LineMatcher, RuleError, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
 use protocol::AgentId;
 use regex::Regex;
 
@@ -55,9 +57,54 @@ pub struct Reading {
     pub from_title: bool,
 }
 
+/// How many characters of a region a rule trace's preview keeps.
+const PREVIEW_CHARS: usize = 240;
+
 /// One agent's rule table with its patterns compiled, highest priority first.
 pub struct CompiledRules {
     rules: Vec<CompiledRule>,
+    /// Why the agent's table was refused, when it was: the set then holds no
+    /// rule. Empty for a table that compiled.
+    rejected: Vec<RuleError>,
+}
+
+/// One evaluation traced rule by rule: what [`CompiledRules::explain`] gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explanation {
+    /// The reading the evaluation gives, the same [`CompiledRules::read`]
+    /// gives.
+    pub winner: Reading,
+    /// Every rule, in the order it is evaluated.
+    pub rules: Vec<RuleTrace>,
+    /// Why the agent's table was refused, when it was.
+    pub rejected: Vec<RuleError>,
+}
+
+/// What one rule saw in one evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleTrace {
+    pub name: Arc<str>,
+    pub priority: u16,
+    pub region: ScreenRegion,
+    pub verdict: Verdict,
+    /// Whether the rule fired: its matcher hit and no guard did.
+    pub matched: bool,
+    /// The index of the first guard that vetoed a matcher hit.
+    pub vetoed_by: Option<usize>,
+    /// The region's lines joined with `" | "`, cut to [`PREVIEW_CHARS`]
+    /// characters.
+    pub preview: String,
+}
+
+/// What one rule makes of its region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The matcher hit no line.
+    Missed,
+    /// The matcher hit and no guard did.
+    Matched,
+    /// The matcher hit, and the guard at this index vetoed it.
+    Vetoed(usize),
 }
 
 /// One rule with its matchers compiled.
@@ -78,34 +125,96 @@ enum CompiledMatcher {
 
 impl CompiledRules {
     /// Compiles `rules`, sorted by descending priority (rules of one priority
-    /// keep their table order). A rule whose pattern does not compile is left
-    /// out with an error, and one with a region, a matcher, a guard or a
-    /// verdict this build does not know is left out with a warning.
-    #[must_use]
-    pub fn compile(rules: &ScreenRules) -> Self {
-        let mut compiled: Vec<CompiledRule> = rules.rules.iter().filter_map(compile_rule).collect();
+    /// keep their table order), or refuses the whole table.
+    ///
+    /// # Errors
+    ///
+    /// Every problem [`ScreenRules::validate`] finds, then every pattern
+    /// that does not compile, in table order; one is enough to refuse the
+    /// table.
+    pub fn try_compile(rules: &ScreenRules) -> Result<Self, Vec<RuleError>> {
+        let mut errors = match rules.validate() {
+            Ok(()) => Vec::new(),
+            Err(errors) => errors,
+        };
+        let mut compiled = Vec::with_capacity(rules.rules.len());
+        for (index, rule) in rules.rules.iter().enumerate() {
+            match compile_rule(rule) {
+                Ok(Some(rule)) => compiled.push(rule),
+                Ok(None) => {}
+                Err(problems) => errors.extend(
+                    problems
+                        .into_iter()
+                        .map(|problem| RuleError::new(index, rule, problem)),
+                ),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
         compiled.sort_by_key(|rule| Reverse(rule.priority));
-        Self { rules: compiled }
+        Ok(Self {
+            rules: compiled,
+            rejected: Vec::new(),
+        })
+    }
+
+    /// A set with no rule, standing for a table refused for `rejected`.
+    fn refused(rejected: Vec<RuleError>) -> Self {
+        Self {
+            rules: Vec::new(),
+            rejected,
+        }
     }
 
     /// The state the screen shows.
     #[must_use]
     pub fn read(&self, screen: &Screen) -> Reading {
+        self.evaluate(screen, None)
+    }
+
+    /// The state the screen shows, with what every rule saw on the way.
+    #[must_use]
+    pub fn explain(&self, screen: &Screen) -> Explanation {
+        let mut rules = Vec::with_capacity(self.rules.len());
+        let winner = self.evaluate(screen, Some(&mut rules));
+        Explanation {
+            winner,
+            rules,
+            rejected: self.rejected.clone(),
+        }
+    }
+
+    /// The one evaluation [`Self::read`] and [`Self::explain`] share: the
+    /// first rule that fires decides the reading. Without a trace to fill it
+    /// stops there; with one it goes on and traces every rule.
+    fn evaluate(&self, screen: &Screen, mut trace: Option<&mut Vec<RuleTrace>>) -> Reading {
         let mut regions = RegionLines::default();
+        let mut winner: Option<&CompiledRule> = None;
         for rule in &self.rules {
-            if rule.matches(regions.get(screen, rule.region)) {
-                return Reading {
-                    verdict: rule.verdict,
-                    rule: Some(Arc::clone(&rule.name)),
-                    from_title: rule.region == ScreenRegion::Title,
-                };
+            let lines = regions.get(screen, rule.region);
+            let outcome = rule.outcome(lines);
+            if winner.is_none() && outcome == Outcome::Matched {
+                winner = Some(rule);
+            }
+            match trace.as_deref_mut() {
+                Some(traces) => traces.push(rule.trace(outcome, lines)),
+                None if winner.is_some() => break,
+                None => {}
             }
         }
-        Reading {
-            verdict: Verdict::NoMatch,
-            rule: None,
-            from_title: false,
-        }
+        winner.map_or(
+            Reading {
+                verdict: Verdict::NoMatch,
+                rule: None,
+                from_title: false,
+            },
+            |rule| Reading {
+                verdict: rule.verdict,
+                rule: Some(Arc::clone(&rule.name)),
+                from_title: rule.region == ScreenRegion::Title,
+            },
+        )
     }
 }
 
@@ -114,23 +223,41 @@ static BY_AGENT: LazyLock<Mutex<HashMap<AgentId, Arc<CompiledRules>>>> =
     LazyLock::new(Mutex::default);
 
 /// The compiled screen rules of `agent`'s plugin, compiled once per agent.
-/// An agent with no registered plugin gets no rules.
+/// An agent with no registered plugin gets no rules, and so does one whose
+/// table is refused ([`compile_or_reject`]).
 #[must_use]
 pub fn rules_for(agent: &AgentId) -> Arc<CompiledRules> {
     let mut cache = crate::sync::lock(&BY_AGENT);
     let rules = cache.entry(agent.clone()).or_insert_with(|| {
         let compiled = if let Some(plugin) = agent_registry::plugin(agent) {
-            CompiledRules::compile(plugin.screen_rules())
+            compile_or_reject(agent, plugin.screen_rules())
         } else {
             tracing::warn!(
                 "no agent plugin `{}` is registered; its screen has no rules",
                 agent.0
             );
-            CompiledRules::compile(&ScreenRules::default())
+            CompiledRules::refused(Vec::new())
         };
         Arc::new(compiled)
     });
     Arc::clone(rules)
+}
+
+/// `agent`'s table compiled, or, when it is refused, one error naming every
+/// bad rule and a set with no rule: the screen then never writes a status.
+fn compile_or_reject(agent: &AgentId, rules: &ScreenRules) -> CompiledRules {
+    match CompiledRules::try_compile(rules) {
+        Ok(compiled) => compiled,
+        Err(errors) => {
+            let listed: Vec<String> = errors.iter().map(ToString::to_string).collect();
+            tracing::error!(
+                agent = %agent.0,
+                errors = %listed.join("; "),
+                "screen rules: the agent's table is refused; its screen has no rules"
+            );
+            CompiledRules::refused(errors)
+        }
+    }
 }
 
 /// A shell's prompt row, each pattern with whether it is the POSIX form,
@@ -199,82 +326,102 @@ impl RegionLines {
     }
 }
 
-/// Compiles one rule's matchers, or gives `None` when one of its patterns does
-/// not compile or one of its parts is unknown to this build.
-fn compile_rule(rule: &ScreenRule) -> Option<CompiledRule> {
-    let verdict = verdict_of(rule)?;
-    if rule.region == ScreenRegion::Unknown {
-        tracing::warn!(
-            rule = %rule.name,
-            "screen rules: the rule reads a region this build does not know; it is skipped"
-        );
-        return None;
-    }
-    let matcher = compile_matcher(&rule.name, &rule.matcher)?;
+/// Compiles one rule's matchers. A pattern that does not compile is an error
+/// naming the matcher; a rule with a part this build does not know gives
+/// `None`, since [`ScreenRules::validate`] already reports that part.
+fn compile_rule(rule: &ScreenRule) -> Result<Option<CompiledRule>, Vec<String>> {
+    let mut problems = Vec::new();
+    let matcher = compile_matcher("its matcher", &rule.matcher, &mut problems);
     let mut not = Vec::with_capacity(rule.not.len());
-    for guard in &rule.not {
-        not.push(compile_matcher(&rule.name, guard)?);
+    for (index, guard) in rule.not.iter().enumerate() {
+        not.push(compile_matcher(
+            &format!("guard {index}"),
+            guard,
+            &mut problems,
+        ));
     }
-    Some(CompiledRule {
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    let (Some(verdict), Some(matcher), Some(not)) = (
+        verdict_of(rule.verdict),
+        matcher,
+        not.into_iter().collect::<Option<Vec<_>>>(),
+    ) else {
+        return Ok(None);
+    };
+    if rule.region == ScreenRegion::Unknown {
+        return Ok(None);
+    }
+    Ok(Some(CompiledRule {
         name: Arc::from(rule.name.as_str()),
         priority: rule.priority,
         region: rule.region,
         matcher,
         not,
         verdict,
-    })
+    }))
 }
 
-/// The verdict a rule gives, or `None`, logged, when this build does not know
-/// it.
-fn verdict_of(rule: &ScreenRule) -> Option<Verdict> {
-    match rule.verdict {
+/// The verdict a rule gives, or `None` when this build does not know it.
+fn verdict_of(verdict: ScreenVerdict) -> Option<Verdict> {
+    match verdict {
         ScreenVerdict::Working => Some(Verdict::State(ScreenState::Working)),
         ScreenVerdict::AwaitingInput => Some(Verdict::State(ScreenState::AwaitingInput)),
         ScreenVerdict::Idle => Some(Verdict::State(ScreenState::Idle)),
         ScreenVerdict::Keep => Some(Verdict::Keep),
-        ScreenVerdict::Unknown => {
-            tracing::warn!(
-                rule = %rule.name,
-                "screen rules: the rule gives a verdict this build does not know; it is skipped"
-            );
-            None
-        }
+        ScreenVerdict::Unknown => None,
     }
 }
 
-/// Compiles one matcher, logging the rule that named a pattern which did not
-/// compile or a matcher this build does not know.
-fn compile_matcher(rule: &str, matcher: &LineMatcher) -> Option<CompiledMatcher> {
+/// Compiles one matcher, named `what` in a problem it adds to `problems` when
+/// its pattern does not compile; `None` for that and for a matcher this
+/// build does not know.
+fn compile_matcher(
+    what: &str,
+    matcher: &LineMatcher,
+    problems: &mut Vec<String>,
+) -> Option<CompiledMatcher> {
     match matcher {
         LineMatcher::Contains(needle) => Some(CompiledMatcher::Contains(needle.clone())),
         LineMatcher::Regex(pattern) => match Regex::new(pattern) {
             Ok(regex) => Some(CompiledMatcher::Line(regex)),
             Err(error) => {
-                tracing::error!(
-                    rule = %rule,
-                    pattern = %pattern,
-                    %error,
-                    "screen rules: a pattern did not compile; the rule is skipped"
-                );
+                problems.push(format!("{what} does not compile: {error}"));
                 None
             }
         },
-        LineMatcher::Unknown => {
-            tracing::warn!(
-                rule = %rule,
-                "screen rules: the rule uses a matcher this build does not know; it is skipped"
-            );
-            None
-        }
+        LineMatcher::Unknown => None,
     }
 }
 
 impl CompiledRule {
-    /// Whether the rule fires over `lines`: its matcher hits one of them and
-    /// none of its guards does.
-    fn matches(&self, lines: &[String]) -> bool {
-        self.matcher.hits(lines) && !self.not.iter().any(|guard| guard.hits(lines))
+    /// What the rule makes of `lines`: whether its matcher hits one of them,
+    /// and if so the first guard that also does.
+    fn outcome(&self, lines: &[String]) -> Outcome {
+        if !self.matcher.hits(lines) {
+            return Outcome::Missed;
+        }
+        match self.not.iter().position(|guard| guard.hits(lines)) {
+            Some(index) => Outcome::Vetoed(index),
+            None => Outcome::Matched,
+        }
+    }
+
+    /// The trace of this rule's `outcome` over `lines`.
+    fn trace(&self, outcome: Outcome, lines: &[String]) -> RuleTrace {
+        RuleTrace {
+            name: Arc::clone(&self.name),
+            priority: self.priority,
+            region: self.region,
+            verdict: self.verdict,
+            matched: outcome == Outcome::Matched,
+            vetoed_by: match outcome {
+                Outcome::Vetoed(index) => Some(index),
+                Outcome::Missed | Outcome::Matched => None,
+            },
+            preview: lines.join(" | ").chars().take(PREVIEW_CHARS).collect(),
+        }
     }
 }
 
@@ -289,13 +436,14 @@ impl CompiledMatcher {
 }
 
 /// The lines of one region; a region this build does not know has none (a
-/// compiled rule never reads one: [`compile_rule`] drops it).
+/// compiled rule never reads one: [`CompiledRules::try_compile`] refuses it).
 fn region_lines(screen: &Screen, region: ScreenRegion) -> Vec<String> {
     match region {
         ScreenRegion::BottomNonEmpty { rows } => screen.bottom_non_empty_lines(rows),
         ScreenRegion::PromptBoxBody => screen.prompt_box_body(),
         ScreenRegion::AbovePromptBox { rows } => screen.above_prompt_box(rows),
         ScreenRegion::Title => screen.title().into_iter().collect(),
+        ScreenRegion::AfterLastRule => screen.after_last_horizontal_rule(),
         ScreenRegion::Unknown => Vec::new(),
     }
 }
@@ -382,14 +530,142 @@ mod tests {
         )
     }
 
+    /// `rules` compiled, which the test expects to succeed.
+    fn compiled(rules: Vec<ScreenRule>) -> CompiledRules {
+        CompiledRules::try_compile(&ScreenRules { rules }).expect("the table compiles")
+    }
+
     #[test]
     fn claude_rules_all_compile() {
-        let compiled = CompiledRules::compile(claude_table());
+        let compiled =
+            CompiledRules::try_compile(claude_table()).expect("Claude's rule table compiles");
         assert_eq!(compiled.rules.len(), 16, "no Claude rule was dropped");
     }
 
     #[test]
-    fn a_rule_whose_pattern_does_not_compile_is_skipped() {
+    fn after_last_rule_region_reads_the_footer() {
+        let rule_row = "─".repeat(24);
+        let footer = compiled(vec![rule(
+            "footer_shell",
+            100,
+            ScreenRegion::AfterLastRule,
+            LineMatcher::Contains("1 shell".to_string()),
+            ScreenVerdict::Idle,
+        )]);
+        let needle_above_the_rule = screen_from(&format!(
+            "some output\n1 shell running\nmore output\n{rule_row}\n  ? for shortcuts"
+        ));
+        let miss = footer.read(&needle_above_the_rule);
+        assert_eq!(
+            miss.verdict,
+            Verdict::NoMatch,
+            "the footer below the last rule holds no needle"
+        );
+        let needle_below_the_rule = screen_from(&format!(
+            "some output\nmore output\n{rule_row}\n1 shell running"
+        ));
+        let hit = footer.read(&needle_below_the_rule);
+        assert_eq!(hit.rule.as_deref(), Some("footer_shell"));
+        assert_eq!(hit.verdict, Verdict::State(ScreenState::Idle));
+        let last_four = compiled(vec![rule(
+            "last_four",
+            100,
+            ScreenRegion::BottomNonEmpty { rows: 4 },
+            LineMatcher::Contains("1 shell".to_string()),
+            ScreenVerdict::Idle,
+        )]);
+        let hit = last_four.read(&needle_above_the_rule);
+        assert_eq!(
+            hit.rule.as_deref(),
+            Some("last_four"),
+            "the text is there; the region is what misses"
+        );
+    }
+
+    #[test]
+    fn explain_lists_every_rule_with_the_winner_marked() {
+        let screen = screen_from(include_str!("fixtures/v21-perm-bash.txt"));
+        let rules = rules_for(&agent_registry::default_agent());
+        let explanation = rules.explain(&screen);
+        assert_eq!(
+            explanation.winner,
+            rules.read(&screen),
+            "explain and read agree"
+        );
+        let names: Vec<&str> = explanation.rules.iter().map(|trace| &*trace.name).collect();
+        let table: Vec<&str> = claude_table()
+            .rules
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(names, table, "every rule, in priority order");
+        let winner = explanation.winner.rule.as_deref().expect("a rule wins");
+        let at = names
+            .iter()
+            .position(|name| *name == winner)
+            .expect("the winner is listed");
+        assert!(
+            explanation.rules[at].matched,
+            "the winner is marked matched"
+        );
+        assert_eq!(explanation.rules[at].vetoed_by, None);
+        for above in &explanation.rules[..at] {
+            assert!(
+                !above.matched,
+                "{} sits above the winner yet matched",
+                above.name
+            );
+        }
+        assert_eq!(explanation.rejected, Vec::<RuleError>::new());
+    }
+
+    #[test]
+    fn explain_reports_the_guard_that_vetoed() {
+        let guarded = ScreenRule {
+            not: vec![
+                LineMatcher::Contains("absent".to_string()),
+                LineMatcher::Contains("VETO".to_string()),
+            ],
+            verdict: ScreenVerdict::AwaitingInput,
+            ..busy_rule("guarded", 900)
+        };
+        let rules = compiled(vec![guarded, busy_rule("busy", 100)]);
+        let explanation = rules.explain(&screen_from("BUSY VETO"));
+        let guarded = &explanation.rules[0];
+        assert_eq!(&*guarded.name, "guarded");
+        assert!(!guarded.matched);
+        assert_eq!(guarded.vetoed_by, Some(1), "the second guard vetoed");
+        assert_eq!(guarded.priority, 900);
+        assert_eq!(guarded.region, ScreenRegion::BottomNonEmpty { rows: 4 });
+        assert_eq!(guarded.verdict, Verdict::State(ScreenState::AwaitingInput));
+        let busy = &explanation.rules[1];
+        assert!(busy.matched);
+        assert_eq!(busy.vetoed_by, None);
+        assert_eq!(explanation.winner.rule.as_deref(), Some("busy"));
+        let missed = rules.explain(&screen_from("idle"));
+        assert!(
+            missed
+                .rules
+                .iter()
+                .all(|t| !t.matched && t.vetoed_by.is_none())
+        );
+        assert_eq!(missed.winner.verdict, Verdict::NoMatch);
+    }
+
+    #[test]
+    fn explain_preview_is_capped_at_240_chars() {
+        let rules = compiled(vec![busy_rule("busy", 100)]);
+        let short = rules.explain(&screen_from("one\r\ntwo BUSY"));
+        assert_eq!(short.rules[0].preview, "one | two BUSY");
+        let long = "x".repeat(200);
+        let text = format!("{long}\r\n{long}");
+        let preview = &rules.explain(&screen_from(&text)).rules[0].preview;
+        assert_eq!(preview.chars().count(), 240);
+        assert_eq!(*preview, format!("{long} | {}", "x".repeat(37)));
+    }
+
+    #[test]
+    fn a_table_with_one_bad_regex_is_rejected_whole() {
         let rules = ScreenRules {
             rules: vec![
                 rule(
@@ -402,15 +678,33 @@ mod tests {
                 busy_rule("busy", 100),
             ],
         };
-        let compiled = CompiledRules::compile(&rules);
-        assert_eq!(compiled.rules.len(), 1, "only the good rule is kept");
-        let reading = compiled.read(&screen_from("BUSY"));
-        assert_eq!(reading.verdict, Verdict::State(ScreenState::Working));
-        assert_eq!(reading.rule.as_deref(), Some("busy"));
+        let errors = CompiledRules::try_compile(&rules)
+            .err()
+            .expect("a table with a bad regex is refused");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].rule, "broken");
+        assert!(
+            errors[0]
+                .problem
+                .starts_with("its matcher does not compile"),
+            "{errors:?}"
+        );
+
+        let installed = compile_or_reject(&AgentId("test-agent".to_owned()), &rules);
+        let explanation = installed.explain(&screen_from("BUSY"));
+        assert!(
+            explanation.rules.is_empty(),
+            "no rule of a rejected table is used"
+        );
+        assert_eq!(explanation.winner.verdict, Verdict::NoMatch);
+        assert_eq!(
+            explanation.rejected, errors,
+            "the rejection shows in the trace"
+        );
     }
 
     #[test]
-    fn an_unknown_matcher_rule_is_skipped() {
+    fn an_unknown_part_rejects_the_whole_table() {
         let unknown_guard = ScreenRule {
             not: vec![LineMatcher::Unknown],
             ..busy_rule("unknown_guard", 800)
@@ -438,18 +732,24 @@ mod tests {
                 busy_rule("busy", 100),
             ],
         };
-        let compiled = CompiledRules::compile(&rules);
+        let errors = CompiledRules::try_compile(&rules)
+            .err()
+            .expect("a table with unknown parts is refused");
+        let refused: Vec<&str> = errors.iter().map(|error| error.rule.as_str()).collect();
         assert_eq!(
-            compiled.rules.len(),
-            1,
-            "every rule with an unknown part is dropped"
+            refused,
+            [
+                "unknown_matcher",
+                "unknown_guard",
+                "unknown_region",
+                "unknown_verdict"
+            ],
+            "every rule with an unknown part is named, and the table is refused"
         );
-        let reading = compiled.read(&screen_from("BUSY"));
-        assert_eq!(reading.rule.as_deref(), Some("busy"));
     }
 
     #[test]
-    fn rule_order_follows_priority_not_input_order() {
+    fn a_rising_priority_table_is_rejected() {
         let idle_first = ScreenRule {
             verdict: ScreenVerdict::Idle,
             ..busy_rule("low", 100)
@@ -457,14 +757,16 @@ mod tests {
         let rules = ScreenRules {
             rules: vec![idle_first, busy_rule("high", 500)],
         };
-        let reading = CompiledRules::compile(&rules).read(&screen_from("BUSY"));
-        assert_eq!(reading.verdict, Verdict::State(ScreenState::Working));
-        assert_eq!(reading.rule.as_deref(), Some("high"));
+        let errors = CompiledRules::try_compile(&rules)
+            .err()
+            .expect("a table whose priorities rise is refused");
+        let refused: Vec<&str> = errors.iter().map(|error| error.rule.as_str()).collect();
+        assert_eq!(refused, ["high"], "{errors:?}");
     }
 
     #[test]
     fn a_plugin_without_rules_reads_no_match() {
-        let compiled = CompiledRules::compile(&ScreenRules::default());
+        let compiled = compiled(Vec::new());
         let reading = compiled.read(&screen_from(include_str!(
             "fixtures/v71-agents-running.txt"
         )));
@@ -659,11 +961,30 @@ mod tests {
         ];
         let mut wrong = Vec::new();
         for (name, text, expected) in cases {
-            let reading = read_claude(&screen_from(text));
+            let screen = screen_from(text);
+            let reading = read_claude(&screen);
             if reading.verdict != expected {
+                let explanation = rules_for(&agent_registry::default_agent()).explain(&screen);
+                let hits: Vec<String> = explanation
+                    .rules
+                    .iter()
+                    .filter(|trace| trace.matched || trace.vetoed_by.is_some())
+                    .map(|trace| {
+                        format!(
+                            "  {} [{}] matched {} vetoed by {:?}: {}",
+                            trace.name,
+                            trace.priority,
+                            trace.matched,
+                            trace.vetoed_by,
+                            trace.preview
+                        )
+                    })
+                    .collect();
                 wrong.push(format!(
-                    "{name}: wanted {expected:?}, got {:?} by rule {:?}",
-                    reading.verdict, reading.rule
+                    "{name}: wanted {expected:?}, got {:?} by rule {:?}\n{}",
+                    reading.verdict,
+                    reading.rule,
+                    hits.join("\n")
                 ));
             }
         }

@@ -455,6 +455,7 @@ pub(super) fn host_only_refusal(msg: &ClientMessage, auth: &AuthKind) -> Option<
     match msg {
         ClientMessage::Shutdown { .. } => Some("shutdown is local-only"),
         ClientMessage::ConfigureRemote { .. } => Some("remote access is local-only"),
+        ClientMessage::DumpScreen { .. } => Some("screen dump is local-only"),
         ClientMessage::ListPendingDevices
         | ClientMessage::ApproveDevice { .. }
         | ClientMessage::DenyDevice { .. }

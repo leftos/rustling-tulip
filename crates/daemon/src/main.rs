@@ -14,6 +14,7 @@ mod branch_names;
 mod child_env;
 mod cli_bridge;
 mod cli_pair;
+mod cli_screen;
 mod cli_shutdown;
 mod conversations;
 mod dashboard;
@@ -117,6 +118,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         cli_pair::attach_parent_console();
         cli_pair::run(&dirs.handshake_file, &mut std::io::stdout().lock()).await?;
         return Ok(std::process::ExitCode::SUCCESS);
+    }
+    // `rustling-tulipd screen <session id>` prints one session's screen and
+    // its rule trace from the running daemon, beside it like `pair`.
+    if cli_screen::requested(std::env::args_os().skip(1)) {
+        cli_pair::attach_parent_console();
+        let args = std::env::args_os().skip(2);
+        return Ok(cli_screen::run_and_report(&dirs.handshake_file, args).await);
     }
     // The login `Run` entry runs the installed exe with `--detach`: hand over
     // to a cached copy and exit, without taking the instance lock, the log or

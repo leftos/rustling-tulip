@@ -1778,16 +1778,19 @@ mod hysteresis_tests {
 
     /// Rules made of one regex rule: a row reading exactly `BUSY` is working.
     fn busy_rules() -> Arc<CompiledRules> {
-        Arc::new(CompiledRules::compile(&ScreenRules {
-            rules: vec![ScreenRule {
-                name: "busy".to_string(),
-                priority: 100,
-                region: ScreenRegion::BottomNonEmpty { rows: 4 },
-                matcher: LineMatcher::Regex("^BUSY$".to_string()),
-                not: Vec::new(),
-                verdict: ScreenVerdict::Working,
-            }],
-        }))
+        Arc::new(
+            CompiledRules::try_compile(&ScreenRules {
+                rules: vec![ScreenRule {
+                    name: "busy".to_string(),
+                    priority: 100,
+                    region: ScreenRegion::BottomNonEmpty { rows: 4 },
+                    matcher: LineMatcher::Regex("^BUSY$".to_string()),
+                    not: Vec::new(),
+                    verdict: ScreenVerdict::Working,
+                }],
+            })
+            .expect("the busy rule compiles"),
+        )
     }
 
     #[tokio::test(start_paused = true)]
@@ -1810,7 +1813,9 @@ mod hysteresis_tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_plugin_without_rules_never_writes_a_status() {
-        let empty = Arc::new(CompiledRules::compile(&ScreenRules::default()));
+        let empty = Arc::new(
+            CompiledRules::try_compile(&ScreenRules::default()).expect("an empty table compiles"),
+        );
         let h = start_in(
             scratch_dirs("plugin-empty"),
             false,

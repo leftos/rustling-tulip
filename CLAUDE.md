@@ -101,6 +101,10 @@ Nothing calls `gate.exe` directly. The wrapper hands the call to the installed g
 
 It exits 0 when the daemon closes the WebSocket, and after stdin EOF once the daemon has closed or 5 s have passed (it relays replies still in flight and sends its Close only then, since the daemon drops queued replies once it reads one); a daemon it starts on Windows inherits none of its standard handles. On failure it prints one stderr line `rustling-tulipd bridge: <error>`, leaves stdout empty and exits 1. It starts no tracing, takes no instance lock, rotates no log, creates no folders and attaches no console.
 
+`rustling-tulipd screen <session id> [--fixture <path>]` shows how the running daemon reads one session's screen (it needs the daemon already running and proves the token like `pair`; `crates/daemon/src/cli_screen.rs`, the daemon's side in `crates/daemon/src/server/screen.rs`). It prints one line per rule (`<priority>  <name>  <region>  matched|vetoed by guard N|no match  <preview>`), `winner: <name> (<verdict>)` or `winner: none (no_match)`, any `rejected:` lines, `title: <title>` when there is one, then `grid <cols>x<rows>:` and the rows.
+
+With `--fixture` it then writes the trimmed rows (LF) to exactly that path, refusing an existing file, and prints `wrote <path>`. It refuses at once against a daemon whose `Welcome.features` lack `screen_dump`, and on any failure prints one stderr line `rustling-tulipd screen: <error>` and exits 1.
+
 The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The spawn breaks away from the caller's job; when that job forbids breakaway it launches the daemon through WMI `Win32_Process.Create` with the caller's full environment, outside the job (`wmi_launch.rs`, bounded at 30 s), and only if that fails starts it inside the job, logging which path ran. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect.
 
 A daemon sharing none of the client's versions is retired and replaced. The native client speaks only the current version, and the daemon's `supported` (`protocol-version.json`) lists only the current version too.
@@ -288,6 +292,8 @@ Pre-C.3 sidecars without tracer fields fall through to the read-only `insert_orp
 
 The watcher feeds each session's PTY output into a per-session grid (`alacritty_terminal`, the crate the client renders with) and reads it with the session's own agent's rules (`screen/rules.rs`: `CompiledRules` compiles the plugin's `ScreenRules`, `rules_for(agent)` caches one set per agent; Claude's table is data in `crates/agents/claude/src/rules.rs`) a short debounce after output pauses.
 
+A rule table fails closed: one bad rule (a structural problem, an unknown part, an empty pattern, over 128 rules, a pattern over 512 characters, over 8 guards, a regex that does not compile) refuses the whole table (`ScreenRules::validate` in agent-api, `CompiledRules::try_compile`), the daemon logs one error "screen rules: the agent's table is refused; its screen has no rules", and that agent's screen reading sets no status. To see why a live session reads as it does, run `rustling-tulipd screen <session id>`: it prints the rule trace (`CompiledRules::explain`) and the grid.
+
 There is no output/input volume classifier, no title heartbeat and no silence demotion for a Claude session: a quiet screen that still shows the spinner stays `Working`.
 
 A session turns hook-driven on its first mapped hook event that passes the ordering check, from Claude Code's hooks, injected through the settings file its spawn writes. A hook event applies at once. A session whose hooks never run is screen-driven only.
@@ -349,7 +355,7 @@ The refresher tracks two flags — `status` and `stash` — and only invokes `gi
 
   A tailnet `Hello` whose token is not a valid device token (none, unknown, another node's, revoked, the daemon's own, or an unreadable store) is not an `AuthFailed`: it gets `Welcome`, then `DevicePairFailed { reason: "device not approved" }`, and stays open as a pairing connection.
 
-  That connection accepts only `DevicePairRequest` / `DevicePairCancel` / `DevicePairRedeem` (anything else gets the same `DevicePairFailed`), and `ListPendingDevices`, `ApproveDevice`, `DenyDevice`, `MintDevicePairCode`, `ListDevices`, `RevokeDevice` and `ForgetDevice` work on loopback only (a tailnet connection gets `Error "device approval is local-only"` for `ForgetDevice`).
+  That connection accepts only `DevicePairRequest` / `DevicePairCancel` / `DevicePairRedeem` (anything else gets the same `DevicePairFailed`), and `ListPendingDevices`, `ApproveDevice`, `DenyDevice`, `MintDevicePairCode`, `ListDevices`, `RevokeDevice` and `ForgetDevice` work on loopback only (a tailnet connection gets `Error "device approval is local-only"` for `ForgetDevice`). `DumpScreen` is loopback only too: a tailnet connection gets `Error "screen dump is local-only"`.
 
   `RevokeDevice` blocks the device and closes every served tailnet connection of it with a WebSocket Close, also when the flag write fails (the reply is then an `Error`).
 

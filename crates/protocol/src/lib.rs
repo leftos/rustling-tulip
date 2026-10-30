@@ -2495,6 +2495,49 @@ pub struct DeviceInfo {
     pub connected: u32,
 }
 
+/// How a session's screen rules read its screen, rule by rule: the trace a
+/// [`DaemonMessage::ScreenDump`] carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenExplanation {
+    /// The reading: `working`, `awaiting_input`, `idle`, `keep` or
+    /// `no_match`.
+    pub verdict: String,
+    /// The rule that decided the reading; `None` when none matched.
+    #[serde(default)]
+    pub winner: Option<String>,
+    /// Whether the deciding rule read the terminal title.
+    #[serde(default)]
+    pub from_title: bool,
+    /// Every rule, in the order it is evaluated.
+    #[serde(default)]
+    pub rules: Vec<ScreenRuleTrace>,
+    /// Why the agent's rule table was refused, one line per problem; the
+    /// table then holds no rule.
+    #[serde(default)]
+    pub rejected: Vec<String>,
+}
+
+/// What one screen rule saw in one evaluation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenRuleTrace {
+    pub name: String,
+    pub priority: u16,
+    /// The region it reads, as `bottom_non_empty(24)`, `prompt_box_body`,
+    /// `above_prompt_box(12)`, `title` or `after_last_rule`.
+    pub region: String,
+    /// What a hit means: `working`, `awaiting_input`, `idle` or `keep`.
+    pub verdict: String,
+    /// Whether the rule fired: its matcher hit and no guard did.
+    #[serde(default)]
+    pub matched: bool,
+    /// The 0-based index of the first guard that vetoed a matcher hit.
+    #[serde(default)]
+    pub vetoed_by: Option<u32>,
+    /// The region's lines joined with `" | "`, at most 240 characters.
+    #[serde(default)]
+    pub preview: String,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -2989,6 +3032,14 @@ pub enum ClientMessage {
     /// Ask for one session's summary ring, first prompt and recent work,
     /// answered with [`DaemonMessage::SessionDetail`].
     GetSessionDetail {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Ask for one session's rendered screen and how its screen rules read
+    /// it, answered with [`DaemonMessage::ScreenDump`]. Host-only: a tailnet
+    /// connection gets `Error "screen dump is local-only"`.
+    DumpScreen {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -4195,6 +4246,24 @@ pub enum DaemonMessage {
         /// When the issue cache last synced; `None` before the first sync.
         #[serde(default)]
         linear_synced_at: Option<DateTime<Utc>>,
+    },
+    /// The answer to [`ClientMessage::DumpScreen`]: the session's grid as
+    /// plain-text rows (trailing spaces trimmed) and its rules' trace over it.
+    ScreenDump {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        grid: Vec<String>,
+        #[serde(default)]
+        title: Option<String>,
+        /// The session's agent; `None` for a plain shell.
+        #[serde(default)]
+        agent: Option<AgentId>,
+        #[serde(default)]
+        explanation: ScreenExplanation,
     },
     /// The answer to [`ClientMessage::GetSessionDetail`].
     SessionDetail {
@@ -5756,6 +5825,87 @@ mod tests {
         let state: AgentState =
             serde_json::from_str(r#""later""#).expect("an unknown state decodes");
         assert_eq!(state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn screen_dump_messages_round_trip() {
+        let ask = ClientMessage::DumpScreen {
+            session_id: "s1".to_string(),
+            request_id: Some("req-9".to_string()),
+        };
+        let json = serde_json::to_string(&ask).expect("serialize");
+        assert!(json.contains(r#""type":"dump_screen""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        let ClientMessage::DumpScreen {
+            session_id,
+            request_id,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(request_id, Some("req-9".to_string()));
+
+        let explanation = ScreenExplanation {
+            verdict: "idle".to_string(),
+            winner: Some("idle_prompt_box".to_string()),
+            from_title: false,
+            rules: vec![ScreenRuleTrace {
+                name: "idle_prompt_box".to_string(),
+                priority: 500,
+                region: "prompt_box_body".to_string(),
+                verdict: "idle".to_string(),
+                matched: true,
+                vetoed_by: Some(2),
+                preview: "❯ ".to_string(),
+            }],
+            rejected: vec!["screen rule \"x\": bad".to_string()],
+        };
+        let dump = DaemonMessage::ScreenDump {
+            session_id: "s1".to_string(),
+            request_id: Some("req-9".to_string()),
+            cols: 80,
+            rows: 2,
+            grid: vec!["one".to_string(), String::new()],
+            title: Some("t".to_string()),
+            agent: Some(AgentId("agent-x".to_string())),
+            explanation: explanation.clone(),
+        };
+        let json = serde_json::to_string(&dump).expect("serialize");
+        assert!(json.contains(r#""type":"screen_dump""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        let DaemonMessage::ScreenDump {
+            session_id,
+            request_id,
+            cols,
+            rows,
+            grid,
+            title,
+            agent,
+            explanation: back_explanation,
+        } = back
+        else {
+            panic!("decoded as another message: {json}");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(request_id, Some("req-9".to_string()));
+        assert_eq!((cols, rows), (80, 2));
+        assert_eq!(grid, ["one", ""]);
+        assert_eq!(title, Some("t".to_string()));
+        assert_eq!(agent, Some(AgentId("agent-x".to_string())));
+        assert_eq!(back_explanation, explanation);
+
+        let bare: DaemonMessage =
+            serde_json::from_str(r#"{"type":"screen_dump","session_id":"s1","cols":1,"rows":1}"#)
+                .expect("a bare dump decodes");
+        let DaemonMessage::ScreenDump {
+            grid, explanation, ..
+        } = bare
+        else {
+            panic!("decoded as another message");
+        };
+        assert_eq!(grid, Vec::<String>::new());
+        assert_eq!(explanation, ScreenExplanation::default());
     }
 
     #[test]
