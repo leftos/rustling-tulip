@@ -563,15 +563,12 @@ fn prune_corrupt_states(folder: &Path, kept: &Path) {
     }
 }
 
-/// Serialize `state` and swap it in as `state.json` via a temporary file, so a
-/// reader never observes a partially-written file. Written owner-only, like
-/// the other files a spawn config reaches (`secret::write_private`).
+/// Serialize `state` and swap it in as `state.json` through
+/// [`crate::atomic_file::write_atomic`], so a reader never observes a
+/// partially-written file and a power loss never leaves a torn one.
 fn persist(dirs: &Dirs, state: &PersistedState) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(state).context("serializing state")?;
-    let tmp = dirs.state_file.with_extension("json.tmp");
-    crate::secret::write_private(&tmp, &bytes).context("writing state tmp")?;
-    std::fs::rename(&tmp, &dirs.state_file).context("renaming state.json")?;
-    Ok(())
+    crate::atomic_file::write_atomic(&dirs.state_file, &bytes).context("writing state.json")
 }
 
 /// Seal the secret literal rows in every persisted `last_spawn_config` (repos

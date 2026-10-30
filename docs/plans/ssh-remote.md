@@ -50,7 +50,7 @@ Build an `rustling-tulipd bridge` subcommand and a `Target::Ssh` in the native c
 
 ## Facts from the code
 
-- Loopback `/ws` is `AuthKind::Local` (`crates/daemon/src/server.rs:544-546`). It compares the `daemon.json` token constant-time (`handshake.rs:154-159`). `daemon.json` is written owner-only (`server.rs:538`, `secret::write_private`).
+- Loopback `/ws` is `AuthKind::Local` (`crates/daemon/src/server.rs:544-546`). It compares the `daemon.json` token constant-time (`handshake.rs:154-159`). `daemon.json` is written owner-only (`server.rs` `write_handshake`, `atomic_file::write_atomic`).
 - `AuthKind::{Local, Tailnet(PeerIdentity)}` (`server/connection.rs:49-52`) is the only auth split. Sites that branch on it:
   - `handshake.rs:67,154,161` (token check);
   - `connection.rs:120` (pairing loop for tailnet only);

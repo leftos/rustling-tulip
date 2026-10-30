@@ -326,7 +326,7 @@ fn write_entry_to(dirs: &Dirs, path: &Path, entry: &HistoryEntry) -> anyhow::Res
     let dir = dirs.history_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let bytes = serde_json::to_vec_pretty(entry).context("serializing history entry")?;
-    orphan::write_atomic(path, &bytes)?;
+    crate::atomic_file::write_atomic(path, &bytes)?;
     CHANGES.send_modify(|n| *n = n.wrapping_add(1));
     Ok(())
 }

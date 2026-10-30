@@ -215,7 +215,7 @@ fn prune_file(path: &Path, key: &str, cutoff: DateTime<Utc>, live: bool) {
     if !dropped {
         return;
     }
-    if let Err(err) = crate::orphan::write_atomic(path, kept.as_bytes()) {
+    if let Err(err) = crate::atomic_file::write_atomic(path, kept.as_bytes()) {
         warn!(key, ?err, path = %path.display(), "rewriting an activity log failed");
     }
 }
@@ -342,7 +342,7 @@ fn write_daemon_record(dir: &Path, record: &DaemonRecord) {
         warn!(?err, dir = %dir.display(), "creating the activity dir failed");
         return;
     }
-    if let Err(err) = crate::orphan::write_atomic(&path, &bytes) {
+    if let Err(err) = crate::atomic_file::write_atomic(&path, &bytes) {
         warn!(?err, path = %path.display(), "writing the activity daemon record failed");
     }
 }

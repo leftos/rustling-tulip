@@ -20,7 +20,6 @@ use protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tracing::warn;
 
@@ -206,32 +205,12 @@ fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
     dirs.sessions_dir.join(session_id).join("meta.json")
 }
 
-/// Write `bytes` to `path` through a sibling `.tmp` file and a rename, so a
-/// reader never sees a half-written file. Each write gets its own temp name,
-/// so two writers of the same file never write into or rename each other's
-/// temp file. Written owner-only (`secret::write_private`), like every other
-/// file a session's spawn config reaches.
-pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
-    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
-    crate::secret::write_private(&tmp, bytes)
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    if let Err(err) = std::fs::rename(&tmp, path) {
-        if let Err(cleanup) = std::fs::remove_file(&tmp) {
-            warn!(?cleanup, path = %tmp.display(), "failed to remove temp file after a failed rename");
-        }
-        return Err(err).with_context(|| format!("renaming onto {}", path.display()));
-    }
-    Ok(())
-}
-
 pub fn write_meta(dirs: &Dirs, meta: &OrphanMeta) -> anyhow::Result<()> {
     let dir = dirs.sessions_dir.join(&meta.session_id);
     std::fs::create_dir_all(&dir).context("creating session sidecar dir")?;
     let path = dir.join("meta.json");
     let bytes = serde_json::to_vec_pretty(meta).context("serializing orphan meta")?;
-    write_atomic(&path, &bytes).context("writing meta")
+    crate::atomic_file::write_atomic(&path, &bytes).context("writing meta")
 }
 
 /// Read a single session's meta sidecar. Used by `stop_session` to recover
@@ -413,7 +392,7 @@ pub fn write_summary(
         return Ok(());
     }
     let bytes = serde_json::to_vec_pretty(summary).context("serializing the session summary")?;
-    write_atomic(
+    crate::atomic_file::write_atomic(
         &crate::paths::session_summary_file(dirs, session_id),
         &bytes,
     )

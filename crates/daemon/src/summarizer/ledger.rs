@@ -123,7 +123,7 @@ mod tests {
 
     fn save(ledger: &Ledger) {
         let bytes = ledger.to_bytes().expect("the record serializes");
-        crate::orphan::write_atomic(ledger.path(), &bytes).expect("the ledger writes");
+        crate::atomic_file::write_atomic(ledger.path(), &bytes).expect("the ledger writes");
     }
 
     #[test]

@@ -78,7 +78,8 @@ pub fn load(dirs: &Dirs) -> RemoteConfig {
 pub fn save(dirs: &Dirs, cfg: RemoteConfig) -> anyhow::Result<()> {
     use anyhow::Context as _;
     let bytes = serde_json::to_vec_pretty(&cfg).context("serializing remote.json")?;
-    crate::orphan::write_atomic(&dirs.remote_config_file, &bytes).context("writing remote.json")
+    crate::atomic_file::write_atomic(&dirs.remote_config_file, &bytes)
+        .context("writing remote.json")
 }
 
 #[cfg(test)]

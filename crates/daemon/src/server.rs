@@ -526,19 +526,11 @@ fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<(
         supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
     };
     let bytes = serde_json::to_vec_pretty(&payload).context("serializing handshake")?;
-    // Tag the tmp file with our pid so concurrent daemons don't stomp each
-    // other's mid-write file (which would lose one daemon's atomic rename
-    // when the other consumed the shared tmp). Two daemons can briefly
-    // co-exist during wdio test sessions; this lets both write+rename
-    // independently without colliding.
-    let tmp = dirs
-        .handshake_file
-        .with_extension(format!("json.tmp.{pid}"));
-    // Carries the auth token — owner-only, and written to the tmp path so the
-    // rename lands an already-restricted file.
-    crate::secret::write_private(&tmp, &bytes).context("writing handshake tmp")?;
-    std::fs::rename(&tmp, &dirs.handshake_file).context("renaming handshake")?;
-    Ok(())
+    // Each write gets its own temp name, so two daemons that briefly co-exist
+    // (during wdio test sessions) never write into each other's mid-write file
+    // and lose a rename. The file carries the auth token, so the helper creates
+    // it owner-only and the replace lands an already-restricted file.
+    crate::atomic_file::write_atomic(&dirs.handshake_file, &bytes).context("writing handshake")
 }
 
 async fn ws_handler(State(hub): State<Hub>, ws: WebSocketUpgrade) -> Response {

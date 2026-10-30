@@ -18,7 +18,6 @@
 //! never shares entries with the user's own.
 
 use crate::paths;
-use crate::secret;
 use crate::spawn_plan::SpawnFailure;
 use crate::user_env::Secret;
 use anyhow::Context as _;
@@ -572,10 +571,8 @@ fn read_index(path: &Path) -> anyhow::Result<Vec<IndexEntry>> {
 
 fn write_index(path: &Path, entries: &[IndexEntry]) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(entries).context("serializing the secret index")?;
-    let tmp = path.with_extension("json.tmp");
-    secret::write_private(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
+    crate::atomic_file::write_atomic(path, &bytes)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

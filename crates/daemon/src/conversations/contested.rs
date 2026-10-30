@@ -16,7 +16,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::orphan;
+use crate::atomic_file;
 use crate::paths::Dirs;
 use crate::sync::lock;
 
@@ -92,7 +92,7 @@ pub(crate) fn add(dirs: &Dirs, agent: &str, id: &str, now: DateTime<Utc>) -> any
     let dir = dirs.contested_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let bytes = serde_json::to_vec_pretty(&entries).context("serializing the contested store")?;
-    orphan::write_atomic(&store_path(dirs, agent)?, &bytes)
+    atomic_file::write_atomic(&store_path(dirs, agent)?, &bytes)
 }
 
 #[cfg(test)]

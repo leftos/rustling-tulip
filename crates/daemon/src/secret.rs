@@ -76,14 +76,7 @@ pub fn generate_pairing_code() -> String {
 pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path)?;
+    let mut file = create_private(path)?;
     file.write_all(bytes)?;
     drop(file);
     #[cfg(unix)]
@@ -92,6 +85,21 @@ pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+/// Open `path` for writing, creating or truncating it, owner-only from the
+/// moment it exists: Unix `0600`, set at creation so the file is never briefly
+/// world-readable. Windows relies on the config dir's ACL, as [`write_private`]
+/// does.
+pub(crate) fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    opts.open(path)
 }
 
 /// Compare two secrets without short-circuiting on the first differing byte.

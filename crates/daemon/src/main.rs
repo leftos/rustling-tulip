@@ -7,6 +7,7 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod activity_log;
+mod atomic_file;
 mod binary_cache;
 mod branch_fate;
 mod branch_names;

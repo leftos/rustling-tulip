@@ -3,7 +3,7 @@
 
 use crate::paths::Dirs;
 use crate::server::Hub;
-use crate::{orphan, pty_state, tracer_client};
+use crate::{atomic_file, pty_state, tracer_client};
 use agent_api::{AgentPlugin, HookFile, HookPlan, HookShim};
 use protocol::{AgentId, OptionValues};
 use std::path::{Component, Path, PathBuf};
@@ -261,7 +261,7 @@ fn write_plan(
     let mut paths: Vec<PathBuf> = Vec::with_capacity(plan.files.len());
     for file in &plan.files {
         let path = dir.join(&file.name);
-        if let Err(err) = orphan::write_atomic(&path, file.contents.as_bytes()) {
+        if let Err(err) = atomic_file::write_atomic(&path, file.contents.as_bytes()) {
             for written in &paths {
                 if let Err(err) = std::fs::remove_file(written) {
                     warn!(

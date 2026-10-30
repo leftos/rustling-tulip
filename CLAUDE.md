@@ -260,6 +260,8 @@ Before every breaking bump, verify that `daemon_client::ensure_running` retires 
 - `sessions/<id>/scrollback.bin` — 2 MB ring (trims to about 1.5 MB on overflow, cut at the next line start within 4 KiB, off the async workers), held open by the session's scrollback gate while it runs and replayed via `LoadScrollback` on attach
 - `sessions/<id>/scrollback.truncated` — flag file iff the ring overflowed
 
+Every temp-file-and-rename write in the daemon (sidecars, `state.json`, `daemon.json`, the indexes and ledgers above) goes through `atomic_file::write_atomic`: an owner-only temp file unique per call, flushed with `sync_all` before `std::fs::rename` replaces the target (retried briefly while another process holds it), so a power cut leaves the old bytes or the new ones, never a torn file.
+
 Sessions are deliberately **not** in `state.json` — they're rebuilt from sidecars on startup so the daemon can survive restarts without a single fragile state blob.
 
 **Orphan recovery + tracer reattach (Phase C.3).** On startup, `main.rs` reads all `meta.json` sidecars and partitions live vs dead via `orphan::is_session_alive` (sysinfo: a tracer-backed sidecar's `tracer_pid` must still be an `rt-tracer` process; a sidecar without tracer fields matches its `pid` against its `program_name`, which otherwise just names the program the user runs, the leaf's label).

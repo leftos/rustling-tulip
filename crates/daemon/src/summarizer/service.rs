@@ -660,7 +660,8 @@ impl Summarizer {
             }
         };
         let written =
-            tokio::task::spawn_blocking(move || crate::orphan::write_atomic(&path, &bytes)).await;
+            tokio::task::spawn_blocking(move || crate::atomic_file::write_atomic(&path, &bytes))
+                .await;
         match written {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {

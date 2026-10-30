@@ -338,7 +338,7 @@ fn write_file(path: &Path, devices: &[DeviceRecord]) -> io::Result<()> {
         devices: devices.to_vec(),
     })
     .map_err(|err| io::Error::other(format!("serializing devices.json: {err}")))?;
-    crate::orphan::write_atomic(path, &bytes)
+    crate::atomic_file::write_atomic(path, &bytes)
         .map_err(|err| io::Error::other(format!("writing {}: {err:#}", path.display())))
 }
 
