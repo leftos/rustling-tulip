@@ -19,7 +19,7 @@ Linear: RT-530 (Connect remote clients over OpenSSH without Tailscale, with a si
 3. **The host string.** It is an `~/.ssh/config` alias or `user@host[:port]`, always passed after `--`. One that starts with `-` is refused, since `-oProxyCommand=…` would run code.
 4. **Prompts.** `BatchMode=yes` means no prompt is ever shown. An unknown host key, a key with a passphrase and no agent, or a denied login fails the connection with the `ssh` stderr shown in the dialog. There is no `StrictHostKeyChecking=accept-new`.
 5. **The remote command default** is settled by SSH.2's Windows check. A saved SSH host may carry an optional `remote_command`. If the installed daemon is not on the sshd session's PATH, the installer adds its folder to the user PATH, and the default stays `rustling-tulipd bridge`.
-6. **v1 hosts are Windows only.** Linux and macOS hosts are not claimed.
+6. **v1 hosts are Windows only.** Linux and macOS hosts are not claimed. **Owner ruling (2026-10-30):** Linux and macOS hosts are planned for vNext+1, as RT-536.
 7. **Saved hosts.** `saved_hosts` and `last_target` in `native-ui.json` gain `kind` (`"tailnet"` default, or `"ssh"`). An SSH entry stores its host string and an optional `remote_command`, and no port. Aliases are typed, not listed from `~/.ssh/config`.
 8. **Device approval stays local.** The pairing and device-approval UI (`ListPendingDevices`, the pending-device prompts) shows only on `Target::Local`, never on an SSH or tailnet target. The daemon sends `PendingDevices` to every loopback connection, so the client must ignore it there.
 9. **Accepted as they are:** the daemon's idle exit on an SSH-only host, and the unbounded per-connection output queue (RT-466, in vNext+1).
