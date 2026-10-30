@@ -11,6 +11,7 @@ mod binary_cache;
 mod branch_fate;
 mod branch_names;
 mod child_env;
+mod cli_bridge;
 mod cli_pair;
 mod cli_shutdown;
 mod conversations;
@@ -90,6 +91,22 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let code =
             cli_shutdown::run(&daemon_client::config_dir()?, &mut std::io::stdout().lock()).await?;
         return Ok(std::process::ExitCode::from(code));
+    }
+    // `rustling-tulipd bridge` relays one SSH client's protocol lines between
+    // stdio and the loopback listener, starting the daemon when none runs. It
+    // comes before `Dirs::ensure` because the daemon it starts makes its own
+    // folders, takes no instance lock and no log, and starts no tracing, so
+    // nothing but protocol lines reaches stdout. Its stdio belongs to ssh, so
+    // it attaches no console.
+    if cli_bridge::requested(std::env::args_os().skip(1)) {
+        return Ok(match cli_bridge::run().await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(err) => {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr(), "rustling-tulipd bridge: {err:#}");
+                std::process::ExitCode::FAILURE
+            }
+        });
     }
     let dirs = paths::Dirs::ensure()?;
     // `rustling-tulipd pair` prints a one-time device pairing code from the

@@ -135,7 +135,9 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # daemon's handles, plus the Job Objects API killing a pre-create run's whole
 # process tree, plus the Console API (`AttachConsole`, `GetStdHandle`,
 # `SetStdHandle`) and `CreateFileW` giving the `pair` subcommand the parent's
-# console. 0.61 matches the version already pulled transitively by
+# console, plus `SetHandleInformation` keeping the `bridge` subcommand's
+# standard handles out of a daemon it starts (`CreatePipe`, Pipes, in its
+# test). 0.61 matches the version already pulled transitively by
 # the existing dep graph.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
@@ -143,6 +145,7 @@ windows = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_JobObjects",
+    "Win32_System_Pipes",
     "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_RestartManager",

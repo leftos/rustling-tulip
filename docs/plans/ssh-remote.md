@@ -27,7 +27,7 @@ Linear: RT-530 (Connect remote clients over OpenSSH without Tailscale, with a si
 
 ## Steps
 
-- [ ] **SSH.1 `rustling-tulipd bridge`.** Files: `crates/daemon/src/cli_bridge.rs` (new), `crates/daemon/src/main.rs`. Proof: daemon tests against a fake loopback daemon, covering relay in both directions, the token put into `Hello`, exit on stdin EOF, no stdout output besides frames, and starting a daemon when none runs.
+- [x] **SSH.1 `rustling-tulipd bridge`.** Files: `crates/daemon/src/cli_bridge.rs` (new), `crates/daemon/src/main.rs`. Proof: daemon tests against a fake loopback daemon, covering relay in both directions, the token put into `Hello`, exit on stdin EOF, no stdout output besides frames, and starting a daemon when none runs.
 - [ ] **SSH.2 Windows stdio check.** `ssh localhost rustling-tulipd bridge` under Windows OpenSSH sshd returns a `Welcome` line, which shows the GUI-subsystem exe keeps its stdio. Also check whether the installed command resolves on the session's PATH. The result settles decision 5. Depends on SSH.1.
 - [ ] **SSH.3 `Target::Ssh` and the transport.** Files: `apps/native/src/target.rs`, `net.rs` (the socket becomes a boxed stream), `ssh.rs` (new), `remote_mode.rs`, `file_fetch.rs`, `lib.rs`, and the UI state in `sidebar.rs`. A hotspot. Proof: `net.rs` tests with a scripted child, capabilities, the folder name for fetched files, and the `ListPendingDevices` gate. Depends on SSH.1.
 - [ ] **SSH.4 The picker's Add SSH host and Test connection.** Files: `apps/native/src/connection_picker*.rs`, `sidebar.rs` (`kind`), `tests/ui/ui_connections.rs`. Proof: UI specs and a `native-shot` of the picker. Depends on SSH.3.

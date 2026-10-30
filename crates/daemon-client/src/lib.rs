@@ -329,6 +329,9 @@ pub(crate) async fn kill_pid(pid: u32) -> anyhow::Result<()> {
         .arg(pid.to_string())
         .arg("/F")
         .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .await
         .context("taskkill")?;
@@ -350,6 +353,9 @@ pub(crate) async fn kill_pid(pid: u32) -> anyhow::Result<()> {
     let status = tokio::process::Command::new("kill")
         .arg("-TERM")
         .arg(pid.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .await
         .context("kill")?;

@@ -89,6 +89,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
 - **Blocked (device)**: a `devices.json` record with `revoked: true`, refused at every pairing path until the owner forgets it (`ForgetDevice`).
 - **Boot target**: the `Target` the native client starts on: `native-ui.json`'s `last_target` when it names a saved host (dialled on the port it was saved with, the local daemon never started), else this PC; `connection_picker::resolve_boot_target`, `docs/native-client.md`.
+- **Bridge**: `rustling-tulipd bridge`, the subcommand an SSH client runs on the host to relay JSON protocol lines between stdin and stdout and the loopback daemon, filling the `Hello` token on the host (`crates/daemon/src/cli_bridge.rs`).
 - **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
 - **Busy-excluded**: a per-session daemon flag (`busy_excluded` on the snapshot, sidecar and history entry) marking a session the user does not want counted as busy; set by `SetSessionBusyExcluded`, optionally carried to a duplicate and kept through reattach and recovery.
 - **CA.0, CA.1, …**: step ids in `docs/plans/accounts.md` (Claude accounts), distinct from `agent-cli.md`'s AC steps.

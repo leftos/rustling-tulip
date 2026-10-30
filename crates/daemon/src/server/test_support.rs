@@ -590,6 +590,48 @@ pub(crate) async fn serve_loopback(hub: &Hub) -> u16 {
     scratch_listener(super::build_loopback_router(hub.clone())).await
 }
 
+/// Serves one connection to [`unproven_listener`]: a `GET /proof` gets a
+/// 404 and `None`; any other connection returns every byte it sent, once
+/// it closes.
+fn serve_unproven(mut stream: std::net::TcpStream) -> Option<Vec<u8>> {
+    use std::io::{Read as _, Write as _};
+    let mut received = Vec::new();
+    let mut byte = [0u8; 1];
+    while !received.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => received.push(byte[0]),
+            _ => break,
+        }
+    }
+    if received.starts_with(b"GET /proof ") {
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return None;
+    }
+    let _ = stream.read_to_end(&mut received);
+    Some(received)
+}
+
+/// A loopback listener that proves no token: see [`serve_unproven`]. The
+/// receiver gets the bytes of each connection that was not a proof
+/// request, once the client closes it.
+pub(crate) fn unproven_listener() -> (u16, std::sync::mpsc::Receiver<Vec<u8>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let port = listener.local_addr().expect("listener address").port();
+    let (received_tx, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let received_tx = received_tx.clone();
+            std::thread::spawn(move || {
+                if let Some(bytes) = serve_unproven(stream) {
+                    let _ = received_tx.send(bytes);
+                }
+            });
+        }
+    });
+    (port, received)
+}
+
 /// Serve `app` on a scratch loopback listener and open a WebSocket client
 /// to `url`'s path on it; `url`'s authority is what the upgrade's `Host`
 /// carries. The serving task lives until the test's runtime ends.
