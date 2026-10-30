@@ -409,6 +409,7 @@ fn a_refused_send_raises_a_toast_and_stops_overlaying(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: refusal.to_owned(),
         request_id: Some(id),
+        code: None,
     });
 
     assert_eq!(

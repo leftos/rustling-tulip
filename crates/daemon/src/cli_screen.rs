@@ -303,6 +303,7 @@ fn classify(text: &str, asked: bool) -> Step {
         DaemonMessage::Error {
             message,
             request_id,
+            ..
         } if asked && request_id.as_deref().is_none_or(|id| id == REQUEST_ID) => {
             Step::Refused(message)
         }

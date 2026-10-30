@@ -814,6 +814,7 @@ impl RootView {
             DaemonMessage::Error {
                 message,
                 request_id: Some(id),
+                ..
             } if self.diff_opens.failed(id) => {
                 tracing::warn!("the daemon could not open a diff tab: {message}");
                 self.push_toast(

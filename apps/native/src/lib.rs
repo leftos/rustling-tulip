@@ -3579,8 +3579,9 @@ impl RootView {
             DaemonMessage::Welcome { .. } => self.on_welcome(window, cx),
             DaemonMessage::Error {
                 message,
-                request_id,
-            } => self.on_daemon_failure(message, request_id.as_deref(), window, cx),
+                request_id: id,
+                code,
+            } => self.on_daemon_failure(message, id.as_deref(), code.as_deref(), window, cx),
             DaemonMessage::ActionFailed {
                 title,
                 detail,
@@ -3713,37 +3714,39 @@ impl RootView {
         &mut self,
         message: String,
         request_id: Option<&str>,
+        code: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(id) = request_id {
             let _ = self.launch_last.take_request(id);
         }
-        self.on_refusal(message, request_id, window, cx);
+        self.on_refusal(message, request_id, code, window, cx);
     }
 
     /// A daemon refusal: an unrouted one (`None`) while the workspace creator
     /// waits fails a pending create or parse inline there, raising no toast,
-    /// and a refused worktrees root ends that tab's save, whose message
-    /// still toasts. A routed refusal (`Some`) answers its own request: one
-    /// of the launch-command refusals of an apply shows under its row with
-    /// no toast; refused Settings values end their apply and toast; any
-    /// other takes the generic path.
+    /// and a refused worktrees root (by its `code`) ends that tab's save,
+    /// whose message still toasts. A routed refusal (`Some`) answers its own
+    /// request: a launch-command refusal of an apply, by its `code`, shows
+    /// under its row with no toast; refused Settings values end their apply
+    /// and toast; any other takes the generic path.
     fn on_refusal(
         &mut self,
         message: String,
         request_id: Option<&str>,
+        code: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if request_id.is_none() {
-            self.on_worktrees_root_error(&message, cx);
+            self.on_worktrees_root_error(code, cx);
         }
         let inline = match request_id {
             None => self.on_creator_error(&message, cx) || self.on_preset_list_error(&message, cx),
             Some(id) => {
                 self.on_agent_setting_refused(id, &message, cx);
-                self.on_agent_command_error(id, &message, cx)
+                self.on_agent_command_error(id, code, &message, cx)
             }
         };
         self.repo_remove.disarm();

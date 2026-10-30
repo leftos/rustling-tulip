@@ -473,6 +473,7 @@ fn a_failed_list_shows_the_error_without_a_toast(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "presets.json: expected value at line 1".to_owned(),
         request_id: None,
+        code: None,
     });
 
     assert_eq!(preset_labels(&mut h), ["Launch preset… (failed to load)"]);
@@ -488,6 +489,7 @@ fn a_failed_list_shows_the_error_without_a_toast(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "something else".to_owned(),
         request_id: None,
+        code: None,
     });
     assert_eq!(
         h.root(|root, _| root.toasts().len()),
@@ -602,6 +604,7 @@ fn a_failed_row_takes_its_own_list_when_it_arrives(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "r1's presets.json is malformed".to_owned(),
         request_id: None,
+        code: None,
     });
     assert_eq!(preset_labels(&mut h), ["Launch preset… (failed to load)"]);
 

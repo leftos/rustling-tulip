@@ -142,6 +142,11 @@ pub struct OrphanMeta {
     /// `status` is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_since: Option<DateTime<Utc>>,
+    /// How many times the session's `status` changed, so a reattached
+    /// session's count keeps rising instead of starting over at 0. 0 when
+    /// absent.
+    #[serde(default)]
+    pub status_seq: u64,
     /// What the session was waiting for when the sidecar was last written, as
     /// its hooks reported it. A reattach restores it only beside a restored
     /// `AwaitingInput`. Absent when nothing was pending.
@@ -679,6 +684,7 @@ pub fn meta_from_record(
         // `meta_from_record` never sees that record.
         status: None,
         status_since: None,
+        status_seq: 0,
         pending_input: None,
         tracer_pid,
         tracer_started_at,
@@ -707,6 +713,7 @@ pub struct RecordMirror {
     pub recent_actions_tail: Vec<String>,
     pub status: SessionStatus,
     pub status_since: Option<DateTime<Utc>>,
+    pub status_seq: u64,
     pub pending_input: Option<PendingInput>,
     pub terminal_title: Option<String>,
     pub current_cwd: Option<String>,
@@ -726,6 +733,7 @@ impl RecordMirror {
         meta.recent_actions_tail == self.recent_actions_tail
             && meta.status == Some(self.status)
             && meta.status_since == self.status_since
+            && meta.status_seq == self.status_seq
             && meta.pending_input == self.pending_input
             && meta.terminal_title == self.terminal_title
             && meta.current_cwd == self.current_cwd
@@ -746,6 +754,7 @@ impl RecordMirror {
             .clone_from(&self.recent_actions_tail);
         meta.status = Some(self.status);
         meta.status_since = self.status_since;
+        meta.status_seq = self.status_seq;
         meta.pending_input.clone_from(&self.pending_input);
         meta.terminal_title.clone_from(&self.terminal_title);
         meta.current_cwd.clone_from(&self.current_cwd);
@@ -963,11 +972,13 @@ mod tests {
         .expect("build meta");
         meta.status = Some(SessionStatus::AwaitingInput);
         meta.status_since = Some(since);
+        meta.status_seq = 9;
         write_meta(&dirs, &meta).expect("write meta");
 
         let loaded = load_meta(&dirs, "s1").expect("load meta");
         assert_eq!(loaded.status, Some(SessionStatus::AwaitingInput));
         assert_eq!(loaded.status_since, Some(since));
+        assert_eq!(loaded.status_seq, 9, "the status count round-trips");
 
         // A sidecar written before these fields existed loads with both unset
         // rather than being rejected.
@@ -985,6 +996,7 @@ mod tests {
         let loaded = load_meta(&dirs, "legacy").expect("load legacy meta");
         assert_eq!(loaded.status, None);
         assert_eq!(loaded.status_since, None);
+        assert_eq!(loaded.status_seq, 0, "an absent status count reads as 0");
     }
 
     #[test]
@@ -1015,6 +1027,7 @@ mod tests {
             recent_actions_tail: Vec::new(),
             status: None,
             status_since: None,
+            status_seq: 0,
             pending_input: None,
             tracer_pid: Some(1234),
             tracer_started_at: Some(1_700_000_000),
@@ -1279,6 +1292,7 @@ mod tests {
             recent_actions_tail: Vec::new(),
             status: SessionStatus::Idle,
             status_since: None,
+            status_seq: 0,
             pending_input: None,
             terminal_title: None,
             current_cwd: None,

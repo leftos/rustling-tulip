@@ -391,6 +391,7 @@ fn error_shows_daemon_error_toast_that_expires(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "boom".to_owned(),
         request_id: None,
+        code: None,
     });
     assert_eq!(toasts(&mut h), [owned(("Daemon error", Some("boom")))]);
     let id = toast_ids(&mut h)[0];
@@ -408,6 +409,7 @@ fn error_shows_daemon_error_toast_that_expires(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "no such repo".to_owned(),
         request_id: Some(spawn_id.clone()),
+        code: None,
     });
     assert_eq!(
         toasts(&mut h),
@@ -428,6 +430,7 @@ fn error_shows_daemon_error_toast_that_expires(cx: &mut TestAppContext) {
         h.send(DaemonMessage::Error {
             message: message.to_owned(),
             request_id: None,
+            code: None,
         });
     }
     let details: Vec<Option<String>> = toasts(&mut h).into_iter().map(|t| t.1).collect();
@@ -1154,6 +1157,7 @@ fn waiting_prompt_whose_spawn_fails_is_dropped_and_not_counted(cx: &mut TestAppC
     h.send(DaemonMessage::Error {
         message: "no such repo".to_owned(),
         request_id: Some(b),
+        code: None,
     });
     assert_eq!(
         checkout_title(&mut h).as_deref(),
@@ -1258,6 +1262,7 @@ fn refused_spawn_clears_its_spawning_toast(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "no such repo".to_owned(),
         request_id: Some(errored),
+        code: None,
     });
     let error_toast = owned(("Daemon error", Some("no such repo")));
     assert_eq!(
@@ -1299,6 +1304,7 @@ fn reconnect_clears_spawning_toasts(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "boom".to_owned(),
         request_id: None,
+        code: None,
     });
     spawn(&mut h, request(true), OpenIn::NewTab);
     spawn(&mut h, request(true), OpenIn::NewTab);

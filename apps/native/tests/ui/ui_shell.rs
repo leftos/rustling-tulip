@@ -230,6 +230,7 @@ fn failed_shell_spawn_does_not_save_default(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "claude is not installed".to_owned(),
         request_id: request.request_id.clone(),
+        code: None,
     });
     assert!(
         saved_ui(&dir)["quick_shell_dir"].is_null(),

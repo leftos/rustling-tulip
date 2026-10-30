@@ -154,6 +154,7 @@ fn daemon_error(h: &mut Harness<'_>) {
     h.send(DaemonMessage::Error {
         message: "worktree delete failed".to_owned(),
         request_id: None,
+        code: None,
     });
 }
 

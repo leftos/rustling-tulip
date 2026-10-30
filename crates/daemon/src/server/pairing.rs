@@ -15,7 +15,7 @@
 //! for a block while it holds [`Hub::pairing`], so `pairing` comes before
 //! `devices` too; nothing takes `pairing` or `live_devices` while holding
 //! `devices`.
-use super::connection::{AuthKind, ConnCtx, ConnLife, Inbound};
+use super::connection::{AuthKind, ConnCtx, ConnLife, Inbound, undecoded_reply};
 use super::{Hub, StateEvent};
 use crate::devices::{
     CODE_LIFETIME, PairError, PairingBook, PendingView, REQUEST_LIFETIME, RequestId,
@@ -23,6 +23,7 @@ use crate::devices::{
 use axum::extract::ws::Message;
 use chrono::Utc;
 use futures::StreamExt as _;
+use protocol::error_codes;
 use protocol::{
     ClientMessage, DEVICE_NOT_APPROVED, DaemonMessage, DevicePairOutcome, InboundClientMessage,
     Secret,
@@ -230,12 +231,8 @@ impl PairingConn<'_> {
             Message::Ping(_) => return Flow::Stay,
             Message::Binary(_) => return self.stray(),
         };
-        match InboundClientMessage::from_json_str(text.as_str()) {
-            Ok(InboundClientMessage::Known(msg)) => self.on_message(msg),
-            Ok(InboundClientMessage::Unknown { type_tag, .. }) => {
-                debug!(%type_tag, "pairing connection: ignoring an unknown client message type");
-                self.stray()
-            }
+        let parsed = match InboundClientMessage::from_json_str(text.as_str()) {
+            Ok(parsed) => parsed,
             Err(err) => {
                 if matches!(self.stray(), Flow::Close) {
                     return Flow::Close;
@@ -243,7 +240,21 @@ impl PairingConn<'_> {
                 let _ = self.out_tx.send(DaemonMessage::Error {
                     message: format!("malformed message: {err}"),
                     request_id: None,
+                    code: Some(error_codes::MALFORMED_MESSAGE.to_owned()),
                 });
+                return Flow::Stay;
+            }
+        };
+        match parsed {
+            InboundClientMessage::Known(msg) => self.on_message(msg),
+            InboundClientMessage::Unknown { ref type_tag, .. } => {
+                debug!(%type_tag, "pairing connection: ignoring an unknown client message type");
+                if matches!(self.stray(), Flow::Close) {
+                    return Flow::Close;
+                }
+                if let Some(reply) = undecoded_reply(&parsed) {
+                    let _ = self.out_tx.send(reply);
+                }
                 Flow::Stay
             }
         }
@@ -568,11 +579,15 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
         ClientMessage::DevicePairRequest
         | ClientMessage::DevicePairCancel
         | ClientMessage::DevicePairRedeem { .. } => {
-            refuse(out_tx, if local { TAILNET_ONLY } else { ALREADY_PAIRED });
+            refuse(
+                out_tx,
+                error_codes::INVALID_REQUEST,
+                if local { TAILNET_ONLY } else { ALREADY_PAIRED },
+            );
         }
         _ if !local => {
             warn!("pairing: an approval message reached a tailnet connection; refused");
-            refuse(out_tx, LOCAL_ONLY);
+            refuse(out_tx, error_codes::LOCAL_ONLY, LOCAL_ONLY);
         }
         ClientMessage::ListPendingDevices => {
             let requests = pending_list(&crate::sync::lock(&hub.pairing));
@@ -592,11 +607,11 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
         ClientMessage::ListDevices => send_devices(hub, out_tx),
         ClientMessage::RevokeDevice { device_id } => match block_device(hub, &device_id) {
             Ok(_) => send_devices(hub, out_tx),
-            Err(err) => refuse(out_tx, err.to_string()),
+            Err(err) => refuse(out_tx, error_codes::INTERNAL, err.to_string()),
         },
         ClientMessage::ForgetDevice { device_id } => match forget_device(hub, &device_id) {
             Ok(_) => send_devices(hub, out_tx),
-            Err(err) => refuse(out_tx, err.to_string()),
+            Err(err) => refuse(out_tx, error_codes::INTERNAL, err.to_string()),
         },
         _ => debug!("pairing: dispatch routed a message this module does not handle"),
     }
@@ -664,7 +679,7 @@ fn approve(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>, request_id:
     if blocked {
         drop(book);
         info!(%request_id, "pairing: approval of a blocked device's request refused");
-        refuse(out_tx, DEVICE_BLOCKED);
+        refuse(out_tx, error_codes::DEVICE_BLOCKED, DEVICE_BLOCKED);
         return;
     }
     match book.approve(request_id, Instant::now()) {
@@ -686,7 +701,7 @@ fn approve(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>, request_id:
                 broadcast_pending(hub, &book);
             }
             drop(book);
-            refuse(out_tx, err.to_string());
+            refuse(out_tx, error_codes::NOT_FOUND, err.to_string());
         }
     }
 }
@@ -722,10 +737,11 @@ fn decided(request_id: &str, outcome: DevicePairOutcome) -> DaemonMessage {
     }
 }
 
-fn refuse(out_tx: &mpsc::UnboundedSender<DaemonMessage>, message: impl Into<String>) {
+fn refuse(out_tx: &mpsc::UnboundedSender<DaemonMessage>, code: &str, message: impl Into<String>) {
     let _ = out_tx.send(DaemonMessage::Error {
         message: message.into(),
         request_id: None,
+        code: Some(code.to_owned()),
     });
 }
 
@@ -1486,6 +1502,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pairing_connection_answers_an_unknown_message_by_its_request_id() {
+        let (hub, _scratch) = test_hub("pairing-unknown-reply");
+        let mut client = pairing_client(&hub, test_peer()).await;
+        send_raw(
+            &mut client,
+            r#"{"type":"future_message","request_id":"r1"}"#,
+        )
+        .await;
+        let reply = next(&mut client).await;
+        assert!(
+            matches!(&reply, DaemonMessage::Error { code: Some(code), request_id: Some(id), .. }
+                if code == error_codes::UNSUPPORTED_MESSAGE && id == "r1"),
+            "{reply:?}"
+        );
+        send_raw(&mut client, r#"{"type":"future_message"}"#).await;
+        // Without a request id nothing answers, so the next message is the
+        // pairing request's own answer.
+        ask(&mut client).await;
+    }
+
+    #[tokio::test]
     async fn pairing_connection_closes_after_sixteen_stray_frames() {
         let (hub, _scratch) = test_hub("pairing-stray-frames");
         let mut client = pairing_client(&hub, test_peer()).await;
@@ -1761,7 +1798,8 @@ mod tests {
 
     fn assert_local_only(reply: &DaemonMessage) {
         assert!(
-            matches!(reply, DaemonMessage::Error { message, .. } if message == LOCAL_ONLY),
+            matches!(reply, DaemonMessage::Error { message, code: Some(code), .. }
+                if message == LOCAL_ONLY && code == error_codes::LOCAL_ONLY),
             "{reply:?}"
         );
     }

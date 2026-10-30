@@ -1019,6 +1019,7 @@ fn a_refused_open_raises_a_toast(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "open diff tab failed: unknown repo: r1".to_owned(),
         request_id: Some(id.clone()),
+        code: None,
     });
     let toasts: Vec<(ToastKind, String, Option<String>)> = h.root(|root, _| {
         root.toasts()

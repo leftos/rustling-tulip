@@ -233,6 +233,7 @@ fn refused_reorder_snaps_the_strip_back_with_a_toast(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "unknown tab".to_owned(),
         request_id: Some(id),
+        code: None,
     });
 
     assert_eq!(
@@ -750,6 +751,7 @@ fn a_refused_swap_clears_the_in_flight_mark(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "refused".to_owned(),
         request_id: Some(request_id),
+        code: None,
     });
     h.sent();
     h.click_on(&format!("undo-action-{id}"));

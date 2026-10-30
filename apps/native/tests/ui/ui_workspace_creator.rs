@@ -262,6 +262,7 @@ fn a_refused_create_stays_open_with_its_form_and_error(cx: &mut TestAppContext) 
     h.send(DaemonMessage::Error {
         message: "another request failed".to_owned(),
         request_id: Some("other".to_owned()),
+        code: None,
     });
     assert!(is_open(&mut h), "a routed error answers its own request");
     assert_eq!(
@@ -278,6 +279,7 @@ fn a_refused_create_stays_open_with_its_form_and_error(cx: &mut TestAppContext) 
     h.send(DaemonMessage::Error {
         message: "another workspace already uses the name \"taken\"".to_owned(),
         request_id: None,
+        code: None,
     });
     assert!(is_open(&mut h), "a refusal keeps the creator open");
     assert_eq!(
@@ -420,6 +422,7 @@ fn a_parse_failure_shows_inline_and_leaves_the_form_usable(cx: &mut TestAppConte
     h.send(DaemonMessage::Error {
         message: "another request failed".to_owned(),
         request_id: Some("other".to_owned()),
+        code: None,
     });
     assert!(
         h.root(|root, _| root.workspace_creator_parsing()),
@@ -435,6 +438,7 @@ fn a_parse_failure_shows_inline_and_leaves_the_form_usable(cx: &mut TestAppConte
     h.send(DaemonMessage::Error {
         message: "parsing C:/work/broken.code-workspace: expected value".to_owned(),
         request_id: None,
+        code: None,
     });
     assert!(is_open(&mut h), "a failed parse keeps the form open");
     assert_eq!(

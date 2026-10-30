@@ -186,6 +186,7 @@ impl RootView {
             DaemonMessage::Error {
                 message,
                 request_id: Some(id),
+                ..
             } if self.stash.model.fail_request(id, message) => {
                 cx.notify();
                 true

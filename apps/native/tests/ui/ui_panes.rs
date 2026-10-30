@@ -1357,6 +1357,7 @@ fn refuse(h: &mut Harness, request_id: String) {
     h.send(DaemonMessage::Error {
         message: "refused".to_owned(),
         request_id: Some(request_id),
+        code: None,
     });
 }
 

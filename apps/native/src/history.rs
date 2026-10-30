@@ -184,6 +184,7 @@ impl HistoryModel {
             DaemonMessage::Error {
                 message,
                 request_id: Some(request_id),
+                ..
             } => {
                 if self.stale.remove(request_id).is_some() || self.fail(request_id, message) {
                     Applied::Consumed
@@ -879,6 +880,7 @@ mod tests {
         DaemonMessage::Error {
             message: message.to_owned(),
             request_id: Some(request_id.to_owned()),
+            code: None,
         }
     }
 
@@ -1067,7 +1069,8 @@ mod tests {
         assert_eq!(
             model.apply(&DaemonMessage::Error {
                 message: "no id".to_owned(),
-                request_id: None
+                request_id: None,
+                code: None,
             }),
             Applied::Ignored
         );

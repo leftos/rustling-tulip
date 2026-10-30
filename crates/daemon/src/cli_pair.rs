@@ -415,6 +415,7 @@ mod tests {
         let error = frame(&DaemonMessage::Error {
             message: "boom".to_owned(),
             request_id: None,
+            code: None,
         });
         assert_eq!(
             classify(&error, false),

@@ -254,6 +254,7 @@ fn history_view_more_row_ends_in_an_ellipsis(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: format!("commit list failed: {reason}"),
         request_id: Some(request_id),
+        code: None,
     });
     assert_ellipsized(
         &format!("sc-history-more-{BROWSED}"),

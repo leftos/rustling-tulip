@@ -280,6 +280,7 @@ fn a_failed_load_shows_the_text_with_no_toast(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "commit list failed: not a git repository".to_owned(),
         request_id: Some(request_id),
+        code: None,
     });
     assert_eq!(
         block(&mut h).body,
@@ -290,6 +291,7 @@ fn a_failed_load_shows_the_text_with_no_toast(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "something else".to_owned(),
         request_id: Some("not-ours".to_owned()),
+        code: None,
     });
     assert_eq!(toast_count(&mut h), 1, "other errors still toast");
 }
@@ -464,6 +466,7 @@ fn the_forge_button_is_disabled_with_each_tooltip(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "remote url failed: No such remote 'origin'".to_owned(),
         request_id: Some(remotes[0].clone()),
+        code: None,
     });
     let forge = block(&mut h).forge;
     assert_eq!(forge.url, None);

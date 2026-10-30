@@ -343,9 +343,9 @@ They are `invalid_request`, `unknown_method`/`unsupported_method`, `not_found`, 
 
 The skill tells agents to branch on them ("do not blindly resubmit after timeout/stalled", SKILL.md:171). Malformed requests still get a reply: id is recovered only when the line parses and has an unambiguous top-level string id, else empty id (server.rs:350-376). A host that sends an unknown method gets `unsupported_method` naming it (`src/server/client_transport.rs:97-105`).
 
-Ours: `DaemonMessage::Error { message, request_id }` (`crates/protocol/src/lib.rs:3944-3953`) has no code; `ActionFailed { title, detail, hint }` is UI prose (lib.rs:3960).
+Ours: `DaemonMessage::Error { message, request_id }` (`crates/protocol/src/lib.rs`) had no code; `ActionFailed { title, detail, hint }` is UI prose.
 
-An unknown client message type is logged and dropped with no reply (`crates/daemon/src/server/connection.rs:760-766`, verified), so a newer client waiting on a reply just times out. The planned `/agent/v1` routes use HTTP statuses 401/403/408/429 and CLI exit codes 0/2/3/4/5 (`docs/plans/agent-cli.md:47,99`) but no body code.
+An unknown client message type is logged and dropped with no reply (`crates/daemon/src/server/connection.rs`, the `InboundClientMessage::Unknown` arm, verified), so a newer client waiting on a reply just times out. The planned `/agent/v1` routes use HTTP statuses 401/403/408/429 and CLI exit codes 0/2/3/4/5 (`docs/plans/agent-cli.md:47,99`) but no body code.
 
 Change: (a) additive `#[serde(default)] code: Option<String>` on `Error`, defined as a small enum-backed catalogue in `crates/protocol`; (b) agent routes return `{"error":{"code","message"}}` in the body in addition to HTTP status, and the agent CLI prints that JSON on stderr; (c) for `InboundClientMessage::Unknown` that carries a `request_id` in `raw`, reply `Error{code:"unsupported_message", request_id}` instead of `continue`.
 

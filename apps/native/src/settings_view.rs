@@ -17,7 +17,7 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
-    FEATURE_AGENT_COMMANDS, FieldKind, KeepAwakeMode, OptionValue, RemoteState,
+    FEATURE_AGENT_COMMANDS, FieldKind, KeepAwakeMode, OptionValue, RemoteState, error_codes,
 };
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
@@ -94,16 +94,6 @@ const AGENTS_GROUP: &str = "Agents";
 const LAUNCH_ARGS_PLACEHOLDER: &str = "Extra arguments";
 const LAUNCH_USE_HINT: &str = "Used for new sessions, Restart and Resume; not for headless runs.";
 const LAUNCH_QUOTING_HINT: &str = "Extra arguments follow POSIX shell rules: quote a Windows path or double its backslashes. In cmd, a doskey macro is not expanded; set Program to a .cmd file instead.";
-/// The start of every daemon refusal of a launch command that names its
-/// field, and the start of those naming Program.
-const LAUNCH_REFUSAL_PREFIX: &str = "The launch command's ";
-const LAUNCH_PROGRAM_REFUSAL_PREFIX: &str = "The launch command's Program";
-/// The daemon's refusal when it cannot create a worktrees root, from
-/// `State::set_worktrees_root`'s `creating worktrees root {path}` context.
-const WORKTREES_ROOT_REFUSAL_PREFIX: &str = "creating worktrees root ";
-const LAUNCH_UNCLOSED_QUOTE: &str = "The extra arguments have an unclosed quote.";
-const LAUNCH_RESERVED_FLAG_SUFFIX: &str =
-    " is set by rustling-tulip; remove it from the extra arguments.";
 
 /// A tab of the Settings modal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -421,18 +411,13 @@ pub enum LaunchCommandRow {
     Args,
 }
 
-/// The row a daemon refusal of a launch command belongs under, or `None`
-/// when `message` is no launch-command refusal.
-fn launch_refusal_row(message: &str) -> Option<LaunchCommandRow> {
-    if message.starts_with(LAUNCH_PROGRAM_REFUSAL_PREFIX) {
-        Some(LaunchCommandRow::Program)
-    } else if message.starts_with(LAUNCH_REFUSAL_PREFIX)
-        || message == LAUNCH_UNCLOSED_QUOTE
-        || message.ends_with(LAUNCH_RESERVED_FLAG_SUFFIX)
-    {
-        Some(LaunchCommandRow::Args)
-    } else {
-        None
+/// The row a daemon refusal of a launch command belongs under, by its error
+/// `code`, or `None` when it is no launch-command refusal.
+fn launch_refusal_row(code: Option<&str>) -> Option<LaunchCommandRow> {
+    match code? {
+        error_codes::LAUNCH_PROGRAM_REFUSED => Some(LaunchCommandRow::Program),
+        error_codes::LAUNCH_ARGS_REFUSED => Some(LaunchCommandRow::Args),
+        _ => None,
     }
 }
 
@@ -1400,13 +1385,14 @@ impl RootView {
     }
 
     /// A daemon refusal carrying `request_id`: when it names a
-    /// launch-command apply still waiting, it ends that apply, and one of
-    /// the launch-command refusals shows under the row it names on that
+    /// launch-command apply still waiting, it ends that apply, and a refusal
+    /// whose `code` names a launch-command row shows under that row on that
     /// apply's page. Returns whether it took `message`; any other refusal
     /// is left to toast.
     pub(crate) fn on_agent_command_error(
         &mut self,
         request_id: &str,
+        code: Option<&str>,
         message: &str,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1432,7 +1418,7 @@ impl RootView {
         tab.awaiting -= 1;
         tab.saved = false;
         cx.notify();
-        let Some(row) = launch_refusal_row(message) else {
+        let Some(row) = launch_refusal_row(code) else {
             return false;
         };
         tab.refusal = Some((row, message.to_owned()));
@@ -1490,13 +1476,13 @@ impl RootView {
         cx.notify();
     }
 
-    /// A daemon refusal of the worktrees root while the tab's field waits:
-    /// the save the daemon could not make ends here, so a later broadcast
-    /// from another client is not taken for its echo. The refusal is not
-    /// claimed: the tab has no inline slot for it, and the generic toast
-    /// still shows the message.
-    pub(crate) fn on_worktrees_root_error(&mut self, message: &str, cx: &mut Context<Self>) {
-        if !message.starts_with(WORKTREES_ROOT_REFUSAL_PREFIX) {
+    /// A daemon refusal of the worktrees root (by its `code`) while the
+    /// tab's field waits: the save the daemon could not make ends here, so a
+    /// later broadcast from another client is not taken for its echo. The
+    /// refusal is not claimed: the tab has no inline slot for it, and the
+    /// generic toast still shows the message.
+    pub(crate) fn on_worktrees_root_error(&mut self, code: Option<&str>, cx: &mut Context<Self>) {
+        if code != Some(error_codes::WORKTREES_ROOT_REFUSED) {
             return;
         }
         let Some(tab) = self.worktrees_tab.as_mut().filter(|tab| tab.awaiting > 0) else {

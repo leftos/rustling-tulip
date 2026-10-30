@@ -561,6 +561,7 @@ pub(super) async fn duplicate_session(
             let _ = out_tx.send(DaemonMessage::Error {
                 message: err.to_string(),
                 request_id,
+                code: Some(protocol::error_codes::SPAWN_REFUSED.to_owned()),
             });
             return;
         }
@@ -835,6 +836,7 @@ fn set_session_appearance(
             let _ = out_tx.send(DaemonMessage::Error {
                 message: err.to_string(),
                 request_id,
+                code: Some(protocol::error_codes::INVALID_REQUEST.to_owned()),
             });
             return;
         }
@@ -848,6 +850,7 @@ fn set_session_appearance(
         let _ = out_tx.send(DaemonMessage::Error {
             message: format!("unknown session: {session_id}"),
             request_id,
+            code: Some(protocol::error_codes::NOT_FOUND.to_owned()),
         });
     }
 }
@@ -3226,7 +3229,7 @@ mod tests {
         assert!(
             matches!(
                 &reply,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "req-11" && message == "unknown session: gone"
             ),
             "{reply:?}"
@@ -3252,7 +3255,7 @@ mod tests {
         assert!(
             matches!(
                 &reply,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "req-10" && message == "accent color must use #RRGGBB format"
             ),
             "{reply:?}"

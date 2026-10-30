@@ -253,6 +253,7 @@ mod tests {
             started_at: Utc::now(),
             status,
             status_since: Some(Utc::now()),
+            status_seq: 0,
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: Vec::new(),

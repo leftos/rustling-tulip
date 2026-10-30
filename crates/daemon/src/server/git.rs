@@ -95,6 +95,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: err.to_string(),
                         request_id,
+                        code: Some(protocol::error_codes::GIT_FAILED.to_owned()),
                     });
                 }
             }
@@ -468,6 +469,7 @@ async fn reply_git_read<F>(
             let _ = out_tx.send(DaemonMessage::Error {
                 message: format!("{label} failed: {err:#}"),
                 request_id,
+                code: Some(protocol::error_codes::GIT_FAILED.to_owned()),
             });
         }
     }
@@ -1009,8 +1011,9 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
                     if id == "q2" && message.contains("unknown repo")
+                        && code == protocol::error_codes::GIT_FAILED
             ),
             "{msg:?}"
         );
@@ -1078,7 +1081,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "q1" && message.starts_with("status failed:")
             ),
             "{msg:?}"
@@ -1116,7 +1119,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "q2" && message.starts_with("remote url failed:")
             ),
             "{msg:?}"

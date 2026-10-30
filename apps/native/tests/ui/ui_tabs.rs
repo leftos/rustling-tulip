@@ -812,6 +812,7 @@ fn refuse(h: &mut Harness, id: String) {
     h.send(DaemonMessage::Error {
         message: "refused".to_owned(),
         request_id: Some(id),
+        code: None,
     });
 }
 
@@ -1261,6 +1262,7 @@ fn refused_restore_does_not_activate_the_next_new_tab(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "tab already exists: t1".to_owned(),
         request_id: None,
+        code: None,
     });
     h.send(DaemonMessage::TabUpdated {
         tab: tab("t9", &pane("p9", None)),

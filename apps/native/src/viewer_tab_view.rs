@@ -516,6 +516,7 @@ impl RootView {
             DaemonMessage::Error {
                 message,
                 request_id: Some(id),
+                ..
             } if self.viewer_opens.failed(id) => {
                 tracing::warn!("the daemon could not open a viewer tab: {message}");
                 self.push_toast(

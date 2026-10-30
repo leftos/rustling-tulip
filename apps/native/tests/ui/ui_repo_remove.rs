@@ -193,6 +193,7 @@ fn a_refused_removal_toasts_and_leaves_the_dialog_open(cx: &mut TestAppContext) 
     h.send(DaemonMessage::Error {
         message: "the registry is read-only".to_owned(),
         request_id: None,
+        code: None,
     });
     assert!(dialog_open(&mut h), "a refusal leaves it open");
     let toasts: Vec<String> = h.root(|root, _| {
@@ -232,6 +233,7 @@ fn a_refusal_drops_the_armed_row_and_toasts(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "the registry is read-only".to_owned(),
         request_id: None,
+        code: None,
     });
     assert_eq!(armed(&mut h), None, "a refusal drops the arm");
     let toasts: Vec<String> = h.root(|root, _| {

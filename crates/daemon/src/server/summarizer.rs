@@ -61,6 +61,7 @@ fn answer_refusal(
             let _ = out_tx.send(DaemonMessage::Error {
                 message: err.to_string(),
                 request_id: Some(request_id),
+                code: Some(protocol::error_codes::SUMMARIZER_REFUSED.to_owned()),
             });
             Ok(())
         }
@@ -86,6 +87,7 @@ fn spawn_test(hub: &Hub, out_tx: mpsc::UnboundedSender<DaemonMessage>, request_i
                 DaemonMessage::Error {
                     message: err.to_string(),
                     request_id,
+                    code: Some(protocol::error_codes::SUMMARIZER_REFUSED.to_owned()),
                 }
             }
         };
@@ -417,8 +419,9 @@ mod tests {
         assert!(
             matches!(
                 &reply,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
                     if id == "t2" && message.contains("cap")
+                        && code == protocol::error_codes::SUMMARIZER_REFUSED
             ),
             "{reply:?}"
         );
@@ -435,7 +438,7 @@ mod tests {
         assert!(
             matches!(
                 &reply,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "t3" && message.contains("No summarizer provider")
             ),
             "{reply:?}"

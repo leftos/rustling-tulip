@@ -123,6 +123,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Edge overlay**: the tint a pane draws while a dragged pane would drop on it: a half for a split, a strip along the grid's edge for an outer-band split, or the inset centre with a `Swap panes` badge; see `docs/native-client.md` ("Drag model").
 - **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
 - **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment, then the user and system environment, at spawn; only the reference is stored and echoed; see Secret reference.
+- **Error code**: the snake_case `code` string on a `DaemonMessage::Error`, from the catalogue in `crates/protocol/src/error_codes.rs`; a client branches on it, never on the message text, and keeps an unknown code as an opaque string.
 - **ES.1, ES.9**: step ids of the finished secrets-in-env-rows design (ES sealing steps), named in commit messages; its decisions are in `docs/env-secrets.md`.
 - **Fan-out**: an agent splitting a task into independent parts, each run by a worker in its own worktree.
 - **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
@@ -230,6 +231,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **SSH target**: `Target::Ssh`, a host the native client reaches by running `ssh` with an `~/.ssh/config` alias or `user@host[:port]` and `rustling-tulipd bridge` (or the saved host's `remote_command`), speaking the protocol over the child's stdio; the SSH login is the owner, so there is no device token; `apps/native/src/ssh.rs`, `docs/native-client.md`, `docs/plans/ssh-remote.md`.
 - **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
+- **Status sequence (`status_seq`)**: the count of status changes on a `SessionSnapshot` (default 0), raised by one on each change (a reattach or orphan rebuild that changes the stored status included) and kept in the sidecar's `meta.json`; a client compares it to tell a newer snapshot from an older one.
 - **Status-change log**: the planned `activity/<key>.jsonl` files in the config dir, one line per status change of a session or dispatch run, kept 2 hours and across daemon restarts, which the activity track draws from; see `docs/plans/dashboard.md`.
 - **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
 - **Sticky toast**: a toast with no timeout that stays until its × is clicked or something replaces it; a running preset job's toast and a failed launch's toast are sticky.

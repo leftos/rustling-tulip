@@ -14,7 +14,7 @@ use std::time::Duration;
 use gpui::{Modifiers, Point, TestAppContext, point, px};
 use protocol::{
     AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValue,
-    OptionValues, SplitDirection, TabEntry,
+    OptionValues, SplitDirection, TabEntry, error_codes,
 };
 use rustling_tulip_native::{
     Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, SidebarView, fonts,
@@ -1367,6 +1367,8 @@ const RESERVED_FLAG: &str =
     "--settings is set by rustling-tulip; remove it from the extra arguments.";
 const ARGS_CONTROL: &str =
     "The launch command's Extra arguments cannot contain a newline or other control character.";
+const WORKTREES_ROOT_REFUSAL: &str =
+    "creating worktrees root X:\\nope: Access is denied. (os error 5)";
 
 /// The daemon's launch commands: Claude's `program` and `args`, and the
 /// variable that overrides the program on the host.
@@ -1443,12 +1445,24 @@ fn toast_titles(h: &mut Harness<'_>) -> Vec<String> {
     })
 }
 
-/// The daemon refuses with `message`, answering the request `request_id`
-/// names, or none.
+/// The error code the daemon sends with each refusal this spec fakes.
+fn refusal_code(message: &str) -> &'static str {
+    match message {
+        PROGRAM_REFUSAL => error_codes::LAUNCH_PROGRAM_REFUSED,
+        UNCLOSED_QUOTE | RESERVED_FLAG | ARGS_CONTROL => error_codes::LAUNCH_ARGS_REFUSED,
+        WORKTREES_ROOT_REFUSAL => error_codes::WORKTREES_ROOT_REFUSED,
+        PROFILE_REFUSAL => error_codes::SETTINGS_REFUSED,
+        _ => error_codes::INTERNAL,
+    }
+}
+
+/// The daemon refuses with `message` and its [`refusal_code`], answering
+/// the request `request_id` names, or none.
 fn refuse(h: &mut Harness<'_>, request_id: Option<&str>, message: &str) {
     h.send(DaemonMessage::Error {
         message: message.to_owned(),
         request_id: request_id.map(str::to_owned),
+        code: Some(refusal_code(message).to_owned()),
     });
 }
 
@@ -3043,11 +3057,7 @@ fn a_refused_worktrees_save_stops_waiting(cx: &mut TestAppContext) {
     h.sent();
     h.click_on("settings-worktrees-root-save");
     assert_eq!(worktrees_root_sets(&h.sent()), [Some("X:/nope".to_owned())]);
-    refuse(
-        &mut h,
-        None,
-        "creating worktrees root X:\\nope: Access is denied. (os error 5)",
-    );
+    refuse(&mut h, None, WORKTREES_ROOT_REFUSAL);
     assert_eq!(toast_titles(&mut h).len(), 1, "the refusal still toasts");
 
     h.send(DaemonMessage::WorktreesRootChanged {

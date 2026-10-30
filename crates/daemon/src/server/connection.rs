@@ -9,7 +9,7 @@ use crate::file_fetch;
 use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt as _, StreamExt as _};
-use protocol::{DaemonMessage, InboundClientMessage};
+use protocol::{DaemonMessage, InboundClientMessage, error_codes};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
@@ -1105,17 +1105,21 @@ async fn recv_loop<R: Inbound>(
                         let _ = out_tx.send(DaemonMessage::Error {
                             message: format!("malformed message: {err}"),
                             request_id: None,
+                            code: Some(error_codes::MALFORMED_MESSAGE.to_owned()),
                         });
                         continue;
                     }
                 };
                 let parsed = match parsed {
                     InboundClientMessage::Known(msg) => msg,
-                    InboundClientMessage::Unknown { type_tag, .. } => {
+                    InboundClientMessage::Unknown { ref type_tag, .. } => {
                         warn!(
                             %type_tag,
-                            "ignoring unknown client message type (forward-compat path)"
+                            "undecodable client message (forward-compat path): answered only when it carries a request_id"
                         );
+                        if let Some(reply) = undecoded_reply(&parsed) {
+                            let _ = out_tx.send(reply);
+                        }
                         continue;
                     }
                 };
@@ -1128,11 +1132,39 @@ async fn recv_loop<R: Inbound>(
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: err.to_string(),
                         request_id: None,
+                        code: Some(error_codes::INTERNAL.to_owned()),
                     });
                 }
             }
         }
     }
+}
+
+/// The `Error` answering a frame that did not decode as a client message,
+/// when it carries a top-level string `request_id`: `invalid_request` when
+/// its `type` names a known message (a field was refused), else
+/// `unsupported_message`. `None` for a frame without one, which gets no reply.
+pub(super) fn undecoded_reply(frame: &InboundClientMessage) -> Option<DaemonMessage> {
+    let InboundClientMessage::Unknown { type_tag, .. } = frame else {
+        return None;
+    };
+    let request_id = frame.request_id()?.to_owned();
+    let (code, message) = if frame.names_known_type() {
+        (
+            error_codes::INVALID_REQUEST,
+            format!("invalid {type_tag} message: a field did not decode"),
+        )
+    } else {
+        (
+            error_codes::UNSUPPORTED_MESSAGE,
+            format!("unsupported message type: {type_tag}"),
+        )
+    };
+    Some(DaemonMessage::Error {
+        message,
+        request_id: Some(request_id),
+        code: Some(code.to_owned()),
+    })
 }
 
 #[cfg(test)]
@@ -1184,6 +1216,87 @@ mod tests {
 
     fn is_remote_status(message: &DaemonMessage) -> bool {
         matches!(message, DaemonMessage::RemoteStatus { .. })
+    }
+
+    /// Send `text` as one raw text frame.
+    async fn send_raw(client: &mut WsClient, text: &str) {
+        use futures::SinkExt as _;
+        client
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                text.to_owned(),
+            ))
+            .await
+            .expect("send a frame");
+    }
+
+    /// On a served loopback connection, send `frame`, then a `ListEnvNames`
+    /// the daemon answers with its id: every `Error` that came before that
+    /// answer, which proves the connection still serves requests.
+    async fn errors_answering(tag: &str, frame: &str) -> Vec<DaemonMessage> {
+        let (hub, _scratch) = test_hub(tag);
+        let mut client = loopback_ws_client(&hub).await;
+        ws_send(&mut client, &hello(&hub.auth_token, None)).await;
+        send_raw(&mut client, frame).await;
+        ws_send(
+            &mut client,
+            &protocol::ClientMessage::ListEnvNames {
+                request_id: Some("after".to_owned()),
+            },
+        )
+        .await;
+        let mut errors = Vec::new();
+        loop {
+            let message = ws_next(&mut client)
+                .await
+                .expect("a message before the connection closes");
+            match message {
+                DaemonMessage::EnvNames { request_id, .. }
+                    if request_id.as_deref() == Some("after") =>
+                {
+                    return errors;
+                }
+                error @ DaemonMessage::Error { .. } => errors.push(error),
+                _ => {}
+            }
+        }
+    }
+
+    fn assert_coded(errors: &[DaemonMessage], want_code: &str, want_id: &str) {
+        assert!(
+            matches!(
+                errors,
+                [DaemonMessage::Error { code: Some(code), request_id: Some(id), .. }]
+                    if code == want_code && id == want_id
+            ),
+            "{errors:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_message_with_a_request_id_is_answered_unsupported() {
+        let errors = errors_answering(
+            "unknown-message-reply",
+            r#"{"type":"future_message","request_id":"r1"}"#,
+        )
+        .await;
+        assert_coded(&errors, protocol::error_codes::UNSUPPORTED_MESSAGE, "r1");
+    }
+
+    #[tokio::test]
+    async fn a_known_message_with_a_bad_field_is_answered_invalid() {
+        let errors = errors_answering(
+            "bad-field-reply",
+            r#"{"type":"stop_session","session_id":7,"request_id":"r2"}"#,
+        )
+        .await;
+        assert_coded(&errors, protocol::error_codes::INVALID_REQUEST, "r2");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_message_without_a_request_id_gets_no_reply() {
+        let errors =
+            errors_answering("unknown-message-silent", r#"{"type":"future_message"}"#).await;
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[tokio::test]

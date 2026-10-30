@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod env_rows;
+pub mod error_codes;
 
 include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 
@@ -591,6 +592,12 @@ pub struct SessionSnapshot {
     /// When `status` last changed; `None` from a daemon that predates it.
     #[serde(default)]
     pub status_since: Option<DateTime<Utc>>,
+    /// Counts the session's `status` changes: the daemon adds one each time
+    /// `status` changes, so a client holding an older value knows the status
+    /// moved since. 0 for a session whose status never changed, and from a
+    /// daemon that predates it.
+    #[serde(default)]
+    pub status_seq: u64,
     /// The session's latest summary from the summarizer; `None` until one is made.
     #[serde(default)]
     pub summary: Option<SessionSummary>,
@@ -4495,6 +4502,11 @@ pub enum DaemonMessage {
         /// (`SuggestBranchName`) that failed, on the reply to its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        /// The failure's stable machine-readable code, one of
+        /// [`error_codes`]; a client keeps a code it does not know as an
+        /// opaque string. `None` from a daemon that predates codes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
     /// A user-requested action was refused or failed in a way that warrants a
     /// blocking modal rather than a transient toast — e.g. a worktree spawn
@@ -4579,7 +4591,8 @@ pub enum DaemonMessage {
 /// Parse-time wrapper around [`ClientMessage`] that captures unknown message
 /// types as `Unknown { type_tag, raw }` instead of failing. The daemon reads
 /// from the wire via [`Self::from_json_str`] and matches on the result:
-/// `Known(msg)` to dispatch normally, `Unknown { .. }` to log + drop.
+/// `Known(msg)` to dispatch normally, `Unknown { .. }` to log, answering with
+/// an `Error` only a frame that carries a top-level string `request_id`.
 ///
 /// This is the wire-level implementation of forward-compatible deserialization:
 /// a v(N+1) client speaking to a v(N) daemon may send message types the
@@ -4617,6 +4630,77 @@ impl InboundClientMessage {
             type_tag,
             raw: value,
         })
+    }
+
+    /// The frame's top-level `request_id` when it is a string, for answering
+    /// a frame the daemon could not decode. `None` for a decoded message.
+    #[must_use]
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Known(_) => None,
+            Self::Unknown { raw, .. } => raw.get("request_id").and_then(serde_json::Value::as_str),
+        }
+    }
+
+    /// Whether an undecodable frame's `type` names a [`ClientMessage`]
+    /// variant, so its fields, not its type, were refused. `false` for a
+    /// decoded message.
+    #[must_use]
+    pub fn names_known_type(&self) -> bool {
+        match self {
+            Self::Known(_) => false,
+            Self::Unknown { raw, .. } => raw
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(client_message_type_is_known),
+        }
+    }
+}
+
+/// Whether `type_tag` is the wire tag of a [`ClientMessage`] variant. Feeds
+/// serde a map holding only the tag: an unknown tag fails with
+/// `unknown_variant`, which [`TagProbeError`] records; a known one fails on a
+/// missing field or decodes.
+fn client_message_type_is_known(type_tag: &str) -> bool {
+    use serde::de::value::MapDeserializer;
+    let fields = std::iter::once(("type", type_tag));
+    let probe: MapDeserializer<'_, _, TagProbeError> = MapDeserializer::new(fields);
+    match ClientMessage::deserialize(probe) {
+        Ok(_) => true,
+        Err(err) => !err.unknown_variant,
+    }
+}
+
+/// The error a [`client_message_type_is_known`] probe decodes with: it notes
+/// whether serde refused the tag itself.
+#[derive(Debug)]
+struct TagProbeError {
+    unknown_variant: bool,
+}
+
+impl std::fmt::Display for TagProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.unknown_variant {
+            f.write_str("unknown message type")
+        } else {
+            f.write_str("known message type")
+        }
+    }
+}
+
+impl std::error::Error for TagProbeError {}
+
+impl serde::de::Error for TagProbeError {
+    fn custom<T: std::fmt::Display>(_msg: T) -> Self {
+        Self {
+            unknown_variant: false,
+        }
+    }
+
+    fn unknown_variant(_variant: &str, _expected: &'static [&'static str]) -> Self {
+        Self {
+            unknown_variant: true,
+        }
     }
 }
 
@@ -8376,7 +8460,7 @@ mod tests {
         let old: DaemonMessage =
             serde_json::from_str(r#"{"type":"error","message":"boom"}"#).expect("old error");
         assert!(
-            matches!(&old, DaemonMessage::Error { message, request_id: None } if message == "boom"),
+            matches!(&old, DaemonMessage::Error { message, request_id: None, .. } if message == "boom"),
             "{old:?}"
         );
         let json = serde_json::to_string(&old).expect("serialize");
@@ -8400,6 +8484,7 @@ mod tests {
             DaemonMessage::Error {
                 message: "boom".to_string(),
                 request_id: Some("req-4".to_string()),
+                code: None,
             },
             DaemonMessage::ActionFailed {
                 title: "t".to_string(),
@@ -8963,6 +9048,83 @@ mod tests {
         let snapshot: SessionSnapshot =
             serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
         assert_eq!(snapshot.status_since, None, "an absent stamp reads as None");
+        assert_eq!(snapshot.status_seq, 0, "an absent sequence reads as 0");
+    }
+
+    #[test]
+    fn session_snapshot_status_seq_round_trips() {
+        let mut snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        snapshot.status_seq = 7;
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        assert!(json.contains(r#""status_seq":7"#), "{json}");
+        let decoded: SessionSnapshot = serde_json::from_str(&json).expect("decode");
+        assert_eq!(decoded.status_seq, 7);
+    }
+
+    #[test]
+    fn error_without_code_decodes_and_omits_it() {
+        let old: DaemonMessage =
+            serde_json::from_str(r#"{"type":"error","message":"boom"}"#).expect("old error");
+        assert!(
+            matches!(&old, DaemonMessage::Error { code: None, .. }),
+            "{old:?}"
+        );
+        let json = serde_json::to_string(&old).expect("serialize");
+        assert!(!json.contains("code"), "{json}");
+    }
+
+    #[test]
+    fn error_with_code_round_trips() {
+        let error = DaemonMessage::Error {
+            message: "unknown session: s1".to_owned(),
+            request_id: Some("req-4".to_owned()),
+            code: Some(error_codes::NOT_FOUND.to_owned()),
+        };
+        let json = serde_json::to_string(&error).expect("serialize");
+        assert!(json.contains(r#""code":"not_found""#), "{json}");
+        let decoded: DaemonMessage = serde_json::from_str(&json).expect("decode");
+        assert!(
+            matches!(
+                &decoded,
+                DaemonMessage::Error { code: Some(code), request_id: Some(id), .. }
+                    if code == "not_found" && id == "req-4"
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    fn inbound(json: &str) -> InboundClientMessage {
+        InboundClientMessage::from_json_str(json).expect("valid JSON")
+    }
+
+    #[test]
+    fn inbound_request_id_reads_a_top_level_string_only() {
+        assert_eq!(
+            inbound(r#"{"type":"future_thing","request_id":"r1"}"#).request_id(),
+            Some("r1")
+        );
+        assert_eq!(
+            inbound(r#"{"type":"future_thing","request_id":7}"#).request_id(),
+            None
+        );
+        assert_eq!(inbound(r#"{"type":"future_thing"}"#).request_id(), None);
+        assert_eq!(
+            inbound(r#"{"type":"future_thing","body":{"request_id":"r1"}}"#).request_id(),
+            None
+        );
+        assert_eq!(inbound(r#"{"type":"list_repos"}"#).request_id(), None);
+    }
+
+    #[test]
+    fn inbound_names_known_type_tells_a_bad_field_from_an_unknown_type() {
+        assert!(!inbound(r#"{"type":"future_thing","request_id":"r1"}"#).names_known_type());
+        assert!(
+            inbound(r#"{"type":"stop_session","session_id":7,"request_id":"r1"}"#)
+                .names_known_type()
+        );
+        assert!(!inbound(r#"{"request_id":"r1"}"#).names_known_type());
+        assert!(!inbound(r#"{"type":"list_repos"}"#).names_known_type());
     }
 
     #[test]

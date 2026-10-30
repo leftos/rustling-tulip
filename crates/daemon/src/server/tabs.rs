@@ -50,6 +50,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: format!("open diff tab failed: {err:#}"),
                         request_id: Some(id),
+                        code: Some(protocol::error_codes::OPEN_FAILED.to_owned()),
                     });
                 }
             }
@@ -70,6 +71,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: format!("open viewer tab failed: {err:#}"),
                         request_id: Some(id),
+                        code: Some(protocol::error_codes::OPEN_FAILED.to_owned()),
                     });
                 }
             }
@@ -88,6 +90,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 let _ = out_tx.send(DaemonMessage::Error {
                     message: format!("open dashboard tab failed: {err:#}"),
                     request_id: Some(id),
+                    code: Some(protocol::error_codes::OPEN_FAILED.to_owned()),
                 });
             }
         },
@@ -129,6 +132,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             let _ = out_tx.send(DaemonMessage::Error {
                 message: "can't restore a tab this app does not understand".to_owned(),
                 request_id: None,
+                code: Some(protocol::error_codes::INVALID_REQUEST.to_owned()),
             });
         }
         ClientMessage::RestoreTab { tab, index } => {
@@ -624,6 +628,7 @@ fn send_tab_failure(
     let _ = out_tx.send(DaemonMessage::Error {
         message: err.to_string(),
         request_id,
+        code: Some(protocol::error_codes::TAB_REFUSED.to_owned()),
     });
 }
 
@@ -746,8 +751,9 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
                     if id == "m1" && message.contains("at least two tabs")
+                        && code == protocol::error_codes::TAB_REFUSED
             ),
             "{msg:?}"
         );
@@ -761,7 +767,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: None }
+                DaemonMessage::Error { message, request_id: None, .. }
                     if message.contains("at least two tabs")
             ),
             "{msg:?}"
@@ -789,7 +795,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "v1" && message.contains("ghost-tab")
             ),
             "{msg:?}"
@@ -820,7 +826,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "s1" && message.contains("ghost-tab")
             ),
             "{msg:?}"
@@ -845,7 +851,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "x1" && message.contains("ghost-tab")
             ),
             "{msg:?}"
@@ -868,7 +874,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "r1" && message.contains("ghost-pane")
             ),
             "{msg:?}"
@@ -892,7 +898,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "diff-open-1" && message.contains("unknown repo")
             ),
             "{msg:?}"
@@ -1029,7 +1035,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "v1" && message == "open viewer tab failed: the path is empty"
             ),
             "{msg:?}"
@@ -1194,7 +1200,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "w1" && message.contains("ghost-tab")
             ),
             "{msg:?}"
@@ -1343,7 +1349,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "o1" && message.contains("reorder set mismatch")
             ),
             "{msg:?}"
@@ -1366,7 +1372,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: None }
+                DaemonMessage::Error { message, request_id: None, .. }
                     if message.contains("reorder set mismatch")
             ),
             "{msg:?}"

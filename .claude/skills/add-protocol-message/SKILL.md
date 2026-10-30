@@ -66,7 +66,7 @@ For a `DaemonMessage` variant, add the code that constructs and sends it from wh
 Guardrails:
 - If the handler does I/O or anything slow, `tokio::spawn` it — never block the WS receive loop.
 - Use `tracing::{info, warn, error, debug}` for logging, never `println!`.
-- Return errors as `DaemonMessage::Error { message, .. }` on the same connection — never panic, never `unwrap()`.
+- Return errors as `DaemonMessage::Error { message, code, .. }` on the same connection — never panic, never `unwrap()`. Every error carries a `code` from `crates/protocol/src/error_codes.rs`: a new refusal picks an existing code or adds one there (snake_case, listed in `ALL`).
 
 ### 3. Native client handling (`apps/native/src`)
 

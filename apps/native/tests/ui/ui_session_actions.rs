@@ -596,6 +596,7 @@ fn failed_restart_clears_pending_and_allows_retry(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "unknown session: s1".to_owned(),
         request_id: Some(id),
+        code: None,
     });
     assert!(!pending(&mut h, "s1"), "an Error answers it too");
 
@@ -979,6 +980,7 @@ fn duplicate_new_tab_sends_duplicate_then_create_tab(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "refused".to_owned(),
         request_id: Some(create_id),
+        code: None,
     });
     new_tab_arrives(&mut h, "s3");
     assert_eq!(
@@ -1325,6 +1327,7 @@ fn a_refused_spawn_split_ends_its_request_in_flight(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "unknown pane: p1".to_owned(),
         request_id: Some(split_request),
+        code: None,
     });
     h.sent();
 

@@ -20,6 +20,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A power cut or a sleep the PC never wakes from no longer leaves sessions, settings or saved hosts as empty or half-written files.
 - Sessions no longer end when the terminal, IDE task or tool that started the app closes and takes its child processes with it.
 - After a restart, or when Claude's hooks don't run, a session still running a background shell or subagent is no longer reported as finished.
+- A worktrees folder that can't be created in Settings now shows why, such as "Access is denied".
 
 ### Changed
 

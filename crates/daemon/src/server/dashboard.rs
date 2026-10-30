@@ -45,6 +45,7 @@ async fn session_detail(
         return DaemonMessage::Error {
             message: format!("unknown session: {session_id}"),
             request_id,
+            code: Some(protocol::error_codes::NOT_FOUND.to_owned()),
         };
     };
     let (members, started_at, lines) = {
@@ -454,7 +455,7 @@ mod tests {
         assert!(
             matches!(
                 reply,
-                DaemonMessage::Error { ref message, request_id: Some(ref id) }
+                DaemonMessage::Error { ref message, request_id: Some(ref id), .. }
                     if message == "unknown session: nope" && id == "d1"
             ),
             "{reply:?}"

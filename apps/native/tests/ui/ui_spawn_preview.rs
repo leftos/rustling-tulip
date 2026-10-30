@@ -373,6 +373,7 @@ fn preview_error_with_id_clears_pending_and_toasts(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "unknown repo: r1".to_owned(),
         request_id: id,
+        code: None,
     });
     assert!(
         h.root(|root, _| root

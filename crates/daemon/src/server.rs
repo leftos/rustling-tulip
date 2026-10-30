@@ -583,6 +583,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         let _ = out_tx.send(DaemonMessage::Error {
             message: reason.to_owned(),
             request_id: None,
+            code: Some(protocol::error_codes::LOCAL_ONLY.to_owned()),
         });
         return Ok(());
     }
@@ -779,6 +780,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: format!("unknown preset launch job: {job_id}"),
                         request_id: None,
+                        code: Some(protocol::error_codes::NOT_FOUND.to_owned()),
                     });
                 }
             }
@@ -866,6 +868,7 @@ fn refuse_not_supported_yet(msg: ClientMessage, out_tx: &mpsc::UnboundedSender<D
         let _ = out_tx.send(DaemonMessage::Error {
             message: "not supported yet".to_owned(),
             request_id: Some(request_id),
+            code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
         });
     }
 }
@@ -1013,7 +1016,7 @@ mod tests {
         assert!(
             matches!(
                 &reply,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if message == "not supported yet" && id == "d1"
             ),
             "{reply:?}"
@@ -1070,7 +1073,7 @@ mod tests {
             assert!(
                 matches!(
                     &reply,
-                    DaemonMessage::Error { message, request_id: None }
+                    DaemonMessage::Error { message, request_id: None, .. }
                         if message == "can't restore a tab this app does not understand"
                 ),
                 "{reply:?}"

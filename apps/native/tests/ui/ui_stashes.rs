@@ -582,6 +582,7 @@ fn a_failed_list_shows_its_text_and_raises_no_toast(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "stash list failed: not a git repository".to_owned(),
         request_id: id,
+        code: None,
     });
     assert_eq!(
         part(&mut h).body.as_deref(),

@@ -409,6 +409,7 @@ pub(super) async fn configure_remote(
         let _ = out_tx.send(DaemonMessage::Error {
             message: "remote access needs a port from 1 to 65535".to_owned(),
             request_id: None,
+            code: Some(protocol::error_codes::INVALID_REQUEST.to_owned()),
         });
         return Ok(());
     }
@@ -846,7 +847,8 @@ mod tests {
                 assert!(
                     matches!(
                         &reply,
-                        DaemonMessage::Error { message, request_id: None } if message == LAN_RETIRED
+                        DaemonMessage::Error { message, request_id: None, code: Some(code) }
+                            if message == LAN_RETIRED && code == protocol::error_codes::GONE
                     ),
                     "{auth:?} {msg:?}: {reply:?}"
                 );
@@ -973,7 +975,7 @@ mod tests {
             assert!(
                 matches!(
                     &reply,
-                    DaemonMessage::Error { message, request_id: None }
+                    DaemonMessage::Error { message, request_id: None, .. }
                         if message == crate::server::pairing::ALREADY_PAIRED
                 ),
                 "{msg:?}: {reply:?}"
@@ -994,7 +996,7 @@ mod tests {
             assert!(
                 matches!(
                     &reply,
-                    DaemonMessage::Error { message, request_id: None }
+                    DaemonMessage::Error { message, request_id: None, .. }
                         if message == crate::server::pairing::TAILNET_ONLY
                 ),
                 "{msg:?}: {reply:?}"

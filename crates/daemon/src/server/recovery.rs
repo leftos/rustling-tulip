@@ -750,6 +750,7 @@ async fn resume_all_abandoned(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMe
             let _ = out_tx.send(DaemonMessage::Error {
                 message: format!("resume {id}: {err}"),
                 request_id: None,
+                code: Some(protocol::error_codes::RESUME_FAILED.to_owned()),
             });
         }
     }

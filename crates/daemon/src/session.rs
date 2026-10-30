@@ -164,6 +164,10 @@ pub struct SessionRecord {
     /// whenever an update moves the status, and every record-creation path
     /// stamps one, so a client can tell how long a session has been waiting.
     pub status_since: Option<DateTime<Utc>>,
+    /// Counts `status` changes: [`SessionRegistry::update_from`] adds one
+    /// wherever it stamps `status_since`. 0 on a new record; a reattach
+    /// restores it from the sidecar.
+    pub status_seq: u64,
     pub exit_code: Option<i32>,
     pub metrics: SessionMetrics,
     pub recent_actions: Vec<String>,
@@ -435,6 +439,7 @@ impl SessionRecord {
             members: self.members.clone(),
             status: self.status,
             status_since: self.status_since,
+            status_seq: self.status_seq,
             summary: self
                 .summary
                 .as_ref()
@@ -993,6 +998,7 @@ impl SessionRegistry {
             recent_actions_tail: trim_recent_tail(&guard.recent_actions),
             status: guard.status,
             status_since: guard.status_since,
+            status_seq: guard.status_seq,
             pending_input: guard.pending_input.clone(),
             terminal_title: guard.terminal_title.clone(),
             current_cwd: guard.current_cwd.clone(),
@@ -1098,6 +1104,7 @@ impl SessionRegistry {
             if guard.status != was_status {
                 let at = Utc::now();
                 guard.status_since = Some(at);
+                guard.status_seq = guard.status_seq.saturating_add(1);
                 status_change = Some((at, guard.status));
                 if self.turn_ended_without_stop_line(id, was_status, guard.status) {
                     guard.drop_provisional_line();
@@ -1587,6 +1594,14 @@ fn resolve_labels_from_meta(meta: &OrphanMeta) -> (String, Option<String>, Strin
     (default_label, user_label, effective)
 }
 
+/// The status count a record rebuilt from `meta` with `status` starts at: the
+/// sidecar's count, plus one when `status` is not the stored one, since the
+/// rebuild changed it.
+fn restored_status_seq(meta: &OrphanMeta, status: SessionStatus) -> u64 {
+    let changed = meta.status != Some(status);
+    meta.status_seq.saturating_add(u64::from(changed))
+}
+
 fn appearance_from_meta(meta: &OrphanMeta) -> AppearanceOverrides {
     let mut appearance = meta.appearance.clone();
     if appearance.accent_color.is_none() {
@@ -1609,6 +1624,7 @@ impl SessionRegistry {
             started_at: meta.started_at,
             status: SessionStatus::Idle,
             status_since: Some(Utc::now()),
+            status_seq: restored_status_seq(meta, SessionStatus::Idle),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: meta.recent_actions_tail.clone(),
@@ -1692,6 +1708,7 @@ impl SessionRegistry {
             started_at: meta.started_at,
             status,
             status_since: Some(status_since),
+            status_seq: restored_status_seq(meta, status),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: meta.recent_actions_tail.clone(),
@@ -1752,6 +1769,7 @@ impl SessionRegistry {
             started_at: meta.started_at,
             status: SessionStatus::Stopped,
             status_since: Some(Utc::now()),
+            status_seq: restored_status_seq(meta, SessionStatus::Stopped),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: meta.recent_actions_tail.clone(),
@@ -1836,6 +1854,7 @@ mod tests {
             started_at: Utc::now(),
             status: SessionStatus::Idle,
             status_since: Some(Utc::now()),
+            status_seq: 0,
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: Vec::new(),
@@ -2154,6 +2173,102 @@ mod tests {
             "every record-creation path stamps one"
         );
         let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// The `status_seq` of every `SessionUpdated` snapshot `events` holds.
+    fn updated_seqs(events: &mut broadcast::Receiver<SessionEvent>) -> Vec<u64> {
+        let mut seqs = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SessionEvent::Updated(snap, _) = event {
+                seqs.push(snap.status_seq);
+            }
+        }
+        seqs
+    }
+
+    #[test]
+    fn status_change_bumps_status_seq() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("status-seq-bump");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Headless));
+        assert_eq!(
+            registry.snapshots()[0].status_seq,
+            0,
+            "a new record starts at 0"
+        );
+        let mut events = registry.subscribe();
+
+        registry.update("s1", |rec| rec.status = SessionStatus::Working);
+        registry.update("s1", |rec| rec.status = SessionStatus::Working);
+        registry.update("s1", |rec| rec.status = SessionStatus::Idle);
+
+        assert_eq!(
+            updated_seqs(&mut events),
+            vec![1, 1, 2],
+            "each status change adds one, in the update that carries it"
+        );
+        assert_eq!(registry.snapshots()[0].status_seq, 2);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_background_or_pending_input_write_keeps_status_seq() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("status-seq-keep");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Headless));
+
+        registry.update("s1", |rec| rec.background = true);
+        registry.update("s1", |rec| {
+            rec.pending_input = Some(PendingInput::Permission {
+                tool_name: "Bash".to_owned(),
+                summary: "cargo build".to_owned(),
+            });
+        });
+        registry.update("s1", |rec| rec.exit_code = Some(0));
+
+        assert_eq!(
+            registry.snapshots()[0].status_seq,
+            0,
+            "only a status change moves the count"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// Reattach `s1` from a sidecar holding `status` and a status count of
+    /// 5; answers the restored snapshot's count.
+    fn reattached_status_seq(tag: &str, status: &str) -> u64 {
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs(tag);
+        let since = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+        write_sidecar_with_fields(&dirs, "s1", status, since, r#", "status_seq": 5"#);
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        registry.insert_reattached(&meta, pty).publish();
+        let snapshots = registry.snapshots();
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        assert_eq!(snapshots.len(), 1);
+        snapshots[0].status_seq
+    }
+
+    #[tokio::test]
+    async fn reattach_restores_status_seq() {
+        assert_eq!(
+            reattached_status_seq("status-seq-restore", "awaiting_input"),
+            5,
+            "a restored status keeps its count"
+        );
+    }
+
+    #[tokio::test]
+    async fn reattach_coercion_bumps_status_seq() {
+        assert_eq!(
+            reattached_status_seq("status-seq-coerce", "working"),
+            6,
+            "a status the reattach turns into Idle is a change"
+        );
     }
 
     /// Write a sidecar for `id` the way a daemon that synced its status

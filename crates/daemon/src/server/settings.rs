@@ -9,10 +9,10 @@ use crate::registry::{
 use crate::session::SessionRegistry;
 use crate::state::{AgentCommand, AppState};
 use crate::{user_env, vscode};
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
 use protocol::{
     AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValues,
-    VscodeWorkspaceSuggestion,
+    VscodeWorkspaceSuggestion, error_codes,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -124,13 +124,22 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
             let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
         }
-        ClientMessage::SetWorktreesRoot { path } => {
-            let (resolved, is_override) = hub.state.set_worktrees_root(path)?;
-            let _ = hub.state_events.send(StateEvent::WorktreesRootChanged {
-                root: resolved.to_string_lossy().into_owned(),
-                is_override,
-            });
-        }
+        ClientMessage::SetWorktreesRoot { path } => match hub.state.set_worktrees_root(path) {
+            Ok((resolved, is_override)) => {
+                let _ = hub.state_events.send(StateEvent::WorktreesRootChanged {
+                    root: resolved.to_string_lossy().into_owned(),
+                    is_override,
+                });
+            }
+            Err(err) => {
+                warn!(?err, "settings: the worktrees root was refused");
+                let _ = out_tx.send(DaemonMessage::Error {
+                    message: format!("{err:#}"),
+                    request_id: None,
+                    code: Some(error_codes::WORKTREES_ROOT_REFUSED.to_owned()),
+                });
+            }
+        },
         ClientMessage::ConfigureLan { .. }
         | ClientMessage::StartPairing
         | ClientMessage::CancelPairing => {
@@ -138,6 +147,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             let _ = out_tx.send(DaemonMessage::Error {
                 message: LAN_RETIRED.to_owned(),
                 request_id: None,
+                code: Some(error_codes::GONE.to_owned()),
             });
         }
         ClientMessage::SetKeepAwake { enabled } => {
@@ -213,8 +223,9 @@ fn set_keep_awake_mode(hub: &Hub, mode: KeepAwakeMode) -> anyhow::Result<()> {
 
 /// A Settings request's outcome: a refusal of a request that carried a
 /// `request_id` is answered here with an `Error` echoing it, to this
-/// requester only; any other outcome is returned as it came, so a refusal
-/// without one still gets the connection's `Error { request_id: None }`.
+/// requester only, coded by its [`LaunchRefusal`] when it is one and
+/// `settings_refused` otherwise; any other outcome is returned as it came, so
+/// a refusal without one still gets the connection's `Error { request_id: None }`.
 fn answer_refusal(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     outcome: anyhow::Result<()>,
@@ -223,15 +234,46 @@ fn answer_refusal(
     match (outcome, request_id) {
         (Err(err), Some(request_id)) => {
             warn!(?err, %request_id, "settings request refused");
+            let code = err
+                .downcast_ref::<LaunchRefusal>()
+                .map_or(error_codes::SETTINGS_REFUSED, LaunchRefusal::code);
             let _ = out_tx.send(DaemonMessage::Error {
                 message: err.to_string(),
                 request_id: Some(request_id),
+                code: Some(code.to_owned()),
             });
             Ok(())
         }
         (outcome, _) => outcome,
     }
 }
+
+/// A launch command refused for one of its two fields; its message is what
+/// the user reads under that field.
+#[derive(Debug)]
+enum LaunchRefusal {
+    Program(String),
+    Args(String),
+}
+
+impl LaunchRefusal {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Program(_) => error_codes::LAUNCH_PROGRAM_REFUSED,
+            Self::Args(_) => error_codes::LAUNCH_ARGS_REFUSED,
+        }
+    }
+}
+
+impl std::fmt::Display for LaunchRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Program(message) | Self::Args(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for LaunchRefusal {}
 
 /// Check `command` against `agent`'s reserved flags, persist it (a blank pair
 /// removes the agent's entry) and broadcast every agent's command.
@@ -265,19 +307,19 @@ fn set_agent_settings(hub: &Hub, agent: &AgentId, options: &OptionValues) -> any
 /// Refuse a launch command a field of which holds a control character, whose
 /// extra arguments do not split, or one of whose extra arguments names a flag
 /// in `reserved`: the flag itself, or a long flag followed by `=`.
-fn check_agent_command(reserved: &[&str], command: &AgentCommand) -> anyhow::Result<()> {
-    for (field, text) in [
-        ("Program", &command.program),
-        ("Extra arguments", &command.args),
-    ] {
-        if text.chars().any(char::is_control) {
-            bail!(
-                "The launch command's {field} cannot contain a newline or other control character."
-            );
-        }
+fn check_agent_command(reserved: &[&str], command: &AgentCommand) -> Result<(), LaunchRefusal> {
+    let control = |field: &str| {
+        format!("The launch command's {field} cannot contain a newline or other control character.")
+    };
+    if command.program.chars().any(char::is_control) {
+        return Err(LaunchRefusal::Program(control("Program")));
     }
-    let tokens = shell_words::split(&command.args)
-        .map_err(|_| anyhow!("The extra arguments have an unclosed quote."))?;
+    if command.args.chars().any(char::is_control) {
+        return Err(LaunchRefusal::Args(control("Extra arguments")));
+    }
+    let tokens = shell_words::split(&command.args).map_err(|_| {
+        LaunchRefusal::Args("The extra arguments have an unclosed quote.".to_owned())
+    })?;
     for token in &tokens {
         for flag in reserved {
             let with_value = flag.starts_with("--")
@@ -285,7 +327,9 @@ fn check_agent_command(reserved: &[&str], command: &AgentCommand) -> anyhow::Res
                     .strip_prefix(flag)
                     .is_some_and(|rest| rest.starts_with('='));
             if token == flag || with_value {
-                bail!("{flag} is set by rustling-tulip; remove it from the extra arguments.");
+                return Err(LaunchRefusal::Args(format!(
+                    "{flag} is set by rustling-tulip; remove it from the extra arguments."
+                )));
             }
         }
     }
@@ -884,6 +928,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_worktrees_root_is_coded_and_names_its_cause() {
+        let (hub, _scratch) = test_hub("worktrees-root-refused");
+        // A root under a plain file cannot be created on any platform.
+        let blocker =
+            std::env::temp_dir().join(format!("rt-worktrees-root-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, b"a file, not a folder").expect("write the blocker file");
+        let root = blocker.join("root");
+        let reply = crate::server::test_support::dispatch_one(
+            &hub,
+            ClientMessage::SetWorktreesRoot {
+                path: Some(root.to_string_lossy().into_owned()),
+            },
+        )
+        .await;
+        let _ = std::fs::remove_file(&blocker);
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: None, code: Some(code) }
+                    if code == protocol::error_codes::WORKTREES_ROOT_REFUSED
+                        && message.starts_with("creating worktrees root ")
+                        && message.contains("(os error")
+            ),
+            "a coded refusal whose message carries the OS cause: {reply:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn set_agent_command_refuses_every_reserved_flag() {
         let (hub, _scratch) = test_hub("agent-command-reserved");
         let reserved = agent_registry::plugin(&agent_registry::default_agent())
@@ -971,8 +1043,9 @@ mod tests {
         assert!(
             matches!(
                 &reply,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
                     if message == "Claude has no option `x`" && id == "s1"
+                        && code == protocol::error_codes::SETTINGS_REFUSED
             ),
             "the refusal answers the request it refuses: {reply:?}"
         );
@@ -1002,8 +1075,9 @@ mod tests {
         assert!(
             matches!(
                 &reply,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
                     if message == "The extra arguments have an unclosed quote." && id == "c1"
+                        && code == protocol::error_codes::LAUNCH_ARGS_REFUSED
             ),
             "the refusal answers the request it refuses: {reply:?}"
         );

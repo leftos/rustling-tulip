@@ -1314,6 +1314,7 @@ fn a_failed_suggestion_drops_the_wait_and_reports_once(cx: &mut TestAppContext) 
     h.send(DaemonMessage::Error {
         message: "suggest failed".to_owned(),
         request_id: Some(request_id),
+        code: None,
     });
 
     let errors: Vec<_> = toasts(&mut h)

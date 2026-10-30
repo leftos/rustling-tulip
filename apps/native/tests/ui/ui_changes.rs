@@ -193,6 +193,7 @@ fn a_failed_status_shows_its_reason_and_raises_no_toast(cx: &mut TestAppContext)
     h.send(DaemonMessage::Error {
         message: "status failed: not a git repository".to_owned(),
         request_id: id,
+        code: None,
     });
     let row = section(&mut h);
     assert_eq!(
@@ -222,6 +223,7 @@ fn refresh_retries_a_failed_status(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "status failed: locked".to_owned(),
         request_id: id,
+        code: None,
     });
 
     h.click_on("sc-refresh");

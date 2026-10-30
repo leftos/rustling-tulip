@@ -30,6 +30,7 @@ fn dump(hub: &Hub, session_id: String, request_id: Option<String>) -> DaemonMess
         return DaemonMessage::Error {
             message: format!("unknown session: {session_id}"),
             request_id,
+            code: Some(protocol::error_codes::NOT_FOUND.to_owned()),
         };
     };
     let (screen, agent, wire_agent) = {
@@ -44,6 +45,7 @@ fn dump(hub: &Hub, session_id: String, request_id: Option<String>) -> DaemonMess
         return DaemonMessage::Error {
             message: format!("session {session_id} has no screen"),
             request_id,
+            code: Some(protocol::error_codes::NO_SCREEN.to_owned()),
         };
     };
     let rules = rules_for(&agent);
@@ -163,6 +165,7 @@ mod tests {
         let DaemonMessage::Error {
             message,
             request_id,
+            ..
         } = reply
         else {
             panic!("not an error: {reply:?}");
@@ -179,6 +182,7 @@ mod tests {
         let DaemonMessage::Error {
             message,
             request_id,
+            ..
         } = reply
         else {
             panic!("not an error: {reply:?}");

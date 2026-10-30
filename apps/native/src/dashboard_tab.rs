@@ -153,6 +153,7 @@ impl RootView {
             DaemonMessage::Error {
                 message,
                 request_id: Some(id),
+                ..
             } if self.dashboard_opens.failed(id) => {
                 tracing::warn!("the daemon could not open the Dashboard tab: {message}");
                 self.push_toast(

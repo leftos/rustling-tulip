@@ -159,6 +159,7 @@ fn send_preview_failure(
     let _ = out_tx.send(DaemonMessage::Error {
         message: err.to_string(),
         request_id,
+        code: Some(protocol::error_codes::SPAWN_REFUSED.to_owned()),
     });
 }
 
@@ -702,6 +703,7 @@ fn interactive_record(
         started_at: new.started_at,
         status: SessionStatus::Idle,
         status_since: Some(new.started_at),
+        status_seq: 0,
         exit_code: None,
         metrics: SessionMetrics::default(),
         recent_actions: Vec::new(),
@@ -778,6 +780,7 @@ fn plain_shell_record(
         started_at: new.started_at,
         status: SessionStatus::Idle,
         status_since: Some(new.started_at),
+        status_seq: 0,
         exit_code: None,
         metrics: SessionMetrics::default(),
         recent_actions: Vec::new(),
@@ -1361,6 +1364,7 @@ async fn spawn_interactive_session(
     if let Some(mut meta) = meta {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
+        meta.status_seq = snap.status_seq;
         write_meta_then_sync(hub, &meta);
     }
 
@@ -1583,6 +1587,7 @@ async fn spawn_plain_shell_session(
     {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
+        meta.status_seq = snap.status_seq;
         meta.hook_agent.clone_from(&cfg.extras.hook_agent);
         meta.hook_options.clone_from(&cfg.extras.hook_options);
         meta.hook_trusted = cfg.extras.hook_trusted;
@@ -1733,6 +1738,7 @@ fn spawn_headless_session(
         started_at,
         status: SessionStatus::Spawning,
         status_since: Some(started_at),
+        status_seq: 0,
         exit_code: None,
         metrics: SessionMetrics::default(),
         recent_actions: Vec::new(),
@@ -1813,6 +1819,7 @@ fn spawn_headless_session(
     {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
+        meta.status_seq = snap.status_seq;
         write_meta_then_sync(hub, &meta);
     }
 
@@ -2535,7 +2542,7 @@ mod tests {
         assert!(
             matches!(
                 &msg,
-                DaemonMessage::Error { message, request_id: Some(id) }
+                DaemonMessage::Error { message, request_id: Some(id), .. }
                     if id == "p2" && message.contains("no-such-repo")
             ),
             "{msg:?}"
@@ -5113,7 +5120,7 @@ mod tests {
             assert!(
                 matches!(
                     &msg,
-                    DaemonMessage::Error { message, request_id: Some(id) }
+                    DaemonMessage::Error { message, request_id: Some(id), .. }
                         if id == "p1" && *message == expected
                 ),
                 "{msg:?}"
@@ -5160,7 +5167,7 @@ mod tests {
             assert!(
                 matches!(
                     &msg,
-                    DaemonMessage::Error { message, request_id: Some(id) }
+                    DaemonMessage::Error { message, request_id: Some(id), .. }
                         if id == "p2" && *message == expected
                 ),
                 "{msg:?}"

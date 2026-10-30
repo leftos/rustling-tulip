@@ -217,6 +217,7 @@ fn an_open_error_ends_the_wait_and_toasts(cx: &mut TestAppContext) {
     h.send(DaemonMessage::Error {
         message: "open viewer tab failed: the path is empty".to_owned(),
         request_id: Some(id.clone()),
+        code: None,
     });
     let toasts: Vec<(ToastKind, String, Option<String>)> = h.root(|root, _| {
         root.toasts()
