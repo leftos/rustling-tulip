@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// On Windows, suppresses the brief console window flash that would otherwise
 /// appear for each git child. No-op on other platforms.
@@ -308,34 +308,69 @@ pub async fn fetch(repo: &Path) -> anyhow::Result<()> {
 /// always omitted — callers only want additional worktrees created via
 /// `git worktree add`. Worktrees in a detached-HEAD state (no `branch` line
 /// in the porcelain output) are included with an empty branch string.
+///
+/// A prunable entry is left out: git reports one whose folder is gone, so
+/// there is nothing to launch or reuse there — the next [`worktree_add`]
+/// drops its stale registration.
 pub async fn list_worktrees(repo: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
     let stdout = run_git(repo, &["worktree", "list", "--porcelain"]).await?;
     // First entry is always the main worktree; skip it.
-    Ok(parse_worktree_list(&stdout).into_iter().skip(1).collect())
+    Ok(parse_worktree_list(&stdout)
+        .into_iter()
+        .skip(1)
+        .filter(|entry| !entry.prunable)
+        .map(|entry| (entry.branch, entry.path))
+        .collect())
 }
 
-/// Every worktree in `git worktree list --porcelain` output as `(branch, path)`
-/// pairs, main worktree first. Detached-HEAD worktrees carry an empty branch.
-fn parse_worktree_list(stdout: &str) -> Vec<(String, PathBuf)> {
-    let mut all_blocks: Vec<(String, PathBuf)> = Vec::new();
-    let mut current_path: Option<PathBuf> = None;
-    let mut current_branch = String::new();
+/// One worktree of `git worktree list --porcelain`.
+#[derive(Debug)]
+struct WorktreeEntry {
+    path: PathBuf,
+    /// Branch name with `refs/heads/` stripped; empty for a detached HEAD.
+    branch: String,
+    /// git reports this entry as prunable: the folder it names is gone, so
+    /// the next prune (or [`forget_stale_worktree`]) drops the registration.
+    prunable: bool,
+    /// The owner locked the worktree (`git worktree lock`), so removing it
+    /// needs `git worktree remove --force --force`.
+    locked: bool,
+}
+
+/// Every worktree in `git worktree list --porcelain` output, main worktree
+/// first. Detached-HEAD worktrees carry an empty branch.
+///
+/// `prunable [reason]` and `locked [reason]` each mark the entry above them;
+/// either line may carry a reason after a space, and `locked` may stand bare.
+fn parse_worktree_list(stdout: &str) -> Vec<WorktreeEntry> {
+    let mut entries: Vec<WorktreeEntry> = Vec::new();
+    let mut current: Option<WorktreeEntry> = None;
 
     for line in stdout.lines() {
-        if line.starts_with("worktree ") {
-            if let Some(path) = current_path.take() {
-                all_blocks.push((std::mem::take(&mut current_branch), path));
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
             }
-            current_path = Some(PathBuf::from(line.trim_start_matches("worktree ")));
-            current_branch = String::new();
-        } else if let Some(branch_ref) = line.strip_prefix("branch ") {
-            current_branch = branch_ref.trim_start_matches("refs/heads/").to_string();
+            current = Some(WorktreeEntry {
+                path: PathBuf::from(path),
+                branch: String::new(),
+                prunable: false,
+                locked: false,
+            });
+        } else if let Some(entry) = current.as_mut() {
+            if let Some(branch_ref) = line.strip_prefix("branch ") {
+                entry.branch = branch_ref.trim_start_matches("refs/heads/").to_string();
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                entry.prunable = true;
+            } else if line == "locked" || line.starts_with("locked ") {
+                entry.locked = true;
+            }
         }
     }
-    if let Some(path) = current_path.take() {
-        all_blocks.push((std::mem::take(&mut current_branch), path));
+    if let Some(entry) = current {
+        entries.push(entry);
     }
-    all_blocks
+    entries
 }
 
 /// Path of the worktree that currently has `branch` checked out, main
@@ -343,15 +378,57 @@ fn parse_worktree_list(stdout: &str) -> Vec<(String, PathBuf)> {
 ///
 /// A branch checked out anywhere is undeletable, so the discard path uses
 /// this to tell the session own worktree apart from any other holder before
-/// it considers reaping.
+/// it considers reaping. A prunable entry holds nothing: its folder is gone,
+/// and the next [`worktree_add`] drops the registration.
 pub async fn worktree_holding_branch(repo: &Path, branch: &str) -> Option<PathBuf> {
     let stdout = run_git(repo, &["worktree", "list", "--porcelain"])
         .await
         .ok()?;
     parse_worktree_list(&stdout)
         .into_iter()
-        .find(|(b, _)| b == branch)
-        .map(|(_, path)| path)
+        .find(|entry| !entry.prunable && entry.branch == branch)
+        .map(|entry| entry.path)
+}
+
+/// Drop the worktree registrations for `branch` or `target_path` that git
+/// already reports as prunable, so a folder deleted by hand stops counting as
+/// a checkout of that branch.
+///
+/// Each stale entry is cleared with `git worktree remove --force <its path>`,
+/// which unregisters exactly that entry and exits 0 when the folder is
+/// already gone. A bare `git worktree prune` is never used here: it drops
+/// every unlocked registration whose folder is unreachable at that moment,
+/// including a healthy worktree on a detached drive or an unmapped share.
+///
+/// A failed removal is logged and not returned — the add that follows reports
+/// git's own error for whatever is still in the way.
+pub async fn forget_stale_worktree(
+    repo: &Path,
+    branch: &str,
+    target_path: &Path,
+) -> anyhow::Result<()> {
+    let stdout = run_git(repo, &["worktree", "list", "--porcelain"]).await?;
+    let target = crate::paths::normalize_path_key(&target_path.to_string_lossy());
+    for entry in parse_worktree_list(&stdout) {
+        let same_path = crate::paths::normalize_path_key(&entry.path.to_string_lossy()) == target;
+        if entry.prunable && (entry.branch == branch || same_path) {
+            let path = entry.path.to_string_lossy();
+            match run_git(repo, &["worktree", "remove", "--force", &path]).await {
+                Ok(_) => info!(
+                    worktree = %path,
+                    branch,
+                    "forget_stale_worktree: dropped a stale worktree registration",
+                ),
+                Err(err) => warn!(
+                    ?err,
+                    worktree = %path,
+                    branch,
+                    "forget_stale_worktree: removing a stale worktree registration failed",
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether `path` is one of `repo`'s worktrees (main worktree included),
@@ -368,7 +445,8 @@ pub async fn is_worktree_of(repo: &Path, path: &Path) -> bool {
     let want = crate::paths::normalize_path_key(&path.to_string_lossy());
     parse_worktree_list(&stdout)
         .iter()
-        .any(|(_, p)| crate::paths::normalize_path_key(&p.to_string_lossy()) == want)
+        .filter(|entry| !entry.prunable)
+        .any(|entry| crate::paths::normalize_path_key(&entry.path.to_string_lossy()) == want)
 }
 
 /// Refuse a worktree folder that exists but isn't one of `repo`'s worktrees:
@@ -419,6 +497,10 @@ pub async fn worktree_add(
     if create_from_base.is_some() {
         ensure_not_remote_tracking(repo, branch).await?;
     }
+    // A worktree folder deleted by hand leaves its registration behind, and
+    // git still reports its branch as checked out there. Clear just the stale
+    // registrations that belong to this branch or this path.
+    forget_stale_worktree(repo, branch, target_path).await?;
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent).context("creating worktree parent dir")?;
     }
@@ -541,17 +623,37 @@ pub async fn ref_short_sha(repo: &Path, refname: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-pub async fn worktree_remove(repo: &Path, target_path: &Path) -> anyhow::Result<()> {
-    let target_str = target_path.to_string_lossy();
-    run_git(repo, &["worktree", "remove", "--force", &target_str])
-        .await
-        .map(|_| ())
+/// How hard `git worktree remove` pushes when it meets a worktree it cannot
+/// remove as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeRemoveForce {
+    /// `--force`: removes a worktree with modifications, but git refuses one
+    /// the owner locked.
+    Plain,
+    /// `--force --force`: also removes a locked worktree, dropping its lock.
+    OverLock,
 }
 
-/// `git -C <repo> worktree prune`. Drops orphaned
-/// `.git/worktrees/<name>/` admin dirs whose target on disk is gone.
-/// Used by [`crate::worktree_cleanup`] after a member removal so the
-/// originating repo's worktree registry stays in sync with the disk.
+pub async fn worktree_remove(
+    repo: &Path,
+    target_path: &Path,
+    force: WorktreeRemoveForce,
+) -> anyhow::Result<()> {
+    let target_str = target_path.to_string_lossy();
+    let mut args: Vec<&str> = vec!["worktree", "remove", "--force"];
+    if force == WorktreeRemoveForce::OverLock {
+        args.push("--force");
+    }
+    args.push(&target_str);
+    run_git(repo, &args).await.map(|_| ())
+}
+
+/// `git -C <repo> worktree prune`. Drops every unlocked
+/// `.git/worktrees/<name>/` admin dir whose target on disk is unreachable
+/// right now — a worktree on a detached drive or an unmapped share included —
+/// so it runs only after a user-confirmed removal
+/// ([`crate::worktree_cleanup`]), never on a spawn. A spawn clears just its
+/// own stale registration with [`forget_stale_worktree`].
 pub async fn worktree_prune(repo: &Path) -> anyhow::Result<()> {
     run_git(repo, &["worktree", "prune"]).await.map(|_| ())
 }
@@ -1577,7 +1679,9 @@ mod tests {
             "forked from the stale local main"
         );
 
-        worktree_remove(&repo, &wt).await.expect("remove worktree");
+        worktree_remove(&repo, &wt, WorktreeRemoveForce::Plain)
+            .await
+            .expect("remove worktree");
         delete_branch(&repo, "wt/stale")
             .await
             .expect("branch survives worktree removal and must be deleted");
@@ -1766,6 +1870,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    #[test]
+    fn parse_worktree_list_keeps_prunable_and_locked_flags() {
+        let stdout = "\
+worktree /repo/main
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo/wt-prunable
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/wt/prunable
+prunable gitdir file points to non-existent location
+
+worktree /repo/wt-locked
+HEAD 3333333333333333333333333333333333333333
+branch refs/heads/wt/locked
+locked
+
+worktree /repo/wt-locked-with-reason
+HEAD 4444444444444444444444444444444444444444
+branch refs/heads/wt/locked-with-reason
+locked reason text
+";
+        let entries = parse_worktree_list(stdout);
+
+        assert_eq!(entries.len(), 4, "one entry per worktree block");
+        assert_eq!(entries[0].branch, "main");
+        assert_eq!(entries[0].path, PathBuf::from("/repo/main"));
+        assert!(
+            !entries[0].prunable && !entries[0].locked,
+            "a plain entry carries neither flag"
+        );
+
+        assert_eq!(entries[1].branch, "wt/prunable");
+        assert!(entries[1].prunable, "a prunable entry keeps its flag");
+        assert!(!entries[1].locked);
+
+        assert!(!entries[2].prunable);
+        assert!(entries[2].locked, "a bare `locked` line is still a lock");
+
+        assert!(!entries[3].prunable);
+        assert!(
+            entries[3].locked,
+            "a reason after `locked ` does not hide the flag"
+        );
+    }
+
     #[tokio::test]
     async fn worktree_holding_branch_finds_the_checkout() {
         let repo = init_repo("holder").await;
@@ -1798,6 +1948,98 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&wt);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn a_hand_deleted_worktree_does_not_hold_its_branch() {
+        let repo = init_repo("holder-hand-deleted").await;
+        let wt = sibling(&repo, "wt-hand-deleted");
+        let _ = std::fs::remove_dir_all(&wt);
+        worktree_add(&repo, &wt, "wt/hand-deleted", Some("main"))
+            .await
+            .expect("worktree add");
+        std::fs::remove_dir_all(&wt).expect("delete the worktree folder by hand");
+
+        assert!(
+            worktree_holding_branch(&repo, "wt/hand-deleted")
+                .await
+                .is_none(),
+            "a worktree whose folder is gone must not hold its branch"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn worktree_add_succeeds_after_its_branch_worktree_was_deleted_by_hand() {
+        let repo = init_repo("add-after-hand-delete").await;
+        let old = sibling(&repo, "wt-old");
+        let new = sibling(&repo, "wt-new");
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&new);
+        worktree_add(&repo, &old, "wt/readd", Some("main"))
+            .await
+            .expect("first worktree add");
+        std::fs::remove_dir_all(&old).expect("delete the worktree folder by hand");
+
+        worktree_add(&repo, &new, "wt/readd", None)
+            .await
+            .expect("re-adding the branch after its worktree folder was deleted");
+
+        let listing = run_git(&repo, &["worktree", "list", "--porcelain"])
+            .await
+            .expect("list worktrees");
+        let want = crate::paths::normalize_path_key(&new.to_string_lossy());
+        assert!(
+            listing
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .any(|named| crate::paths::normalize_path_key(named) == want),
+            "git must name the new path {new:?} for wt/readd: {listing}"
+        );
+
+        let _ = std::fs::remove_dir_all(&new);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn worktree_add_does_not_unregister_another_unreachable_worktree() {
+        let repo = init_repo("add-keeps-other").await;
+        let a = sibling(&repo, "wt-a");
+        let b = sibling(&repo, "wt-b");
+        let new_a = sibling(&repo, "wt-a-new");
+        for leftover in [&a, &b, &new_a] {
+            let _ = std::fs::remove_dir_all(leftover);
+        }
+        worktree_add(&repo, &a, "wt/a", Some("main"))
+            .await
+            .expect("worktree add for a");
+        worktree_add(&repo, &b, "wt/b", Some("main"))
+            .await
+            .expect("worktree add for b");
+        // Both folders gone by hand: b's stands in for a worktree on a drive
+        // that is unmounted right now, which a bare prune would drop as well.
+        std::fs::remove_dir_all(&a).expect("delete a's folder by hand");
+        std::fs::remove_dir_all(&b).expect("delete b's folder by hand");
+
+        worktree_add(&repo, &new_a, "wt/a", None)
+            .await
+            .expect("re-adding a after its folder was deleted");
+
+        let listing = run_git(&repo, &["worktree", "list", "--porcelain"])
+            .await
+            .expect("list worktrees");
+        let b_key = crate::paths::normalize_path_key(&b.to_string_lossy());
+        assert!(
+            listing
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .any(|named| crate::paths::normalize_path_key(named) == b_key),
+            "adding a must not unregister the unrelated unreachable worktree b: {listing}"
+        );
+
+        let _ = std::fs::remove_dir_all(&new_a);
         let _ = std::fs::remove_dir_all(&repo);
     }
 

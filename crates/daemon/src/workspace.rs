@@ -1,7 +1,7 @@
 //! Workspace spawn helpers: resolving member branches, computing worktree
 //! paths, and rendering preview rows.
 
-use crate::git;
+use crate::git::{self, WorktreeRemoveForce as WorktreeForce};
 use crate::spawn_plan;
 use crate::state::AppState;
 use anyhow::{Context as _, anyhow};
@@ -322,7 +322,7 @@ pub async fn ensure_branches(
                         branch_name,
                         "ensure_branches: recreating worktree from base; uncommitted work there is discarded"
                     );
-                    git::worktree_remove(&repo_path, &member.working_path)
+                    git::worktree_remove(&repo_path, &member.working_path, WorktreeForce::Plain)
                         .await
                         .with_context(|| {
                             format!(
@@ -334,6 +334,7 @@ pub async fn ensure_branches(
                 }
                 // `worktree remove` leaves the branch, so a `-b` re-add
                 // would fail on "already exists".
+                git::forget_stale_worktree(&repo_path, branch_name, &member.working_path).await?;
                 if let Err(err) = git::delete_branch(&repo_path, branch_name).await {
                     info!(
                         ?err,

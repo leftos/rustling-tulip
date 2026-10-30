@@ -36,7 +36,9 @@ pub enum CleanupOutcome {
 ///
 /// Sequence:
 ///   1. `git -C <repo> worktree remove --force <member>`
-///   2. Sleep 250 ms, then retry (1) — catches transient Windows locks.
+///   2. Sleep 250 ms, then retry with `--force --force` — catches transient
+///      Windows locks, and drops a lock the owner set
+///      (`git worktree lock`) on a worktree the user already asked to delete.
 ///   3. `std::fs::remove_dir_all(<member>)` — last-resort, bypasses git.
 ///   4. After member removal, `git -C <repo> worktree prune` so the
 ///      originating repo's `.git/worktrees/<name>` admin dir is dropped.
@@ -49,13 +51,16 @@ pub async fn remove_member(repo: &Path, member: &Path) -> CleanupOutcome {
     let mut last_err: Option<String> = None;
 
     // Attempt 1: git remove.
-    match git::worktree_remove(repo, member).await {
+    match git::worktree_remove(repo, member, git::WorktreeRemoveForce::Plain).await {
         Ok(()) => {}
         Err(err) => {
             last_err = Some(format!("git worktree remove: {err}"));
             tokio::time::sleep(Duration::from_millis(250)).await;
-            // Attempt 2: retry git remove after a brief delay.
-            if let Err(err) = git::worktree_remove(repo, member).await {
+            // Attempt 2: retry git remove after a brief delay, this time
+            // over a lock too — the user already asked to delete the member.
+            if let Err(err) =
+                git::worktree_remove(repo, member, git::WorktreeRemoveForce::OverLock).await
+            {
                 last_err = Some(format!("git worktree remove (retry): {err}"));
             }
         }
@@ -179,6 +184,45 @@ mod tests {
         }
     }
 
+    /// Run `git` in `dir` and return its stdout, failing the test on a
+    /// non-zero exit.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A throwaway repo on `main` with one commit, so `worktree_add` has a
+    /// base to fork from.
+    fn init_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init"]);
+        git(dir, &["config", "user.email", "t@example.com"]);
+        git(dir, &["config", "user.name", "Test"]);
+        git(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("README.md"), "init\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "init"]);
+        git(dir, &["branch", "-M", "main"]);
+    }
+
+    /// Whether `git worktree list --porcelain` still names `path`.
+    fn registration_names(repo: &Path, path: &Path) -> bool {
+        let want = crate::paths::normalize_path_key(&path.to_string_lossy());
+        git(repo, &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .any(|named| crate::paths::normalize_path_key(named) == want)
+    }
+
     #[test]
     fn prune_clears_anchor_skeleton_and_wrapper_up_to_root() {
         // New layout: <root>/wt.<slug>/X/dev/<member>. After the member
@@ -257,5 +301,49 @@ mod tests {
         prune_empty_ancestors(&outside, &root);
 
         assert!(outside.exists(), "dir outside root must be untouched");
+    }
+
+    #[tokio::test]
+    async fn a_locked_worktree_is_removed_and_unregistered() {
+        let scratch = Scratch::new();
+        let repo = scratch.path().join("repo");
+        init_repo(&repo);
+        let member = scratch.path().join("wt-locked");
+        crate::git::worktree_add(&repo, &member, "wt/locked", Some("main"))
+            .await
+            .unwrap();
+        git(&repo, &["worktree", "lock", &member.to_string_lossy()]);
+
+        let outcome = remove_member(&repo, &member).await;
+
+        assert!(matches!(&outcome, CleanupOutcome::Removed), "{outcome:?}");
+        assert!(
+            !member.exists(),
+            "the locked worktree's folder must be gone"
+        );
+        assert!(
+            !registration_names(&repo, &member),
+            "a removed worktree must no longer be registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hand_deleted_worktree_is_cleaned_up() {
+        let scratch = Scratch::new();
+        let repo = scratch.path().join("repo");
+        init_repo(&repo);
+        let member = scratch.path().join("wt-hand-deleted");
+        crate::git::worktree_add(&repo, &member, "wt/hand-deleted", Some("main"))
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&member).unwrap();
+
+        let outcome = remove_member(&repo, &member).await;
+
+        assert!(matches!(&outcome, CleanupOutcome::Removed), "{outcome:?}");
+        assert!(
+            !registration_names(&repo, &member),
+            "a hand-deleted worktree's registration must be pruned away"
+        );
     }
 }

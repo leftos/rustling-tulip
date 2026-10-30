@@ -246,6 +246,10 @@ pub(super) async fn materialize_single_worktree(
                     branch_name,
                     base, "deleting leftover branch and forking fresh from base"
                 );
+                // A folder deleted by hand still counts as a checkout of the
+                // branch, and git refuses `branch -D` while any worktree holds
+                // it; clear just that stale registration first.
+                crate::git::forget_stale_worktree(repo_path, branch_name, worktree_path).await?;
                 if let Err(err) = crate::git::delete_branch(repo_path, branch_name).await {
                     debug!(?err, branch_name, "leftover branch delete failed");
                 }
@@ -305,18 +309,24 @@ async fn recreate_or_reuse_worktree(
                 base,
                 "recreating existing worktree from base; uncommitted work there is discarded"
             );
-            crate::git::worktree_remove(repo_path, worktree_path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "removing existing worktree at {} before recreating it",
-                        worktree_path.display()
-                    )
-                })?;
+            crate::git::worktree_remove(
+                repo_path,
+                worktree_path,
+                crate::git::WorktreeRemoveForce::Plain,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "removing existing worktree at {} before recreating it",
+                    worktree_path.display()
+                )
+            })?;
             // The branch itself survives `worktree remove`, so re-adding with
             // `-b` would fail on "branch already exists". Delete it too — the
             // user asked for a fresh fork from `base`, not a rebind to the old
-            // branch tip.
+            // branch tip. A registration left at a folder deleted by hand
+            // still holds the branch, so clear that before deleting it.
+            crate::git::forget_stale_worktree(repo_path, branch_name, worktree_path).await?;
             if let Err(err) = crate::git::delete_branch(repo_path, branch_name).await {
                 debug!(
                     ?err,
@@ -421,41 +431,45 @@ pub(super) async fn pinned_branch(worktree: &Path, requested: &str) -> String {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn commit(repo: &Path, name: &str) {
+        std::fs::write(repo.join(name), "x\n").expect("write file");
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", name]);
+    }
+
+    fn rev(repo: &Path, refname: &str) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", refname])
+            .output()
+            .expect("spawn git");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     mod refuse_leftover {
         use super::super::materialize_single_worktree;
+        use super::{commit, git, rev};
         use crate::spawn_plan::SpawnFailure;
-        use std::path::{Path, PathBuf};
+        use std::path::PathBuf;
         use std::process::Command;
-
-        fn git(cwd: &Path, args: &[&str]) {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .expect("spawn git");
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        fn commit(repo: &Path, name: &str) {
-            std::fs::write(repo.join(name), "x\n").expect("write file");
-            git(repo, &["add", "."]);
-            git(repo, &["commit", "-m", name]);
-        }
-
-        fn rev(repo: &Path, refname: &str) -> String {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(repo)
-                .args(["rev-parse", refname])
-                .output()
-                .expect("spawn git");
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        }
 
         /// A repo where `wt/x` sits at the old `main` tip with no worktree
         /// attached — what "close session and delete worktree" leaves behind
@@ -572,6 +586,65 @@ mod tests {
                 rev(&worktree, "HEAD"),
                 rev(&repo, "release"),
                 "a fresh worktree must fork from the resolved base"
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    mod recreate {
+        use super::super::materialize_single_worktree;
+        use super::{commit, git, rev};
+
+        /// A hand-deleted worktree folder leaves its branch registered as
+        /// checked out there, so `git branch -D` is refused and the re-add
+        /// fails on "branch already exists". Recreate must clear just that
+        /// stale registration first.
+        #[tokio::test]
+        async fn recreate_after_a_hand_deleted_worktree_succeeds() {
+            let root =
+                std::env::temp_dir().join(format!("rt-recreate-hand-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let repo = root.join("repo");
+            std::fs::create_dir_all(&repo).expect("create repo dir");
+            git(&repo, &["init", "-b", "main"]);
+            git(&repo, &["config", "user.email", "t@example.com"]);
+            git(&repo, &["config", "user.name", "Test"]);
+            git(&repo, &["config", "commit.gpgsign", "false"]);
+            commit(&repo, "seed.txt");
+            let worktree = root.join("wt");
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "wt/recreate",
+                    &worktree.to_string_lossy(),
+                    "main",
+                ],
+            );
+            // The branch moves ahead of the base, so "points at the base"
+            // after the recreate is a real assertion.
+            commit(&worktree, "branch-only.txt");
+            std::fs::remove_dir_all(&worktree).expect("delete the worktree folder by hand");
+
+            materialize_single_worktree(
+                "fixture",
+                &repo,
+                &worktree,
+                "wt/recreate",
+                "main",
+                protocol::WorktreeReusePolicy::RecreateFromBase,
+            )
+            .await
+            .expect("recreating over a hand-deleted worktree must succeed");
+
+            assert!(worktree.exists(), "the recreated worktree must be on disk");
+            assert_eq!(
+                rev(&repo, "wt/recreate"),
+                rev(&repo, "main"),
+                "the recreated branch must point at the base again"
             );
 
             let _ = std::fs::remove_dir_all(&root);

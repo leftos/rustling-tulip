@@ -219,7 +219,7 @@ Members on another drive are anchored per drive under `<workspace-slug>/<drive a
 
 A group folder has a `<slug>.rt-group` marker beside it (`{"kind","name"}`), which Manage worktrees reads to list each group separately; a group's members are its linked worktrees, a member nested inside another included (a submodule or plain clone inside one is not listed), and a workspace marker makes a one-member group launch as that workspace.
 
-A spawn reuses the worktree git reports as holding the branch (any layout, so older `wt.<branch>/<sanitized-anchor>/…` worktrees are still reused) and refuses a folder at its path that isn't one of the repo's worktrees. Path construction lives in `git::workspace_worktree_paths` / `git::single_worktree_path`.
+A spawn reuses the worktree git reports as holding the branch, skipping one git marks prunable (its folder is gone): that stale registration alone is removed with `git worktree remove --force` before the add or a Recreate, and a spawn never runs `git worktree prune`, which would also drop a worktree on a detached drive (any layout, so older `wt.<branch>/<sanitized-anchor>/…` worktrees are still reused) and refuses a folder at its path that isn't one of the repo's worktrees. Path construction lives in `git::workspace_worktree_paths` / `git::single_worktree_path`.
 
 The tailnet listener's certificate lives in a third machine-local root beside the worktrees one, `ProjectDirs::data_local_dir().join("tailnet")` (overridable with `RUSTLING_TULIP_TAILNET_DIR`), `%LOCALAPPDATA%\leftos\rustling-tulip\data\tailnet\` on Windows: `<name>.crt` and `<name>.key`, written by `tailscale cert` for the host's MagicDNS name (no trailing dot).
 
