@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Changed
+
+- A higher-contrast look: menus, popovers and dialogs stand clearly above a near-black window, session rows are cards, and menu groups are ruled.
+
 ## v0.5.1-alpha
 
 ### Fixed

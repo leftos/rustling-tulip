@@ -25,7 +25,7 @@ use protocol::{
     ClientMessage, DaemonMessage, PresetEntry, PresetLaunchJobSnapshot, PresetLaunchJobStatus,
     PresetTarget,
 };
-use rustling_tulip_native::palette::{CHIP, LAUNCHED_TINT};
+use rustling_tulip_native::palette::{LAUNCHED_TINT, SELECTION};
 use rustling_tulip_native::{
     Activity, FileFilter, LaunchButton, NextButton, Toast, ToastKind, toast_action_selector,
 };
@@ -1421,7 +1421,7 @@ fn select_launched_tints_job_sessions_and_shows_sessions(cx: &mut TestAppContext
     assert_eq!(leaf_fill(&mut h, "s3"), Some(LAUNCHED_TINT));
     assert_eq!(
         leaf_fill(&mut h, "s1"),
-        Some(CHIP),
+        Some(SELECTION),
         "the focused leaf keeps its fill"
     );
     assert_eq!(active_tab(&mut h), tab_before, "no focus change");

@@ -944,8 +944,15 @@ fn action_button(
     }
     let key = key.clone();
     let action = button.action;
+    // Quiet text lifts to secondary on the hover fill, where it would fall
+    // below 4.5:1.
+    let hover_text = if color == SUBTLE { TEXT_2 } else { color };
     base.cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| {
+            style
+                .bg(gpui::rgb(HOVER_BG))
+                .text_color(gpui::rgb(hover_text))
+        })
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             cx.stop_propagation();
             this.run_sc_action(&key, action, paths.clone(), window, cx);

@@ -23,8 +23,8 @@ use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::notices;
 use crate::overlay_owner::Overlay;
 use crate::palette::{
-    ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, MODAL_INSET, ON_ACCENT, SPAWN_BADGE_OK, SUBTLE,
-    TEXT_2, TRANSPARENT,
+    ACCENT, CHIP, HOVER, LINE, LINE_STRONG, MODAL_INSET, ON_ACCENT, SPAWN_BADGE_OK, SUBTLE, TEXT_2,
+    TRANSPARENT,
 };
 use crate::remote_mode::spawn_no_repos_note;
 use crate::session_menu::{backdrop, dialog_button};
@@ -1572,8 +1572,8 @@ pub(crate) fn field(label: impl Into<SharedString>) -> Div {
         .child(field_label(label))
 }
 
-/// A segmented control: its segments on the ground inside a thin edge,
-/// wrapping onto more lines when they do not fit.
+/// A segmented control: its segments in a well a step lighter than the
+/// modal, inside a thin edge, wrapping onto more lines when they do not fit.
 pub(crate) fn segmented(buttons: Vec<AnyElement>) -> Div {
     div()
         .flex()
@@ -1581,7 +1581,7 @@ pub(crate) fn segmented(buttons: Vec<AnyElement>) -> Div {
         .gap(px(2.0))
         .p(px(3.0))
         .rounded(px(SEGMENTED_RADIUS))
-        .bg(gpui::rgb(GROUND))
+        .bg(gpui::rgb(MODAL_INSET))
         .border_1()
         .border_color(gpui::rgb(LINE))
         .children(buttons)

@@ -17,7 +17,7 @@ use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
-use crate::palette::{SUBTLE, SURFACE};
+use crate::palette::{SUBTLE, SURFACE, TEXT_2};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::source_control::{Part, ScKey};
 use crate::source_control_view::ScSectionRow;
@@ -709,9 +709,11 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
         .iter()
         .map(|button| stash_button(key, &shown, button, cx))
         .collect();
+    let group = SharedString::from(name.clone());
     div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
+        .id(ElementId::Name(group.clone()))
         .debug_selector(|| name)
+        .group(group.clone())
         .flex()
         .items_center()
         .gap(px(4.0))
@@ -727,6 +729,7 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
                 .font_family(DEFAULT_FAMILY)
                 .text_size(px(ID_TEXT_SIZE))
                 .text_color(gpui::rgb(SUBTLE))
+                .group_hover(group, |style| style.text_color(gpui::rgb(TEXT_2)))
                 .child(stash.id.clone()),
         )
         .child(truncating(&subject_id, StyledText::new(stash.subject.clone())).flex_1())
