@@ -413,7 +413,7 @@ impl RootView {
 
     /// The pop-out window that draws terminal `slot_id`, if one does: its
     /// session's, its pane's, or its tab's.
-    fn slot_window(&self, slot_id: &str) -> Option<WindowId> {
+    pub(crate) fn slot_window(&self, slot_id: &str) -> Option<WindowId> {
         let key = match popouts::slot_session(slot_id) {
             Some(session_id) => PopoutKey::Session {
                 session_id: session_id.to_owned(),

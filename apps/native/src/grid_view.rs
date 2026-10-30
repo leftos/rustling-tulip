@@ -17,6 +17,7 @@ use protocol::{
 };
 
 use crate::appearance::{self, PaneFrame, Resolved, Source};
+use crate::chat_view::{offers_chat, toggle_label};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
@@ -84,6 +85,9 @@ pub(crate) struct PaneSlot {
     tab_id: String,
     /// The pane's session; attached once the session list names it.
     session: Option<String>,
+    /// The session a new connection unbound the pane from, until the next
+    /// tab list binds it again.
+    unbound_from: Option<String>,
     attached: bool,
     /// The accent the pane's last apply resolved, `0xRRGGBB`.
     accent: u32,
@@ -239,6 +243,7 @@ impl RootView {
         if let Some(id) = self.shown_session() {
             self.sidebar.mark_seen(&id);
         }
+        self.sync_chat_loads();
         self.update_pane_roles(cx);
         self.follow_pane_focus_windows(cx);
     }
@@ -274,7 +279,15 @@ impl RootView {
                 continue;
             };
             slot.tab_id = binding.tab_id;
+            let unbound_from = slot.unbound_from.take();
             if slot.session != binding.session_id {
+                // A pane that shows another session now starts on its
+                // terminal; one a new connection unbound keeps its view
+                // when it is bound to the same session again.
+                let before = slot.session.as_ref().or(unbound_from.as_ref());
+                if before.is_some_and(|old| binding.session_id.as_ref() != Some(old)) {
+                    self.chat.forget_pane(&binding.pane_id);
+                }
                 slot.view.update(cx, |pane, _| pane.release());
                 slot.attached = false;
                 slot.session = binding.session_id;
@@ -303,6 +316,7 @@ impl RootView {
             view,
             tab_id: String::new(),
             session: None,
+            unbound_from: None,
             attached: false,
             accent: self.sidebar.theme_base().accent,
             focus_in,
@@ -473,15 +487,21 @@ impl RootView {
     /// Tells every terminal whether it drives its session's PTY size and
     /// whether it answers the session's terminal queries: a pane open in a
     /// pop-out, or a session pop-out's terminal, does both for its session,
-    /// whichever tab the main window shows.
+    /// whichever tab the main window shows. A pane showing its chat does
+    /// neither: its terminal is not drawn, and the chat never sizes the PTY.
     pub(crate) fn update_pane_roles(&self, cx: &mut Context<Self>) {
         let active = self.tabs.active_id();
         let focused = active.and_then(|tab_id| self.tabs.focused_pane(tab_id));
-        let bindings = self.tabs.bindings();
+        let mut bindings = self.tabs.bindings();
+        bindings
+            .retain(|binding| !self.chat_shown(&binding.pane_id, binding.session_id.as_deref()));
         let tab_panes = self.popped_tab_panes();
         let mut popped = self.popouts.popped_panes();
         popped.extend(tab_panes.iter().map(String::as_str));
-        let popped_sessions = self.popouts.popped_sessions();
+        let mut popped_sessions = self.popouts.popped_sessions();
+        popped_sessions.retain(|session_id| {
+            !self.chat_shown(&popouts::session_slot_id(session_id), Some(session_id))
+        });
         let drivers = tabs::size_drivers(
             &bindings,
             active,
@@ -756,15 +776,17 @@ impl RootView {
     /// A new connection starts with nothing attached; the next tab list
     /// attaches every pane again. A session pop-out's terminal, which no tab
     /// list names, keeps its session and attaches with the next session
-    /// list.
+    /// list. Its chats are loaded afresh too: each chat pane keeps its view
+    /// and asks again once bound.
     pub(crate) fn reset_panes(&mut self, cx: &mut Context<Self>) {
+        self.chat.reset_connection();
         for (pane_id, slot) in &mut self.panes {
             slot.view.update(cx, |pane, cx| {
                 pane.reset_for_reconnect();
                 cx.notify();
             });
             if popouts::slot_session(pane_id).is_none() {
-                slot.session = None;
+                slot.unbound_from = slot.session.take();
             }
             slot.attached = false;
         }
@@ -806,11 +828,13 @@ impl RootView {
         slot.session = Some(new.to_owned());
         slot.attached = false;
         self.panes.insert(new_id.clone(), slot);
+        self.chat.rekey_pane(&old_id, &new_id);
         if self.popout_focused.as_deref() == Some(old_id.as_str()) {
             self.popout_focused = Some(new_id);
         }
         self.apply_fonts_where(|slot| slot.session.as_deref() == Some(new), false, cx);
         self.sync_session(new, cx);
+        self.sync_chat_loads();
     }
 
     /// Drops session `session_id`'s pop-out terminal as its window closes;
@@ -822,6 +846,8 @@ impl RootView {
             return;
         };
         slot.view.update(cx, |pane, _| pane.release());
+        self.chat.forget_pane(&slot_id);
+        self.sync_chat_loads();
         if self.popout_focused.as_deref() == Some(slot_id.as_str()) {
             self.popout_focused = None;
         }
@@ -894,13 +920,18 @@ impl RootView {
     /// Gives `window`'s keyboard to `pane_id`'s terminal, unless the pane
     /// is open in a pop-out, or `window` is the main one and the pane's tab
     /// is popped out: its terminal draws in the pop-out, so the main window
-    /// focuses nothing for it.
+    /// focuses nothing for it. A pane showing its chat gives its hidden
+    /// terminal no keys: the window keeps the keyboard.
     pub(crate) fn focus_pane_view(&self, pane_id: &str, window: &mut Window, cx: &Context<Self>) {
         if let Some(slot) = self.panes.get(pane_id)
             && !self.is_pane_popped(pane_id)
             && !(self.is_tab_popped(&slot.tab_id) && self.is_main_window(window))
         {
-            slot.view.read(cx).focus(window);
+            if self.pane_shows_chat(pane_id) {
+                self.root_focus.focus(window);
+            } else {
+                slot.view.read(cx).focus(window);
+            }
         }
     }
 
@@ -1338,12 +1369,14 @@ impl RootView {
         }
         let focused = self.tabs.focused_pane(tab_id).as_deref() == Some(pane_id);
         let body = match (session_id, self.panes.get(pane_id)) {
-            (Some(_), Some(slot)) if slot.attached => div()
-                .flex_1()
-                .min_h(px(0.0))
-                .debug_selector(|| format!("pane-grid-{pane_id}"))
-                .child(slot.view.clone())
-                .into_any_element(),
+            (Some(id), Some(slot)) if slot.attached => {
+                let terminal = div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .debug_selector(|| format!("pane-grid-{pane_id}"))
+                    .child(slot.view.clone());
+                self.attached_body(pane_id, id, terminal, cx)
+            }
             (Some(id), slot) => self.note_body(pane_id, id, slot, cx),
             (None, Some(slot)) => {
                 let handle = slot.view.read(cx).focus_handle();
@@ -1572,12 +1605,14 @@ impl RootView {
         let toolbar = popout_toolbar_row(&slot_id, title, controls, cx);
         let slot = self.panes.get(&slot_id);
         let body = match slot {
-            Some(slot) if slot.attached => div()
-                .flex_1()
-                .min_h(px(0.0))
-                .size_full()
-                .child(slot.view.clone())
-                .into_any_element(),
+            Some(slot) if slot.attached => {
+                let terminal = div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .size_full()
+                    .child(slot.view.clone());
+                self.attached_body(&slot_id, session_id, terminal, cx)
+            }
             slot => self.note_body(&slot_id, session_id, slot, cx),
         };
         let body = div()
@@ -1616,12 +1651,10 @@ impl RootView {
         // As the main grid draws the pane: the terminal once attached, else
         // the note for its session, gone or not yet attached.
         let body = match (session_id, self.panes.get(pane_id)) {
-            (Some(_), Some(slot)) if slot.attached => div()
-                .flex_1()
-                .min_h(px(0.0))
-                .size_full()
-                .child(terminal)
-                .into_any_element(),
+            (Some(id), Some(slot)) if slot.attached => {
+                let terminal = div().flex_1().min_h(px(0.0)).size_full().child(terminal);
+                self.attached_body(pane_id, id, terminal, cx)
+            }
             (Some(id), slot) => self.note_body(pane_id, id, slot, cx),
             (None, _) => div()
                 .flex_1()
@@ -1715,15 +1748,7 @@ impl RootView {
             .collect();
         controls.extend(self.header_stop(pane_id, session_id, StopPlace::Grid, cx));
         let controls = (!controls.is_empty()).then(|| header_controls(cx).children(controls));
-        let prompt_jumps = session_id
-            .and_then(|id| self.sidebar.session(id))
-            .filter(|session| {
-                matches!(
-                    session.mode,
-                    SessionMode::Interactive | SessionMode::PlainShell
-                )
-            })
-            .map(|_| self.pane_prompt_jumps(pane_id, cx));
+        let buttons = self.pane_buttons(tab_id, pane_id, session_id, cx);
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
@@ -1770,13 +1795,35 @@ impl RootView {
             .children(header_title(pane_id, parts.as_ref(), cx))
             .child(div().flex_1())
             .children(controls)
-            .children(Self::header_buttons(
-                tab_id,
-                pane_id,
-                session_id,
-                prompt_jumps,
-                cx,
-            ))
+            .children(buttons)
+    }
+
+    /// Every button at the right of pane `pane_id`'s header: the Terminal /
+    /// Chat toggle on a session that offers a chat, then split, move, the
+    /// prompt jumps (on a terminal only) and close.
+    fn pane_buttons(
+        &self,
+        tab_id: &str,
+        pane_id: &str,
+        session_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let session = session_id.and_then(|id| self.sidebar.session(id));
+        let chat_shown = self.chat_shown(pane_id, session_id);
+        let prompt_jumps = session
+            .filter(|session| {
+                matches!(
+                    session.mode,
+                    SessionMode::Interactive | SessionMode::PlainShell
+                )
+            })
+            .filter(|_| !chat_shown)
+            .map(|_| self.pane_prompt_jumps(pane_id, cx));
+        let mut buttons = Self::header_buttons(tab_id, pane_id, session_id, prompt_jumps, cx);
+        if session.is_some_and(offers_chat) {
+            buttons.insert(0, view_toggle(pane_id, chat_shown, cx));
+        }
+        buttons
     }
 
     /// Follows a drag over the shown tab: the pane under the pointer and the
@@ -2487,6 +2534,20 @@ fn header_button(
         .hover(move |style| style.bg(gpui::rgb(t.hover)).text_color(gpui::rgb(t.text)))
         .tooltip(tooltip(tip))
         .child(glyph)
+}
+
+/// A pane header's Terminal / Chat toggle, labelled with the view a click
+/// switches pane `pane_id` to.
+fn view_toggle(pane_id: &str, chat_shown: bool, cx: &mut Context<RootView>) -> AnyElement {
+    let (label, tip) = toggle_label(chat_shown);
+    let pane = pane_id.to_owned();
+    header_button(pane_id, "pane-view-toggle", label, tip, cx)
+        .w_auto()
+        .px(px(8.0))
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.toggle_pane_view(&pane, window, cx);
+        }))
+        .into_any_element()
 }
 
 /// A pane header's previous or next prompt button, drawn disabled when it

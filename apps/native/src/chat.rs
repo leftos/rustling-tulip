@@ -1,11 +1,13 @@
 //! The chat model: a session's conversation rows by id with the display cap,
-//! tool-card expansion, the one-line tool summary, the answer builders, and
-//! the prompt card stack with its digit grace.
+//! tool-card expansion, the one-line tool summary, the answer builders, the
+//! prompt card stack with its digit grace, which panes show a chat, which
+//! sessions' chats this connection has loaded, and when the chat follows its
+//! bottom.
 //!
 //! It is pure data: it takes the clock as a parameter and depends on
 //! `protocol` alone, so it can move into a shared client core unchanged.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use protocol::{ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage};
@@ -23,6 +25,13 @@ const GHOST_CAP: usize = 3;
 /// The longest one-line tool summary, the closing ellipsis included.
 const ONE_LINER_CAP: usize = 80;
 
+/// How many ids that left a log (trimmed off its top or removed) it
+/// remembers, so a late update for one is not taken for a new row.
+const GONE_CAP: usize = 4 * DISPLAY_CAP;
+
+/// How near its bottom, in pixels, a chat still counts as at it.
+const BOTTOM_SLACK: f32 = 1.0;
+
 /// The id a chat entry is known by, or `None` for an entry kind this build
 /// does not know.
 #[must_use]
@@ -39,36 +48,116 @@ pub fn entry_id(entry: &ChatEntry) -> Option<&str> {
     }
 }
 
+/// The newest ids that left a log, oldest first, at most [`GONE_CAP`].
+#[derive(Debug, Default)]
+struct GoneIds {
+    order: VecDeque<String>,
+    known: HashSet<String>,
+}
+
+impl GoneIds {
+    fn insert(&mut self, id: &str) {
+        if !self.known.insert(id.to_owned()) {
+            return;
+        }
+        self.order.push_back(id.to_owned());
+        if self.order.len() > GONE_CAP
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.known.remove(&oldest);
+        }
+    }
+
+    fn remove(&mut self, id: &str) {
+        if self.known.remove(id) {
+            self.order.retain(|known| known != id);
+        }
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.known.contains(id)
+    }
+
+    fn clear(&mut self) {
+        self.order.clear();
+        self.known.clear();
+    }
+}
+
 /// One session's chat rows in arrival order, the tool cards the user opened,
-/// and the count of older rows the display cap or a load left out.
+/// the count of older rows the display cap or a load left out, and the ids
+/// that left since the last load.
 #[derive(Debug, Default)]
 pub struct ChatLog {
     entries: Vec<ChatEntry>,
     expanded: HashSet<String>,
     hidden: u32,
+    gone: GoneIds,
 }
 
 impl ChatLog {
     /// Replaces every row with a load reply's rows, taking that reply's count
-    /// of the older rows it left out.
+    /// of the older rows it left out; every card closes, and an id that left
+    /// before is accepted again.
     pub fn load(&mut self, entries: Vec<ChatEntry>, hidden: u32) {
         self.entries = entries
             .into_iter()
             .filter(|entry| !matches!(entry, ChatEntry::Unknown))
             .collect();
         self.expanded.clear();
+        self.gone.clear();
         self.hidden = hidden;
     }
 
+    /// A load the daemon sent unasked: it replaces every row as a load does,
+    /// but the cards the user opened stay open when their rows survive it.
+    pub fn reset(&mut self, entries: Vec<ChatEntry>, hidden: u32) {
+        let expanded = std::mem::take(&mut self.expanded);
+        self.load(entries, hidden);
+        self.expanded = expanded
+            .into_iter()
+            .filter(|id| self.get(id).is_some())
+            .collect();
+    }
+
+    /// Drops the rows `ids` names and forgets their expansion; a later
+    /// update for one of them is ignored until the next load.
+    pub fn remove(&mut self, ids: &[String]) {
+        for id in ids {
+            self.entries
+                .retain(|entry| entry_id(entry) != Some(id.as_str()));
+            self.expanded.remove(id);
+            self.gone.insert(id);
+        }
+    }
+
+    /// Applies one append: the `removed` ids leave first, then `entries` are
+    /// upserted, so an id both removed and carried comes back at the bottom.
+    pub fn append(&mut self, entries: Vec<ChatEntry>, removed: &[String]) {
+        self.remove(removed);
+        for entry in &entries {
+            if let Some(id) = entry_id(entry)
+                && removed.iter().any(|gone| gone == id)
+            {
+                self.gone.remove(id);
+            }
+        }
+        self.upsert(entries);
+    }
+
     /// Applies appended rows: a known id is replaced in its place, a new id
-    /// is pushed, an entry kind this build does not know is skipped, and the
-    /// rows past [`DISPLAY_CAP`] drop off the top, counted into `hidden` with
-    /// their expansion forgotten.
+    /// is pushed, an id that left (trimmed off the top or removed) and an
+    /// entry kind this build does not know are skipped, and the rows past
+    /// [`DISPLAY_CAP`] drop off the top, counted into `hidden` with their
+    /// expansion forgotten.
     pub fn upsert(&mut self, entries: Vec<ChatEntry>) {
         for entry in entries {
             let Some(id) = entry_id(&entry).map(ToOwned::to_owned) else {
                 continue;
             };
+            if self.gone.contains(&id) {
+                continue;
+            }
             match self
                 .entries
                 .iter()
@@ -142,12 +231,125 @@ impl ChatLog {
         for entry in self.entries.drain(..excess) {
             if let Some(id) = entry_id(&entry) {
                 self.expanded.remove(id);
+                self.gone.insert(id);
             }
         }
         self.hidden = self
             .hidden
             .saturating_add(u32::try_from(excess).unwrap_or(u32::MAX));
     }
+}
+
+/// What a pane draws for its session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PaneView {
+    /// The session's terminal.
+    #[default]
+    Terminal,
+    /// The session's chat, its terminal kept fed but not drawn.
+    Chat,
+}
+
+/// The view each pane shows, by pane id; a pane not named shows its
+/// terminal.
+#[derive(Debug, Default)]
+pub struct PaneViews {
+    views: HashMap<String, PaneView>,
+}
+
+impl PaneViews {
+    /// What pane `pane_id` shows.
+    #[must_use]
+    pub fn get(&self, pane_id: &str) -> PaneView {
+        self.views.get(pane_id).copied().unwrap_or_default()
+    }
+
+    /// Whether pane `pane_id` shows its session's chat.
+    #[must_use]
+    pub fn is_chat(&self, pane_id: &str) -> bool {
+        self.get(pane_id) == PaneView::Chat
+    }
+
+    /// Pane `pane_id` shows `view` from now on.
+    pub fn set(&mut self, pane_id: &str, view: PaneView) {
+        match view {
+            PaneView::Terminal => {
+                self.views.remove(pane_id);
+            }
+            PaneView::Chat => {
+                self.views.insert(pane_id.to_owned(), view);
+            }
+        }
+    }
+
+    /// Switches pane `pane_id` between its terminal and its chat, returning
+    /// what it shows now.
+    pub fn toggle(&mut self, pane_id: &str) -> PaneView {
+        let next = match self.get(pane_id) {
+            PaneView::Terminal => PaneView::Chat,
+            PaneView::Chat => PaneView::Terminal,
+        };
+        self.set(pane_id, next);
+        next
+    }
+
+    /// The pane known as `old` is now `new`, and keeps its view.
+    pub fn rekey(&mut self, old: &str, new: &str) {
+        let view = self.get(old);
+        self.views.remove(old);
+        self.set(new, view);
+    }
+
+    /// Forgets the view of every pane `keep` refuses.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.views.retain(|pane_id, _| keep(pane_id));
+    }
+}
+
+/// The chats a connection starts and stops loading after a change.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LoadChanges {
+    /// The sessions to send `LoadChat` for.
+    pub load: Vec<String>,
+    /// The sessions to send `UnloadChat` for.
+    pub unload: Vec<String>,
+}
+
+/// The sessions whose chat this connection has loaded.
+#[derive(Debug, Default)]
+pub struct ChatLoads {
+    loaded: BTreeSet<String>,
+}
+
+impl ChatLoads {
+    /// The sessions some pane wants the chat of are now `wanted`: returns
+    /// the ones to load and the ones to unload, and counts them loaded.
+    pub fn diff(&mut self, wanted: BTreeSet<String>) -> LoadChanges {
+        let load = wanted.difference(&self.loaded).cloned().collect();
+        let unload = self.loaded.difference(&wanted).cloned().collect();
+        self.loaded = wanted;
+        LoadChanges { load, unload }
+    }
+
+    /// A new connection has loaded nothing, and needs no unload either.
+    pub fn clear(&mut self) {
+        self.loaded.clear();
+    }
+
+    /// The daemon refused session `session_id`'s load, so it holds nothing
+    /// to unload.
+    pub fn forget(&mut self, session_id: &str) {
+        self.loaded.remove(session_id);
+    }
+}
+
+/// Whether a chat follows its bottom, from how far it was scrolled down and
+/// how far it could scroll at its last layout: at the bottom (within a
+/// pixel) it follows, scrolled up off it it stays put; a chat never laid out
+/// starts at the bottom.
+#[must_use]
+pub fn follows_bottom(laid_out: Option<(f32, f32)>) -> bool {
+    laid_out.is_none_or(|(scrolled, max_scroll)| scrolled >= max_scroll - BOTTOM_SLACK)
 }
 
 /// The one line a collapsed tool card shows: the summary's first line,
@@ -351,6 +553,7 @@ pub fn answer_message(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::time::{Duration, Instant};
 
     use protocol::{
@@ -359,9 +562,10 @@ mod tests {
     };
 
     use super::{
-        ChatLog, DIGIT_GRACE, DISPLAY_CAP, PromptStack, allow_with_text, answer_message,
-        back_answer, deny_with_text, entry_id, option_answer, skip_answer, submit_answer,
-        toggle_answer, tool_one_liner, type_something_answer,
+        ChatLoads, ChatLog, DIGIT_GRACE, DISPLAY_CAP, LoadChanges, PaneView, PaneViews,
+        PromptStack, allow_with_text, answer_message, back_answer, deny_with_text, entry_id,
+        follows_bottom, option_answer, skip_answer, submit_answer, toggle_answer, tool_one_liner,
+        type_something_answer,
     };
 
     /// A message row, the simplest entry with an id.
@@ -432,6 +636,218 @@ mod tests {
             composer: ComposerState::Dialog,
             prompt,
         }
+    }
+
+    /// A log holding one row past the display cap: `row0` dropped off the
+    /// top, `row1` to `row500` kept.
+    fn over_cap() -> ChatLog {
+        let mut log = ChatLog::default();
+        log.upsert(
+            (0..=DISPLAY_CAP)
+                .map(|n| tool(&format!("row{n}"), None))
+                .collect(),
+        );
+        log
+    }
+
+    fn done(text: &str) -> ToolOutcome {
+        ToolOutcome {
+            text: text.to_owned(),
+            is_error: false,
+        }
+    }
+
+    fn sessions(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    fn changes(load: &[&str], unload: &[&str]) -> LoadChanges {
+        LoadChanges {
+            load: load.iter().map(|id| (*id).to_owned()).collect(),
+            unload: unload.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_late_update_for_a_row_trimmed_off_the_top_is_ignored() {
+        let mut log = over_cap();
+        assert_eq!(log.hidden(), 1, "the oldest row dropped off the top");
+        assert!(log.get("row0").is_none());
+        log.upsert(vec![tool("row0", Some(done("late result")))]);
+        assert_eq!(log.len(), DISPLAY_CAP, "the late update adds no row");
+        assert!(log.get("row0").is_none(), "the trimmed row stays gone");
+        assert_eq!(log.hidden(), 1, "nothing more is counted hidden");
+        let kept = ids(&log);
+        assert_eq!(
+            kept.first().map(String::as_str),
+            Some("row1"),
+            "no other row dropped"
+        );
+        let newest = format!("row{DISPLAY_CAP}");
+        assert_eq!(kept.last(), Some(&newest), "the newest row stays the last");
+    }
+
+    #[test]
+    fn an_update_for_a_row_still_held_replaces_it_past_the_cap() {
+        let mut log = over_cap();
+        log.upsert(vec![tool("row7", Some(done("result")))]);
+        assert!(matches!(
+            log.get("row7"),
+            Some(ChatEntry::Tool {
+                result: Some(_),
+                ..
+            })
+        ));
+        assert_eq!(log.len(), DISPLAY_CAP);
+    }
+
+    #[test]
+    fn a_load_accepts_an_id_trimmed_or_removed_before_it() {
+        let mut log = over_cap();
+        log.upsert(vec![user("gone")]);
+        log.remove(&["gone".to_owned()]);
+        log.load(Vec::new(), 0);
+        log.upsert(vec![user("row0"), user("gone")]);
+        assert_eq!(ids(&log), ["row0", "gone"]);
+    }
+
+    #[test]
+    fn remove_drops_rows_and_their_expansion_and_keeps_them_gone() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![tool("t1", None), user("u1"), tool("t2", None)]);
+        assert!(log.toggle_expanded("t1"));
+        log.remove(&["t1".to_owned(), "unknown".to_owned()]);
+        assert_eq!(ids(&log), ["u1", "t2"]);
+        assert!(!log.is_expanded("t1"));
+        assert_eq!(log.hidden(), 0, "a removed row is not hidden");
+        log.upsert(vec![tool("t1", Some(done("late")))]);
+        assert_eq!(ids(&log), ["u1", "t2"], "a late update does not revive it");
+    }
+
+    #[test]
+    fn an_append_removes_before_it_upserts() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![user("u1"), answer("live:m1", true), user("u2")]);
+        log.append(vec![answer("a1", false)], &["live:m1".to_owned()]);
+        assert_eq!(
+            ids(&log),
+            ["u1", "u2", "a1"],
+            "the transcript answer replaces the live one"
+        );
+        log.append(vec![answer("u2", false)], &["u2".to_owned()]);
+        assert_eq!(
+            ids(&log),
+            ["u1", "a1", "u2"],
+            "an id removed and carried in one append comes back at the bottom"
+        );
+    }
+
+    #[test]
+    fn a_reset_keeps_the_expansion_of_the_cards_that_survive_it() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![tool("t1", None), tool("t2", None), user("gone")]);
+        log.toggle_expanded("t1");
+        log.toggle_expanded("t2");
+        log.remove(&["gone".to_owned()]);
+        log.reset(vec![tool("t1", Some(done("ok"))), user("u1")], 3);
+        assert_eq!(ids(&log), ["t1", "u1"]);
+        assert_eq!(log.hidden(), 3);
+        assert!(log.is_expanded("t1"), "a surviving card stays open");
+        assert!(
+            !log.is_expanded("t2"),
+            "a card the reset dropped is forgotten"
+        );
+        log.upsert(vec![tool("t2", None), user("gone")]);
+        assert_eq!(ids(&log), ["t1", "u1", "t2", "gone"]);
+        assert!(
+            !log.is_expanded("t2"),
+            "a card that comes back starts closed"
+        );
+    }
+
+    #[test]
+    fn a_pane_shows_its_terminal_until_toggled() {
+        let mut views = PaneViews::default();
+        assert_eq!(views.get("p1"), PaneView::Terminal);
+        assert_eq!(views.toggle("p1"), PaneView::Chat);
+        assert!(views.is_chat("p1"));
+        assert!(!views.is_chat("p2"), "another pane keeps its terminal");
+        assert_eq!(views.toggle("p1"), PaneView::Terminal);
+        assert!(!views.is_chat("p1"));
+        views.set("p2", PaneView::Chat);
+        assert!(views.is_chat("p2"));
+    }
+
+    #[test]
+    fn a_rekeyed_pane_keeps_its_view() {
+        let mut views = PaneViews::default();
+        views.set("old", PaneView::Chat);
+        views.rekey("old", "new");
+        assert!(views.is_chat("new"));
+        assert!(!views.is_chat("old"));
+        views.rekey("terminal", "moved");
+        assert!(
+            !views.is_chat("moved"),
+            "a terminal pane moves as a terminal"
+        );
+    }
+
+    #[test]
+    fn a_pane_that_is_gone_forgets_its_view() {
+        let mut views = PaneViews::default();
+        views.set("p1", PaneView::Chat);
+        views.set("p2", PaneView::Chat);
+        views.retain(|pane_id| pane_id == "p2");
+        assert!(!views.is_chat("p1"));
+        assert!(views.is_chat("p2"));
+    }
+
+    #[test]
+    fn the_first_chat_pane_of_a_session_loads_it_and_the_last_unloads_it() {
+        let mut loads = ChatLoads::default();
+        assert_eq!(loads.diff(sessions(&["s1"])), changes(&["s1"], &[]));
+        assert_eq!(
+            loads.diff(sessions(&["s1"])),
+            changes(&[], &[]),
+            "a session already loaded is not asked for again"
+        );
+        assert_eq!(loads.diff(sessions(&["s1", "s2"])), changes(&["s2"], &[]));
+        assert_eq!(loads.diff(sessions(&["s2"])), changes(&[], &["s1"]));
+        assert_eq!(loads.diff(BTreeSet::new()), changes(&[], &["s2"]));
+    }
+
+    #[test]
+    fn a_new_connection_asks_for_every_wanted_chat_again_and_unloads_none() {
+        let mut loads = ChatLoads::default();
+        loads.diff(sessions(&["s1", "s2"]));
+        loads.clear();
+        assert_eq!(loads.diff(sessions(&["s1"])), changes(&["s1"], &[]));
+        loads.clear();
+        assert_eq!(loads.diff(BTreeSet::new()), changes(&[], &[]));
+    }
+
+    #[test]
+    fn a_forgotten_load_is_never_unloaded() {
+        let mut loads = ChatLoads::default();
+        loads.diff(sessions(&["s1"]));
+        loads.forget("s1");
+        assert_eq!(loads.diff(BTreeSet::new()), changes(&[], &[]));
+    }
+
+    #[test]
+    fn the_chat_follows_its_bottom_until_scrolled_up() {
+        assert!(
+            follows_bottom(None),
+            "a chat not laid out yet starts at the bottom"
+        );
+        assert!(follows_bottom(Some((0.0, 0.0))), "content that fits");
+        assert!(follows_bottom(Some((400.0, 400.0))), "at the bottom");
+        assert!(follows_bottom(Some((399.5, 400.0))), "within a pixel of it");
+        assert!(!follows_bottom(Some((300.0, 400.0))), "scrolled up");
+        assert!(
+            !follows_bottom(Some((0.0, 400.0))),
+            "at the top of a long chat"
+        );
     }
 
     #[test]

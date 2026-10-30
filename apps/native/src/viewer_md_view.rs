@@ -87,15 +87,37 @@ impl MdDoc {
     }
 }
 
-/// Each linked span's byte range in [`inline_text`]'s string, with its target.
-/// An empty span has nothing to click.
-pub(crate) fn link_ranges(spans: &[Span]) -> Vec<(Range<usize>, LinkTarget)> {
+/// Which links a rendered document follows on a click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkRoute {
+    /// A viewer tab's: every link, followed as the tab's file writes it.
+    ViewerTab,
+    /// A chat answer's: only a web link, opened in the browser; any other
+    /// link is plain text.
+    WebOnly,
+}
+
+impl LinkRoute {
+    /// Whether a link to `target` is drawn as a link and followed.
+    pub(crate) fn follows(self, target: &LinkTarget) -> bool {
+        match self {
+            Self::ViewerTab => true,
+            Self::WebOnly => matches!(target, LinkTarget::Url(_)),
+        }
+    }
+}
+
+/// Each span `route` follows a link from: its byte range in
+/// [`inline_text`]'s string, with its target. An empty span has nothing to
+/// click.
+pub(crate) fn link_ranges(spans: &[Span], route: LinkRoute) -> Vec<(Range<usize>, LinkTarget)> {
     let (_, ranges) = inline_text(spans);
     ranges
         .into_iter()
         .zip(spans)
         .filter(|(range, _)| !range.is_empty())
         .filter_map(|(range, span)| span.link.clone().map(|target| (range, target)))
+        .filter(|(_, target)| route.follows(target))
         .collect()
 }
 
@@ -373,10 +395,14 @@ fn steps(count: usize, step: f32) -> f32 {
     f32::from(u16::try_from(count).unwrap_or(u16::MAX)) * step
 }
 
-/// A span's look: bold, italic, struck through, a code chip, muted, or a
-/// link's colour and underline.
-fn span_style(span: &Span, t: &UiTheme) -> HighlightStyle {
-    let color = if span.link.is_some() {
+/// A span's look: bold, italic, struck through, a code chip, muted, or the
+/// colour and underline of a link `route` follows.
+fn span_style(span: &Span, route: LinkRoute, t: &UiTheme) -> HighlightStyle {
+    let linked = span
+        .link
+        .as_ref()
+        .is_some_and(|target| route.follows(target));
+    let color = if linked {
         Some(hsla(t.periwinkle))
     } else if span.muted {
         Some(hsla(t.subtle))
@@ -388,7 +414,7 @@ fn span_style(span: &Span, t: &UiTheme) -> HighlightStyle {
         font_weight: span.strong.then_some(FontWeight::BOLD),
         font_style: span.emphasis.then_some(FontStyle::Italic),
         background_color: span.code.then(|| hsla(t.chip)),
-        underline: span.link.is_some().then_some(UnderlineStyle {
+        underline: linked.then_some(UnderlineStyle {
             thickness: px(DECORATION),
             color: None,
             wavy: false,
@@ -437,9 +463,12 @@ fn task_box(checked: bool, t: &UiTheme) -> Div {
         .when(checked, |boxed| boxed.bg(gpui::rgb(t.accent)))
 }
 
-/// What every row of one rendered tab is drawn with.
-struct Painter {
+/// What every row of one rendered document is drawn with; `tab_id` names
+/// the document in its rows' selectors and the links it follows, which
+/// `route` picks.
+pub(crate) struct Painter {
     tab_id: String,
+    route: LinkRoute,
     mono: SharedString,
     mono_size: f32,
     colors: [Hsla; 6],
@@ -447,6 +476,26 @@ struct Painter {
 }
 
 impl Painter {
+    /// A painter for document `tab_id`, following the links `route` picks,
+    /// whose code draws in the terminal font `family` (the bundled one when
+    /// `None`) at `size`, coloured as the source view colours a file in `t`.
+    pub(crate) fn new(
+        tab_id: String,
+        route: LinkRoute,
+        family: Option<&str>,
+        size: f32,
+        t: &UiTheme,
+    ) -> Self {
+        Self {
+            tab_id,
+            route,
+            mono: SharedString::from(family.unwrap_or(fonts::DEFAULT_FAMILY).to_owned()),
+            mono_size: size,
+            colors: TokenClass::ALL.map(|class| hsla(class.color(t))),
+            theme: *t,
+        }
+    }
+
     /// Row `ix`'s content, before its indent and quote borders.
     fn row(&self, row: &Row, ix: usize) -> Div {
         let t = &self.theme;
@@ -483,12 +532,12 @@ impl Painter {
     fn inline(&self, spans: &[Span], ix: usize, part: usize) -> AnyElement {
         let t = &self.theme;
         let (text, ranges) = inline_text(spans);
-        let links = link_ranges(spans);
+        let links = link_ranges(spans, self.route);
         let highlights: Vec<(Range<usize>, HighlightStyle)> = ranges
             .into_iter()
             .zip(spans)
             .filter(|(range, _)| !range.is_empty())
-            .map(|(range, span)| (range, span_style(span, t)))
+            .map(|(range, span)| (range, span_style(span, self.route, t)))
             .collect();
         let id = ElementId::Name(SharedString::from(format!(
             "md-text-{}-{ix}-{part}",
@@ -499,7 +548,7 @@ impl Painter {
             return text.into_any_element();
         }
         let (bounds, targets): (Vec<Range<usize>>, Vec<LinkTarget>) = links.into_iter().unzip();
-        let tab_id = self.tab_id.clone();
+        let (tab_id, route) = (self.tab_id.clone(), self.route);
         text.on_click(bounds, move |index, window, cx| {
             let Some(target) = targets.get(index).cloned() else {
                 tracing::debug!(index, "a Markdown link click outside every link");
@@ -509,8 +558,14 @@ impl Painter {
                 tracing::debug!("a Markdown link click in a window without the root view");
                 return;
             };
-            root.update(cx, |root, cx| {
-                root.follow_md_link(&tab_id, target, window, cx);
+            root.update(cx, |root, cx| match (route, target) {
+                (LinkRoute::ViewerTab, target) => root.follow_md_link(&tab_id, target, window, cx),
+                (LinkRoute::WebOnly, LinkTarget::Url(url)) => {
+                    root.dispatch_open(OpenJob::Url(url), Then::Nothing, window, cx);
+                }
+                (LinkRoute::WebOnly, _) => {
+                    tracing::debug!("a chat answer follows only web links");
+                }
             });
         })
         .into_any_element()
@@ -616,8 +671,15 @@ impl Painter {
 }
 
 /// Row `ix` of `doc` as its list item: indented, inside its quotes' borders,
-/// tagged with its top-level block when it is the block's first row.
-fn render_row(doc: &MdDoc, painter: &Painter, ix: usize) -> AnyElement {
+/// tagged with its top-level block when it is the block's first row, with
+/// `pad_x` left and right of it and `pad_top` above the first row.
+pub(crate) fn render_row(
+    doc: &MdDoc,
+    painter: &Painter,
+    ix: usize,
+    pad_x: f32,
+    pad_top: f32,
+) -> AnyElement {
     let t = &painter.theme;
     let Some(row) = doc.rows.get(ix) else {
         return div().into_any_element();
@@ -640,8 +702,8 @@ fn render_row(doc: &MdDoc, painter: &Painter, ix: usize) -> AnyElement {
     };
     div()
         .debug_selector(move || selector)
-        .px(px(BODY_PAD_X))
-        .when(ix == 0, |first| first.pt(px(BODY_PAD_TOP)))
+        .px(px(pad_x))
+        .when(ix == 0, |first| first.pt(px(pad_top)))
         .child(framed)
         .into_any_element()
 }
@@ -814,24 +876,25 @@ impl RootView {
         t: &UiTheme,
     ) -> Div {
         let font = &self.sidebar.ui_state().terminal_font;
-        let painter = Painter {
-            tab_id: tab_id.to_owned(),
-            mono: SharedString::from(
-                font.family
-                    .clone()
-                    .unwrap_or_else(|| fonts::DEFAULT_FAMILY.to_owned()),
-            ),
-            mono_size: font.size,
-            colors: TokenClass::ALL.map(|class| hsla(class.color(t))),
-            theme: *t,
-        };
+        let painter = Painter::new(
+            tab_id.to_owned(),
+            LinkRoute::ViewerTab,
+            font.family.as_deref(),
+            font.size,
+            t,
+        );
         let doc = Arc::clone(doc);
         let selector = format!("viewer-md-{tab_id}");
         div()
             .debug_selector(move || selector)
             .flex_1()
             .min_h(px(0.0))
-            .child(list(rows.clone(), move |ix, _, _| render_row(&doc, &painter, ix)).size_full())
+            .child(
+                list(rows.clone(), move |ix, _, _| {
+                    render_row(&doc, &painter, ix, BODY_PAD_X, BODY_PAD_TOP)
+                })
+                .size_full(),
+            )
     }
 }
 
@@ -924,10 +987,37 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_answer_follows_only_web_links() {
+        let spans = spans_of("[web](https://example.com/page) [doc](other.md) [top](#top)\n");
+        let (text, _) = inline_text(&spans);
+        let links = link_ranges(&spans, LinkRoute::WebOnly);
+        let [(web, web_target)] = links.as_slice() else {
+            panic!("only the web link is clickable, got {links:?}");
+        };
+        assert_eq!(&text[web.clone()], "web");
+        assert_eq!(
+            *web_target,
+            LinkTarget::Url("https://example.com/page".to_owned())
+        );
+        for label in ["doc", "top"] {
+            let span = spans
+                .iter()
+                .find(|span| span.text == label)
+                .expect("the link's span");
+            let style = span_style(span, LinkRoute::WebOnly);
+            assert!(
+                style.underline.is_none() && style.color.is_none(),
+                "{label} is plain text: {style:?}"
+            );
+        }
+        assert_eq!(link_ranges(&spans, LinkRoute::ViewerTab).len(), 3);
+    }
+
+    #[test]
     fn link_spans_become_click_ranges() {
         let spans = spans_of("plain [web](https://example.com/page) and [doc](other.md)\n");
         let (text, _) = inline_text(&spans);
-        let links = link_ranges(&spans);
+        let links = link_ranges(&spans, LinkRoute::ViewerTab);
         let [(web, web_target), (doc, doc_target)] = links.as_slice() else {
             panic!("two link ranges, got {links:?}");
         };

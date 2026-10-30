@@ -17,6 +17,7 @@ pub mod builtin_themes;
 mod buttons;
 mod changes_view;
 pub mod chat;
+mod chat_view;
 mod cleanup_failed;
 mod cleanup_failed_view;
 mod combobox;
@@ -710,6 +711,8 @@ pub struct RootView {
     tabs: TabsModel,
     /// A terminal for every pane of every tab, by pane id.
     panes: HashMap<String, PaneSlot>,
+    /// What each pane shows, terminal or chat, and the chats loaded for them.
+    chat: chat_view::ChatPanes,
     /// Scrollback retries already sent, so each goes out once per session.
     retries: RetryGate,
     /// Where each window's split tree was last laid out; a divider drag maps
@@ -1289,6 +1292,7 @@ impl RootView {
                 sidebar
             },
             panes: HashMap::new(),
+            chat: chat_view::ChatPanes::default(),
             retries: RetryGate::default(),
             layouts: WindowLayouts::new(window.window_handle().window_id()),
             overlays: OverlayOwners::new(window.window_handle().window_id()),
@@ -1671,15 +1675,20 @@ impl RootView {
     }
 
     /// What takes the keyboard in `key`'s pop-out window: a popped diff
-    /// tab's view, else [`Self::popout_terminal`].
+    /// tab's view, else [`Self::popout_terminal`]. A terminal whose pane
+    /// shows its chat is not drawn and takes nothing.
     pub(crate) fn popout_focus(&self, key: &PopoutKey, cx: &App) -> Option<gpui::FocusHandle> {
         if let PopoutKey::Tab { tab_id } = key
             && let Some(focus) = self.diff_tab_focus(tab_id, cx)
         {
             return Some(focus);
         }
-        self.popout_terminal(key)
-            .map(|terminal| terminal.read(cx).focus_handle())
+        let terminal = self.popout_terminal(key)?;
+        let terminal = terminal.read(cx);
+        if self.pane_shows_chat(terminal.pane_id()) {
+            return None;
+        }
+        Some(terminal.focus_handle())
     }
 
     /// The pop-out window of terminal `pane_id` (a pane's, or a session
@@ -3703,7 +3712,7 @@ impl RootView {
             msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(&msg),
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
             msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(msg, cx),
-            other => self.fold_agents(other, cx),
+            other => self.fold_chat_or_agents(other, cx),
         }
     }
 
@@ -3766,6 +3775,8 @@ impl RootView {
 
     /// A daemon `Error`: the launch-last wait it answers ends here, so the
     /// daemon's report is the only one and its timeout toast never follows.
+    /// A refused chat load snaps its panes back to the terminal, with no
+    /// toast.
     fn on_daemon_failure(
         &mut self,
         message: String,
@@ -3776,6 +3787,9 @@ impl RootView {
     ) {
         if let Some(id) = request_id {
             let _ = self.launch_last.take_request(id);
+        }
+        if self.on_chat_refused(&message, request_id, code, cx) {
+            return;
         }
         self.on_refusal(message, request_id, code, window, cx);
     }
@@ -3905,6 +3919,7 @@ impl RootView {
         };
         self.tabs.clear_for_switch(restored_active);
         self.panes.clear();
+        self.chat = chat_view::ChatPanes::default();
         self.sessions_loaded = false;
         self.seen_sessions.clear();
         self.last_focused_session = None;

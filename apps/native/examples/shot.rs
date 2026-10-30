@@ -13,8 +13,10 @@
 //! over a Markdown file, rendered), `dashboard`, `connections` (the host
 //! picker with a saved tailnet host and a saved SSH host) and
 //! `connections-ssh` (its add form switched to SSH, filled in, after a
-//! passing Test connection), and `menu` (the sessions panel's ⋯ menu open
-//! over the repo rows, with a toast over the panes). The PNG goes to
+//! passing Test connection), `menu` (the sessions panel's ⋯ menu open
+//! over the repo rows, with a toast over the panes) and `chat` (the Petal
+//! pane switched to its chat, a row of each kind and a live answer). The PNG
+//! goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -39,7 +41,8 @@ use gpui::{
     WindowHandle, WindowOptions, px, size,
 };
 use protocol::{
-    AgentCommandEntry, ClientMessage, DaemonMessage, GridNode, SessionSnapshot, SplitDirection,
+    AgentCommandEntry, ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage,
+    GridNode, SessionSnapshot, SplitDirection, ToolOutcome,
 };
 use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
@@ -140,10 +143,11 @@ enum View {
     ConnectionsSsh,
     Menu,
     Update,
+    Chat,
 }
 
 impl View {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -158,6 +162,7 @@ impl View {
         Self::ConnectionsSsh,
         Self::Menu,
         Self::Update,
+        Self::Chat,
     ];
 
     fn name(self) -> &'static str {
@@ -176,6 +181,7 @@ impl View {
             Self::ConnectionsSsh => "connections-ssh",
             Self::Menu => "menu",
             Self::Update => "update",
+            Self::Chat => "chat",
         }
     }
 
@@ -236,6 +242,7 @@ impl View {
                         .flat_map(|(_, rows)| rows)
                         .any(|row| row.context != "—")
             }
+            Self::Chat => root.pane_shows_chat("p1") && !root.chat_rows("s-petal").is_empty(),
             Self::Connections => {
                 root.connection_picker_open() && root.connection_picker_scan_text().is_none()
             }
@@ -302,7 +309,8 @@ impl Shot {
             | View::Connections
             | View::ConnectionsSsh
             | View::Menu
-            | View::Update => None,
+            | View::Update
+            | View::Chat => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -649,6 +657,14 @@ fn drive(
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
         View::Menu => open_menu(window, cx),
         View::Update => drive_update(step, address, window, cx),
+        View::Chat => {
+            let root = window
+                .root::<RootView>()
+                .flatten()
+                .context("the window has no root view")?;
+            root.update(cx, |root, cx| root.toggle_pane_view("p1", window, cx));
+            Ok(())
+        }
     }
 }
 
@@ -1221,6 +1237,10 @@ impl FakeDaemon {
                 *offset,
                 worktree_path.as_deref(),
             ))?,
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } => chat_reply(session_id, request_id.clone()),
             ClientMessage::GetFileSnapshot { .. } => file_snapshot(msg)?,
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
             ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
@@ -1236,6 +1256,83 @@ impl FakeDaemon {
             _ => return Ok(Vec::new()),
         };
         Ok(vec![reply])
+    }
+}
+
+/// The `chat` shot's conversation: a row of each kind, a tool card done and
+/// one still running, a message not yet in the transcript, and a live answer.
+fn chat_reply(session_id: &str, request_id: Option<String>) -> DaemonMessage {
+    let tool = |id: &str, name: &str, summary: &str, result: Option<&str>| ChatEntry::Tool {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        summary: summary.to_owned(),
+        input: format!("{{\"file_path\": \"{DIFF_PATH}\"}}"),
+        result: result.map(|text| ToolOutcome {
+            text: text.to_owned(),
+            is_error: false,
+        }),
+        parent_id: None,
+    };
+    let answer = "The footer now keeps **8 px** between its pills:\n\n\
+                  - `pill()` takes the gap from its caller\n\
+                  - the colours come from `palette.rs`\n\n\
+                  ```rust\nlet gap = px(8.0);\n```";
+    let entries = vec![
+        ChatEntry::System {
+            id: "cleared:c1".to_owned(),
+            text: "Conversation cleared".to_owned(),
+        },
+        ChatEntry::User {
+            id: "u1".to_owned(),
+            text: "Tighten the footer spacing and check the pill colours.".to_owned(),
+            pending: false,
+        },
+        ChatEntry::Thinking {
+            id: "k1".to_owned(),
+            secs: Some(14),
+        },
+        tool("t1", "Read", DIFF_PATH, Some("412 lines")),
+        ChatEntry::Receipt {
+            id: "r1".to_owned(),
+            question: "Allow Edit on footer.rs?".to_owned(),
+            answer: "Yes".to_owned(),
+        },
+        tool(
+            "t2",
+            "Edit",
+            "footer.rs: the pill gap 6 px to 8 px",
+            Some("ok"),
+        ),
+        ChatEntry::Answer {
+            id: "a1".to_owned(),
+            text: answer.to_owned(),
+            live: false,
+        },
+        ChatEntry::TurnEnd {
+            id: "e1".to_owned(),
+            duration_ms: Some(72_000),
+        },
+        ChatEntry::User {
+            id: "u2".to_owned(),
+            text: "Now run the footer specs.".to_owned(),
+            pending: true,
+        },
+        tool("t3", "Bash", "cargo nextest run footer", None),
+        ChatEntry::Answer {
+            id: "live:m2".to_owned(),
+            text: "Running the footer specs now.\nThe first two pass".to_owned(),
+            live: true,
+        },
+    ];
+    DaemonMessage::Chat {
+        session_id: session_id.to_owned(),
+        entries,
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Working,
+            prompt: None,
+        },
+        request_id,
     }
 }
 

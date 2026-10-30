@@ -1,0 +1,453 @@
+//! Chat pane specs: a pane header's Chat toggle loads the session's chat
+//! from the daemon and draws it in place of the terminal; the daemon's
+//! appends, live answers and unasked resets update it; the last chat pane
+//! going unloads it; a reconnect loads it again; and a session whose agent
+//! offers no chat snaps back to its terminal with a note.
+
+use crate::support;
+
+use gpui::{TestAppContext, px};
+use protocol::{
+    ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, SplitDirection,
+    ToolOutcome,
+};
+use rustling_tulip_native::{OpenOutcome, PopoutKey};
+use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
+
+const TOGGLE: &str = "pane-view-toggle-p1";
+
+/// `s1` alone in pane `p1`, its scrollback answered and everything sent so
+/// far drained.
+fn attached<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h
+}
+
+/// The request id of the `LoadChat` for `s1` among `sent`.
+fn load_request(sent: &[ClientMessage]) -> Option<String> {
+    sent.iter().find_map(|msg| match msg {
+        ClientMessage::LoadChat {
+            session_id,
+            request_id,
+        } if session_id == "s1" => request_id.clone(),
+        _ => None,
+    })
+}
+
+fn unloads(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::UnloadChat { session_id } if session_id == "s1"))
+        .count()
+}
+
+/// `p1` switched to its chat, with the request id its `LoadChat` went out
+/// under.
+fn opened<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, String) {
+    let mut h = attached(cx, dir);
+    h.click_on(TOGGLE);
+    let id = load_request(&h.sent()).expect("the toggle asks for the chat");
+    (h, id)
+}
+
+fn screen() -> ChatScreen {
+    ChatScreen {
+        composer: ComposerState::Ready,
+        prompt: None,
+    }
+}
+
+fn reply(request_id: Option<&str>, entries: Vec<ChatEntry>) -> DaemonMessage {
+    DaemonMessage::Chat {
+        session_id: "s1".to_owned(),
+        entries,
+        hidden: 0,
+        screen: screen(),
+        request_id: request_id.map(str::to_owned),
+    }
+}
+
+fn append(entries: Vec<ChatEntry>, removed: &[&str]) -> DaemonMessage {
+    DaemonMessage::ChatAppend {
+        session_id: "s1".to_owned(),
+        entries,
+        removed: removed.iter().map(|id| (*id).to_owned()).collect(),
+    }
+}
+
+fn user(id: &str) -> ChatEntry {
+    ChatEntry::User {
+        id: id.to_owned(),
+        text: format!("message {id}"),
+        pending: false,
+    }
+}
+
+fn answer(id: &str, text: &str, live: bool) -> ChatEntry {
+    ChatEntry::Answer {
+        id: id.to_owned(),
+        text: text.to_owned(),
+        live,
+    }
+}
+
+fn tool(id: &str, result: Option<&str>) -> ChatEntry {
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: "Read".to_owned(),
+        summary: "apps/native/src/chat.rs".to_owned(),
+        input: "{\"file_path\": \"apps/native/src/chat.rs\"}".to_owned(),
+        result: result.map(|text| ToolOutcome {
+            text: text.to_owned(),
+            is_error: false,
+        }),
+        parent_id: None,
+    }
+}
+
+/// The ids of `s1`'s chat rows, in display order.
+fn row_ids(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| root.chat_rows("s1"))
+        .iter()
+        .filter_map(|entry| match entry {
+            ChatEntry::User { id, .. }
+            | ChatEntry::Answer { id, .. }
+            | ChatEntry::Thinking { id, .. }
+            | ChatEntry::Tool { id, .. }
+            | ChatEntry::System { id, .. }
+            | ChatEntry::Receipt { id, .. }
+            | ChatEntry::TurnEnd { id, .. } => Some(id.clone()),
+            ChatEntry::Unknown => None,
+        })
+        .collect()
+}
+
+/// Whether the element `selector` tags has been painted with a size.
+fn painted(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).size.height > px(0.0)
+}
+
+/// Whether the element `selector` tags is drawn now. gpui keeps an
+/// element's last bounds after it stops drawing, so the window is narrowed
+/// first: a drawn element is laid out again at the new width, one no longer
+/// drawn keeps its old bounds. The window gets its width back after.
+fn drawn_now(h: &mut Harness<'_>, selector: &str) -> bool {
+    let before = h.bounds(selector);
+    if before.size.height <= px(0.0) {
+        return false;
+    }
+    let (width, height) = (h.window_width(), h.window_height());
+    h.cx.simulate_resize(gpui::size(px(width - 100.0), px(height)));
+    let after = h.bounds(selector);
+    h.cx.simulate_resize(gpui::size(px(width), px(height)));
+    h.cx.run_until_parked();
+    after != before
+}
+
+fn shows_chat(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.pane_shows_chat("p1"))
+}
+
+#[gpui::test]
+fn the_toggle_asks_for_the_chat_and_draws_it_in_place_of_the_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    assert!(!shows_chat(&mut h), "a pane opens on its terminal");
+    assert!(painted(&mut h, "pane-grid-p1"));
+    h.click_on(TOGGLE);
+    let sent = h.sent();
+    assert!(
+        load_request(&sent).is_some(),
+        "the toggle sends LoadChat: {sent:?}"
+    );
+    assert!(shows_chat(&mut h));
+    assert!(painted(&mut h, "pane-chat-p1"), "the chat body is drawn");
+    assert!(
+        !drawn_now(&mut h, "pane-grid-p1"),
+        "the terminal is not drawn beside it"
+    );
+}
+
+#[gpui::test]
+fn the_reply_draws_its_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(
+        Some(&id),
+        vec![
+            user("u1"),
+            ChatEntry::Thinking {
+                id: "k1".to_owned(),
+                secs: Some(14),
+            },
+            tool("t1", None),
+            answer("a1", "Done: **two** files.", false),
+            ChatEntry::TurnEnd {
+                id: "e1".to_owned(),
+                duration_ms: Some(12_000),
+            },
+        ],
+    ));
+    assert_eq!(row_ids(&mut h), ["u1", "k1", "t1", "a1", "e1"]);
+    for row in ["u1", "k1", "t1", "a1", "e1"] {
+        assert!(
+            painted(&mut h, &format!("chat-row-p1-{row}")),
+            "row {row} is drawn"
+        );
+    }
+    assert!(
+        painted(&mut h, "chat-tool-running-p1-t1"),
+        "a call without a result runs"
+    );
+}
+
+#[gpui::test]
+fn an_append_updates_a_tool_card_in_place(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1"), tool("t1", None)]));
+    h.send(append(vec![tool("t1", Some("fn main() {}"))], &[]));
+    assert_eq!(row_ids(&mut h), ["u1", "t1"], "the card keeps its place");
+    assert!(
+        painted(&mut h, "chat-tool-done-p1-t1"),
+        "the card shows its result"
+    );
+}
+
+#[gpui::test]
+fn a_live_answer_grows_then_gives_way_to_the_transcript_answer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    h.send(append(vec![answer("live:m1", "one", true)], &[]));
+    let short = h.bounds("chat-live-p1-live:m1").size.height;
+    assert!(short > px(0.0), "the live answer is drawn");
+    h.send(append(
+        vec![answer("live:m1", "one\n\ntwo\n\nthree", true)],
+        &[],
+    ));
+    let tall = h.bounds("chat-live-p1-live:m1").size.height;
+    assert!(
+        tall > short,
+        "the live answer grows: {short:?} then {tall:?}"
+    );
+    h.send(append(
+        vec![answer("a1", "one two three", false)],
+        &["live:m1"],
+    ));
+    assert_eq!(
+        row_ids(&mut h),
+        ["u1", "a1"],
+        "the transcript answer replaces it"
+    );
+    assert!(painted(&mut h, "chat-row-p1-a1"));
+}
+
+#[gpui::test]
+fn an_unasked_chat_from_the_daemon_replaces_every_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1"), user("u2")]));
+    h.send(reply(
+        None,
+        vec![
+            ChatEntry::System {
+                id: "cleared:c2".to_owned(),
+                text: "Conversation cleared".to_owned(),
+            },
+            user("u3"),
+        ],
+    ));
+    assert_eq!(row_ids(&mut h), ["cleared:c2", "u3"]);
+    assert!(painted(&mut h, "chat-row-p1-u3"));
+}
+
+#[gpui::test]
+fn toggling_back_unloads_the_chat_and_draws_the_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    h.click_on(TOGGLE);
+    assert_eq!(unloads(&h.sent()), 1, "the last chat pane going unloads");
+    assert!(!shows_chat(&mut h));
+    assert!(painted(&mut h, "pane-grid-p1"));
+    assert!(!drawn_now(&mut h, "pane-chat-p1"), "the chat body is gone");
+}
+
+#[gpui::test]
+fn closing_the_last_chat_pane_unloads_the_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let split = GridNode::Split {
+        direction: SplitDirection::Horizontal,
+        ratio: 0.5,
+        first: Box::new(pane("p1", Some("s1"))),
+        second: Box::new(pane("p2", Some("s1"))),
+    };
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &split)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.click_on(TOGGLE);
+    assert!(load_request(&h.sent()).is_some());
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &pane("p2", Some("s1")))],
+    });
+    let sent = h.sent();
+    assert_eq!(unloads(&sent), 1, "closing the chat pane unloads: {sent:?}");
+}
+
+#[gpui::test]
+fn a_reconnect_asks_for_the_chat_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s1").build()));
+    let sent = h.sent();
+    let again = load_request(&sent).expect("the new connection asks for the chat");
+    assert_ne!(again, id, "under a fresh request id");
+    assert_eq!(unloads(&sent), 0, "a new connection unloads nothing");
+    assert!(shows_chat(&mut h), "the pane stays on its chat");
+}
+
+#[gpui::test]
+fn an_agent_without_a_chat_snaps_the_pane_back_with_a_note(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(DaemonMessage::Error {
+        message: "chat is not offered for agent `other`".to_owned(),
+        request_id: Some(id),
+        code: Some("unsupported_message".to_owned()),
+    });
+    assert!(!shows_chat(&mut h), "the pane is back on its terminal");
+    assert_eq!(
+        h.root(|root, _| root.pane_chat_note("p1").map(str::to_owned))
+            .as_deref(),
+        Some("This session offers no chat, so it shows its terminal")
+    );
+    assert!(painted(&mut h, "pane-chat-note-p1"), "the note is drawn");
+    assert!(painted(&mut h, "pane-grid-p1"), "over the terminal");
+    assert_eq!(
+        unloads(&h.sent()),
+        0,
+        "a refused load has nothing to unload"
+    );
+}
+
+#[gpui::test]
+fn a_failed_load_shows_the_terminal_with_the_daemons_message(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(DaemonMessage::Error {
+        message: "session `s1` not found".to_owned(),
+        request_id: Some(id),
+        code: Some("not_found".to_owned()),
+    });
+    assert!(!shows_chat(&mut h), "the pane is back on its terminal");
+    assert_eq!(
+        h.root(|root, _| root.pane_chat_note("p1").map(str::to_owned))
+            .as_deref(),
+        Some("Could not load the chat: session `s1` not found")
+    );
+    assert!(painted(&mut h, "pane-chat-note-p1"), "the note is drawn");
+    assert!(painted(&mut h, "pane-grid-p1"), "over the terminal");
+    assert!(
+        h.root(|root, _| root.toasts().is_empty()),
+        "the note is the only word of it"
+    );
+    h.click_on(TOGGLE);
+    assert!(
+        load_request(&h.sent()).is_some(),
+        "a later toggle asks for the chat again"
+    );
+}
+
+#[gpui::test]
+fn a_reconnect_onto_a_plain_shell_gives_the_pane_its_terminal_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s2").shell("D:/src").build()));
+    h.answer_scrollback("s2", b"");
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::Resize { session_id, .. } if session_id == "s2"
+        )),
+        "the pane drives the shell's PTY size: {sent:?}"
+    );
+    h.click_on("leaf-s2");
+    let root = h.root.clone();
+    let focused =
+        h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx));
+    assert!(focused, "the pane's terminal takes the keyboard");
+}
+
+/// `s1` of `r1` alone in `p1`, attached: with a repo registered, Ctrl+N
+/// opens the spawn dialog itself.
+fn attached_in_a_repo<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h
+}
+
+fn pop_out_p1(h: &mut Harness<'_>) {
+    let key = PopoutKey::Pane {
+        tab_id: "t1".to_owned(),
+        pane_id: "p1".to_owned(),
+    };
+    let outcome = h.root_update(move |root, window, cx| root.open_popout(key, window, cx));
+    assert_eq!(outcome, OpenOutcome::Opened);
+}
+
+/// Whether `p1`'s terminal has the pop-out window's keyboard.
+fn focused_in_popout(h: &mut Harness<'_>) -> bool {
+    let root = h.root.clone();
+    let mut popout = h.popout_window();
+    popout.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx))
+}
+
+#[gpui::test]
+fn a_popped_out_chat_pane_gives_its_hidden_terminal_no_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_in_a_repo(cx, &dir);
+    h.click_on(TOGGLE);
+    assert!(shows_chat(&mut h));
+    pop_out_p1(&mut h);
+    assert!(
+        !focused_in_popout(&mut h),
+        "the pop-out focuses no hidden terminal"
+    );
+    h.keys("ctrl-n");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "Ctrl+N outside the terminals opens the spawn dialog"
+    );
+}
+
+#[gpui::test]
+fn switching_a_popped_pane_to_its_chat_releases_its_terminals_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_in_a_repo(cx, &dir);
+    pop_out_p1(&mut h);
+    assert!(
+        focused_in_popout(&mut h),
+        "the popped terminal has the pop-out's keyboard"
+    );
+    h.root_update(|root, window, cx| root.toggle_pane_view("p1", window, cx));
+    assert!(shows_chat(&mut h));
+    assert!(
+        !focused_in_popout(&mut h),
+        "the pop-out's keyboard left the hidden terminal"
+    );
+}

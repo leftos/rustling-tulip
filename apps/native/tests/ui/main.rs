@@ -19,6 +19,7 @@ mod ui_agent_options;
 mod ui_appearance;
 mod ui_appearance_editor;
 mod ui_changes;
+mod ui_chat;
 mod ui_commit;
 mod ui_connections;
 mod ui_container_menu;
