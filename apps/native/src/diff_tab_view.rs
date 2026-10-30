@@ -776,6 +776,7 @@ impl RootView {
     /// Folds a diff message in; returns whether nothing else is owed it.
     pub(crate) fn on_diff_message(
         &mut self,
+        _host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,

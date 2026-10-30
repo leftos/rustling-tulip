@@ -238,12 +238,18 @@ impl RootView {
     /// records its count; `LayoutInitRequired` drops the offer for the
     /// chooser; the next tab list opens it unless it answers our own
     /// arrangement; a new or removed session records the host's live count.
+    /// Only the layout home's connection (`HostKey::Local`) takes part:
+    /// another host's messages leave the offer and the counts alone.
     pub(crate) fn on_import_message(
         &mut self,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if *host != HostKey::Local {
+            return;
+        }
         match msg {
             DaemonMessage::Sessions { sessions } => {
                 let initial = std::mem::take(&mut self.awaiting_initial_sessions);

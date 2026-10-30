@@ -504,6 +504,7 @@ impl RootView {
     /// Folds a viewer message in; returns whether nothing else is owed it.
     pub(crate) fn on_viewer_message(
         &mut self,
+        _host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,

@@ -2081,7 +2081,7 @@ impl RootView {
             .and_then(Option::as_ref)
     }
 
-    /// Asks the daemon to scan each DIR or SH container's folder for a
+    /// Asks each DIR or SH container's own host to scan its folder for a
     /// `.code-workspace` file, once per distinct folder on a connection.
     fn scan_unseen_cwd_paths(&mut self) {
         if !self.conn().is_open() {
@@ -2100,7 +2100,7 @@ impl RootView {
             }
             self.cwd_workspace_scans.insert(key, None);
             self.send_to(
-                &HostKey::Local,
+                &self.host_of_container(&container.key),
                 ClientMessage::ScanVscodeWorkspaces { path },
             );
         }
@@ -2867,7 +2867,12 @@ impl RootView {
     /// A branch-name reply for the launch-last wait: the spawn goes out with
     /// the fresh name. Only the reply echoing the wait's own `request_id`
     /// finishes it, so the spawn dialog's suggestion does not.
-    fn on_launch_last_message(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
+    fn on_launch_last_message(
+        &mut self,
+        _host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
         let DaemonMessage::BranchNameSuggestion {
             target,
             name,
@@ -3582,17 +3587,18 @@ impl RootView {
     /// nothing else is owed it.
     fn on_panel_message(
         &mut self,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.on_fetch_message(msg, window, cx)
-            || self.on_diff_message(msg, window, cx)
-            || self.on_viewer_message(msg, window, cx)
-            || self.on_dashboard_message(msg, window, cx)
-            || self.on_sc_message(msg, window, cx)
-            || self.on_stash_message(msg, window, cx)
-            || self.apply_history(msg, cx)
+        self.on_fetch_message(host, msg, window, cx)
+            || self.on_diff_message(host, msg, window, cx)
+            || self.on_viewer_message(host, msg, window, cx)
+            || self.on_dashboard_message(host, msg, window, cx)
+            || self.on_sc_message(host, msg, window, cx)
+            || self.on_stash_message(host, msg, window, cx)
+            || self.apply_history(host, msg, cx)
     }
 
     /// Folds the message into the sidebar, and forgets the remembered
@@ -3662,21 +3668,21 @@ impl RootView {
         // snapshot changed is read from the old one.
         let (moved, exit_discard, finished) = self.before_fold(host, &msg);
         self.fold_sidebar(host, &msg, cx);
-        self.on_import_message(&msg, window, cx);
+        self.on_import_message(host, &msg, window, cx);
         if let Some(discard) = exit_discard {
             self.send_to(host, discard);
         }
         // Windows deactivates a window it minimizes, so a minimized window
         // counts as not focused.
-        self.notify_on(&msg, finished, window.is_window_active(), cx);
-        if self.on_panel_message(&msg, window, cx) {
+        self.notify_on(host, &msg, finished, window.is_window_active(), cx);
+        if self.on_panel_message(host, &msg, window, cx) {
             return;
         }
         self.drop_stale_session_ui(window, cx);
-        self.on_spawn_dialog_message(&msg, window, cx);
-        self.on_launch_last_message(&msg, cx);
+        self.on_spawn_dialog_message(host, &msg, window, cx);
+        self.on_launch_last_message(host, &msg, cx);
         self.on_dialog_message(host, &msg, window, cx);
-        if self.on_vscode_message(&msg, window, cx) {
+        if self.on_vscode_message(host, &msg, window, cx) {
             return;
         }
         // Tabs are This PC's layout: a remote host's tab messages fold nowhere.
@@ -3688,7 +3694,7 @@ impl RootView {
         if self.fold_tabs_and_drop_stale_menus(host, &msg, window, cx) {
             return;
         }
-        if self.on_notice_message(&msg, cx) {
+        if self.on_notice_message(host, &msg, cx) {
             return;
         }
         self.dispatch_message(host, msg, moved, window, cx);
@@ -3798,7 +3804,12 @@ impl RootView {
 
     /// Shows the daemon's start-up resume report as one toast; a later report
     /// replaces it in place. Returns whether `msg` was that report.
-    fn on_resume_report(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+    fn on_resume_report(
+        &mut self,
+        _host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let DaemonMessage::ResumeReport {
             resumed,
             left_in_recover,
@@ -3813,7 +3824,12 @@ impl RootView {
     /// Shows a session's agent exit as one toast, keyed by the session so a
     /// second exit updates it in place; an exit for a session this client
     /// does not list raises nothing. Returns whether `msg` was that notice.
-    fn on_agent_exited(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+    fn on_agent_exited(
+        &mut self,
+        _host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let DaemonMessage::AgentExited { session_id } = msg else {
             return false;
         };
@@ -3837,9 +3853,14 @@ impl RootView {
     /// Shows the daemon's notices that raise only a toast: the start-up
     /// resume, an agent's exit and a session notice. Returns whether `msg`
     /// was one.
-    fn on_notice_message(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
-        self.on_resume_report(msg, cx)
-            || self.on_agent_exited(msg, cx)
+    fn on_notice_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.on_resume_report(host, msg, cx)
+            || self.on_agent_exited(host, msg, cx)
             || self.on_session_notice(msg, cx)
     }
 
@@ -3857,7 +3878,9 @@ impl RootView {
         let label = session
             .agent
             .as_ref()
-            .and_then(|id| crate::agent_options::descriptor_for(&self.agents, id))
+            .and_then(|id| {
+                crate::agent_options::descriptor_for(self.sidebar.session_agents(session_id), id)
+            })
             .map(|descriptor| descriptor.label.clone());
         if let Some(spec) = notices::session_notice_toast(session_id, label.as_deref(), notice) {
             self.push_toast_spec(spec, cx);

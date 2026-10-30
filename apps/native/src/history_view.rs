@@ -76,7 +76,12 @@ impl RootView {
 
     /// A daemon message for the History; `true` when it was an error the
     /// History answered for, which nothing else may take.
-    pub(crate) fn apply_history(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn apply_history(
+        &mut self,
+        _host: &crate::target::HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) -> bool {
         match self.history.apply(msg) {
             Applied::Ignored => false,
             Applied::Changed => {

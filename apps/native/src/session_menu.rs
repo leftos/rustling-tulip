@@ -1074,8 +1074,8 @@ impl RootView {
     /// Whether the container a menu names is still there.
     fn container_listed(&self, container: &MenuContainer) -> bool {
         match container {
-            MenuContainer::Repo(id) => self.sidebar.repos().iter().any(|repo| &repo.id == id),
-            MenuContainer::Workspace(id) => self.sidebar.workspaces().iter().any(|ws| &ws.id == id),
+            MenuContainer::Repo(id) => self.sidebar.find_repo(id).is_some(),
+            MenuContainer::Workspace(id) => self.sidebar.find_workspace(id).is_some(),
             MenuContainer::Tab(id) => self.tabs.tabs().iter().any(|tab| &tab.id == id),
         }
     }
@@ -1099,11 +1099,12 @@ impl RootView {
             .map(str::to_owned)
     }
 
-    /// Whether the repo or workspace `level` names is registered.
+    /// Whether the repo or workspace `level` names is registered on any
+    /// host.
     fn level_listed(&self, level: &Level) -> bool {
         match level {
-            Level::Repo(id) => self.sidebar.repos().iter().any(|repo| &repo.id == id),
-            Level::Workspace(id) => self.sidebar.workspaces().iter().any(|ws| &ws.id == id),
+            Level::Repo(id) => self.sidebar.find_repo(id).is_some(),
+            Level::Workspace(id) => self.sidebar.find_workspace(id).is_some(),
             Level::Session(_) | Level::App => false,
         }
     }

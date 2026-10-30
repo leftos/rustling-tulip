@@ -1299,6 +1299,12 @@ impl SidebarModel {
         &self.local.sessions
     }
 
+    /// `host`'s sessions, in its daemon's order; none for a remote host
+    /// that never sent a list.
+    pub fn sessions_of(&self, host: &HostKey) -> &[SessionSnapshot] {
+        self.slice(host).map_or(&[], |slice| &slice.sessions)
+    }
+
     /// Every host's sessions, This PC's first, then the remote hosts' in
     /// order.
     pub fn all_sessions(&self) -> impl Iterator<Item = &SessionSnapshot> {

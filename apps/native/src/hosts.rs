@@ -276,9 +276,22 @@ impl RootView {
             .map_or(HostKey::Local, |(host, _)| host)
     }
 
-    /// The host that owns container `id`, a repo or a workspace; This PC
-    /// for an id no host registered.
+    /// The host that owns container `id`: a repo or workspace id, or a
+    /// sidebar container key. A key carrying a connected remote host's
+    /// prefix names that host, so its DIR and SH containers resolve too; a
+    /// `repo:` or `ws:` key resolves by the id it holds. This PC for
+    /// anything else.
     pub(crate) fn host_of_container(&self, id: &str) -> HostKey {
+        if let Some((name, _)) = id.split_once("::") {
+            let host = HostKey::Remote(name.to_owned());
+            if self.hosts.get(&host).is_some() {
+                return host;
+            }
+        }
+        let id = id
+            .strip_prefix("repo:")
+            .or_else(|| id.strip_prefix("ws:"))
+            .unwrap_or(id);
         match self.sidebar.find_repo(id) {
             Some((host, _)) => host,
             None => self.host_of_workspace(id),

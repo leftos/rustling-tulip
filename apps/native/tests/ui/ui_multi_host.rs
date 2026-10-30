@@ -5,13 +5,14 @@ use crate::support;
 
 use std::collections::BTreeMap;
 
-use gpui::{Modifiers, TestAppContext};
+use gpui::{Modifiers, Pixels, Point, TestAppContext, point};
 use protocol::{
-    AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValue, RemoteState, SessionSnapshot,
+    AgentId, ClientMessage, ContainerRef, DaemonMessage, KeepAwakeMode, OptionValue, RemoteState,
+    SessionSnapshot,
 };
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetEvent, toast_action_selector};
-use support::{Fixture, Harness, PROTOCOL, TestDir, repo, session, welcome};
+use support::{Fixture, Harness, PROTOCOL, TestDir, pane, repo, session, tab, welcome};
 
 #[gpui::test]
 fn the_window_opens_one_connection_for_the_boot_target(cx: &mut TestAppContext) {
@@ -341,6 +342,175 @@ fn a_remote_sessions_menu_offers_what_a_remote_host_allows(cx: &mut TestAppConte
         reveal_tip(&mut h, "leaf-a1"),
         None,
         "This PC's session keeps Reveal"
+    );
+}
+
+/// The point 30% across the row `selector`, `fy` down its height.
+fn on_row(h: &mut Harness<'_>, selector: &str, fy: f32) -> Point<Pixels> {
+    let row = h.bounds(selector);
+    assert!(row.size.height > Pixels::ZERO, "{selector} is on screen");
+    point(
+        row.origin.x + row.size.width * 0.3,
+        row.origin.y + row.size.height * fy,
+    )
+}
+
+/// The container orders among `sent`.
+fn container_orders(sent: Vec<ClientMessage>) -> Vec<Vec<ContainerRef>> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ReorderContainers { ordered } => Some(ordered),
+            _ => None,
+        })
+        .collect()
+}
+
+fn repo_ref(id: &str) -> ContainerRef {
+    ContainerRef::Repo(id.to_owned())
+}
+
+#[gpui::test]
+fn dragging_containers_sends_each_host_only_its_own_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/r1"), repo("r2", "D:/r2")],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r3", "D:/r3"), repo("r4", "D:/r4")],
+    });
+    h.sent();
+    h.host(&remote()).sent();
+
+    let from = on_row(&mut h, "container-repo:r2", 0.5);
+    let to = on_row(&mut h, "container-repo:r1", 0.2);
+    h.start_drag(from);
+    h.drag_to(to);
+    h.release(to);
+
+    assert_eq!(
+        container_orders(h.sent()),
+        [vec![repo_ref("r2"), repo_ref("r1")]],
+        "This PC gets only its own containers, in the new order"
+    );
+    assert_eq!(
+        container_orders(h.host(&remote()).sent()),
+        [vec![repo_ref("r3"), repo_ref("r4")]],
+        "the remote host gets only its own, in their order"
+    );
+}
+
+#[gpui::test]
+fn a_remote_shell_folder_is_scanned_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("a1").in_repo("gone").build()),
+    );
+    h.sent();
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").dir_shell("D:/remote/dir").build()],
+    });
+    let scans = |sent: Vec<ClientMessage>| -> Vec<String> {
+        sent.into_iter()
+            .filter_map(|msg| match msg {
+                ClientMessage::ScanVscodeWorkspaces { path } => Some(path),
+                _ => None,
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        scans(h.host(&remote()).sent()),
+        ["D:\\remote\\dir"],
+        "the remote folder is scanned on the remote host"
+    );
+    assert!(scans(h.sent()).is_empty(), "This PC is not asked");
+}
+
+#[gpui::test]
+fn removing_a_remote_repo_lists_its_own_hosts_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, vec![session("b1").in_repo("r2").build()]);
+    h.host(&remote()).send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    h.sent();
+    h.host(&remote()).sent();
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    h.sent();
+    h.host(&remote()).sent();
+    h.click_on("container-menu-remove");
+
+    assert_eq!(
+        h.root(|root, _| root.repo_remove_session_rows()),
+        ["b1 (claude)"],
+        "the dialog lists the remote host's live session"
+    );
+    h.click_on("repo-remove-stop-and-remove");
+    let remote_sent = h.host(&remote()).sent();
+    assert!(
+        matches!(remote_sent.as_slice(), [
+            ClientMessage::StopSession { session_id, .. },
+            ClientMessage::RemoveRepo { repo_id },
+        ] if session_id == "b1" && repo_id == "r2"),
+        "the stop and the removal go to the remote host: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        local_sent.is_empty(),
+        "nothing goes to This PC: {local_sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_remote_sessions_list_never_counts_as_this_pcs_import(cx: &mut TestAppContext) {
+    const HOME: &str = "home.tail1234.ts.net";
+    let dir = TestDir::new();
+    let ui = serde_json::json!({
+        "saved_hosts": [{ "name": HOME, "port": 8787 }],
+        "host_session_counts": { HOME: 3 },
+    });
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::to_vec_pretty(&ui).expect("serialize native-ui.json"),
+    )
+    .expect("write native-ui.json");
+    let fixture = Fixture {
+        sessions: (1..=3).map(|i| session(&format!("s{i}")).build()).collect(),
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOME, None), &fixture);
+    assert!(
+        !h.root(|root, _| root.import_modal_open()),
+        "3 recorded, 3 arrived"
+    );
+
+    h.send_welcome(PROTOCOL);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+    h.send(DaemonMessage::Sessions {
+        sessions: fixture.sessions.clone(),
+    });
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+
+    assert!(
+        !h.root(|root, _| root.import_modal_open()),
+        "the other host's list is not the layout home's first list"
     );
 }
 
