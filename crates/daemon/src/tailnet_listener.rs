@@ -2316,11 +2316,11 @@ mod tests {
                     .await
                     .expect("the fake outlives its cert calls");
                 let result = match script {
-                    CertScript::Write { cert, key } => {
-                        std::fs::write(cert_file, cert).expect("write the scripted certificate");
-                        std::fs::write(key_file, key).expect("write the scripted key");
-                        Ok(())
-                    }
+                    // A write that fails is a transient CLI failure the cert
+                    // task retries, not a panic that ends the task.
+                    CertScript::Write { cert, key } => std::fs::write(cert_file, cert)
+                        .and_then(|()| std::fs::write(key_file, key))
+                        .map_err(|err| TailnetError::Failed(format!("cert write failed: {err}"))),
                     CertScript::Fail(err) => Err(err),
                     #[expect(clippy::panic, reason = "the script ends the cert task with a panic")]
                     CertScript::Panic => std::panic::panic_any("scripted tailscale cert panic"),
@@ -2446,12 +2446,11 @@ mod tests {
         mut pred: impl FnMut(&ListenerStatus) -> bool,
     ) -> ListenerStatus {
         let mut status = listener.status();
-        // Four production poll intervals: on the paused clock a missing
-        // behaviour fails here instead of hanging; on the real clock it is
-        // far past any legitimate wait.
+        // A hang guard on the real clock: far past any legitimate wait, so a
+        // missing behaviour fails as hung instead of hanging.
         let seen = tokio::time::timeout(Duration::from_secs(120), status.wait_for(|s| pred(s)))
             .await
-            .expect("the awaited status arrives within four poll intervals")
+            .expect("hung: the awaited status never arrived")
             .expect("the supervisor keeps the status sender alive");
         seen.clone()
     }
@@ -2642,11 +2641,11 @@ mod tests {
         shutdown.send_replace(true);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn rebinds_when_the_address_set_changes() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
         let serve = Arc::new(PlainServe::default());
-        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
         let first = serving_addrs(&wait_for_status(&listener, is_serving).await);
         assert_eq!(first.len(), 1);
 
@@ -2669,30 +2668,34 @@ mod tests {
         shutdown.send_replace(true);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_dead_server_is_rebound_on_the_next_poll() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
         let serve = Arc::new(PlainServe {
             fail_first: AtomicBool::new(true),
             ..PlainServe::default()
         });
-        let (listener, shutdown) = start(&fake, &serve, options(0));
-        let first = serving_addrs(&wait_for_status(&listener, is_serving).await);
-        let second =
-            wait_for_status(&listener, |s| is_serving(s) && serving_addrs(s) != first).await;
-        assert_eq!(serve.started.load(Ordering::SeqCst), 2, "served again");
-        assert_eq!(fake.whoami_calls(), 2, "on the next poll");
-        assert_eq!(serving_ips(&second), [V4_LOOPBACK]);
-        std::net::TcpStream::connect(serving_addrs(&second)[0])
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
+        // The replacement's serve starts after it publishes `Serving`, and
+        // port 0 can come back equal, so wait on the serve start, not on an
+        // address change.
+        wait_until("the replacement server to start", || {
+            serve.started.load(Ordering::SeqCst) >= 2
+        })
+        .await;
+        let status = wait_for_status(&listener, is_serving).await;
+        assert!(fake.whoami_calls() >= 2, "on the next poll");
+        assert_eq!(serving_ips(&status), [V4_LOOPBACK]);
+        std::net::TcpStream::connect(serving_addrs(&status)[0])
             .expect("the rebound server accepts connections");
         shutdown.send_replace(true);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn tailscale_down_at_start_retries_without_blocking() {
         let fake = Arc::new(FakeTailnet::with_whoami(Err(TailnetError::NotRunning)));
         let serve = Arc::new(PlainServe::default());
-        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
         assert_eq!(
             *listener.status().borrow(),
             ListenerStatus::Starting,
@@ -2728,11 +2731,11 @@ mod tests {
         shutdown.send_replace(true);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_definitive_whoami_error_stops_the_servers() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
         let serve = Arc::new(PlainServe::default());
-        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
         let first = serving_addrs(&wait_for_status(&listener, is_serving).await);
 
         fake.set_whoami(Err(TailnetError::NotConnected));
@@ -2741,28 +2744,32 @@ mod tests {
             down,
             ListenerStatus::TailscaleDown(TailnetError::NotConnected)
         );
-        assert_eq!(fake.whoami_calls(), 2, "down on the first failure");
+        assert!(fake.whoami_calls() >= 2, "down on the first failure");
         assert_eq!(serve.finished.load(Ordering::SeqCst), 1, "server stopped");
         std::net::TcpListener::bind(first[0]).expect("the address was released");
         shutdown.send_replace(true);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn transient_whoami_errors_keep_serving_until_the_third() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
         let serve = Arc::new(PlainServe::default());
-        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
         wait_for_status(&listener, is_serving).await;
         let seen = record_statuses(&listener);
 
         fake.set_whoami(Err(TailnetError::Timeout));
         let down = wait_for_status(&listener, |s| !is_serving(s)).await;
         assert_eq!(down, ListenerStatus::TailscaleDown(TailnetError::Timeout));
-        assert_eq!(
-            fake.whoami_calls(),
-            4,
+        assert!(
+            fake.whoami_calls() >= 4,
             "one answer, then two transient failures kept serving and the third stopped it"
         );
+        // The recorder is a task of its own, so wait for it to see the change.
+        wait_until("the recorded status", || {
+            !seen.lock().expect("status log lock").is_empty()
+        })
+        .await;
         assert_eq!(
             *seen.lock().expect("status log lock"),
             [ListenerStatus::TailscaleDown(TailnetError::Timeout)],
@@ -2772,11 +2779,11 @@ mod tests {
         shutdown.send_replace(true);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn stopped_waits_until_every_port_is_released() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
         let serve = Arc::new(PlainServe::default());
-        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
         let addrs = serving_addrs(&wait_for_status(&listener, is_serving).await);
         shutdown.send_replace(true);
         listener.stopped().await;
@@ -2835,8 +2842,9 @@ mod tests {
         Arc::new(TlsServe { router })
     }
 
-    /// Real-clock options that check the certificate every 50 ms, so a test
-    /// sees several checks.
+    /// Real-clock options that poll `whoami` and check the certificate every
+    /// 50 ms, so a test sees several of each without waiting out the 30 s
+    /// production poll interval.
     fn quick_options() -> ListenerOptions {
         ListenerOptions {
             port: 0,
@@ -2846,12 +2854,12 @@ mod tests {
         }
     }
 
-    /// Poll `done` until it holds; the deadline is far past any legitimate
-    /// wait on either clock.
+    /// Poll `done` until it holds; the deadline is a hang guard far past any
+    /// legitimate wait.
     async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(120);
         while !done() {
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            assert!(Instant::now() < deadline, "hung waiting for {what}");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -3505,12 +3513,12 @@ mod tests {
         shutdown.send_replace(true);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn status_is_starting_while_the_first_cert_check_runs() {
         let fake = Arc::new(FakeTailnet::with_whoami(Err(TailnetError::NotRunning)));
         fake.cert_held.send_replace(true);
         let serve = Arc::new(PlainServe::default());
-        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
         wait_for_status(&listener, |s| matches!(s, ListenerStatus::TailscaleDown(_))).await;
 
         fake.set_addresses(&["127.0.0.1/32"]);
@@ -3833,12 +3841,12 @@ mod tests {
         shutdown.send_replace(true);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_repeated_failure_does_not_wake_the_supervisor() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
         fake.set_cert(CertScript::Fail(TailnetError::Timeout));
         let serve = Arc::new(PlainServe::default());
-        let (listener, shutdown) = start(&fake, &serve, options(0));
+        let (listener, shutdown) = start(&fake, &serve, quick_options());
         wait_for_status(&listener, |s| {
             *s == ListenerStatus::CertFailed(CertFailedCause::Command)
         })

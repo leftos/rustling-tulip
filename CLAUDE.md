@@ -85,6 +85,8 @@ cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test u
 
 Tests run with cargo-nextest although the full suite measured 1.41x slower than `cargo test`, because the daemon's git-fixture tests (RT-70) dominate it. `.config/nextest.toml` sets fail-fast off, no retries, a 60 s slow-timeout that kills a test still running at 300 s (a hang guard; it fails as TIMEOUT) and a `serial-live` test group that runs `e2e_live`, `e2e_recover`, `e2e_remote`, `e2e_ssh` and `smoke_window` one at a time, with a 120 s period killed at 720 s. The protocol, tracer-protocol and daemon-client crates set `doctest = false`.
 
+On a paused tokio clock (`#[tokio::test(start_paused = true)]`) a `timeout` or `wait_until` deadline is a count of timer steps, not a hang guard: tokio skips idle virtual time in microseconds of real time, so any real OS call on the awaited path (a socket bind, a file read) that fails for a few milliseconds fails the test. A test whose wait crosses real I/O runs on the real clock with short intervals and waits on the event, its deadline a hang guard that fails as `hung`; only tests that assert a virtual schedule stay paused, with the OS kept off their path.
+
 The repo is in `test mode: stable`: every landed change's last gate runs the full suite (`cargo nextest run --workspace --cargo-profile test-release`). The **test map**, `tools/test-map.json` (keys `central`, `ignore`, `rows` of source paths to nextest filtersets), still drives `.\rt.ps1 test -Reached` for a quick run while iterating.
 
 The release step is cutting a versioned release from the Linear release pipeline's `vNext`, only after a green full suite (procedure: `docs/release.md`); `v0.1.0-alpha` was the first.
