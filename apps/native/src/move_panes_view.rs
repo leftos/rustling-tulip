@@ -12,6 +12,7 @@ use crate::move_panes::{Control, LayoutChoice, MovePanes, NAME_LABEL, NAME_PLACE
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::tabs::collect_panes;
+use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{BORDER, HOVER_BG, MUTED, RootView};
 
@@ -161,7 +162,7 @@ impl RootView {
         }
         tracing::info!(tab = %dialog.model.tab_id(), "moving panes to a new tab");
         self.tabs.note_layout_request(&msg);
-        self.send(msg);
+        self.send_to(&HostKey::Local, msg);
         self.close_move_panes(window, cx);
     }
 

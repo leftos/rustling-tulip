@@ -14,6 +14,7 @@ use crate::overlay_owner::Overlay;
 use crate::pane_close::PaneClose;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator};
 use crate::tabs::{collect_panes, pick_balanced_drop_target};
+use crate::target::HostKey;
 use crate::undo;
 use crate::{RootView, tooltip};
 
@@ -208,7 +209,7 @@ impl RootView {
             request_id: Some(request_id),
         };
         self.tabs.note_layout_request(&msg);
-        self.send(msg);
+        self.send_to(&HostKey::Local, msg);
     }
 
     /// Moves `pane_id` of `tab_id` into grid tab `dst_tab_id` at its
@@ -276,7 +277,7 @@ impl RootView {
         }
         let message = drop.message();
         self.tabs.note_layout_request(&message);
-        self.send(message);
+        self.send_to(&HostKey::Local, message);
         if drop.swap {
             self.tabs.focus_pane(&drop.dst_tab_id, &drop.dst_pane_id);
         }
@@ -309,11 +310,14 @@ impl RootView {
                 let request_id = crate::new_request_id();
                 self.tabs
                     .mark_closing_if_last_pane(&tab_id, Some(&request_id));
-                self.send(ClientMessage::ClosePane {
-                    tab_id,
-                    pane_id,
-                    request_id: Some(request_id),
-                });
+                self.send_to(
+                    &HostKey::Local,
+                    ClientMessage::ClosePane {
+                        tab_id,
+                        pane_id,
+                        request_id: Some(request_id),
+                    },
+                );
             }
         }
         self.close_empty_pane_menu(window, cx);

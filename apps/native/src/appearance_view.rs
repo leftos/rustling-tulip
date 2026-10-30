@@ -341,7 +341,7 @@ impl RootView {
             || self.fetch_dialog.is_some()
             || self.delete_dialog.is_some()
             || self.notices.has_modal()
-            || self.conn.overlay().is_some();
+            || self.conn().overlay().is_some();
         if blocked {
             return;
         }
@@ -644,14 +644,20 @@ impl RootView {
         }
         match level {
             Level::Session(id) => self.send_session_appearance(&id, &view.own, &change),
-            Level::Repo(repo_id) => self.send(ClientMessage::SetRepoAppearance {
-                repo_id,
-                appearance,
-            }),
-            Level::Workspace(workspace_id) => self.send(ClientMessage::SetWorkspaceAppearance {
-                workspace_id,
-                appearance,
-            }),
+            Level::Repo(repo_id) => self.send_to(
+                &self.host_of_repo(&repo_id),
+                ClientMessage::SetRepoAppearance {
+                    repo_id,
+                    appearance,
+                },
+            ),
+            Level::Workspace(workspace_id) => self.send_to(
+                &self.host_of_workspace(&workspace_id),
+                ClientMessage::SetWorkspaceAppearance {
+                    workspace_id,
+                    appearance,
+                },
+            ),
             Level::App => self.set_app_appearance(&appearance, cx),
         }
         cx.notify();

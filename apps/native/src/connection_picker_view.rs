@@ -36,6 +36,7 @@ use crate::palette::{
 };
 use crate::session_menu::backdrop;
 use crate::ssh::DEFAULT_REMOTE_COMMAND;
+use crate::target::HostKey;
 use crate::target::{DEFAULT_TAILNET_PORT, SshHost, TailnetHost, Target};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 
@@ -241,7 +242,7 @@ impl RootView {
             .rows()
             .into_iter()
             .map(|row| {
-                let current = row.target == *self.conn.target();
+                let current = row.target == *self.conn().target();
                 (row.label, current)
             })
             .collect()
@@ -295,7 +296,7 @@ impl RootView {
 
     /// What the picker knows about `row` for its second line and chip.
     fn row_facts(&self, dialog: &ConnectionPickerDialog, row: &Row) -> RowFacts {
-        let current = row.target == *self.conn.target();
+        let current = row.target == *self.conn().target();
         let host = match (row.kind, &row.target) {
             (RowKind::Local, _) => RowHost::ThisPc,
             (RowKind::Peer, _) => RowHost::Peer,
@@ -304,7 +305,7 @@ impl RootView {
         };
         let sessions_last_time = row
             .target
-            .session_count_key()
+            .host_key()
             .and_then(|key| self.sidebar.host_session_count(&key))
             .and_then(|count| usize::try_from(count).ok());
         RowFacts {
@@ -317,7 +318,7 @@ impl RootView {
                 .map(str::to_owned),
             current,
             live: if current {
-                LiveState::from_state(self.conn.state())
+                LiveState::from_state(self.conn().state())
             } else {
                 None
             },
@@ -426,7 +427,7 @@ impl RootView {
         let current = picker
             .rows()
             .iter()
-            .position(|row| row.target == *self.conn.target())
+            .position(|row| row.target == *self.conn().target())
             .unwrap_or(0);
         let scan = self.start_connection_scan(window, cx);
         self.close_flyout();
@@ -810,7 +811,7 @@ impl RootView {
     /// the pairing dialog. The current host, while it does not know this
     /// PC, opens the pairing dialog instead.
     fn switch_to_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        let current = target == *self.conn.target();
+        let current = target == *self.conn().target();
         let pair_current = current && self.device_pairing_offered();
         if !current {
             let host = SavedHost::from_target(&target);
@@ -823,7 +824,7 @@ impl RootView {
             }
             self.sidebar.set_last_target(host);
             self.save_ui();
-            self.command(NetCommand::SwitchTarget(target));
+            self.command_to(&HostKey::Local, NetCommand::SwitchTarget(target));
         }
         self.close_connection_picker(window, cx);
         if pair_current {
@@ -835,7 +836,7 @@ impl RootView {
     /// tailnet host's device token deleted with it; forgetting the current
     /// host switches to this PC. The picker stays open.
     fn forget_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.conn.target().clone();
+        let current = self.conn().target().clone();
         let Some(dialog) = &mut self.connection_picker else {
             return;
         };
@@ -843,7 +844,7 @@ impl RootView {
             return;
         };
         let was_current = dialog.picker.forget(&row.target, &current);
-        if let Some(key) = row.target.session_count_key() {
+        if let Some(key) = row.target.host_key() {
             self.sidebar.forget_host_session_count(&key);
         }
         let rows = dialog.picker.rows().len();
@@ -851,7 +852,7 @@ impl RootView {
         self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
         if was_current {
             self.sidebar.set_last_target(None);
-            self.command(NetCommand::SwitchTarget(Target::Local));
+            self.command_to(&HostKey::Local, NetCommand::SwitchTarget(Target::Local));
         }
         self.save_ui();
         if let Target::Tailnet(host) = &row.target {

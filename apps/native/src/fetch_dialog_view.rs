@@ -104,7 +104,7 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.stash.drop.is_some()
             || self.notices.has_modal()
-            || self.conn.overlay().is_some();
+            || self.conn().overlay().is_some();
         if blocked || self.capabilities().opens_local_files() {
             return;
         }

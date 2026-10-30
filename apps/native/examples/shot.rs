@@ -43,11 +43,11 @@ use protocol::{
 use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
-use rustling_tulip_native::target::SshHost;
+use rustling_tulip_native::target::{SshHost, Target};
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, ViewerLoad, bind_keys,
+    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, Transport, ViewerLoad, bind_keys,
     remote_access::Autostart,
 };
 use serde_json::{Value, json};
@@ -471,9 +471,18 @@ fn deps(
     let pick_file: FilePicker = Rc::new(|_: &mut App, _: Option<PathBuf>, _: FileFilter| {
         futures::future::ready(None).boxed_local()
     });
+    // The fake daemon's channels serve the first connection; a later one
+    // gets a pair nothing answers.
+    let first = RefCell::new(Some((tx, events)));
+    let open_host: Transport = Rc::new(move |_: &Target| {
+        first.borrow_mut().take().unwrap_or_else(|| {
+            let (tx, _) = unbounded();
+            let (_, events) = unbounded();
+            (tx, events)
+        })
+    });
     RootDeps {
-        tx,
-        events,
+        open_host,
         ui_dir: Some(ui_dir.to_path_buf()),
         paths: Err("the shot has no config dir".to_owned()),
         wanted: None,

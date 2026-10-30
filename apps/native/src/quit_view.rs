@@ -15,6 +15,7 @@ use crate::notice_view::modal_panel;
 use crate::quit::{BODY, Counts, ExitButton, ExitDialog, TITLE, Walk, covered, removal_messages};
 use crate::session_menu::backdrop;
 use crate::session_menu::{ConfirmOwner, dialog_button};
+use crate::target::HostKey;
 use crate::{DANGER, MUTED, RootView};
 
 /// Quits the app: `cx.quit()` in the binary, a recorder in the specs.
@@ -86,7 +87,7 @@ impl RootView {
             return Vec::new();
         };
         let counts = self.exit_counts();
-        let connected = self.conn.is_open();
+        let connected = self.conn().is_open();
         exit.model
             .buttons(counts)
             .into_iter()
@@ -107,7 +108,7 @@ impl RootView {
         let exit = self.exit.as_ref()?;
         let focused = exit
             .model
-            .focused(self.exit_counts(), self.conn.is_open())?;
+            .focused(self.exit_counts(), self.conn().is_open())?;
         Some(focused.selector().to_owned())
     }
 
@@ -140,7 +141,7 @@ impl RootView {
             return false;
         }
         let active = self.exit_counts().active;
-        let connected = self.conn.is_open();
+        let connected = self.conn().is_open();
         if !connected || !self.sessions_loaded || active == 0 {
             tracing::info!(
                 connected,
@@ -206,7 +207,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let connected = self.conn.is_open();
+        let connected = self.conn().is_open();
         if !self
             .exit
             .as_ref()
@@ -246,7 +247,7 @@ impl RootView {
             before = before.len(),
             "exit dialog: shutting the daemon down"
         );
-        self.command(NetCommand::Shutdown { before, drain });
+        self.command_to(&HostKey::Local, NetCommand::Shutdown { before, drain });
         let now = (self.now)();
         if let Some(exit) = &mut self.exit {
             exit.model.start_stopping(pressed, now);
@@ -384,15 +385,15 @@ impl RootView {
             // A close before the network thread sent the shutdown predates
             // it: `ShutdownFailed` follows and the dialog stays.
             if exit.model.is_sent()
-                && !matches!(self.conn.state(), State::Open { .. } | State::Connecting)
+                && !matches!(self.conn().state(), State::Open { .. } | State::Connecting)
             {
-                tracing::info!(state = ?self.conn.state(), "exit dialog: the connection closed; quitting");
+                tracing::info!(state = ?self.conn().state(), "exit dialog: the connection closed; quitting");
                 self.request_quit(cx);
             }
             return;
         }
         if exit.model.walk().is_some() {
-            if !self.conn.is_open() {
+            if !self.conn().is_open() {
                 self.delete_dialog = None;
                 self.cancel_exit_walk(window, cx);
                 return;
@@ -473,7 +474,7 @@ impl RootView {
             return true;
         }
         let counts = self.exit_counts();
-        let connected = self.conn.is_open();
+        let connected = self.conn().is_open();
         let Some(exit) = &mut self.exit else {
             return true;
         };
@@ -498,7 +499,7 @@ impl RootView {
     pub(crate) fn exit_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let model = &self.exit.as_ref()?.model;
         let counts = self.exit_counts();
-        let connected = self.conn.is_open();
+        let connected = self.conn().is_open();
         let focused = model.focused(counts, connected);
         let buttons: Vec<AnyElement> = model
             .buttons(counts)
