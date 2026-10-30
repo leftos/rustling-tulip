@@ -101,8 +101,7 @@ impl RootView {
         let open_viewers = undo::take_open_viewers(&mut entry, self.tabs.tabs(), &live);
         let known: HashSet<String> = self
             .sidebar
-            .sessions()
-            .iter()
+            .all_sessions()
             .map(|session| session.id.clone())
             .collect();
         let messages = undo::restore_messages(&entry, &live, &known);

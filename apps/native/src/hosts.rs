@@ -1,9 +1,8 @@
 //! The window's connections, one per host, and the routing that picks which
 //! host a message goes to.
 
-use std::collections::HashMap;
-
 use futures::channel::mpsc::UnboundedSender;
+use gpui::{Context, Window};
 use protocol::{ClientMessage, PresetTarget, SpawnTarget, SuggestTarget};
 
 use crate::RootView;
@@ -31,10 +30,11 @@ impl HostConn {
 }
 
 /// The window's connections: This PC's, always present because it is the
-/// layout home, and one per remote host by its host key.
+/// layout home, and one per remote host by its host key, in the order
+/// they joined.
 pub(crate) struct Hosts {
     local: HostConn,
-    remote: HashMap<String, HostConn>,
+    remote: Vec<(String, HostConn)>,
 }
 
 impl Hosts {
@@ -42,7 +42,7 @@ impl Hosts {
     pub(crate) fn new(local: HostConn) -> Self {
         Self {
             local,
-            remote: HashMap::new(),
+            remote: Vec::new(),
         }
     }
 
@@ -55,7 +55,11 @@ impl Hosts {
     pub(crate) fn get(&self, key: &HostKey) -> Option<&HostConn> {
         match key {
             HostKey::Local => Some(&self.local),
-            HostKey::Remote(name) => self.remote.get(name),
+            HostKey::Remote(name) => self
+                .remote
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, conn)| conn),
         }
     }
 
@@ -63,8 +67,22 @@ impl Hosts {
     pub(crate) fn get_mut(&mut self, key: &HostKey) -> Option<&mut HostConn> {
         match key {
             HostKey::Local => Some(&mut self.local),
-            HostKey::Remote(name) => self.remote.get_mut(name),
+            HostKey::Remote(name) => self
+                .remote
+                .iter_mut()
+                .find(|(key, _)| key == name)
+                .map(|(_, conn)| conn),
         }
+    }
+
+    /// Adds remote host `name`'s connection after the others; returns
+    /// false, adding nothing, when the window already holds one to it.
+    pub(crate) fn insert(&mut self, name: String, conn: HostConn) -> bool {
+        if self.remote.iter().any(|(key, _)| *key == name) {
+            return false;
+        }
+        self.remote.push((name, conn));
+        true
     }
 }
 
@@ -74,6 +92,31 @@ impl RootView {
     /// that assumes so, and it goes once the window holds one per host.
     pub(crate) fn conn(&self) -> &Connection {
         &self.hosts.local().conn
+    }
+
+    /// `host`'s connection; `None` when the window has none to it.
+    pub(crate) fn conn_of(&self, host: &HostKey) -> Option<&Connection> {
+        self.hosts.get(host).map(|entry| &entry.conn)
+    }
+
+    /// Opens a connection to `target`'s host beside the ones the window
+    /// holds and handles its events from then on. This PC's connection is
+    /// the window's first, so a `target` on This PC, or a host the window
+    /// already holds, opens nothing.
+    pub fn connect_host(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        let HostKey::Remote(name) = HostKey::of(&target) else {
+            tracing::warn!(
+                "connect_host: This PC is the window's first connection; opened nothing"
+            );
+            return;
+        };
+        if self.hosts.get(&HostKey::Remote(name.clone())).is_some() {
+            tracing::info!("connect_host: the window already holds host {name}");
+            return;
+        }
+        let (tx, events) = (self.open_host)(&target);
+        self.hosts.insert(name.clone(), HostConn::new(tx, target));
+        Self::forward_net_events(HostKey::Remote(name), events, window, cx);
     }
 
     /// The handshake of the daemon the window shows, once it reported one.
@@ -129,58 +172,49 @@ impl RootView {
         self.command_to(host, NetCommand::Send(Box::new(msg)));
     }
 
-    /// The host that owns session `id`. The window holds one host; this
-    /// looks the session's host up once the sidebar is per host.
-    #[expect(
-        clippy::unused_self,
-        reason = "the window holds one host; the lookup reads the sidebar once it is per host"
-    )]
-    pub(crate) fn host_of_session(&self, _id: &str) -> HostKey {
-        HostKey::Local
+    /// The host that lists session `id`; This PC for a session no host
+    /// lists.
+    pub(crate) fn host_of_session(&self, id: &str) -> HostKey {
+        self.sidebar
+            .find_session(id)
+            .map_or(HostKey::Local, |(host, _)| host)
     }
 
-    /// The host that owns repo `id`. The window holds one host; this looks
-    /// the repo's host up once the sidebar is per host.
-    #[expect(
-        clippy::unused_self,
-        reason = "the window holds one host; the lookup reads the sidebar once it is per host"
-    )]
-    pub(crate) fn host_of_repo(&self, _id: &str) -> HostKey {
-        HostKey::Local
+    /// The host that registered repo `id`; This PC for a repo no host
+    /// lists.
+    pub(crate) fn host_of_repo(&self, id: &str) -> HostKey {
+        self.sidebar
+            .find_repo(id)
+            .map_or(HostKey::Local, |(host, _)| host)
     }
 
-    /// The host that owns workspace `id`. The window holds one host; this
-    /// looks the workspace's host up once the sidebar is per host.
-    #[expect(
-        clippy::unused_self,
-        reason = "the window holds one host; the lookup reads the sidebar once it is per host"
-    )]
-    pub(crate) fn host_of_workspace(&self, _id: &str) -> HostKey {
-        HostKey::Local
+    /// The host that registered workspace `id`; This PC for a workspace no
+    /// host lists.
+    pub(crate) fn host_of_workspace(&self, id: &str) -> HostKey {
+        self.sidebar
+            .find_workspace(id)
+            .map_or(HostKey::Local, |(host, _)| host)
     }
 
-    /// The host that owns container `id`, a repo or a workspace. The window
-    /// holds one host; this looks the container's host up once the sidebar
-    /// is per host.
-    #[expect(
-        clippy::unused_self,
-        reason = "the window holds one host; the lookup reads the sidebar once it is per host"
-    )]
-    pub(crate) fn host_of_container(&self, _id: &str) -> HostKey {
-        HostKey::Local
+    /// The host that owns container `id`, a repo or a workspace; This PC
+    /// for an id no host registered.
+    pub(crate) fn host_of_container(&self, id: &str) -> HostKey {
+        match self.sidebar.find_repo(id) {
+            Some((host, _)) => host,
+            None => self.host_of_workspace(id),
+        }
     }
 }
 
 impl RootView {
-    /// The host that owns the repo or workspace a spawn `target` names. The
-    /// window holds one host; this looks the container's host up once the
-    /// sidebar is per host.
-    #[expect(
-        clippy::unused_self,
-        reason = "the window holds one host; the lookup reads the sidebar once it is per host"
-    )]
-    pub(crate) fn host_of_target(&self, _target: &SpawnTarget) -> HostKey {
-        HostKey::Local
+    /// The host that owns the repo or workspace a spawn `target` names;
+    /// This PC for a standalone spawn.
+    pub(crate) fn host_of_target(&self, target: &SpawnTarget) -> HostKey {
+        match target {
+            SpawnTarget::Single { repo_id, .. } => self.host_of_repo(repo_id),
+            SpawnTarget::Workspace { workspace_id, .. } => self.host_of_workspace(workspace_id),
+            SpawnTarget::Standalone { .. } => HostKey::Local,
+        }
     }
 
     /// The host that owns the repo or workspace a preset `target` names.

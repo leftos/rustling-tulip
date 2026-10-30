@@ -268,7 +268,7 @@ impl RootView {
             let label = self
                 .sidebar
                 .session(&session)
-                .map(|s| display_label(s, &self.agents))?;
+                .map(|s| display_label(s, self.sidebar.agents(&crate::target::HostKey::Local)))?;
             let plural = if count == 1 { "" } else { "s" };
             return Some(ScContext {
                 text: format!("{label} · {count} repo{plural}"),

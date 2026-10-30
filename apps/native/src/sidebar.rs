@@ -22,6 +22,7 @@ use crate::launch_last;
 use crate::popouts::{PopoutKey, SavedPopout};
 use crate::source_control::{Part, ScKey, ScUiState};
 use crate::tabs::collect_panes;
+use crate::target::HostKey;
 use crate::window_state::WindowState;
 
 /// The sidebar layout file, in the client's config dir.
@@ -1005,10 +1006,13 @@ impl Default for UiState {
     }
 }
 
-/// The daemon's registry as the sidebar sees it, plus the attention set and
-/// the layout.
+/// The key [`SidebarModel::slices`] names This PC's slice by.
+static LOCAL_HOST: HostKey = HostKey::Local;
+
+/// One host's part of the sidebar: the registry, sessions and agents its
+/// daemon sent, and the orders and sets kept from them.
 #[derive(Debug, Default)]
-pub struct SidebarModel {
+struct HostSlice {
     repos: Vec<RepoEntry>,
     repos_loaded: bool,
     workspaces: Vec<WorkspaceEntry>,
@@ -1022,6 +1026,153 @@ pub struct SidebarModel {
     /// Agent sessions whose turn ended while this client showed another
     /// session focused, until the user looks at them.
     unseen: HashSet<String>,
+}
+
+impl HostSlice {
+    /// Folds a whole-list or order message into the slice, replacing what
+    /// it held of that list; messages it does not track are ignored.
+    fn apply(&mut self, msg: &DaemonMessage, focused: Option<&str>) {
+        match msg {
+            DaemonMessage::Repos { repos } => {
+                repos.clone_into(&mut self.repos);
+                self.repos_loaded = true;
+            }
+            DaemonMessage::Workspaces { workspaces } => workspaces.clone_into(&mut self.workspaces),
+            DaemonMessage::ContainersReordered { ordered } => {
+                ordered.clone_into(&mut self.container_order);
+            }
+            DaemonMessage::SessionsReordered {
+                container_id,
+                ordered_ids,
+            } => {
+                self.session_order
+                    .insert(container_id.clone(), ordered_ids.clone());
+            }
+            _ => self.apply_session_message(msg, focused),
+        }
+    }
+
+    fn apply_session_message(&mut self, msg: &DaemonMessage, focused: Option<&str>) {
+        match msg {
+            DaemonMessage::Sessions { sessions } => {
+                for session in sessions {
+                    let before = self.turn_state(&session.id);
+                    self.note_turn(before, session, focused);
+                }
+                self.unseen
+                    .retain(|id| sessions.iter().any(|s| &s.id == id));
+                sessions.clone_into(&mut self.sessions);
+            }
+            DaemonMessage::SessionUpdated { session, .. } => self.update_session(session, focused),
+            DaemonMessage::SessionRemoved { session_id } => {
+                self.sessions.retain(|s| &s.id != session_id);
+                self.attention.remove(session_id);
+                self.unseen.remove(session_id);
+            }
+            DaemonMessage::Attention { session_id, .. } => {
+                self.attention.insert(session_id.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// Replace or append the session; a session that settled back into
+    /// working, idle or spawning on its own no longer needs attention.
+    fn update_session(&mut self, session: &SessionSnapshot, focused: Option<&str>) {
+        let before = self.turn_state(&session.id);
+        self.note_turn(before, session, focused);
+        match self.sessions.iter_mut().find(|s| s.id == session.id) {
+            Some(existing) => existing.clone_from(session),
+            None => self.sessions.push(session.clone()),
+        }
+        if matches!(
+            session.status,
+            SessionStatus::Working | SessionStatus::Idle | SessionStatus::Spawning
+        ) {
+            self.attention.remove(&session.id);
+        }
+    }
+
+    fn session(&self, id: &str) -> Option<&SessionSnapshot> {
+        self.sessions.iter().find(|s| s.id == id)
+    }
+
+    /// The listed session's status and background flag, before an update
+    /// replaces them.
+    fn turn_state(&self, id: &str) -> Option<(SessionStatus, bool)> {
+        self.session(id).map(|s| (s.status, s.background))
+    }
+
+    /// An agent session whose turn ends while another session is shown
+    /// focused joins the unseen set: it goes idle with no background work
+    /// left, from working or from idle with background work. Any status but
+    /// idle leaves the set, so it holds only idle sessions.
+    fn note_turn(
+        &mut self,
+        before: Option<(SessionStatus, bool)>,
+        session: &SessionSnapshot,
+        focused: Option<&str>,
+    ) {
+        let turn_running = matches!(
+            before,
+            Some((SessionStatus::Working, _) | (SessionStatus::Idle, true))
+        );
+        match session.status {
+            SessionStatus::Idle
+                if turn_running
+                    && !session.background
+                    && session.mode != SessionMode::PlainShell
+                    && focused != Some(session.id.as_str()) =>
+            {
+                self.unseen.insert(session.id.clone());
+            }
+            SessionStatus::Idle => {}
+            _ => {
+                self.unseen.remove(&session.id);
+            }
+        }
+    }
+
+    /// The container tree's inputs from this slice, folded by `collapsed`.
+    fn tree_inputs<'a>(&'a self, collapsed: &'a BTreeSet<String>) -> TreeInputs<'a> {
+        TreeInputs {
+            repos: &self.repos,
+            workspaces: &self.workspaces,
+            sessions: &self.sessions,
+            agents: &self.agents,
+            container_order: &self.container_order,
+            session_order: &self.session_order,
+            attention: &self.attention,
+            unseen: &self.unseen,
+            collapsed,
+        }
+    }
+
+    /// Whether the registry is in and holds a repo or a workspace.
+    fn has_registry(&self) -> bool {
+        self.repos_loaded && !(self.repos.is_empty() && self.workspaces.is_empty())
+    }
+}
+
+/// The key a container of `host` folds by: This PC's keeps the plain `key`,
+/// a remote host's carries its host key in front, `<host key>::<key>`, so
+/// two hosts' `detached` rows or equal folders never share a fold.
+#[must_use]
+pub fn host_container_key(host: &HostKey, key: &str) -> String {
+    match host.wire() {
+        None => key.to_owned(),
+        Some(name) => format!("{name}::{key}"),
+    }
+}
+
+/// Every daemon's registry as the sidebar sees it, one slice per host, plus
+/// the window's own layout.
+#[derive(Debug, Default)]
+pub struct SidebarModel {
+    /// This PC's slice, the layout home's.
+    local: HostSlice,
+    /// The remote hosts' slices, in the order they first sent one.
+    remote: Vec<(HostKey, HostSlice)>,
     /// The session this client shows focused, as the root last reported it
     /// before folding a message in.
     focused: Option<String>,
@@ -1044,17 +1195,6 @@ impl SidebarModel {
         }
     }
 
-    /// Forgets everything the daemon sent, as a switch to another daemon
-    /// must; the layout in `ui` is this PC's and stays.
-    pub fn clear_daemon_state(&mut self) {
-        let ui = std::mem::take(&mut self.ui);
-        let closed_popouts = std::mem::take(&mut self.closed_popouts);
-        let theme_base = self.theme_base;
-        *self = Self::new(ui);
-        self.closed_popouts = closed_popouts;
-        self.theme_base = theme_base;
-    }
-
     /// Makes `base` the bottom of every appearance cascade, as a theme
     /// switch does.
     pub fn set_theme_base(&mut self, base: ThemeBase) {
@@ -1067,110 +1207,96 @@ impl SidebarModel {
         self.theme_base
     }
 
-    /// Keeps the daemon's agents, in its order, as a connection sends them.
-    pub fn set_agents(&mut self, agents: Vec<AgentDescriptor>) {
-        self.agents = agents;
+    /// Every host's slice, This PC's first, then the remote hosts in order.
+    fn slices(&self) -> impl Iterator<Item = (&HostKey, &HostSlice)> {
+        std::iter::once((&LOCAL_HOST, &self.local))
+            .chain(self.remote.iter().map(|(host, slice)| (host, slice)))
     }
 
-    /// The daemon's agents, in its order, as the connection last sent them.
+    /// `host`'s slice; `None` for a remote host that never sent one.
+    fn slice(&self, host: &HostKey) -> Option<&HostSlice> {
+        match host {
+            HostKey::Local => Some(&self.local),
+            HostKey::Remote(_) => self
+                .remote
+                .iter()
+                .find(|(key, _)| key == host)
+                .map(|(_, slice)| slice),
+        }
+    }
+
+    /// `host`'s slice, to update; a remote host's first one joins the end.
+    fn slice_mut(&mut self, host: &HostKey) -> &mut HostSlice {
+        if *host == HostKey::Local {
+            return &mut self.local;
+        }
+        let index = self
+            .remote
+            .iter()
+            .position(|(key, _)| key == host)
+            .unwrap_or_else(|| {
+                self.remote.push((host.clone(), HostSlice::default()));
+                self.remote.len() - 1
+            });
+        &mut self.remote[index].1
+    }
+
+    /// The slice that lists session `id`, else This PC's.
+    fn slice_of_session(&self, id: &str) -> &HostSlice {
+        self.slices()
+            .map(|(_, slice)| slice)
+            .find(|slice| slice.session(id).is_some())
+            .unwrap_or(&self.local)
+    }
+
+    /// Forgets everything `host`'s daemon sent, as a switch of its
+    /// connection to another daemon must; other hosts' slices and the
+    /// layout in `ui`, which is this PC's, stay. A remote host keeps its
+    /// place in the order; This PC's also forgets the focused session, a
+    /// session of the layout home.
+    pub fn clear_host(&mut self, host: &HostKey) {
+        if *host == HostKey::Local {
+            self.focused = None;
+        }
+        if let Some(slice) = match host {
+            HostKey::Local => Some(&mut self.local),
+            HostKey::Remote(_) => self
+                .remote
+                .iter_mut()
+                .find(|(key, _)| key == host)
+                .map(|(_, slice)| slice),
+        } {
+            *slice = HostSlice::default();
+        }
+    }
+
+    /// Keeps `host`'s agents, in its daemon's order, as its connection
+    /// sends them.
+    pub fn set_agents(&mut self, host: &HostKey, agents: Vec<AgentDescriptor>) {
+        self.slice_mut(host).agents = agents;
+    }
+
+    /// `host`'s agents, in its daemon's order, as its connection last sent
+    /// them; empty for a host that sent none.
     #[must_use]
-    pub fn agents(&self) -> &[AgentDescriptor] {
-        &self.agents
+    pub fn agents(&self, host: &HostKey) -> &[AgentDescriptor] {
+        self.slice(host).map_or(&[], |slice| &slice.agents)
     }
 
-    /// Fold a daemon message into the model; messages it does not track are
-    /// ignored.
-    pub fn apply(&mut self, msg: &DaemonMessage) {
-        match msg {
-            DaemonMessage::Repos { repos } => {
-                repos.clone_into(&mut self.repos);
-                self.repos_loaded = true;
-            }
-            DaemonMessage::Workspaces { workspaces } => workspaces.clone_into(&mut self.workspaces),
-            DaemonMessage::ContainersReordered { ordered } => {
-                ordered.clone_into(&mut self.container_order);
-            }
-            DaemonMessage::SessionsReordered {
-                container_id,
-                ordered_ids,
-            } => {
-                self.session_order
-                    .insert(container_id.clone(), ordered_ids.clone());
-            }
-            _ => self.apply_session_message(msg),
-        }
+    /// The agents of the host that lists session `id`, This PC's for a
+    /// session no host lists: a session's label and chips read its own
+    /// host's descriptors.
+    #[must_use]
+    pub fn session_agents(&self, id: &str) -> &[AgentDescriptor] {
+        &self.slice_of_session(id).agents
     }
 
-    fn apply_session_message(&mut self, msg: &DaemonMessage) {
-        match msg {
-            DaemonMessage::Sessions { sessions } => {
-                for session in sessions {
-                    let before = self.turn_state(&session.id);
-                    self.note_turn(before, session);
-                }
-                self.unseen
-                    .retain(|id| sessions.iter().any(|s| &s.id == id));
-                sessions.clone_into(&mut self.sessions);
-            }
-            DaemonMessage::SessionUpdated { session, .. } => self.update_session(session),
-            DaemonMessage::SessionRemoved { session_id } => {
-                self.sessions.retain(|s| &s.id != session_id);
-                self.attention.remove(session_id);
-                self.unseen.remove(session_id);
-            }
-            DaemonMessage::Attention { session_id, .. } => {
-                self.attention.insert(session_id.clone());
-            }
-            _ => {}
-        }
-    }
-
-    /// Replace or append the session; a session that settled back into
-    /// working, idle or spawning on its own no longer needs attention.
-    fn update_session(&mut self, session: &SessionSnapshot) {
-        let before = self.turn_state(&session.id);
-        self.note_turn(before, session);
-        match self.sessions.iter_mut().find(|s| s.id == session.id) {
-            Some(existing) => existing.clone_from(session),
-            None => self.sessions.push(session.clone()),
-        }
-        if matches!(
-            session.status,
-            SessionStatus::Working | SessionStatus::Idle | SessionStatus::Spawning
-        ) {
-            self.attention.remove(&session.id);
-        }
-    }
-
-    /// The listed session's status and background flag, before an update
-    /// replaces them.
-    fn turn_state(&self, id: &str) -> Option<(SessionStatus, bool)> {
-        self.session(id).map(|s| (s.status, s.background))
-    }
-
-    /// An agent session whose turn ends while another session is shown
-    /// focused joins the unseen set: it goes idle with no background work
-    /// left, from working or from idle with background work. Any status but
-    /// idle leaves the set, so it holds only idle sessions.
-    fn note_turn(&mut self, before: Option<(SessionStatus, bool)>, session: &SessionSnapshot) {
-        let turn_running = matches!(
-            before,
-            Some((SessionStatus::Working, _) | (SessionStatus::Idle, true))
-        );
-        match session.status {
-            SessionStatus::Idle
-                if turn_running
-                    && !session.background
-                    && session.mode != SessionMode::PlainShell
-                    && self.focused.as_deref() != Some(session.id.as_str()) =>
-            {
-                self.unseen.insert(session.id.clone());
-            }
-            SessionStatus::Idle => {}
-            _ => {
-                self.unseen.remove(&session.id);
-            }
-        }
+    /// Fold a message from `host`'s daemon into that host's slice; a whole
+    /// list replaces only that host's list, and messages the model does not
+    /// track are ignored.
+    pub fn apply(&mut self, host: &HostKey, msg: &DaemonMessage) {
+        let focused = self.focused.clone();
+        self.slice_mut(host).apply(msg, focused.as_deref());
     }
 
     /// Records the session this client shows focused, so a turn that ends
@@ -1181,62 +1307,127 @@ impl SidebarModel {
 
     /// The user looked at the session: its finished turn is seen.
     pub fn mark_seen(&mut self, id: &str) {
-        self.unseen.remove(id);
+        self.local.unseen.remove(id);
+        for (_, slice) in &mut self.remote {
+            slice.unseen.remove(id);
+        }
     }
 
     /// Whether the session's last turn ended unseen.
     pub fn is_unseen(&self, id: &str) -> bool {
-        self.unseen.contains(id)
+        self.slices().any(|(_, slice)| slice.unseen.contains(id))
     }
 
-    pub fn sessions(&self) -> &[SessionSnapshot] {
-        &self.sessions
+    /// This PC's sessions, the layout home's.
+    pub fn local_sessions(&self) -> &[SessionSnapshot] {
+        &self.local.sessions
     }
 
-    /// How many sessions are abandoned, the set `ResumeAllAbandoned` acts
-    /// on.
+    /// Every host's sessions, This PC's first, then the remote hosts' in
+    /// order.
+    pub fn all_sessions(&self) -> impl Iterator<Item = &SessionSnapshot> {
+        self.slices().flat_map(|(_, slice)| slice.sessions.iter())
+    }
+
+    /// How many of This PC's sessions are abandoned, the set
+    /// `ResumeAllAbandoned` acts on.
     #[must_use]
     pub fn abandoned_count(&self) -> usize {
-        self.sessions.iter().filter(|s| s.is_abandoned).count()
+        self.local
+            .sessions
+            .iter()
+            .filter(|s| s.is_abandoned)
+            .count()
     }
 
-    /// The registered repos, in the daemon's order.
+    /// This PC's registered repos, in its daemon's order.
     pub fn repos(&self) -> &[RepoEntry] {
-        &self.repos
+        &self.local.repos
     }
 
-    /// Whether the daemon's repo list has arrived.
+    /// Whether This PC's repo list has arrived.
     pub fn repos_loaded(&self) -> bool {
-        self.repos_loaded
+        self.local.repos_loaded
     }
 
-    /// The registered workspaces, in the daemon's order.
+    /// This PC's registered workspaces, in its daemon's order.
     pub fn workspaces(&self) -> &[WorkspaceEntry] {
-        &self.workspaces
+        &self.local.workspaces
     }
 
     /// The spawn config `container` last launched with, when it has one.
     #[must_use]
     pub fn last_spawn_config(&self, container: launch_last::Container<'_>) -> Option<SpawnConfig> {
-        launch_last::stored_config(container, &self.repos, &self.workspaces)
-    }
-
-    pub fn session(&self, id: &str) -> Option<&SessionSnapshot> {
-        self.sessions.iter().find(|s| s.id == id)
-    }
-
-    pub fn containers(&self) -> Vec<Container> {
-        build_containers(&TreeInputs {
-            repos: &self.repos,
-            workspaces: &self.workspaces,
-            sessions: &self.sessions,
-            agents: &self.agents,
-            container_order: &self.container_order,
-            session_order: &self.session_order,
-            attention: &self.attention,
-            unseen: &self.unseen,
-            collapsed: &self.ui.collapsed_containers,
+        self.slices().find_map(|(_, slice)| {
+            launch_last::stored_config(container, &slice.repos, &slice.workspaces)
         })
+    }
+
+    /// Session `id`, on whichever host lists it.
+    pub fn session(&self, id: &str) -> Option<&SessionSnapshot> {
+        self.find_session(id).map(|(_, session)| session)
+    }
+
+    /// Session `id` and the host that lists it.
+    #[must_use]
+    pub fn find_session(&self, id: &str) -> Option<(HostKey, &SessionSnapshot)> {
+        self.slices()
+            .find_map(|(host, slice)| slice.session(id).map(|session| (host.clone(), session)))
+    }
+
+    /// Repo `id` and the host that registered it.
+    #[must_use]
+    pub fn find_repo(&self, id: &str) -> Option<(HostKey, &RepoEntry)> {
+        self.slices().find_map(|(host, slice)| {
+            slice
+                .repos
+                .iter()
+                .find(|repo| repo.id == id)
+                .map(|repo| (host.clone(), repo))
+        })
+    }
+
+    /// Workspace `id` and the host that registered it.
+    #[must_use]
+    pub fn find_workspace(&self, id: &str) -> Option<(HostKey, &WorkspaceEntry)> {
+        self.slices().find_map(|(host, slice)| {
+            slice
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == id)
+                .map(|workspace| (host.clone(), workspace))
+        })
+    }
+
+    /// Every host's containers, This PC's first, then each remote host's in
+    /// order, a remote host's keys carrying its host key
+    /// ([`host_container_key`]).
+    pub fn containers(&self) -> Vec<Container> {
+        let collapsed = &self.ui.collapsed_containers;
+        self.slices()
+            .flat_map(|(host, slice)| {
+                let built = build_containers(&slice.tree_inputs(collapsed));
+                built.into_iter().map(move |mut container| {
+                    if *host != HostKey::Local {
+                        container.key = host_container_key(host, &container.key);
+                        container.collapsed = collapsed.contains(&container.key);
+                    }
+                    container
+                })
+            })
+            .collect()
+    }
+
+    /// The keys of every host's repo and workspace containers a live
+    /// session counts for ([`active_container_keys`]).
+    fn active_keys(&self) -> HashSet<String> {
+        self.slices()
+            .flat_map(|(host, slice)| {
+                active_container_keys(&slice.repos, &slice.workspaces, &slice.sessions)
+                    .into_iter()
+                    .map(move |key| host_container_key(host, &key))
+            })
+            .collect()
     }
 
     /// The repos view's containers in the order its rows show:
@@ -1245,7 +1436,7 @@ impl SidebarModel {
     /// repo and workspace rows a live session works in or the Needs You list
     /// shows.
     pub fn display_containers(&self) -> Vec<Container> {
-        let active = active_container_keys(&self.repos, &self.workspaces, &self.sessions);
+        let active = self.active_keys();
         let sorted = sort_containers(self.containers(), self.repo_sort(), &active);
         if self.repo_filter() == RepoFilter::All {
             return sorted;
@@ -1261,14 +1452,13 @@ impl SidebarModel {
     }
 
     /// Whether the repos view's Active filter has left the body without a
-    /// repo or workspace row: the view is Repos, the daemon's registry is in
+    /// repo or workspace row: the view is Repos, a daemon's registry is in
     /// and holds one, and none of `shown` is a repo or workspace.
     #[must_use]
     pub fn active_filter_empty(&self, shown: &[Container]) -> bool {
         self.sidebar_view() == SidebarView::Repos
             && self.repo_filter() == RepoFilter::Active
-            && self.repos_loaded
-            && !(self.repos.is_empty() && self.workspaces.is_empty())
+            && self.slices().any(|(_, slice)| slice.has_registry())
             && !shown
                 .iter()
                 .any(|c| matches!(c.kind, ContainerKind::Repo | ContainerKind::Workspace))
@@ -1278,7 +1468,7 @@ impl SidebarModel {
     /// group under the chosen [`RepoSort`] ([`sort_group`]); false when
     /// either row is not there.
     pub fn same_sort_group(&self, a: &str, b: &str) -> bool {
-        let active = active_container_keys(&self.repos, &self.workspaces, &self.sessions);
+        let active = self.active_keys();
         let sort = self.repo_sort();
         let containers = self.containers();
         let group = |key: &str| {
@@ -1291,34 +1481,42 @@ impl SidebarModel {
         a.is_some() && a == group(b)
     }
 
-    /// The tabs view's containers for `tabs`, in the daemon's tab order.
+    /// The tabs view's containers for `tabs`, This PC's layout, in the
+    /// daemon's tab order.
     pub fn tab_containers(&self, tabs: &[TabEntry]) -> Vec<Container> {
+        let local = &self.local;
         build_tab_containers(
             tabs,
-            &self.sessions,
-            &self.agents,
+            &local.sessions,
+            &local.agents,
             &TabRollups {
-                session_order: &self.session_order,
-                attention: &self.attention,
-                unseen: &self.unseen,
+                session_order: &local.session_order,
+                attention: &local.attention,
+                unseen: &local.unseen,
             },
             &self.ui.collapsed_containers,
         )
     }
 
-    /// Takes `ordered` as the manual container order at once, before the
-    /// daemon's broadcast of it arrives; that broadcast writes the same
+    /// Takes `ordered` as `host`'s manual container order at once, before
+    /// its daemon's broadcast of it arrives; that broadcast writes the same
     /// order, and one that disagrees replaces it.
-    pub fn reorder_containers_local(&mut self, ordered: &[ContainerRef]) {
-        ordered.clone_into(&mut self.container_order);
+    pub fn reorder_containers_local(&mut self, host: &HostKey, ordered: &[ContainerRef]) {
+        ordered.clone_into(&mut self.slice_mut(host).container_order);
     }
 
-    /// Takes `ordered_ids` as the manual session order of the workspace,
-    /// repo or tab `container_id` at once, before the daemon's broadcast of
-    /// it arrives; that broadcast writes the same order, and one that
-    /// disagrees replaces it.
-    pub fn reorder_sessions_local(&mut self, container_id: &str, ordered_ids: &[String]) {
-        self.session_order
+    /// Takes `ordered_ids` as the manual session order of `host`'s
+    /// workspace, repo or tab `container_id` at once, before its daemon's
+    /// broadcast of it arrives; that broadcast writes the same order, and
+    /// one that disagrees replaces it.
+    pub fn reorder_sessions_local(
+        &mut self,
+        host: &HostKey,
+        container_id: &str,
+        ordered_ids: &[String],
+    ) {
+        self.slice_mut(host)
+            .session_order
             .insert(container_id.to_owned(), ordered_ids.to_vec());
     }
 
@@ -1362,7 +1560,10 @@ impl SidebarModel {
     }
 
     pub fn clear_attention(&mut self, id: &str) {
-        self.attention.remove(id);
+        self.local.attention.remove(id);
+        for (_, slice) in &mut self.remote {
+            slice.attention.remove(id);
+        }
     }
 
     pub fn toggle_container(&mut self, key: &str) {
@@ -1776,8 +1977,7 @@ impl SidebarModel {
 
     /// Each session's resolved accent, `0xRRGGBB`, by session id.
     pub fn session_accents(&self) -> HashMap<&str, u32> {
-        self.sessions
-            .iter()
+        self.all_sessions()
             .map(|session| {
                 (
                     session.id.as_str(),
@@ -1787,11 +1987,14 @@ impl SidebarModel {
             .collect()
     }
 
+    /// `session`'s appearance through the containers of the host that lists
+    /// it (This PC's for none).
     fn resolve(&self, session: Option<&SessionSnapshot>) -> Resolved {
+        let slice = session.map_or(&self.local, |s| self.slice_of_session(&s.id));
         appearance::resolve(
             session,
-            &self.repos,
-            &self.workspaces,
+            &slice.repos,
+            &slice.workspaces,
             AppLevel {
                 font: &self.ui.terminal_font,
                 theme: self.theme_base,
@@ -2958,57 +3161,249 @@ pub(crate) mod tests {
     fn sidebar_keeps_repos_and_workspaces_in_daemon_order() {
         let mut model = SidebarModel::default();
         assert!(model.repos().is_empty() && model.workspaces().is_empty());
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("zeta", "C:/z"), repo("alpha", "C:/a")],
-        });
-        model.apply(&DaemonMessage::Workspaces {
-            workspaces: vec![workspace("w2", &["zeta"]), workspace("w1", &["alpha"])],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("zeta", "C:/z"), repo("alpha", "C:/a")],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![workspace("w2", &["zeta"]), workspace("w1", &["alpha"])],
+            },
+        );
         let repos: Vec<&str> = model.repos().iter().map(|r| r.id.as_str()).collect();
         let workspaces: Vec<&str> = model.workspaces().iter().map(|w| w.id.as_str()).collect();
         assert_eq!(repos, ["zeta", "alpha"], "not sorted by name");
         assert_eq!(workspaces, ["w2", "w1"]);
-        model.apply(&DaemonMessage::Repos { repos: Vec::new() });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos { repos: Vec::new() },
+        );
         assert!(model.repos().is_empty(), "a new snapshot replaces the old");
     }
 
     #[test]
     fn clear_daemon_state_keeps_the_ui_state() {
         let mut model = SidebarModel::default();
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("r1", "C:/r1")],
-        });
-        model.apply(&DaemonMessage::Workspaces {
-            workspaces: vec![workspace("w1", &["r1"])],
-        });
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![in_repo("s1", "r1")],
-        });
-        model.apply(&DaemonMessage::SessionsReordered {
-            container_id: "r1".to_owned(),
-            ordered_ids: vec!["s1".to_owned()],
-        });
-        model.apply(&DaemonMessage::Attention {
-            session_id: "s1".to_owned(),
-            reason: AttentionReason::AwaitingInput,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "C:/r1")],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![workspace("w1", &["r1"])],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("s1", "r1")],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionsReordered {
+                container_id: "r1".to_owned(),
+                ordered_ids: vec!["s1".to_owned()],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Attention {
+                session_id: "s1".to_owned(),
+                reason: AttentionReason::AwaitingInput,
+            },
+        );
         model.set_focused_session(Some("s1"));
         assert!(model.set_active_tab(Some("t1")), "the UI value is set");
 
-        model.clear_daemon_state();
+        model.clear_host(&crate::target::HostKey::Local);
 
         assert!(model.repos().is_empty(), "the old daemon's repos are gone");
         assert!(!model.repos_loaded(), "the next host's list is awaited");
         assert!(model.workspaces().is_empty(), "and its workspaces");
-        assert!(model.sessions().is_empty(), "and its sessions");
-        assert!(model.session_order.is_empty(), "and its session order");
-        assert!(model.attention.is_empty(), "and its attention marks");
+        assert!(model.local_sessions().is_empty(), "and its sessions");
+        assert!(
+            model.local.session_order.is_empty(),
+            "and its session order"
+        );
+        assert!(model.local.attention.is_empty(), "and its attention marks");
         assert!(model.focused.is_none());
         assert_eq!(
             model.ui_state().active_tab_id.as_deref(),
             Some("t1"),
             "the layout is this PC's and stays"
         );
+    }
+
+    fn remote_host(name: &str) -> crate::target::HostKey {
+        crate::target::HostKey::Remote(name.to_owned())
+    }
+
+    fn sessions_msg(ids: &[&str]) -> DaemonMessage {
+        DaemonMessage::Sessions {
+            sessions: ids.iter().map(|id| session(id)).collect(),
+        }
+    }
+
+    fn ids<'a>(sessions: impl Iterator<Item = &'a SessionSnapshot>) -> Vec<&'a str> {
+        sessions.map(|s| s.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_hosts_session_list_replaces_only_its_own_slice() {
+        let local = crate::target::HostKey::Local;
+        let remote = remote_host("box");
+        let mut model = SidebarModel::default();
+        model.apply(&local, &sessions_msg(&["a1", "a2"]));
+        model.apply(&remote, &sessions_msg(&["b1"]));
+        model.apply(&remote, &sessions_msg(&["b2"]));
+        model.apply(
+            &remote,
+            &DaemonMessage::SessionRemoved {
+                session_id: "a1".to_owned(),
+            },
+        );
+
+        assert_eq!(ids(model.local_sessions().iter()), ["a1", "a2"]);
+        assert_eq!(ids(model.all_sessions()), ["a1", "a2", "b2"]);
+    }
+
+    #[test]
+    fn a_hosts_repo_list_leaves_the_other_hosts_repos() {
+        let remote = remote_host("box");
+        let mut model = SidebarModel::default();
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "C:/r1")],
+            },
+        );
+        model.apply(
+            &remote,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r2", "C:/r2")],
+            },
+        );
+
+        assert_eq!(model.repos().len(), 1, "This PC's list stays");
+        assert_eq!(
+            model.find_repo("r1").map(|(host, _)| host),
+            Some(crate::target::HostKey::Local)
+        );
+        assert_eq!(model.find_repo("r2").map(|(host, _)| host), Some(remote));
+        assert!(model.find_repo("r3").is_none());
+    }
+
+    #[test]
+    fn find_names_the_host_that_lists_the_item() {
+        let remote = remote_host("box");
+        let mut model = SidebarModel::default();
+        model.apply(&crate::target::HostKey::Local, &sessions_msg(&["a1"]));
+        model.apply(&remote, &sessions_msg(&["b1"]));
+        model.apply(
+            &remote,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![workspace("w2", &["r2"])],
+            },
+        );
+
+        assert_eq!(
+            model
+                .find_session("a1")
+                .map(|(host, s)| (host, s.id.as_str())),
+            Some((crate::target::HostKey::Local, "a1"))
+        );
+        assert_eq!(
+            model.find_session("b1").map(|(host, _)| host),
+            Some(remote.clone())
+        );
+        assert_eq!(model.session("b1").map(|s| s.id.as_str()), Some("b1"));
+        assert_eq!(
+            model.find_workspace("w2").map(|(host, _)| host),
+            Some(remote)
+        );
+        assert!(model.find_session("zz").is_none());
+    }
+
+    #[test]
+    fn all_sessions_go_local_first_then_remotes_in_the_order_they_came() {
+        let mut model = SidebarModel::default();
+        model.apply(&remote_host("second"), &sessions_msg(&["c1"]));
+        model.apply(&remote_host("third"), &sessions_msg(&["d1"]));
+        model.apply(&crate::target::HostKey::Local, &sessions_msg(&["a1"]));
+        model.apply(&remote_host("second"), &sessions_msg(&["c2"]));
+
+        assert_eq!(ids(model.all_sessions()), ["a1", "c2", "d1"]);
+    }
+
+    #[test]
+    fn clear_host_forgets_only_that_hosts_slice() {
+        let remote = remote_host("box");
+        let mut model = SidebarModel::default();
+        model.apply(&crate::target::HostKey::Local, &sessions_msg(&["a1"]));
+        model.apply(&remote, &sessions_msg(&["b1"]));
+        model.apply(&remote_host("other"), &sessions_msg(&["c1"]));
+        model.set_agents(&remote, agent_registry::descriptors());
+
+        model.clear_host(&remote);
+
+        assert_eq!(ids(model.all_sessions()), ["a1", "c1"]);
+        assert_eq!(model.agents(&remote), [], "its agents went too");
+        model.apply(&remote, &sessions_msg(&["b2"]));
+        assert_eq!(
+            ids(model.all_sessions()),
+            ["a1", "b2", "c1"],
+            "it keeps its place"
+        );
+    }
+
+    #[test]
+    fn each_host_keeps_its_own_agents() {
+        let mut model = SidebarModel::default();
+        model.set_agents(
+            &crate::target::HostKey::Local,
+            agent_registry::descriptors(),
+        );
+
+        assert_ne!(model.agents(&crate::target::HostKey::Local), []);
+        assert_eq!(model.agents(&remote_host("box")), []);
+    }
+
+    #[test]
+    fn a_remote_hosts_container_keys_carry_its_host_key() {
+        let remote = remote_host("box");
+        let mut model = SidebarModel::default();
+        let detached = DaemonMessage::Sessions {
+            sessions: vec![in_repo("a1", "gone")],
+        };
+        model.apply(&crate::target::HostKey::Local, &detached);
+        model.apply(
+            &remote,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("b1", "gone")],
+            },
+        );
+        model.toggle_container("box::detached");
+
+        let containers = model.containers();
+        assert_eq!(keys(&containers), ["detached", "box::detached"]);
+        let folded: Vec<bool> = containers.iter().map(|c| c.collapsed).collect();
+        assert_eq!(
+            folded,
+            [false, true],
+            "each host's row folds by its own key"
+        );
+        assert_eq!(
+            host_container_key(&crate::target::HostKey::Local, "cwd:C:/x"),
+            "cwd:C:/x"
+        );
+        assert_eq!(host_container_key(&remote, "cwd:C:/x"), "box::cwd:C:/x");
     }
 
     pub(crate) fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {
@@ -3794,10 +4189,16 @@ pub(crate) mod tests {
 
     fn model_with(sessions: Vec<SessionSnapshot>) -> SidebarModel {
         let mut model = SidebarModel::new(UiState::default());
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("r1", "D:\\r1")],
-        });
-        model.apply(&DaemonMessage::Sessions { sessions });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:\\r1")],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions { sessions },
+        );
         model
     }
 
@@ -3811,10 +4212,13 @@ pub(crate) mod tests {
     }
 
     fn flag(model: &mut SidebarModel, id: &str) {
-        model.apply(&DaemonMessage::Attention {
-            session_id: id.to_owned(),
-            reason: AttentionReason::AwaitingInput,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Attention {
+                session_id: id.to_owned(),
+                reason: AttentionReason::AwaitingInput,
+            },
+        );
     }
 
     #[test]
@@ -3839,10 +4243,13 @@ pub(crate) mod tests {
             flag(&mut model, "a");
             let mut updated = in_repo("a", "r1");
             updated.status = status;
-            model.apply(&DaemonMessage::SessionUpdated {
-                session: updated,
-                request_id: None,
-            });
+            model.apply(
+                &crate::target::HostKey::Local,
+                &DaemonMessage::SessionUpdated {
+                    session: updated,
+                    request_id: None,
+                },
+            );
             assert_eq!(attention_of(&model, "a"), !cleared, "status {status:?}");
         }
     }
@@ -3918,10 +4325,13 @@ pub(crate) mod tests {
     fn set_status(model: &mut SidebarModel, session: &SessionSnapshot, status: SessionStatus) {
         let mut updated = session.clone();
         updated.status = status;
-        model.apply(&DaemonMessage::SessionUpdated {
-            session: updated,
-            request_id: None,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionUpdated {
+                session: updated,
+                request_id: None,
+            },
+        );
     }
 
     /// `session` works, then its turn ends.
@@ -3948,10 +4358,13 @@ pub(crate) mod tests {
         let mut updated = session.clone();
         updated.status = SessionStatus::Idle;
         updated.background = background;
-        model.apply(&DaemonMessage::SessionUpdated {
-            session: updated,
-            request_id: None,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionUpdated {
+                session: updated,
+                request_id: None,
+            },
+        );
     }
 
     fn leaf_background(model: &SidebarModel, id: &str) -> Option<bool> {
@@ -3998,9 +4411,12 @@ pub(crate) mod tests {
         let a = in_repo("a", "r1");
         let mut model = model_with(vec![a.clone()]);
         set_status(&mut model, &a, SessionStatus::Working);
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![a.clone()],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![a.clone()],
+            },
+        );
         assert!(unseen_of(&model, "a"));
     }
 
@@ -4035,12 +4451,18 @@ pub(crate) mod tests {
                 "stopped" => set_status(&mut model, &a, SessionStatus::Stopped),
                 "asking" => set_status(&mut model, &a, SessionStatus::AwaitingInput),
                 "seen" => model.mark_seen("a"),
-                "removed" => model.apply(&DaemonMessage::SessionRemoved {
-                    session_id: "a".to_owned(),
-                }),
-                _ => model.apply(&DaemonMessage::Sessions {
-                    sessions: Vec::new(),
-                }),
+                "removed" => model.apply(
+                    &crate::target::HostKey::Local,
+                    &DaemonMessage::SessionRemoved {
+                        session_id: "a".to_owned(),
+                    },
+                ),
+                _ => model.apply(
+                    &crate::target::HostKey::Local,
+                    &DaemonMessage::Sessions {
+                        sessions: Vec::new(),
+                    },
+                ),
             }
             assert!(!model.is_unseen("a"), "{clear}");
         }
@@ -4058,14 +4480,20 @@ pub(crate) mod tests {
     #[test]
     fn session_messages_update_the_session_list() {
         let mut model = model_with(vec![in_repo("a", "r1")]);
-        model.apply(&DaemonMessage::SessionUpdated {
-            session: in_repo("b", "r1"),
-            request_id: None,
-        });
-        assert_eq!(model.sessions().len(), 2);
-        model.apply(&DaemonMessage::SessionRemoved {
-            session_id: "a".to_owned(),
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionUpdated {
+                session: in_repo("b", "r1"),
+                request_id: None,
+            },
+        );
+        assert_eq!(model.local_sessions().len(), 2);
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionRemoved {
+                session_id: "a".to_owned(),
+            },
+        );
         assert_eq!(leaf_ids(&model.containers(), "repo:r1"), ["b"]);
     }
 
@@ -5385,18 +5813,27 @@ pub(crate) mod tests {
     #[test]
     fn active_filter_leaves_out_the_repos_and_workspaces_with_no_live_session() {
         let mut model = SidebarModel::new(UiState::default());
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")],
-        });
-        model.apply(&DaemonMessage::Workspaces {
-            workspaces: vec![workspace("w1", &["r3"]), workspace("w2", &[])],
-        });
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![
-                in_repo("busy", "r1"),
-                shell("sh", None, SessionKind::Standalone),
-            ],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![workspace("w1", &["r3"]), workspace("w2", &[])],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![
+                    in_repo("busy", "r1"),
+                    shell("sh", None, SessionKind::Standalone),
+                ],
+            },
+        );
 
         let shown = model.display_containers();
         let mut all = keys(&shown);
@@ -5424,24 +5861,33 @@ pub(crate) mod tests {
             "before the daemon's registry arrives the view shows what All shows"
         );
 
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("r1", "D:/src/r1")],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:/src/r1")],
+            },
+        );
         let shown = model.display_containers();
         assert!(
             model.active_filter_empty(&shown),
             "no live session leaves the note"
         );
 
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![in_repo("busy", "r1")],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("busy", "r1")],
+            },
+        );
         let shown = model.display_containers();
         assert!(!model.active_filter_empty(&shown), "the repo shows");
 
-        model.apply(&DaemonMessage::Sessions {
-            sessions: Vec::new(),
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: Vec::new(),
+            },
+        );
         let shown = model.display_containers();
         assert!(model.active_filter_empty(&shown));
         assert!(model.set_sidebar_view(SidebarView::Tabs));
@@ -5454,14 +5900,20 @@ pub(crate) mod tests {
     #[test]
     fn active_filter_keeps_a_row_the_needs_you_list_shows() {
         let mut model = SidebarModel::new(UiState::default());
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")],
+            },
+        );
         let mut failed = in_repo("failed", "r2");
         failed.status = SessionStatus::Error;
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![failed],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![failed],
+            },
+        );
         flag(&mut model, "failed");
         assert!(model.set_repo_filter(RepoFilter::Active));
 
@@ -6133,9 +6585,12 @@ pub(crate) mod tests {
     #[test]
     fn tab_and_unbound_containers_fold_by_their_own_keys() {
         let mut model = SidebarModel::default();
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![session("s1"), session("s2")],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![session("s1"), session("s2")],
+            },
+        );
         let tabs = [tab("t1", &pane("p1", Some("s1")))];
         let folds = |model: &SidebarModel| -> Vec<(String, bool)> {
             model
@@ -6390,18 +6845,24 @@ pub(crate) mod tests {
     #[test]
     fn last_spawn_config_reads_the_repo_and_workspace_records() {
         let mut model = model_with(Vec::new());
-        model.apply(&DaemonMessage::Workspaces {
-            workspaces: vec![workspace("w1", &["r1"])],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![workspace("w1", &["r1"])],
+            },
+        );
         let repo_config = spawn_config(
             single_target("feat/x", None, false),
             SessionMode::Interactive,
         );
         let mut launched = repo("r1", "D:\\r1");
         launched.last_spawn_config = Some(repo_config.clone());
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![launched],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![launched],
+            },
+        );
 
         assert_eq!(
             model.last_spawn_config(launch_last::Container::Repo("r1")),
@@ -6431,9 +6892,12 @@ pub(crate) mod tests {
         ));
         let mut launched = workspace("w1", &["r1"]);
         launched.last_spawn_config = Some(workspace_config.clone());
-        model.apply(&DaemonMessage::Workspaces {
-            workspaces: vec![launched],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![launched],
+            },
+        );
 
         assert_eq!(
             model.last_spawn_config(launch_last::Container::Workspace("w1")),
@@ -6453,10 +6917,13 @@ pub(crate) mod tests {
         assert_eq!(model.abandoned_count(), 0);
         let mut abandoned = in_repo("b", "r1");
         abandoned.is_abandoned = true;
-        model.apply(&DaemonMessage::SessionUpdated {
-            session: abandoned,
-            request_id: None,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionUpdated {
+                session: abandoned,
+                request_id: None,
+            },
+        );
         assert_eq!(model.abandoned_count(), 1);
     }
 
@@ -6597,15 +7064,24 @@ pub(crate) mod tests {
     /// workspace `w1`.
     fn ordered_model() -> SidebarModel {
         let mut model = SidebarModel::new(UiState::default());
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
-        });
-        model.apply(&DaemonMessage::Workspaces {
-            workspaces: vec![workspace("w1", &[])],
-        });
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![in_repo("a", "r1"), in_repo("b", "r1")],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Workspaces {
+                workspaces: vec![workspace("w1", &[])],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("a", "r1"), in_repo("b", "r1")],
+            },
+        );
         model
     }
 
@@ -6626,19 +7102,28 @@ pub(crate) mod tests {
         let mut model = ordered_model();
         assert_eq!(keys(&model.containers()), ["ws:w1", "repo:r1", "repo:r2"]);
 
-        model.reorder_containers_local(&refs(&[("r2", true), ("w1", false), ("r1", true)]));
+        model.reorder_containers_local(
+            &crate::target::HostKey::Local,
+            &refs(&[("r2", true), ("w1", false), ("r1", true)]),
+        );
         assert_eq!(
             keys(&model.containers()),
             ["repo:r2", "ws:w1", "repo:r1"],
             "the new order shows with no broadcast"
         );
 
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![in_repo("a", "r1"), in_repo("b", "r1")],
-        });
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("a", "r1"), in_repo("b", "r1")],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")],
+            },
+        );
         assert_eq!(
             keys(&model.containers()),
             ["repo:r2", "ws:w1", "repo:r1"],
@@ -6651,17 +7136,24 @@ pub(crate) mod tests {
         let mut model = ordered_model();
         assert_eq!(leaf_ids(&model.containers(), "repo:r1"), ["a", "b"]);
 
-        model.reorder_sessions_local("r1", &["b".to_owned(), "a".to_owned()]);
+        model.reorder_sessions_local(
+            &crate::target::HostKey::Local,
+            "r1",
+            &["b".to_owned(), "a".to_owned()],
+        );
         assert_eq!(
             leaf_ids(&model.containers(), "repo:r1"),
             ["b", "a"],
             "the new order shows with no broadcast"
         );
 
-        model.apply(&DaemonMessage::SessionUpdated {
-            session: in_repo("a", "r1"),
-            request_id: None,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionUpdated {
+                session: in_repo("a", "r1"),
+                request_id: None,
+            },
+        );
         assert_eq!(
             leaf_ids(&model.containers(), "repo:r1"),
             ["b", "a"],
@@ -6673,31 +7165,54 @@ pub(crate) mod tests {
     fn local_order_echo_with_the_same_order_changes_nothing() {
         let mut model = ordered_model();
         let ordered = refs(&[("r2", true), ("r1", true), ("w1", false)]);
-        model.reorder_containers_local(&ordered);
-        model.reorder_sessions_local("r1", &["b".to_owned(), "a".to_owned()]);
+        model.reorder_containers_local(&crate::target::HostKey::Local, &ordered);
+        model.reorder_sessions_local(
+            &crate::target::HostKey::Local,
+            "r1",
+            &["b".to_owned(), "a".to_owned()],
+        );
         let before = model.containers();
 
-        model.apply(&DaemonMessage::ContainersReordered { ordered });
-        model.apply(&DaemonMessage::SessionsReordered {
-            container_id: "r1".to_owned(),
-            ordered_ids: vec!["b".to_owned(), "a".to_owned()],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::ContainersReordered { ordered },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionsReordered {
+                container_id: "r1".to_owned(),
+                ordered_ids: vec!["b".to_owned(), "a".to_owned()],
+            },
+        );
         assert_eq!(model.containers(), before);
     }
 
     #[test]
     fn local_order_gives_way_to_an_echo_that_disagrees() {
         let mut model = ordered_model();
-        model.reorder_containers_local(&refs(&[("r2", true), ("r1", true)]));
-        model.reorder_sessions_local("r1", &["b".to_owned(), "a".to_owned()]);
+        model.reorder_containers_local(
+            &crate::target::HostKey::Local,
+            &refs(&[("r2", true), ("r1", true)]),
+        );
+        model.reorder_sessions_local(
+            &crate::target::HostKey::Local,
+            "r1",
+            &["b".to_owned(), "a".to_owned()],
+        );
 
-        model.apply(&DaemonMessage::ContainersReordered {
-            ordered: refs(&[("r1", true), ("w1", false)]),
-        });
-        model.apply(&DaemonMessage::SessionsReordered {
-            container_id: "r1".to_owned(),
-            ordered_ids: vec!["a".to_owned(), "b".to_owned()],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::ContainersReordered {
+                ordered: refs(&[("r1", true), ("w1", false)]),
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionsReordered {
+                container_id: "r1".to_owned(),
+                ordered_ids: vec!["a".to_owned(), "b".to_owned()],
+            },
+        );
         let containers = model.containers();
         assert_eq!(keys(&containers), ["repo:r1", "ws:w1", "repo:r2"]);
         assert_eq!(leaf_ids(&containers, "repo:r1"), ["a", "b"]);
@@ -6721,13 +7236,20 @@ pub(crate) mod tests {
             "pane order without a manual order"
         );
 
-        model.reorder_sessions_local("t1", &["b".to_owned(), "a".to_owned()]);
+        model.reorder_sessions_local(
+            &crate::target::HostKey::Local,
+            "t1",
+            &["b".to_owned(), "a".to_owned()],
+        );
         assert_eq!(leaf_ids(&model.tab_containers(&tabs), "tab:t1"), ["b", "a"]);
 
-        model.apply(&DaemonMessage::SessionsReordered {
-            container_id: "t1".to_owned(),
-            ordered_ids: vec!["a".to_owned(), "b".to_owned()],
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionsReordered {
+                container_id: "t1".to_owned(),
+                ordered_ids: vec!["a".to_owned(), "b".to_owned()],
+            },
+        );
         assert_eq!(
             leaf_ids(&model.tab_containers(&tabs), "tab:t1"),
             ["a", "b"],

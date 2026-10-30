@@ -830,7 +830,7 @@ impl RootView {
                 session_rows(
                     session,
                     &self.tabs,
-                    self.sidebar.sessions(),
+                    self.sidebar.local_sessions(),
                     &self.popouts,
                     self.capabilities(),
                 )
@@ -2215,7 +2215,7 @@ impl RootView {
         };
         let Some(mut placed) =
             self.duplicates
-                .place(request_id, copy, &self.tabs, self.sidebar.sessions())
+                .place(request_id, copy, &self.tabs, self.sidebar.local_sessions())
         else {
             return;
         };
@@ -3043,7 +3043,10 @@ impl RootView {
                 .bg(gpui::rgba((t.warning << 8) | 0x24))
                 .text_size(ui_px_at(offset, UI_TEXT_SIZE))
                 .text_color(gpui::rgb(t.text))
-                .child(orphan_banner_text(session, &self.agents)),
+                .child(orphan_banner_text(
+                    session,
+                    self.sidebar.agents(&crate::target::HostKey::Local),
+                )),
         )
     }
 
@@ -3085,7 +3088,10 @@ impl RootView {
         };
         let mut text = Vec::new();
         if session.is_orphan {
-            text.push(orphan_banner_text(session, &self.agents));
+            text.push(orphan_banner_text(
+                session,
+                self.sidebar.agents(&crate::target::HostKey::Local),
+            ));
         }
         if action_state(session) == ActionState::Abandoned {
             text.extend(abandoned_lines(session));

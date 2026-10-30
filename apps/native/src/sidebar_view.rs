@@ -172,8 +172,7 @@ impl RootView {
                 pills: self.tabs.is_loaded().then(|| tab_pills(self.tabs.tabs())),
                 headless: self
                     .sidebar
-                    .sessions()
-                    .iter()
+                    .all_sessions()
                     .filter(|s| !can_attach(s))
                     .map(|s| s.id.as_str())
                     .collect(),
@@ -1113,7 +1112,8 @@ impl RootView {
                 self.reorder_tabs_by_drop(ordered_ids);
             }
             Some(ClientMessage::ReorderContainers { ordered }) => {
-                self.sidebar.reorder_containers_local(&ordered);
+                self.sidebar
+                    .reorder_containers_local(&HostKey::Local, &ordered);
                 self.send_to(
                     &HostKey::Local,
                     ClientMessage::ReorderContainers { ordered },
@@ -1123,10 +1123,11 @@ impl RootView {
                 container_id,
                 ordered_ids,
             }) => {
+                let host = self.host_of_container(&container_id);
                 self.sidebar
-                    .reorder_sessions_local(&container_id, &ordered_ids);
+                    .reorder_sessions_local(&host, &container_id, &ordered_ids);
                 self.send_to(
-                    &self.host_of_container(&container_id),
+                    &host,
                     ClientMessage::ReorderSessions {
                         container_id,
                         ordered_ids,

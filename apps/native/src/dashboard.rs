@@ -328,10 +328,16 @@ mod tests {
 
     fn sidebar(sessions: Vec<SessionSnapshot>) -> SidebarModel {
         let mut model = SidebarModel::default();
-        model.apply(&DaemonMessage::Repos {
-            repos: vec![repo()],
-        });
-        model.apply(&DaemonMessage::Sessions { sessions });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Repos {
+                repos: vec![repo()],
+            },
+        );
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Sessions { sessions },
+        );
         model
     }
 
@@ -471,10 +477,13 @@ mod tests {
     #[test]
     fn an_unseen_turn_is_done() {
         let mut model = sidebar(vec![with_status("s1", SessionStatus::Working)]);
-        model.apply(&DaemonMessage::SessionUpdated {
-            session: session("s1"),
-            request_id: None,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionUpdated {
+                session: session("s1"),
+                request_id: None,
+            },
+        );
         assert!(
             model.is_unseen("s1"),
             "the turn ended while nothing was focused"
@@ -488,10 +497,13 @@ mod tests {
             with_status("s1", SessionStatus::Stopped),
             with_status("s2", SessionStatus::Error),
         ]);
-        model.apply(&DaemonMessage::Attention {
-            session_id: "s2".to_owned(),
-            reason: AttentionReason::Error,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Attention {
+                session_id: "s2".to_owned(),
+                reason: AttentionReason::Error,
+            },
+        );
         let built = build(&model);
         assert_eq!(group(&built, "s1"), Some(GroupKind::Done));
         assert_eq!(group(&built, "s2"), Some(GroupKind::Done));
@@ -503,10 +515,13 @@ mod tests {
             with_status("s1", SessionStatus::AwaitingInput),
             with_status("s2", SessionStatus::Error),
         ]);
-        model.apply(&DaemonMessage::Attention {
-            session_id: "s2".to_owned(),
-            reason: AttentionReason::Error,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Attention {
+                session_id: "s2".to_owned(),
+                reason: AttentionReason::Error,
+            },
+        );
         assert_eq!(
             needs_you::rows(&model).len(),
             2,
@@ -587,10 +602,13 @@ mod tests {
             with_status("s5", SessionStatus::Stopped),
             with_status("s6", SessionStatus::Working),
         ]);
-        model.apply(&DaemonMessage::SessionUpdated {
-            session: session("s6"),
-            request_id: None,
-        });
+        model.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::SessionUpdated {
+                session: session("s6"),
+                request_id: None,
+            },
+        );
         assert_eq!(
             build(&model).counts(),
             HeaderCounts {

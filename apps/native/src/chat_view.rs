@@ -808,7 +808,12 @@ impl RootView {
 
     /// A message no earlier fold took: a chat message updates its chat, a
     /// summary message its summary, anything else goes to the agents' fold.
-    pub(crate) fn fold_chat_or_agents(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+    pub(crate) fn fold_chat_or_agents(
+        &mut self,
+        host: &crate::target::HostKey,
+        msg: DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
         match msg {
             DaemonMessage::Chat { .. }
             | DaemonMessage::ChatAppend { .. }
@@ -834,7 +839,7 @@ impl RootView {
                 }
                 self.summary_folded(&session_id, applied, cx);
             }
-            other => self.fold_agents(other, cx),
+            other => self.fold_agents(host, other, cx),
         }
     }
 

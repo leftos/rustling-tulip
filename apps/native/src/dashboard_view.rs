@@ -66,7 +66,7 @@ impl RootView {
             row,
             session,
             facts: self.dashboard_facts.facts_for(&row.session_id),
-            agents: self.sidebar.agents(),
+            agents: self.sidebar.session_agents(&row.session_id),
             unseen: self.sidebar.is_unseen(&row.session_id),
         })
     }
