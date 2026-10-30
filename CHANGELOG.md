@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - `rustling-tulipd screen <session id>` prints how the app read a session's screen, rule by rule, with the screen itself, and `--fixture <path>` saves it.
 - A Claude session's pane can show its conversation as a chat, with answers appearing as they are written, through the pane's Chat button, its menu or Ctrl+Shift+M; each session remembers which view it was last shown in.
 - A chat pane shows what is still running under the chat: its subagents, background shells and the next wakeup, with their ages.
+- A chat pane answers Claude's prompts from cards, by click or key, and sends your messages from a box under the chat, keeping your text when a send fails.
 - When Claude asks for you while a subagent's view is open in the terminal, the session switches back to the main conversation, setting any draft aside and restoring it afterwards.
 
 ### Fixed

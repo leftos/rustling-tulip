@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
-    ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage, WorkShell,
-    WorkSubagent,
+    ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
+    ComposerState, WorkShell, WorkSubagent,
 };
 
 /// How many rows the client keeps: a load reply carries the newest this
@@ -539,22 +539,6 @@ pub fn deny_with_text(prompt: &ChatPrompt, text: &str) -> Option<ChatAnswerKind>
     )
 }
 
-/// The message that answers `prompt` with `answer` for `session_id`.
-#[must_use]
-pub fn answer_message(
-    session_id: &str,
-    prompt: &ChatPrompt,
-    answer: ChatAnswerKind,
-    request_id: Option<String>,
-) -> ClientMessage {
-    ClientMessage::ChatAnswer {
-        session_id: session_id.to_owned(),
-        prompt_id: prompt.id.clone(),
-        answer,
-        request_id,
-    }
-}
-
 /// The longest command or description a lone shell shows on the strip,
 /// before its closing ellipsis.
 const STRIP_COMMAND_CAP: usize = 24;
@@ -811,6 +795,207 @@ fn wakeup_text(now: DateTime<Utc>, at: DateTime<Utc>) -> String {
     format!("wakeup in {}", crate::needs_you::waited(later, now))
 }
 
+/// The message that types `text` into session `session_id`'s prompt box,
+/// when `text` is not blank; the text is passed on as typed.
+#[must_use]
+pub fn send_message(session_id: &str, text: &str, request_id: String) -> Option<ClientMessage> {
+    non_blank(text).then(|| ClientMessage::ChatSend {
+        session_id: session_id.to_owned(),
+        text: text.to_owned(),
+        request_id: Some(request_id),
+    })
+}
+
+/// The text a send carried, as the daemon's pending entry shows it.
+fn sent_text(text: &str) -> String {
+    text.replace("\r\n", "\n").trim().to_owned()
+}
+
+/// One send the daemon has not settled: its request id, its text, and
+/// whether the screen has shown its paste in the prompt box yet.
+#[derive(Debug, Clone)]
+struct Send {
+    request_id: String,
+    text: String,
+    saw_draft: bool,
+    at: Instant,
+}
+
+/// A session's chat send in flight. The daemon sends no success reply: a
+/// send is in flight from `ChatSend` until its pending user entry arrives,
+/// the screen's composer leaves the draft its paste made, or the daemon
+/// refuses it. While it is in flight its paste is not a draft of the
+/// owner's. The last settled send is kept, so a refusal that comes after
+/// its entry still gives its text back.
+#[derive(Debug, Default)]
+pub struct SendTracker {
+    in_flight: Option<Send>,
+    settled: Option<Send>,
+    /// The recent card answers that took the composer's text, by request
+    /// id, so a refusal gives the text back even after the card left.
+    taken: VecDeque<(String, String)>,
+}
+
+impl SendTracker {
+    /// A send of `text` went out under `request_id`.
+    pub fn sent(&mut self, request_id: String, text: String, now: Instant) {
+        self.in_flight = Some(Send {
+            request_id,
+            text,
+            saw_draft: false,
+            at: now,
+        });
+    }
+
+    /// A card answer under `request_id` took `text` from the composer.
+    pub fn took(&mut self, request_id: String, text: String) {
+        self.taken.push_back((request_id, text));
+        if self.taken.len() > TAKEN_CAP {
+            self.taken.pop_front();
+        }
+    }
+
+    /// Whether a send is in flight.
+    #[must_use]
+    pub fn in_flight(&self, now: Instant) -> bool {
+        self.in_flight
+            .as_ref()
+            .is_some_and(|send| now < send.at + SEND_BACKSTOP)
+    }
+
+    /// Appended rows: a pending user entry with the send's text settles it.
+    pub fn on_entries(&mut self, entries: &[ChatEntry]) {
+        let Some(send) = self.in_flight.as_ref() else {
+            return;
+        };
+        let ours = sent_text(&send.text);
+        let arrived = entries.iter().any(|entry| {
+            matches!(entry, ChatEntry::User { text, pending: true, .. } if sent_text(text) == ours)
+        });
+        if arrived {
+            self.settle();
+        }
+    }
+
+    /// The screen's composer now reads `state`: once it has shown the
+    /// send's paste as a draft, leaving the draft settles the send.
+    pub fn on_composer(&mut self, state: &ComposerState) {
+        let Some(send) = self.in_flight.as_mut() else {
+            return;
+        };
+        if *state == ComposerState::Draft {
+            send.saw_draft = true;
+        } else if send.saw_draft || *state == ComposerState::Working {
+            self.settle();
+        }
+    }
+
+    /// The daemon refused `request_id`: the text of the send it names, in
+    /// flight or the last settled one, which ends with it.
+    pub fn refused(&mut self, request_id: &str) -> Option<String> {
+        if self
+            .in_flight
+            .as_ref()
+            .is_some_and(|send| send.request_id == request_id)
+        {
+            return self.in_flight.take().map(|send| send.text);
+        }
+        if self
+            .settled
+            .as_ref()
+            .is_some_and(|send| send.request_id == request_id)
+        {
+            return self.settled.take().map(|send| send.text);
+        }
+        let taken = self.taken.iter().position(|(sent, _)| sent == request_id)?;
+        self.taken.remove(taken).map(|(_, text)| text)
+    }
+
+    fn settle(&mut self) {
+        self.settled = self.in_flight.take();
+    }
+}
+
+/// How long a send stays in flight at most when nothing settles it sooner.
+pub const SEND_BACKSTOP: Duration = Duration::from_secs(10);
+
+/// How many card answers that took composer text are remembered.
+const TAKEN_CAP: usize = 16;
+
+/// The composer's text after a refusal gives `refused` back while it holds
+/// `current`: the refused text alone, or before what was typed since.
+#[must_use]
+pub fn restored_text(refused: &str, current: &str) -> String {
+    if current.is_empty() {
+        refused.to_owned()
+    } else {
+        format!("{refused}\n{current}")
+    }
+}
+
+/// Why the composer cannot send now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerNote {
+    /// No daemon connection.
+    NotConnected,
+    /// Our own send is in flight.
+    Sending,
+    /// The terminal's prompt box holds text of the owner's.
+    Draft,
+    /// The named overlay is open in the terminal.
+    Overlay(String),
+    /// The screen's prompt box cannot be read.
+    Unknown,
+}
+
+impl ComposerNote {
+    /// What the composer says.
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::NotConnected => "Not connected".to_owned(),
+            Self::Sending => "Sending\u{2026}".to_owned(),
+            Self::Draft => {
+                "The prompt box has a draft. Send or clear it in the terminal first.".to_owned()
+            }
+            Self::Overlay(name) => {
+                format!("{name} is open in the terminal. Close it there to send.")
+            }
+            Self::Unknown => "Can't read the prompt box right now.".to_owned(),
+        }
+    }
+
+    /// Whether the composer takes no input while it shows this.
+    #[must_use]
+    pub fn disables(&self) -> bool {
+        matches!(self, Self::NotConnected)
+    }
+}
+
+/// The note the composer shows: none while it can send. `connected` says
+/// the daemon connection is open, `state` is the screen's last composer
+/// state (none before the chat loaded), and `sending` says our own send is
+/// in flight, whose paste reads as a draft.
+#[must_use]
+pub fn composer_note(
+    connected: bool,
+    state: Option<&ComposerState>,
+    sending: bool,
+) -> Option<ComposerNote> {
+    if !connected {
+        return Some(ComposerNote::NotConnected);
+    }
+    if sending {
+        return Some(ComposerNote::Sending);
+    }
+    match state? {
+        ComposerState::Draft => Some(ComposerNote::Draft),
+        ComposerState::Overlay { name } => Some(ComposerNote::Overlay(name.clone())),
+        ComposerState::Unknown => Some(ComposerNote::Unknown),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -818,13 +1003,13 @@ mod tests {
 
     use protocol::{
         ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen,
-        ClientMessage, ComposerState, ToolOutcome,
+        ComposerState, ToolOutcome,
     };
 
     use super::{
         ChatLoads, ChatLog, DIGIT_GRACE, DISPLAY_CAP, LoadChanges, PaneView, PaneViews,
-        PromptStack, allow_with_text, answer_message, back_answer, deny_with_text, entry_id,
-        follows_bottom, option_answer, skip_answer, submit_answer, toggle_answer, tool_one_liner,
+        PromptStack, allow_with_text, back_answer, deny_with_text, entry_id, follows_bottom,
+        option_answer, skip_answer, submit_answer, toggle_answer, tool_one_liner,
         type_something_answer,
     };
 
@@ -1603,50 +1788,14 @@ mod tests {
         assert_eq!(stack.grace_ends_at(), None);
         assert_eq!(stack.digit_answer(1, true, false, t0 + DIGIT_GRACE), None);
     }
-
-    #[test]
-    fn an_answer_message_names_the_session_and_the_prompt() {
-        let prompt = test_prompt("prompt-7", ChatPromptKind::Permission, false, &[1]);
-        let message = answer_message(
-            "session-3",
-            &prompt,
-            ChatAnswerKind::Option { number: 1 },
-            Some("req-9".to_owned()),
-        );
-        assert!(
-            matches!(message, ClientMessage::ChatAnswer { .. }),
-            "an answer is a ChatAnswer message"
-        );
-        if let ClientMessage::ChatAnswer {
-            session_id,
-            prompt_id,
-            answer,
-            request_id,
-        } = message
-        {
-            assert_eq!(session_id, "session-3");
-            assert_eq!(prompt_id, "prompt-7");
-            assert_eq!(answer, ChatAnswerKind::Option { number: 1 });
-            assert_eq!(request_id.as_deref(), Some("req-9"));
-        }
-        let plain = answer_message("session-3", &prompt, ChatAnswerKind::Submit, None);
-        assert!(
-            matches!(
-                plain,
-                ClientMessage::ChatAnswer {
-                    request_id: None,
-                    ..
-                }
-            ),
-            "a request without an id stays without one"
-        );
-    }
 }
 
 #[cfg(test)]
 mod strip_tests {
+    use std::time::{Duration, Instant};
+
     use chrono::{DateTime, TimeDelta, TimeZone, Utc};
-    use protocol::{WorkShell, WorkSubagent};
+    use protocol::{ChatEntry, ClientMessage, ComposerState, WorkShell, WorkSubagent};
 
     use super::{RunningWork, SCREEN_READ_TIP, Strip, StripKind};
 
@@ -1975,5 +2124,156 @@ mod strip_tests {
             None,
         );
         assert!(work.counts_seconds(now()));
+    }
+
+    fn pending_user(id: &str, text: &str) -> ChatEntry {
+        ChatEntry::User {
+            id: id.to_owned(),
+            text: text.to_owned(),
+            pending: true,
+        }
+    }
+
+    #[test]
+    fn a_send_message_names_the_session_and_carries_the_text() {
+        let sent = super::send_message("s1", "hello", "r1".to_owned());
+        assert!(
+            matches!(
+                &sent,
+                Some(ClientMessage::ChatSend { session_id, text, request_id })
+                    if session_id == "s1" && text == "hello" && request_id.as_deref() == Some("r1")
+            ),
+            "{sent:?}"
+        );
+        assert!(super::send_message("s1", "  \n ", "r2".to_owned()).is_none());
+    }
+
+    #[test]
+    fn a_send_is_in_flight_until_its_pending_entry_arrives() {
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), Instant::now());
+        assert!(sends.in_flight(Instant::now()));
+        sends.on_entries(&[pending_user("pending:1", "something else")]);
+        assert!(
+            sends.in_flight(Instant::now()),
+            "another message's entry is not ours"
+        );
+        sends.on_entries(&[pending_user("pending:2", "hello\n")]);
+        assert!(!sends.in_flight(Instant::now()));
+    }
+
+    #[test]
+    fn a_send_is_in_flight_until_the_composer_leaves_draft() {
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), Instant::now());
+        sends.on_composer(&ComposerState::Ready);
+        assert!(
+            sends.in_flight(Instant::now()),
+            "the paste has not shown yet"
+        );
+        sends.on_composer(&ComposerState::Draft);
+        assert!(sends.in_flight(Instant::now()));
+        sends.on_composer(&ComposerState::Working);
+        assert!(!sends.in_flight(Instant::now()));
+    }
+
+    #[test]
+    fn a_refused_send_gives_its_text_back_and_ends_the_flight() {
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), Instant::now());
+        assert_eq!(sends.refused("other"), None);
+        assert!(sends.in_flight(Instant::now()));
+        assert_eq!(sends.refused("r1"), Some("hello".to_owned()));
+        assert!(!sends.in_flight(Instant::now()));
+        assert_eq!(sends.refused("r1"), None, "a refusal is taken once");
+    }
+
+    #[test]
+    fn a_refusal_after_the_pending_entry_still_gives_the_text_back() {
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "hello".to_owned(), Instant::now());
+        sends.on_entries(&[pending_user("pending:1", "hello")]);
+        assert_eq!(sends.refused("r1"), Some("hello".to_owned()));
+    }
+
+    #[test]
+    fn a_send_settles_ten_seconds_after_it_went() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "/compact".to_owned(), at);
+        assert!(sends.in_flight(at + Duration::from_millis(9_999)));
+        assert!(!sends.in_flight(at + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn a_send_settles_when_the_turn_starts() {
+        let at = Instant::now();
+        let mut sends = super::SendTracker::default();
+        sends.sent("r1".to_owned(), "/compact".to_owned(), at);
+        sends.on_composer(&ComposerState::Working);
+        assert!(!sends.in_flight(at));
+    }
+
+    #[test]
+    fn an_answer_that_took_text_gives_it_back_when_refused() {
+        let mut sends = super::SendTracker::default();
+        sends.took("r1".to_owned(), "careful".to_owned());
+        assert_eq!(sends.refused("r2"), None);
+        assert_eq!(sends.refused("r1"), Some("careful".to_owned()));
+        assert_eq!(sends.refused("r1"), None);
+    }
+
+    #[test]
+    fn refused_text_goes_back_before_what_was_typed_since() {
+        assert_eq!(super::restored_text("hello", ""), "hello");
+        assert_eq!(super::restored_text("hello", "more"), "hello\nmore");
+    }
+
+    #[test]
+    fn the_composer_note_says_why_a_send_cannot_go() {
+        use super::{ComposerNote, composer_note};
+        assert_eq!(
+            composer_note(true, Some(&ComposerState::Ready), false),
+            None
+        );
+        assert_eq!(
+            composer_note(true, Some(&ComposerState::Working), false),
+            None
+        );
+        assert_eq!(
+            composer_note(true, Some(&ComposerState::Dialog), false),
+            None
+        );
+        assert_eq!(
+            composer_note(true, Some(&ComposerState::Draft), false),
+            Some(ComposerNote::Draft)
+        );
+        assert_eq!(
+            composer_note(true, Some(&ComposerState::Draft), true),
+            Some(ComposerNote::Sending),
+            "our own send in flight reads as sending"
+        );
+        let overlay = ComposerState::Overlay {
+            name: "/model".to_owned(),
+        };
+        assert_eq!(
+            composer_note(true, Some(&overlay), false).map(|note| note.text()),
+            Some("/model is open in the terminal. Close it there to send.".to_owned())
+        );
+        assert_eq!(
+            composer_note(true, Some(&ComposerState::Unknown), false).map(|note| note.text()),
+            Some("Can't read the prompt box right now.".to_owned())
+        );
+        assert_eq!(
+            ComposerNote::Draft.text(),
+            "The prompt box has a draft. Send or clear it in the terminal first."
+        );
+        assert_eq!(
+            composer_note(false, Some(&ComposerState::Ready), false).map(|note| note.text()),
+            Some("Not connected".to_owned())
+        );
+        assert!(ComposerNote::NotConnected.disables());
+        assert!(!ComposerNote::Draft.disables());
+        assert_eq!(composer_note(true, None, false), None);
     }
 }

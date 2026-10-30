@@ -10,11 +10,15 @@
 
 use crate::support;
 
+use std::time::Duration;
+
 use chrono::{DateTime, TimeDelta, Utc};
 use gpui::{TestAppContext, px};
+use protocol::error_codes::CHAT_REFUSED;
 use protocol::{
-    ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, SplitDirection,
-    ToolOutcome, WorkShell, WorkSubagent,
+    ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
+    ClientMessage, ComposerState, DaemonMessage, GridNode, SplitDirection, ToolOutcome, WorkShell,
+    WorkSubagent,
 };
 use rustling_tulip_native::{OpenOutcome, PopoutKey};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
@@ -793,4 +797,626 @@ fn the_strip_shows_while_the_chat_is_empty(cx: &mut TestAppContext) {
         drawn_now(&mut h, "work-strip"),
         "the strip is drawn under the empty note"
     );
+}
+
+// Cards and the composer.
+
+/// `p1` on its chat, the chat loaded with no rows and its composer up.
+fn loaded<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let (mut h, id) = opened(cx, dir);
+    h.send(reply(Some(&id), vec![]));
+    h.sent();
+    h
+}
+
+fn options(list: &[(u32, &str)]) -> Vec<ChatOption> {
+    list.iter()
+        .map(|(number, label)| ChatOption {
+            number: *number,
+            label: (*label).to_owned(),
+            description: None,
+            selected: false,
+        })
+        .collect()
+}
+
+fn prompt(id: &str, kind: ChatPromptKind, list: &[(u32, &str)]) -> ChatPrompt {
+    ChatPrompt {
+        id: id.to_owned(),
+        kind,
+        subject: "calc.py".to_owned(),
+        body: "Do you want to make this edit?".to_owned(),
+        options: options(list),
+        questions: Vec::new(),
+        can_amend: true,
+        always_allow_tip: None,
+        multi: false,
+        cursor: None,
+    }
+}
+
+fn permission(id: &str) -> ChatPrompt {
+    prompt(
+        id,
+        ChatPromptKind::Permission,
+        &[
+            (1, "Yes"),
+            (2, "Yes, and don't ask again for: python *"),
+            (3, "No"),
+        ],
+    )
+}
+
+/// The screen now shows `prompt` (or none) with the composer `state`.
+fn show_screen(h: &mut Harness<'_>, state: ComposerState, prompt: Option<ChatPrompt>) {
+    h.send(DaemonMessage::ChatScreenChanged {
+        session_id: "s1".to_owned(),
+        screen: ChatScreen {
+            composer: state,
+            prompt,
+        },
+    });
+}
+
+fn show(h: &mut Harness<'_>, prompt: ChatPrompt) {
+    show_screen(h, ComposerState::Dialog, Some(prompt));
+}
+
+/// The `ChatAnswer`s sent since the last drain: prompt id, answer and
+/// request id.
+fn answers(h: &mut Harness<'_>) -> Vec<(String, ChatAnswerKind, Option<String>)> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatAnswer {
+                session_id,
+                prompt_id,
+                answer,
+                request_id,
+            } if session_id == "s1" => Some((prompt_id, answer, request_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn answer_kinds(h: &mut Harness<'_>) -> Vec<ChatAnswerKind> {
+    answers(h)
+        .into_iter()
+        .map(|(_, answer, _)| answer)
+        .collect()
+}
+
+/// The `ChatSend`s sent since the last drain: text and request id.
+fn sends(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatSend {
+                session_id,
+                text,
+                request_id,
+            } if session_id == "s1" => Some((text, request_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn type_text(h: &mut Harness<'_>, text: &str) {
+    let keys: Vec<String> = text
+        .chars()
+        .map(|c| {
+            if c == ' ' {
+                "space".to_owned()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    h.keys(&keys.join(" "));
+}
+
+fn composer_text(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, cx| root.chat_composer_text("s1", cx))
+}
+
+fn note(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_composer_note("s1"))
+}
+
+fn refused(h: &mut Harness<'_>, request_id: Option<String>, message: &str) {
+    h.send(DaemonMessage::Error {
+        message: message.to_owned(),
+        request_id,
+        code: Some(CHAT_REFUSED.to_owned()),
+    });
+}
+
+fn opt(number: u32) -> ChatAnswerKind {
+    ChatAnswerKind::Option { number }
+}
+
+/// The selectors of the buttons beside the composer.
+fn actions(h: &mut Harness<'_>) -> Vec<&'static str> {
+    h.root(|root, cx| root.chat_composer_actions("s1", cx))
+}
+
+/// The current card's prompt id and whether it is busy.
+fn card(h: &mut Harness<'_>) -> Option<(String, bool)> {
+    h.root(|root, _| root.chat_card("s1"))
+}
+
+#[gpui::test]
+fn each_permission_button_sends_its_chat_answer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    for (id, button, number) in [
+        ("p1", "chat-card-1", 1),
+        ("p2", "chat-card-2", 2),
+        ("p3", "chat-card-3", 3),
+    ] {
+        show(&mut h, permission(id));
+        h.click_on(button);
+        assert_eq!(answer_kinds(&mut h), [opt(number)], "{button}");
+    }
+}
+
+#[gpui::test]
+fn question_review_plan_trust_and_heads_up_cards_send_their_answers(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let single = prompt(
+        "q1",
+        ChatPromptKind::Question,
+        &[(1, "sub"), (2, "div"), (3, "Type something")],
+    );
+    show(&mut h, single.clone());
+    h.click_on("chat-card-2");
+    assert_eq!(answer_kinds(&mut h), [opt(2)]);
+
+    let mut multi = single.clone();
+    multi.id = "q2".to_owned();
+    multi.multi = true;
+    multi.questions = ["Op", "Base"]
+        .iter()
+        .enumerate()
+        .map(|(index, label)| ChatQuestionTab {
+            label: (*label).to_owned(),
+            answered: false,
+            current: index == 0,
+        })
+        .collect();
+    show(&mut h, multi.clone());
+    h.click_on("chat-card-1");
+    h.click_on("chat-card-back");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::Toggle { number: 1 }, ChatAnswerKind::Back]
+    );
+    multi.id = "q3".to_owned();
+    show(&mut h, multi.clone());
+    h.click_on("chat-card-skip");
+    multi.id = "q4".to_owned();
+    show(&mut h, multi);
+    h.click_on("chat-card-submit");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::Skip, ChatAnswerKind::Submit]
+    );
+
+    let mut typed = single;
+    typed.id = "q5".to_owned();
+    show(&mut h, typed);
+    h.click_on("chat-composer");
+    type_text(&mut h, "use mul");
+    h.click_on("chat-card-3");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::TypeSomething {
+            text: "use mul".to_owned()
+        }]
+    );
+
+    show(
+        &mut h,
+        prompt(
+            "r1",
+            ChatPromptKind::Review,
+            &[(1, "Submit answers"), (2, "Cancel")],
+        ),
+    );
+    h.click_on("chat-card-2");
+    show(
+        &mut h,
+        prompt(
+            "pl1",
+            ChatPromptKind::Plan,
+            &[
+                (1, "Yes, auto"),
+                (2, "Yes, manual"),
+                (3, "No, keep planning"),
+            ],
+        ),
+    );
+    h.click_on("chat-card-1");
+    show(
+        &mut h,
+        prompt(
+            "t1",
+            ChatPromptKind::Trust,
+            &[(1, "Yes, proceed"), (2, "No, exit")],
+        ),
+    );
+    h.click_on("chat-card-2");
+    show(
+        &mut h,
+        prompt(
+            "h1",
+            ChatPromptKind::HeadsUp,
+            &[(1, "Learn more"), (2, "Knew this already"), (0, "Dismiss")],
+        ),
+    );
+    h.click_on("chat-card-0");
+    assert_eq!(answer_kinds(&mut h), [opt(2), opt(1), opt(2), opt(0)]);
+}
+
+#[gpui::test]
+fn a_card_answer_carries_the_prompt_id_and_a_request_id(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, permission("p7"));
+    h.click_on("chat-card-1");
+    let sent = answers(&mut h);
+    assert_eq!(sent.len(), 1);
+    let (prompt_id, answer, request_id) = &sent[0];
+    assert_eq!(prompt_id, "p7");
+    assert_eq!(*answer, opt(1));
+    assert!(request_id.as_deref().is_some_and(|id| !id.is_empty()));
+}
+
+#[gpui::test]
+fn a_digit_inside_the_grace_is_dropped_and_after_it_answers(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    show(&mut h, permission("p1"));
+    h.advance(Duration::from_millis(399));
+    h.keys("1");
+    assert_eq!(answer_kinds(&mut h), [], "inside the grace nothing answers");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some(""),
+        "and nothing is typed"
+    );
+    h.advance(Duration::from_millis(1));
+    h.keys("1");
+    assert_eq!(answer_kinds(&mut h), [opt(1)]);
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+}
+
+#[gpui::test]
+fn digits_type_into_a_non_empty_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    show(&mut h, permission("p1"));
+    h.advance(Duration::from_millis(500));
+    type_text(&mut h, "a1");
+    assert_eq!(answer_kinds(&mut h), []);
+    assert_eq!(composer_text(&mut h).as_deref(), Some("a1"));
+}
+
+#[gpui::test]
+fn esc_denies_ctrl_enter_allows_once_and_ctrl_shift_enter_always_allows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    show(&mut h, permission("p1"));
+    h.keys("escape");
+    show(&mut h, permission("p2"));
+    h.keys("ctrl-enter");
+    show(&mut h, permission("p3"));
+    h.keys("ctrl-shift-enter");
+    assert_eq!(answer_kinds(&mut h), [opt(3), opt(1), opt(2)]);
+}
+
+#[gpui::test]
+fn the_composer_sends_with_ctrl_enter_and_keeps_its_text_when_refused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "hello there");
+    h.keys("ctrl-enter");
+    let sent = sends(&mut h);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "hello there");
+    assert_eq!(
+        composer_text(&mut h).as_deref(),
+        Some(""),
+        "the send clears it"
+    );
+    refused(&mut h, sent[0].1.clone(), "the prompt box holds a draft");
+    assert_eq!(composer_text(&mut h).as_deref(), Some("hello there"));
+    assert_eq!(
+        h.root(|root, _| root.chat_composer_error("s1")).as_deref(),
+        Some("the prompt box holds a draft")
+    );
+    assert!(painted(&mut h, "chat-composer-error"));
+}
+
+#[gpui::test]
+fn while_a_dialog_is_up_the_composer_offers_the_two_ride_on_answers(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "careful");
+    assert_eq!(actions(&mut h), ["chat-send"]);
+    assert!(painted(&mut h, "chat-send"));
+    show(&mut h, permission("p1"));
+    assert_eq!(
+        actions(&mut h),
+        ["chat-ride-yes", "chat-ride-no"],
+        "Send gives way to the ride-on answers"
+    );
+    assert!(painted(&mut h, "chat-ride-yes"));
+    assert!(painted(&mut h, "chat-ride-no"));
+    h.keys("ctrl-enter");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [],
+        "Ctrl+Enter leaves the choice to the buttons"
+    );
+    h.click_on("chat-ride-yes");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::AllowWithText {
+            text: "careful".to_owned()
+        }]
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+
+    let mut fixed = permission("p2");
+    fixed.can_amend = false;
+    show(&mut h, fixed);
+    h.click_on("chat-composer");
+    type_text(&mut h, "no");
+    assert_eq!(actions(&mut h), ["chat-ride-no"], "no amendment, no Yes");
+    h.click_on("chat-ride-no");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [ChatAnswerKind::DenyWithText {
+            text: "no".to_owned()
+        }]
+    );
+}
+
+#[gpui::test]
+fn a_draft_composer_shows_why_it_cannot_send(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    assert_eq!(note(&mut h), None);
+    show_screen(&mut h, ComposerState::Draft, None);
+    assert_eq!(
+        note(&mut h).as_deref(),
+        Some("The prompt box has a draft. Send or clear it in the terminal first.")
+    );
+    assert!(painted(&mut h, "chat-composer-note"));
+}
+
+#[gpui::test]
+fn an_overlay_composer_names_the_overlay(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show_screen(
+        &mut h,
+        ComposerState::Overlay {
+            name: "/model".to_owned(),
+        },
+        None,
+    );
+    assert_eq!(
+        note(&mut h).as_deref(),
+        Some("/model is open in the terminal. Close it there to send.")
+    );
+}
+
+#[gpui::test]
+fn a_draft_from_our_own_send_is_not_a_refusal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "hello");
+    h.keys("ctrl-enter");
+    show_screen(&mut h, ComposerState::Draft, None);
+    assert_eq!(
+        note(&mut h).as_deref(),
+        Some("Sending…"),
+        "our own paste is not a draft"
+    );
+    show_screen(&mut h, ComposerState::Working, None);
+    show_screen(&mut h, ComposerState::Draft, None);
+    assert!(note(&mut h).is_some(), "a later draft is the owner's");
+}
+
+#[gpui::test]
+fn a_submitted_card_stays_busy_until_the_dialog_goes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, permission("p1"));
+    h.click_on("chat-card-1");
+    assert_eq!(card(&mut h), Some(("p1".to_owned(), true)));
+    assert!(painted(&mut h, "chat-card-busy"));
+    h.click_on("chat-card-2");
+    assert_eq!(
+        answers(&mut h).len(),
+        1,
+        "a busy card takes no second answer"
+    );
+    show(&mut h, permission("p1"));
+    assert_eq!(card(&mut h), Some(("p1".to_owned(), true)));
+    show_screen(&mut h, ComposerState::Ready, None);
+    h.send(append(
+        vec![ChatEntry::Receipt {
+            id: "rc1".to_owned(),
+            question: "Edit calc.py".to_owned(),
+            answer: "Yes".to_owned(),
+        }],
+        &[],
+    ));
+    assert_eq!(card(&mut h), None);
+    assert!(!h.root(|root, _| root.chat_answered_elsewhere("s1")));
+    assert!(painted(&mut h, "chat-row-p1-rc1"));
+}
+
+#[gpui::test]
+fn a_card_closed_without_our_answer_reads_answered_elsewhere(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, permission("p1"));
+    show_screen(&mut h, ComposerState::Ready, None);
+    assert!(h.root(|root, _| root.chat_answered_elsewhere("s1")));
+    assert!(painted(&mut h, "chat-answered-elsewhere"));
+    h.send(append(vec![user("u1")], &[]));
+    assert!(!h.root(|root, _| root.chat_answered_elsewhere("s1")));
+}
+
+#[gpui::test]
+fn a_refused_answer_frees_the_card_and_shows_the_daemons_reason(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, permission("p1"));
+    h.click_on("chat-card-1");
+    let request_id = answers(&mut h)[0].2.clone();
+    refused(&mut h, request_id, "the terminal did not respond");
+    assert_eq!(card(&mut h), Some(("p1".to_owned(), false)));
+    assert_eq!(
+        h.root(|root, _| root.chat_card_refusal("s1")).as_deref(),
+        Some("the terminal did not respond")
+    );
+    assert!(painted(&mut h, "chat-card-refusal"));
+    h.click_on("chat-card-1");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [opt(1)],
+        "the freed card answers again"
+    );
+}
+
+#[gpui::test]
+fn the_heads_up_notice_is_pinned_over_the_composer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    show(
+        &mut h,
+        prompt(
+            "h1",
+            ChatPromptKind::HeadsUp,
+            &[(1, "Learn more"), (2, "Knew this already"), (0, "Dismiss")],
+        ),
+    );
+    let card = h.bounds("chat-card");
+    let composer = h.bounds("chat-composer");
+    assert!(card.size.height > px(0.0));
+    assert!(
+        card.bottom() <= composer.top(),
+        "{card:?} over {composer:?}"
+    );
+    h.advance(Duration::from_millis(400));
+    h.keys("0");
+    assert_eq!(answer_kinds(&mut h), [opt(0)]);
+}
+
+#[gpui::test]
+fn an_unreadable_dialog_says_to_open_the_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, prompt("u1", ChatPromptKind::Unknown, &[(1, "a")]));
+    assert!(painted(&mut h, "chat-card-terminal"));
+    assert!(!painted(&mut h, "chat-card-1"));
+}
+
+#[gpui::test]
+fn the_composer_sits_under_the_running_work_strip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    send_full_work(&mut h);
+    let strip = h.bounds("work-strip");
+    let composer = h.bounds("chat-composer");
+    assert!(strip.size.height > px(0.0));
+    assert!(composer.size.height > px(0.0));
+    assert!(
+        strip.bottom() <= composer.top(),
+        "{strip:?} over {composer:?}"
+    );
+}
+
+#[gpui::test]
+fn a_refused_ride_on_after_the_dialog_went_gives_the_text_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    show(&mut h, permission("p1"));
+    type_text(&mut h, "careful");
+    h.click_on("chat-ride-no");
+    let request_id = answers(&mut h)[0].2.clone();
+    assert_eq!(composer_text(&mut h).as_deref(), Some(""));
+    show_screen(&mut h, ComposerState::Ready, None);
+    refused(
+        &mut h,
+        request_id,
+        "the denial was typed, but the message was not sent",
+    );
+    assert_eq!(composer_text(&mut h).as_deref(), Some("careful"));
+    assert_eq!(
+        h.root(|root, _| root.chat_composer_error("s1")).as_deref(),
+        Some("the denial was typed, but the message was not sent")
+    );
+}
+
+#[gpui::test]
+fn a_refusal_keeps_what_was_typed_since(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "hello");
+    h.keys("ctrl-enter");
+    let request_id = sends(&mut h)[0].1.clone();
+    type_text(&mut h, "more");
+    refused(&mut h, request_id, "the prompt box holds a draft");
+    assert_eq!(composer_text(&mut h).as_deref(), Some("hello\nmore"));
+}
+
+#[gpui::test]
+fn a_second_send_waits_for_the_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "one");
+    h.keys("ctrl-enter");
+    type_text(&mut h, "two");
+    h.keys("ctrl-enter");
+    let sent: Vec<String> = sends(&mut h).into_iter().map(|(text, _)| text).collect();
+    assert_eq!(sent, ["one"]);
+    assert_eq!(composer_text(&mut h).as_deref(), Some("two"));
+    assert_eq!(note(&mut h).as_deref(), Some("Sending\u{2026}"));
+    h.click_on("chat-send");
+    assert!(
+        sends(&mut h).is_empty(),
+        "Send is disabled while one is in flight"
+    );
+}
+
+#[gpui::test]
+fn a_send_with_no_pending_entry_settles_when_the_turn_starts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "/compact");
+    h.keys("ctrl-enter");
+    assert_eq!(sends(&mut h).len(), 1);
+    show_screen(&mut h, ComposerState::Working, None);
+    assert_eq!(note(&mut h), None);
+    type_text(&mut h, "next");
+    h.keys("ctrl-enter");
+    assert_eq!(sends(&mut h).len(), 1, "the next send goes");
 }

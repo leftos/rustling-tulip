@@ -12,20 +12,34 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use std::rc::Rc;
+
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, ScrollHandle, SharedString, Task, Window,
-    WindowId, div, prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, KeyDownEvent, Keystroke,
+    ScrollHandle, SharedString, Subscription, Task, Window, WindowId, div, prelude::*, px,
+    relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
-    ChatEntry, ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, ToolOutcome,
+    ChatAnswerKind, ChatEntry, ChatPrompt, ChatScreen, ClientMessage, ComposerState, DaemonMessage,
+    SessionMode, SessionSnapshot, ToolOutcome,
 };
 
-use crate::chat::{self, ChatLoads, ChatLog, PaneView, PaneViews, PromptStack, RunningWork, Strip};
+use crate::buttons::{ButtonSize, field_frame, outlined_button, primary_button};
+use crate::chat::{
+    self, ChatLoads, ChatLog, ComposerNote, PaneView, PaneViews, PromptStack, RunningWork,
+    SendTracker, Strip,
+};
+use crate::chat_cards::{
+    ANSWERED_ELSEWHERE, ButtonAnswer, CardKey, CardState, CardView, ComposerAction, KeyAction,
+    OnPress, card_answer_message, composer_actions, key_action, prompt_card, ride_no_label,
+    ride_yes_label,
+};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::palette::{CHIP, DANGER, FAINT, LINE_STRONG, SUBTLE, TEXT_2, WAITING, WORKING};
 use crate::scrollbar::Scrollbar;
 use crate::sidebar::LOCAL_HOST_KEY;
+use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare, render_row};
 use crate::work_strip::strip_row;
 use crate::{MUTED, RootView, TEXT, UI_TEXT_SIZE, new_request_id};
@@ -39,6 +53,14 @@ const LOAD_FAILED_NOTE: &str = "Could not load the chat: ";
 const LOADING_NOTE: &str = "Loading the chat…";
 /// What a chat pane says when the conversation has no rows yet.
 const EMPTY_NOTE: &str = "No messages yet";
+
+/// What an empty composer says.
+const COMPOSER_PLACEHOLDER: &str = "Send a message (Ctrl+Enter)";
+/// How many rows the composer grows between.
+const COMPOSER_MIN_ROWS: usize = 2;
+const COMPOSER_MAX_ROWS: usize = 6;
+/// How a label names an agent the client has no descriptor for.
+const GENERIC_AGENT: &str = "the agent";
 
 const TOGGLE_TO_CHAT_TIP: &str = "Show this session's chat";
 const TOGGLE_TO_TERMINAL_TIP: &str = "Show this session's terminal";
@@ -89,9 +111,68 @@ pub(crate) struct SessionChat {
     /// The work running beside the chat, for its strip; a `Chat` reply
     /// leaves it as it is.
     work: RunningWork,
+    /// The screen's last composer state; none until the chat loaded.
+    composer_state: Option<ComposerState>,
+    /// The cards' busy and "Answered elsewhere" marks.
+    cards: CardState,
+    /// The chat send in flight.
+    sends: SendTracker,
+    /// The composer, made once the chat has loaded.
+    composer: Option<Composer>,
+    /// The daemon's reason for refusing the last send.
+    send_error: Option<String>,
+}
+
+/// A loaded chat's composer and its subscriptions.
+pub(crate) struct Composer {
+    input: Entity<TextInput>,
+    _subscriptions: [Subscription; 2],
 }
 
 impl SessionChat {
+    /// The composer's text, empty before the composer is made.
+    fn composer_text(&self, cx: &App) -> String {
+        self.composer
+            .as_ref()
+            .map(|composer| composer.input.read(cx).text().to_owned())
+            .unwrap_or_default()
+    }
+
+    /// Puts `text` in the composer, the caret at its end.
+    fn set_composer_text(&self, text: &str, cx: &mut App) {
+        if let Some(composer) = &self.composer {
+            let text = text.to_owned();
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text(text, cx));
+        }
+    }
+
+    /// Gives a refused send's or answer's `text` back to the composer,
+    /// before whatever was typed since.
+    fn give_back(&self, text: &str, cx: &mut App) {
+        let current = self.composer_text(cx);
+        self.set_composer_text(&chat::restored_text(text, &current), cx);
+    }
+
+    /// Whether the card on screen was submitted and is still up.
+    fn card_busy(&self) -> bool {
+        self.stack
+            .current()
+            .is_some_and(|prompt| self.cards.is_busy(&prompt.id))
+    }
+
+    /// A screen reading: the card stack, the cards' marks, the send in
+    /// flight and the composer state follow it.
+    fn take_screen(&mut self, screen: &ChatScreen, now: Instant) {
+        let before = self.stack.current().map(|prompt| prompt.id.clone());
+        self.stack.on_screen(screen, now);
+        let after = screen.prompt.as_ref().map(|prompt| prompt.id.as_str());
+        self.cards.on_screen(before.as_deref(), after);
+        self.sends.on_composer(&screen.composer);
+        self.composer_state = Some(screen.composer.clone());
+    }
+
     /// Applies one chat message: a `Chat` that answers this chat's load or
     /// that the daemon sent unasked (a reset that keeps open cards open), an
     /// append, a screen change, or the running work. A reply to an older
@@ -113,16 +194,24 @@ impl SessionChat {
                     Some(_) => return false,
                     None => self.log.reset(entries, hidden),
                 }
-                self.stack.on_screen(&screen, now);
+                self.take_screen(&screen, now);
                 self.refresh_docs();
             }
             DaemonMessage::ChatAppend {
                 entries, removed, ..
             } => {
+                let new_entry = entries
+                    .iter()
+                    .filter_map(chat::entry_id)
+                    .any(|id| self.log.get(id).is_none());
+                if new_entry {
+                    self.cards.on_new_entry();
+                }
+                self.sends.on_entries(&entries);
                 self.log.append(entries, &removed);
                 self.refresh_docs();
             }
-            DaemonMessage::ChatScreenChanged { screen, .. } => self.stack.on_screen(&screen, now),
+            DaemonMessage::ChatScreenChanged { screen, .. } => self.take_screen(&screen, now),
             DaemonMessage::ChatWork {
                 subagents,
                 shells,
@@ -571,6 +660,7 @@ impl RootView {
             if work {
                 self.arm_work_strip_repaint(cx);
             }
+            self.ensure_composer(&session_id, cx);
             cx.notify();
         } else {
             tracing::debug!(%session_id, "chat message for a chat no pane shows, or for an older load: dropped");
@@ -593,6 +683,9 @@ impl RootView {
         let Some(request_id) = request_id else {
             return false;
         };
+        if self.on_chat_reply_refused(message, request_id, cx) {
+            return true;
+        }
         let Some(session_id) = self
             .chat
             .sessions
@@ -635,6 +728,292 @@ impl RootView {
         self.update_pane_roles(cx);
         cx.notify();
         true
+    }
+
+    /// A daemon `Error` that answers one of our chat sends or card answers,
+    /// shown inline with no toast. A refused send, or a refused answer that
+    /// took composer text (even after its card left), gives the text back
+    /// before what was typed since, with the daemon's reason under the
+    /// composer; a refused answer to a card still up frees it with the
+    /// reason on it. Returns whether the error was ours.
+    fn on_chat_reply_refused(
+        &mut self,
+        message: &str,
+        request_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        for (session_id, chat) in &mut self.chat.sessions {
+            let text = chat.sends.refused(request_id);
+            let card = chat.cards.refused(request_id, message);
+            if text.is_none() && card.is_none() {
+                continue;
+            }
+            tracing::info!(%session_id, message, ?card, "the daemon refused a chat send or card answer");
+            if let Some(text) = text {
+                chat.give_back(&text, cx);
+                chat.send_error = Some(message.to_owned());
+            }
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// Makes session `session_id`'s composer once its chat has loaded:
+    /// Ctrl+Enter and Esc in it go through [`Self::chat_key`], and every edit
+    /// repaints the buttons beside it.
+    fn ensure_composer(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let wanted = self
+            .chat
+            .sessions
+            .get(session_id)
+            .is_some_and(|chat| chat.request.is_none() && chat.composer.is_none());
+        if !wanted {
+            return;
+        }
+        let input = cx.new(|cx| {
+            TextInput::multi_line("", COMPOSER_PLACEHOLDER, cx)
+                .with_rows(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
+        });
+        let id = session_id.to_owned();
+        let keys = cx.subscribe(&input, move |this, _, event: &TextInputEvent, cx| {
+            let key = match event {
+                TextInputEvent::Submit => CardKey::CtrlEnter,
+                TextInputEvent::Cancel => CardKey::Escape,
+            };
+            this.chat_key(&id, key, cx);
+        });
+        let edits = cx.subscribe(&input, |_, _, _: &TextChanged, cx| cx.notify());
+        if let Some(chat) = self.chat.sessions.get_mut(session_id) {
+            chat.composer = Some(Composer {
+                input,
+                _subscriptions: [keys, edits],
+            });
+        }
+    }
+
+    /// A key the chat of session `session_id` reads before its composer:
+    /// it answers the current card, sends the composer's text, or is
+    /// swallowed; Ctrl+Enter does nothing while a send is in flight.
+    /// Returns whether the key was taken.
+    fn chat_key(&mut self, session_id: &str, key: CardKey, cx: &mut Context<Self>) -> bool {
+        let now = (self.now)();
+        let Some(chat) = self.chat.sessions.get(session_id) else {
+            return false;
+        };
+        if key == CardKey::CtrlEnter && chat.sends.in_flight(now) {
+            return true;
+        }
+        let text = chat.composer_text(cx);
+        let current = chat.stack.current().cloned();
+        match key_action(&chat.stack, chat.card_busy(), key, &text, now) {
+            KeyAction::Answer(answer) => {
+                if let Some(prompt) = current {
+                    self.answer_card(session_id, &prompt, answer, None, cx);
+                }
+            }
+            KeyAction::Send => self.send_composer(session_id, cx),
+            KeyAction::Swallow => {}
+            KeyAction::Pass => return false,
+        }
+        true
+    }
+
+    /// Sends `answer` to `prompt`, the card it was drawn or keyed for, under
+    /// a new request id, unless that card is busy; a card gone since is
+    /// answered all the same and the daemon refuses it. A toggle leaves the
+    /// card free; any other answer makes it busy. `taken`, the composer
+    /// text the answer carries, is cleared from the composer and kept by
+    /// its request id to give back on a refusal.
+    fn answer_card(
+        &mut self,
+        session_id: &str,
+        prompt: &ChatPrompt,
+        answer: ChatAnswerKind,
+        taken: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        if chat.cards.is_busy(&prompt.id) {
+            return;
+        }
+        let request_id = new_request_id();
+        let current = chat.stack.current().map(|current| current.id.clone());
+        chat.cards
+            .clicked(&prompt.id, current.as_deref(), request_id.clone(), &answer);
+        if let Some(text) = taken {
+            chat.sends.took(request_id.clone(), text);
+            chat.set_composer_text("", cx);
+        }
+        self.send(card_answer_message(
+            session_id,
+            &prompt.id,
+            answer,
+            Some(request_id),
+        ));
+        cx.notify();
+    }
+
+    /// A button of session `session_id`'s card for `prompt` was pressed.
+    fn press_card(
+        &mut self,
+        session_id: &str,
+        prompt: &ChatPrompt,
+        answer: &ButtonAnswer,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.chat.sessions.get(session_id) else {
+            return;
+        };
+        let text = chat.composer_text(cx);
+        let Some(resolved) = answer.resolve(&text) else {
+            return;
+        };
+        let taken = matches!(answer, ButtonAnswer::TypedText).then_some(text);
+        self.answer_card(session_id, prompt, resolved, taken, cx);
+    }
+
+    /// A ride-on button of session `session_id` drawn for `prompt`: the
+    /// composer's text rides on allowing (`allow`) or denying it. Nothing
+    /// happens while a send is in flight.
+    fn ride_on(
+        &mut self,
+        session_id: &str,
+        prompt: &ChatPrompt,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let now = (self.now)();
+        let Some(chat) = self.chat.sessions.get(session_id) else {
+            return;
+        };
+        if chat.sends.in_flight(now) {
+            return;
+        }
+        let text = chat.composer_text(cx);
+        let answer = if allow {
+            chat::allow_with_text(prompt, &text)
+        } else {
+            chat::deny_with_text(prompt, &text)
+        };
+        if let Some(answer) = answer {
+            self.answer_card(session_id, prompt, answer, Some(text), cx);
+        }
+    }
+
+    /// Sends session `session_id`'s composer text, clearing the composer;
+    /// a refusal puts it back. Nothing happens while a send is in flight.
+    fn send_composer(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let now = (self.now)();
+        let request_id = new_request_id();
+        let Some(chat) = self.chat.sessions.get_mut(session_id) else {
+            return;
+        };
+        if chat.sends.in_flight(now) {
+            return;
+        }
+        let text = chat.composer_text(cx);
+        let Some(msg) = chat::send_message(session_id, &text, request_id.clone()) else {
+            return;
+        };
+        chat.sends.sent(request_id, text, now);
+        chat.send_error = None;
+        chat.set_composer_text("", cx);
+        self.send(msg);
+        cx.notify();
+    }
+
+    /// The note `chat`'s composer shows: why it cannot send.
+    fn composer_note_of(&self, chat: &SessionChat) -> Option<ComposerNote> {
+        chat::composer_note(
+            self.conn.is_open(),
+            chat.composer_state.as_ref(),
+            chat.sends.in_flight((self.now)()),
+        )
+    }
+
+    /// The name people read for session `session_id`'s agent, for the
+    /// labels that name it.
+    fn agent_label(&self, session_id: &str) -> String {
+        let agent = self
+            .sidebar
+            .session(session_id)
+            .and_then(|session| session.agent.as_ref());
+        self.sidebar
+            .agents()
+            .iter()
+            .find(|descriptor| Some(&descriptor.id) == agent)
+            .map_or_else(
+                || GENERIC_AGENT.to_owned(),
+                |descriptor| descriptor.label.clone(),
+            )
+    }
+
+    /// The text of session `session_id`'s composer; none before its chat
+    /// has loaded.
+    #[must_use]
+    pub fn chat_composer_text(&self, session_id: &str, cx: &App) -> Option<String> {
+        let chat = self.chat.sessions.get(session_id)?;
+        chat.composer
+            .as_ref()
+            .map(|composer| composer.input.read(cx).text().to_owned())
+    }
+
+    /// The note session `session_id`'s composer shows, if any.
+    #[must_use]
+    pub fn chat_composer_note(&self, session_id: &str) -> Option<String> {
+        let chat = self.chat.sessions.get(session_id)?;
+        self.composer_note_of(chat).map(|note| note.text())
+    }
+
+    /// The daemon's reason for refusing session `session_id`'s last send.
+    #[must_use]
+    pub fn chat_composer_error(&self, session_id: &str) -> Option<String> {
+        self.chat.sessions.get(session_id)?.send_error.clone()
+    }
+
+    /// Session `session_id`'s card: its prompt id and whether it is busy.
+    #[must_use]
+    pub fn chat_card(&self, session_id: &str) -> Option<(String, bool)> {
+        let chat = self.chat.sessions.get(session_id)?;
+        let prompt = chat.stack.current()?;
+        Some((prompt.id.clone(), chat.cards.is_busy(&prompt.id)))
+    }
+
+    /// The daemon's reason for refusing the last answer to session
+    /// `session_id`'s card.
+    #[must_use]
+    pub fn chat_card_refusal(&self, session_id: &str) -> Option<String> {
+        let chat = self.chat.sessions.get(session_id)?;
+        let prompt = chat.stack.current()?;
+        chat.cards.refusal(&prompt.id).map(ToOwned::to_owned)
+    }
+
+    /// The selectors of the buttons beside session `session_id`'s
+    /// composer: Send, or the ride-on answers.
+    #[must_use]
+    pub fn chat_composer_actions(&self, session_id: &str, cx: &App) -> Vec<&'static str> {
+        let Some(chat) = self.chat.sessions.get(session_id) else {
+            return Vec::new();
+        };
+        if chat.composer.is_none() {
+            return Vec::new();
+        }
+        composer_actions(chat.stack.current(), &chat.composer_text(cx))
+            .into_iter()
+            .map(ComposerAction::selector)
+            .collect()
+    }
+
+    /// Whether session `session_id`'s chat shows "Answered elsewhere".
+    #[must_use]
+    pub fn chat_answered_elsewhere(&self, session_id: &str) -> bool {
+        self.chat
+            .sessions
+            .get(session_id)
+            .is_some_and(|chat| chat.cards.answered_elsewhere())
     }
 
     /// A click on a tool card of session `session_id`'s chat opens or
@@ -708,6 +1087,10 @@ impl RootView {
             let note = if loading { LOADING_NOTE } else { EMPTY_NOTE };
             chat_note(note).into_any_element()
         };
+        let loaded = chat.filter(|chat| chat.request.is_none());
+        let cards = loaded.and_then(|chat| self.card_area(session_id, chat, cx));
+        let composer = loaded.and_then(|chat| self.composer_row(session_id, chat, cx));
+        let keys_for = session_id.to_owned();
         div()
             .debug_selector(|| name)
             .flex()
@@ -715,10 +1098,209 @@ impl RootView {
             .flex_1()
             .min_h(px(0.0))
             .size_full()
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if let Some(key) = card_key(&event.keystroke)
+                    && this.chat_key(&keys_for, key, cx)
+                {
+                    cx.stop_propagation();
+                }
+            }))
             .child(main)
+            .children(cards)
             .children(strip.map(|strip| strip_row(&strip, &look.mono)))
+            .children(composer)
             .into_any_element()
     }
+
+    /// Session `session_id`'s card and the cards behind it, under an
+    /// "Answered elsewhere" line while one shows; none while neither does.
+    fn card_area(
+        &self,
+        session_id: &str,
+        chat: &SessionChat,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let elsewhere = chat.cards.answered_elsewhere().then(|| {
+            muted_line(ANSWERED_ELSEWHERE.to_owned())
+                .debug_selector(|| "chat-answered-elsewhere".to_owned())
+        });
+        let agent = self.agent_label(session_id);
+        let card = chat.stack.current().map(|prompt| {
+            let view = CardView {
+                prompt,
+                agent: &agent,
+                busy: chat.cards.is_busy(&prompt.id),
+                refusal: chat.cards.refusal(&prompt.id),
+                ghosts: chat.stack.ghosts().len(),
+            };
+            let id = session_id.to_owned();
+            let drawn = prompt.clone();
+            let on_press: OnPress =
+                Rc::new(cx.listener(move |this, answer: &ButtonAnswer, _, cx| {
+                    this.press_card(&id, &drawn, answer, cx);
+                }));
+            prompt_card(&view, &on_press)
+        });
+        if elsewhere.is_none() && card.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(BODY_PAD_X))
+                .pb(px(6.0))
+                .children(elsewhere)
+                .children(card)
+                .into_any_element(),
+        )
+    }
+
+    /// Session `session_id`'s composer row: the note saying why it cannot
+    /// send, the input (tagged `chat-composer`) with Send (`chat-send`) or,
+    /// with text while a card is up, the ride-on answers (`chat-ride-yes`,
+    /// `chat-ride-no`), and the daemon's reason for refusing the last send
+    /// (`chat-composer-error`). Without a connection the input is
+    /// disabled.
+    fn composer_row(
+        &self,
+        session_id: &str,
+        chat: &SessionChat,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let composer = chat.composer.as_ref()?;
+        let note = self.composer_note_of(chat);
+        let disabled = note.as_ref().is_some_and(ComposerNote::disables);
+        let text = composer.input.read(cx).text().to_owned();
+        let blank = text.trim().is_empty();
+        let field = field_frame(false)
+            .debug_selector(|| "chat-composer".to_owned())
+            .flex_1()
+            .min_w(px(0.0))
+            .py(px(6.0))
+            .when(disabled, |field| field.opacity(DISABLED_OPACITY))
+            .when(!disabled, |field| field.child(composer.input.clone()));
+        let prompt = chat.stack.current();
+        let busy = prompt.is_some_and(|prompt| chat.cards.is_busy(&prompt.id));
+        let sending = chat.sends.in_flight((self.now)());
+        let agent = self.agent_label(session_id);
+        let actions: Vec<AnyElement> = composer_actions(prompt, &text)
+            .into_iter()
+            .map(|action| match action {
+                ComposerAction::Send => {
+                    let enabled = !blank && !disabled && !sending;
+                    let id = session_id.to_owned();
+                    primary_button(action.selector(), ButtonSize::Compact, enabled)
+                        .child("Send")
+                        .when(enabled, |send| {
+                            send.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.send_composer(&id, cx);
+                            }))
+                        })
+                        .into_any_element()
+                }
+                ComposerAction::RideYes | ComposerAction::RideNo => {
+                    let allow = action == ComposerAction::RideYes;
+                    let label = if allow {
+                        ride_yes_label(&agent)
+                    } else {
+                        ride_no_label(&agent)
+                    };
+                    let ride = Ride {
+                        selector: action.selector(),
+                        label,
+                        allow,
+                        busy: busy || sending,
+                        prompt: prompt.cloned(),
+                    };
+                    Self::ride_button(session_id, ride, cx)
+                }
+            })
+            .collect();
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .px(px(BODY_PAD_X))
+                .pt(px(6.0))
+                .pb(px(BODY_PAD_Y))
+                .children(note.map(|note| {
+                    muted_line(note.text()).debug_selector(|| "chat-composer-note".to_owned())
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap(px(8.0))
+                        .child(field)
+                        .children(actions),
+                )
+                .children(chat.send_error.clone().map(|reason| {
+                    div()
+                        .debug_selector(|| "chat-composer-error".to_owned())
+                        .text_size(px(SMALL_TEXT_SIZE))
+                        .text_color(gpui::rgb(DANGER))
+                        .child(reason)
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// One ride-on button: the composer's text rides on allowing (`allow`)
+    /// or denying session `session_id`'s card; a busy card's takes no click.
+    fn ride_button(session_id: &str, ride: Ride, cx: &mut Context<Self>) -> AnyElement {
+        let id = session_id.to_owned();
+        let Ride {
+            selector,
+            label,
+            allow,
+            busy,
+            prompt,
+        } = ride;
+        outlined_button(selector, ButtonSize::Compact, !busy)
+            .child(label)
+            .when(!busy, |button| {
+                button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if let Some(prompt) = &prompt {
+                        this.ride_on(&id, prompt, allow, cx);
+                    }
+                }))
+            })
+            .into_any_element()
+    }
+}
+
+/// One ride-on button: its selector, its label, whether it allows or
+/// denies, and whether the card is busy.
+struct Ride {
+    selector: &'static str,
+    label: String,
+    allow: bool,
+    busy: bool,
+    prompt: Option<ChatPrompt>,
+}
+
+/// How a disabled composer is dimmed.
+const DISABLED_OPACITY: f32 = 0.5;
+
+/// The card key `keystroke` is, when the chat reads it before its
+/// composer: a bare digit, or Ctrl+Shift+Enter. Ctrl+Enter and Esc reach
+/// the chat through the composer's own Submit and Cancel.
+fn card_key(keystroke: &Keystroke) -> Option<CardKey> {
+    let mods = &keystroke.modifiers;
+    if keystroke.key == "enter" && mods.control && mods.shift && !mods.alt && !mods.platform {
+        return Some(CardKey::CtrlShiftEnter);
+    }
+    if mods.control || mods.alt || mods.shift || mods.platform || mods.function {
+        return None;
+    }
+    let mut chars = keystroke.key.chars();
+    let digit = chars.next()?.to_digit(10)?;
+    chars.next().is_none().then_some(CardKey::Digit(digit))
 }
 
 /// A loaded chat's rows in a column that follows the bottom until scrolled
