@@ -10,19 +10,12 @@
 ## Wave 2 — Daily driver: close the port's gaps
 
 - [ ] RT-465 Daemon robustness and ideas from the herdr read · release vNext
-  - [ ] RT-466 Bound a slow client's outbound queue, time out its sends and ping tailnet connections · release vNext
-  - [ ] RT-467 Keep the daemon and its tracers alive when the client starts inside a kill-on-close job · release vNext
-  - [ ] RT-468 Trim scrollback at a line start and move its file IO off the tokio worker · release vNext
-  - [ ] RT-469 Wake the git watcher on reftable changes · release vNext
   - [ ] RT-470 Add error codes and a status sequence number to the wire · release vNext
-  - [ ] RT-473 Flush the daemon's atomic writes to disk before the rename · release vNext
-  - [ ] RT-474 Record a session killed by logoff or shutdown as lost, so auto-resume picks it up · release vNext
-  - [ ] RT-475 Guard the tracer liveness check against PID reuse · release vNext
-  - [ ] RT-476 Handle prunable and locked worktrees in the worktree list, add and cleanup · release vNext
-  - [ ] RT-477 Add screen-rule tooling: a rule trace, a capture-to-fixture command, the footer region and whole-table validation · release vNext
   - [ ] RT-478 Derive the background flag from the screen as well as from hooks · release vNext
+  - [ ] RT-545 Pass the WMI daemon launch's environment as Unicode · release vNext
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
 - [ ] RT-238 Route a ListPresets failure by request_id · release vNext
+- [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
 
 ## Wave 2b — Hook status
 
@@ -206,7 +199,6 @@
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
 - [ ] RT-422 Remove wall-clock time assertions from the tests · release vNext
-- [ ] RT-427 Kill hung tests with a nextest terminate-after guard · release vNext
 
 ## macOS
 
