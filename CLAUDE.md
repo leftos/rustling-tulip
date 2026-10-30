@@ -216,7 +216,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   It holds the diff tabs' include-whitespace and highlight toggles, whether a Markdown viewer tab opens rendered (`viewer_markdown_rendered`, default true; a missing key loads as true), and the per-host remote session counts (`host_session_counts`, `{"<lower-cased MagicDNS name>": <count>}`, or `"ssh:<host string>"` for an SSH host, only for hosts in `saved_hosts`; the import-remote-sessions modal compares against it).
 
-  It holds the open pop-out windows in open order (`popouts`, each `{"key": {"kind": "pane"|"tab"|"session", …ids}, "window": <the window shape, or null until first moved>}`; restored once per launch once the tabs and sessions arrive; a missing key or a non-list value loads as empty, and an entry whose key does not decode is dropped).
+  It holds the open pop-out windows in open order (`popouts`, each `{"key": {"kind": "pane"|"tab"|"session", …ids}, "window": <the window shape, or null until first moved>}`; a session key also carries `"host": "{host key}"` for a remote host's session and omits it for This PC; restored once per launch once the tabs and sessions arrive; a missing key or a non-list value loads as empty, and an entry whose key does not decode is dropped).
 
   It holds the Settings modal's Spawn default (`spawn` holds only the trusted-launch default; Claude's approval mode and provider are the daemon's `agent_settings`, not stored here), General, Notifications and App title choices (`general`, `notifications`, `title`).
 
