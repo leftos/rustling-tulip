@@ -74,6 +74,55 @@ pub(crate) const MAX_VALUE_UNITS: usize = 1280;
 /// before a restart, so a value a config still needs is never swept.
 const UNREFERENCED_GRACE: TimeDelta = TimeDelta::hours(1);
 
+/// What a store operation says when Windows Credential Manager is out of reach
+/// of this daemon's logon session, as for a daemon a key-based SSH login
+/// started.
+pub(crate) const VAULT_UNREACHABLE: &str = concat!(
+    "This daemon cannot reach Windows Credential Manager because it was started from an SSH login. ",
+    "Start rustling-tulip on this PC from the desktop app or the login autostart to use saved secrets."
+);
+
+/// How `windows-native-keyring-store` shows Windows error 1312
+/// (`ERROR_NO_SUCH_LOGON_SESSION`). The store keeps the error code in a private
+/// type with no accessor, so [`is_no_logon_session`] can only match this text.
+const NO_LOGON_SESSION_TEXT: &str = "ERROR_NO_SUCH_LOGON_SESSION";
+
+/// The error of a store operation that could not reach Credential Manager; it
+/// displays as [`VAULT_UNREACHABLE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VaultUnreachable;
+
+impl fmt::Display for VaultUnreachable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(VAULT_UNREACHABLE)
+    }
+}
+
+impl std::error::Error for VaultUnreachable {}
+
+/// Whether `err` is Windows error 1312, `ERROR_NO_SUCH_LOGON_SESSION`: the
+/// process's logon session has no Credential Manager, as for a key-based SSH
+/// login (logon type 3). The store reports it as `NoStorageAccess`; any other
+/// code is a `PlatformFailure`.
+pub(crate) fn is_no_logon_session(err: &KeyringError) -> bool {
+    match err {
+        KeyringError::NoStorageAccess(platform) | KeyringError::PlatformFailure(platform) => {
+            platform.to_string().contains(NO_LOGON_SESSION_TEXT)
+        }
+        _ => false,
+    }
+}
+
+/// The refusal of a spawn whose secret could not be read or saved because
+/// Credential Manager is out of reach.
+pub(crate) fn vault_unreachable_failure() -> SpawnFailure {
+    SpawnFailure {
+        title: "Saved secrets are out of reach".to_owned(),
+        detail: VAULT_UNREACHABLE.to_owned(),
+        hint: None,
+    }
+}
+
 /// Install Windows Credential Manager as the process's credential store.
 ///
 /// Meant for startup, before any spawn seals a value.
@@ -106,15 +155,20 @@ pub fn init() -> anyhow::Result<()> {
 ///
 /// A [`SpawnFailure`] refusing the spawn: the value is over the store's size
 /// limit, or the store or the index could not be written. Neither message
-/// carries the value.
+/// carries the value. A store out of reach refuses with [`VAULT_UNREACHABLE`].
 pub fn seal(key: &str, value: &str) -> Result<String, SpawnFailure> {
     check_sealable_value(key, value)?;
-    seal_value(key, value).map_err(|err| SpawnFailure {
-        title: "Could not save a secret".to_owned(),
-        detail: format!("{key}'s value could not be saved: {err:#}"),
-        hint: Some(format!(
-            "Try again, or set {key} in your environment and use ${{env:{key}}}."
-        )),
+    seal_value(key, value).map_err(|err| {
+        if err.is::<VaultUnreachable>() {
+            return vault_unreachable_failure();
+        }
+        SpawnFailure {
+            title: "Could not save a secret".to_owned(),
+            detail: format!("{key}'s value could not be saved: {err:#}"),
+            hint: Some(format!(
+                "Try again, or set {key} in your environment and use ${{env:{key}}}."
+            )),
+        }
     })
 }
 
@@ -288,21 +342,27 @@ fn check_sealable_value(key: &str, value: &str) -> Result<(), SpawnFailure> {
 /// Read the value saved under `id`. `None` when the index has no such id, or
 /// the store no longer holds it — a value the user deleted in Credential
 /// Manager reads as missing rather than as an error.
-#[must_use]
-pub fn open(id: &str) -> Option<Secret> {
+///
+/// # Errors
+///
+/// [`VaultUnreachable`] when Credential Manager is out of reach of this
+/// daemon's logon session.
+pub fn open(id: &str) -> Result<Option<Secret>, VaultUnreachable> {
     let context = match context() {
         Ok(context) => context,
         Err(err) => {
             warn!(error = %err, "env_secrets: no config dir to read the index from");
-            return None;
+            return Ok(None);
         }
     };
     let entries = read_index(&context.index).unwrap_or_else(|err| {
         warn!(error = %err, "env_secrets: unreadable index; treating it as empty");
         Vec::new()
     });
-    let entry = entries.iter().find(|entry| entry.id == id)?;
-    stored_value(&context.service, &entry.key, id).map(Secret::new)
+    let Some(entry) = entries.iter().find(|entry| entry.id == id) else {
+        return Ok(None);
+    };
+    Ok(stored_value(&context.service, &entry.key, id)?.map(Secret::new))
 }
 
 /// Remove the value saved under `id` from the store and its line from the
@@ -311,7 +371,8 @@ pub fn open(id: &str) -> Option<Secret> {
 /// # Errors
 ///
 /// Fails when the index cannot be read or rewritten, or when the store refuses
-/// to remove the value. A refusal leaves the line in place: the value is still
+/// to remove the value ([`VaultUnreachable`] when Credential Manager is out of
+/// reach). A refusal leaves the line in place: the value is still
 /// in the store, so it has to stay findable for a later cleanup to retry.
 pub fn delete(id: &str) -> anyhow::Result<()> {
     let _guard = index_lock();
@@ -418,7 +479,7 @@ fn seal_value(key: &str, value: &str) -> anyhow::Result<String> {
     let mut entries = read_index(&context.index)?;
     for entry in &entries {
         if entry.key == key
-            && stored_value(&context.service, key, &entry.id).as_deref() == Some(value)
+            && stored_value(&context.service, key, &entry.id)?.as_deref() == Some(value)
         {
             return Ok(entry.id.clone());
         }
@@ -440,13 +501,17 @@ fn seal_value(key: &str, value: &str) -> anyhow::Result<String> {
     Ok(id)
 }
 
-fn stored_value(service: &str, key: &str, id: &str) -> Option<String> {
+/// The value saved under `key` and `id`, or `None` when the store has none or
+/// fails to read it (logged). Credential Manager out of reach is an error, so
+/// a caller can say so rather than call the value missing.
+fn stored_value(service: &str, key: &str, id: &str) -> Result<Option<String>, VaultUnreachable> {
     match Entry::new(service, &user(key, id)).and_then(|entry| entry.get_password()) {
-        Ok(value) => Some(value),
-        Err(KeyringError::NoEntry) => None,
+        Ok(value) => Ok(Some(value)),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(err) if is_no_logon_session(&err) => Err(VaultUnreachable),
         Err(err) => {
             warn!(key, id, error = %err, "env_secrets: could not read a saved secret");
-            None
+            Ok(None)
         }
     }
 }
@@ -454,10 +519,11 @@ fn stored_value(service: &str, key: &str, id: &str) -> Option<String> {
 fn store_value(service: &str, key: &str, id: &str, value: &str) -> anyhow::Result<()> {
     let entry = Entry::new(service, &user(key, id))
         .with_context(|| format!("opening the credential entry for {key}"))?;
-    entry
-        .set_password(value)
-        .with_context(|| format!("saving {key} to Windows Credential Manager"))?;
-    Ok(())
+    match entry.set_password(value) {
+        Ok(()) => Ok(()),
+        Err(err) if is_no_logon_session(&err) => Err(VaultUnreachable.into()),
+        Err(err) => Err(err).with_context(|| format!("saving {key} to Windows Credential Manager")),
+    }
 }
 
 fn remove_stored(service: &str, key: &str, id: &str) -> anyhow::Result<()> {
@@ -465,6 +531,7 @@ fn remove_stored(service: &str, key: &str, id: &str) -> anyhow::Result<()> {
         .with_context(|| format!("opening the credential entry for {key}"))?;
     match entry.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(err) if is_no_logon_session(&err) => Err(VaultUnreachable.into()),
         Err(err) => Err(err).with_context(|| format!("deleting the saved secret for {key}")),
     }
 }
@@ -515,9 +582,69 @@ fn write_index(path: &Path, entries: &[IndexEntry]) -> anyhow::Result<()> {
 #[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
 pub(crate) mod test_support {
     use super::CONFIG_DIR_VAR;
+    use keyring_core::Error as KeyringError;
     use std::ffi::{OsStr, OsString};
+    use std::fmt;
     use std::path::PathBuf;
     use std::sync::{Arc, OnceLock};
+
+    /// Windows error 1312, `ERROR_NO_SUCH_LOGON_SESSION`.
+    pub(crate) const NO_LOGON_SESSION: u32 = 1312;
+
+    /// A Windows error code shown the way `windows-native-keyring-store`'s own
+    /// platform error shows it; the store's type is private, so a test cannot
+    /// build one.
+    #[derive(Debug)]
+    struct StoreCode(u32);
+
+    impl fmt::Display for StoreCode {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if self.0 == NO_LOGON_SESSION {
+                f.write_str("Windows ERROR_NO_SUCH_LOGON_SESSION")
+            } else {
+                write!(f, "Windows error code {}", self.0)
+            }
+        }
+    }
+
+    impl std::error::Error for StoreCode {}
+
+    /// The keyring error the Windows store returns for Windows error `code`:
+    /// `NoStorageAccess` for 1312, `PlatformFailure` for any other.
+    pub(crate) fn store_error_with_code(code: u32) -> KeyringError {
+        let inner = Box::new(StoreCode(code));
+        if code == NO_LOGON_SESSION {
+            KeyringError::NoStorageAccess(inner)
+        } else {
+            KeyringError::PlatformFailure(inner)
+        }
+    }
+
+    /// Make the next call on the mock credential filed under `user` (in this
+    /// config dir's service) fail with `err`. The credential must already
+    /// exist; the mock clears the error once it has returned it.
+    pub(crate) fn inject_error(user: &str, err: KeyringError) {
+        let store = mock_store();
+        let specifiers = (
+            super::service().expect("the config dir resolves"),
+            user.to_owned(),
+        );
+        let mut guard = store.inner.lock().expect("the mock store is not poisoned");
+        let cred = Arc::clone(
+            guard
+                .get_mut()
+                .iter()
+                .find(|cred| cred.specifiers == specifiers)
+                .expect("the credential was built"),
+        );
+        cred.set_error(err);
+    }
+
+    /// [`inject_error`] for the credential holding the secret row `key`'s
+    /// value under `id`.
+    pub(crate) fn inject_row_error(key: &str, id: &str, err: KeyringError) {
+        inject_error(&super::user(key, id), err);
+    }
 
     /// Serialises the tests that point `RUSTLING_TULIP_CONFIG_DIR` somewhere:
     /// env vars are process-global and tests run on parallel threads. An async
@@ -619,7 +746,10 @@ pub(crate) mod test_support {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
 mod tests {
-    use super::test_support::{mock_store, scratch};
+    use super::test_support::{
+        NO_LOGON_SESSION, inject_row_error as inject_store_error, mock_store, scratch,
+        store_error_with_code,
+    };
     use super::*;
     use crate::{history, orphan};
     use std::sync::Arc;
@@ -627,24 +757,19 @@ mod tests {
     /// A value no index file may ever contain.
     const VALUE_SENTINEL: &str = "sentinel-value-8c41f0d2";
 
-    /// Make the next call on `key`'s credential for `id` fail with `err`, the
-    /// way a credential store that is busy or locked would. The mock clears the
-    /// error once it has returned it, so the following call goes through.
-    fn inject_store_error(key: &str, id: &str, err: KeyringError) {
-        let store = mock_store();
-        let specifiers = (
-            service_for(&paths::config_dir().expect("the config dir resolves")),
-            user(key, id),
-        );
-        let mut guard = store.inner.lock().expect("the mock store is not poisoned");
-        let cred = Arc::clone(
-            guard
-                .get_mut()
-                .iter()
-                .find(|cred| cred.specifiers == specifiers)
-                .expect("the credential was built"),
-        );
-        cred.set_error(err);
+    /// The value saved under `id`, from a store that is within reach.
+    fn opens(id: &str) -> Option<Secret> {
+        open(id).expect("Credential Manager is within reach")
+    }
+
+    #[test]
+    fn the_classifier_recognises_windows_error_1312_and_no_other_code() {
+        assert!(is_no_logon_session(&store_error_with_code(
+            NO_LOGON_SESSION
+        )));
+        // ERROR_ACCESS_DENIED: the store is locked, not out of this session's reach.
+        assert!(!is_no_logon_session(&store_error_with_code(5)));
+        assert!(!is_no_logon_session(&KeyringError::NoEntry));
     }
 
     fn index_text() -> String {
@@ -658,7 +783,7 @@ mod tests {
         let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         assert_eq!(id.len(), 32, "the id is a 32-character UUID: {id}");
         assert_eq!(
-            open(&id).expect("the sealed value opens").expose(),
+            opens(&id).expect("the sealed value opens").expose(),
             VALUE_SENTINEL
         );
     }
@@ -684,7 +809,7 @@ mod tests {
         let (_lock, _dir) = scratch("delete");
         let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
         delete(&id).expect("deletes");
-        assert!(open(&id).is_none(), "the store no longer holds it");
+        assert!(opens(&id).is_none(), "the store no longer holds it");
         let index = index_text();
         assert!(!index.contains(&id), "{index}");
     }
@@ -692,7 +817,7 @@ mod tests {
     #[test]
     fn an_unknown_id_opens_none() {
         let (_lock, _dir) = scratch("unknown");
-        assert!(open("0123456789abcdef0123456789abcdef").is_none());
+        assert!(opens("0123456789abcdef0123456789abcdef").is_none());
     }
 
     #[test]
@@ -848,7 +973,7 @@ mod tests {
                 entries.iter().any(|entry| &entry.id == id),
                 "{id} was dropped from the index"
             );
-            assert!(open(id).is_some(), "{id} does not open");
+            assert!(opens(id).is_some(), "{id} does not open");
         }
     }
 
@@ -870,7 +995,7 @@ mod tests {
             "{refusal:#}"
         );
         assert!(index_text().contains(&id), "the line survives for a retry");
-        assert!(open(&id).is_some(), "the value is still in the store");
+        assert!(opens(&id).is_some(), "the value is still in the store");
 
         // The mock clears its injected error once it has returned it, so the
         // next cleanup finds the value and the retry goes through.
@@ -1166,7 +1291,7 @@ mod tests {
 
         let id = sealed_id(&state_text);
         assert_eq!(
-            open(&id).expect("the sealed value opens").expose(),
+            opens(&id).expect("the sealed value opens").expose(),
             VALUE_SENTINEL,
             "the store holds the literal the file used to carry"
         );
@@ -1288,7 +1413,7 @@ mod tests {
             0,
             "a referenced value is never swept"
         );
-        assert!(open(&id).is_some(), "the value survives the sweep");
+        assert!(opens(&id).is_some(), "the value survives the sweep");
     }
 
     #[test]
@@ -1321,7 +1446,7 @@ mod tests {
             collect_unreferenced(&referenced, Utc::now() + TimeDelta::hours(2)),
             0
         );
-        assert!(open(&sidecar_id).is_some() && open(&state_id).is_some());
+        assert!(opens(&sidecar_id).is_some() && opens(&state_id).is_some());
     }
 
     #[test]
@@ -1350,7 +1475,7 @@ mod tests {
             0,
             "the copy's reference keeps the value"
         );
-        assert!(open(&id).is_some(), "the value survives the sweep");
+        assert!(opens(&id).is_some(), "the value survives the sweep");
     }
 
     #[test]
@@ -1379,7 +1504,7 @@ mod tests {
         let removed = collect_unreferenced(&HashSet::new(), Utc::now() + TimeDelta::hours(2));
 
         assert_eq!(removed, 1);
-        assert!(open(&id).is_none(), "the value is gone from the store");
+        assert!(opens(&id).is_none(), "the value is gone from the store");
         assert!(!index_text().contains(&id), "and its line from the index");
     }
 
@@ -1393,7 +1518,7 @@ mod tests {
             0,
             "the grace period covers a spawn sealed moments before a restart"
         );
-        assert!(open(&id).is_some(), "the value is still in the store");
+        assert!(opens(&id).is_some(), "the value is still in the store");
         assert!(index_text().contains(&id), "and its line in the index");
     }
 
@@ -1431,7 +1556,7 @@ mod tests {
             index_text().contains(&id),
             "the line survives for the next start"
         );
-        assert!(open(&id).is_some(), "and so does the value");
+        assert!(opens(&id).is_some(), "and so does the value");
 
         // The mock clears its injected error once it has returned it, so the
         // next start's sweep finds the value and the removal goes through.
@@ -1450,7 +1575,7 @@ mod tests {
 
         crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
 
-        assert!(open(&id).is_none(), "an unreferenced id is swept");
+        assert!(opens(&id).is_none(), "an unreferenced id is swept");
         assert!(!index_text().contains(&id));
     }
 
@@ -1476,7 +1601,7 @@ mod tests {
         crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
 
         assert!(
-            open(&id).is_some(),
+            opens(&id).is_some(),
             "an id survives a sweep that cannot read every file"
         );
     }
@@ -1513,7 +1638,7 @@ mod tests {
         crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
 
         assert!(
-            open(&id).is_some(),
+            opens(&id).is_some(),
             "an id survives a sweep that skipped a sidecar"
         );
     }
@@ -1533,7 +1658,7 @@ mod tests {
         crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
 
         assert!(
-            open(&id).is_some(),
+            opens(&id).is_some(),
             "nothing is deleted when a folder cannot be read"
         );
     }
@@ -1555,7 +1680,7 @@ mod tests {
         crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
 
         assert!(
-            open(&id).is_some(),
+            opens(&id).is_some(),
             "nothing is deleted when state.json could not be read"
         );
     }

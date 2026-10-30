@@ -16,7 +16,7 @@ use protocol::{KeyState, SummarizerKeySource};
 use sha2::{Digest as _, Sha256};
 use tracing::warn;
 
-use crate::env_secrets;
+use crate::env_secrets::{self, VaultUnreachable};
 use crate::user_env::{self, Secret};
 
 /// Where a provider's key comes from, as this build reads it.
@@ -45,7 +45,8 @@ impl KeySource {
 /// # Errors
 ///
 /// The key is blank or over the store's size limit, the config dir cannot be
-/// resolved, or the store refused the write. No message carries the key.
+/// resolved, or the store refused the write ([`VaultUnreachable`] when
+/// Credential Manager is out of reach). No message carries the key.
 pub(crate) fn set(provider: &str, key: &Secret) -> anyhow::Result<()> {
     let text = key.expose();
     if text.trim().is_empty() {
@@ -58,31 +59,47 @@ pub(crate) fn set(provider: &str, key: &Secret) -> anyhow::Result<()> {
             env_secrets::MAX_VALUE_UNITS
         );
     }
-    entry(provider)?
-        .set_password(text)
-        .with_context(|| format!("saving the {provider} key to Windows Credential Manager"))
-}
-
-/// The saved key, or `None` when there is none or the store cannot be read
-/// (logged, without the key).
-fn read_stored(provider: &str) -> Option<Secret> {
-    let read = entry(provider).and_then(|entry| entry.get_password().map_err(anyhow::Error::from));
-    match read {
-        Ok(text) => Some(Secret::new(text)),
-        Err(err) if matches!(err.downcast_ref(), Some(KeyringError::NoEntry)) => None,
-        Err(err) => {
-            warn!(provider, error = %format!("{err:#}"), "summarizer: could not read the saved key; treating it as missing");
-            None
-        }
+    match entry(provider)?.set_password(text) {
+        Ok(()) => Ok(()),
+        Err(err) if env_secrets::is_no_logon_session(&err) => Err(VaultUnreachable.into()),
+        Err(err) => Err(err)
+            .with_context(|| format!("saving the {provider} key to Windows Credential Manager")),
     }
 }
 
-/// `provider`'s key from `source`, or `None` when there is none. A store that
-/// cannot be read is logged and reads as no key.
-pub(crate) fn get(provider: &str, source: &KeySource) -> Option<Secret> {
+/// The saved key, or `None` when there is none or the store fails to read it
+/// (logged, without the key).
+///
+/// # Errors
+///
+/// [`VaultUnreachable`] when Credential Manager is out of reach of this
+/// daemon's logon session, so the key reads as unreachable, not as missing.
+fn read_stored(provider: &str) -> Result<Option<Secret>, VaultUnreachable> {
+    let read = entry(provider).and_then(|entry| entry.get_password().map_err(anyhow::Error::from));
+    match read {
+        Ok(text) => Ok(Some(Secret::new(text))),
+        Err(err) => match err.downcast_ref::<KeyringError>() {
+            Some(KeyringError::NoEntry) => Ok(None),
+            Some(store_err) if env_secrets::is_no_logon_session(store_err) => Err(VaultUnreachable),
+            _ => {
+                warn!(provider, error = %format!("{err:#}"), "summarizer: could not read the saved key; treating it as missing");
+                Ok(None)
+            }
+        },
+    }
+}
+
+/// `provider`'s key from `source`, `Ok(None)` when there is none. A store that
+/// fails to read is logged and reads as no key.
+///
+/// # Errors
+///
+/// [`VaultUnreachable`] when Credential Manager is out of reach of this
+/// daemon's logon session.
+pub(crate) fn get(provider: &str, source: &KeySource) -> Result<Option<Secret>, VaultUnreachable> {
     match source {
         KeySource::Stored => read_stored(provider),
-        KeySource::Env(variable) => user_env::resolve(variable).map(|(key, _)| key),
+        KeySource::Env(variable) => Ok(user_env::resolve(variable).map(|(key, _)| key)),
     }
 }
 
@@ -90,10 +107,12 @@ pub(crate) fn get(provider: &str, source: &KeySource) -> Option<Secret> {
 ///
 /// # Errors
 ///
-/// The config dir cannot be resolved or the store refused the delete.
+/// The config dir cannot be resolved or the store refused the delete
+/// ([`VaultUnreachable`] when Credential Manager is out of reach).
 pub(crate) fn delete(provider: &str) -> anyhow::Result<()> {
     match entry(provider)?.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(err) if env_secrets::is_no_logon_session(&err) => Err(VaultUnreachable.into()),
         Err(err) => Err(err).with_context(|| {
             format!("deleting the {provider} key from Windows Credential Manager")
         }),
@@ -101,7 +120,8 @@ pub(crate) fn delete(provider: &str) -> anyhow::Result<()> {
 }
 
 /// The state of `provider`'s key from `source`; `None`, a source this build
-/// does not know, reads as [`KeyState::Missing`].
+/// does not know, reads as [`KeyState::Missing`], and a store out of reach as
+/// [`KeyState::Unreachable`].
 pub(crate) fn state(
     provider: &str,
     source: Option<&KeySource>,
@@ -110,7 +130,10 @@ pub(crate) fn state(
     let Some(source) = source else {
         return KeyState::Missing;
     };
-    match (source, get(provider, source)) {
+    let Ok(key) = get(provider, source) else {
+        return KeyState::Unreachable;
+    };
+    match (source, key) {
         (_, Some(key)) if rejections.is_rejected(provider, &key) => KeyState::Rejected,
         (KeySource::Stored, Some(_)) => KeyState::Stored,
         (KeySource::Stored, None) => KeyState::Missing,
@@ -187,10 +210,11 @@ fn entry(provider: &str) -> anyhow::Result<Entry> {
 #[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
 mod tests {
     use super::*;
-    use crate::env_secrets::test_support::{EnvVarGuard, mock_store, scratch};
+    use crate::env_secrets::test_support::{
+        EnvVarGuard, NO_LOGON_SESSION, inject_error, scratch, store_error_with_code,
+    };
     use chrono::{TimeDelta, Utc};
     use std::collections::HashSet;
-    use std::sync::Arc;
 
     /// A key no message, log or `Debug` output may ever contain.
     const KEY_SENTINEL: &str = "sentinel-key-5e2a9b71";
@@ -205,29 +229,45 @@ mod tests {
     }
 
     fn stored(provider: &str) -> Option<String> {
-        get(provider, &KeySource::Stored).map(|key| key.expose().to_owned())
+        get(provider, &KeySource::Stored)
+            .expect("Credential Manager is within reach")
+            .map(|key| key.expose().to_owned())
     }
 
     /// Make the next call on `provider`'s credential fail, the way a busy or
     /// locked store would. The credential must already exist in the mock.
     fn inject_store_error(provider: &str) {
-        let store = mock_store();
-        let specifiers = (
-            env_secrets::service().expect("the config dir resolves"),
-            user(provider),
+        inject_error(
+            &user(provider),
+            KeyringError::Invalid("injected".to_owned(), "the store refused".to_owned()),
         );
-        let mut guard = store.inner.lock().expect("the mock store is not poisoned");
-        let cred = Arc::clone(
-            guard
-                .get_mut()
-                .iter()
-                .find(|cred| cred.specifiers == specifiers)
-                .expect("the credential was built"),
+    }
+
+    #[test]
+    fn clearing_a_key_without_credential_manager_says_why() {
+        let _scratch = scratch("summ-keys");
+        set(PROVIDER, &key(KEY_SENTINEL)).expect("the key saves");
+        inject_error(&user(PROVIDER), store_error_with_code(NO_LOGON_SESSION));
+
+        let refusal = delete(PROVIDER).expect_err("the store is out of reach");
+
+        assert_eq!(refusal.to_string(), env_secrets::VAULT_UNREACHABLE);
+    }
+
+    #[test]
+    fn a_key_read_without_credential_manager_is_unreachable_not_missing() {
+        let _scratch = scratch("summ-keys");
+        set(PROVIDER, &key(KEY_SENTINEL)).expect("the key saves");
+
+        inject_error(&user(PROVIDER), store_error_with_code(NO_LOGON_SESSION));
+        let unreachable = read_stored(PROVIDER).expect_err("the store is out of reach");
+        assert_eq!(unreachable.to_string(), env_secrets::VAULT_UNREACHABLE);
+
+        inject_error(&user(PROVIDER), store_error_with_code(NO_LOGON_SESSION));
+        assert_eq!(
+            state(PROVIDER, Some(&KeySource::Stored), &Rejections::default()),
+            KeyState::Unreachable
         );
-        cred.set_error(KeyringError::Invalid(
-            "injected".to_owned(),
-            "the store refused".to_owned(),
-        ));
     }
 
     #[test]
@@ -296,7 +336,9 @@ mod tests {
         let _scratch = scratch("summ-keys");
         let _var = EnvVarGuard::set(SET_VAR, KEY_SENTINEL);
         let source = KeySource::Env(SET_VAR.to_owned());
-        let found = get(PROVIDER, &source).expect("the variable is read");
+        let found = get(PROVIDER, &source)
+            .expect("Credential Manager is within reach")
+            .expect("the variable is read");
         assert_eq!(found.expose(), KEY_SENTINEL);
         assert_eq!(
             state(PROVIDER, Some(&source), &Rejections::default()),
@@ -309,7 +351,7 @@ mod tests {
         let _scratch = scratch("summ-keys");
         set(PROVIDER, &key(KEY_SENTINEL)).expect("a stored key is not read for an env source");
         let source = KeySource::Env(ABSENT_VAR.to_owned());
-        assert!(get(PROVIDER, &source).is_none());
+        assert!(get(PROVIDER, &source).is_ok_and(|key| key.is_none()));
         assert_eq!(
             state(PROVIDER, Some(&source), &Rejections::default()),
             KeyState::EnvMissing
@@ -370,7 +412,9 @@ mod tests {
     fn debug_of_a_key_and_of_a_struct_holding_it_shows_no_key_text() {
         let _scratch = scratch("summ-keys");
         set(PROVIDER, &key(KEY_SENTINEL)).expect("the key saves");
-        let found = get(PROVIDER, &KeySource::Stored).expect("the key reads back");
+        let found = get(PROVIDER, &KeySource::Stored)
+            .expect("Credential Manager is within reach")
+            .expect("the key reads back");
         let rejections = Rejections::default();
         rejections.reject(PROVIDER, &found);
         let held = (KeySource::Stored, Some(found));

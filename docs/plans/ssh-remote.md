@@ -24,6 +24,7 @@ Linear: RT-530 (Connect remote clients over OpenSSH without Tailscale, with a si
 8. **Device approval stays local.** The pairing and device-approval UI (`ListPendingDevices`, the pending-device prompts) shows only on `Target::Local`, never on an SSH or tailnet target. The daemon sends `PendingDevices` to every loopback connection, so the client must ignore it there.
 9. **The daemon outlives the SSH session.** Win32-OpenSSH runs a session's command in a job with `KILL_ON_JOB_CLOSE` and `BREAKAWAY_OK` (measured `LimitFlags=0x2800`), so `spawn_daemon` creates the daemon with `CREATE_BREAKAWAY_FROM_JOB`, falling back to the old flags when a job forbids breakaway (error 5). Its tracers start outside every job too. **Accepted as they are:** the daemon's idle exit on an SSH-only host, and the unbounded per-connection output queue (RT-466, in vNext+1).
 10. **No feature branch.** Each step lands on `main`. SSH.1 adds a subcommand nothing calls yet, and SSH.3's target stays unreachable until SSH.4's picker offers it.
+11. **A daemon the bridge starts has no Credential Manager.** A key-based SSH login is logon type 3, where every Credential Manager call fails with Windows error 1312, so such a daemon refuses secret env rows and reads the summarizer key as unreachable with a message naming the cause (RT-538, `docs/env-secrets.md`); launching the daemon through an S4U scheduled task is the planned fix (RT-539).
 
 ## Steps
 

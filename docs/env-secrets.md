@@ -42,6 +42,12 @@ A value Credential Manager cannot take (over its credential size limit) refuses 
 
 The `SpawnSession` pre-check refuses it before a checkout confirm and before any git work. Duplicate, Restart, Resume, Recover and Launch last all re-resolve, so each fails the same way until the user types the value again.
 
+## A daemon started from an SSH login
+
+A daemon started from a key-based SSH login (logon type 3, as `rustling-tulipd bridge` starts one when none runs) cannot use Credential Manager: every read, save and delete fails with Windows error 1312, `ERROR_NO_SUCH_LOGON_SESSION` (`env_secrets::is_no_logon_session`). A spawn that needs a secret reference, or has a secret row to seal, is refused with "This daemon cannot reach Windows Credential Manager because it was started from an SSH login. Start rustling-tulip on this PC from the desktop app or the login autostart to use saved secrets."
+
+The summarizer's stored key reads as `unreachable` rather than `missing`, and saving or clearing one, or running the Test summary, fails with the same message. To avoid it, start the daemon on the host from the desktop app or the login autostart before connecting over SSH; the bridge then uses that daemon.
+
 ## Existing files and cleanup
 
 At startup, before orphan recovery reads the sidecars, the daemon seals every literal secret row in `state.json`'s `last_spawn_config`s, every `sessions/<id>/meta.json` and every `history/<id>.json` (`main.rs`: `seal_stored_secrets`, `prune_and_seal_history`), rewriting each file that changed. Only the name pattern applies, since old files have no toggle, and other rows (`RUST_LOG`) are untouched.

@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - A host's daemon started by an SSH connection no longer stops, taking its sessions with it, when that connection ends.
+- A daemon started from an SSH login says it cannot reach Credential Manager, and how to start it so saved secrets work, instead of treating secrets and summarizer keys as missing.
 
 ## v0.5.0-alpha
 
