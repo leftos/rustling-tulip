@@ -2644,8 +2644,8 @@ pub enum ComposerState {
     Dialog,
     /// A full-screen overlay owns the keyboard.
     Overlay { name: String },
-    /// Forward-compat fallback: a state the current build doesn't know.
-    /// Daemon never constructs this directly.
+    /// Forward-compat fallback: a state the current build doesn't know. The
+    /// daemon sends it only while it has no reading of the session's screen.
     #[serde(other)]
     Unknown,
 }
@@ -4840,11 +4840,15 @@ pub enum DaemonMessage {
         request_id: Option<String>,
     },
     /// Chat rows that arrived after the load, sent to loaders only. An entry
-    /// whose id is already known replaces it.
+    /// whose id is already known replaces it. `removed` names the entries
+    /// that leave the chat: a live answer the transcript's answer, sent in
+    /// the same message, takes the place of.
     ChatAppend {
         session_id: String,
         #[serde(default)]
         entries: Vec<ChatEntry>,
+        #[serde(default)]
+        removed: Vec<String>,
     },
     /// The dialog or composer state changed, sent to loaders only.
     ChatScreenChanged {
@@ -10167,16 +10171,35 @@ mod tests {
         let msg = DaemonMessage::ChatAppend {
             session_id: "s1".to_string(),
             entries: entries.clone(),
+            removed: vec!["live:m1".to_string()],
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains(r#""type":"chat_append""#));
+        assert!(json.contains(r#""removed":["live:m1"]"#));
         match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
             DaemonMessage::ChatAppend {
                 session_id,
                 entries: decoded,
+                removed,
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(decoded, entries);
+                assert_eq!(removed, vec!["live:m1".to_string()]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_chat_append_without_removed_decodes() {
+        let json = r#"{"type":"chat_append","session_id":"s1","entries":[
+            {"kind":"system","id":"sys1","text":"Conversation cleared"}]}"#;
+        match serde_json::from_str::<DaemonMessage>(json).expect("an older append decodes") {
+            DaemonMessage::ChatAppend {
+                entries, removed, ..
+            } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(removed, Vec::<String>::new());
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -10263,6 +10286,7 @@ mod tests {
             DaemonMessage::ChatAppend {
                 session_id,
                 entries,
+                ..
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(entries.len(), 2);

@@ -22,6 +22,7 @@
 //!   first qualifying chunk, but demotion back to `idle` waits for
 //!   [`SHELL_IDLE_AFTER`] of silence
 
+use crate::chat_mirror::ChatTap;
 use crate::osc_title::TitleActivity;
 use crate::screen::SharedScreen;
 use crate::screen::rules::{self, CompiledRules, Reading, ScreenState, Verdict};
@@ -89,21 +90,32 @@ pub struct AttentionEvent {
 
 /// What a plain shell's status watcher reads: the session's output broadcast,
 /// the byte counts of the user input forwarded to it, the grid it feeds that
-/// output into and reads the agent's screen from, and the agent's rules.
+/// output into and reads the agent's screen from, the agent's rules, and the
+/// chat mirror's tap each reading of a running agent's screen goes to.
 pub struct ShellStreams {
     pub output: broadcast::Receiver<Vec<u8>>,
     pub input_pulses: mpsc::UnboundedReceiver<usize>,
     pub screen: SharedScreen,
     pub rules: Arc<CompiledRules>,
+    pub chat: ChatTap,
 }
 
 /// What an agent session's status watcher reads: the session's output
 /// broadcast, the grid it feeds that output into and reads the status from,
-/// and the agent's rules.
+/// the agent's rules, and the chat mirror's tap each reading goes to.
 pub struct AgentStreams {
     pub output: broadcast::Receiver<Vec<u8>>,
     pub screen: SharedScreen,
     pub rules: Arc<CompiledRules>,
+    pub chat: ChatTap,
+}
+
+/// What a screen check reads and hands its reading to: the grid, the agent's
+/// rules and the chat mirror's tap.
+struct Sight {
+    screen: SharedScreen,
+    rules: Arc<CompiledRules>,
+    chat: ChatTap,
 }
 
 /// Spawn a background task that feeds an agent session's grid from its PTY
@@ -153,8 +165,14 @@ pub fn watch(
         mut output,
         screen,
         rules,
+        chat,
     } = streams;
-    let mut watcher = ScreenWatch::new(registry, session_id, screen, attention_tx, rules);
+    let sight = Sight {
+        screen,
+        rules,
+        chat,
+    };
+    let mut watcher = ScreenWatch::new(registry, session_id, sight, attention_tx);
     tokio::spawn(async move { watcher.run_agent(&mut output).await });
 }
 
@@ -208,6 +226,8 @@ struct ScreenWatch {
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
     /// The screen rules of the session's agent.
     rules: Arc<CompiledRules>,
+    /// Where each reading of an agent's screen goes for the chat.
+    chat: ChatTap,
     wake: RecordWake,
     confirm: Confirm,
     /// When the last chunk of output arrived; a check at least
@@ -346,17 +366,17 @@ impl ScreenWatch {
     fn new(
         registry: &Arc<SessionRegistry>,
         session_id: String,
-        screen: SharedScreen,
+        sight: Sight,
         attention_tx: mpsc::UnboundedSender<AttentionEvent>,
-        rules: Arc<CompiledRules>,
     ) -> Self {
         let wake = RecordWake::new(registry, &session_id);
         Self {
             registry: Arc::clone(registry),
             session_id,
-            screen,
+            screen: sight.screen,
             attention_tx,
-            rules,
+            rules: sight.rules,
+            chat: sight.chat,
             wake,
             confirm: Confirm::new(Instant::now()),
             last_output: None,
@@ -423,7 +443,7 @@ impl ScreenWatch {
             Ok(found) => found,
             Err(checked) => return checked,
         };
-        let Some((reading, background, prompt)) = self.read_screen() else {
+        let Some((reading, background, prompt)) = self.read_screen(mode) else {
             self.confirm.hold(now);
             return Checked::Done;
         };
@@ -503,18 +523,24 @@ impl ScreenWatch {
     /// The screen's reading, the background rule that fires on it, and
     /// whether its last non-empty row is a shell's prompt; `None` when the
     /// grid's size changed since the last executed check: the frame under the
-    /// new size may be half drawn.
-    fn read_screen(&mut self) -> Option<(Reading, Option<Arc<str>>, bool)> {
-        let (size, reading, background, prompt) = {
+    /// new size may be half drawn. A frame that is read, of an agent's
+    /// screen (`mode` not [`Mode::Shell`]), goes to the chat mirror too.
+    fn read_screen(&mut self, mode: Mode) -> Option<(Reading, Option<Arc<str>>, bool)> {
+        let (size, resized, reading, background, prompt) = {
             let screen = crate::sync::lock(&self.screen);
+            let size = screen.size();
+            let resized = self.size.is_some_and(|last| last != size);
+            if !resized && mode != Mode::Shell {
+                self.chat.observe(&screen);
+            }
             (
-                screen.size(),
+                size,
+                resized,
                 self.rules.read(&screen),
                 self.rules.read_background(&screen),
                 rules::last_row_is_shell_prompt(&screen),
             )
         };
-        let resized = self.size.is_some_and(|last| last != size);
         self.size = Some(size);
         (!resized).then_some((reading, background, prompt))
     }
@@ -922,8 +948,14 @@ pub fn watch_plain_shell(
         input_pulses,
         screen,
         rules,
+        chat,
     } = streams;
-    let watch = ScreenWatch::new(registry, session_id, screen, attention_tx, rules);
+    let sight = Sight {
+        screen,
+        rules,
+        chat,
+    };
+    let watch = ScreenWatch::new(registry, session_id, sight, attention_tx);
     let mut watcher = ShellWatcher {
         replay_until: watch.confirm.hold_until,
         watch,
@@ -1561,6 +1593,12 @@ mod hysteresis_tests {
         record.screen = Some(Arc::clone(&screen));
         let registry = SessionRegistry::new(dirs);
         registry.insert(record);
+        let chat = crate::chat_mirror::ChatMirror::new(
+            Arc::clone(&registry),
+            crate::hook_status::LiveLines::default(),
+            Arc::new(tokio::sync::watch::channel(0usize).0),
+        )
+        .tap(SESSION, &agent_registry::default_agent());
         let (output, output_rx) = broadcast::channel(64);
         let (input, input_rx) = mpsc::unbounded_channel();
         let (attention_tx, attention_rx) = mpsc::unbounded_channel();
@@ -1573,6 +1611,7 @@ mod hysteresis_tests {
                     input_pulses: input_rx,
                     screen: Arc::clone(&screen),
                     rules,
+                    chat,
                 },
                 attention_tx,
                 initial,
@@ -1586,6 +1625,7 @@ mod hysteresis_tests {
                     output: output_rx,
                     screen: Arc::clone(&screen),
                     rules,
+                    chat,
                 },
                 attention_tx,
             );

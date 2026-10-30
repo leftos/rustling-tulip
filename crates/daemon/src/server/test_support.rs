@@ -117,7 +117,7 @@ pub(super) fn build_test_hub(
     let (tab_events, _) = broadcast::channel(16);
     let (preset_events, _) = broadcast::channel(16);
     let (state_events, _) = broadcast::channel(16);
-    let (client_count, _) = tokio::sync::watch::channel(0usize);
+    let client_count = Arc::new(tokio::sync::watch::channel(0usize).0);
     let (keep_awake_mode, _) = tokio::sync::watch::channel(protocol::KeepAwakeMode::default());
     let (remote_enabled, _) = tokio::sync::watch::channel(false);
     let (_, keep_awake_status) = tokio::sync::watch::channel(crate::keep_awake::Status {
@@ -136,6 +136,12 @@ pub(super) fn build_test_hub(
     );
     let turns =
         crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
+    let live_lines = crate::hook_status::LiveLines::default();
+    let chat_mirror = crate::chat_mirror::ChatMirror::new(
+        Arc::clone(&sessions),
+        live_lines.clone(),
+        Arc::clone(&client_count),
+    );
     let hub = Hub {
         state,
         sessions,
@@ -150,7 +156,7 @@ pub(super) fn build_test_hub(
         preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
         preset_job_snapshots: Arc::default(),
         state_events,
-        client_count: Arc::new(client_count),
+        client_count,
         remote_enabled: Arc::new(remote_enabled),
         tailnet: Arc::new(AsyncMutex::new(None)),
         remote_status: Arc::new(tokio::sync::watch::Sender::new(RemoteSlot::initial(
@@ -163,7 +169,8 @@ pub(super) fn build_test_hub(
         start_resume: Arc::default(),
         resume_reported: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
-        live_lines: crate::hook_status::LiveLines::default(),
+        live_lines,
+        chat_mirror,
         devices: Arc::new(std::sync::Mutex::new(devices)),
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: super::pairing::PairingWaiters::default(),
@@ -1044,4 +1051,31 @@ pub(super) const MISSING_SECRET_ID: &str = "0123456789abcdef0123456789abcdef";
 /// The `${secret:<id>}` reference standing for `id`.
 pub(super) fn secret_ref(id: &str) -> String {
     format!("${{secret:{id}}}")
+}
+
+/// Dispatch `msg` over connection `connection`, whose messages go to
+/// `out_tx`, for a test that reads what that connection is sent afterwards.
+pub(super) async fn dispatch_on(
+    hub: &Hub,
+    msg: ClientMessage,
+    connection: u64,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    let (file_tx, _file_rx) = mpsc::channel(1);
+    let pty_lane: Arc<PtyLane> = Arc::default();
+    let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+    let local = AuthKind::Local;
+    let ctx = ConnCtx {
+        out_tx,
+        file_tx: &file_tx,
+        pty_lane: &pty_lane,
+        fetches: &fetches,
+        client_id: "c1",
+        client_name: None,
+        connection,
+        auth: &local,
+    };
+    dispatch(hub, msg, &ctx)
+        .await
+        .expect("a failed request is reported on the wire, not returned from dispatch");
 }

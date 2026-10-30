@@ -179,6 +179,17 @@ pub struct LiveLine {
     pub prompt_key: Option<String>,
 }
 
+/// What the chat needs of one transcript line beyond its entries: which
+/// prompt's turn it belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TranscriptLineFacts {
+    /// The id the agent stamps on the line's prompt, the same key a
+    /// [`LiveLine::prompt_key`] carries.
+    pub prompt_id: Option<String>,
+    /// Whether the line is a prompt sent to the agent, which starts a turn.
+    pub is_user_prompt: bool,
+}
+
 /// One change a plugin read from a line of its CLI's headless output, for the
 /// daemon to apply to the session's record in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -641,6 +652,12 @@ pub trait Agent: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// The prompt of one complete transcript line; none known
+    /// for a line that does not parse, or for an agent with no transcript.
+    fn chat_line_facts(&self, _line: &str) -> TranscriptLineFacts {
+        TranscriptLineFacts::default()
+    }
+
     /// The argv passed to the CLI for an interactive (PTY-attached) session.
     /// Does not include the executable name itself — that is resolved by
     /// [`AgentPlugin::resolve_program`].
@@ -862,6 +879,9 @@ pub trait AgentPlugin: Send + Sync {
     fn chat_entries(&self, line: &str, known: &dyn Fn(&str) -> Option<ChatEntry>)
     -> Vec<ChatEntry>;
 
+    /// See [`Agent::chat_line_facts`].
+    fn chat_line_facts(&self, line: &str) -> TranscriptLineFacts;
+
     /// [`Agent::interactive_args`] over `opts` decoded.
     fn interactive_args(
         &self,
@@ -1062,6 +1082,10 @@ impl<A: Agent> AgentPlugin for A {
         known: &dyn Fn(&str) -> Option<ChatEntry>,
     ) -> Vec<ChatEntry> {
         Agent::chat_entries(self, line, known)
+    }
+
+    fn chat_line_facts(&self, line: &str) -> TranscriptLineFacts {
+        Agent::chat_line_facts(self, line)
     }
 
     fn interactive_args(
@@ -1521,6 +1545,7 @@ mod tests {
         );
         let line = r#"{"type":"user","uuid":"u1","message":{"content":"hi"}}"#;
         assert_eq!(plugin.chat_entries(line, &|_| None), []);
+        assert_eq!(plugin.chat_line_facts(line), TranscriptLineFacts::default());
     }
 
     #[test]

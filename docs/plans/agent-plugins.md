@@ -115,6 +115,7 @@ Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, 
 | Resume options | `recovery_options` | The options a recovered run spawns with | `recovered_claude_flags` (`history.rs:1361-1402`) |
 | Shell resume | `shell_resume` | Called after the shell spawn wrote the plugin's hook files; returns the final command to type, `Err` to refuse (a DeepSeek entry), or `Ok(None)` for an agent without one | `shell_request` and `shell_allowed` (`history.rs`), `prepare_shell_resume` (`server/spawn.rs`) |
 | Import | `import_rev`, `import_tracer_run` | The importer offers each tracer log to every plugin and stamps the plugin's revision; the first `Some` becomes the entry, else the app's shell rule applies | `entry_from_tracer_log` (`history.rs:616-676`), `imported_provider`, `model_arg`, the app-wide `IMPORT_REV` (`history.rs:56`) |
+| Chat | `chat_entries`, `chat_line_facts` | The chat mirror turns each transcript line into entries with `chat_entries`, and reads a line's `promptId`, `timestamp` and user-prompt flag (`TranscriptLineFacts`) with `chat_line_facts` (default: no facts) | `crates/daemon/src/chat_mirror.rs` |
 | Liveness | `liveness_tokens` | The orphan check's fallback for a sidecar with no `program_name` | `orphan.rs:417-423` |
 | Fake CLI | `fake_cli` | The live harness points each plugin's override at its fake | `crates/agents/claude/fake/`, `apps/native/tests/support/live.rs` |
 

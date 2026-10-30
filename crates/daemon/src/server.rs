@@ -6,6 +6,7 @@ pub(crate) mod test_support;
 mod remote;
 pub(crate) use self::remote::RemoteSlot;
 
+mod chat;
 mod connection;
 mod dashboard;
 mod handshake;
@@ -155,6 +156,9 @@ pub struct Hub {
     pub pending_hooks: crate::hook_status::PendingHooks,
     /// Each session's live-line channel, fed by the hook route.
     pub live_lines: crate::hook_status::LiveLines,
+    /// The chats loaded by connections, served from each session's transcript
+    /// and screen.
+    pub chat_mirror: crate::chat_mirror::ChatMirror,
     /// The approved tailnet devices, one record each holding only the hex
     /// SHA-256 of its token (`config/devices.json`).
     pub devices: Arc<std::sync::Mutex<crate::devices::DeviceStore>>,
@@ -378,7 +382,8 @@ pub async fn run(
     // sessions once they're fully wired up, at the cost of delaying the
     // handshake by `reattach_orphans`'s elapsed time. The supervisor's
     // SPAWN_WAIT_TIMEOUT is sized to absorb a worst-case PIPE_CONNECT_TIMEOUT.
-    reattach_orphans(&sessions, &dirs, &attention_tx, orphans, abandoned).await;
+    let (client_count, client_count_rx, live_lines, outlets) = chat_hub(&sessions, &attention_tx);
+    reattach_orphans(&sessions, &dirs, &outlets, orphans, abandoned).await;
 
     // Forward attention events through the registry's broadcast so all
     // attached clients see them via the same SessionEvent channel they
@@ -389,8 +394,6 @@ pub async fn run(
     let (tab_events, _) = broadcast::channel(TAB_EVENT_CAPACITY);
     let (preset_events, _) = broadcast::channel(PRESET_EVENT_CAPACITY);
     let (state_events, _) = broadcast::channel(STATE_EVENT_CAPACITY);
-    let (client_count_tx, client_count_rx) = tokio::sync::watch::channel(0usize);
-    let client_count = Arc::new(client_count_tx);
 
     // Per-repo filesystem watchers that keep the source-control sidebar
     // live without user-triggered refreshes. The supervisor task owns the
@@ -441,7 +444,8 @@ pub async fn run(
         start_resume: Arc::default(),
         resume_reported: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
-        live_lines: crate::hook_status::LiveLines::default(),
+        live_lines,
+        chat_mirror: outlets.chat,
         devices: Arc::new(std::sync::Mutex::new(crate::devices::DeviceStore::load(
             &crate::paths::devices_file(&dirs),
         ))),
@@ -626,15 +630,15 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ListDevices
         | ClientMessage::RevokeDevice { .. }
         | ClientMessage::ForgetDevice { .. }) => pairing::handle(hub, m, ctx),
-        ClientMessage::Hello { .. }
-        | ClientMessage::Attach { session_id: _ }
-        | ClientMessage::UnloadChat { .. } => {
+        ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
             // Attach: no-op — PTY forwarders are started by LoadScrollback
             // so the live subscription is atomic with the scrollback
             // snapshot read. Kept in the protocol for back-compat with
-            // older clients that send it. UnloadChat: no-op too — the daemon
-            // holds no chat mirror to unload.
+            // older clients that send it.
+        }
+        m @ (ClientMessage::LoadChat { .. } | ClientMessage::UnloadChat { .. }) => {
+            chat::handle(hub, m, ctx);
         }
         m @ (ClientMessage::ListRepos
         | ClientMessage::AddRepo { .. }
@@ -878,13 +882,13 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,
         m @ ClientMessage::AnswerPrompt { .. } => refuse_not_supported_yet(m, out_tx),
-        ClientMessage::LoadChat { request_id, .. }
-        | ClientMessage::ChatSend { request_id, .. }
+        ClientMessage::ChatSend { request_id, .. }
         | ClientMessage::ChatAnswer { request_id, .. } => {
-            // The daemon holds no chat mirror, so a chat request is answered
-            // with the reason rather than silently dropped.
+            // The chat is served read-only, so a send is answered with the
+            // reason rather than silently dropped.
             let _ = out_tx.send(DaemonMessage::Error {
-                message: "chat is not supported by this daemon".to_string(),
+                message: "sending from the chat is not supported yet".to_string(),
+                code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
                 request_id,
             });
         }
@@ -941,6 +945,32 @@ fn start_summarizer(
         client_count: client_count.subscribe(),
         events: state_events.clone(),
     }))
+}
+
+/// The client count, the live-line channels and the chat mirror over them,
+/// made before the reattach so each reattached watcher gets the mirror's tap.
+fn chat_hub(
+    sessions: &Arc<SessionRegistry>,
+    attention_tx: &mpsc::UnboundedSender<pty_state::AttentionEvent>,
+) -> (
+    Arc<tokio::sync::watch::Sender<usize>>,
+    tokio::sync::watch::Receiver<usize>,
+    crate::hook_status::LiveLines,
+    recovery::Outlets,
+) {
+    let (client_count_tx, client_count_rx) = tokio::sync::watch::channel(0usize);
+    let client_count = Arc::new(client_count_tx);
+    let live_lines = crate::hook_status::LiveLines::default();
+    let chat = crate::chat_mirror::ChatMirror::new(
+        Arc::clone(sessions),
+        live_lines.clone(),
+        Arc::clone(&client_count),
+    );
+    let outlets = recovery::Outlets {
+        attention_tx: attention_tx.clone(),
+        chat,
+    };
+    (client_count, client_count_rx, live_lines, outlets)
 }
 
 /// Start the tasks that watch the hub for the daemon's lifetime.

@@ -29,7 +29,7 @@ use agent_api::{
     ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent, HookPlan,
     HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal, RecoveredRun, Refusal,
     ResolvedRows, ScreenRules, SpawnCheck, SpawnContext, SummarizerRequest, SummarizerSpec,
-    TracerRun, hook_vocabulary, workspace_prelude,
+    TracerRun, TranscriptLineFacts, hook_vocabulary, workspace_prelude,
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
@@ -360,6 +360,10 @@ impl Agent for ClaudePlugin {
         known: &dyn Fn(&str) -> Option<ChatEntry>,
     ) -> Vec<ChatEntry> {
         chat_entries::chat_entries(line, known)
+    }
+
+    fn chat_line_facts(&self, line: &str) -> TranscriptLineFacts {
+        chat_entries::line_facts(line)
     }
 
     fn interactive_args(

@@ -96,7 +96,7 @@ The mirror follows the session record's conversation id: `SessionStart` with `cl
 
 The rules, from a read of how Claude Desktop rebuilds a session and from the spike:
 
-- The plugin turns one line into entries in file order; attachments are written out of order, so placing entries across records by `timestamp` is the mirror's (CV.7), not the plugin's.
+- The plugin turns one line into entries in file order; the mirror keeps entries in file order too, in a reply and in appends alike (`ChatAppend` carries no position), so an attachment written out of order shows where the file put it. The plugin's `Agent::chat_line_facts(line)` reads a line's `promptId` and whether it is a user prompt (`TranscriptLineFacts`). **Orchestrator decision (not an owner ruling):** placing by `timestamp` was dropped after the CV.7 review, so a live chat and a reload always agree on order.
 - `user` records with text are user messages. `attachment` records of type `queued_command` are user messages typed mid-turn; those with `commandMode: "task-notification"` are skipped, since the notification arrives again as its own record.
 - A `user` record with `origin.kind: "task-notification"` is a turn nobody typed: a **system row** "Background command `<summary>` completed" or "Agent `<description>` finished" from its `<status>` and `<summary>`. `<bash-input>` and `<bash-stdout>` records are a `!` command: one system row with the command and its output folded.
 - `<pasted_content>` is unwrapped to the pasted text. Slash-command output (`system` `local_command`) has its SGR escapes stripped and shows as a system row.
@@ -150,7 +150,7 @@ MessageDisplay is added to the hooks the Claude plugin installs. The hook body c
 
 Measured with Claude Code 2.1.314 in print mode, one call carried the whole three-line answer as `delta` with `index: 0` and `final: true`, so `text` is a piece of the message, possibly several lines, not one line. Whether an interactive session sends one call per line is unmeasured, so the mirror orders by `index` and does not assume a count.
 
-No id in the body appears on the transcript's `assistant` record (`message.id`, `requestId`, `uuid`); `prompt_id` appears as `promptId` on the prompt's `user` record. Orchestrator decision (not an owner ruling): when the transcript has the answer, the mirror matches the live line's `prompt_key` to that `promptId` and takes the assistant text that follows it, telling several assistant messages in one turn apart by `message_key` and arrival order. That replaces the live entry and its `live` flag clears. A Claude Code without the hook, or a session spawned before it, shows the answer when the transcript gets it (D-J).
+No id in the body appears on the transcript's `assistant` record (`message.id`, `requestId`, `uuid`); `prompt_id` appears as `promptId` on the prompt's `user` record. Orchestrator decision (not an owner ruling): when the transcript has the answer, the mirror matches the live line's `prompt_key` to that `promptId` (read by `chat_line_facts`) and takes the assistant text that follows it, telling several assistant messages in one turn apart by `message_key` and arrival order. That replaces the live entry and its `live` flag clears. A Claude Code without the hook, or a session spawned before it, shows the answer when the transcript gets it (D-J).
 
 ### Typing a message
 
@@ -216,7 +216,8 @@ Client to daemon:
 Daemon to client:
 
 - `Chat { session_id, entries, hidden, screen: ChatScreen, request_id }`, the reply to `LoadChat`.
-- `ChatAppend { session_id, entries }` to loaders only; an entry whose id is known replaces it.
+- `ChatAppend { session_id, entries, removed }` to loaders only; an entry whose id is known replaces it, and `removed` (ids, serde default) lists entries that leave the chat, so one append carries a transcript answer and the live id it replaces together.
+- An unsolicited `Chat` (`request_id: None`) is a full reset, sent for a new conversation id (opening with the system row "Conversation cleared", id `cleared:<id>`, only when both the old and the new conversation are known) and for a transcript that restarted. `LoadChat` answers the newest 500 entries (`CHAT_REPLY_CAP` in `chat_mirror.rs`) with `hidden` counting the rest.
 - `ChatScreenChanged { session_id, screen }` to loaders only, when the dialog or composer state changes.
 - `ChatScreen { composer: ComposerState, prompt: Option<ChatPrompt> }`. `ComposerState`: `Ready`, `Working`, `Draft`, `Dialog`, `Overlay { name }`, `Unknown`.
 - `ChatPrompt { id, kind: ChatPromptKind, subject, body, options: Vec<ChatOption>, questions: Vec<ChatQuestionTab>, can_amend, always_allow_tip }`, `ChatPromptKind`: `Permission`, `Question`, `Review`, `Plan`, `Trust`, `HeadsUp`, `Unknown`; `ChatOption { number, label, description, selected }`.
@@ -333,9 +334,9 @@ Each step is one brief on `feat/chat-mirror`. Steps that edit `crates/protocol/s
 - [x] **CV.6 Carry MessageDisplay lines to the daemon.** `crates/agents/claude/src/hooks.rs` (the event in the hook plan), `crates/agents/api/src/hook_vocabulary.rs` (its report: a `LiveLine` with text, `index`, `message_key` and `prompt_key`), `crates/daemon/src/hook_status.rs` and `crates/daemon/src/server/hooks.rs` (`hook_status::deliver` and `LiveLines`, a per-session broadcast of live lines with no status effect), a captured payload under `crates/agents/claude/tests/fixtures/hooks/`.
 
   Proof: first record one real MessageDisplay body into the fixture; mapping tests over it; out-of-order lines keep their `index`. Depends on CV.1.
-- [ ] **CV.7 Serve a session's chat from the transcript and the screen.**
+- [x] **CV.7 Serve a session's chat from the transcript and the screen.**
 
-  New `crates/daemon/src/chat_mirror.rs`, new `crates/daemon/src/server/chat.rs`, `crates/daemon/src/server.rs` (dispatch arms), `crates/daemon/src/pty_state.rs` (hand each screen reading to the mirror), `crates/daemon/src/main.rs` (`mod` line): `LoadChat` / `UnloadChat`, the newest 500 with `hidden`, `ChatAppend` and `ChatScreenChanged` to loaders, live lines merged by `index` and replaced by the transcript's answer (matched through `prompt_key` and the user record's `promptId`, messages in one turn told apart by `message_key` and arrival order), the tail following the conversation id.
+  New `crates/daemon/src/chat_mirror.rs`, new `crates/daemon/src/server/chat.rs`, `crates/daemon/src/server.rs` (dispatch arms), `crates/daemon/src/pty_state.rs` (hand each screen reading to the mirror), `crates/daemon/src/main.rs` (`mod` line): `LoadChat` / `UnloadChat`, the newest 500 (`CHAT_REPLY_CAP`) with `hidden`, `ChatAppend` (with `removed`) and `ChatScreenChanged` to loaders, live lines merged by `index` and replaced by the transcript's answer (matched through `prompt_key` and the user record's `promptId`, messages in one turn told apart by `message_key` and arrival order), the tail following the conversation id.
 
   Proof: server tests with a temp `CLAUDE_CONFIG_DIR` and scripted transcript writes: appends reach loaders only; the reply caps and echoes `request_id`; a missing transcript yields none; the last unload stops the tail; a `/clear` switches files; a fixture screen yields its `ChatScreen`. Depends on CV.2, CV.3, CV.4, CV.6.
 - [ ] **CV.8 Type chat messages into the PTY.** `crates/daemon/src/server/chat.rs` (`ChatSend`, gated by the composer state), `crates/daemon/src/inject.rs` (a bracketed paste then Enter helper), `crates/daemon/src/chat_mirror.rs` (the `pending` user entry, cleared by its `queued_command` or `user` record).

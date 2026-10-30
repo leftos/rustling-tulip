@@ -19,10 +19,6 @@ use super::Screen;
 /// What `screen` shows the chat, as `agent`'s plugin reads it; `None` for an
 /// agent with no registered plugin or one whose screen the chat does not
 /// mirror.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no session watcher reads the chat screen yet")
-)]
 #[must_use]
 pub fn read(agent: &AgentId, screen: &Screen) -> Option<ChatScreen> {
     let Some(plugin) = agent_registry::plugin(agent) else {
@@ -64,10 +60,6 @@ pub fn recipe_for(
 /// body, its options' numbers in order and its question tabs' labels. The
 /// cursor, which option is selected, the options' labels (a field being
 /// typed into) and the id are left out. Stable within one process only.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no session watcher reads the chat screen yet")
-)]
 #[must_use]
 pub fn prompt_identity(prompt: &ChatPrompt) -> u64 {
     let mut hasher = DefaultHasher::new();

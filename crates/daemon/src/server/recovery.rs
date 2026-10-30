@@ -111,7 +111,7 @@ const ALREADY_RECOVERING: &str = "already being recovered";
 pub(super) async fn reattach_orphans(
     sessions: &Arc<SessionRegistry>,
     dirs: &Dirs,
-    attention_tx: &mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    outlets: &Outlets,
     orphans: Vec<OrphanMeta>,
     abandoned: Vec<OrphanMeta>,
 ) {
@@ -131,7 +131,7 @@ pub(super) async fn reattach_orphans(
         tasks.push(tokio::spawn(reattach_one(
             Arc::clone(sessions),
             dirs.clone(),
-            attention_tx.clone(),
+            outlets.clone(),
             meta,
         )));
     }
@@ -175,6 +175,14 @@ struct DiscoveryRestart {
     baseline: Baseline,
 }
 
+/// Where a reattached session's status watcher hands what it reads: the
+/// attention events and the chat mirror.
+#[derive(Clone)]
+pub(super) struct Outlets {
+    pub(super) attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    pub(super) chat: crate::chat_mirror::ChatMirror,
+}
+
 /// Reattach a single orphan to its still-running tracer, or route it to the
 /// abandoned bucket if the tracer is unreachable. Runs as its own task so a
 /// slow/dead tracer doesn't serialize the others (see `reattach_orphans`).
@@ -183,7 +191,7 @@ struct DiscoveryRestart {
 async fn reattach_one(
     sessions: Arc<SessionRegistry>,
     dirs: Dirs,
-    attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    outlets: Outlets,
     meta: OrphanMeta,
 ) -> Option<DiscoveryRestart> {
     let session_start = std::time::Instant::now();
@@ -235,8 +243,9 @@ async fn reattach_one(
                         input_pulses: in_rx,
                         screen,
                         rules: rules_for(&agent),
+                        chat: outlets.chat.tap(&meta.session_id, &agent),
                     },
-                    attention_tx.clone(),
+                    outlets.attention_tx.clone(),
                     restored,
                 );
             } else {
@@ -247,8 +256,9 @@ async fn reattach_one(
                         output: pty.output.subscribe(),
                         screen,
                         rules: rules_for(&agent),
+                        chat: outlets.chat.tap(&meta.session_id, &agent),
                     },
-                    attention_tx.clone(),
+                    outlets.attention_tx.clone(),
                 );
             }
             osc_title::watch(

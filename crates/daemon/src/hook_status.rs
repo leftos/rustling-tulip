@@ -171,10 +171,6 @@ pub struct LiveLines {
 impl LiveLines {
     /// Receive `session_id`'s live lines from now on. Channels left with no
     /// subscriber are dropped here and on the next line sent to them.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no chat server subscribes to live lines yet")
-    )]
     pub fn subscribe(&self, session_id: &str) -> broadcast::Receiver<LiveLine> {
         let mut channels = crate::sync::lock(&self.channels);
         channels.retain(|_, sender| sender.receiver_count() > 0);

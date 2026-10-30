@@ -1332,6 +1332,7 @@ async fn spawn_interactive_session(
                 input_pulses: in_rx,
                 screen,
                 rules: rules_for(&agent),
+                chat: hub.chat_mirror.tap(&session_id, &agent),
             },
             hub.attention_tx.clone(),
             SessionStatus::Idle,
@@ -1344,6 +1345,7 @@ async fn spawn_interactive_session(
                 output: pty.output.subscribe(),
                 screen,
                 rules: rules_for(&agent),
+                chat: hub.chat_mirror.tap(&session_id, &agent),
             },
             hub.attention_tx.clone(),
         );
@@ -1550,6 +1552,7 @@ async fn spawn_plain_shell_session(
             input_pulses: in_rx,
             screen,
             rules: rules_for(&default_agent()),
+            chat: hub.chat_mirror.tap(&session_id, &default_agent()),
         },
         hub.attention_tx.clone(),
         SessionStatus::Idle,

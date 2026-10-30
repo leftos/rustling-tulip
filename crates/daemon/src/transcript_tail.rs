@@ -9,7 +9,6 @@
 //! The task parks while no client is connected (`client_count` 0, the pattern
 //! `git_watch` uses for its refreshers) and reads once as soon as one arrives,
 //! catching up with everything appended while it was parked.
-#![expect(dead_code, reason = "consumed by the chat mirror")]
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -36,6 +35,10 @@ pub enum TailEvent {
     /// was missing: what a consumer built from the old content is stale, and
     /// the lines after this one start a fresh file.
     Restarted,
+    /// The tail's first read, or a read that restarted, has delivered every
+    /// complete line the file held: each line after this one was appended
+    /// since. Sent even when that read found no line.
+    CaughtUp,
 }
 
 /// What the handle and the tailing task share: the offset past the last
@@ -70,6 +73,7 @@ pub struct TailHandle {
 
 impl TailHandle {
     /// The byte offset just past the last complete line delivered.
+    #[expect(dead_code, reason = "no consumer resumes a tail from its offset yet")]
     #[must_use]
     pub fn offset(&self) -> u64 {
         self.shared.offset.load(Ordering::SeqCst)
@@ -150,6 +154,8 @@ struct Cursor {
     delivered: bool,
     /// The file was missing on the last wake: the next read starts over from 0.
     reset: bool,
+    /// Whether a read has finished and sent [`TailEvent::CaughtUp`].
+    caught_up: bool,
 }
 
 impl Cursor {
@@ -248,6 +254,7 @@ async fn tail_task(
         // so it counts as content the consumer has already been given.
         delivered: start_offset > 0,
         reset: false,
+        caught_up: false,
     };
     let mut poll = tokio::time::interval(POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -294,27 +301,32 @@ async fn tail_task(
     debug!(path = %path.display(), "transcript_tail: stopped");
 }
 
-/// One wake's read, counted for a spec that polls [`TailHandle::reads`].
+/// One wake's read, ended by [`TailEvent::CaughtUp`] when it is the first or
+/// it restarted, and counted for a spec that polls [`TailHandle::reads`].
 fn read_wake(
     path: &Path,
     cursor: &mut Cursor,
     shared: &Shared,
     on_event: &mut impl FnMut(TailEvent),
 ) {
-    read_once(path, cursor, shared, on_event);
+    let restarted = read_once(path, cursor, shared, on_event);
+    if restarted || !cursor.caught_up {
+        cursor.caught_up = true;
+        on_event(TailEvent::CaughtUp);
+    }
     #[cfg(test)]
     shared.reads.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Read whatever the file holds past the cursor's read position, delivering one
 /// [`TailEvent::Line`] per complete line and holding a partial last line for the
-/// next wake.
+/// next wake. Returns whether it sent [`TailEvent::Restarted`].
 fn read_once(
     path: &Path,
     cursor: &mut Cursor,
     shared: &Shared,
     on_event: &mut impl FnMut(TailEvent),
-) {
+) -> bool {
     let length = match std::fs::metadata(path) {
         Ok(metadata) => metadata.len(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -326,7 +338,7 @@ fn read_once(
             shared.offset.store(0, Ordering::SeqCst);
             #[cfg(test)]
             shared.missing.fetch_add(1, Ordering::SeqCst);
-            return;
+            return false;
         }
         Err(err) => {
             debug!(
@@ -334,17 +346,19 @@ fn read_once(
                 error = %err,
                 "transcript_tail: the transcript could not be read"
             );
-            return;
+            return false;
         }
     };
+    let mut restarted = false;
     if length < cursor.read_position() || cursor.reset {
         if cursor.restart() {
             on_event(TailEvent::Restarted);
+            restarted = true;
         }
         debug!(path = %path.display(), "transcript_tail: restarted");
     }
     if length <= cursor.read_position() {
-        return;
+        return restarted;
     }
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -354,7 +368,7 @@ fn read_once(
                 error = %err,
                 "transcript_tail: the transcript could not be opened"
             );
-            return;
+            return restarted;
         }
     };
     if let Err(err) = file.seek(SeekFrom::Start(cursor.read_position())) {
@@ -363,7 +377,7 @@ fn read_once(
             error = %err,
             "transcript_tail: could not seek in the transcript"
         );
-        return;
+        return restarted;
     }
     let mut appended = Vec::new();
     if let Err(err) = file.read_to_end(&mut appended) {
@@ -372,7 +386,7 @@ fn read_once(
             error = %err,
             "transcript_tail: could not read the transcript"
         );
-        return;
+        return restarted;
     }
     cursor.partial.extend_from_slice(&appended);
     let consumed = deliver_lines(&cursor.partial, on_event);
@@ -382,6 +396,7 @@ fn read_once(
         cursor.delivered = true;
     }
     shared.offset.store(cursor.offset, Ordering::SeqCst);
+    restarted
 }
 
 /// Deliver one event per complete line in `bytes`, returning how many bytes the
@@ -442,8 +457,12 @@ mod tests {
         clients: watch::Receiver<usize>,
     ) -> (TailHandle, UnboundedReceiver<TailEvent>) {
         let (tx, rx) = unbounded_channel();
+        // These specs follow the lines and restarts; the chat mirror's own
+        // tests cover the end of a read.
         let handle = spawn(path, start_offset, clients, move |event| {
-            let _ = tx.send(event);
+            if event != TailEvent::CaughtUp {
+                let _ = tx.send(event);
+            }
         });
         (handle, rx)
     }

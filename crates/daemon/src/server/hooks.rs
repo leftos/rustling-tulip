@@ -358,6 +358,7 @@ mod tests {
                 output: output_rx,
                 screen,
                 rules: crate::screen::rules::rules_for(&agent_registry::default_agent()),
+                chat: hub.chat_mirror.tap("s1", &agent_registry::default_agent()),
             },
             hub.attention_tx.clone(),
         );

@@ -258,6 +258,21 @@ pub(super) async fn client_session(hub: Hub, socket: WebSocket, auth: AuthKind) 
     client_session_until(hub, socket, auth, None).await;
 }
 
+/// The guards that end `connection`'s Dashboard watch and unload its chats
+/// when dropped.
+fn connection_watches(
+    hub: &Hub,
+    connection: u64,
+) -> (
+    crate::dashboard::WatchGuard,
+    crate::chat_mirror::ChatLoadGuard,
+) {
+    (
+        hub.dashboard.watch_guard(connection),
+        hub.chat_mirror.guard(connection),
+    )
+}
+
 /// Serve one connection until the peer closes it, the daemon shuts down,
 /// `server_life` (the life of the tailnet listener server that accepted it,
 /// `None` on loopback) is cancelled, or the send pump gives up on the peer. A
@@ -377,9 +392,9 @@ pub(super) async fn client_session_until<S: Socket>(
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
-    // Ends any Dashboard watch of this connection on every way out, panic
-    // included; dropped before `out_tx`, since a watcher holds a clone of it.
-    let dashboard_watch = hub.dashboard.watch_guard(connection);
+    // End any Dashboard watch and chat load of this connection on every way
+    // out, panic included; dropped before `out_tx`, since each holds a clone.
+    let watches = connection_watches(&hub, connection);
     let event_task = spawn_session_forwarder(Arc::clone(&hub.sessions), out_tx.clone(), connection);
 
     // Subscribe to tab-layout and preset-launch events. Tab events are
@@ -418,7 +433,7 @@ pub(super) async fn client_session_until<S: Socket>(
 
     info!("client_session: recv_loop returned; tearing down");
     stop_transfers(&conn.lane, &fetches).await;
-    drop(dashboard_watch);
+    drop(watches);
     drop(file_tx);
     drop(out_tx);
     event_task.abort();

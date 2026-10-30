@@ -5,6 +5,7 @@
 //! Ids: a message's entries use the record `uuid`, a tool card the `tool_use`
 //! block's id (so its result upserts the card), a receipt `receipt:<that id>`.
 
+use agent_api::TranscriptLineFacts;
 use protocol::{ChatEntry, ToolOutcome};
 use serde_json::{Map, Value};
 
@@ -48,6 +49,34 @@ pub(crate) fn chat_entries(line: &str, known: Known<'_>) -> Vec<ChatEntry> {
         Some("attachment") => queued_entry(&record, uuid).into_iter().collect(),
         Some("system") => system_entry(&record, uuid).into_iter().collect(),
         _ => Vec::new(),
+    }
+}
+
+/// The prompt id and whether one transcript line is a prompt sent to
+/// Claude: a `user` record carrying text (a string, or a text block beside
+/// any tool results) that is neither meta nor a compact summary. A line that
+/// does not parse has neither.
+pub(crate) fn line_facts(line: &str) -> TranscriptLineFacts {
+    let Ok(record) = serde_json::from_str::<Value>(line) else {
+        return TranscriptLineFacts::default();
+    };
+    TranscriptLineFacts {
+        prompt_id: str_at(&record, "promptId").map(str::to_owned),
+        is_user_prompt: is_user_prompt(&record),
+    }
+}
+
+fn is_user_prompt(record: &Value) -> bool {
+    if str_at(record, "type") != Some("user") || is_meta(record) || flag(record, "isCompactSummary")
+    {
+        return false;
+    }
+    match record.pointer("/message/content") {
+        Some(Value::String(_)) => true,
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .any(|block| str_at(block, "type") == Some("text")),
+        _ => false,
     }
 }
 
@@ -565,9 +594,57 @@ fn cap_chars(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, chat_entries};
+    use super::{TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, chat_entries, line_facts};
+    use agent_api::TranscriptLineFacts;
     use protocol::{ChatEntry, ToolOutcome};
     use serde_json::{Value, json};
+
+    #[test]
+    fn a_typed_prompt_carries_its_prompt_id() {
+        let line = json!({
+            "type": "user", "uuid": uid("01"), "promptId": "p-1",
+            "timestamp": "2026-09-27T10:00:01.500Z",
+            "message": {"role": "user", "content": "Hello there"},
+        })
+        .to_string();
+        assert_eq!(
+            line_facts(&line),
+            TranscriptLineFacts {
+                prompt_id: Some("p-1".to_owned()),
+                is_user_prompt: true,
+            }
+        );
+    }
+
+    #[test]
+    fn only_a_user_record_with_text_is_a_prompt() {
+        let text_beside_result = json!({
+            "type": "user", "uuid": uid("02"), "promptId": "p-1",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                {"type": "text", "text": "and also this"},
+            ]},
+        });
+        assert!(line_facts(&text_beside_result.to_string()).is_user_prompt);
+        let not_prompts = [
+            json!({"type": "user", "uuid": uid("03"), "promptId": "p-1",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}),
+            json!({"type": "user", "uuid": uid("04"), "isMeta": true,
+                "message": {"role": "user", "content": "caveat"}}),
+            json!({"type": "assistant", "uuid": uid("05"), "promptId": "p-1",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}),
+        ];
+        for record in not_prompts {
+            let facts = line_facts(&record.to_string());
+            assert!(!facts.is_user_prompt, "{record}");
+        }
+    }
+
+    #[test]
+    fn a_line_that_does_not_parse_has_no_facts() {
+        assert_eq!(line_facts("{not json"), TranscriptLineFacts::default());
+    }
 
     fn uid(n: &str) -> String {
         format!("00000000-0000-4000-8000-0000000000{n}")

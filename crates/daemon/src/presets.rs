@@ -2916,6 +2916,13 @@ mod tests {
         );
         let turns =
             crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
+        let client_count = Arc::new(client_count);
+        let live_lines = crate::hook_status::LiveLines::default();
+        let chat_mirror = crate::chat_mirror::ChatMirror::new(
+            Arc::clone(&sessions),
+            live_lines.clone(),
+            Arc::clone(&client_count),
+        );
         let hub = Hub {
             state,
             sessions,
@@ -2930,7 +2937,7 @@ mod tests {
             preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
             preset_job_snapshots: Arc::default(),
             state_events,
-            client_count: Arc::new(client_count),
+            client_count,
             remote_enabled: Arc::new(remote_enabled),
             tailnet: Arc::new(AsyncMutex::new(None)),
             remote_status: Arc::new(watch::Sender::new(crate::server::RemoteSlot::initial(
@@ -2943,7 +2950,8 @@ mod tests {
             start_resume: Arc::default(),
             resume_reported: Arc::default(),
             pending_hooks: crate::hook_status::PendingHooks::default(),
-            live_lines: crate::hook_status::LiveLines::default(),
+            live_lines,
+            chat_mirror,
             devices: Arc::new(std::sync::Mutex::new(devices)),
             pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
             pairing_waiters: Arc::default(),
