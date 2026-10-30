@@ -19,9 +19,8 @@ use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::palette::{
-    ACCENT, ASKING, CHIP, GROUND, HOVER, LAUNCHED_TINT, LILAC, LINE, LINE_STRONG, MENU_GROUP_RULES,
-    ON_ACCENT, ON_ASKING, RAISED, ROW_CARD, ROW_EDGE, ROW_GAP, ROW_HOVER, SELECTION,
-    SELECTION_EDGE, SUBTLE, TEXT_2, TRANSPARENT,
+    ACCENT, ASKING, CHIP, GROUND, HOVER, LAUNCHED_TINT, LILAC, LINE, LINE_STRONG, ON_ACCENT,
+    ON_ASKING, RAISED, ROW_CARD, ROW_GAP, ROW_HOVER, SELECTION, SUBTLE, TEXT_2, TRANSPARENT,
 };
 use crate::preset_launch::LaunchHighlight;
 use crate::remote_mode::{Capabilities, sidebar_no_repos_note};
@@ -323,7 +322,7 @@ impl RootView {
             )
             .child(shell)
             .children(fetch_file)
-            .when(MENU_GROUP_RULES, |frame| frame.child(menu_separator()))
+            .child(menu_separator())
             .child(add_repo)
             .child(add_workspace);
             let frame = if let Some(row) = resume {
@@ -1889,10 +1888,7 @@ fn leaf_row(
         .copied()
         .unwrap_or(appearance::BUILTIN_ACCENT);
     let ground = leaf_ground(selected, ctx.highlighted.contains(id));
-    let edge = if selected { SELECTION_EDGE } else { ROW_EDGE };
-    let row = leaf_frame(leaf, ground, accent, ctx.density, cx).when(ROW_EDGE & 0xff != 0, |row| {
-        row.border_1().border_color(gpui::rgba(edge))
-    });
+    let row = leaf_frame(leaf, ground, accent, ctx.density, cx);
     match ctx.density {
         LeafDensity::Compact => {
             let chips = leaf_chips(leaf, ctx.pill(id), ctx.attachable(id), ChipSize::Row, cx);

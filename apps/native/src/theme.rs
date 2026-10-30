@@ -232,7 +232,7 @@ mod tests {
     fn default_theme_matches_the_ported_values() {
         let theme = Theme::default();
         assert_eq!(theme.bg, DEFAULT_BACKGROUND);
-        assert_eq!(theme.bg, rgb(0x0c0b0e));
+        assert_eq!(theme.bg, rgb(0x070609));
         assert_eq!(theme.fg, rgb(0xe5e6e8));
         assert_eq!(theme.caret, rgb(0xffffff));
         assert_eq!(theme.selection, rgb(0x5b9bff));

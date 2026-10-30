@@ -234,15 +234,16 @@ impl Rows {
                     .filter_map(|segment| self.segment_style(segment))
                     .collect()
             };
+        // A hovered line lifts its quiet number to secondary text, which
+        // keeps 4.5:1 on the hover fill.
+        let hovered = self.target == Some(index) && !selected;
         div()
             .w_full()
             .h(px(self.line_height))
             .flex()
             .flex_row()
             .items_center()
-            .when(self.target == Some(index) && !selected, |row| {
-                row.bg(gpui::rgb(HOVER_BG))
-            })
+            .when(hovered, |row| row.bg(gpui::rgb(HOVER_BG)))
             .when(selected, |row| row.bg(gpui::rgba(INPUT_SELECTION)))
             .on_mouse_down(MouseButton::Left, self.on_press(index))
             .child(
@@ -253,7 +254,7 @@ impl Rows {
                     .pr(px(GUTTER_PAD))
                     .text_right()
                     .text_size(px(GUTTER_TEXT_SIZE))
-                    .text_color(gpui::rgb(SUBTLE))
+                    .text_color(gpui::rgb(if hovered { MUTED } else { SUBTLE }))
                     .child(number.to_string()),
             )
             .child(

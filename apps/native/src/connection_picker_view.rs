@@ -31,8 +31,8 @@ use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::palette::{
-    ASK_BORDER, ASK_WASH, ASKING, CARD_EDGE, DANGER, DANGER_BG, FAINT, HOVER, LINE, OK_WASH,
-    RAISED, SELECTION, STATUS_IDLE, STATUS_OK, SUBTLE, TEXT, TEXT_2,
+    ASK_BORDER, ASK_WASH, ASKING, CARD_EDGE, DANGER, DANGER_BG, FAINT, HOVER, LINE, MODAL_INSET,
+    OK_WASH, RAISED, SELECTION, STATUS_IDLE, STATUS_OK, SUBTLE, TEXT, TEXT_2,
 };
 use crate::session_menu::backdrop;
 use crate::ssh::DEFAULT_REMOTE_COMMAND;
@@ -1103,7 +1103,12 @@ fn host_row(
         .flex()
         .flex_col()
         .child(name_line(row))
-        .child(detail_line(&row.key(), facts.host, &detail.line));
+        .child(detail_line(
+            &row.key(),
+            facts.host,
+            &detail.line,
+            group.clone(),
+        ));
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
         .debug_selector(move || selector)
@@ -1260,8 +1265,9 @@ fn detail_pieces(host: RowHost, line: &str) -> Vec<DetailPiece> {
         .collect()
 }
 
-/// A row's second line, its pieces split by faint dots.
-fn detail_line(key: &str, host: RowHost, line: &str) -> Div {
+/// A row's second line, its pieces split by faint dots, lifted from quiet to
+/// secondary text while its row, the hover `group`, is hovered.
+fn detail_line(key: &str, host: RowHost, line: &str, group: SharedString) -> Div {
     let selector = format!("connections-detail-{key}");
     let mut drawn = div()
         .debug_selector(move || selector)
@@ -1272,7 +1278,8 @@ fn detail_line(key: &str, host: RowHost, line: &str) -> Div {
         .overflow_hidden()
         .whitespace_nowrap()
         .text_size(px(11.0))
-        .text_color(gpui::rgb(SUBTLE));
+        .text_color(gpui::rgb(SUBTLE))
+        .group_hover(group, |style| style.text_color(gpui::rgb(TEXT_2)));
     for (index, piece) in detail_pieces(host, line).into_iter().enumerate() {
         if index > 0 {
             drawn = drawn.child(div().text_color(gpui::rgb(FAINT)).child("·"));
@@ -1469,7 +1476,7 @@ fn form_top(mode: AddMode, draw: &Draw<'_>, cx: &mut Context<RootView>) -> Div {
         .flex()
         .p(px(3.0))
         .gap(px(2.0))
-        .bg(gpui::rgb(RAISED))
+        .bg(gpui::rgb(MODAL_INSET))
         .border_1()
         .border_color(gpui::rgb(LINE))
         .rounded(px(8.0))
