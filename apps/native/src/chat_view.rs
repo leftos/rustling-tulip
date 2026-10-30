@@ -28,7 +28,7 @@ use protocol::{
 use crate::buttons::{ButtonSize, field_frame, outlined_button, primary_button};
 use crate::chat::{
     self, ChatLoads, ChatLog, ComposerNote, PaneView, PaneViews, PromptStack, RunningWork,
-    SendTracker, Strip,
+    SendTracker, Strip, ViewKey,
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardKey, CardState, CardView, ComposerAction, KeyAction,
@@ -39,6 +39,7 @@ use crate::fonts::DEFAULT_FAMILY;
 use crate::palette::{CHIP, DANGER, FAINT, LINE_STRONG, SUBTLE, TEXT_2, WAITING, WORKING};
 use crate::scrollbar::Scrollbar;
 use crate::sidebar::LOCAL_HOST_KEY;
+use crate::summary::{SummaryLog, wanted_loads};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare, render_row};
 use crate::work_strip::strip_row;
@@ -50,7 +51,7 @@ pub(crate) const UNSUPPORTED_NOTE: &str = "This session offers no chat, so it sh
 /// the daemon's message.
 const LOAD_FAILED_NOTE: &str = "Could not load the chat: ";
 /// What a chat pane says while its first rows are on their way.
-const LOADING_NOTE: &str = "Loading the chat…";
+pub(crate) const LOADING_NOTE: &str = "Loading the chat…";
 /// What a chat pane says when the conversation has no rows yet.
 const EMPTY_NOTE: &str = "No messages yet";
 
@@ -64,6 +65,7 @@ const GENERIC_AGENT: &str = "the agent";
 
 const TOGGLE_TO_CHAT_TIP: &str = "Show this session's chat";
 const TOGGLE_TO_TERMINAL_TIP: &str = "Show this session's terminal";
+const TOGGLE_TO_SUMMARY_TIP: &str = "Show this session's summary";
 
 /// The room between rows, and around the column.
 const ROW_GAP: f32 = 8.0;
@@ -130,6 +132,21 @@ pub(crate) struct Composer {
 }
 
 impl SessionChat {
+    /// The chat's rows.
+    pub(crate) fn log(&self) -> &ChatLog {
+        &self.log
+    }
+
+    /// Whether the reply to this chat's load is still awaited.
+    pub(crate) fn is_loading(&self) -> bool {
+        self.request.is_some()
+    }
+
+    /// The work running beside the chat.
+    pub(crate) fn work(&self) -> &RunningWork {
+        &self.work
+    }
+
     /// The composer's text, empty before the composer is made.
     fn composer_text(&self, cx: &App) -> String {
         self.composer
@@ -249,8 +266,15 @@ pub(crate) struct ChatPanes {
     views: PaneViews,
     loads: ChatLoads,
     sessions: HashMap<String, SessionChat>,
-    scrolls: HashMap<String, Scrollbar>,
+    /// The summaries this connection has loaded, and each one's lines.
+    summary_loads: ChatLoads,
+    pub(crate) summaries: HashMap<String, SummaryLog>,
+    /// Each chat or summary pane's scroll.
+    pub(crate) scrolls: HashMap<String, Scrollbar>,
     notes: HashMap<String, String>,
+    /// The request ids of loads forgotten when the session's other load was
+    /// refused, whose own refusal is taken without a word.
+    refused_loads: BTreeSet<String>,
     wall: WallClock,
     /// Repaints the running-work strips while one shows, so their ages and
     /// countdowns keep counting.
@@ -295,8 +319,11 @@ impl ChatPanes {
             views: PaneViews::default(),
             loads: ChatLoads::default(),
             sessions: HashMap::new(),
+            summary_loads: ChatLoads::default(),
+            summaries: HashMap::new(),
             scrolls: HashMap::new(),
             notes: HashMap::new(),
+            refused_loads: BTreeSet::new(),
             wall,
             work_strip_timer: None,
             work_strip_repaints: 0,
@@ -308,9 +335,9 @@ impl ChatPanes {
         self.wall
     }
 
-    /// Whether pane `pane_id` was switched to its chat.
-    pub(crate) fn is_chat(&self, pane_id: &str) -> bool {
-        self.views.is_chat(pane_id)
+    /// The session `session_id`'s loaded chat.
+    pub(crate) fn session(&self, session_id: &str) -> Option<&SessionChat> {
+        self.sessions.get(session_id)
     }
 
     /// Pane `pane_id` closed or now shows another session: it shows a
@@ -337,7 +364,51 @@ impl ChatPanes {
     pub(crate) fn reset_connection(&mut self) {
         self.loads.clear();
         self.sessions.clear();
+        self.summary_loads.clear();
+        self.summaries.clear();
+        self.refused_loads.clear();
         self.work_strip_timer = None;
+    }
+
+    /// The daemon refused session `session_id`'s chat load (`chat_refused`)
+    /// or its summary load: that load is forgotten with nothing to unload,
+    /// and so is the session's other load while its reply is still awaited,
+    /// its request id kept so its own refusal is taken without a word.
+    fn forget_refused_load(&mut self, session_id: &str, chat_refused: bool) {
+        let other_pending = if chat_refused {
+            self.summaries
+                .get(session_id)
+                .is_some_and(SummaryLog::is_loading)
+        } else {
+            self.sessions
+                .get(session_id)
+                .is_some_and(SessionChat::is_loading)
+        };
+        let chat = (chat_refused || other_pending)
+            .then(|| self.forget_chat_load(session_id))
+            .flatten();
+        let summary = (!chat_refused || other_pending)
+            .then(|| self.forget_summary_load(session_id))
+            .flatten();
+        let other = if chat_refused { summary } else { chat };
+        self.refused_loads.extend(other);
+    }
+
+    /// Forgets session `session_id`'s chat and its load, returning the
+    /// request id its reply was awaited under.
+    fn forget_chat_load(&mut self, session_id: &str) -> Option<String> {
+        self.loads.forget(session_id);
+        self.sessions.remove(session_id)?.request
+    }
+
+    /// Forgets session `session_id`'s summary and its load, returning the
+    /// request id its reply was awaited under.
+    fn forget_summary_load(&mut self, session_id: &str) -> Option<String> {
+        self.summary_loads.forget(session_id);
+        self.summaries
+            .remove(session_id)?
+            .request()
+            .map(str::to_owned)
     }
 
     /// Whether some loaded chat shows a running-work strip.
@@ -347,12 +418,12 @@ impl ChatPanes {
 }
 
 /// What every row of one chat pane is drawn with.
-struct RowLook<'a> {
-    pane_id: &'a str,
-    session_id: &'a str,
-    mono: SharedString,
-    mono_family: Option<&'a str>,
-    mono_size: f32,
+pub(crate) struct RowLook<'a> {
+    pub(crate) pane_id: &'a str,
+    pub(crate) session_id: &'a str,
+    pub(crate) mono: SharedString,
+    pub(crate) mono_family: Option<&'a str>,
+    pub(crate) mono_size: f32,
 }
 
 /// The parts of a tool call a card draws.
@@ -365,21 +436,37 @@ struct ToolRow<'a> {
 }
 
 impl RootView {
-    /// Whether pane `pane_id`, showing `session_id`, draws its session's
-    /// chat: it was switched to it, and the session offers one.
-    pub(crate) fn chat_shown(&self, pane_id: &str, session_id: Option<&str>) -> bool {
-        self.chat.is_chat(pane_id)
-            && session_id
-                .and_then(|id| self.sidebar.session(id))
-                .is_some_and(offers_chat)
+    /// What pane `pane_id`, showing `session_id`, draws: the view it was
+    /// switched to while the session offers a chat, else its terminal.
+    pub(crate) fn view_shown(&self, pane_id: &str, session_id: Option<&str>) -> PaneView {
+        let offers = session_id
+            .and_then(|id| self.sidebar.session(id))
+            .is_some_and(offers_chat);
+        if offers {
+            self.chat.views.get(pane_id)
+        } else {
+            PaneView::Terminal
+        }
+    }
+
+    /// Whether pane `pane_id`, showing `session_id`, draws its chat or its
+    /// summary in place of its terminal.
+    pub(crate) fn terminal_hidden(&self, pane_id: &str, session_id: Option<&str>) -> bool {
+        self.view_shown(pane_id, session_id).hides_terminal()
     }
 
     /// Whether pane `pane_id` draws its session's chat in place of its
     /// terminal.
     #[must_use]
     pub fn pane_shows_chat(&self, pane_id: &str) -> bool {
+        self.pane_view(pane_id) == PaneView::Chat
+    }
+
+    /// What pane `pane_id` draws for its session.
+    #[must_use]
+    pub fn pane_view(&self, pane_id: &str) -> PaneView {
         let session = self.panes.get(pane_id).and_then(|slot| slot.session());
-        self.chat_shown(pane_id, session)
+        self.view_shown(pane_id, session)
     }
 
     /// The note pane `pane_id` shows above its terminal after its chat was
@@ -457,49 +544,83 @@ impl RootView {
         self.arm_work_strip_repaint(cx);
     }
 
-    /// Switches pane `pane_id` between its terminal and its chat. The chat
-    /// takes no keys, so a terminal that had the keyboard of the window
+    /// Switches pane `pane_id` between its terminal and its chat, as
+    /// Ctrl+Shift+M does (a summary pane goes to its terminal).
+    pub fn toggle_pane_view(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let next = self.chat.views.get(pane_id).after_key(ViewKey::Chat);
+        self.set_pane_view(pane_id, next, window, cx);
+    }
+
+    /// Pane `pane_id` shows `view` from now on. The chat and the summary
+    /// take no keys, so a terminal that had the keyboard of the window
     /// drawing it, the main one or a pop-out, lets go of it; switching back
     /// gives the terminal the keyboard again.
     /// The view chosen becomes its session's remembered one, saved at once.
-    pub fn toggle_pane_view(&mut self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// A new view starts at its bottom.
+    pub fn set_pane_view(
+        &mut self,
+        pane_id: &str,
+        view: PaneView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.chat.notes.remove(pane_id);
-        let shown = self.chat.views.toggle(pane_id);
-        self.remember_pane_view(pane_id, shown);
+        if self.chat.views.get(pane_id) != view {
+            self.chat.scrolls.remove(pane_id);
+        }
+        self.chat.views.set(pane_id, view);
+        self.remember_pane_view(pane_id, view);
         self.sync_chat_loads();
         self.arm_work_strip_repaint(cx);
         self.update_pane_roles(cx);
-        match shown {
-            PaneView::Chat => self.release_pane_keyboard(pane_id, window, cx),
-            PaneView::Terminal => self.focus_pane_where_drawn(pane_id, window, cx),
+        if view.hides_terminal() {
+            self.release_pane_keyboard(pane_id, window, cx);
+        } else {
+            self.focus_pane_where_drawn(pane_id, window, cx);
         }
         cx.notify();
     }
 
-    /// Ctrl+Shift+M in the main window: switches the active tab's focused
-    /// pane between its terminal and its chat, when its session offers one.
-    pub(crate) fn toggle_focused_pane_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pane_id) = self.focused_pane() else {
-            return;
-        };
-        if self.pane_offers_chat(&pane_id) {
-            self.toggle_pane_view(&pane_id, window, cx);
-        }
-    }
-
-    /// Ctrl+Shift+M in pop-out window `here`: switches the pane it draws (a
-    /// popped tab's focused pane) when its session offers a chat.
-    pub(crate) fn toggle_window_pane_view(
+    /// Ctrl+Shift+M or Ctrl+Shift+U (`key`) on pane `pane_id`, when its
+    /// session offers a chat.
+    fn press_view_key(
         &mut self,
-        here: WindowId,
+        pane_id: &str,
+        key: ViewKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.window_pane(here) else {
-            return;
-        };
-        if self.pane_offers_chat(&pane_id) {
-            self.toggle_pane_view(&pane_id, window, cx);
+        if self.pane_offers_chat(pane_id) {
+            let next = self.chat.views.get(pane_id).after_key(key);
+            self.set_pane_view(pane_id, next, window, cx);
+        }
+    }
+
+    /// Ctrl+Shift+M or Ctrl+Shift+U in the main window: switches the
+    /// active tab's focused pane, when its session offers a chat.
+    pub(crate) fn focused_pane_view_key(
+        &mut self,
+        key: ViewKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane_id) = self.focused_pane() {
+            self.press_view_key(&pane_id, key, window, cx);
+        }
+    }
+
+    /// Ctrl+Shift+M or Ctrl+Shift+U in pop-out window `here`: switches the
+    /// pane it draws (a popped tab's focused pane) when its session offers a
+    /// chat.
+    pub(crate) fn window_pane_view_key(
+        &mut self,
+        here: WindowId,
+        key: ViewKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane_id) = self.window_pane(here) {
+            self.press_view_key(&pane_id, key, window, cx);
         }
     }
 
@@ -580,34 +701,50 @@ impl RootView {
         }
     }
 
-    /// Brings the loaded chats in line with the panes: `LoadChat` for a
-    /// session the first chat pane (in any window) now shows, `UnloadChat`
-    /// for one the last chat pane stopped showing. A pane that is gone
-    /// forgets its view.
+    /// Brings the loaded chats and summaries in line with the panes:
+    /// `LoadChat` for a session the first chat or summary pane (in any
+    /// window) now shows, `LoadSummary` for one the first summary pane now
+    /// shows, and `UnloadChat` or `UnloadSummary` once the last such pane
+    /// stopped showing it. A pane that is gone forgets its view.
     pub(crate) fn sync_chat_loads(&mut self) {
         let panes = &self.panes;
         self.chat
             .views
             .retain(|pane_id| panes.contains_key(pane_id));
-        let shown: Vec<(String, String)> = self
+        let shown: Vec<(String, String, PaneView)> = self
             .panes
             .iter()
-            .filter_map(|(pane_id, slot)| Some((pane_id.clone(), slot.session()?.to_owned())))
-            .filter(|(pane_id, session_id)| self.chat_shown(pane_id, Some(session_id)))
+            .filter_map(|(pane_id, slot)| {
+                let session_id = slot.session()?;
+                let view = self.view_shown(pane_id, Some(session_id));
+                view.hides_terminal()
+                    .then(|| (pane_id.clone(), session_id.to_owned(), view))
+            })
             .collect();
-        let chat_panes: BTreeSet<&str> =
-            shown.iter().map(|(pane_id, _)| pane_id.as_str()).collect();
+        let shown_panes: BTreeSet<&str> = shown
+            .iter()
+            .map(|(pane_id, _, _)| pane_id.as_str())
+            .collect();
         self.chat
             .scrolls
-            .retain(|pane_id, _| chat_panes.contains(pane_id.as_str()));
-        for pane_id in chat_panes {
-            self.chat.scrolls.entry(pane_id.to_owned()).or_default();
+            .retain(|pane_id, _| shown_panes.contains(pane_id.as_str()));
+        for pane_id in shown_panes {
+            self.chat
+                .scrolls
+                .entry(pane_id.to_owned())
+                .or_insert_with(|| {
+                    let scroll = Scrollbar::default();
+                    scroll.handle().scroll_to_bottom();
+                    scroll
+                });
         }
-        let wanted = shown
-            .into_iter()
-            .map(|(_, session_id)| session_id)
-            .collect();
-        let changes = self.chat.loads.diff(wanted);
+        let wanted = wanted_loads(
+            shown
+                .iter()
+                .map(|(_, session_id, view)| (session_id.as_str(), *view)),
+        );
+        self.sync_summary_loads(wanted.summary);
+        let changes = self.chat.loads.diff(wanted.chat);
         for session_id in changes.unload {
             self.chat.sessions.remove(&session_id);
             self.send(ClientMessage::UnloadChat { session_id });
@@ -626,15 +763,67 @@ impl RootView {
         }
     }
 
-    /// A message no earlier fold took: a chat message updates its chat,
-    /// anything else goes to the agents' fold.
+    /// The summaries some summary pane shows are now `wanted`: unloads the
+    /// ones no pane shows any more and loads the new ones.
+    fn sync_summary_loads(&mut self, wanted: BTreeSet<String>) {
+        let changes = self.chat.summary_loads.diff(wanted);
+        for session_id in changes.unload {
+            self.chat.summaries.remove(&session_id);
+            self.send(ClientMessage::UnloadSummary { session_id });
+        }
+        for session_id in changes.load {
+            let request_id = new_request_id();
+            self.chat
+                .summaries
+                .insert(session_id.clone(), SummaryLog::asked(request_id.clone()));
+            self.send(ClientMessage::LoadSummary {
+                session_id,
+                request_id: Some(request_id),
+            });
+        }
+    }
+
+    /// A message no earlier fold took: a chat message updates its chat, a
+    /// summary message its summary, anything else goes to the agents' fold.
     pub(crate) fn fold_chat_or_agents(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
         match msg {
             DaemonMessage::Chat { .. }
             | DaemonMessage::ChatAppend { .. }
             | DaemonMessage::ChatScreenChanged { .. }
             | DaemonMessage::ChatWork { .. } => self.on_chat_message(msg, cx),
+            DaemonMessage::Summary {
+                session_id,
+                lines,
+                request_id,
+            } => {
+                let applied = self
+                    .chat
+                    .summaries
+                    .get_mut(&session_id)
+                    .is_some_and(|summary| summary.apply_summary(lines, request_id.as_deref()));
+                self.summary_folded(&session_id, applied, cx);
+            }
+            DaemonMessage::SummaryAppend { session_id, lines } => {
+                let summary = self.chat.summaries.get_mut(&session_id);
+                let applied = summary.is_some();
+                if let Some(summary) = summary {
+                    summary.append(lines);
+                }
+                self.summary_folded(&session_id, applied, cx);
+            }
             other => self.fold_agents(other, cx),
+        }
+    }
+
+    /// A `Summary` or `SummaryAppend` for session `session_id` was folded
+    /// (`applied`), or dropped: one for a summary no pane shows, or a reply
+    /// to an older load.
+    fn summary_folded(&self, session_id: &str, applied: bool, cx: &mut Context<Self>) {
+        if applied {
+            self.follow_summary_panes(session_id);
+            cx.notify();
+        } else {
+            tracing::debug!(%session_id, "summary message for a summary no pane shows, or for an older load: dropped");
         }
     }
 
@@ -660,6 +849,7 @@ impl RootView {
             if work {
                 self.arm_work_strip_repaint(cx);
             }
+            self.follow_summary_panes(&session_id);
             self.ensure_composer(&session_id, cx);
             cx.notify();
         } else {
@@ -668,9 +858,10 @@ impl RootView {
     }
 
     /// A daemon `Error` that answers one of this connection's pending
-    /// `LoadChat`s: every chat pane of that session snaps back to its
-    /// terminal with a note, nothing is unloaded and a later toggle asks
-    /// again. An `unsupported_message` refusal says the session offers no
+    /// `LoadChat`s or `LoadSummary`s: every chat and summary pane of that
+    /// session snaps back to its terminal with a note, nothing is unloaded
+    /// and a later toggle asks again. The session's other load, still
+    /// pending, is forgotten with it, and its own refusal is taken silently. An `unsupported_message` refusal says the session offers no
     /// chat; any other carries the daemon's `message`. Returns whether the
     /// error answered a `LoadChat`.
     pub(crate) fn on_chat_refused(
@@ -683,16 +874,29 @@ impl RootView {
         let Some(request_id) = request_id else {
             return false;
         };
+        if self.chat.refused_loads.remove(request_id) {
+            tracing::debug!(
+                request_id,
+                "refusal of a load forgotten with its session's other load: taken"
+            );
+            return true;
+        }
         if self.on_chat_reply_refused(message, request_id, cx) {
             return true;
         }
-        let Some(session_id) = self
+        let chat_refused = self
             .chat
             .sessions
             .iter()
             .find(|(_, chat)| chat.request.as_deref() == Some(request_id))
-            .map(|(session_id, _)| session_id.clone())
-        else {
+            .map(|(session_id, _)| session_id.clone());
+        let summary_refused = self
+            .chat
+            .summaries
+            .iter()
+            .find(|(_, summary)| summary.request() == Some(request_id))
+            .map(|(session_id, _)| session_id.clone());
+        let Some(session_id) = chat_refused.clone().or(summary_refused) else {
             return false;
         };
         let note = if code == Some(UNSUPPORTED_MESSAGE) {
@@ -709,13 +913,14 @@ impl RootView {
             tracing::warn!(%session_id, ?code, message, "the daemon could not load this session's chat; its chat panes show the terminal");
             format!("{LOAD_FAILED_NOTE}{message}")
         };
-        self.chat.sessions.remove(&session_id);
-        self.chat.loads.forget(&session_id);
+        self.chat
+            .forget_refused_load(&session_id, chat_refused.is_some());
         let panes: Vec<String> = self
             .panes
             .iter()
             .filter(|(pane_id, slot)| {
-                slot.session() == Some(session_id.as_str()) && self.chat.is_chat(pane_id)
+                slot.session() == Some(session_id.as_str())
+                    && self.chat.views.get(pane_id).hides_terminal()
             })
             .map(|(pane_id, _)| pane_id.clone())
             .collect();
@@ -796,7 +1001,12 @@ impl RootView {
     /// it answers the current card, sends the composer's text, or is
     /// swallowed; Ctrl+Enter does nothing while a send is in flight.
     /// Returns whether the key was taken.
-    fn chat_key(&mut self, session_id: &str, key: CardKey, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn chat_key(
+        &mut self,
+        session_id: &str,
+        key: CardKey,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let now = (self.now)();
         let Some(chat) = self.chat.sessions.get(session_id) else {
             return false;
@@ -1035,8 +1245,10 @@ impl RootView {
         terminal: Div,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.chat_shown(pane_id, Some(session_id)) {
-            return self.chat_body(pane_id, session_id, cx);
+        match self.view_shown(pane_id, Some(session_id)) {
+            PaneView::Chat => return self.chat_body(pane_id, session_id, cx),
+            PaneView::Summary => return self.summary_body(pane_id, session_id, cx),
+            PaneView::Terminal => {}
         }
         let Some(note) = self.chat.notes.get(pane_id).cloned() else {
             return terminal.into_any_element();
@@ -1069,15 +1281,7 @@ impl RootView {
     fn chat_body(&self, pane_id: &str, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let name = format!("pane-chat-{pane_id}");
         let chat = self.chat.sessions.get(session_id);
-        let font = &self.sidebar.ui_state().terminal_font;
-        let family = font.family.as_deref();
-        let look = RowLook {
-            pane_id,
-            session_id,
-            mono: SharedString::from(family.unwrap_or(DEFAULT_FAMILY).to_owned()),
-            mono_family: family,
-            mono_size: font.size,
-        };
+        let look = self.row_look(pane_id, session_id);
         let strip = chat.and_then(|chat| chat.work.strip(self.wall_now()));
         let rows = chat.filter(|chat| !chat.log.is_empty() || chat.log.hidden() > 0);
         let main = if let Some(chat) = rows {
@@ -1112,9 +1316,23 @@ impl RootView {
             .into_any_element()
     }
 
+    /// What every row pane `pane_id` draws for session `session_id` is
+    /// drawn with: the terminal's font for code.
+    pub(crate) fn row_look<'a>(&'a self, pane_id: &'a str, session_id: &'a str) -> RowLook<'a> {
+        let font = &self.sidebar.ui_state().terminal_font;
+        let family = font.family.as_deref();
+        RowLook {
+            pane_id,
+            session_id,
+            mono: SharedString::from(family.unwrap_or(DEFAULT_FAMILY).to_owned()),
+            mono_family: family,
+            mono_size: font.size,
+        }
+    }
+
     /// Session `session_id`'s card and the cards behind it, under an
     /// "Answered elsewhere" line while one shows; none while neither does.
-    fn card_area(
+    pub(crate) fn card_area(
         &self,
         session_id: &str,
         chat: &SessionChat,
@@ -1164,7 +1382,7 @@ impl RootView {
     /// `chat-ride-no`), and the daemon's reason for refusing the last send
     /// (`chat-composer-error`). Without a connection the input is
     /// disabled.
-    fn composer_row(
+    pub(crate) fn composer_row(
         &self,
         session_id: &str,
         chat: &SessionChat,
@@ -1290,7 +1508,7 @@ const DISABLED_OPACITY: f32 = 0.5;
 /// The card key `keystroke` is, when the chat reads it before its
 /// composer: a bare digit, or Ctrl+Shift+Enter. Ctrl+Enter and Esc reach
 /// the chat through the composer's own Submit and Cancel.
-fn card_key(keystroke: &Keystroke) -> Option<CardKey> {
+pub(crate) fn card_key(keystroke: &Keystroke) -> Option<CardKey> {
     let mods = &keystroke.modifiers;
     if keystroke.key == "enter" && mods.control && mods.shift && !mods.alt && !mods.platform {
         return Some(CardKey::CtrlShiftEnter);
@@ -1318,7 +1536,7 @@ fn chat_column(
     rows.extend(
         chat.log
             .entries()
-            .map(|entry| chat_row(look, chat, entry, cx)),
+            .map(|entry| chat_row(look, chat, entry, CHAT_ROW, cx)),
     );
     let column = div()
         .id(ElementId::Name(SharedString::from(format!(
@@ -1354,7 +1572,7 @@ fn chat_column(
 
 /// Keeps a chat at its bottom while it was there at its last layout, so new
 /// rows scroll into view; a chat scrolled up stays where it is.
-fn follow_bottom(handle: &ScrollHandle) {
+pub(crate) fn follow_bottom(handle: &ScrollHandle) {
     let viewport = handle.bounds().size.height / px(1.0);
     let laid_out = (viewport > 0.0).then(|| {
         (
@@ -1367,18 +1585,20 @@ fn follow_bottom(handle: &ScrollHandle) {
     }
 }
 
-/// The label and tooltip of a pane header's Terminal / Chat toggle: the
-/// view a click switches to.
-pub(crate) fn toggle_label(chat_shown: bool) -> (&'static str, &'static str) {
-    if chat_shown {
-        ("Terminal", TOGGLE_TO_TERMINAL_TIP)
-    } else {
-        ("Chat", TOGGLE_TO_CHAT_TIP)
+/// The label and tooltip of a pane header's segment for `view`.
+pub(crate) fn view_segment(view: PaneView) -> (&'static str, &'static str) {
+    match view {
+        PaneView::Terminal => ("Terminal", TOGGLE_TO_TERMINAL_TIP),
+        PaneView::Chat => ("Chat", TOGGLE_TO_CHAT_TIP),
+        PaneView::Summary => ("Summary", TOGGLE_TO_SUMMARY_TIP),
     }
 }
 
+/// The selector prefix of a chat pane's rows.
+const CHAT_ROW: &str = "chat-row";
+
 /// One muted line centred in the chat pane.
-fn chat_note(text: &'static str) -> Div {
+pub(crate) fn chat_note(text: &'static str) -> Div {
     div()
         .flex()
         .flex_1()
@@ -1390,11 +1610,13 @@ fn chat_note(text: &'static str) -> Div {
         .child(text)
 }
 
-/// One row of the chat, tagged `chat-row-<pane>-<id>`.
-fn chat_row(
+/// One row of the chat, tagged `<prefix>-<pane>-<id>`: `chat-row` in a
+/// chat pane, `summary-row` in a summary pane.
+pub(crate) fn chat_row(
     look: &RowLook<'_>,
     chat: &SessionChat,
     entry: &ChatEntry,
+    prefix: &str,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let Some(id) = chat::entry_id(entry) else {
@@ -1429,7 +1651,7 @@ fn chat_row(
         ChatEntry::TurnEnd { duration_ms, .. } => muted_line(turn_label(*duration_ms)),
         ChatEntry::Unknown => div(),
     };
-    let name = format!("chat-row-{}-{id}", look.pane_id);
+    let name = format!("{prefix}-{}-{id}", look.pane_id);
     div()
         .debug_selector(|| name)
         .flex()
@@ -1612,7 +1834,7 @@ fn system_pill(text: &str) -> Div {
 }
 
 /// One small muted line.
-fn muted_line(text: String) -> Div {
+pub(crate) fn muted_line(text: String) -> Div {
     div()
         .text_size(px(SMALL_TEXT_SIZE))
         .text_color(gpui::rgb(MUTED))

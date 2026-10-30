@@ -339,10 +339,10 @@ impl RootView {
         {
             self.close_shell_menu(window, cx);
             true
-        } else if crate::keys::is_pane_view_key(ks) {
-            // Swallowed even with nothing to switch: Ctrl+M is Enter to
-            // the terminal.
-            self.toggle_window_pane_view(here, window, cx);
+        } else if let Some(key) = crate::keys::pane_view_key(ks) {
+            // Swallowed even with nothing to switch: Ctrl+M is Enter and
+            // Ctrl+U a line kill to the terminal.
+            self.window_pane_view_key(here, key, window, cx);
             true
         } else {
             false

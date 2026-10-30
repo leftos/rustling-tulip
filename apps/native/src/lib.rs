@@ -121,6 +121,8 @@ pub mod ssh;
 mod stash_view;
 mod stashes;
 mod status_glyph;
+mod summary;
+mod summary_view;
 pub mod syntax;
 mod tab_bar;
 mod tab_menu;
@@ -1688,7 +1690,7 @@ impl RootView {
         }
         let terminal = self.popout_terminal(key)?;
         let terminal = terminal.read(cx);
-        if self.pane_shows_chat(terminal.pane_id()) {
+        if self.pane_view(terminal.pane_id()).hides_terminal() {
             return None;
         }
         Some(terminal.focus_handle())
@@ -4376,8 +4378,8 @@ impl RootView {
             self.toggle_sidebar(window, cx);
         } else if ctrl_only && ks.key == "," {
             self.open_settings(window, cx);
-        } else if keys::is_pane_view_key(ks) {
-            self.toggle_focused_pane_view(window, cx);
+        } else if let Some(key) = keys::pane_view_key(ks) {
+            self.focused_pane_view_key(key, window, cx);
         } else if self.is_spawn_shortcut(ks, window, cx) {
             self.open_spawn_dialog(crate::spawn_view::SpawnEntry::Toolbar, window, cx);
         } else {

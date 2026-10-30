@@ -17,7 +17,8 @@ use protocol::{
 };
 
 use crate::appearance::{self, PaneFrame, Resolved, Source};
-use crate::chat_view::{offers_chat, toggle_label};
+use crate::chat::PaneView;
+use crate::chat_view::{offers_chat, view_segment};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
@@ -495,14 +496,15 @@ impl RootView {
         let active = self.tabs.active_id();
         let focused = active.and_then(|tab_id| self.tabs.focused_pane(tab_id));
         let mut bindings = self.tabs.bindings();
-        bindings
-            .retain(|binding| !self.chat_shown(&binding.pane_id, binding.session_id.as_deref()));
+        bindings.retain(|binding| {
+            !self.terminal_hidden(&binding.pane_id, binding.session_id.as_deref())
+        });
         let tab_panes = self.popped_tab_panes();
         let mut popped = self.popouts.popped_panes();
         popped.extend(tab_panes.iter().map(String::as_str));
         let mut popped_sessions = self.popouts.popped_sessions();
         popped_sessions.retain(|session_id| {
-            !self.chat_shown(&popouts::session_slot_id(session_id), Some(session_id))
+            !self.terminal_hidden(&popouts::session_slot_id(session_id), Some(session_id))
         });
         let drivers = tabs::size_drivers(
             &bindings,
@@ -949,7 +951,7 @@ impl RootView {
             && !self.is_pane_popped(pane_id)
             && !(self.is_tab_popped(&slot.tab_id) && self.is_main_window(window))
         {
-            if self.pane_shows_chat(pane_id) {
+            if self.pane_view(pane_id).hides_terminal() {
                 self.root_focus.focus(window);
             } else {
                 slot.view.read(cx).focus(window);
@@ -1831,7 +1833,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let session = session_id.and_then(|id| self.sidebar.session(id));
-        let chat_shown = self.chat_shown(pane_id, session_id);
+        let shown = self.view_shown(pane_id, session_id);
         let prompt_jumps = session
             .filter(|session| {
                 matches!(
@@ -1839,11 +1841,11 @@ impl RootView {
                     SessionMode::Interactive | SessionMode::PlainShell
                 )
             })
-            .filter(|_| !chat_shown)
+            .filter(|_| !shown.hides_terminal())
             .map(|_| self.pane_prompt_jumps(pane_id, cx));
         let mut buttons = Self::header_buttons(tab_id, pane_id, session_id, prompt_jumps, cx);
         if session.is_some_and(offers_chat) {
-            buttons.insert(0, view_toggle(pane_id, chat_shown, cx));
+            buttons.insert(0, view_segments(pane_id, shown, cx));
         }
         buttons
     }
@@ -2558,17 +2560,39 @@ fn header_button(
         .child(glyph)
 }
 
-/// A pane header's Terminal / Chat toggle, labelled with the view a click
-/// switches pane `pane_id` to.
-fn view_toggle(pane_id: &str, chat_shown: bool, cx: &mut Context<RootView>) -> AnyElement {
-    let (label, tip) = toggle_label(chat_shown);
-    let pane = pane_id.to_owned();
-    header_button(pane_id, "pane-view-toggle", label, tip, cx)
-        .w_auto()
-        .px(px(8.0))
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.toggle_pane_view(&pane, window, cx);
-        }))
+/// A pane header's Terminal | Chat | Summary control, the view `shown`
+/// marked; each segment is tagged `pane-view-<view>-<pane>` and a click
+/// switches pane `pane_id` to its view.
+fn view_segments(pane_id: &str, shown: PaneView, cx: &mut Context<RootView>) -> AnyElement {
+    let segments: Vec<AnyElement> = [
+        (PaneView::Terminal, "pane-view-terminal"),
+        (PaneView::Chat, "pane-view-chat"),
+        (PaneView::Summary, "pane-view-summary"),
+    ]
+    .into_iter()
+    .map(|(view, action)| {
+        let (label, tip) = view_segment(view);
+        let pane = pane_id.to_owned();
+        header_button(pane_id, action, label, tip, cx)
+            .w_auto()
+            .px(px(8.0))
+            .when(view == shown, |segment| {
+                segment.bg(gpui::rgb(CHIP)).text_color(gpui::rgb(TEXT))
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                if this.pane_view(&pane) != view {
+                    this.set_pane_view(&pane, view, window, cx);
+                }
+            }))
+            .into_any_element()
+    })
+    .collect();
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(2.0))
+        .children(segments)
         .into_any_element()
 }
 

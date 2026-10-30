@@ -9,6 +9,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, TabContent};
 
+use crate::chat::PaneView;
 use crate::drag::PaneDrop;
 use crate::move_panes_view::MovePanesDialog;
 use crate::overlay_owner::Overlay;
@@ -19,16 +20,39 @@ use crate::ui_theme::theme;
 use crate::undo;
 use crate::{RootView, tooltip};
 
-/// The selector of the session pane menu's row that switches the pane
-/// between its terminal and its chat.
+/// The selector of the session pane menu's first view row, the one that
+/// does what Ctrl+Shift+M does: the chat from the terminal, else the
+/// terminal.
 pub(crate) const PANE_VIEW_ROW: &str = "session-menu-pane-view";
 
-/// The label of the Terminal / Chat row: the view a click switches to.
-fn pane_view_label(chat_shown: bool) -> &'static str {
-    if chat_shown {
-        "Show terminal"
-    } else {
-        "Show chat"
+/// The pane menu's view rows for a pane showing `shown`: "Show terminal",
+/// "Show chat" and "Show summary", leaving out the view shown. The first
+/// row is tagged [`PANE_VIEW_ROW`]; the second `session-menu-pane-view-`
+/// and its view's name.
+pub(crate) fn pane_view_rows(shown: PaneView) -> [(&'static str, &'static str, PaneView); 2] {
+    const TERMINAL: (&str, &str, PaneView) = (PANE_VIEW_ROW, "Show terminal", PaneView::Terminal);
+    const CHAT: (&str, &str, PaneView) = (PANE_VIEW_ROW, "Show chat", PaneView::Chat);
+    match shown {
+        PaneView::Terminal => [
+            CHAT,
+            (
+                "session-menu-pane-view-summary",
+                "Show summary",
+                PaneView::Summary,
+            ),
+        ],
+        PaneView::Chat => [
+            TERMINAL,
+            (
+                "session-menu-pane-view-summary",
+                "Show summary",
+                PaneView::Summary,
+            ),
+        ],
+        PaneView::Summary => [
+            TERMINAL,
+            ("session-menu-pane-view-chat", "Show chat", PaneView::Chat),
+        ],
     }
 }
 
@@ -97,13 +121,34 @@ impl MenuRow {
 }
 
 impl RootView {
-    /// The label of the open session menu's Terminal / Chat row; `None`
-    /// when the menu did not open from a pane header or that pane's session
-    /// offers no chat, the same rule as the header's toggle.
+    /// The label of the open session menu's first view row; `None` when
+    /// the menu did not open from a pane header or that pane's session
+    /// offers no chat, the same rule as the header's control.
     #[must_use]
     pub fn pane_view_menu_label(&self) -> Option<&'static str> {
+        self.pane_view_menu_labels().first().copied()
+    }
+
+    /// The labels of the open session menu's view rows, in order; none
+    /// when it offers no view rows.
+    #[must_use]
+    pub fn pane_view_menu_labels(&self) -> Vec<&'static str> {
+        self.pane_view_menu_selectors_and_labels()
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect()
+    }
+
+    /// The selectors and labels of the open session menu's view rows.
+    pub(crate) fn pane_view_menu_selectors_and_labels(&self) -> Vec<(&'static str, &'static str)> {
         self.pane_view_menu_pane()
-            .map(|pane_id| pane_view_label(self.pane_shows_chat(pane_id)))
+            .map(|pane_id| {
+                pane_view_rows(self.pane_view(pane_id))
+                    .into_iter()
+                    .map(|(selector, label, _)| (selector, label))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The pane whose header opened the session menu, while it offers the
@@ -113,18 +158,24 @@ impl RootView {
             .filter(|pane_id| self.pane_offers_chat(pane_id))
     }
 
-    /// The session menu's Terminal / Chat row, while it offers one: a click
-    /// closes the menu and switches the pane, as its header toggle does.
-    pub(crate) fn pane_view_menu_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let pane_id = self.pane_view_menu_pane()?.to_owned();
-        let label = pane_view_label(self.pane_shows_chat(&pane_id));
-        let row = menu_item(PANE_VIEW_ROW, label, false).on_click(cx.listener(
-            move |this, _: &ClickEvent, window, cx| {
-                this.close_session_menu(window, cx);
-                this.toggle_pane_view(&pane_id, window, cx);
-            },
-        ));
-        Some(row.into_any_element())
+    /// The session menu's view rows, while it offers them: a click closes
+    /// the menu and switches the pane, as its header control does.
+    pub(crate) fn pane_view_menu_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(pane_id) = self.pane_view_menu_pane().map(ToOwned::to_owned) else {
+            return Vec::new();
+        };
+        pane_view_rows(self.pane_view(&pane_id))
+            .into_iter()
+            .map(|(selector, label, view)| {
+                let pane_id = pane_id.clone();
+                menu_item(selector, label, false)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.close_session_menu(window, cx);
+                        this.set_pane_view(&pane_id, view, window, cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect()
     }
 
     /// The empty pane whose menu is open.

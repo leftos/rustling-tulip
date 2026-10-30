@@ -252,6 +252,37 @@ pub enum PaneView {
     Terminal,
     /// The session's chat, its terminal kept fed but not drawn.
     Chat,
+    /// The session's summary lines, its terminal kept fed but not drawn.
+    Summary,
+}
+
+/// A key that switches a pane's view: Ctrl+Shift+M (`Chat`) or
+/// Ctrl+Shift+U (`Summary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewKey {
+    Chat,
+    Summary,
+}
+
+impl PaneView {
+    /// What a pane showing `self` shows after `key`: Ctrl+Shift+M flips
+    /// terminal and chat and leaves the summary for the terminal; Ctrl+Shift+U
+    /// opens the summary and leaves it for the terminal.
+    #[must_use]
+    pub fn after_key(self, key: ViewKey) -> PaneView {
+        match (key, self) {
+            (ViewKey::Chat, PaneView::Terminal) => PaneView::Chat,
+            (ViewKey::Summary, PaneView::Terminal | PaneView::Chat) => PaneView::Summary,
+            (ViewKey::Chat, PaneView::Chat | PaneView::Summary)
+            | (ViewKey::Summary, PaneView::Summary) => PaneView::Terminal,
+        }
+    }
+
+    /// Whether a pane showing `self` hides its terminal.
+    #[must_use]
+    pub fn hides_terminal(self) -> bool {
+        self != PaneView::Terminal
+    }
 }
 
 /// The view each pane shows, by pane id; a pane not named shows its
@@ -280,21 +311,10 @@ impl PaneViews {
             PaneView::Terminal => {
                 self.views.remove(pane_id);
             }
-            PaneView::Chat => {
+            PaneView::Chat | PaneView::Summary => {
                 self.views.insert(pane_id.to_owned(), view);
             }
         }
-    }
-
-    /// Switches pane `pane_id` between its terminal and its chat, returning
-    /// what it shows now.
-    pub fn toggle(&mut self, pane_id: &str) -> PaneView {
-        let next = match self.get(pane_id) {
-            PaneView::Terminal => PaneView::Chat,
-            PaneView::Chat => PaneView::Terminal,
-        };
-        self.set(pane_id, next);
-        next
     }
 
     /// The pane known as `old` is now `new`, and keeps its view.
@@ -1008,8 +1028,8 @@ mod tests {
 
     use super::{
         ChatLoads, ChatLog, DIGIT_GRACE, DISPLAY_CAP, LoadChanges, PaneView, PaneViews,
-        PromptStack, allow_with_text, back_answer, deny_with_text, entry_id, follows_bottom,
-        option_answer, skip_answer, submit_answer, toggle_answer, tool_one_liner,
+        PromptStack, ViewKey, allow_with_text, back_answer, deny_with_text, entry_id,
+        follows_bottom, option_answer, skip_answer, submit_answer, toggle_answer, tool_one_liner,
         type_something_answer,
     };
 
@@ -1210,17 +1230,63 @@ mod tests {
         );
     }
 
+    /// Presses `key` on pane `pane_id`, returning what it shows now.
+    fn press(views: &mut PaneViews, pane_id: &str, key: ViewKey) -> PaneView {
+        let next = views.get(pane_id).after_key(key);
+        views.set(pane_id, next);
+        next
+    }
+
     #[test]
     fn a_pane_shows_its_terminal_until_toggled() {
         let mut views = PaneViews::default();
         assert_eq!(views.get("p1"), PaneView::Terminal);
-        assert_eq!(views.toggle("p1"), PaneView::Chat);
+        assert_eq!(press(&mut views, "p1", ViewKey::Chat), PaneView::Chat);
         assert!(views.is_chat("p1"));
         assert!(!views.is_chat("p2"), "another pane keeps its terminal");
-        assert_eq!(views.toggle("p1"), PaneView::Terminal);
+        assert_eq!(press(&mut views, "p1", ViewKey::Chat), PaneView::Terminal);
         assert!(!views.is_chat("p1"));
         views.set("p2", PaneView::Chat);
         assert!(views.is_chat("p2"));
+    }
+
+    #[test]
+    fn ctrl_shift_m_flips_terminal_and_chat_and_leaves_the_summary_for_the_terminal() {
+        assert_eq!(PaneView::Terminal.after_key(ViewKey::Chat), PaneView::Chat);
+        assert_eq!(PaneView::Chat.after_key(ViewKey::Chat), PaneView::Terminal);
+        assert_eq!(
+            PaneView::Summary.after_key(ViewKey::Chat),
+            PaneView::Terminal
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_u_opens_the_summary_and_leaves_it_for_the_terminal() {
+        assert_eq!(
+            PaneView::Terminal.after_key(ViewKey::Summary),
+            PaneView::Summary
+        );
+        assert_eq!(
+            PaneView::Chat.after_key(ViewKey::Summary),
+            PaneView::Summary
+        );
+        assert_eq!(
+            PaneView::Summary.after_key(ViewKey::Summary),
+            PaneView::Terminal
+        );
+    }
+
+    #[test]
+    fn a_summary_pane_keeps_its_view_and_is_no_chat() {
+        let mut views = PaneViews::default();
+        views.set("p1", PaneView::Summary);
+        assert_eq!(views.get("p1"), PaneView::Summary);
+        assert!(!views.is_chat("p1"));
+        views.rekey("p1", "p9");
+        assert_eq!(views.get("p9"), PaneView::Summary);
+        assert_eq!(views.get("p1"), PaneView::Terminal);
+        views.set("p9", PaneView::Terminal);
+        assert_eq!(views.get("p9"), PaneView::Terminal);
     }
 
     #[test]

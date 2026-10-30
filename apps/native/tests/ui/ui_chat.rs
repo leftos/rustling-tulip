@@ -23,7 +23,8 @@ use protocol::{
 use rustling_tulip_native::{OpenOutcome, PopoutKey};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 
-const TOGGLE: &str = "pane-view-toggle-p1";
+const TO_TERMINAL: &str = "pane-view-terminal-p1";
+const TO_CHAT: &str = "pane-view-chat-p1";
 
 /// `s1` alone in pane `p1`, its scrollback answered and everything sent so
 /// far drained.
@@ -55,7 +56,7 @@ fn unloads(sent: &[ClientMessage]) -> usize {
 /// under.
 fn opened<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, String) {
     let mut h = attached(cx, dir);
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     let id = load_request(&h.sent()).expect("the toggle asks for the chat");
     (h, id)
 }
@@ -164,7 +165,7 @@ fn the_toggle_asks_for_the_chat_and_draws_it_in_place_of_the_terminal(cx: &mut T
     let mut h = attached(cx, &dir);
     assert!(!shows_chat(&mut h), "a pane opens on its terminal");
     assert!(painted(&mut h, "pane-grid-p1"));
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     let sent = h.sent();
     assert!(
         load_request(&sent).is_some(),
@@ -277,7 +278,7 @@ fn toggling_back_unloads_the_chat_and_draws_the_terminal(cx: &mut TestAppContext
     let dir = TestDir::new();
     let (mut h, id) = opened(cx, &dir);
     h.send(reply(Some(&id), vec![user("u1")]));
-    h.click_on(TOGGLE);
+    h.click_on(TO_TERMINAL);
     assert_eq!(unloads(&h.sent()), 1, "the last chat pane going unloads");
     assert!(!shows_chat(&mut h));
     assert!(painted(&mut h, "pane-grid-p1"));
@@ -301,7 +302,7 @@ fn closing_the_last_chat_pane_unloads_the_chat(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture);
     h.answer_scrollback("s1", b"");
     h.sent();
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     assert!(load_request(&h.sent()).is_some());
     h.send(DaemonMessage::Tabs {
         tabs: vec![tab("t1", &pane("p2", Some("s1")))],
@@ -369,7 +370,7 @@ fn a_failed_load_shows_the_terminal_with_the_daemons_message(cx: &mut TestAppCon
         h.root(|root, _| root.toasts().is_empty()),
         "the note is the only word of it"
     );
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     assert!(
         load_request(&h.sent()).is_some(),
         "a later toggle asks for the chat again"
@@ -430,7 +431,7 @@ fn focused_in_popout(h: &mut Harness<'_>) -> bool {
 fn a_popped_out_chat_pane_gives_its_hidden_terminal_no_keys(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached_in_a_repo(cx, &dir);
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     assert!(shows_chat(&mut h));
     pop_out_p1(&mut h);
     assert!(
@@ -517,7 +518,7 @@ fn the_key_switches_the_focused_pane(cx: &mut TestAppContext) {
 fn a_new_pane_on_the_session_opens_in_its_remembered_view(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir);
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     h.sent();
     h.send(DaemonMessage::Tabs {
         tabs: vec![tab("t1", &split_with("s1"))],
@@ -526,7 +527,7 @@ fn a_new_pane_on_the_session_opens_in_its_remembered_view(cx: &mut TestAppContex
         h.root(|root, _| root.pane_shows_chat("p2")),
         "p2 opens on the chat"
     );
-    h.click_on(TOGGLE);
+    h.click_on(TO_TERMINAL);
     h.send(DaemonMessage::Tabs {
         tabs: vec![tab("t1", &pane("p1", Some("s1")))],
     });
@@ -543,7 +544,7 @@ fn a_new_pane_on_the_session_opens_in_its_remembered_view(cx: &mut TestAppContex
 fn a_new_session_opens_on_its_terminal(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir);
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     h.sent();
     h.send(DaemonMessage::Sessions {
         sessions: vec![session("s1").build(), session("s2").build()],
@@ -567,7 +568,7 @@ fn a_new_session_opens_on_its_terminal(cx: &mut TestAppContext) {
 fn a_popped_out_pane_keeps_its_view(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached_in_a_repo(cx, &dir);
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     h.sent();
     pop_out_p1(&mut h);
     assert!(shows_chat(&mut h), "the popped pane still shows its chat");
@@ -594,13 +595,13 @@ fn the_remembered_view_is_saved_with_only_live_sessions(cx: &mut TestAppContext)
     );
     assert!(load_request(&h.sent()).is_some(), "and asks for it");
     let other_host = serde_json::json!({ "gone": "chat" });
-    h.click_on(TOGGLE);
+    h.click_on(TO_TERMINAL);
     assert_eq!(
         saved_views(&dir),
         serde_json::json!({ "ssh:dev": other_host }),
         "this PC's ended session goes, another host's stays"
     );
-    h.click_on(TOGGLE);
+    h.click_on(TO_CHAT);
     assert_eq!(
         saved_views(&dir),
         serde_json::json!({ "local": { "s1": "chat" }, "ssh:dev": other_host })

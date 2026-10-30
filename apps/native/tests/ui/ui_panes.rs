@@ -620,7 +620,7 @@ fn split_at(ratio: f32) -> TabEntry {
 
 /// The smallest share of the row at which `p1`'s long header shows whole
 /// beside all its buttons.
-const WHOLE_HEADER_RATIO: f32 = 0.53;
+const WHOLE_HEADER_RATIO: f32 = 0.70;
 
 /// Every header button of `p1` lies inside its card.
 fn assert_buttons_inside_p1(h: &mut Harness<'_>, stage: &str) {

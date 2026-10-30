@@ -14,9 +14,10 @@
 //! picker with a saved tailnet host and a saved SSH host) and
 //! `connections-ssh` (its add form switched to SSH, filled in, after a
 //! passing Test connection), `menu` (the sessions panel's ⋯ menu open
-//! over the repo rows, with a toast over the panes) and `chat` (the Petal
-//! pane switched to its chat, a row of each kind and a live answer). The PNG
-//! goes to
+//! over the repo rows, with a toast over the panes), `chat` (the Petal
+//! pane switched to its chat, a row of each kind and a live answer) and
+//! `summary` (the Petal pane switched to its summary: three lines, the
+//! second one open, under a pinned Permission card). The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -41,9 +42,11 @@ use gpui::{
     WindowHandle, WindowOptions, px, size,
 };
 use protocol::{
-    AgentCommandEntry, ChatEntry, ChatScreen, ClientMessage, ComposerState, DaemonMessage,
-    GridNode, SessionSnapshot, SplitDirection, ToolOutcome, WorkShell, WorkSubagent,
+    AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen,
+    ClientMessage, ComposerState, DaemonMessage, GridNode, SessionSnapshot, SplitDirection,
+    StretchLine, SummarySource, ToolOutcome, WorkShell, WorkSubagent,
 };
+use rustling_tulip_native::chat::PaneView;
 use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
@@ -63,6 +66,10 @@ const WINDOW_SIZE: (u16, u16) = (1000, 640);
 /// The `dashboard` shot's window: wide enough for every column of the By
 /// status view.
 const DASHBOARD_WINDOW_SIZE: (u16, u16) = (1800, 900);
+/// The `summary` shot's window: tall enough for the split's top pane to
+/// hold the pinned card, all three lines with one open, the strip and the
+/// composer.
+const SUMMARY_WINDOW_SIZE: (u16, u16) = (1000, 1000);
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -103,6 +110,8 @@ const VIEWER_FILE: &str = "footer.rs";
 const VIEWER_LINE: u32 = 30;
 /// The file the `viewer-md` shot views.
 const VIEWER_MD_FILE: &str = "README.md";
+/// The `summary` shot's line drawn open: the second of its three.
+const SUMMARY_OPEN_LINE: &str = "t1";
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -144,10 +153,11 @@ enum View {
     Menu,
     Update,
     Chat,
+    Summary,
 }
 
 impl View {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -163,6 +173,7 @@ impl View {
         Self::Menu,
         Self::Update,
         Self::Chat,
+        Self::Summary,
     ];
 
     fn name(self) -> &'static str {
@@ -182,6 +193,7 @@ impl View {
             Self::Menu => "menu",
             Self::Update => "update",
             Self::Chat => "chat",
+            Self::Summary => "summary",
         }
     }
 
@@ -189,21 +201,22 @@ impl View {
     /// to draw before the next: the add form opens from the picker, its SSH
     /// segment is pressed once drawn, and its Host field takes typing only
     /// once drawn; the update shot checks and opens Settings, then moves the
-    /// keyboard to Check now, which scrolls the update rows into view.
+    /// keyboard to Check now, which scrolls the update rows into view; a
+    /// summary line opens only once the lines have arrived.
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
-            Self::Update => 2,
+            Self::Update | Self::Summary => 2,
             _ => 1,
         }
     }
 
     /// The window's size for this view.
     fn window_size(self) -> (u16, u16) {
-        if self == Self::Dashboard {
-            DASHBOARD_WINDOW_SIZE
-        } else {
-            WINDOW_SIZE
+        match self {
+            Self::Dashboard => DASHBOARD_WINDOW_SIZE,
+            Self::Summary => SUMMARY_WINDOW_SIZE,
+            _ => WINDOW_SIZE,
         }
     }
 
@@ -243,6 +256,11 @@ impl View {
                         .any(|row| row.context != "—")
             }
             Self::Chat => root.pane_shows_chat("p1") && !root.chat_rows("s-petal").is_empty(),
+            Self::Summary => {
+                root.pane_view("p1") == PaneView::Summary
+                    && root.summary_line_open("s-petal", SUMMARY_OPEN_LINE)
+                    && !root.chat_rows("s-petal").is_empty()
+            }
             Self::Connections => {
                 root.connection_picker_open() && root.connection_picker_scan_text().is_none()
             }
@@ -310,7 +328,8 @@ impl Shot {
             | View::ConnectionsSsh
             | View::Menu
             | View::Update
-            | View::Chat => None,
+            | View::Chat
+            | View::Summary => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -469,6 +488,7 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     let failure = Arc::new(Mutex::new(None));
     let daemon = FakeDaemon {
         events: event_tx,
+        view: shot.view,
         now,
         failure: Arc::clone(&failure),
     };
@@ -663,6 +683,20 @@ fn drive(
                 .flatten()
                 .context("the window has no root view")?;
             root.update(cx, |root, cx| root.toggle_pane_view("p1", window, cx));
+            Ok(())
+        }
+        View::Summary => {
+            let root = window
+                .root::<RootView>()
+                .flatten()
+                .context("the window has no root view")?;
+            root.update(cx, |root, cx| {
+                if step == 0 {
+                    root.set_pane_view("p1", PaneView::Summary, window, cx);
+                } else {
+                    root.toggle_summary_line("s-petal", SUMMARY_OPEN_LINE, cx);
+                }
+            });
             Ok(())
         }
     }
@@ -1095,6 +1129,8 @@ fn check_daemon(failure: &Mutex<Option<anyhow::Error>>) -> Result<()> {
 /// answers the requests the views make.
 struct FakeDaemon {
     events: UnboundedSender<NetEvent>,
+    /// The view the shot shows, which picks the chat's screen.
+    view: View,
     now: DateTime<Utc>,
     failure: Arc<Mutex<Option<anyhow::Error>>>,
 }
@@ -1241,11 +1277,23 @@ impl FakeDaemon {
                 session_id,
                 request_id,
             } => {
+                let screen = if self.view == View::Summary {
+                    permission_screen()
+                } else {
+                    ChatScreen {
+                        composer: ComposerState::Working,
+                        prompt: None,
+                    }
+                };
                 return Ok(vec![
-                    chat_reply(session_id, request_id.clone()),
+                    chat_reply(session_id, request_id.clone(), screen),
                     chat_work(self.now, session_id),
                 ]);
             }
+            ClientMessage::LoadSummary {
+                session_id,
+                request_id,
+            } => summary_reply(session_id, request_id.clone()),
             ClientMessage::GetFileSnapshot { .. } => file_snapshot(msg)?,
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
             ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
@@ -1265,8 +1313,9 @@ impl FakeDaemon {
 }
 
 /// The `chat` shot's conversation: a row of each kind, a tool card done and
-/// one still running, a message not yet in the transcript, and a live answer.
-fn chat_reply(session_id: &str, request_id: Option<String>) -> DaemonMessage {
+/// one still running, a message not yet in the transcript, and a live answer,
+/// under `screen`.
+fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) -> DaemonMessage {
     let tool = |id: &str, name: &str, summary: &str, result: Option<&str>| ChatEntry::Tool {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -1333,10 +1382,74 @@ fn chat_reply(session_id: &str, request_id: Option<String>) -> DaemonMessage {
         session_id: session_id.to_owned(),
         entries,
         hidden: 0,
-        screen: ChatScreen {
-            composer: ComposerState::Working,
-            prompt: None,
-        },
+        screen,
+        request_id,
+    }
+}
+
+/// The `summary` shot's screen: a Permission dialog for the footer specs'
+/// command, pinned over the lines.
+fn permission_screen() -> ChatScreen {
+    let options = [(1, "Yes"), (2, "Yes, and don't ask again"), (3, "No")]
+        .into_iter()
+        .map(|(number, label)| ChatOption {
+            number,
+            label: label.to_owned(),
+            description: None,
+            selected: false,
+        })
+        .collect();
+    ChatScreen {
+        composer: ComposerState::Dialog,
+        prompt: Some(ChatPrompt {
+            id: "perm-1".to_owned(),
+            kind: ChatPromptKind::Permission,
+            subject: "cargo nextest run footer".to_owned(),
+            body: "Do you want to run this command?".to_owned(),
+            options,
+            questions: Vec::new(),
+            can_amend: true,
+            always_allow_tip: None,
+            multi: false,
+            cursor: Some(1),
+        }),
+    }
+}
+
+/// The `summary` shot's lines over [`chat_reply`]'s entries: the ask, the
+/// edit (drawn open) and the answer with the specs it started.
+fn summary_reply(session_id: &str, request_id: Option<String>) -> DaemonMessage {
+    let line = |id: &str, from: &str, to: &str, text: &str| StretchLine {
+        id: id.to_owned(),
+        from_entry: from.to_owned(),
+        to_entry: to.to_owned(),
+        started_at: None,
+        ended_at: None,
+        text: text.to_owned(),
+        source: SummarySource::Model,
+    };
+    DaemonMessage::Summary {
+        session_id: session_id.to_owned(),
+        lines: vec![
+            line(
+                "u1",
+                "u1",
+                "k1",
+                "Asked to tighten the footer spacing and check the pill colours",
+            ),
+            line(
+                SUMMARY_OPEN_LINE,
+                "t1",
+                "t2",
+                "Read footer.rs and, once allowed, widened the pill gap from 6 px to 8 px",
+            ),
+            line(
+                "a1",
+                "a1",
+                "live:m2",
+                "Explained the new gap and started the footer specs",
+            ),
+        ],
         request_id,
     }
 }

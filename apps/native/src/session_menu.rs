@@ -867,8 +867,9 @@ impl RootView {
             .into_iter()
             .map(|offered| offered.row.selector().to_owned())
             .chain(
-                self.pane_view_menu_label()
-                    .map(|_| crate::pane_menu::PANE_VIEW_ROW.to_owned()),
+                self.pane_view_menu_selectors_and_labels()
+                    .into_iter()
+                    .map(|(selector, _)| selector.to_owned()),
             )
             .collect();
         [self.menu_rows(), offered, self.appearance_group_rows()]
@@ -2340,7 +2341,7 @@ impl RootView {
                 .into_iter()
                 .map(|offered| Self::offered_row(session_id, offered, cx)),
         );
-        rows.extend(self.pane_view_menu_row(cx));
+        rows.extend(self.pane_view_menu_rows(cx));
         rows
     }
 
