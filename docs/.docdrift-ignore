@@ -32,3 +32,6 @@ task-checklist.ts
 # The retired Tauri app's files, named by the UX audit
 utils/a11y.ts
 GitPanel.tsx
+# Summarizer runtime files under the config dir and session dirs
+summary.json
+summarizer-spend.json
