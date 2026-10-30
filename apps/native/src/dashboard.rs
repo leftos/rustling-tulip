@@ -205,7 +205,7 @@ pub struct DashboardEntry {
 
 impl RootView {
     fn dashboard_model(&self) -> DashboardModel {
-        model(&self.sidebar, self.dashboard_facts.facts())
+        model(&self.sidebar, &self.dashboard_facts.facts())
     }
 
     /// The Dashboard's groups in display order, each as its heading and its

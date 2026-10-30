@@ -7,12 +7,14 @@ use std::collections::BTreeMap;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point};
 use protocol::{
-    AgentId, ClientMessage, ContainerRef, DaemonMessage, KeepAwakeMode, OptionValue, RemoteState,
-    SessionSnapshot,
+    AgentId, AttentionReason, ClientMessage, ContainerRef, DaemonMessage, KeepAwakeMode,
+    OptionValue, RemoteState, SessionSnapshot, TabEntry,
 };
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetEvent, toast_action_selector};
-use support::{Fixture, Harness, PROTOCOL, TestDir, pane, repo, session, tab, welcome};
+use support::{
+    Fixture, Harness, PROTOCOL, TestDir, facts, facts_message, pane, repo, session, tab, welcome,
+};
 
 #[gpui::test]
 fn the_window_opens_one_connection_for_the_boot_target(cx: &mut TestAppContext) {
@@ -511,6 +513,105 @@ fn a_remote_sessions_list_never_counts_as_this_pcs_import(cx: &mut TestAppContex
     assert!(
         !h.root(|root, _| root.import_modal_open()),
         "the other host's list is not the layout home's first list"
+    );
+}
+
+#[gpui::test]
+fn a_remote_session_asking_raises_a_notification_and_a_needs_you_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(
+        cx,
+        &dir,
+        vec![
+            session("b1")
+                .label("")
+                .agent("test-agent")
+                .status("awaiting_input")
+                .in_repo("gone")
+                .build(),
+        ],
+    );
+    let mut agents = agent_registry::descriptors();
+    agents.push(agent_api::test_agent::DESCRIPTOR.clone());
+    h.host(&remote()).send(DaemonMessage::Agents { agents });
+
+    h.host(&remote()).send(DaemonMessage::Attention {
+        session_id: "b1".to_owned(),
+        reason: AttentionReason::AwaitingInput,
+    });
+
+    assert_eq!(
+        h.notified(),
+        [("Needs you".to_owned(), "test: Waiting for input".to_owned())],
+        "the toast names the session by its own host's agent"
+    );
+    let rows: Vec<(String, String)> = h.root(|root, _| {
+        root.needs_you_rows()
+            .into_iter()
+            .map(|row| (row.session_id, row.label))
+            .collect()
+    });
+    assert_eq!(
+        rows,
+        [("b1".to_owned(), "test".to_owned())],
+        "Needs You lists the remote session"
+    );
+}
+
+/// Whether `sent` holds a `WatchDashboard` turning the watch on.
+fn watches(sent: &[ClientMessage]) -> bool {
+    sent.iter()
+        .any(|msg| matches!(msg, ClientMessage::WatchDashboard { on: true }))
+}
+
+#[gpui::test]
+fn the_dashboard_watches_every_host_and_lists_both_hosts_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let dashboard: TabEntry = serde_json::from_value(serde_json::json!({
+        "id": "d1",
+        "name": "Dashboard",
+        "content": { "kind": "dashboard" },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("dashboard tab fixture");
+    let fixture = Fixture {
+        sessions: vec![session("a1").in_repo("gone").status("working").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("a1"))), dashboard],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("tab-d1");
+    assert!(watches(&h.sent()), "This PC is watched");
+
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").in_repo("gone").status("working").build()],
+    });
+    h.host(&remote())
+        .send(facts_message(vec![facts("b1").context(90).build()]));
+
+    let rows: Vec<(String, String)> = h.root(|root, _| {
+        root.dashboard_view_rows()
+            .into_iter()
+            .flat_map(|(_, rows)| rows)
+            .map(|row| (row.session_id, row.context))
+            .collect()
+    });
+    let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["a1", "b1"], "both hosts' rows show together");
+    assert_ne!(
+        rows[1].1, "—",
+        "a host that joins while the Dashboard shows is watched once it welcomes"
+    );
+
+    h.click_on("tab-t1");
+    assert!(
+        h.host(&remote())
+            .sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::WatchDashboard { on: false })),
+        "leaving the Dashboard ends the remote host's watch too"
     );
 }
 

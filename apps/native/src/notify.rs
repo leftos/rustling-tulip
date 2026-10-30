@@ -21,6 +21,7 @@ use crate::RootView;
 use crate::needs_you::{self, Reason};
 use crate::pairing::{PairingAction, PairingToast};
 use crate::sidebar::{NotifySkip, display_label};
+use crate::target::HostKey;
 #[cfg(windows)]
 use crate::toast_activation;
 use crate::window_title::PRODUCT_NAME;
@@ -214,17 +215,26 @@ pub(crate) struct Notifications {
     /// Windows' toast setting as last read when the Notifications tab
     /// opened; `None` while a read is out.
     pub(crate) state: Option<NotifyState>,
-    /// The summarizer's status as last reported; `None` before one arrives
-    /// and after every reconnect, so a newly chosen host never inherits
-    /// "on".
-    summaries: Option<Summaries>,
-    /// Finished toasts waiting for their session's alert, by session id.
-    held: HashMap<String, Held>,
+    /// Each host's summarizer status as last reported; a host has none
+    /// before one arrives and after every reconnect, so a newly chosen host
+    /// never inherits "on".
+    summaries: HashMap<HostKey, Summaries>,
+    /// Finished toasts waiting for their session's alert, by host and
+    /// session id.
+    held: HashMap<SessionKey, Held>,
     /// Each session's latest alert, kept for a Finished toast the alert came
-    /// too early to word, by session id.
-    alerts: HashMap<String, Alert>,
+    /// too early to word, by host and session id.
+    alerts: HashMap<SessionKey, Alert>,
     /// The generation the next hold is given.
     next_hold: u64,
+}
+
+/// A session as the notifications know it: its host and its id.
+type SessionKey = (HostKey, String);
+
+/// The key of session `id` on `host`.
+fn key_of(host: &HostKey, id: &str) -> SessionKey {
+    (host.clone(), id.to_owned())
 }
 
 impl Notifications {
@@ -232,17 +242,80 @@ impl Notifications {
         Self {
             notifier,
             state: None,
-            summaries: None,
+            summaries: HashMap::new(),
             held: HashMap::new(),
             alerts: HashMap::new(),
             next_hold: 0,
         }
     }
 
-    /// Whether a Finished toast from now waits for its session's alert:
-    /// only while the summarizer reports it can still write one.
-    fn holds(&self) -> bool {
-        self.summaries.is_some_and(Summaries::active)
+    /// Whether a Finished toast from now about a session on `host` waits
+    /// for its alert: only while that host's summarizer reports it can
+    /// still write one.
+    fn holds(&self, host: &HostKey) -> bool {
+        self.summaries.get(host).is_some_and(|s| s.active())
+    }
+
+    /// Forgets what `host`'s old connection left: its summarizer's status
+    /// and its sessions' held toasts and alerts.
+    fn forget_host(&mut self, host: &HostKey) {
+        self.summaries.remove(host);
+        self.held.retain(|(owner, _), _| owner != host);
+        self.alerts.retain(|(owner, _), _| owner != host);
+    }
+
+    /// Folds what `msg` from `host` says about the summarizer, held toasts
+    /// and alerts; true when `msg` raises nothing further.
+    fn fold_state(&mut self, host: &HostKey, msg: &DaemonMessage) -> bool {
+        match msg {
+            DaemonMessage::SummarizerStatus {
+                settings,
+                keys,
+                cap_reached,
+                ..
+            } => {
+                self.summaries
+                    .insert(host.clone(), Summaries::of(settings, keys, *cap_reached));
+                true
+            }
+            // A toast held for the old connection has no alert coming, and
+            // another daemon's summarizer says nothing about this one's.
+            DaemonMessage::Welcome { .. } => {
+                self.forget_host(host);
+                true
+            }
+            DaemonMessage::SessionRemoved { session_id } => {
+                let key = key_of(host, session_id);
+                self.held.remove(&key);
+                self.alerts.remove(&key);
+                true
+            }
+            // A relist that has a session working, waiting, exited or gone
+            // leaves its held toast with no alert to word it, and a session
+            // at work has an alert of its own coming.
+            DaemonMessage::Sessions { sessions } => {
+                let keep = |(owner, id): &SessionKey| {
+                    owner != host
+                        || sessions.iter().any(|session| {
+                            session.id == *id && session.status == SessionStatus::Idle
+                        })
+                };
+                self.held.retain(|key, _| keep(key));
+                self.alerts.retain(|key, _| keep(key));
+                false
+            }
+            DaemonMessage::SessionUpdated { session, .. } => {
+                let key = key_of(host, &session.id);
+                if session.status != SessionStatus::Idle {
+                    self.held.remove(&key);
+                }
+                if session.status == SessionStatus::Working {
+                    self.alerts.remove(&key);
+                }
+                false
+            }
+            _ => false,
+        }
     }
 }
 
@@ -405,64 +478,19 @@ impl RootView {
     /// keyboard.
     pub(crate) fn notify_on(
         &mut self,
-        _host: &crate::target::HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         finished: bool,
         window_focused: bool,
         cx: &mut Context<Self>,
     ) {
-        match msg {
-            DaemonMessage::SummarizerStatus {
-                settings,
-                keys,
-                cap_reached,
-                ..
-            } => {
-                self.notifications.summaries = Some(Summaries::of(settings, keys, *cap_reached));
-                return;
-            }
-            // A toast held for the old connection has no alert coming, and
-            // another host's summarizer says nothing about this one's.
-            DaemonMessage::Welcome { .. } => {
-                self.notifications.summaries = None;
-                self.notifications.held.clear();
-                self.notifications.alerts.clear();
-                return;
-            }
-            DaemonMessage::SessionRemoved { session_id } => {
-                self.notifications.held.remove(session_id);
-                self.notifications.alerts.remove(session_id);
-                return;
-            }
-            // A relist that has a session working, waiting, exited or gone
-            // leaves its held toast with no alert to word it, and a session
-            // at work has an alert of its own coming.
-            DaemonMessage::Sessions { sessions } => {
-                let idle = |id: &str| {
-                    sessions
-                        .iter()
-                        .any(|session| session.id == id && session.status == SessionStatus::Idle)
-                };
-                self.notifications.held.retain(|id, _| idle(id));
-                self.notifications.alerts.retain(|id, _| idle(id));
-            }
-            DaemonMessage::SessionUpdated { session, .. } => {
-                if session.status != SessionStatus::Idle {
-                    self.notifications.held.remove(&session.id);
-                }
-                if session.status == SessionStatus::Working {
-                    self.notifications.alerts.remove(&session.id);
-                }
-            }
-            _ => {}
+        if self.notifications.fold_state(host, msg) {
+            return;
         }
         match msg {
             DaemonMessage::SessionUpdated { session, .. } if finished => {
-                let label = body(
-                    Some(session),
-                    self.sidebar.agents(&crate::target::HostKey::Local),
-                );
-                if !self.waits_for_alert(session) {
+                let label = body(Some(session), self.sidebar.agents(host));
+                if !self.waits_for_alert(host, session) {
                     let wanted = self.sidebar.ui_state().notifications.finished;
                     self.raise_toast(
                         &Toast {
@@ -474,10 +502,12 @@ impl RootView {
                         window_focused,
                         cx,
                     );
-                } else if let Some(alert) = self.notifications.alerts.remove(&session.id) {
+                } else if let Some(alert) =
+                    self.notifications.alerts.remove(&key_of(host, &session.id))
+                {
                     self.raise_alert(&session.id, &label, &alert, window_focused, cx);
                 } else {
-                    self.hold_finished(session.id.clone(), label, cx);
+                    self.hold_finished(key_of(host, &session.id), label, cx);
                 }
             }
             DaemonMessage::Attention {
@@ -486,10 +516,8 @@ impl RootView {
                 ..
             } => {
                 let wanted = self.sidebar.ui_state().notifications.awaiting_input;
-                let body = needs_you_body(
-                    self.sidebar.session(session_id),
-                    self.sidebar.agents(&crate::target::HostKey::Local),
-                );
+                let body =
+                    needs_you_body(self.sidebar.session(session_id), self.sidebar.agents(host));
                 self.raise_toast(
                     &Toast {
                         session_id,
@@ -511,20 +539,21 @@ impl RootView {
                     kind: *kind,
                     notification: notification.clone(),
                 };
-                self.release_hold(session_id, &alert, window_focused, cx);
+                let key = key_of(host, session_id);
+                self.release_hold(&key, &alert, window_focused, cx);
                 // A Stop leaves its session Idle with background work still
                 // running, so the alert for that turn can beat its end.
-                self.notifications.alerts.insert(session_id.clone(), alert);
+                self.notifications.alerts.insert(key, alert);
             }
             _ => {}
         }
     }
 
-    /// Whether a Finished toast about `session` waits for its alert: the
-    /// summarizer can still write one, and writes about this session at all
-    /// — an interactive run of a registered agent.
-    fn waits_for_alert(&self, session: &SessionSnapshot) -> bool {
-        self.notifications.holds()
+    /// Whether a Finished toast about `session` on `host` waits for its
+    /// alert: that host's summarizer can still write one, and writes about
+    /// this session at all — an interactive run of a registered agent.
+    fn waits_for_alert(&self, host: &HostKey, session: &SessionSnapshot) -> bool {
+        self.notifications.holds(host)
             && session.mode != SessionMode::Headless
             && session.agent.is_some()
     }
@@ -552,19 +581,19 @@ impl RootView {
             .detach();
     }
 
-    /// Holds a Finished toast about `label` for `session_id`'s alert for
+    /// Holds a Finished toast about `label` for session `key`'s alert for
     /// [`FINISHED_HOLD`], raising the plain one if none comes.
-    fn hold_finished(&mut self, session_id: String, label: String, cx: &mut Context<Self>) {
+    fn hold_finished(&mut self, key: SessionKey, label: String, cx: &mut Context<Self>) {
         self.notifications.next_hold += 1;
         let generation = self.notifications.next_hold;
         self.notifications
             .held
-            .insert(session_id.clone(), Held { label, generation });
+            .insert(key.clone(), Held { label, generation });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FINISHED_HOLD).await;
             // Fails only when the view is gone, and the hold with it.
             this.update(cx, |this, cx| {
-                this.hold_expired(&session_id, generation, cx);
+                this.hold_expired(&key, generation, cx);
             })
             .ok();
         })
@@ -573,18 +602,19 @@ impl RootView {
 
     /// The hold's time is up with no alert having worded it: the plain toast
     /// is raised, under the toggle and skip rule as they stand now.
-    fn hold_expired(&mut self, session_id: &str, generation: u64, cx: &mut Context<Self>) {
+    fn hold_expired(&mut self, key: &SessionKey, generation: u64, cx: &mut Context<Self>) {
         if self
             .notifications
             .held
-            .get(session_id)
+            .get(key)
             .is_none_or(|held| held.generation != generation)
         {
             return;
         }
-        let Some(held) = self.notifications.held.remove(session_id) else {
+        let Some(held) = self.notifications.held.remove(key) else {
             return;
         };
+        let session_id = key.1.as_str();
         let focused = cx
             .active_window()
             .is_some_and(|window| window.window_id() == self.layouts.main());
@@ -601,19 +631,19 @@ impl RootView {
         );
     }
 
-    /// Ends the toast held for `session_id` with its alert's wording. An
+    /// Ends the toast held for session `key` with its alert's wording. An
     /// alert with no held toast behind it raises nothing.
     fn release_hold(
         &mut self,
-        session_id: &str,
+        key: &SessionKey,
         alert: &Alert,
         window_focused: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(held) = self.notifications.held.remove(session_id) else {
+        let Some(held) = self.notifications.held.remove(key) else {
             return;
         };
-        self.raise_alert(session_id, &held.label, alert, window_focused, cx);
+        self.raise_alert(&key.1, &held.label, alert, window_focused, cx);
     }
 
     /// Raises the Finished toast about `session_id` that `alert` words, or
