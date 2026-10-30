@@ -744,6 +744,7 @@ fn shutdown_does_not_reconnect_after_close(cx: &mut TestAppContext) {
                     auth_token: "spec-token".to_owned(),
                     pid: 0,
                     supported_versions: vec![23],
+                    build_version: String::new(),
                 })
             })
         }),

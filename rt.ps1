@@ -643,7 +643,15 @@ function Invoke-Installer {
         "/DBINDIR=$binDir", "/DOUTFILE=$outFile", $nsiScript
     )
     Test-CargoExitOk 'makensis'
+
+    # The release's `.sha256` asset, which the client's updater checks the
+    # download against: `<64 lower-case hex>  <file name>`, one LF-terminated line.
+    $hashFile = "$outFile.sha256"
+    $hash = (Get-FileHash -Algorithm SHA256 -Path $outFile).Hash.ToLowerInvariant()
+    $installerName = Split-Path -Leaf $outFile
+    [System.IO.File]::WriteAllText($hashFile, "$hash  $installerName`n", [System.Text.UTF8Encoding]::new($false))
     Write-Host $outFile
+    Write-Host $hashFile
 }
 
 function Invoke-Stop {

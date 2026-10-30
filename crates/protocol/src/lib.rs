@@ -311,6 +311,11 @@ pub struct DaemonHandshake {
     /// written by a daemon before protocol 23, meaning only `protocol_version`.
     #[serde(default)]
     pub supported_versions: Vec<u32>,
+    /// The daemon's build version (its `CARGO_PKG_VERSION`). Empty in a
+    /// `daemon.json` written by a daemon that predates the field, which a
+    /// client counts as older than itself.
+    #[serde(default)]
+    pub build_version: String,
 }
 
 impl DaemonHandshake {
@@ -8339,6 +8344,7 @@ mod tests {
             auth_token: "t".to_owned(),
             pid: 7,
             supported_versions: vec![23],
+            build_version: String::new(),
         };
         let json = serde_json::to_string(&handshake).expect("encode handshake");
         let decoded: DaemonHandshake = serde_json::from_str(&json).expect("decode handshake");

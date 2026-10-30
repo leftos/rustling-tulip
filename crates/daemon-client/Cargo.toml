@@ -19,6 +19,9 @@ workspace = true
 anyhow = { workspace = true }
 directories = { workspace = true }
 protocol = { workspace = true }
+# Orders the running daemon's build version against this client's
+# (`supervisor::classify_proven`): an older daemon is retired, a newer one never.
+semver = { workspace = true }
 # The daemon proof (`src/proof.rs`): a listener named by `daemon.json` proves it
 # holds the token before the client sends the token or kills its pid.
 tracer-protocol = { workspace = true }

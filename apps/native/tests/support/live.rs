@@ -167,6 +167,7 @@ impl LiveDaemon {
                 auth_token: String::new(),
                 pid: 0,
                 supported_versions: Vec::new(),
+                build_version: String::new(),
             },
             tailnet_ca,
         };

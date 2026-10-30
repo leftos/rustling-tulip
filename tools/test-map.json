@@ -350,6 +350,12 @@
     },
     {
       "paths": [
+        "apps/native/src/update.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^update::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/file_fetch_view.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_fetch_dialog|ui_file_fetch|ui_links|ui_remote|ui_viewer)::/)"

@@ -5,7 +5,7 @@ How a versioned release of rustling-tulip is cut, starting with `v0.1.0-alpha`. 
 ## What a release publishes
 
 - A git tag `v<version>` on `main` (`v0.1.0-alpha`, `v0.2.0-alpha`, …).
-- A GitHub release of that tag, marked pre-release while the version carries a pre-release suffix, with the Windows installer attached: `rustling-tulip-<version>-setup.exe`, built by `.\rt.ps1 installer` (NSIS, per-user, unsigned, so SmartScreen warns; see `tools/installer/README.md`).
+- A GitHub release of that tag, marked pre-release while the version carries a pre-release suffix, with the Windows installer and its SHA-256 file attached: `rustling-tulip-<version>-setup.exe` and `rustling-tulip-<version>-setup.exe.sha256` (a release missing either is never offered as an update), built by `.\rt.ps1 installer` (NSIS, per-user, unsigned, so SmartScreen warns; see `tools/installer/README.md`).
 - The version lives in one place, `[workspace.package] version` in `Cargo.toml`, which every crate inherits; the installer reads it from there.
 
 ## Steps
@@ -20,9 +20,9 @@ How a versioned release of rustling-tulip is cut, starting with `v0.1.0-alpha`. 
    - `.\rt.ps1 native-e2e` and `.\rt.ps1 native-smoke`
 
    A red gate stops the release; its fix lands first.
-4. **Installer.** `.\rt.ps1 installer`, then install it on this PC and run the hand-test list in `tools/installer/README.md`.
+4. **Installer.** `.\rt.ps1 installer`, then install it on this PC and run the hand-test list in `tools/installer/README.md`. It also writes `target/installer/rustling-tulip-<version>-setup.exe.sha256` (`<hex>  <file name>`), which the app's updater checks every download against (`docs/plans/auto-update.md`).
 5. **README.** Refresh `README.md`'s Features and What's new sections from the release's notes (new features in, removed ones out), and re-shoot any screenshot whose view changed with `.\rt.ps1 native-shot <view>` into `docs/images/`; commit it as `docs: refresh the README for v<version>`.
 6. **Tag and push.** `git tag -a v<version> -m "rustling-tulip v<version>"` on the commit the gates ran on, then `git push origin main v<version>`.
-7. **Publish.** `gh release create v<version> target/installer/rustling-tulip-<version>-setup.exe --repo leftos/rustling-tulip --title "rustling-tulip v<version>" --notes-file <notes> --prerelease` (drop `--prerelease` for a version with no suffix). The notes are the version's `CHANGELOG.md` section, checked against the issues `linear release status` lists in `vNext`.
+7. **Publish.** `gh release create v<version> target/installer/rustling-tulip-<version>-setup.exe target/installer/rustling-tulip-<version>-setup.exe.sha256 --repo leftos/rustling-tulip --title "rustling-tulip v<version>" --notes-file <notes> --prerelease` (drop `--prerelease` for a version with no suffix). The notes are the version's `CHANGELOG.md` section, checked against the issues `linear release status` lists in `vNext`.
 8. **Linear.** Once the release is public: `uv run --project ~/.claude/tools/linear python -m linear release complete rustling-tulip --version v<version> --sha <tag commit> --repo-root .`. It files every shipped Done issue under the new release and moves `vNext+1` up into `vNext`. Never run it twice for one version; a cut that missed issues is fixed with `linear release settle`.
 9. **After the first release** the repo's test mode turns `stable` (the `rustling-tulip-nextup` profile's `test mode:` line and CLAUDE.md), so every landed change runs the full suite from then on.

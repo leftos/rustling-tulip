@@ -62,6 +62,15 @@ pulldown-cmark = { version = "0.13", default-features = false }
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 qrcodegen = "1.8"
+# The updater (`src/update.rs`): the release feed and its downloads over HTTPS,
+# rustls on the `ring` backend with the OS's root certificates as the daemon's
+# summarizer uses it; the download's SHA-256; the release versions' order.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "json",
+] }
+sha2 = "0.10"
+semver = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
@@ -108,7 +117,6 @@ agent-api = { workspace = true, features = ["test-support"] }
 agent-registry = { workspace = true, features = ["test-support"] }
 gpui = { version = "0.2.2", features = ["test-support"] }
 png = "0.18"
-sha2 = "0.10"
 # `test-util` enables the paused clock net.rs's tests run its deadlines on.
 tokio = { workspace = true, features = ["test-util"] }
 # The fake TLS daemon in net.rs's tests: a test CA and a leaf signed by it.
