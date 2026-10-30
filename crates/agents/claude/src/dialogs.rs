@@ -8,12 +8,20 @@
 //! the input box's own state.
 //! [`recipe`] turns an answer to one of those prompts into the keys that
 //! give it, each group with the reading the daemon waits for after it.
+//! [`read_view`] reads which conversation is in view (the main one or a
+//! subagent's) and which part of the screen holds the keys, and
+//! [`next_view_key`] gives the one key that moves towards a wanted view.
 //!
 //! The parsers key on the text Claude Code 2.1.307 draws (the captures in
 //! the daemon's `screen/fixtures/`), never on colour, which the rows do not
 //! carry.
 
-use agent_api::{AnswerRecipe, AnswerRefusal, Key, RecipeStep, ScreenExpect};
+use std::cmp::Ordering;
+
+use agent_api::{
+    AnswerRecipe, AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal, ViewReading,
+    ViewRefusal, ViewStep,
+};
 use protocol::{
     ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
     ComposerState,
@@ -402,7 +410,10 @@ fn key_pairs(row: &str) -> Option<Vec<ChatOption>> {
 /// down to the card's inner rule, then the `Enter to select` footer; or the
 /// review step when `Review your answers` follows the tab bar.
 fn parse_question(rows: &[String]) -> Option<Parsed> {
-    let bar = rows.iter().rposition(|row| is_tab_bar(row))?;
+    let rules = rule_indices(rows);
+    let bar = (0..rows.len())
+        .rev()
+        .find(|&index| is_tab_bar(rows, &rules, index))?;
     let mut tabs = question_tabs(&rows[bar]);
     let title = find(rows, bar + 1, |row| !row.trim().is_empty());
     if let Some(title) = title
@@ -418,7 +429,7 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
     let Some(title) = title.filter(|&title| title < footer) else {
         return Some(Parsed::HalfDrawn);
     };
-    let end = rule_indices(rows)
+    let end = rules
         .into_iter()
         .find(|&index| index > title && index < footer)
         .unwrap_or(footer);
@@ -442,10 +453,18 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
     }))
 }
 
-/// Whether `row` is a question card's tab bar: `←  ☐ Next fn  ✔ Submit  →`.
-fn is_tab_bar(row: &str) -> bool {
-    let text = row.trim();
-    text.starts_with('←') && text.ends_with('→') && text.contains([TAB_OPEN, TAB_DONE])
+/// Whether `rows[index]` is a question card's tab bar: `←  ☐ Next fn  ✔
+/// Submit  →`, or a single question's bar (` ☐ Colour`), which has no
+/// arrows and sits directly under a rule.
+fn is_tab_bar(rows: &[String], rules: &[usize], index: usize) -> bool {
+    let text = rows[index].trim();
+    if text.starts_with('←') && text.ends_with('→') {
+        return text.contains([TAB_OPEN, TAB_DONE]);
+    }
+    let under_rule = index
+        .checked_sub(1)
+        .is_some_and(|above| rules.contains(&above));
+    under_rule && text.starts_with([TAB_OPEN, TAB_DONE]) && !text.contains(['←', '→'])
 }
 
 /// The question tabs of a tab bar, each label the text after its mark; the
@@ -456,7 +475,7 @@ fn question_tabs(row: &str) -> Vec<ChatQuestionTab> {
         .filter(|&(_, c)| matches!(c, TAB_OPEN | TAB_DONE | TAB_SUBMIT))
         .collect();
     let ends = marks.iter().skip(1).map(|&(at, _)| at);
-    let ends = ends.chain(row.rfind('→'));
+    let ends = ends.chain(Some(row.rfind('→').unwrap_or(row.len())));
     marks
         .iter()
         .zip(ends)
@@ -1110,14 +1129,206 @@ fn plan_feedback(prompt: &ChatPrompt, text: &str) -> Result<AnswerRecipe, Answer
     })
 }
 
+/// The hint row the agents panel shows while it holds the keys; what
+/// follows it varies.
+const PANEL_HINT: &str = "↑/↓ to select";
+
+/// The end of the mode line while the tasks pill holds the keys.
+const TASKS_PILL_HINT: &str = "Enter to view tasks";
+
+/// The end of the mode line while a prompt is stashed.
+const STASHED: &str = "› stashed";
+
+/// The start of the placeholder an agent's empty box shows
+/// (`Message @general-purpose…`).
+const AGENT_PLACEHOLDER: &str = "Message @";
+
+/// A panel row's dot: open, and filled on the row in view.
+const DOT_OPEN: char = '◯';
+const DOT_IN_VIEW: char = '●';
+
+/// The gap that parts a panel row's label from its age and token figures.
+const PANEL_GAP: &str = "   ";
+
+/// One row of the agents panel.
+struct PanelRow {
+    label: String,
+    cursor: bool,
+    in_view: bool,
+}
+
+/// Which conversation the screen whose visible rows are `rows` shows, and
+/// where its keys go: the rule over the box, the hint and mode line under
+/// it, and the agents panel under those.
+pub(crate) fn read_view(rows: &[String]) -> ViewReading {
+    let rules = rule_indices(rows);
+    let under: &[String] = rules.last().map_or(&[], |&last| &rows[last + 1..]);
+    let mode_line = mode_line(under);
+    let panel: Vec<PanelRow> = under.iter().filter_map(|row| panel_row(row)).collect();
+    let dialog = matches!(
+        read(rows).composer,
+        ComposerState::Dialog | ComposerState::Overlay { .. }
+    );
+    ViewReading {
+        agent_in_view: agent_in_view(rows, &rules),
+        key_holder: key_holder(under, mode_line),
+        stashed: mode_line.is_some_and(|line| line.ends_with(STASHED)),
+        box_first_line: if dialog {
+            None
+        } else {
+            box_first_line(rows, &rules)
+        },
+        dialog,
+        panel_cursor: panel.iter().position(|row| row.cursor),
+        panel_in_view: panel.iter().position(|row| row.in_view),
+        panel: panel.into_iter().map(|row| row.label).collect(),
+    }
+}
+
+/// The description on the rule over the box (`─ Sleeper A ─`): the later
+/// of the last two rules that carries one, since a dialog in an agent's
+/// view draws that rule last.
+fn agent_in_view(rows: &[String], rules: &[usize]) -> Option<String> {
+    let last_two = &rules[rules.len().saturating_sub(2)..];
+    last_two.iter().rev().find_map(|&index| {
+        let text = rows[index].trim().trim_matches(RULE_CHAR).trim();
+        (!text.is_empty()).then(|| text.to_owned())
+    })
+}
+
+/// The mode line: the last row of the block directly under the box, which
+/// a status line may head.
+fn mode_line(under: &[String]) -> Option<&str> {
+    under
+        .iter()
+        .map(|row| row.trim())
+        .take_while(|row| !row.is_empty())
+        .last()
+}
+
+/// Which part of the screen holds the keys: the panel while its hint
+/// shows, the tasks pill while the mode line ends with its hint, else the
+/// box.
+fn key_holder(under: &[String], mode_line: Option<&str>) -> KeyHolder {
+    if under
+        .iter()
+        .any(|row| row.trim_start().starts_with(PANEL_HINT))
+    {
+        KeyHolder::Panel
+    } else if mode_line.is_some_and(|line| line.ends_with(TASKS_PILL_HINT)) {
+        KeyHolder::TasksPill
+    } else {
+        KeyHolder::Box
+    }
+}
+
+/// `row` as an agents panel row (`❯ ● general-purpose  Sleeper A   30s · …`),
+/// its label cut before the figures.
+fn panel_row(row: &str) -> Option<PanelRow> {
+    let text = row.trim_start();
+    let (cursor, text) = match text.strip_prefix(CURSOR) {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, text),
+    };
+    let mut chars = text.chars();
+    let in_view = match chars.next()? {
+        DOT_IN_VIEW => true,
+        DOT_OPEN => false,
+        _ => return None,
+    };
+    let rest = chars.as_str();
+    if !rest.starts_with(' ') {
+        return None;
+    }
+    let label = rest.trim_start().split(PANEL_GAP).next()?.trim_end();
+    (!label.is_empty()).then(|| PanelRow {
+        label: label.to_owned(),
+        cursor,
+        in_view,
+    })
+}
+
+/// The box's first line of text, its prompt taken off; `None` for an empty
+/// box or one showing only a placeholder.
+fn box_first_line(rows: &[String], rules: &[usize]) -> Option<String> {
+    let [.., top, bottom] = rules[..] else {
+        return None;
+    };
+    let first = rows[top + 1..bottom]
+        .iter()
+        .map(|row| row.trim())
+        .find(|row| !row.is_empty())?;
+    let text = first.strip_prefix(CURSOR).map_or(first, str::trim);
+    let placeholder =
+        text.starts_with("Try \"") || (text.starts_with(AGENT_PLACEHOLDER) && text.ends_with('…'));
+    (!text.is_empty() && !placeholder).then(|| text.to_owned())
+}
+
+/// The one key that moves the screen read as `reading` towards `goal`.
+/// Only Down, and Up or Enter where the panel or the tasks pill holds the
+/// keys, ever come back: never Left, a digit, Tab, text or the stash.
+pub(crate) fn next_view_key(goal: ViewGoal, reading: &ViewReading) -> ViewStep {
+    if reading.dialog {
+        return ViewStep::Refuse(ViewRefusal::DialogUp);
+    }
+    match goal {
+        ViewGoal::Main => step_to_main(reading),
+        ViewGoal::Agent { row } => step_to_agent(row, reading),
+    }
+}
+
+/// The next key back to the main conversation with the box holding the
+/// keys.
+fn step_to_main(reading: &ViewReading) -> ViewStep {
+    let agent = reading.agent_in_view.is_some();
+    match reading.key_holder {
+        KeyHolder::Box | KeyHolder::TasksPill if agent => ViewStep::Press(Key::Down),
+        KeyHolder::Box => ViewStep::Done,
+        KeyHolder::TasksPill => ViewStep::Press(Key::Up),
+        KeyHolder::Panel if reading.panel_in_view == Some(0) => ViewStep::Press(Key::Up),
+        KeyHolder::Panel => panel_step(reading.panel_cursor, 0),
+    }
+}
+
+/// The next key to the agent on panel row `row` with the box holding the
+/// keys.
+fn step_to_agent(row: usize, reading: &ViewReading) -> ViewStep {
+    if !reading.panel.is_empty() && reading.panel.len() <= row {
+        return ViewStep::Refuse(ViewRefusal::RowMissing);
+    }
+    let row_in_view = reading.panel_in_view == Some(row);
+    match reading.key_holder {
+        KeyHolder::Box if row_in_view && reading.agent_in_view.is_some() => ViewStep::Done,
+        KeyHolder::TasksPill | KeyHolder::Panel if row_in_view => ViewStep::Press(Key::Up),
+        KeyHolder::Box | KeyHolder::TasksPill => ViewStep::Press(Key::Down),
+        KeyHolder::Panel => panel_step(reading.panel_cursor, row),
+    }
+}
+
+/// The key that moves the panel's cursor at `cursor` to row `row`, or
+/// opens that row once the cursor is on it.
+fn panel_step(cursor: Option<usize>, row: usize) -> ViewStep {
+    let Some(cursor) = cursor else {
+        return ViewStep::Refuse(ViewRefusal::NoPanel);
+    };
+    ViewStep::Press(match cursor.cmp(&row) {
+        Ordering::Equal => Key::Enter,
+        Ordering::Less => Key::Down,
+        Ordering::Greater => Key::Up,
+    })
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{read, recipe};
-    use agent_api::{AnswerRefusal, Key, RecipeStep, ScreenExpect};
+    use super::{next_view_key, read, recipe};
+    use agent_api::{
+        AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal, ViewReading,
+        ViewRefusal, ViewStep,
+    };
     use protocol::{ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState};
 
     #[test]
@@ -1564,5 +1775,179 @@ mod tests {
                 prompt: None,
             }
         );
+    }
+
+    /// A reading with no dialog and `panel_len` panel rows (`main` first).
+    fn view(
+        key_holder: KeyHolder,
+        agent: bool,
+        panel_cursor: Option<usize>,
+        panel_in_view: Option<usize>,
+        panel_len: usize,
+    ) -> ViewReading {
+        let panel = (0..panel_len)
+            .map(|row| {
+                if row == 0 {
+                    "main".to_owned()
+                } else {
+                    format!("general-purpose  Agent {row}")
+                }
+            })
+            .collect();
+        ViewReading {
+            agent_in_view: agent.then(|| "Agent 1".to_owned()),
+            key_holder,
+            stashed: false,
+            box_first_line: None,
+            dialog: false,
+            panel,
+            panel_cursor,
+            panel_in_view,
+        }
+    }
+
+    /// One case of a goal: `(holder, agent, cursor, in view, panel length,
+    /// step)`.
+    type StepCase = (
+        KeyHolder,
+        bool,
+        Option<usize>,
+        Option<usize>,
+        usize,
+        ViewStep,
+    );
+
+    /// Checks one goal's cases.
+    fn check_steps(goal: ViewGoal, cases: &[StepCase]) {
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(holder, agent, cursor, in_view, len, want)| {
+                let reading = view(*holder, *agent, *cursor, *in_view, *len);
+                let got = next_view_key(goal, &reading);
+                (got != *want).then(|| format!("{reading:?}: wanted {want:?}, got {got:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{goal:?}:\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn view_key_refuses_while_a_dialog_is_up() {
+        for goal in [ViewGoal::Main, ViewGoal::Agent { row: 1 }] {
+            for holder in [KeyHolder::Box, KeyHolder::Panel, KeyHolder::TasksPill] {
+                let reading = ViewReading {
+                    dialog: true,
+                    ..view(holder, true, Some(1), Some(1), 2)
+                };
+                assert_eq!(
+                    next_view_key(goal, &reading),
+                    ViewStep::Refuse(ViewRefusal::DialogUp),
+                    "{goal:?} {holder:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn view_key_returns_to_main() {
+        use KeyHolder::{Box, Panel, TasksPill};
+        use ViewStep::{Done, Press, Refuse};
+        check_steps(
+            ViewGoal::Main,
+            &[
+                (Box, false, None, Some(0), 2, Done),
+                (Box, true, None, Some(1), 2, Press(Key::Down)),
+                (TasksPill, false, None, Some(0), 2, Press(Key::Up)),
+                (TasksPill, true, None, Some(1), 2, Press(Key::Down)),
+                (Panel, false, Some(0), Some(0), 2, Press(Key::Up)),
+                (Panel, true, Some(1), Some(0), 2, Press(Key::Up)),
+                (Panel, true, Some(0), Some(1), 2, Press(Key::Enter)),
+                (Panel, true, Some(2), Some(1), 3, Press(Key::Up)),
+                (Panel, true, None, Some(1), 2, Refuse(ViewRefusal::NoPanel)),
+            ],
+        );
+    }
+
+    #[test]
+    fn view_key_opens_an_agent() {
+        use KeyHolder::{Box, Panel, TasksPill};
+        use ViewStep::{Done, Press, Refuse};
+        check_steps(
+            ViewGoal::Agent { row: 1 },
+            &[
+                (
+                    Box,
+                    false,
+                    None,
+                    Some(0),
+                    1,
+                    Refuse(ViewRefusal::RowMissing),
+                ),
+                (
+                    Panel,
+                    false,
+                    Some(0),
+                    Some(0),
+                    1,
+                    Refuse(ViewRefusal::RowMissing),
+                ),
+                (Box, false, None, None, 0, Press(Key::Down)),
+                (Box, true, None, Some(1), 2, Done),
+                (Box, false, None, Some(1), 2, Press(Key::Down)),
+                (Box, true, None, Some(2), 3, Press(Key::Down)),
+                (Box, false, None, Some(0), 2, Press(Key::Down)),
+                (TasksPill, true, None, Some(1), 2, Press(Key::Up)),
+                (TasksPill, false, None, Some(0), 2, Press(Key::Down)),
+                (Panel, true, Some(1), Some(1), 2, Press(Key::Up)),
+                (Panel, false, Some(1), Some(0), 2, Press(Key::Enter)),
+                (Panel, false, Some(0), Some(0), 2, Press(Key::Down)),
+                (Panel, true, Some(2), Some(2), 3, Press(Key::Up)),
+                (Panel, true, Some(2), Some(0), 3, Press(Key::Up)),
+                (Panel, false, None, Some(0), 2, Refuse(ViewRefusal::NoPanel)),
+            ],
+        );
+    }
+
+    /// Why `step` breaks the key bounds for a reading whose keys `holder`
+    /// holds, or `None` when it keeps them.
+    fn out_of_bounds(step: &ViewStep, holder: KeyHolder) -> Option<&'static str> {
+        let ViewStep::Press(key) = step else {
+            return None;
+        };
+        match key {
+            Key::Left | Key::Stash | Key::Digit(_) | Key::Tab | Key::Text(_) => {
+                Some("a key no view step sends")
+            }
+            Key::Enter if holder != KeyHolder::Panel => Some("Enter outside the panel"),
+            Key::Up if holder == KeyHolder::Box => Some("Up from the box"),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn view_keys_never_leave_their_bounds() {
+        let positions = [None, Some(0), Some(1), Some(2), Some(3)];
+        let mut wrong = Vec::new();
+        for goal in [
+            ViewGoal::Main,
+            ViewGoal::Agent { row: 1 },
+            ViewGoal::Agent { row: 2 },
+        ] {
+            for holder in [KeyHolder::Box, KeyHolder::Panel, KeyHolder::TasksPill] {
+                for agent in [false, true] {
+                    for cursor in positions {
+                        for in_view in positions {
+                            for len in 0..=4 {
+                                let reading = view(holder, agent, cursor, in_view, len);
+                                let step = next_view_key(goal, &reading);
+                                if let Some(why) = out_of_bounds(&step, holder) {
+                                    wrong.push(format!("{goal:?} {reading:?} -> {step:?}: {why}"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }

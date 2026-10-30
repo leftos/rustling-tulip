@@ -2,8 +2,9 @@
 //! prompt its screen reader found, in groups, each with the reading the
 //! daemon waits for before it types the next group.
 //!
-//! Keys are a closed set: there is no Esc and no ctrl key, so no recipe can
-//! open Rewind or interrupt a turn. These types never cross the wire.
+//! Keys are a closed set: there is no Esc and no general ctrl key (only the
+//! prompt stash, ctrl+s), so no recipe can open Rewind or interrupt a turn.
+//! These types never cross the wire.
 
 use protocol::ChatPromptKind;
 
@@ -26,6 +27,8 @@ pub enum Key {
     Right,
     /// Text typed as it is, without Enter.
     Text(String),
+    /// ctrl+s: the prompt stash.
+    Stash,
 }
 
 impl Key {
@@ -47,6 +50,7 @@ impl Key {
             Self::Right => b"\x1b[C".to_vec(),
             Self::Left => b"\x1b[D".to_vec(),
             Self::Text(text) => text.as_bytes().to_vec(),
+            Self::Stash => vec![0x13],
         }
     }
 }
@@ -101,6 +105,75 @@ pub enum AnswerRefusal {
     TooManyOptions,
 }
 
+/// Which part of the screen the arrow keys and Enter go to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyHolder {
+    /// The input box.
+    Box,
+    /// The agents panel under the box.
+    Panel,
+    /// The tasks pill on the mode line.
+    TasksPill,
+}
+
+/// Which conversation a session's screen shows and where its keys go, as
+/// the agent's plugin reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewReading {
+    /// The description at the right end of the rule over the box (`─ Sleeper A ─`); `None` in the main conversation's view.
+    pub agent_in_view: Option<String>,
+    /// Which part of the screen holds the keys.
+    pub key_holder: KeyHolder,
+    /// `› stashed` shows at the right end of the mode line.
+    pub stashed: bool,
+    /// The box's first line of text; `None` when the box is empty or shows only its placeholder (`Message @…`).
+    pub box_first_line: Option<String>,
+    /// A dialog other than the Heads up notice is up (the box is replaced).
+    pub dialog: bool,
+    /// The agents panel's rows in order; row 0 is `main`. Empty when no panel shows.
+    pub panel: Vec<String>,
+    /// The panel row the cursor (`❯`) is on.
+    pub panel_cursor: Option<usize>,
+    /// The panel row in view (the filled dot `●`).
+    pub panel_in_view: Option<usize>,
+}
+
+/// The view a run of keys is to bring up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewGoal {
+    /// The main conversation, with the box holding the keys.
+    Main,
+    /// The agent on this panel row, with the box holding the keys.
+    Agent {
+        /// The panel row; row 0 is `main`.
+        row: usize,
+    },
+}
+
+/// What to do next on the way to a [`ViewGoal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewStep {
+    /// Press this key, then read the screen again.
+    Press(Key),
+    /// The goal's view is up and the box holds the keys.
+    Done,
+    /// No key leads there from this reading.
+    Refuse(ViewRefusal),
+}
+
+/// Why no key leads to a [`ViewGoal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewRefusal {
+    /// The plugin reads no views.
+    Unsupported,
+    /// A dialog holds the keys.
+    DialogUp,
+    /// The panel holds the keys but no row shows the cursor.
+    NoPanel,
+    /// The panel has no row this goal names.
+    RowMissing,
+}
+
 #[cfg(test)]
 mod tests {
     use super::Key;
@@ -121,6 +194,11 @@ mod tests {
         for (key, bytes) in cases {
             assert_eq!(key.to_bytes(), bytes, "{key:?}");
         }
+    }
+
+    #[test]
+    fn stash_key_writes_ctrl_s() {
+        assert_eq!(Key::Stash.to_bytes(), vec![0x13]);
     }
 
     #[test]

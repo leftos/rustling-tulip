@@ -27,7 +27,10 @@ pub use activity::{
     ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading, EndedTask,
     MINUTE_COLUMNS, OpenCall, SubagentNode,
 };
-pub use dialogs::{AnswerRecipe, AnswerRefusal, Key, RecipeStep, ScreenExpect};
+pub use dialogs::{
+    AnswerRecipe, AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal, ViewReading,
+    ViewRefusal, ViewStep,
+};
 pub use screen_rules::{
     LineMatcher, ReadySignal, RuleError, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
 };
@@ -800,6 +803,19 @@ pub trait Agent: Send + Sync + 'static {
         Err(AnswerRefusal::Unsupported)
     }
 
+    /// Which conversation the screen whose visible rows, top to bottom, are
+    /// `rows` shows, and where its keys go; `None` for an agent whose views
+    /// the daemon does not switch.
+    fn read_view(&self, _rows: &[String]) -> Option<ViewReading> {
+        None
+    }
+
+    /// The one key that moves the screen read as `reading` towards `goal`,
+    /// [`ViewStep::Done`] once it is there, or why no key leads there.
+    fn next_view_key(&self, _goal: ViewGoal, _reading: &ViewReading) -> ViewStep {
+        ViewStep::Refuse(ViewRefusal::Unsupported)
+    }
+
     /// The fake CLI the live test tier runs for this agent, or `None` for an
     /// agent that ships none.
     #[cfg(feature = "test-support")]
@@ -978,6 +994,12 @@ pub trait AgentPlugin: Send + Sync {
         prompt: &ChatPrompt,
         answer: &ChatAnswerKind,
     ) -> Result<AnswerRecipe, AnswerRefusal>;
+
+    /// See [`Agent::read_view`].
+    fn read_view(&self, rows: &[String]) -> Option<ViewReading>;
+
+    /// See [`Agent::next_view_key`].
+    fn next_view_key(&self, goal: ViewGoal, reading: &ViewReading) -> ViewStep;
 
     /// See [`Agent::fake_cli`].
     #[cfg(feature = "test-support")]
@@ -1199,6 +1221,14 @@ impl<A: Agent> AgentPlugin for A {
         answer: &ChatAnswerKind,
     ) -> Result<AnswerRecipe, AnswerRefusal> {
         Agent::answer_recipe(self, prompt, answer)
+    }
+
+    fn read_view(&self, rows: &[String]) -> Option<ViewReading> {
+        Agent::read_view(self, rows)
+    }
+
+    fn next_view_key(&self, goal: ViewGoal, reading: &ViewReading) -> ViewStep {
+        Agent::next_view_key(self, goal, reading)
     }
 
     #[cfg(feature = "test-support")]

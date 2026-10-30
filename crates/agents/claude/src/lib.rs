@@ -29,7 +29,8 @@ use agent_api::{
     ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent, HookPlan,
     HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal, RecoveredRun, Refusal,
     ResolvedRows, ScreenRules, SpawnCheck, SpawnContext, SummarizerRequest, SummarizerSpec,
-    TracerRun, TranscriptLineFacts, hook_vocabulary, workspace_prelude,
+    TracerRun, TranscriptLineFacts, ViewGoal, ViewReading, ViewStep, hook_vocabulary,
+    workspace_prelude,
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
@@ -553,6 +554,16 @@ impl Agent for ClaudePlugin {
         answer: &ChatAnswerKind,
     ) -> Result<AnswerRecipe, AnswerRefusal> {
         dialogs::recipe(prompt, answer)
+    }
+
+    /// Which of Claude's conversations is in view and where its keys go.
+    fn read_view(&self, rows: &[String]) -> Option<ViewReading> {
+        Some(dialogs::read_view(rows))
+    }
+
+    /// The key that brings up `goal`'s view in Claude's terminal.
+    fn next_view_key(&self, goal: ViewGoal, reading: &ViewReading) -> ViewStep {
+        dialogs::next_view_key(goal, reading)
     }
 }
 

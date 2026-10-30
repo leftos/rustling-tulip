@@ -11,7 +11,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use agent_api::{AnswerRecipe, AnswerRefusal};
+use agent_api::{AnswerRecipe, AnswerRefusal, ViewGoal, ViewReading, ViewRefusal, ViewStep};
 use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatScreen};
 
 use super::Screen;
@@ -56,6 +56,50 @@ pub fn recipe_for(
     plugin.answer_recipe(prompt, answer)
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the status watcher reads it in CV.24's second part"
+    )
+)]
+/// Which conversation `screen` shows and where its keys go, as `agent`'s
+/// plugin reads it; `None` for an agent with no registered plugin or one
+/// whose views the daemon does not switch.
+#[must_use]
+pub fn read_view(agent: &AgentId, screen: &Screen) -> Option<ViewReading> {
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        tracing::debug!(
+            "no agent plugin `{}` is registered; its screen has no view reading",
+            agent.0
+        );
+        return None;
+    };
+    plugin.read_view(&screen.rows())
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the status watcher reads it in CV.24's second part"
+    )
+)]
+/// The one key that moves `agent`'s screen, read as `reading`, towards
+/// `goal`; [`ViewRefusal::Unsupported`] for an agent with no registered
+/// plugin.
+#[must_use]
+pub fn next_view_key(agent: &AgentId, goal: ViewGoal, reading: &ViewReading) -> ViewStep {
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        tracing::warn!(
+            "no agent plugin `{}` is registered; refusing the view switch",
+            agent.0
+        );
+        return ViewStep::Refuse(ViewRefusal::Unsupported);
+    };
+    plugin.next_view_key(goal, reading)
+}
+
 /// What makes `prompt` the same prompt across readings: its kind, subject,
 /// body, its options' numbers in order and its question tabs' labels. The
 /// cursor, which option is selected, the options' labels (a field being
@@ -83,7 +127,7 @@ pub fn prompt_identity(prompt: &ChatPrompt) -> u64 {
 mod tests {
     use super::*;
     use crate::screen::fixture_screen::screen_from;
-    use agent_api::{Key, ScreenExpect};
+    use agent_api::{Key, KeyHolder, ScreenExpect};
     use protocol::{ChatPromptKind, ComposerState};
 
     /// The chat reading of a capture by Claude's plugin.
@@ -275,6 +319,11 @@ mod tests {
         ("Tests", true, false),
         ("Style", false, true),
     ];
+
+    /// A single question's options and its one tab, which has no arrows.
+    const COLOUR_OPTIONS: [(u32, &str); 3] = [(1, "Red"), (2, "Blue"), (3, "Type something")];
+
+    const COLOUR_TABS: [(&str, bool, bool); 1] = [("Colour", false, true)];
 
     const REVIEW_BODY: &str = "Which function should be added to calc.py next? -> div\n\
         Which tests should be written? -> add, edge cases, fuzz tests\n\
@@ -631,6 +680,39 @@ mod tests {
                 },
             ),
             (
+                "v167-agent-view-ask",
+                include_str!("fixtures/v167-agent-view-ask.txt"),
+                question(
+                    "Pick a colour",
+                    &COLOUR_OPTIONS,
+                    Some(1),
+                    None,
+                    &COLOUR_TABS,
+                ),
+            ),
+            (
+                "v172-agent-view-ask-down",
+                include_str!("fixtures/v172-agent-view-ask-down.txt"),
+                question(
+                    "Pick a size",
+                    &[(1, "Small"), (2, "Large"), (3, "Type something")],
+                    Some(2),
+                    None,
+                    &[("Size", false, true)],
+                ),
+            ),
+            (
+                "v192-agent-view-ask-with-chat-about-this",
+                include_str!("fixtures/v192-agent-view-ask-with-chat-about-this.txt"),
+                question(
+                    "Pick a colour",
+                    &COLOUR_OPTIONS,
+                    Some(1),
+                    None,
+                    &COLOUR_TABS,
+                ),
+            ),
+            (
                 "v43-ask-submitted",
                 include_str!("fixtures/v43-ask-submitted.txt"),
                 no_prompt(Ready),
@@ -650,6 +732,453 @@ mod tests {
         assert!(
             wrong.is_empty(),
             "captures read the wrong dialog:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// The view reading of a capture by Claude's plugin.
+    fn view_of(text: &str) -> ViewReading {
+        read_view(&agent_registry::default_agent(), &screen_from(text))
+            .expect("Claude's plugin reads views")
+    }
+
+    /// The main conversation in view, the box holding the keys, nothing
+    /// stashed or typed, and `panel` under the box with `main` in view.
+    fn main_view(panel: &[&str]) -> ViewReading {
+        ViewReading {
+            agent_in_view: None,
+            key_holder: KeyHolder::Box,
+            stashed: false,
+            box_first_line: None,
+            dialog: false,
+            panel: panel.iter().map(|&row| row.to_owned()).collect(),
+            panel_cursor: None,
+            panel_in_view: (!panel.is_empty()).then_some(0),
+        }
+    }
+
+    /// The agent described as `agent` in view, on panel row `in_view`.
+    fn agent_view(agent: &str, panel: &[&str], in_view: usize) -> ViewReading {
+        ViewReading {
+            agent_in_view: Some(agent.to_owned()),
+            panel_in_view: Some(in_view),
+            ..main_view(panel)
+        }
+    }
+
+    /// A dialog up in the view of the agent described as `agent`, no panel
+    /// showing.
+    fn agent_dialog(agent: &str) -> ViewReading {
+        ViewReading {
+            agent_in_view: Some(agent.to_owned()),
+            dialog: true,
+            panel_in_view: None,
+            ..main_view(&[])
+        }
+    }
+
+    fn box_text(line: &str) -> String {
+        line.to_owned()
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one row per capture; the table is the test"
+    )]
+    fn every_fixture_reads_its_view() {
+        use KeyHolder::{Panel, TasksPill};
+        const AGENT_A: &str = "Agent A python wait";
+        const AGENT_B: &str = "Agent B python wait";
+        const P160: [&str; 2] = ["main", "general-purpose  Running Python sleep command"];
+        const P161: [&str; 3] = [
+            "main",
+            "general-purpose  Agent A python wait",
+            "general-purpose  Agent B python wait",
+        ];
+        const P163: [&str; 3] = [
+            "main",
+            "general-purpose  Agent A python wait",
+            "general-purpose  Running Python sleep command",
+        ];
+        const P169: [&str; 2] = ["main", "general-purpose  Starting the Python sleep command"];
+        const P173: [&str; 2] = ["main", "general-purpose  Sleeper A"];
+        const P174: [&str; 2] = ["main", "general-purpose  Running 560-second Python sleep"];
+        const P190: [&str; 3] = [
+            "main",
+            "general-purpose  Running 560-second Python sleep",
+            "general-purpose  Preparing to run the sleep command",
+        ];
+        let carried = "draft for agent B";
+        let spike_draft = "Spike notice: tell me more about the planted hazard.";
+        let note = "Here is a note offered by a side agent:";
+        let draft_b = "draft B for the stash test";
+        let image = "[Image #1] what colour is this square? Reply with one word.";
+        let cases: Vec<(&str, &str, ViewReading)> = vec![
+            (
+                "v160",
+                include_str!("fixtures/v160-main-agents-panel.txt"),
+                main_view(&P160),
+            ),
+            (
+                "v161",
+                include_str!("fixtures/v161-agent-view-panel-focus.txt"),
+                ViewReading {
+                    key_holder: Panel,
+                    panel_cursor: Some(1),
+                    ..agent_view(AGENT_A, &P161, 1)
+                },
+            ),
+            (
+                "v162",
+                include_str!("fixtures/v162-agent-view-idle.txt"),
+                agent_view(AGENT_A, &P161, 1),
+            ),
+            (
+                "v163",
+                include_str!("fixtures/v163-agent-view-esc-interrupted.txt"),
+                agent_view(AGENT_A, &P163, 1),
+            ),
+            (
+                "v164",
+                include_str!("fixtures/v164-agent-view-draft.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text(carried)),
+                    panel_cursor: Some(2),
+                    ..agent_view(AGENT_B, &P163, 2)
+                },
+            ),
+            (
+                "v165",
+                include_str!("fixtures/v165-main-draft-carried.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text(carried)),
+                    panel_cursor: Some(2),
+                    ..main_view(&P163)
+                },
+            ),
+            (
+                "v166",
+                include_str!("fixtures/v166-agent-view-paste-draft.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text("[Pasted text #1 +34 lines] tail words")),
+                    ..agent_view(AGENT_B, &P160, 1)
+                },
+            ),
+            (
+                "v167",
+                include_str!("fixtures/v167-agent-view-ask.txt"),
+                agent_dialog("Agent C timed Python wait"),
+            ),
+            (
+                "v168",
+                include_str!("fixtures/v168-agent-view-left-background.txt"),
+                ViewReading {
+                    panel_in_view: None,
+                    ..main_view(&[])
+                },
+            ),
+            (
+                "v169",
+                include_str!("fixtures/v169-agent-view-heads-up-replica.txt"),
+                ViewReading {
+                    panel_cursor: Some(1),
+                    ..agent_view("Agent D", &P169, 1)
+                },
+            ),
+            (
+                "v170",
+                include_str!("fixtures/v170-agent-view-chat-in-main-draft.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text(spike_draft)),
+                    panel_cursor: Some(1),
+                    ..agent_view("Agent D", &P169, 1)
+                },
+            ),
+            (
+                "v171",
+                include_str!("fixtures/v171-main-chat-in-main-draft-carried.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text(spike_draft)),
+                    panel_cursor: Some(1),
+                    ..main_view(&P169)
+                },
+            ),
+            (
+                "v172",
+                include_str!("fixtures/v172-agent-view-ask-down.txt"),
+                agent_dialog("Agent D"),
+            ),
+            (
+                "v173",
+                include_str!("fixtures/v173-agent-view-main-reading.txt"),
+                agent_view("Sleeper A", &P173, 1),
+            ),
+            (
+                "v174",
+                include_str!("fixtures/v174-agent-view-heads-up-builtin.txt"),
+                agent_view("Sleeper A", &P174, 1),
+            ),
+            (
+                "v175",
+                include_str!("fixtures/v175-main-heads-up-panel-keys.txt"),
+                ViewReading {
+                    key_holder: Panel,
+                    panel_cursor: Some(0),
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v176",
+                include_str!("fixtures/v176-main-heads-up-box-keys.txt"),
+                main_view(&P174),
+            ),
+            (
+                "v177",
+                include_str!("fixtures/v177-main-heads-up-expanded.txt"),
+                main_view(&P174),
+            ),
+            (
+                "v178",
+                include_str!("fixtures/v178-agent-view-heads-up-expanded.txt"),
+                agent_view("Sleeper A", &P174, 1),
+            ),
+            (
+                "v179",
+                include_str!("fixtures/v179-agent-view-chat-in-main-draft-builtin.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text(note)),
+                    ..agent_view("Sleeper A", &P174, 1)
+                },
+            ),
+            (
+                "v180",
+                include_str!("fixtures/v180-main-chat-in-main-draft-carried-builtin.txt"),
+                ViewReading {
+                    key_holder: Panel,
+                    box_first_line: Some(box_text(note)),
+                    panel_cursor: Some(0),
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v181",
+                include_str!("fixtures/v181-main-stashed-once.txt"),
+                ViewReading {
+                    stashed: true,
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v182",
+                include_str!("fixtures/v182-main-draft-b-with-stash-held.txt"),
+                ViewReading {
+                    stashed: true,
+                    box_first_line: Some(box_text(draft_b)),
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v183",
+                include_str!("fixtures/v183-main-stashed-twice.txt"),
+                ViewReading {
+                    stashed: true,
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v184",
+                include_str!("fixtures/v184-main-restored-after-two-stashes.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text(draft_b)),
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v185",
+                include_str!("fixtures/v185-main-empty-after-restore-nothing-left.txt"),
+                main_view(&P174),
+            ),
+            (
+                "v186",
+                include_str!("fixtures/v186-main-image-draft.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text(image)),
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v187",
+                include_str!("fixtures/v187-main-image-draft-stashed.txt"),
+                ViewReading {
+                    stashed: true,
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v188",
+                include_str!("fixtures/v188-main-image-draft-restored.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text(image)),
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v189",
+                include_str!("fixtures/v189-main-image-draft-sent-answer.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text("what colour is a blue square?")),
+                    ..main_view(&P174)
+                },
+            ),
+            (
+                "v190",
+                include_str!("fixtures/v190-agent-view-tasks-pill-focused.txt"),
+                ViewReading {
+                    key_holder: TasksPill,
+                    ..agent_view("Sleeper B", &P190, 2)
+                },
+            ),
+            (
+                "v191",
+                include_str!("fixtures/v191-agent-view-box-keys-shell-pill.txt"),
+                agent_view("Sleeper B", &P190, 2),
+            ),
+            (
+                "v192",
+                include_str!("fixtures/v192-agent-view-ask-with-chat-about-this.txt"),
+                agent_dialog("Sleeper B"),
+            ),
+            (
+                "v193",
+                include_str!("fixtures/v193-agent-view-after-chat-about-this.txt"),
+                agent_view("Sleeper B", &P190, 2),
+            ),
+            (
+                "v194",
+                include_str!("fixtures/v194-agent-view-chat-about-this-typed.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text("PROBE-CAT: I would rather have green.")),
+                    ..agent_view("Sleeper B", &P190, 2)
+                },
+            ),
+            (
+                "v195",
+                include_str!("fixtures/v195-agent-view-chat-about-this-text-queued-to-agent.txt"),
+                agent_view("Sleeper B", &P190, 2),
+            ),
+            (
+                "v196",
+                include_str!("fixtures/v196-agent-view-down-on-tasks-pill.txt"),
+                ViewReading {
+                    key_holder: TasksPill,
+                    ..agent_view("Sleeper B", &P190, 2)
+                },
+            ),
+            (
+                "v197",
+                include_str!("fixtures/v197-main-after-chat-about-this-from-agent-view.txt"),
+                ViewReading {
+                    key_holder: Panel,
+                    panel_cursor: Some(0),
+                    ..main_view(&P190)
+                },
+            ),
+            (
+                "v198",
+                include_str!("fixtures/v198-main-up-lands-on-tasks-pill.txt"),
+                ViewReading {
+                    key_holder: TasksPill,
+                    ..main_view(&P190)
+                },
+            ),
+            (
+                "v199",
+                include_str!("fixtures/v199-agent-view-stash-from-main-shown.txt"),
+                ViewReading {
+                    stashed: true,
+                    ..agent_view("Sleeper B", &P190, 2)
+                },
+            ),
+            (
+                "v200",
+                include_str!("fixtures/v200-agent-view-main-stash-restored-here.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text("main-view stash probe")),
+                    ..agent_view("Sleeper B", &P190, 2)
+                },
+            ),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(name, text, expected)| {
+                let got = view_of(text);
+                (got != *expected).then(|| format!("{name}: wanted {expected:?}, got {got:?}"))
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "captures read the wrong view:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    #[test]
+    fn view_keys_walk_the_captured_screens() {
+        use ViewStep::{Done, Press, Refuse};
+        let cases: [(&str, &str, ViewStep); 8] = [
+            (
+                "v173",
+                include_str!("fixtures/v173-agent-view-main-reading.txt"),
+                Press(Key::Down),
+            ),
+            (
+                "v174",
+                include_str!("fixtures/v174-agent-view-heads-up-builtin.txt"),
+                Press(Key::Down),
+            ),
+            (
+                "v190",
+                include_str!("fixtures/v190-agent-view-tasks-pill-focused.txt"),
+                Press(Key::Down),
+            ),
+            (
+                "v196",
+                include_str!("fixtures/v196-agent-view-down-on-tasks-pill.txt"),
+                Press(Key::Down),
+            ),
+            (
+                "v175",
+                include_str!("fixtures/v175-main-heads-up-panel-keys.txt"),
+                Press(Key::Up),
+            ),
+            (
+                "v198",
+                include_str!("fixtures/v198-main-up-lands-on-tasks-pill.txt"),
+                Press(Key::Up),
+            ),
+            (
+                "v176",
+                include_str!("fixtures/v176-main-heads-up-box-keys.txt"),
+                Done,
+            ),
+            (
+                "v192",
+                include_str!("fixtures/v192-agent-view-ask-with-chat-about-this.txt"),
+                Refuse(ViewRefusal::DialogUp),
+            ),
+        ];
+        let agent = agent_registry::default_agent();
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(name, text, want)| {
+                let got = next_view_key(&agent, ViewGoal::Main, &view_of(text));
+                (got != *want).then(|| format!("{name}: wanted {want:?}, got {got:?}"))
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "captures step the wrong way to main:\n{}",
             wrong.join("\n")
         );
     }
