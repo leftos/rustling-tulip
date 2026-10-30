@@ -11,6 +11,7 @@
 //! so a client and the daemon it spawns agree on where each file lives.
 
 pub mod autostart;
+pub mod capped_log;
 pub mod device_tokens;
 #[cfg(windows)]
 mod pinned_process;

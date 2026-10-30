@@ -70,11 +70,10 @@ async fn run_git_inner(repo: &Path, args: &[&str], network: bool) -> anyhow::Res
     // operations on Windows commonly hit several seconds and we want that to
     // surface during slow-spawn investigations.
     //
-    // Pre-spawn "begin" line is also info-level: if git itself hangs (lock
-    // contention, network probe, antivirus), `output.await` never returns
-    // and the post-completion timing log never fires — leaving the operator
-    // staring at a daemon log with no trail. The begin/end pair makes the
-    // hang state visible.
+    // The pre-spawn "begin" line is debug-level like the timing line, but it
+    // exists so a git call that hangs (lock contention, network probe,
+    // antivirus) leaves a trail: `output.await` never returns, so the
+    // post-completion timing log never fires without it.
     let started = std::time::Instant::now();
     let lock = repo_lock(repo);
     let _guard = lock.lock().await;
@@ -87,7 +86,7 @@ async fn run_git_inner(repo: &Path, args: &[&str], network: bool) -> anyhow::Res
             "git invocation: waited on per-repo lock"
         );
     }
-    tracing::info!(?args, repo = %repo.display(), "git invocation: begin");
+    tracing::debug!(?args, repo = %repo.display(), "git invocation: begin");
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(repo)

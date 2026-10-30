@@ -63,6 +63,7 @@ mod worktree_cleanup;
 mod worktrees_admin;
 
 use anyhow::Context as _;
+use daemon_client::capped_log;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -785,19 +786,17 @@ fn init_tracing(dirs: &paths::Dirs) {
     // Rotate-then-truncate so each launch's log is a clean slate while the
     // previous run's log survives as `daemon.log.old` — the record of what a
     // dying/misbehaving daemon did is only ever needed AFTER its successor
-    // has started. Falls back silently to stderr if the file can't be opened
-    // (e.g. ACL issues) — since the supervisor redirects stderr to NUL on
-    // Windows the user wouldn't see those logs anyway, but losing the writer
-    // must not panic.
+    // has started. The writer then caps the file while the daemon runs,
+    // rolling it to `daemon.log.1`, so an in-run roll never overwrites the
+    // previous run's log in `daemon.log.old`. Falls back silently to stderr if
+    // the file can't be opened (e.g. ACL issues) — since the supervisor
+    // redirects stderr to NUL on Windows the user wouldn't see those logs
+    // anyway, but losing the writer must not panic.
     let log_dir = dirs.config.join("logs");
     let dir_create_err = std::fs::create_dir_all(&log_dir).err();
     let log_path = log_dir.join("daemon.log");
     let rotate_err = rotate_log(&log_path).err();
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path);
+    let file = capped_log::CappedLog::open(&log_path, capped_log::DEFAULT_CAP);
 
     match file {
         Ok(f) => {

@@ -26,6 +26,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A preset that sets its panes per tab to 0 is refused with an error naming the preset, instead of opening every session in its own tab.
 - An agent that starts through a `.cmd` file refuses to launch, saying why, when a prompt, path or setting holds a character cmd would run or rewrite.
 - A settings file that fails to load is kept beside a fresh one instead of being overwritten, and its saved secrets are not swept away.
+- The daemon's and the app's logs no longer grow without limit while they run: each rolls over at 5 MiB.
 
 ## v0.4.0-alpha
 

@@ -19,9 +19,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use anyhow::Context as _;
+use daemon_client::capped_log::{self, CappedLog};
 use gpui::{App, Application};
 use rustling_tulip_native::{Assets, LOG_FILE, toast_activation};
-use std::fs::File;
 use std::path::Path;
 use std::sync::Mutex;
 use tracing_subscriber::EnvFilter;
@@ -43,17 +43,15 @@ fn rotate_log(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Rotate and open `<config dir>/logs/native.log` for this launch.
-fn open_log_file() -> anyhow::Result<File> {
+/// Rotate and open `<config dir>/logs/native.log` for this launch, capped so a
+/// long run rolls it to `native.log.1` instead of growing without limit (the
+/// start-of-run rotation keeps its own `native.log.old` name).
+fn open_log_file() -> anyhow::Result<CappedLog> {
     let dir = daemon_client::config_dir()?.join("logs");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join(LOG_FILE);
     rotate_log(&path).with_context(|| format!("rotating {}", path.display()))?;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&path)
+    CappedLog::open(&path, capped_log::DEFAULT_CAP)
         .with_context(|| format!("opening {}", path.display()))
 }
 

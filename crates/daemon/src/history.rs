@@ -660,10 +660,11 @@ fn read_recent_tracer_log(
     Some((modified, summary))
 }
 
-/// Each session's earliest end time in `daemon.log` and `daemon.log.old`.
+/// Each session's earliest end time in `daemon.log`, `daemon.log.1` and
+/// `daemon.log.old`.
 fn daemon_end_times(logs_dir: &Path) -> HashMap<String, DateTime<Utc>> {
     let mut merged: HashMap<String, DateTime<Utc>> = HashMap::new();
-    for name in ["daemon.log", "daemon.log.old"] {
+    for name in ["daemon.log", "daemon.log.1", "daemon.log.old"] {
         let Ok(bytes) = std::fs::read(logs_dir.join(name)) else {
             continue;
         };
@@ -2662,6 +2663,23 @@ mod import_tests {
         assert_eq!(entry.ended_at, ts("2026-09-27T18:29:06Z"));
         assert!(entry.end_time_known, "a daemon-log end line is a known end");
         assert_eq!(entry.import_rev, claude_import_rev());
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn daemon_end_times_reads_the_rolled_generation() {
+        let dirs = scratch_dirs("daemon-end-rolled");
+        write_log(
+            &dirs,
+            "daemon.log.1",
+            &[&format!(
+                "2026-09-27T18:29:06.000000Z  INFO rustling_tulipd::tracer_client: tracer_client: child exited session_id={YAAT_ID} code=1"
+            )],
+        );
+
+        let ends = daemon_end_times(&dirs.config.join("logs"));
+
+        assert_eq!(ends.get(YAAT_ID), Some(&ts("2026-09-27T18:29:06Z")));
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
