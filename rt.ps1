@@ -43,11 +43,11 @@
                  to focus, or to place in the active tab).
       native-e2e Build the daemon (with the `e2e-loopback-peers` feature)
                  and tracer, then run the native client's end-to-end specs
-                 (`e2e_live`, `e2e_recover`, `e2e_remote`, under nextest
-                 `--run-ignored only`, test-release profile) against a real
-                 daemon isolated under `.tmp\native-e2e\`. The agents' fake
-                 CLIs (crates\agents\claude\fake) and fake-tailscale need
-                 `node` on PATH. Refuses
+                 (`e2e_live`, `e2e_recover`, `e2e_remote`, `e2e_ssh`, under
+                 nextest `--run-ignored only`, test-release profile) against
+                 a real daemon isolated under `.tmp\native-e2e\`. The agents'
+                 fake CLIs (crates\agents\claude\fake), fake-tailscale and
+                 fake-ssh need `node` on PATH. Refuses
                  -Release: the test-only daemon stays in test-release.
       native-smoke
                  Build the daemon and tracer, then run the native client's
@@ -997,7 +997,7 @@ function Invoke-NativeE2e {
     if ($Release) {
         throw 'native-e2e builds a test-only daemon (e2e-loopback-peers); it runs in the test-release profile only, so drop -Release.'
     }
-    Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover', 'e2e_remote') -Slot heavy -Name e2e -DaemonFeatures @('e2e-loopback-peers')
+    Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh') -Slot heavy -Name e2e -DaemonFeatures @('e2e-loopback-peers')
 }
 
 function Invoke-NativeSmoke { Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke }
@@ -1068,7 +1068,7 @@ Commands:
              optional session id to focus, or to place in the active tab).
   native-e2e Build daemon (with e2e-loopback-peers) + tracer, then run
              the native client's end-to-end specs (e2e_live, e2e_recover,
-             e2e_remote) against an isolated daemon (needs `node`).
+             e2e_remote, e2e_ssh) against an isolated daemon (needs `node`).
              Test-release only: refuses -Release.
   native-smoke
              Build daemon + tracer, then run the native client's OS smoke

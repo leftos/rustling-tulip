@@ -60,16 +60,21 @@ pub fn target_bin_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Starts `rustling-tulipd` from beside the test binary with `envs` set and no
-/// console or standard streams.
-fn spawn_daemon(envs: &[(&'static str, OsString)]) -> Child {
+/// `rustling-tulipd` beside the test binary, checked to be there.
+fn daemon_binary() -> PathBuf {
     let daemon = target_bin_dir().join(format!("rustling-tulipd{}", std::env::consts::EXE_SUFFIX));
     assert!(
         daemon.is_file(),
         "{MISSING_DAEMON} (looked for {})",
         daemon.display()
     );
-    let mut command = Command::new(&daemon);
+    daemon
+}
+
+/// Starts `rustling-tulipd` from beside the test binary with `envs` set and no
+/// console or standard streams.
+fn spawn_daemon(envs: &[(&'static str, OsString)]) -> Child {
+    let mut command = Command::new(daemon_binary());
     command
         .envs(envs.iter().map(|(key, value)| (*key, value)))
         .stdin(Stdio::null())
@@ -316,6 +321,80 @@ impl LiveDaemon {
         self.handshake = self.wait_healthy();
     }
 
+    /// Stops the daemon the way a user would, with `rustling-tulipd shutdown`
+    /// under its isolation variables, and waits for its process to exit.
+    pub fn shut_down_by_cli(&mut self) {
+        let mut command = Command::new(daemon_binary());
+        command
+            .arg("shutdown")
+            .envs(self.envs.iter().map(|(key, value)| (*key, value)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        no_console(&mut command);
+        let status = command.status().expect("run rustling-tulipd shutdown");
+        assert!(
+            status.success(),
+            "rustling-tulipd shutdown failed: {status}"
+        );
+        let deadline = Instant::now() + START_TIMEOUT;
+        while self
+            .child
+            .try_wait()
+            .expect("poll rustling-tulipd")
+            .is_none()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "rustling-tulipd still runs {START_TIMEOUT:?} after its shutdown"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The fake `ssh` for this daemon: its state file under the test dir
+    /// names the daemon binary beside the test binary as the bridge, every
+    /// isolation variable of this daemon as the bridge's environment (so a
+    /// daemon the bridge starts is isolated the same way), and `fail` as a
+    /// refused login's exit code and stderr.
+    ///
+    /// Bind the result after the daemon, so it drops first: its drop makes
+    /// every later run refuse the login, so a client still reconnecting
+    /// while the daemon is torn down never has a bridge start a new daemon
+    /// that nothing stops.
+    pub fn fake_ssh(&self, fail: Option<(i32, &str)>) -> FakeSsh {
+        let dir = self.root.join("fake-ssh");
+        std::fs::create_dir_all(&dir).expect("create the fake ssh's dir");
+        let env: serde_json::Map<String, Value> = self
+            .envs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), json!(value.to_string_lossy())))
+            .collect();
+        let log = dir.join("argv.jsonl");
+        let state = json!({
+            "bridge": daemon_binary(),
+            "env": env,
+            "fail": fail.map(|(code, stderr)| json!({ "code": code, "stderr": stderr })),
+            "log": log,
+        });
+        let state_file = dir.join("state.json");
+        std::fs::write(&state_file, state.to_string()).expect("write the fake ssh's state");
+        let shim = if cfg!(windows) {
+            "fake-ssh.cmd"
+        } else {
+            "fake-ssh.sh"
+        };
+        FakeSsh {
+            shim: repo_root()
+                .join("tools")
+                .join("e2e")
+                .join("fake-ssh")
+                .join(shim),
+            state: state_file,
+            log,
+        }
+    }
+
     /// The id of the registered repo at `path`, from the daemon's own
     /// `state.json`.
     pub fn repo_id(&self, path: &Path) -> Option<String> {
@@ -400,6 +479,102 @@ impl Drop for LiveDaemon {
         if !std::thread::panicking() {
             remove_dir_retrying(&self.root);
         }
+    }
+}
+
+/// The variable naming the fake ssh's state file.
+const FAKE_SSH_STATE_ENV: &str = "RUSTLING_TULIP_FAKE_SSH_STATE";
+
+/// `tools/e2e/fake-ssh` set up for one test daemon by
+/// [`LiveDaemon::fake_ssh`]: its shim, its state file and its argv log.
+pub struct FakeSsh {
+    shim: PathBuf,
+    state: PathBuf,
+    log: PathBuf,
+}
+
+/// One run of the fake ssh, as its argv log records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshRun {
+    /// The shim's own process: killing its tree cuts the connection.
+    pub pid: u32,
+    pub argv: Vec<String>,
+}
+
+/// The stderr every run refuses with once its [`FakeSsh`] is dropped.
+const FAKE_SSH_ENDED: &str = "fake-ssh: the spec has ended";
+
+impl Drop for FakeSsh {
+    /// Rewrites the state to refuse every later login, keeping the file for
+    /// a failed spec's dir.
+    fn drop(&mut self) {
+        let rewritten = std::fs::read_to_string(&self.state)
+            .map_err(|err| err.to_string())
+            .and_then(|text| serde_json::from_str::<Value>(&text).map_err(|err| err.to_string()))
+            .and_then(|mut state| {
+                state["fail"] = json!({ "code": 255, "stderr": FAKE_SSH_ENDED });
+                // Written beside it and renamed over, so a shim run
+                // mid-write never reads a truncated file.
+                let staged = self.state.with_extension("json.tmp");
+                std::fs::write(&staged, state.to_string()).map_err(|err| err.to_string())?;
+                std::fs::rename(&staged, &self.state).map_err(|err| err.to_string())
+            });
+        if let Err(err) = rewritten {
+            tracing::warn!(
+                "could not make the fake ssh at {} refuse logins: {err}",
+                self.state.display()
+            );
+        }
+    }
+}
+
+impl FakeSsh {
+    /// The client's variables for this fake: `RUSTLING_TULIP_SSH` names the
+    /// shim, and the shim finds its state through the other.
+    pub fn envs(&self) -> [(&'static str, OsString); 2] {
+        [
+            (
+                rustling_tulip_native::ssh::SSH_ENV,
+                self.shim.clone().into_os_string(),
+            ),
+            (FAKE_SSH_STATE_ENV, self.state.clone().into_os_string()),
+        ]
+    }
+
+    /// Sets [`Self::envs`] on this test process, which the client's `ssh`
+    /// child inherits. Each nextest test runs in a process of its own, so the
+    /// variables reach no other spec.
+    pub fn use_for_this_process(&self) {
+        for (key, value) in self.envs() {
+            // SAFETY: set before the spec opens its client, and the threads
+            // already running read the environment only through std, which
+            // serializes its reads and writes with one lock.
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+
+    /// Every run of the shim so far, oldest first; empty before the first.
+    pub fn runs(&self) -> Vec<SshRun> {
+        let text = match std::fs::read_to_string(&self.log) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            read => read
+                .map_err(|err| format!("{}: {err}", self.log.display()))
+                .expect("reading the fake ssh's argv log"),
+        };
+        text.lines()
+            .filter(|line| line.ends_with('}'))
+            .map(|line| {
+                let run: Value = serde_json::from_str(line).expect("an argv log line is JSON");
+                SshRun {
+                    pid: run["pid"]
+                        .as_u64()
+                        .and_then(|pid| u32::try_from(pid).ok())
+                        .expect("an argv log line names its pid"),
+                    argv: serde_json::from_value(run["argv"].clone())
+                        .expect("an argv log line holds its argv"),
+                }
+            })
+            .collect()
     }
 }
 
@@ -1103,8 +1278,11 @@ fn live_deps(
                 daemon_client::connect_proven(port, &token, daemon_client::PROOF_TIMEOUT).await
             })
         }),
-        open_ssh: Box::new(|_| {
-            Box::pin(async { Err(anyhow::anyhow!("a live run never starts ssh")) })
+        // The production start: `RUSTLING_TULIP_SSH` names the binary, which
+        // the SSH specs set to the fake ssh (see [`FakeSsh`]).
+        open_ssh: Box::new(|host| {
+            let host = host.clone();
+            Box::pin(async move { rustling_tulip_native::ssh::open(&host) })
         }),
         identity: Some(identity),
         stop: Box::new(move || {

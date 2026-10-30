@@ -33,6 +33,7 @@ crates/
 apps/
   native/       - native desktop client (GPUI + alacritty_terminal)
 tools/
+  e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
   installer/    - the NSIS installer script
 docs/

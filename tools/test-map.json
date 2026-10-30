@@ -338,6 +338,12 @@
     },
     {
       "paths": [
+        "apps/native/src/ssh.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^(net|ssh)::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/file_fetch.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^file_fetch::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_fetch_dialog|ui_file_fetch)::/))"
@@ -1232,6 +1238,12 @@
         "apps/native/tests/e2e_remote.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::e2e_remote)"
+    },
+    {
+      "paths": [
+        "apps/native/tests/e2e_ssh.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::e2e_ssh)"
     },
     {
       "paths": [
