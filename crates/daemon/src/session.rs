@@ -4,6 +4,7 @@ use crate::activity_log;
 use crate::conversations::discovery::Discovery;
 use crate::headless::HeadlessHandle;
 use crate::history;
+use crate::host_shutdown;
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::{LifecycleItem, PtyExit, PtyHandle};
@@ -19,7 +20,7 @@ use protocol::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// In-memory cap on a session's `recent_actions`, matching the tail the
@@ -1420,13 +1421,54 @@ fn deliver_chunk(
 /// attention. A session the user already stopped or parked has released its
 /// pty, so its lost tracer ends it like any exit, and any exit after such a
 /// stop is the kill's: it sets no exit code and asks for no attention.
+///
+/// An exit that arrives while the host is shutting down or logging off keeps
+/// the session for the next start instead, whatever its tracer reports: no
+/// history entry, the sidecar marked `ended_during_host_shutdown`, and no
+/// attention. The next start records the session lost and auto-resumes it, as
+/// it does after a reboot.
 fn handle_exit(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
     exit: PtyExit,
     dirs: Option<&Dirs>,
 ) {
+    handle_exit_with(
+        registry,
+        session_id,
+        exit,
+        dirs,
+        host_shutdown::in_progress(),
+    );
+}
+
+/// [`handle_exit`] with the host's shutdown state passed in, so a test drives
+/// both paths.
+///
+/// A shutdown or logoff kills the daemon and its tracers without warning, so
+/// a session whose exit the daemon still sees during one keeps its sidecar
+/// and writes no history entry: the next start records it lost and
+/// auto-resumes it, as it does after a reboot. A Stop or a Park released the
+/// pty before the kill, so a user's own stop during a shutdown stays a stop.
+pub(crate) fn handle_exit_with(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    exit: PtyExit,
+    dirs: Option<&Dirs>,
+    shutting_down: bool,
+) {
     let code = exit.code();
+    // A shutdown or logoff kills the tracers too, so an exit the daemon
+    // still sees during one means the session was lost, not ended: keep its
+    // sidecar with no entry, and the next start records the loss and
+    // auto-resumes it. A Stop or a Park released the pty before the kill, so
+    // the user's own stop still ends the session here.
+    let kept_for_shutdown = shutting_down
+        && dirs.is_some()
+        && registry.get(session_id).is_some_and(|rec| {
+            let rec = lock(&rec);
+            rec.pty.is_some() && rec.headless.is_none()
+        });
     // Record the end before the `Stopped` update goes out. A client that
     // reacts to that update by discarding the session writes its own
     // `StoppedByUser` entry, and `history::write_if_absent` keeps whichever
@@ -1435,12 +1477,20 @@ fn handle_exit(
     // touches nothing the entry is built from (label, members, spawn_config,
     // started_at) and nothing else it reads.
     if let Some(dirs) = dirs {
-        history::record_session_end(registry, dirs, session_id, history::end_for_exit(exit));
+        if kept_for_shutdown {
+            // The kept session takes the final look a recorded end does, so a
+            // conversation it created since the last poll still reaches its
+            // sidecar and its discovery waiter is deregistered; no history
+            // entry is written.
+            crate::conversations::discovery::final_look(registry, dirs, session_id, Utc::now());
+        } else {
+            history::record_session_end(registry, dirs, session_id, history::end_for_exit(exit));
+        }
     }
     let mut abandoned = false;
     let mut user_stopped = false;
     registry.update(session_id, |rec| {
-        abandoned = matches!(exit, PtyExit::TracerLost) && rec.pty.is_some();
+        abandoned = rec.pty.is_some() && (kept_for_shutdown || matches!(exit, PtyExit::TracerLost));
         // A Stop or a Park claims the session (stopped, pty taken) before the
         // kill, so this exit is the kill's: no code of its own, no attention.
         user_stopped = rec.pty.is_none() && rec.status == SessionStatus::Stopped;
@@ -1454,7 +1504,14 @@ fn handle_exit(
         if abandoned {
             rec.exit_code = None;
             rec.is_abandoned = true;
-            push_recent_action(rec, "abandoned: tracer lost".to_string());
+            push_recent_action(
+                rec,
+                if kept_for_shutdown {
+                    "abandoned: host shutting down".to_string()
+                } else {
+                    "abandoned: tracer lost".to_string()
+                },
+            );
         } else {
             if !user_stopped {
                 rec.exit_code = Some(code);
@@ -1463,6 +1520,14 @@ fn handle_exit(
         }
     });
     if abandoned {
+        if kept_for_shutdown {
+            mark_ended_during_host_shutdown(dirs, session_id);
+            info!(
+                %session_id,
+                "the host is shutting down; keeping the session for the next start"
+            );
+            return;
+        }
         registry.fan_out_attention(session_id.to_owned(), protocol::AttentionReason::Error);
         return;
     }
@@ -1470,6 +1535,36 @@ fn handle_exit(
         registry.fan_out_attention(session_id.to_owned(), protocol::AttentionReason::Stopped);
     }
     registry.delete_sidecar(session_id);
+}
+
+/// Mark `session_id`'s sidecar as one the host's shutdown ended, so the next
+/// start records it lost whatever its tracer log ends with: a shell that
+/// handles the signal may exit with a code of its own. Written after the
+/// session update, whose own sidecar sync would otherwise put the old value
+/// back.
+fn mark_ended_during_host_shutdown(dirs: Option<&Dirs>, session_id: &str) {
+    let Some(dirs) = dirs else {
+        return;
+    };
+    let mut meta = match orphan::load_meta(dirs, session_id) {
+        Ok(meta) => meta,
+        Err(err) => {
+            warn!(
+                ?err,
+                %session_id,
+                "no sidecar to mark as ended during a host shutdown"
+            );
+            return;
+        }
+    };
+    meta.ended_during_host_shutdown = true;
+    if let Err(err) = orphan::write_meta(dirs, &meta) {
+        warn!(
+            ?err,
+            %session_id,
+            "failed to mark the session as ended during a host shutdown"
+        );
+    }
 }
 
 /// Build a [`SessionRecord`] from a sidecar [`OrphanMeta`] and surface it via
@@ -2299,6 +2394,249 @@ mod tests {
         );
         let rec = registry.get("s1").expect("the session is still listed");
         assert_eq!(crate::sync::lock(&rec).exit_code, Some(1));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A session that ends while the host shuts down is kept for the next
+    /// start: no history entry, so that start records the loss itself and
+    /// auto-resumes the session, as it does after a reboot.
+    #[tokio::test]
+    async fn an_exit_during_host_shutdown_keeps_the_sidecar_and_writes_no_entry() {
+        use crate::history::STATUS_CONTROL_C_EXIT;
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, write_meta_for,
+        };
+        use crate::pty::PtyExit;
+
+        let dirs = scratch_dirs("shutdown-keeps-sidecar");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&dirs, "s1");
+
+        handle_exit_with(
+            &registry,
+            "s1",
+            PtyExit::Code(STATUS_CONTROL_C_EXIT),
+            Some(&dirs),
+            true,
+        );
+
+        assert!(
+            crate::orphan::load_meta(&dirs, "s1").is_ok(),
+            "the sidecar is kept for the next start"
+        );
+        assert!(
+            crate::history::read_one(&dirs, "s1").is_none(),
+            "the next start records the loss, not this exit"
+        );
+        let rec = registry.get("s1").expect("the session is still listed");
+        let rec = crate::sync::lock(&rec);
+        assert!(rec.is_abandoned, "the session is left abandoned");
+        assert_eq!(rec.exit_code, None, "a shutdown exit carries no code");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A tracer lost while the host shuts down is the same loss: no entry,
+    /// so the next start records it and auto-resumes the session.
+    #[tokio::test]
+    async fn a_lost_tracer_during_host_shutdown_writes_no_entry() {
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, write_meta_for,
+        };
+        use crate::pty::PtyExit;
+
+        let dirs = scratch_dirs("shutdown-lost-tracer");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&dirs, "s1");
+
+        handle_exit_with(&registry, "s1", PtyExit::TracerLost, Some(&dirs), true);
+
+        assert!(
+            crate::orphan::load_meta(&dirs, "s1").is_ok(),
+            "the sidecar is kept for the next start"
+        );
+        assert!(
+            crate::history::read_one(&dirs, "s1").is_none(),
+            "the next start records the loss, not this exit"
+        );
+        let rec = registry.get("s1").expect("the session is still listed");
+        let rec = crate::sync::lock(&rec);
+        assert!(rec.is_abandoned, "the session is left abandoned");
+        assert_eq!(rec.exit_code, None, "a lost tracer carries no code");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// The kept session still gets the final look a recorded end takes: a
+    /// conversation it created since the last poll reaches its sidecar, and
+    /// its discovery waiter is deregistered.
+    #[tokio::test]
+    async fn a_shutdown_exit_takes_a_final_look_for_the_conversation() {
+        use crate::conversations::discovery::{self, Baseline, Waiter};
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, write_meta_for,
+        };
+        use crate::pty::PtyExit;
+
+        let agent: &'static agent_api::test_agent::TestAgent = Box::leak(Box::new(
+            agent_api::test_agent::TestAgent::new(agent_api::ConversationPlan::DiscoverAfterLaunch),
+        ));
+        let folder = r"D:\shutdown-final-look";
+        let baseline = Baseline {
+            ids: std::collections::HashSet::new(),
+            plugin: agent,
+            rows: agent_api::ResolvedRows::default(),
+            folder: std::path::PathBuf::from(folder),
+            launched_at: Utc::now() - chrono::TimeDelta::minutes(1),
+        };
+        let dirs = scratch_dirs("shutdown-final-look");
+        let registry = SessionRegistry::new(dirs.clone());
+        discovery::register(&registry, Waiter::new("s1".to_owned(), baseline));
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&dirs, "s1");
+        // The conversation the session created since discovery's last poll.
+        agent.set_found(
+            folder,
+            vec![agent_api::FoundConversation {
+                id: "c-shutdown".to_owned(),
+                last_active: Utc::now(),
+                title: None,
+            }],
+        );
+
+        handle_exit_with(&registry, "s1", PtyExit::TracerLost, Some(&dirs), true);
+
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("the sidecar is kept");
+        assert_eq!(
+            meta.conversation_id.as_deref(),
+            Some("c-shutdown"),
+            "the final look found the conversation the last poll missed"
+        );
+        assert!(
+            registry.discovery().waiter("s1").is_none(),
+            "the waiter is deregistered"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// With no shutdown under way the exit is recorded and its sidecar
+    /// deleted as before, whatever the code: a Ctrl-C status while the OS
+    /// runs is a session the user ended, not one to resume.
+    #[tokio::test]
+    async fn an_exit_with_no_host_shutdown_is_an_ordinary_exit() {
+        use crate::history::STATUS_CONTROL_C_EXIT;
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, sidecar_gone, write_meta_for,
+        };
+        use crate::pty::PtyExit;
+        use protocol::SessionEnd;
+
+        let dirs = scratch_dirs("no-shutdown-ordinary-exit");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&dirs, "s1");
+        let mut events = registry.subscribe();
+
+        handle_exit_with(
+            &registry,
+            "s1",
+            PtyExit::Code(STATUS_CONTROL_C_EXIT),
+            Some(&dirs),
+            false,
+        );
+
+        let entry = crate::history::read_one(&dirs, "s1").expect("the exit is recorded");
+        assert_eq!(
+            entry.end,
+            SessionEnd::Exited {
+                code: STATUS_CONTROL_C_EXIT
+            }
+        );
+        assert!(
+            sidecar_gone(&dirs, "s1").await,
+            "an ordinary exit drops its sidecar"
+        );
+        assert!(
+            drained_attention(&mut events).contains(&protocol::AttentionReason::Stopped),
+            "an ordinary exit asks for attention"
+        );
+        let rec = registry.get("s1").expect("the session is still listed");
+        let rec = crate::sync::lock(&rec);
+        assert!(!rec.is_abandoned, "nothing is left to resume");
+        assert_eq!(rec.exit_code, Some(STATUS_CONTROL_C_EXIT));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A Stop records its own entry and claims the session (status stopped,
+    /// pty taken) before the kill; the exit that follows during a shutdown
+    /// is the kill's, so the stop stays a stop and is never left abandoned
+    /// to resume.
+    #[tokio::test]
+    async fn a_user_stop_during_host_shutdown_stays_a_stop() {
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, sidecar_gone, write_meta_for,
+        };
+        use crate::pty::PtyExit;
+        use protocol::SessionEnd;
+
+        let dirs = scratch_dirs("shutdown-user-stop");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&dirs, "s1");
+        // What `stop_session` writes before the kill, so it wins over the
+        // exit watcher's later end for the same session.
+        crate::history::record_session_end(&registry, &dirs, "s1", SessionEnd::StoppedByUser);
+        registry.update("s1", |rec| {
+            rec.status = SessionStatus::Stopped;
+            rec.pty = None;
+        });
+
+        handle_exit_with(&registry, "s1", PtyExit::Code(1), Some(&dirs), true);
+
+        assert!(
+            sidecar_gone(&dirs, "s1").await,
+            "a stop during a shutdown still drops its sidecar"
+        );
+        let entry = crate::history::read_one(&dirs, "s1").expect("the stop is recorded");
+        assert_eq!(
+            entry.end,
+            SessionEnd::StoppedByUser,
+            "the user's stop stays the recorded end"
+        );
+        let rec = registry.get("s1").expect("the session is still listed");
+        let rec = crate::sync::lock(&rec);
+        assert!(!rec.is_abandoned, "a stop leaves nothing to resume");
+        assert_eq!(rec.exit_code, None, "a stop sets no exit code");
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

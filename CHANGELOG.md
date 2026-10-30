@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Sessions running when you sign out, restart or shut down Windows are resumed automatically on the next start, instead of waiting in Recover.
 - A session on a branch whose worktree folder you deleted by hand now starts, and Recreate from base works there, instead of failing with "already used by worktree".
 - Deleting a locked worktree from Manage worktrees or a session discard now removes it completely, so its branch can be used again.
 - After a restart, the app no longer mistakes another program that reused a session's process number for that session, so it can no longer stop or reattach the wrong one.

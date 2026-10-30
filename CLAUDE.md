@@ -284,7 +284,7 @@ A reattached interactive session with no conversation id, whose plugin discovers
 
 A session that ended before then gets none. In the restarted discovery, launch time is the session's start time, the baseline is empty and the folder is the one it started in, so a conversation created while no daemon watched is still found.
 
-A sidecar whose tracer is gone is recorded as ended at start (see the history entry above), and once the daemon has bound and written its handshake, `recovery::auto_resume` resumes the qualifying ones by itself, one at a time, with no prompt, off switch or retry (`claude --resume <that id>`), then broadcasts `ResumeReport`.
+A session whose exit arrives while Windows is logging off or shutting down (`GetSystemMetrics(SM_SHUTTINGDOWN)`, `host_shutdown.rs`) and that the user did not stop is not ended: the daemon writes no history entry, marks it abandoned, takes a final look for its conversation and keeps its sidecar with `ended_during_host_shutdown` set, so the next start records it as `TracerLost` whatever its exit code. A sidecar whose tracer is gone is recorded as ended at start (see the history entry above), and once the daemon has bound and written its handshake, `recovery::auto_resume` resumes the qualifying ones by itself, one at a time, with no prompt, off switch or retry (`claude --resume <that id>`), then broadcasts `ResumeReport`.
 
 A qualifying one is an interactive Claude session with a spawn config, its own conversation id and an existing transcript, its worktrees still pinned to their folders, its in-place checkout still on its branch. The rest stay abandoned, listed in Recover.
 

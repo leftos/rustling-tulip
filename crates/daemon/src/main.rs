@@ -29,6 +29,7 @@ mod git_write;
 mod headless;
 mod history;
 mod hook_status;
+mod host_shutdown;
 mod idle_exit;
 mod inject;
 mod instance_lock;

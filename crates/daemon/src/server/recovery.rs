@@ -2296,6 +2296,126 @@ mod tests {
         );
     }
 
+    /// A session whose exit the daemon sees while the host shuts down keeps
+    /// its sidecar with no entry, so the next start records it lost and
+    /// auto-resumes it.
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong spawn fails the test loudly")]
+    async fn a_session_ended_during_host_shutdown_is_auto_resumed_at_next_start() {
+        let (_home_lock, home) = claude_home_scratch("shutdown-auto-resume").await;
+        let (hub, scratch) = spawnless_test_hub("shutdown-auto-resume");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+
+        let (pty, _exit_tx) = crate::history::test_support::fake_pty();
+        let mut rec = crate::history::test_support::record("lost", SessionMode::Interactive);
+        rec.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
+            standalone(&folder),
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        rec.conversation_id = Some(RECOVERY_CONVERSATION.to_owned());
+        crate::history::test_support::insert_live(&hub.sessions, &hub.dirs, rec, &pty);
+        crate::history::test_support::write_meta_for(&hub.dirs, "lost");
+
+        crate::session::handle_exit_with(
+            &hub.sessions,
+            "lost",
+            crate::pty::PtyExit::TracerLost,
+            Some(&hub.dirs),
+            true,
+        );
+        assert!(
+            history::read_one(&hub.dirs, "lost").is_none(),
+            "the exit itself writes no entry"
+        );
+
+        let meta = crate::orphan::load_meta(&hub.dirs, "lost").expect("the sidecar is kept");
+        let ids = history::record_lost_at_start(&hub.dirs, std::slice::from_ref(&meta), Utc::now());
+        assert_eq!(ids, ["lost"], "the next start records it lost");
+
+        let spawned = Spawned::default();
+        let counts = auto_resume_recording(&hub, &["lost"], &spawned).await;
+
+        assert_eq!(counts, (1, 0), "the lost session is resumed");
+        let spawned = crate::sync::lock(&spawned);
+        let [(request, _)] = spawned.as_slice() else {
+            panic!("expected one spawn, got {}", spawned.len());
+        };
+        assert_eq!(
+            request.resume_conversation.as_deref(),
+            Some(RECOVERY_CONVERSATION),
+            "its own conversation continues"
+        );
+    }
+
+    /// A shell that handles the logoff and exits with a code of its own is
+    /// still a session lost to the shutdown: its sidecar says so, so the
+    /// next start records it lost and resumes it whatever its tracer log
+    /// ends with.
+    #[tokio::test]
+    async fn a_shutdown_exit_with_code_zero_is_auto_resumed_at_next_start() {
+        let (_home_lock, home) = claude_home_scratch("shutdown-code-zero").await;
+        let (hub, scratch) = spawnless_test_hub("shutdown-code-zero");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+
+        let (pty, _exit_tx) = crate::history::test_support::fake_pty();
+        let mut rec = crate::history::test_support::record("lost", SessionMode::Interactive);
+        rec.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
+            standalone(&folder),
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        rec.conversation_id = Some(RECOVERY_CONVERSATION.to_owned());
+        crate::history::test_support::insert_live(&hub.sessions, &hub.dirs, rec, &pty);
+        crate::history::test_support::write_meta_for(&hub.dirs, "lost");
+        write_tracer_exit(&hub.dirs, "lost", 0);
+
+        crate::session::handle_exit_with(
+            &hub.sessions,
+            "lost",
+            crate::pty::PtyExit::Code(0),
+            Some(&hub.dirs),
+            true,
+        );
+
+        let meta = crate::orphan::load_meta(&hub.dirs, "lost").expect("the sidecar is kept");
+        assert!(
+            meta.ended_during_host_shutdown,
+            "the kept sidecar says the host shut down"
+        );
+        let ids = history::record_lost_at_start(&hub.dirs, std::slice::from_ref(&meta), Utc::now());
+        assert_eq!(
+            ids,
+            ["lost"],
+            "the exit code in the tracer log does not make it a true end"
+        );
+        let entry = history::read_one(&hub.dirs, "lost").expect("entry written at start");
+        assert_eq!(entry.end, SessionEnd::TracerLost);
+        assert!(!entry.end_time_known, "the loss has no known end time");
+
+        let spawned = Spawned::default();
+        let counts = auto_resume_recording(&hub, &["lost"], &spawned).await;
+
+        assert_eq!(counts, (1, 0), "the lost session is resumed");
+    }
+
+    /// A tracer log for `id` whose child exited with `code`, as the tracer
+    /// writes it.
+    fn write_tracer_exit(dirs: &Dirs, id: &str, code: i32) {
+        let at = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ");
+        let log = format!(
+            "{at}  INFO rt_tracer: rt-tracer starting session_id={id} cwd=D:\\ cols=120 rows=32 argc=2\n\
+             {at}  INFO rt_tracer::supervisor: supervisor: child exited; shutting down exit_code={code}\n"
+        );
+        let logs = dirs.config.join("logs");
+        std::fs::create_dir_all(&logs).expect("create logs dir");
+        std::fs::write(logs.join(format!("tracer-{id}.log")), log).expect("write tracer log");
+    }
+
     #[tokio::test]
     async fn the_resume_broadcasts_its_report_when_it_finishes() {
         let (_home_lock, home) = claude_home_scratch("resume-report-broadcast").await;

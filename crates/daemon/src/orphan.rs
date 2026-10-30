@@ -42,6 +42,11 @@ fn default_sidecar_version() -> u32 {
     CURRENT_SIDECAR_VERSION
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the sidecar is a flat serde record of a session's independent flags; folding them \
+              into enums would change the file format for every writer and reader"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrphanMeta {
     /// Schema version of this sidecar. Defaults to `CURRENT_SIDECAR_VERSION`
@@ -206,6 +211,14 @@ pub struct OrphanMeta {
     /// other session and for sidecars written before this field existed.
     #[serde(default)]
     pub hook_trusted: bool,
+    /// Whether the session's exit was seen while the host was shutting down,
+    /// so the daemon kept it for the next start rather than ending it. The
+    /// next start records such a session lost whatever its tracer log ends
+    /// with, since the shell may have handled the signal and exited with a
+    /// code of its own. False for every other session and for sidecars
+    /// written before this field existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ended_during_host_shutdown: bool,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -680,6 +693,7 @@ pub fn meta_from_record(
         hook_agent: None,
         hook_options: protocol::OptionValues::new(),
         hook_trusted: false,
+        ended_during_host_shutdown: false,
     })
 }
 
@@ -1013,6 +1027,7 @@ mod tests {
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             hook_trusted: false,
+            ended_during_host_shutdown: true,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
@@ -1030,6 +1045,7 @@ mod tests {
         assert_eq!(decoded.accent_color.as_deref(), Some("#2f81f7"));
         assert_eq!(decoded.appearance.accent_color.as_deref(), Some("#3fb950"));
         assert_eq!(decoded.current_cwd.as_deref(), Some(r"C:\work\repo"));
+        assert!(decoded.ended_during_host_shutdown, "the flag round trips");
     }
 
     #[test]

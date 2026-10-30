@@ -50,7 +50,7 @@ const SHELL_STEMS: [&str; 6] = ["pwsh", "powershell", "cmd", "bash", "zsh", "sh"
 const PINNED_BRANCH_FALLBACK: &str = "HEAD";
 /// The exit code Windows gives a console child it ends at shutdown or logoff
 /// (`0xC000013A`, `STATUS_CONTROL_C_EXIT`).
-const STATUS_CONTROL_C_EXIT: i32 = -1_073_741_510;
+pub(crate) const STATUS_CONTROL_C_EXIT: i32 = -1_073_741_510;
 
 /// Bumped after every history write, so the server can broadcast the new list.
 static CHANGES: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::channel(0).0);
@@ -218,7 +218,14 @@ pub fn record_lost_at_start(
 
 /// The entry [`record_lost_at_start`] writes for `meta`.
 fn lost_entry(dirs: &Dirs, meta: &orphan::OrphanMeta, now: DateTime<Utc>) -> HistoryEntry {
-    let log = session_tracer_log(dirs, &meta.session_id);
+    // A session the daemon kept as the host shut down was lost whatever its
+    // tracer log ends with: the shell may have handled the signal and exited
+    // with a code of its own.
+    let log = if meta.ended_during_host_shutdown {
+        None
+    } else {
+        session_tracer_log(dirs, &meta.session_id)
+    };
     if let Some(summary) = &log
         && !is_lost(summary.end)
     {
