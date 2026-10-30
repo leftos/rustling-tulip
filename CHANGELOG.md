@@ -4,6 +4,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.5.0-alpha
+
 ### Added
 
 - Connect to another Windows PC over SSH, without Tailscale: Add SSH host… in the Connections picker takes an alias or user@host, and Test connection checks it first.
