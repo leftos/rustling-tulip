@@ -11,7 +11,7 @@
 
 use crate::support;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -440,12 +440,12 @@ fn boot_on_a_saved_host_starts_on_that_target(cx: &mut TestAppContext) {
     .expect("seed native-ui.json");
     let (tx, mut commands) = unbounded();
     let (_events, events) = unbounded();
+    let opened = Rc::new(RefCell::new(Vec::new()));
     let quits = Rc::new(Cell::new(0));
     let pick_folder: FolderPicker = Rc::new(|_, _| Box::pin(async { None }));
     let pick_file: FilePicker = Rc::new(|_, _, _| Box::pin(async { None }));
     let deps = RootDeps {
-        tx,
-        events,
+        open_host: support::fake_transport((tx, events), &opened),
         ui_dir: Some(dir.path().to_path_buf()),
         paths: Err("specs have no config dir".to_owned()),
         wanted: None,
@@ -466,6 +466,11 @@ fn boot_on_a_saved_host_starts_on_that_target(cx: &mut TestAppContext) {
         root.read_with(cx, |root, _| root.connection_target().clone()),
         Target::tailnet(HOST, Some(9443)),
         "the window starts on the saved host, on its saved port"
+    );
+    assert_eq!(
+        *opened.borrow(),
+        vec![Target::tailnet(HOST, Some(9443))],
+        "the window opens one connection, to the saved host"
     );
     assert!(
         commands.try_recv().is_err(),

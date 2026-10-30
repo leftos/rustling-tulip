@@ -113,7 +113,7 @@ impl RootView {
             .collect();
         let reads = self.history.request_missing(&expanded, &repos);
         for msg in reads {
-            self.send(msg);
+            self.send_to(&self.host_of_request(&msg), msg);
         }
     }
 
@@ -127,7 +127,7 @@ impl RootView {
             .filter(|key| self.history_expanded(key, focused))
             .collect();
         for msg in self.history.refresh(&expanded) {
-            self.send(msg);
+            self.send_to(&self.host_of_request(&msg), msg);
         }
         self.seed_history();
     }
@@ -147,13 +147,13 @@ impl RootView {
 
     fn click_more(&mut self, key: &ScKey) {
         if let Some(msg) = self.history.load_more(key) {
-            self.send(msg);
+            self.send_to(&self.host_of_repo(&key.repo_id), msg);
         }
     }
 
     fn click_commit(&mut self, key: &ScKey, sha: &str) {
         if let Some(msg) = self.history.select(key, sha) {
-            self.send(msg);
+            self.send_to(&self.host_of_repo(&key.repo_id), msg);
         }
     }
 

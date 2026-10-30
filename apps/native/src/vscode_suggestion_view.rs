@@ -11,6 +11,7 @@ use crate::fonts;
 use crate::notice_view::modal_panel;
 use crate::scan_key;
 use crate::session_menu::{backdrop, dialog_button};
+use crate::target::HostKey;
 use crate::vscode_suggestion::{
     BodyStyle, DISMISS_LABEL, SuggestionButton, TITLE, VscodeSuggestions, WATCH_TIP,
 };
@@ -118,7 +119,7 @@ impl RootView {
         let message = self.vscode_suggestions.message(choice);
         self.vscode_suggestions.dismiss();
         if let Some(message) = message {
-            self.send(message);
+            self.send_to(&HostKey::Local, message);
         }
         self.after_vscode_prompt(window, cx);
     }

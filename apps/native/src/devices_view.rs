@@ -17,6 +17,7 @@ use crate::devices::{
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::settings_view::SettingsTab;
+use crate::target::HostKey;
 use crate::{DANGER, MUTED, RootView};
 
 /// The devices model with the block confirm's keyboard focus.
@@ -38,13 +39,13 @@ impl RootView {
     /// Whether this client may list, block and forget devices: only on this
     /// PC's daemon, and only one that ends a blocked device's connections.
     fn devices_offered(&self) -> bool {
-        self.conn.target().is_local() && self.conn.supports(FEATURE_DEVICE_BLOCK)
+        self.conn().target().is_local() && self.conn().supports(FEATURE_DEVICE_BLOCK)
     }
 
     /// Asks this PC's daemon for its approved devices, when it blocks them.
     pub(crate) fn ask_devices(&self) {
         if self.devices_offered() {
-            self.send(ClientMessage::ListDevices);
+            self.send_to(&HostKey::Local, ClientMessage::ListDevices);
         }
     }
 
@@ -126,7 +127,7 @@ impl RootView {
     /// live connection to lose.
     fn forget_device(&self, device_id: &str) {
         tracing::info!(device = device_id, "devices: forgetting a device");
-        self.send(forget_message(device_id));
+        self.send_to(&HostKey::Local, forget_message(device_id));
     }
 
     /// Closes the confirm; Block first sends the block.
@@ -138,7 +139,7 @@ impl RootView {
     ) {
         if let Some(msg) = self.devices.model.press(pressed) {
             tracing::info!("devices: blocking a device");
-            self.send(msg);
+            self.send_to(&HostKey::Local, msg);
         }
         self.after_block_confirm_closed(window, cx);
     }

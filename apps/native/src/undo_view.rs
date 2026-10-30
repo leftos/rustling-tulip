@@ -11,6 +11,7 @@ use gpui::{
 use crate::buttons::{ButtonSize, outlined_button, primary_button};
 use crate::ellipsis::truncating;
 use crate::notice_view::{CLOSE_SIZE, toast_frame};
+use crate::target::HostKey;
 use crate::undo::{self, TabSnapshot, UndoEntry};
 use crate::{FOOTER_HEIGHT, RootView, tooltip};
 
@@ -127,7 +128,7 @@ impl RootView {
         }
         for msg in messages {
             self.tabs.note_layout_request(&msg);
-            self.send(msg);
+            self.send_to(&HostKey::Local, msg);
         }
         self.after_tabs_change(window, cx);
         cx.notify();

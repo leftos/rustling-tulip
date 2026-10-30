@@ -35,6 +35,7 @@ use crate::palette::{LINE, SUBTLE, SURFACE};
 use crate::popouts::PopoutKey;
 use crate::source_control::ScKey;
 use crate::syntax::{self, Highlighted};
+use crate::target::HostKey;
 use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
 /// The header's height: room for the compact change buttons.
@@ -677,13 +678,17 @@ impl RootView {
     /// `key`; the tab it names is activated when it answers.
     pub(crate) fn open_diff(&mut self, key: &ScKey, path: &str, against: Option<String>) {
         let id = self.diff_opens.open_id();
-        self.send(ClientMessage::OpenDiffTab {
-            id,
-            repo_id: key.repo_id.clone(),
-            path: path.to_owned(),
-            against,
-            worktree_path: key.worktree.clone(),
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::OpenDiffTab {
+                id,
+                repo_id: key.repo_id.clone(),
+                path: path.to_owned(),
+                against,
+                worktree_path: key.worktree.clone(),
+                host: None,
+            },
+        );
     }
 
     /// Gives every diff tab a view, which fetches its snapshot, and drops
@@ -699,6 +704,7 @@ impl RootView {
                     path,
                     against,
                     worktree_path,
+                    ..
                 } => Some((
                     tab.id.clone(),
                     DiffTarget {
@@ -746,7 +752,7 @@ impl RootView {
     fn fetch_diff(&mut self, view: &Entity<DiffTabView>, cx: &mut Context<Self>) {
         let id = self.diff_opens.snapshot_id();
         let msg = view.update(cx, |tab, _| tab.state.start_fetch(id));
-        self.send(msg);
+        self.send_to(&HostKey::Local, msg);
     }
 
     fn diff_views(&self) -> Vec<Entity<DiffTabView>> {

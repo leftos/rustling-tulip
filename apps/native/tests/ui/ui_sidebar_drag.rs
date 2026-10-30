@@ -203,6 +203,7 @@ fn assert_split_p2(h: &mut Harness, direction: SplitDirection, place: SplitPlace
                 direction: sent_direction,
                 place: sent_place,
                 new_session_id: Some(session),
+                host: None,
                 request_id: Some(_),
             }] if tab_id == "t1"
                 && pane_id == "p2"
@@ -571,6 +572,7 @@ fn leaf_dropped_on_a_pane_edge_places_it(cx: &mut TestAppContext) {
                 tab_id,
                 pane_id,
                 session_id: Some(session),
+                host: None,
             }] if tab_id == "t1" && pane_id == "p2" && session == "u"
         ),
         "the centre replaces what the pane shows: sent {sent:?}"
@@ -632,6 +634,7 @@ fn leaf_dropped_on_a_pill_places_it_in_that_tab(cx: &mut TestAppContext) {
                 tab_id,
                 pane_id,
                 session_id: Some(session),
+                host: None,
             }] if tab_id == "t2" && pane_id == "p3" && session == "u"
         ),
         "the leaf fills t2's empty pane: sent {sent:?}"

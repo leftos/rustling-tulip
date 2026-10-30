@@ -43,6 +43,7 @@ use crate::spawn_view::{
     dialog_title_bar, field, muted, segmented,
 };
 use crate::tabs::tab_session_counts;
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::window_title::compute_title;
 use crate::{Pick, RootView, TEXT, tooltip};
@@ -1035,7 +1036,7 @@ impl RootView {
 
     /// Whether the connected daemon stores a launch command.
     fn launch_command_supported(&self) -> bool {
-        self.conn.supports(FEATURE_AGENT_COMMANDS)
+        self.conn().supports(FEATURE_AGENT_COMMANDS)
     }
 
     /// Agent `agent`'s launch command as the daemon last reported it.
@@ -1068,7 +1069,7 @@ impl RootView {
     /// an older daemon. A connection that is not open says nothing either
     /// way.
     fn launch_command_unsupported(&self) -> bool {
-        self.conn.is_open() && !self.launch_command_supported()
+        self.conn().is_open() && !self.launch_command_supported()
     }
 
     /// Whether agent `agent`'s launch-command rows take input: the daemon
@@ -1343,12 +1344,15 @@ impl RootView {
             .applies
             .push_back((request_id.clone(), agent.clone()));
         tracing::info!(agent = %agent.0, %program, %args, %request_id, "settings: applying an agent's launch command");
-        self.send(ClientMessage::SetAgentCommand {
-            agent: agent.clone(),
-            program,
-            args,
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::SetAgentCommand {
+                agent: agent.clone(),
+                program,
+                args,
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// The daemon's launch commands. Each echo answers the oldest apply
@@ -1913,7 +1917,7 @@ impl RootView {
         tab.awaiting += 1;
         tab.saved = false;
         tracing::info!(?path, "settings: saving the worktrees root");
-        self.send(ClientMessage::SetWorktreesRoot { path });
+        self.send_to(&HostKey::Local, ClientMessage::SetWorktreesRoot { path });
     }
 
     fn reset_worktrees_root(&mut self, cx: &mut Context<Self>) {
@@ -1927,7 +1931,10 @@ impl RootView {
             tab.input.update(cx, |input, cx| input.set_text("", cx));
         }
         tracing::info!("settings: resetting the worktrees root");
-        self.send(ClientMessage::SetWorktreesRoot { path: None });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::SetWorktreesRoot { path: None },
+        );
     }
 
     /// Browse: the folder picked fills the path field, if the field is
@@ -2222,14 +2229,14 @@ impl RootView {
                 enabled = !status.enabled,
                 "settings: switching remote access"
             );
-            self.send(toggle_message(status));
+            self.send_to(&HostKey::Local, toggle_message(status));
         }
     }
 
     fn apply_remote_port(&self) {
         if let Some(message) = self.remote_apply_message() {
             tracing::info!("settings: applying the remote access port");
-            self.send(message);
+            self.send_to(&HostKey::Local, message);
         }
     }
 
@@ -2438,18 +2445,21 @@ impl RootView {
         while self.agent_setting_applies.len() > WAITING_SETTING_APPLIES {
             self.agent_setting_applies.pop_front();
         }
-        self.send(ClientMessage::SetAgentSettings {
-            agent: agent.clone(),
-            options,
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::SetAgentSettings {
+                agent: agent.clone(),
+                options,
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// Whether agent `agent`'s Settings rows take input: connected, this
     /// connection has heard the agents' Settings values, and the daemon
     /// lists the agent.
     fn agent_rows_live(&self, agent: &AgentId) -> bool {
-        self.conn.is_open()
+        self.conn().is_open()
             && self.agent_settings_received()
             && descriptor_for(self.agents(), agent).is_some()
     }
@@ -2543,7 +2553,7 @@ impl RootView {
     /// sent while the daemon is not connected.
     fn choose_keep_awake_mode(&mut self, mode: KeepAwakeMode) {
         if self.keep_awake.is_some() {
-            self.send(ClientMessage::SetKeepAwakeMode { mode });
+            self.send_to(&HostKey::Local, ClientMessage::SetKeepAwakeMode { mode });
         }
     }
 
@@ -2869,7 +2879,7 @@ impl RootView {
                 cx,
             ));
         // Save creates a missing folder on the host, so a typo is not refused.
-        let host_hint = self.conn.target().short_name().map(|host| {
+        let host_hint = self.conn().target().short_name().map(|host| {
             crate::tagged_text(
                 "settings-worktrees-host-hint",
                 format!("Created on {host} if it does not exist."),

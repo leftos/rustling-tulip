@@ -27,6 +27,7 @@ use crate::open_view::{Origin, Route, Then};
 use crate::palette::{ACCENT, INPUT_SELECTION, LINE, LINE_STRONG, SUBTLE, SURFACE};
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::{self, Highlighted, TokenClass};
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::viewer_find::{self, Match, Segment, Tint};
 use crate::viewer_md_view::markdown_toggle;
@@ -319,10 +320,13 @@ impl RootView {
             }
         };
         let id = self.viewer_opens.open_id(line);
-        self.send(ClientMessage::OpenViewerTab {
-            id,
-            path: normalised,
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::OpenViewerTab {
+                id,
+                path: normalised,
+            },
+        );
     }
 
     /// Gives every viewer tab its state, deriving where its file comes from,

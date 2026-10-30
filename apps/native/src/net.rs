@@ -1757,6 +1757,7 @@ mod tests {
             protocol_version: 23,
             supported_versions: vec![23],
             features: Vec::new(),
+            daemon_id: None,
         };
         let refusal = DaemonMessage::DevicePairFailed {
             reason: DEVICE_NOT_APPROVED.to_owned(),
@@ -1928,6 +1929,7 @@ mod tests {
             protocol_version: 23,
             supported_versions: vec![23],
             features: Vec::new(),
+            daemon_id: None,
         };
         let served = matches!(answer, Answer::Served) || token == ISSUED_TOKEN;
         let next = if served {
@@ -3303,6 +3305,7 @@ mod tests {
             protocol_version: 23,
             supported_versions: vec![23],
             features: Vec::new(),
+            daemon_id: None,
         }
     }
 

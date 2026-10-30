@@ -32,6 +32,11 @@ pub const FEATURE_DEVICE_PAIRING: &str = "device_pairing";
 /// offers Block only when the connected daemon lists it.
 pub const FEATURE_DEVICE_BLOCK: &str = "device_block";
 
+/// `Welcome.features` entry: the daemon names itself with a stable id
+/// (`Welcome.daemon_id`), kept across restarts, so a client can tell two
+/// connections to the same daemon apart from connections to two daemons.
+pub const FEATURE_DAEMON_ID: &str = "daemon_id";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -1755,6 +1760,9 @@ pub enum GridNode {
         /// Becomes `None` when the referenced session is removed.
         #[serde(default)]
         session_id: Option<String>,
+        /// The host key of a session on another daemon; `None` is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     Split {
         direction: SplitDirection,
@@ -1876,6 +1884,11 @@ pub enum TabContent {
         /// `against`) but different `worktree_path` values are separate tabs.
         #[serde(default)]
         worktree_path: Option<String>,
+        /// The host key of a session on another daemon; `None` is this daemon.
+        /// Part of the tab's identity: the same file diffed on two hosts is
+        /// two tabs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// A read-only file view. Identified by `path` alone, so opening the
     /// same path twice focuses the existing tab. The path is the
@@ -2985,6 +2998,11 @@ pub enum ClientMessage {
         against: Option<String>,
         #[serde(default)]
         worktree_path: Option<String>,
+        /// The host key of a session on another daemon; `None` is this daemon.
+        /// A foreign diff tab is stored without checking `repo_id`, since the
+        /// repo is registered on that other daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// Open (or focus, if one already exists) a viewer tab for the given
     /// path. The daemon broadcasts a `TabUpdated` when a new tab is
@@ -3305,6 +3323,9 @@ pub enum ClientMessage {
     CreateTab {
         name: Option<String>,
         initial_session_id: Option<String>,
+        /// The host key of a session on another daemon; `None` is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
         /// Echoed on the [`DaemonMessage::Error`] that refuses it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -3372,6 +3393,9 @@ pub enum ClientMessage {
         direction: SplitDirection,
         place: SplitPlace,
         new_session_id: Option<String>,
+        /// The host key of a session on another daemon; `None` is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
         /// Echoed on the [`DaemonMessage::Error`] that refuses it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -3439,6 +3463,9 @@ pub enum ClientMessage {
         tab_id: String,
         pane_id: String,
         session_id: Option<String>,
+        /// The host key of a session on another daemon; `None` is this daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// Rebuild a tab's grid using `layout`. Pane identities (and their
     /// `session_id` bindings) are preserved — only the surrounding split
@@ -3475,6 +3502,22 @@ pub enum ClientMessage {
         #[serde(default)]
         layout: Option<RearrangeLayout>,
         /// Echoed on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Close, in every client's layout, the panes showing sessions of another
+    /// daemon: each pane whose `host` equals `host` and whose `session_id` is
+    /// in `session_ids`, or every pane of `host` when `all` is set. A closed
+    /// pane goes the way a removed local session's pane goes: its sibling
+    /// fills the space, an emptied tab is removed and a tab still on its
+    /// picked layout is rebuilt. Idempotent: no matching pane changes
+    /// nothing and sends nothing.
+    ForgetHostSessions {
+        host: String,
+        session_ids: Vec<String>,
+        #[serde(default)]
+        all: bool,
+        /// Echoed on a [`DaemonMessage::Error`] answering it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -3888,6 +3931,10 @@ pub enum DaemonMessage {
         supported_versions: Vec<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         features: Vec<String>,
+        /// This daemon's stable id, kept across restarts
+        /// ([`FEATURE_DAEMON_ID`]). Absent from a daemon that has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_id: Option<String>,
     },
     AuthFailed {
         reason: String,
@@ -5293,7 +5340,7 @@ mod tests {
     }
 
     /// The tab-layout requests, each carrying `request_id`.
-    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 7] {
+    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 8] {
         let request_id = request_id.map(str::to_owned);
         [
             ClientMessage::SplitPane {
@@ -5302,11 +5349,19 @@ mod tests {
                 direction: SplitDirection::Vertical,
                 place: SplitPlace::Second,
                 new_session_id: None,
+                host: None,
                 request_id: request_id.clone(),
             },
             ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some("s1".to_owned()),
+                host: None,
+                request_id: request_id.clone(),
+            },
+            ClientMessage::ForgetHostSessions {
+                host: "ssh:devbox".to_owned(),
+                session_ids: vec!["s1".to_owned()],
+                all: false,
                 request_id: request_id.clone(),
             },
             ClientMessage::MergeTabs {
@@ -5353,7 +5408,8 @@ mod tests {
             | ClientMessage::MovePane { request_id, .. }
             | ClientMessage::SwapPanes { request_id, .. }
             | ClientMessage::ReorderTabs { request_id, .. }
-            | ClientMessage::ExtractToNewTab { request_id, .. } => request_id.as_deref(),
+            | ClientMessage::ExtractToNewTab { request_id, .. }
+            | ClientMessage::ForgetHostSessions { request_id, .. } => request_id.as_deref(),
             other => panic!("not a tab-layout request: {other:?}"),
         }
     }
@@ -5410,6 +5466,205 @@ mod tests {
         *touch = false;
         let json = serde_json::to_string(&msg).expect("serializes");
         assert!(!json.contains("touch"), "false is omitted: {json}");
+    }
+
+    #[test]
+    fn grid_node_pane_host_defaults_to_none_and_round_trips() {
+        let node: GridNode =
+            serde_json::from_str(r#"{"kind":"pane","pane_id":"p1","session_id":"s1"}"#)
+                .expect("a pane without host decodes");
+        assert!(
+            matches!(&node, GridNode::Pane { host: None, .. }),
+            "{node:?}"
+        );
+        let json = serde_json::to_string(&node).expect("serializes");
+        assert!(!json.contains("host"), "None is omitted: {json}");
+
+        let foreign = GridNode::Pane {
+            pane_id: "p2".to_owned(),
+            session_id: Some("s2".to_owned()),
+            host: Some("ssh:devbox".to_owned()),
+        };
+        let json = serde_json::to_string(&foreign).expect("serializes");
+        assert!(json.contains(r#""host":"ssh:devbox""#), "{json}");
+        let back: GridNode = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, foreign);
+    }
+
+    /// `CreateTab`, `SplitPane` and `ReplacePaneSession`, each naming `host`.
+    fn host_tab_requests(host: Option<&str>) -> [ClientMessage; 3] {
+        let host = host.map(str::to_owned);
+        [
+            ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: Some("s1".to_owned()),
+                host: host.clone(),
+                request_id: None,
+            },
+            ClientMessage::SplitPane {
+                tab_id: "t1".to_owned(),
+                pane_id: "p1".to_owned(),
+                direction: SplitDirection::Vertical,
+                place: SplitPlace::Second,
+                new_session_id: Some("s2".to_owned()),
+                host: host.clone(),
+                request_id: None,
+            },
+            ClientMessage::ReplacePaneSession {
+                tab_id: "t1".to_owned(),
+                pane_id: "p1".to_owned(),
+                session_id: Some("s3".to_owned()),
+                host,
+            },
+        ]
+    }
+
+    fn tab_request_host(msg: &ClientMessage) -> Option<&str> {
+        match msg {
+            ClientMessage::CreateTab { host, .. }
+            | ClientMessage::SplitPane { host, .. }
+            | ClientMessage::ReplacePaneSession { host, .. } => host.as_deref(),
+            other => panic!("not a host-carrying tab request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_tab_split_and_replace_carry_an_optional_host() {
+        for msg in host_tab_requests(None) {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            assert!(!json.contains("host"), "None is omitted: {json}");
+            let back: ClientMessage = serde_json::from_str(&json).expect("decodes without host");
+            assert_eq!(tab_request_host(&back), None, "{json}");
+        }
+        for msg in host_tab_requests(Some("tailnet:laptop")) {
+            let json = serde_json::to_string(&msg).expect("serializes");
+            assert!(json.contains(r#""host":"tailnet:laptop""#), "{json}");
+            let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+            assert_eq!(tab_request_host(&back), Some("tailnet:laptop"), "{json}");
+        }
+    }
+
+    #[test]
+    fn diff_tab_host_round_trips() {
+        let local: TabContent =
+            serde_json::from_str(r#"{"kind":"diff","repo_id":"r1","path":"a.rs","against":null}"#)
+                .expect("a diff tab without host decodes");
+        assert!(
+            matches!(&local, TabContent::Diff { host: None, .. }),
+            "{local:?}"
+        );
+        let json = serde_json::to_string(&local).expect("serializes");
+        assert!(!json.contains("host"), "None is omitted: {json}");
+
+        let foreign = TabContent::Diff {
+            repo_id: "r1".to_owned(),
+            path: "a.rs".to_owned(),
+            against: None,
+            worktree_path: None,
+            host: Some("ssh:devbox".to_owned()),
+        };
+        let json = serde_json::to_string(&foreign).expect("serializes");
+        assert!(json.contains(r#""host":"ssh:devbox""#), "{json}");
+        let back: TabContent = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, foreign);
+
+        let open = ClientMessage::OpenDiffTab {
+            id: "req-1".to_owned(),
+            repo_id: "r1".to_owned(),
+            path: "a.rs".to_owned(),
+            against: None,
+            worktree_path: None,
+            host: Some("ssh:devbox".to_owned()),
+        };
+        let json = serde_json::to_string(&open).expect("serializes");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(&back, ClientMessage::OpenDiffTab { host: Some(h), .. } if h == "ssh:devbox"),
+            "{json}"
+        );
+        let old: ClientMessage = serde_json::from_str(
+            r#"{"type":"open_diff_tab","id":"req-2","repo_id":"r1","path":"a.rs","against":null}"#,
+        )
+        .expect("an open_diff_tab without host decodes");
+        assert!(matches!(old, ClientMessage::OpenDiffTab { host: None, .. }));
+    }
+
+    #[test]
+    fn forget_host_sessions_round_trips_and_all_defaults_false() {
+        let decoded: ClientMessage = serde_json::from_str(
+            r#"{"type":"forget_host_sessions","host":"ssh:devbox","session_ids":["s1","s2"]}"#,
+        )
+        .expect("a forget without all or request_id decodes");
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::ForgetHostSessions { host, session_ids, all: false, request_id: None }
+                    if host == "ssh:devbox" && session_ids == &["s1", "s2"]
+            ),
+            "{decoded:?}"
+        );
+
+        let msg = ClientMessage::ForgetHostSessions {
+            host: "tailnet:laptop".to_owned(),
+            session_ids: Vec::new(),
+            all: true,
+            request_id: Some("req-4".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"forget_host_sessions""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::ForgetHostSessions { host, session_ids, all: true, request_id: Some(id) }
+                    if host == "tailnet:laptop" && session_ids.is_empty() && id == "req-4"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn welcome_daemon_id_is_optional_and_round_trips() {
+        assert_eq!(FEATURE_DAEMON_ID, "daemon_id");
+        let old: DaemonMessage =
+            serde_json::from_str(r#"{"type":"welcome","protocol_version":23}"#)
+                .expect("a welcome without daemon_id decodes");
+        assert!(
+            matches!(
+                old,
+                DaemonMessage::Welcome {
+                    daemon_id: None,
+                    ..
+                }
+            ),
+            "{old:?}"
+        );
+
+        let bare = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23],
+            features: Vec::new(),
+            daemon_id: None,
+        };
+        let json = serde_json::to_string(&bare).expect("serializes");
+        assert!(!json.contains("daemon_id"), "None is omitted: {json}");
+
+        let welcome = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23],
+            features: vec![FEATURE_DAEMON_ID.to_owned()],
+            daemon_id: Some("3f1c0c1e-8f5b-4d5e-9c1a-2b7d9e0a4c11".to_owned()),
+        };
+        let json = serde_json::to_string(&welcome).expect("serializes");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::Welcome { daemon_id: Some(id), .. }
+                    if id == "3f1c0c1e-8f5b-4d5e-9c1a-2b7d9e0a4c11"
+            ),
+            "{json}"
+        );
     }
 
     #[test]
@@ -6294,6 +6549,7 @@ mod tests {
                     first: Box::new(GridNode::Pane {
                         pane_id: "p1".to_string(),
                         session_id: Some("s1".to_string()),
+                        host: None,
                     }),
                     second: Box::new(GridNode::Split {
                         direction: SplitDirection::Vertical,
@@ -6301,10 +6557,12 @@ mod tests {
                         first: Box::new(GridNode::Pane {
                             pane_id: "p2".to_string(),
                             session_id: None,
+                            host: None,
                         }),
                         second: Box::new(GridNode::Pane {
                             pane_id: "p3".to_string(),
                             session_id: Some("s3".to_string()),
+                            host: None,
                         }),
                     }),
                 },
@@ -6358,6 +6616,7 @@ mod tests {
             GridNode::Pane {
                 pane_id: "p1".to_string(),
                 session_id: None,
+                host: None,
             }
         );
     }
@@ -6370,6 +6629,7 @@ mod tests {
             direction: SplitDirection::Horizontal,
             place: SplitPlace::Second,
             new_session_id: None,
+            host: None,
             request_id: None,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
@@ -7286,6 +7546,7 @@ mod tests {
             GridNode::Pane {
                 pane_id,
                 session_id,
+                ..
             } => {
                 assert_eq!(pane_id, "p1");
                 assert_eq!(session_id.as_deref(), Some("s1"));
@@ -7736,6 +7997,7 @@ mod tests {
             protocol_version: 23,
             supported_versions: vec![23, 22],
             features: vec![FEATURE_AGENT_COMMANDS.to_owned(), "later".to_owned()],
+            daemon_id: None,
         };
         let json = serde_json::to_value(&welcome).expect("encode welcome");
         assert_eq!(
@@ -7756,6 +8018,7 @@ mod tests {
             protocol_version: 23,
             supported_versions: vec![23],
             features: Vec::new(),
+            daemon_id: None,
         };
         let json = serde_json::to_value(&bare).expect("encode bare welcome");
         assert!(

@@ -34,6 +34,7 @@ use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
 use crate::spawns::{OpenIn, PaneAim};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{self, PaneBinding, TabsModel};
+use crate::target::HostKey;
 use crate::term::prompt_nav::Dir;
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
 use crate::{
@@ -233,7 +234,10 @@ impl RootView {
         }
         let changes = tabs::session_changes(&before, &after);
         for session_id in changes.detach {
-            self.send(ClientMessage::Detach { session_id });
+            self.send_to(
+                &self.host_of_session(&session_id),
+                ClientMessage::Detach { session_id },
+            );
         }
         to_sync.extend(changes.resync);
         for session_id in to_sync {
@@ -270,7 +274,8 @@ impl RootView {
         let mut shown = BTreeSet::new();
         for binding in bindings {
             if !self.panes.contains_key(&binding.pane_id) {
-                let slot = self.new_slot(&binding.pane_id, window, cx);
+                let slot =
+                    self.new_slot(&binding.pane_id, binding.session_id.as_deref(), window, cx);
                 self.panes.insert(binding.pane_id.clone(), slot);
             }
             let Some(slot) = self.panes.get_mut(&binding.pane_id) else {
@@ -287,8 +292,21 @@ impl RootView {
         shown
     }
 
-    fn new_slot(&self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) -> PaneSlot {
-        let (tx, now) = (self.tx.clone(), self.now.clone());
+    /// A terminal slot for `pane_id`, its input going to the host of
+    /// `session` (Local for a pane with no session yet).
+    fn new_slot(
+        &self,
+        pane_id: &str,
+        session: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PaneSlot {
+        let host = session.map_or(HostKey::Local, |id| self.host_of_session(id));
+        let tx = self.host_tx(&host).unwrap_or_else(|| {
+            tracing::warn!("no connection for host {host:?}; the pane's input goes nowhere");
+            futures::channel::mpsc::unbounded().0
+        });
+        let now = self.now.clone();
         let font = self.sidebar.ui_state().terminal_font.clone();
         let view = cx.new(|cx| TerminalPane::new(pane_id.to_owned(), tx, now, font, cx));
         let focus_in = Self::follow_focus_in(pane_id, &view, window, cx);
@@ -467,10 +485,13 @@ impl RootView {
         for view in self.pane_views(Some(session_id)) {
             view.update(cx, |pane, _| pane.expect_scrollback(&request_id));
         }
-        self.send(ClientMessage::LoadScrollback {
-            session_id: session_id.to_owned(),
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &self.host_of_session(session_id),
+            ClientMessage::LoadScrollback {
+                session_id: session_id.to_owned(),
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// Tells every terminal whether it drives its session's PTY size and
@@ -757,7 +778,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let slot_id = popouts::session_slot_id(session_id);
-        let mut slot = self.new_slot(&slot_id, window, cx);
+        let mut slot = self.new_slot(&slot_id, Some(session_id), window, cx);
         slot.session = Some(session_id.to_owned());
         self.panes.insert(slot_id.clone(), slot);
         self.apply_fonts_where(
@@ -805,9 +826,12 @@ impl RootView {
         }
         let listed = self.sidebar.session(session_id).is_some();
         if listed && self.pane_views(Some(session_id)).is_empty() {
-            self.send(ClientMessage::Detach {
-                session_id: session_id.to_owned(),
-            });
+            self.send_to(
+                &self.host_of_session(session_id),
+                ClientMessage::Detach {
+                    session_id: session_id.to_owned(),
+                },
+            );
         }
     }
 
@@ -928,6 +952,7 @@ impl RootView {
         let msg = ClientMessage::SplitPane {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
+            host: None,
             direction,
             place: if before {
                 SplitPlace::First
@@ -938,7 +963,7 @@ impl RootView {
             request_id: Some(crate::new_request_id()),
         };
         self.tabs.note_layout_request(&msg);
-        self.send(msg);
+        self.send_to(&HostKey::Local, msg);
     }
 
     /// Whether any repo is registered, which a repo-tied spawn needs.
@@ -959,7 +984,7 @@ impl RootView {
     #[must_use]
     pub fn no_tab_choices_shown(&self) -> bool {
         self.tabs.active_tab().is_none()
-            && self.conn.is_open()
+            && self.conn().is_open()
             && self.tabs.is_loaded()
             && self.sidebar.repos_loaded()
     }
@@ -1224,6 +1249,7 @@ impl RootView {
             GridNode::Pane {
                 pane_id,
                 session_id,
+                ..
             } => self.render_pane(tab_id, pane_id, session_id.as_deref(), cx),
             GridNode::Split {
                 direction,
@@ -1749,7 +1775,7 @@ impl RootView {
             LeafDrop::Move(drop) => self.send_pane_move(&drop, cx),
             LeafDrop::Send(message) => {
                 self.tabs.note_layout_request(&message);
-                self.send(*message);
+                self.send_to(&HostKey::Local, *message);
             }
         }
     }

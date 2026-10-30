@@ -339,6 +339,7 @@ impl ShadowPanes {
                 let new_pane = GridNode::Pane {
                     pane_id: stand_in,
                     session_id: Some(session_id.to_owned()),
+                    host: None,
                 };
                 split_pane(grid, &split, new_pane);
                 PaneTarget::Split(split)
@@ -353,6 +354,7 @@ fn fill_pane(grid: &mut GridNode, pane_id: &str, session_id: &str) {
         GridNode::Pane {
             pane_id: id,
             session_id: shown,
+            ..
         } => {
             if id == pane_id {
                 *shown = Some(session_id.to_owned());
@@ -375,6 +377,7 @@ fn split_pane(grid: &mut GridNode, split: &SplitTarget, new_pane: GridNode) -> b
             GridNode::Pane {
                 pane_id: String::new(),
                 session_id: None,
+                host: None,
             },
         );
         let (first, second) = match split.place {
@@ -550,6 +553,7 @@ mod tests {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
             session_id: Some(session_id.to_owned()),
+            host: None,
         })
     }
 
@@ -777,6 +781,7 @@ mod tests {
                 tab_id: "t2".to_owned(),
                 pane_id: "b".to_owned(),
                 session_id: Some("new".to_owned()),
+                host: None,
             })
         );
         assert!(placed.relayout);
@@ -823,7 +828,7 @@ mod tests {
         assert!(
             matches!(
                 only(&placed),
-                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), request_id: Some(_) }
+                ClientMessage::CreateTab { name: None, initial_session_id: Some(id), host: None, request_id: Some(_) }
                     if id == "new"
             ),
             "{:?}",
