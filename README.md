@@ -14,13 +14,19 @@ It is alpha software, Windows only for now.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
 - The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A Windows notification fires when a session needs you or finishes (skipped when you are already looking at it).
+- Each finished turn of a Claude session gets a one-line summary, kept across restarts, and the Finished notification is worded from it.
+- The Dashboard tab, opened from the activity rail, lists every agent session by status: what each is doing now, its context, recent activity, cost and running subagents, with a queue of the sessions waiting on you.
+- Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
 - Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
 - The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, and can show every session under a repo, only the busy ones, or just a count.
 - Repos sort with the ones that need you on top, by latest activity, or in your own order, and an All / Active switch hides the repos and workspaces with nothing running.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
 - In the terminal, copying from Claude Code's boxed panels leaves out the borders, file paths and URLs open with Ctrl+click, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
+- Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
 - When Claude exits, its pane stays a working shell.
 - Secret environment values you give a session are stored in Windows Credential Manager, never in a settings file.
+
+![The Dashboard tab: sessions grouped as Needs you, Working, Idle and Done, each with what it is doing now, its context, recent activity, cost and running subagents](docs/images/dashboard.png)
 
 ### Remote access over Tailscale
 
@@ -29,6 +35,13 @@ It is alpha software, Windows only for now.
 - A new device has to be approved on the host PC with a one-time pairing code. The Devices list shows who is connected and when each device was last seen, and Block cuts a device off until you forget it.
 - Ctrl+click a file path in a remote session's terminal, or use Fetch file…, to copy the file to this PC and open it. An HTML page brings its images and stylesheets with it.
 - When a host's session count changed since your last visit, the app offers to keep your layout, open all its sessions or start empty.
+
+### Remote access over SSH
+
+- Without Tailscale, connect to another Windows PC over SSH: Add SSH host… in the Connections picker takes an alias or user@host, and Test connection checks it first. SSH hosts are Windows PCs for now.
+- The installer puts its folder on your user PATH (and uninstall takes it off), so `rustling-tulipd` runs by name from a terminal or an SSH login.
+
+![The Connections picker with a saved SSH host and the Add an SSH host form after a passing Test connection](docs/images/connections-ssh.png)
 
 ![The source control panel beside the session panes: staged and unstaged changes by folder, stashes and history](docs/images/source-control.png)
 
@@ -76,17 +89,18 @@ It is alpha software, Windows only for now.
 2. Download `rustling-tulip-<version>-setup.exe` from the [latest release](https://github.com/leftos/rustling-tulip/releases/latest) and run it. It installs for your user only, with no administrator prompt, and can start the daemon when you log in.
 3. The installer is not code-signed yet, so Windows SmartScreen warns on first run: choose More info, then Run anyway.
 
-Remote access also needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it.
+Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
 
-## What's new in v0.4.0-alpha
+## What's new in v0.5.0-alpha
 
-- Pop a pane, a whole tab, a diff or a session out into its own window, and Dock back returns it. Pop-outs reopen where you left them on the next start.
-- The Needs You panel says what a waiting session asks: its question, the tool it wants to run, or the plan to approve.
-- On a remote host the preset wizard takes typed paths on that host.
-- Safer daemon connections: the app checks that the program on its port is really the daemon before sending your key, and a refused connection always shows why.
-- Many fixes to Recover, spawning, notifications and keyboard handling.
+- Connect to another Windows PC over SSH, without Tailscale: Add SSH host… and Test connection in the Connections picker. The installer now puts its folder on your user PATH.
+- A Dashboard tab, opened from the activity rail, lists every agent session by status with what it is doing, its context, cost and subagents, and a queue of the sessions waiting on you.
+- Each finished turn is summarized in one line, and notifications are worded from the summary.
+- Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
+- Terminal programs that ask for urxvt or pixel-precise mouse reporting now get it.
+- Many fixes to Settings, the installer, presets, worktree panes and logs.
 
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.4.0-alpha).
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.5.0-alpha).
 
 ## Building from source
 
