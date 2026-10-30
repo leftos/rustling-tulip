@@ -1,6 +1,6 @@
 # Spike: what the Claude Code TUI shows, for the chat mirror
 
-What a mirror of a live Claude Code session can see on the screen, in the OSC title, in hooks, in the transcript and in the MessageDisplay hook, and how each prompt is answered with keys. Input for the chat mirror (RT-51, `docs/plans/off-orca.md` SV.1–SV.3, the redesign of `docs/plans/conversation-view.md`) and for the steadier screen-based status (RT-74).
+What a mirror of a live Claude Code session can see on the screen, in the OSC title, in hooks, in the transcript and in the MessageDisplay hook, and how each prompt is answered with keys. Input for the chat mirror (RT-51, `docs/plans/off-orca.md` SV.1–SV.3, the chat mirror in `docs/architecture.md`) and for the steadier screen-based status (RT-74).
 
 Every claim below was seen in a run. The screens are in [chat-mirror-tui/screens/](./chat-mirror-tui/screens/): `<name>.txt` is the plain screen and `<name>.ansi` the styled one, `v…` from vanilla `claude`, `c…` from `cui` / `cui-ask`, `p…` from a control session with no extra hooks. The names below point at them.
 
@@ -112,7 +112,7 @@ Hooks and the transcript are identical; the screen differs in the user message (
 
 ## The agent in view (CV.23)
 
-What Claude Code's terminal shows while a subagent's transcript is in view, and how to leave and come back, for CV.24 of [conversation-view.md](../plans/conversation-view.md). The screens are fixtures `v160`–`v172` in `crates/daemon/src/screen/fixtures/`.
+What Claude Code's terminal shows while a subagent's transcript is in view, and how to leave and come back, for the return to the main conversation (`docs/architecture.md` "Chat mirror"). The screens are fixtures `v160`–`v172` in `crates/daemon/src/screen/fixtures/`.
 
 ### Setup
 

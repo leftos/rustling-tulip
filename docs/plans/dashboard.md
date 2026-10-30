@@ -290,7 +290,7 @@ The **status-change log** is the daemon's record of each session's and dispatch 
 
 ## The summarizer service
 
-`crates/daemon/src/summarizer/` owns every model call: one queue, one cache and one spend ledger. Its consumers are the summary ring, the snapshot's `summary`, the Finished and Needs you toasts, and the Needs You panel's Answer rows and line 2 (RT-423), and the chat summary view's stretch lines, which spend against the same daily cap and ledger ([conversation-view.md](./conversation-view.md), RT-111).
+`crates/daemon/src/summarizer/` owns every model call: one queue, one cache and one spend ledger. Its consumers are the summary ring, the snapshot's `summary`, the Finished and Needs you toasts, and the Needs You panel's Answer rows and line 2 (RT-423), and the chat summary view's stretch lines, which spend against the same daily cap and ledger ([architecture.md](../architecture.md) "Chat mirror", RT-111).
 
 ### Triggers
 

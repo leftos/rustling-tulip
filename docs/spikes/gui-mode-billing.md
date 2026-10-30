@@ -2,7 +2,7 @@
 
 Measured 2026-09-28 with Claude Code 2.1.284, on a Max plan with claude.ai login (`claude auth status`: `authMethod: claude.ai`, `subscriptionType: max`), with no `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or Bedrock/Vertex variable set.
 
-**Question.** Is GUI mode, the conversation view in [borrowed-ideas.md](../plans/borrowed-ideas.md) that drives Claude through `claude --print --verbose --input-format stream-json --output-format stream-json`, billed against the subscription or as API credits?
+**Question.** Is GUI mode, a conversation view that drives Claude through `claude --print --verbose --input-format stream-json --output-format stream-json`, billed against the subscription or as API credits?
 
 **Answer.** Today it runs on the subscription. The terms, though, only cover personal use of the tool. Run GUI mode through the same logged-in `claude` binary the user runs themselves; never ship a build that signs other people in or routes their requests through a plan.
 

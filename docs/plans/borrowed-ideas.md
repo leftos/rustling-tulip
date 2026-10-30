@@ -8,17 +8,6 @@ Features from three open-source agent managers and terminals that rustling-tulip
 
 Each idea taken up has its own subplan, linked from its entry, which holds its open work and steps; this file keeps where each idea came from and the rulings made when it was picked.
 
-- **Conversation view (GUI mode).** Show a Claude session as a chat instead of the terminal UI: the user's messages, the agent's answers and reasoning, one card per tool call, and permission requests and questions answered with buttons.
-
-  Model, effort and permission mode can change without a restart, and messages typed mid-turn are queued. A session switches between terminal and conversation view, keeping its conversation: the agent restarts with `--resume`, and VelaTerm asks first if a turn is running.
-
-  VelaTerm drives Claude as a two-way protocol peer with `claude --print --verbose --input-format stream-json --output-format stream-json` (`src-tauri/src/agent/chat/protocol.rs` near line 56, the engine in `chat/engine.rs`), and Codex through its app-server.
-
-  The user guide is `docs/manuals/conversation-view_*.md`. rustling-tulip's headless mode (`crates/daemon/src/headless.rs`) already parses the stream-json output. What's missing is the two-way input, the permission prompts and the chat UI in the native client. Plan: [conversation-view.md](./conversation-view.md).
-  - Billing: measured in [gui-mode-billing.md](../spikes/gui-mode-billing.md). It runs on the subscription's usage windows today (`apiKeySource: none`, the plan's 5-hour and 7-day windows in `rate_limit_event`). The CLI counts it as SDK-style use, which a paused Anthropic billing change would move to a separate credit. The terms allow it for personal use only, so keep the terminal UI as the fallback.
-  - How permission requests reach the client: the stream-json permission-prompt tool, or a hook.
-  - How the native client renders a chat: a new view kind next to the terminal and the diff tabs.
-  - Ruling (user, 2026-09-28): a session remembers its last view (kept on the daemon's session); a new Claude session starts in the terminal view.
 - **"Needs You" view.** One place listing every session waiting on the user, grouped as Needs you / Working / Done / Idle, where clicking a card focuses that session's pane. Orca ships this as an experimental kanban board (`onorca.dev/docs/model/agents-sessions`). It's more useful once hook-reported status exists. NY.1–NY.3 have landed; the rest is in [needs-you.md](./needs-you.md).
   - Ruling (user, 2026-09-28): a view on the native client's activity rail, beside Sessions and Source control, not a sidebar filter.
 - **Link a worktree to an issue or PR.** When spawning, paste or search a GitHub issue or PR URL; the session and its sidebar row show the link, and the PR's state once it exists. Orca does this for GitHub, GitLab, Linear and Jira (`onorca.dev/docs/model/worktrees`). It sits next to the presets' GitHub-issue-range prompts. Plan: [issue-link.md](./issue-link.md).

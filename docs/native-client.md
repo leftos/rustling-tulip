@@ -392,13 +392,6 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 - **Prompt jumps** (`prompt_nav.rs`): two header buttons on Interactive and PlainShell panes, between "Move this pane to a new tab" and close, `↑` ("Previous prompt", `pane-prompt-prev-<pane>`) and `↓` ("Next prompt", `pane-prompt-next-<pane>`). Previous scrolls the nearest sent prompt above the top row to the top; Next scrolls to the next prompt, or from the newest to the live bottom.
 
   A prompt is a Claude pane's `❯ ` row (slash commands included; the live prompt box and `❯ N.` dialog options excluded) or a plain shell's OSC 133 prompt mark; the client scans its own grid, so the daemon is not involved. The buttons scroll the terminal directly (nothing reaches the child, even under mouse reporting) and close an open shell-dot menu. With nowhere to go a button is drawn at 45% opacity, never hidden, so the buttons never move; there is no keyboard shortcut.
-- **Chat pane** (`chat.rs`, `chat_view.rs`): an interactive agent session's pane header has a "Chat" button (tip "Show this session's chat") that swaps the pane body for the session's chat; in Chat mode it reads "Terminal" (tip "Show this session's terminal") and the previous and next prompt buttons are hidden. A pop-out's toolbar has no toggle, and a pop-out draws the pane's mode. The header's right-click menu has the same switch ("Show chat" / "Show terminal"), and `Ctrl+Shift+M` switches the focused pane (in a pop-out, the pane that window draws); the key is always taken and never reaches the terminal. Each switch becomes the session's remembered view (`native-ui.json` `session_views`, per host): a new pane on that session, a session pop-out included, opens in it, a new session opens in Terminal, and a session that offers no chat is remembered as Terminal.
-
-  The body is a scrolling chat that follows the bottom until scrolled up, on the shared scrollbar: user bubbles on the right (pending ones dimmed), Markdown answers (a live answer has a blue border, a cursor and "writing · N lines"), "Thought for Ns", tool cards (name, one-liner, running, done or failed; a click shows Input and Result or Error), system pills, receipts ("question — answer"), "Worked for …" and "N earlier messages". Muted lines read "Loading the chat…" and "No messages yet". In an answer only `http`/`https` links are clickable (they open in the browser); file and anchor links are plain text.
-
-  A Chat-mode pane keeps its terminal fed but undrawn, never resizes the PTY and takes no keys; toggling back focuses the terminal. A popped-out Chat pane never focuses its hidden terminal either. A pane rebound to another session, or emptied, goes back to Terminal; a pane a reconnect unbound keeps Chat only when the reconnect binds it to the same session.
-
-  `LoadChat` goes out when the first Chat pane of a session appears and again after a reconnect; `UnloadChat` when the last Chat pane goes (toggle back, close, rebind, or the session pop-out closing). Neither is sent for a Welcome or after a refusal: a session that offers no chat shows its terminal under the muted line "This session offers no chat, so it shows its terminal", and a load that fails for another reason shows "Could not load the chat: {the daemon's message}" the same way, with no toast.
 - **Theme and fonts**: every UI colour is a token in `palette.rs`, the built-in look's data, read at runtime through a `UiTheme` (`ui_theme.rs`: one field per token, `UiTheme::CONTRAST` the Contrast built-in); views call `theme(cx)` for the active one (an `ActiveTheme` global set in `RootView::with_transport`, changed by `RootView::set_theme`, which refreshes every window, the way `UiFont` works), and a function with no `cx` takes `&UiTheme`.
 
   The default theme is Nord (`theme_store::DEFAULT_ID`); a first launch, or a `native-ui.json` with no `theme`, draws it.
@@ -527,6 +520,46 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 
   The leaf shows a 12 px muted crossed-out pulse in the `!` slot, tooltip "Not counted as busy" (`tabs.rs` `tab_session_counts`, `sidebar.rs` `shows_attention`). Restart and Resume keep the flag (`DuplicateSession.carry_busy_excluded: true`); Duplicate starts the copy counted. The `unseen` mark and the status glyph are unchanged.
 - **Appearance levels**: accent, shell background, font family, size and bold resolve session → repo/workspace → app → built-in, each shown with its source. Font size also has a per-tab override (Ctrl+Shift+= / −) above the session level (Ctrl+= / −); Ctrl+0 clears both.
+
+## Chat and summary panes
+
+A pane showing an interactive agent session that offers a chat has three views: Terminal, Chat and Summary. The view is the pane's, so a terminal pane and a chat pane of one session can be open at once; the session itself does not change. The daemon side is in [architecture.md](./architecture.md) "Chat mirror" (`chat.rs` is the pure model, `chat_view.rs` the pane body, `chat_cards.rs` the cards and composer, `summary.rs` and `summary_view.rs` the summary, `work_strip.rs` the strip).
+
+- **Switching**: the pane header starts with a Terminal | Chat | Summary control (`pane-view-<view>-<pane>`, tips "Show this session's terminal", "Show this session's chat", "Show this session's summary") with the shown view marked, and the header's right-click menu has the other two as "Show terminal", "Show chat" and "Show summary".
+
+  `Ctrl+Shift+M` switches the focused pane between terminal and chat and leaves the summary for the terminal; `Ctrl+Shift+U` opens the summary and leaves it for the terminal. In a pop-out the keys act on the pane that window draws. Both keys are always taken and never reach the terminal. A pop-out's toolbar has no control, and a pop-out draws the pane's view.
+- **Remembered view**: each switch becomes the session's remembered view in `native-ui.json` (`session_views`, per host, `"chat"` or `"summary"`; a terminal is not written). A new pane on that session, a session pop-out included, opens in it, and a new session opens in Terminal.
+
+  A session that offers no chat is remembered as Terminal; a pane rebound to another session, or emptied, goes back to Terminal, and a pane a reconnect unbound keeps its view only when the reconnect binds it to the same session.
+- **Terminal under a chat or summary**: the pane keeps its terminal fed but undrawn, never resizes the PTY and takes no keys; switching back focuses the terminal. A popped-out chat pane never focuses its hidden terminal either.
+- **Loading**: `LoadChat` goes out when the first Chat pane of a session appears and again after a reconnect, and `UnloadChat` when the last one goes (switch away, close, rebind, or the session pop-out closing); a Summary pane does the same with `LoadSummary` and `UnloadSummary`. Neither is sent for a Welcome or after a refusal.
+
+  A session that offers no chat shows its terminal under the muted line "This session offers no chat, so it shows its terminal", and a load that fails for another reason shows "Could not load the chat: {the daemon's message}" the same way, with no toast.
+- **Chat body**: a scrolling chat that follows the bottom until scrolled up, on the shared scrollbar.
+
+  User bubbles sit on the right (a pending one dimmed until its transcript record arrives); answers are Markdown through `md_blocks.rs` (a live answer has a blue border, a cursor and "writing · N lines", and only `http`/`https` links are clickable).
+
+  "Thought for Ns" is one muted line; a tool card shows its name, one-liner and running, done or failed state, and a click shows Input and Result or Error; system rows are muted pills, a receipt reads "question — answer", a turn's duration reads "Worked for …" and older entries read "N earlier messages".
+
+  Muted lines read "Loading the chat…" and "No messages yet".
+- **Prompt cards**: one card for the session's current prompt sits over the chat, with any others stacked behind it as ghosts.
+
+  A permission card offers Allow once, Always allow (when the dialog offers it; its tooltip names the rule and where it is saved) and Deny; an AskUserQuestion card shows one question at a time with its options, Type something, Back, Skip and Next; Review offers Submit and Cancel; plan approval offers Approve (auto), Approve (manual edits) and "Tell <agent> what to change"; folder trust offers Trust this folder and Exit.
+
+  A Heads up notice has no buttons: it is pinned over the composer with its digit keys until answered. A prompt the chat cannot answer (previews, Rewind, the detailed transcript, `/model`, `/btw`) says "Open the terminal to answer this".
+- **Card keys**: a bare digit answers from an empty composer, and only 400 ms after the card appeared (a digit inside that grace is dropped); Esc denies a permission card; Ctrl+Enter allows once from an empty composer; Ctrl+Shift+Enter always allows. A submitted card stays, busy ("Sending…"), until the screen shows its dialog gone, then collapses to its receipt. A card answered in the terminal or on another device closes with "Answered elsewhere".
+
+  A refused answer frees its card with the daemon's reason on it, with no toast.
+- **Composer**: a multi-line field under the chat ("Send a message (Ctrl+Enter)"); Ctrl+Enter sends, during a turn too, where the message waits in the CLI's own queue. While a card is up and the field holds text, the card offers the ride-on answers "Yes, and tell <agent> this" and "No, and tell <agent> this", and the text goes with the answer. A refused send gives its text back to the field, before anything typed since, with the daemon's reason under the composer.
+
+  A note replaces the field's ability to send while the screen cannot take a message: "Not connected", "Sending…", "The prompt box has a draft. Send or clear it in the terminal first.", "<overlay> is open in the terminal. Close it there to send." or "Can't read the prompt box right now.".
+- **Notices**: the daemon's `SessionNotice` raises an info toast: "<agent> is waiting in the main conversation." when the daemon did not return the terminal to main because a stash was already held and the box holds a draft, or "Your draft for <agent> is back in the main conversation: that agent has finished.".
+- **Running-work strip**: a row over the composer of the chat and summary views while the session has subagents, background shells or a wakeup, folded from `ChatWork` (`RunningWork` in `chat.rs`, drawn by `work_strip.rs`). Its present parts are joined with " · ": "1 subagent" or "N subagents", "1 background shell (<command cut to 24 characters>, <age>)" or "N background shells (oldest <age>)", and "wakeup in <time>", or "wakeup due" once the time has passed.
+
+  A segment's tooltip lists its items: a shell's full command, "<agent type>: <description>" for a subagent, or "Counted from the screen; no details reported yet" for an item only the screen counted. The strip repaints every second while a figure reads in seconds, when a countdown drops under a minute, and every 30 s otherwise. Nothing in it responds to a click yet.
+- **Summary body**: the current prompt's card pinned on top, then one line per stretch of work in the daemon's order, and under them the strip and the composer. A click on a line opens it into the chat entries of its stretch (the same rows as the chat, "Earlier messages aren't loaded" when its first ones are no longer held) and a second click closes it; opening or closing moves no scroll. The pane follows new lines while it sat at the bottom.
+
+  Muted lines read "Loading the summary…" and "Nothing to summarize yet".
 
 ## Source control and diffs
 
