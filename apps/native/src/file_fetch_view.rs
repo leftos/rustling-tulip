@@ -20,6 +20,7 @@ use crate::links::TerminalLink;
 use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{OpenAction, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Origin, Route, Then};
+use crate::target::HostKey;
 
 /// The detail of the toast refusing a fetched file's open of a path outside
 /// the folder for fetched files.
@@ -125,11 +126,11 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Result<String, Refusal> {
         let name = file_fetch::file_name(&request.rel_path).to_owned();
-        let (host, target) = self.fetch_target(&request)?;
+        let (host_key, host, target) = self.fetch_target(&request)?;
         let repo_id = request.repo_id.clone();
         let worktree_path = request.worktree_path.clone();
         let rel_path = request.rel_path.clone();
-        let mut entry = FetchEntry::new(host.clone(), request, target);
+        let mut entry = FetchEntry::new(host_key.clone(), host.clone(), request, target);
         if let Some(group) = group {
             entry = entry.in_group(group);
         }
@@ -146,7 +147,7 @@ impl RootView {
         };
         tracing::info!(%id, %host, rel = %rel_path, popup, "fetching a file");
         self.send_to(
-            &self.host_of_repo(&repo_id),
+            &host_key,
             ClientMessage::FetchFile {
                 id: id.clone(),
                 repo_id,
@@ -173,15 +174,17 @@ impl RootView {
         Ok(id)
     }
 
-    /// The download folder of this host and where `request`'s file lands in
-    /// it.
+    /// The host that registered `request`'s repo, its download folder and
+    /// where `request`'s file lands in it.
     ///
     /// # Errors
     /// The [`Refusal`] for the local daemon, a refused path or a missing
     /// download folder.
-    fn fetch_target(&self, request: &FetchRequest) -> Result<(String, PathBuf), Refusal> {
+    fn fetch_target(&self, request: &FetchRequest) -> Result<(HostKey, String, PathBuf), Refusal> {
         let name = file_fetch::file_name(&request.rel_path);
-        let Some(host) = file_fetch::host_folder(self.conn().target()) else {
+        let host_key = self.host_of_repo(&request.repo_id);
+        let conn = self.conn_of(&host_key).unwrap_or_else(|| self.conn());
+        let Some(host) = file_fetch::host_folder(conn.target()) else {
             tracing::warn!(rel = %request.rel_path, "refusing a file fetch from the local daemon");
             return Err(Refusal {
                 kind: ToastKind::Warning,
@@ -196,7 +199,7 @@ impl RootView {
             Err(err) => Err(format!("No folder for fetched files: {err}")),
         };
         match target {
-            Ok(target) => Ok((host, target)),
+            Ok(target) => Ok((host_key, host, target)),
             Err(reason) => {
                 tracing::warn!(rel = %request.rel_path, "refusing a file fetch: {reason}");
                 Err(Refusal {
@@ -211,7 +214,7 @@ impl RootView {
     /// Starts the media fetch `request` for the page `page_id`, quietly: a
     /// refused path fails it, and a file already fetching counts as landed.
     fn start_child(&mut self, page_id: &str, request: FetchRequest) {
-        let (host, target) = match self.fetch_target(&request) {
+        let (host_key, host, target) = match self.fetch_target(&request) {
             Ok(found) => found,
             Err(refusal) => {
                 tracing::warn!(
@@ -227,13 +230,16 @@ impl RootView {
         let repo_id = request.repo_id.clone();
         let worktree_path = request.worktree_path.clone();
         let rel_path = request.rel_path.clone();
-        let Some(id) = self.fetches.insert_child(page_id, host, request, target) else {
+        let Some(id) = self
+            .fetches
+            .insert_child(page_id, host_key.clone(), host, request, target)
+        else {
             tracing::info!(page = page_id, rel = %rel_path, "a page's media file is already fetching");
             return;
         };
         tracing::info!(%id, page = page_id, rel = %rel_path, "fetching a page's media file");
         self.send_to(
-            &self.host_of_repo(&repo_id),
+            &host_key,
             ClientMessage::FetchFile {
                 id,
                 repo_id,
@@ -459,7 +465,7 @@ impl RootView {
         tracing::info!(id, rel = %entry.request().rel_path, "cancelled a file fetch");
         abort_writer(id, &entry);
         self.send_to(
-            &self.host_of_repo(&entry.request().repo_id),
+            entry.host_key(),
             ClientMessage::CancelFetch { id: id.to_owned() },
         );
         true
@@ -498,7 +504,7 @@ impl RootView {
     /// Folds in a fetch's reply; returns whether it was one.
     pub(crate) fn on_fetch_message(
         &mut self,
-        _host: &crate::target::HostKey,
+        _host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -696,7 +702,7 @@ impl RootView {
         abort_writer(id, &entry);
         if cancel {
             self.send_to(
-                &self.host_of_repo(&entry.request().repo_id),
+                entry.host_key(),
                 ClientMessage::CancelFetch { id: id.to_owned() },
             );
         }
@@ -718,18 +724,20 @@ impl RootView {
         );
     }
 
-    /// The connection closed or moved to another daemon: every fetch still
-    /// receiving ends, its part file deleted; one whose `Done` reached its
-    /// writer ends by the writer's result. The Fetch file… dialog's own
-    /// fetch says so in the dialog, which the connection overlay closes. A
-    /// saved page waiting on its media does not open, and one toast says so
-    /// for the page and its media fetches.
+    /// `host`'s connection closed or moved to another daemon: every fetch
+    /// from it still receiving ends, its part file deleted; one whose `Done`
+    /// reached its writer ends by the writer's result. The Fetch file…
+    /// dialog's own fetch says so in the dialog, which the connection
+    /// overlay closes. A saved page waiting on its media does not open, and
+    /// one toast says so for the page and its media fetches. Other hosts'
+    /// fetches go on.
     pub(crate) fn end_fetches_on_disconnect(
         &mut self,
+        host: &HostKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for (id, entry) in self.fetches.take_unfinished() {
+        for (id, entry) in self.fetches.take_unfinished(host) {
             let reason = format!("The connection to {} closed.", entry.host());
             tracing::warn!(%id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");
             abort_writer(&id, &entry);

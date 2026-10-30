@@ -37,27 +37,21 @@ impl RootView {
     /// The panel's sections, and whether they are a focused session's
     /// members.
     fn history_sections(&self) -> (Vec<Section>, bool) {
-        let members = self.sc_focused_members();
-        let shown = sections(
-            self.sidebar.repos(),
-            members,
-            self.sidebar.source_control().pinned_repo.as_deref(),
-        );
-        (shown, members.is_some())
+        (self.sc_sections(), self.sc_focused_members().is_some())
     }
 
     fn history_expanded(&self, key: &ScKey, session_focused: bool) -> bool {
         !self
             .sidebar
             .source_control()
-            .is_history_collapsed(key, session_focused)
+            .is_history_collapsed(&self.sc_stored_key(key), session_focused)
     }
 
     /// Every section's History block, in section order; none with no repo
     /// registered.
     #[must_use]
     pub fn history_panel(&self) -> Vec<HistoryBlock> {
-        if self.sidebar.repos().is_empty() {
+        if self.sc_repos().is_empty() {
             return Vec::new();
         }
         let (shown, focused) = self.history_sections();
@@ -106,7 +100,7 @@ impl RootView {
         self.sc_layout.blocks.retain(|id, _| ids.contains(id));
         let visible = self.sidebar.activity() == Activity::SourceControl
             && !self.sidebar.is_collapsed()
-            && !self.sidebar.repos().is_empty();
+            && !self.sc_repos().is_empty();
         if !visible {
             return;
         }
@@ -143,7 +137,11 @@ impl RootView {
     fn toggle_history(&mut self, key: &ScKey) {
         let (_, focused) = self.history_sections();
         let collapse = self.history_expanded(key, focused);
-        if self.sidebar.set_sc_collapsed(key, Part::History, collapse) {
+        let stored = self.sc_stored_key(key);
+        if self
+            .sidebar
+            .set_sc_collapsed(&stored, Part::History, collapse)
+        {
             self.save_ui();
         }
         if collapse {
@@ -202,7 +200,11 @@ impl RootView {
     pub(crate) fn drag_history_list(&mut self, key_id: &str, y: f32) {
         if let Some(&(top, height)) = self.sc_layout.blocks.get(key_id) {
             let next = clamp_split(y - top, height, MIN_LIST_SIDE);
-            self.sidebar.set_sc_history_list_height(key_id, next);
+            let stored = match &self.sc_shown {
+                crate::target::HostKey::Local => key_id.to_owned(),
+                crate::target::HostKey::Remote(name) => format!("{name}::{key_id}"),
+            };
+            self.sidebar.set_sc_history_list_height(&stored, next);
         }
     }
 
@@ -351,7 +353,11 @@ impl RootView {
             return content.child(list.flex_1()).into_any_element();
         };
         let total = self.sc_layout.blocks.get(id).map(|(_, height)| *height);
-        let height = list_height(self.sidebar.source_control(), key, total);
+        let height = list_height(
+            self.sidebar.source_control(),
+            &self.sc_stored_key(key),
+            total,
+        );
         let active = matches!(&self.drag, Some(Drag::HistoryList(dragged)) if dragged == id);
         let name = format!("sc-history-split-{id}");
         let drag_id = id.to_owned();

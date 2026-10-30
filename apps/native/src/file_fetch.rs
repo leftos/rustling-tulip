@@ -14,7 +14,7 @@ use crate::html_media::{
     MAX_MEDIA_BATCH_BYTES, MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE, MEDIA_FETCHES_IN_FLIGHT,
 };
 use crate::open::OpenJob;
-use crate::target::Target;
+use crate::target::{HostKey, Target};
 
 /// A file under a repo root or one of its worktrees on the remote host, to
 /// fetch onto this PC.
@@ -556,6 +556,8 @@ impl MediaBatch {
 /// A fetch in flight.
 #[derive(Debug)]
 pub struct FetchEntry {
+    /// The host whose daemon sends the file.
+    host_key: HostKey,
     host: String,
     request: FetchRequest,
     target: PathBuf,
@@ -591,10 +593,12 @@ fn target_key(target: &Path) -> String {
 }
 
 impl FetchEntry {
-    /// A fetch of `request` from `host`, saved at `target`.
+    /// A fetch of `request` from `host_key`'s daemon, whose download folder
+    /// is `host`, saved at `target`.
     #[must_use]
-    pub fn new(host: String, request: FetchRequest, target: PathBuf) -> Self {
+    pub fn new(host_key: HostKey, host: String, request: FetchRequest, target: PathBuf) -> Self {
         Self {
+            host_key,
             host,
             request,
             target,
@@ -677,6 +681,12 @@ impl FetchEntry {
     #[must_use]
     pub fn host(&self) -> &str {
         &self.host
+    }
+
+    /// The host whose daemon sends the file.
+    #[must_use]
+    pub fn host_key(&self) -> &HostKey {
+        &self.host_key
     }
 
     #[must_use]
@@ -819,16 +829,21 @@ impl FetchRegistry {
         self.entries.remove(id)
     }
 
-    /// Ends every fetch that is not finishing, and every saved page waiting
-    /// on its media; a finishing one ends by its writer's result, marked as
-    /// having lost its connection.
-    pub fn take_unfinished(&mut self) -> Vec<(String, FetchEntry)> {
+    /// Ends every fetch from `host` that is not finishing, and every saved
+    /// page from it waiting on its media; a finishing one ends by its
+    /// writer's result, marked as having lost its connection. Other hosts'
+    /// fetches go on.
+    pub fn take_unfinished(&mut self, host: &HostKey) -> Vec<(String, FetchEntry)> {
         let ended = self
             .entries
-            .extract_if(|_, entry| !entry.finishing || entry.batch.is_some())
+            .extract_if(|_, entry| {
+                entry.host_key == *host && (!entry.finishing || entry.batch.is_some())
+            })
             .collect();
         for entry in self.entries.values_mut() {
-            entry.connection_lost = true;
+            if entry.host_key == *host {
+                entry.connection_lost = true;
+            }
         }
         ended
     }
@@ -896,11 +911,12 @@ impl FetchRegistry {
     pub fn insert_child(
         &mut self,
         page_id: &str,
+        host_key: HostKey,
         host: String,
         request: FetchRequest,
         target: PathBuf,
     ) -> Option<String> {
-        let mut entry = FetchEntry::new(host, request, target);
+        let mut entry = FetchEntry::new(host_key, host, request, target);
         entry.parent = Some(page_id.to_owned());
         let inserted = self.insert(entry).ok();
         if inserted.is_none() {
@@ -958,7 +974,7 @@ mod tests {
         sanitize_segment,
     };
     use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
-    use crate::target::Target;
+    use crate::target::{HostKey, Target};
 
     /// A fresh folder under the system temp dir, removed on drop.
     struct TempDir(PathBuf);
@@ -1247,7 +1263,7 @@ mod tests {
             open_when_done: false,
         };
         let target = download_path(Path::new("root"), host, "repo", rel).expect("a valid path");
-        FetchEntry::new(host.to_owned(), request, target)
+        FetchEntry::new(HostKey::Local, host.to_owned(), request, target)
     }
 
     #[test]
@@ -1314,13 +1330,38 @@ mod tests {
             .mark_finishing();
 
         let ended: Vec<String> = registry
-            .take_unfinished()
+            .take_unfinished(&HostKey::Local)
             .into_iter()
             .map(|(id, _)| id)
             .collect();
 
         assert_eq!(ended, [running]);
         assert!(registry.get(&finishing).is_some(), "the writer decides it");
+    }
+
+    #[test]
+    fn a_hosts_disconnect_ends_only_its_own_fetches() {
+        let remote = HostKey::Remote("box".to_owned());
+        let mut registry = FetchRegistry::new("t");
+        let local = registry.insert(entry("host", "a.txt")).expect("starts");
+        let theirs = registry
+            .insert(FetchEntry::new(
+                remote.clone(),
+                "box".to_owned(),
+                entry("box", "b.txt").request().clone(),
+                PathBuf::from("box/b.txt"),
+            ))
+            .expect("starts");
+
+        let ended: Vec<String> = registry
+            .take_unfinished(&remote)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        assert_eq!(ended, [theirs]);
+        let kept = registry.get(&local).expect("This PC's fetch goes on");
+        assert!(!kept.connection_lost(), "its connection still stands");
     }
 
     #[test]
@@ -1406,7 +1447,13 @@ mod tests {
         let (next, group) = registry.next_reading(&id).expect("moves on");
         let last = registry
             .insert(
-                FetchEntry::new("host".to_owned(), next, PathBuf::from("b.txt")).in_group(group),
+                FetchEntry::new(
+                    HostKey::Local,
+                    "host".to_owned(),
+                    next,
+                    PathBuf::from("b.txt"),
+                )
+                .in_group(group),
             )
             .expect("the next reading starts");
 
@@ -1505,7 +1552,7 @@ mod tests {
         let target = download_path(Path::new("root"), "host", "repo", &child.rel_path)
             .expect("a valid path");
         let child_id = registry
-            .insert_child(&id, "host".to_owned(), child, target)
+            .insert_child(&id, HostKey::Local, "host".to_owned(), child, target)
             .expect("the child starts");
         assert_eq!(
             registry.get(&child_id).and_then(FetchEntry::parent),
@@ -1561,7 +1608,7 @@ mod tests {
         let target = download_path(Path::new("root"), "host", "repo", &child.rel_path)
             .expect("a valid path");
         assert_eq!(
-            registry.insert_child(&id, "host".to_owned(), child, target),
+            registry.insert_child(&id, HostKey::Local, "host".to_owned(), child, target),
             None,
             "the file is already fetching"
         );

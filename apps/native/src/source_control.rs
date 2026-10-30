@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::target::HostKey;
+
 /// What a section reads: a registered repo, and the worktree under it the
 /// status comes from (`None` is the repo's main tree).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -515,21 +517,24 @@ impl ScUiState {
         self.collapsed.insert(part_key(key, part), collapsed) != Some(collapsed)
     }
 
-    /// Drop the collapse entries, the list heights and the pin of repos no
-    /// longer registered; `true` when any went.
-    pub fn prune(&mut self, repos: &[RepoEntry]) -> bool {
+    /// Drop the collapse entries, the list heights and the pin of `host`'s
+    /// repos no longer registered, `repos` being its list; `true` when any
+    /// went. Another host's entries stay.
+    pub fn prune(&mut self, host: &HostKey, repos: &[RepoEntry]) -> bool {
         let ids: HashSet<&str> = repos.iter().map(|repo| repo.id.as_str()).collect();
-        let registered = |entry: &str| entry.split("::").next().is_some_and(|id| ids.contains(id));
+        let host = host_name(host);
+        let keep = |entry: &str| {
+            let (owner, id) = split_key_entry(entry);
+            owner != host || ids.contains(id)
+        };
         let before = self.collapsed.len() + self.history_list_height.len();
-        self.collapsed.retain(|entry, _| registered(entry));
-        self.history_list_height
-            .retain(|entry, _| registered(entry));
+        self.collapsed.retain(|entry, _| keep(entry));
+        self.history_list_height.retain(|entry, _| keep(entry));
         let mut changed = self.collapsed.len() + self.history_list_height.len() != before;
-        if self
-            .pinned_repo
-            .as_deref()
-            .is_some_and(|pinned| !ids.contains(pinned))
-        {
+        if self.pinned_repo.as_deref().is_some_and(|pinned| {
+            let (owner, id) = split_pin_entry(pinned);
+            owner == host && !ids.contains(id)
+        }) {
             self.pinned_repo = None;
             changed = true;
         }
@@ -540,6 +545,69 @@ impl ScUiState {
 /// The key a part's collapse state is stored under.
 fn part_key(key: &ScKey, part: Part) -> String {
     format!("{}|{}", key.id(), part.suffix())
+}
+
+/// A remote host's name, the prefix its persisted entries carry; `None`
+/// for This PC, whose entries carry none.
+fn host_name(host: &HostKey) -> Option<&str> {
+    match host {
+        HostKey::Local => None,
+        HostKey::Remote(name) => Some(name),
+    }
+}
+
+/// `key` as `host`'s persisted collapse and height entries name it: This
+/// PC's as it is, a remote host's with `<host key>::` before its repo id.
+#[must_use]
+pub fn stored_key(host: &HostKey, key: &ScKey) -> ScKey {
+    match host_name(host) {
+        None => key.clone(),
+        Some(name) => ScKey {
+            repo_id: format!("{name}::{}", key.repo_id),
+            worktree: key.worktree.clone(),
+        },
+    }
+}
+
+/// The persisted pin of `host`'s repo `repo_id`: This PC's is the bare id,
+/// a remote host's carries `<host key>::` before it.
+#[must_use]
+pub fn pin_entry(host: &HostKey, repo_id: &str) -> String {
+    match host_name(host) {
+        None => repo_id.to_owned(),
+        Some(name) => format!("{name}::{repo_id}"),
+    }
+}
+
+/// The host and repo id a persisted pin names.
+#[must_use]
+pub fn pin_parts(entry: &str) -> (HostKey, &str) {
+    match split_pin_entry(entry) {
+        (None, id) => (HostKey::Local, id),
+        (Some(name), id) => (HostKey::Remote(name.to_owned()), id),
+    }
+}
+
+/// A pin's remote host name, `None` for This PC's, and its repo id.
+fn split_pin_entry(entry: &str) -> (Option<&str>, &str) {
+    match entry.split_once("::") {
+        Some((name, id)) => (Some(name), id),
+        None => (None, entry),
+    }
+}
+
+/// A collapse or height entry's remote host name, `None` for This PC's,
+/// and its repo id. This PC's key id is `<repo>::<worktree>`; a remote
+/// host's has its name and `::` before that.
+fn split_key_entry(entry: &str) -> (Option<&str>, &str) {
+    let id = entry.split('|').next().unwrap_or(entry);
+    let mut parts = id.split("::");
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    match (second, parts.next()) {
+        (Some(repo), Some(_)) => (Some(first), repo),
+        _ => (None, first),
+    }
 }
 
 #[cfg(test)]
@@ -1107,7 +1175,10 @@ mod tests {
             "a stored false beats the collapsed default"
         );
 
-        assert!(state.prune(&[repo("r1", "D:\\r1")]), "r2's entries went");
+        assert!(
+            state.prune(&HostKey::Local, &[repo("r1", "D:\\r1")]),
+            "r2's entries went"
+        );
         assert!(
             state.is_collapsed(&r1, Part::Changes, Some(4)),
             "a registered repo stays"
@@ -1120,7 +1191,10 @@ mod tests {
             ..ScUiState::default()
         };
         assert!(
-            !kept.prune(&[repo("r1", "D:\\r1"), repo("r2", "D:\\r2")]),
+            !kept.prune(
+                &HostKey::Local,
+                &[repo("r1", "D:\\r1"), repo("r2", "D:\\r2")]
+            ),
             "nothing to drop"
         );
         assert_eq!(kept.pinned_repo.as_deref(), Some("r2"));
@@ -1130,10 +1204,44 @@ mod tests {
             ..ScUiState::default()
         };
         assert!(
-            pin_only.prune(&[repo("r1", "D:\\r1")]),
+            pin_only.prune(&HostKey::Local, &[repo("r1", "D:\\r1")]),
             "the pin alone counts"
         );
         assert_eq!(pin_only.pinned_repo, None);
+    }
+
+    #[test]
+    fn a_remote_hosts_entries_carry_its_name_and_prune_apart() {
+        let remote = HostKey::Remote("box.ts.net".to_owned());
+        let mut state = ScUiState::default();
+        let local = worktree("r1", "D:\\r1-wt");
+        let theirs = stored_key(&remote, &worktree("r2", "D:\\r2-wt"));
+        state.set_collapsed(&local, Part::Changes, true);
+        state.set_collapsed(&theirs, Part::History, true);
+        state.pinned_repo = Some(pin_entry(&remote, "r2"));
+        assert_eq!(
+            state.collapsed.get("box.ts.net::r2::D:\\r2-wt|history"),
+            Some(&true)
+        );
+        assert_eq!(state.pinned_repo.as_deref(), Some("box.ts.net::r2"));
+        assert_eq!(pin_parts("box.ts.net::r2"), (remote.clone(), "r2"));
+        assert_eq!(pin_parts("r1"), (HostKey::Local, "r1"));
+
+        assert!(
+            !state.prune(&HostKey::Local, &[repo("r1", "D:\\r1")]),
+            "This PC's list leaves the remote host's entries alone"
+        );
+        assert!(
+            !state.prune(&remote, &[repo("r2", "D:\\r2")]),
+            "the remote host still lists r2"
+        );
+        assert!(state.prune(&remote, &[]), "the remote host dropped r2");
+        assert_eq!(state.pinned_repo, None);
+        assert_eq!(
+            state.collapsed.keys().collect::<Vec<_>>(),
+            ["r1::D:\\r1-wt|changes"],
+            "This PC's entry stays"
+        );
     }
 
     #[test]

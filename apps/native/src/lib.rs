@@ -1034,6 +1034,11 @@ pub struct RootView {
     run_focus: FocusHandle,
     /// The source-control statuses and the requests out for them.
     sc: ScModel,
+    /// The host whose source-control models (`sc`, `history`,
+    /// `changes.writes` and `stash.model`) are the live ones.
+    sc_shown: HostKey,
+    /// Every other host's source-control models, parked until it shows.
+    sc_parked: HashMap<HostKey, source_control_view::ScModels>,
     /// Whether the source-control repo picker's menu is open.
     sc_picker_open: bool,
     /// The source-control History: commits, details and remotes.
@@ -1441,6 +1446,8 @@ impl RootView {
             run_confirm: None,
             run_focus: cx.focus_handle(),
             sc: ScModel::default(),
+            sc_shown: HostKey::Local,
+            sc_parked: HashMap::new(),
             sc_picker_open: false,
             history: history::HistoryModel::default(),
             sc_layout: history::ScLayout::default(),
@@ -2508,11 +2515,14 @@ impl RootView {
         }
     }
 
-    /// Drops the source-control pin and collapse state of repos a registry
-    /// snapshot no longer lists, saving when any went. A remote host's list
-    /// prunes nothing: the saved entries are the local daemon's.
-    fn prune_source_control(&mut self, repos: &[RepoEntry]) {
-        if self.conn().target().is_local() && self.sidebar.prune_source_control(repos) {
+    /// Drops the source-control pin and collapse state of `host`'s repos
+    /// its registry snapshot no longer lists, saving when any went. The
+    /// first connection's list prunes nothing while it holds a remote
+    /// target: the saved entries without a host prefix are the local
+    /// daemon's.
+    fn prune_source_control(&mut self, host: &HostKey, repos: &[RepoEntry]) {
+        let local_target = *host != HostKey::Local || self.conn().target().is_local();
+        if local_target && self.sidebar.prune_source_control(host, repos) {
             self.save_ui();
         }
     }
@@ -3567,9 +3577,7 @@ impl RootView {
                 // A fetch streams over the connection it was asked on, and
                 // the remote access status is that connection's daemon's.
                 if !conn.is_open() || moved {
-                    if *host == HostKey::Local {
-                        self.end_fetches_on_disconnect(window, cx);
-                    }
+                    self.end_fetches_on_disconnect(host, window, cx);
                     self.set_remote_status(host, None, cx);
                 }
                 self.set_conn(host, conn);
@@ -3638,9 +3646,7 @@ impl RootView {
             || self.on_diff_message(host, msg, window, cx)
             || self.on_viewer_message(host, msg, window, cx)
             || self.on_dashboard_message(host, msg, window, cx)
-            || self.on_sc_message(host, msg, window, cx)
-            || self.on_stash_message(host, msg, window, cx)
-            || self.apply_history(host, msg, cx)
+            || self.on_sc_panel_message(host, msg, window, cx)
     }
 
     /// Folds the message into the sidebar, and forgets the remembered
@@ -3838,9 +3844,7 @@ impl RootView {
     /// A fresh repo list from the daemon: the source-control panel drops the
     /// repos that are gone, and the sidebar's containers re-render.
     fn on_repos(&mut self, host: &HostKey, repos: &[RepoEntry], cx: &mut Context<Self>) {
-        if *host == HostKey::Local {
-            self.prune_source_control(repos);
-        }
+        self.prune_source_control(host, repos);
         self.on_containers_changed(cx);
     }
 
@@ -4088,6 +4092,7 @@ impl RootView {
             self.sidebar.clear_host(host);
             self.seen_sessions.remove(host);
             self.reset_dashboard_for_target(host);
+            self.forget_sc_host(host);
             self.drop_stale_session_ui(window, cx);
             self.prune_container_row_focus();
             cx.notify();
@@ -4121,6 +4126,7 @@ impl RootView {
         self.retries = RetryGate::default();
         self.renaming = None;
         self.wanted_session = None;
+        self.show_sc_host(&HostKey::Local);
         self.sc = ScModel::default();
         self.sc_picker_open = false;
         self.changes.writes = sc_writes::ScWrites::default();
