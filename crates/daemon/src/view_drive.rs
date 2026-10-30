@@ -10,12 +10,22 @@
 //! row, or too long. [`ViewReturn`] decides when to drive and what to do with
 //! the draft, from each settled reading the watcher hands it. Neither types
 //! anything: they answer with the keys the watcher writes.
+//!
+//! [`ScreenReader`] is the reading a writer outside the watcher takes after
+//! each of its own keys (a chat send): the screen once the output the key
+//! brought has been drawn and has paused.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_api::{Key, KeyHolder, ViewGoal, ViewReading, ViewRefusal, ViewStep};
 use protocol::{AgentId, ChatPromptKind, ChatScreen, ComposerState, SessionNoticeKind};
+use tokio::sync::broadcast;
 use tokio::time::Instant;
+
+use crate::pty::PtyHandle;
+use crate::screen::{Screen, SharedScreen, dialogs};
+use crate::sync::lock;
 
 /// The most Downs in a row a drive presses while the panel does not hold
 /// the keys.
@@ -124,6 +134,197 @@ impl ViewDrive {
         }
         self.last_key_at = Some(now);
         DriveAction::Press(key)
+    }
+}
+
+/// How long a [`ScreenReader`] waits for the output to pause before it reads
+/// the screen: the status watcher's own debounce.
+pub const READ_QUIET: Duration = Duration::from_millis(40);
+
+/// How often a [`ScreenReader`] looks again while the grid has not yet been
+/// fed the output the reader saw.
+const FED_POLL: Duration = Duration::from_millis(5);
+
+/// One look at a session's screen: which conversation it shows and where its
+/// keys go, and what its input box holds; `None` where the agent's plugin
+/// gives no such reading.
+#[derive(Debug, Clone)]
+pub struct Reading {
+    pub view: Option<ViewReading>,
+    pub chat: Option<ChatScreen>,
+}
+
+impl Reading {
+    /// `screen` as `agent`'s plugin reads it.
+    #[must_use]
+    pub fn of(agent: &AgentId, screen: &Screen) -> Self {
+        Self {
+            view: dialogs::read_view(agent, screen),
+            chat: dialogs::read(agent, screen),
+        }
+    }
+}
+
+/// Reads a session's screen for a writer that types into it: after a key,
+/// once the session's grid has been fed every byte of output the reader
+/// received since it was armed and no output came for [`READ_QUIET`], or
+/// once [`KEY_WAIT`] has passed. The status watcher feeds the grid from the
+/// same output, so a reading never comes from a frame the watcher has not
+/// drawn yet.
+pub struct ScreenReader {
+    pty: Arc<PtyHandle>,
+    screen: SharedScreen,
+    agent: AgentId,
+    output: broadcast::Receiver<Vec<u8>>,
+    /// The grid's fed count when the reader was last armed.
+    base: u64,
+    /// The bytes of output received since the reader was last armed.
+    seen: u64,
+}
+
+impl ScreenReader {
+    /// A reader of `screen`, the grid of `pty`'s output, as `agent`'s plugin
+    /// reads it.
+    #[must_use]
+    pub fn new(pty: Arc<PtyHandle>, screen: SharedScreen, agent: AgentId) -> Self {
+        let output = pty.output.subscribe();
+        let base = lock(&screen).fed();
+        Self {
+            pty,
+            screen,
+            agent,
+            output,
+            base,
+            seen: 0,
+        }
+    }
+
+    /// Start counting the output anew; called before each write, so the
+    /// output that write brings is counted.
+    pub fn arm(&mut self) {
+        let output = self.subscribe();
+        let fed = lock(&self.screen).fed();
+        self.arm_at(output, fed);
+    }
+
+    /// A new subscription to the session's output, for [`Self::arm_at`].
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.pty.output.subscribe()
+    }
+
+    /// [`Self::arm`] for a caller holding the screen's lock: `output` was
+    /// subscribed before the lock was taken, and `fed` is the grid's fed
+    /// count read under it. Subscribing first means no output the grid has
+    /// not drawn goes unseen; output drawn between the two is counted on both
+    /// sides, which only makes the reading wait.
+    pub fn arm_at(&mut self, output: broadcast::Receiver<Vec<u8>>, fed: u64) {
+        self.output = output;
+        self.base = fed;
+        self.seen = 0;
+    }
+
+    /// The screen as it stands now.
+    #[must_use]
+    pub fn read(&self) -> Reading {
+        Reading::of(&self.agent, &lock(&self.screen))
+    }
+
+    /// The screen with no key pressed: once the output has paused and the
+    /// grid holds it, at the latest after [`KEY_WAIT`].
+    pub async fn current(&mut self) -> Reading {
+        self.arm();
+        let now = Instant::now();
+        match self.settle(now + KEY_WAIT, Some(now)).await {
+            Some(reading) => reading,
+            None => self.read(),
+        }
+    }
+
+    /// The screen after a key: once the output it brought has been drawn and
+    /// has paused, or after [`KEY_WAIT`] whatever came.
+    pub async fn after_key(&mut self) -> Reading {
+        match self.settle(Instant::now() + KEY_WAIT, None).await {
+            Some(reading) => reading,
+            None => self.read(),
+        }
+    }
+
+    /// The next reading once more output has been drawn and has paused;
+    /// `None` when no output came before `deadline`.
+    pub async fn next_before(&mut self, deadline: Instant) -> Option<Reading> {
+        self.settle(deadline, None).await
+    }
+
+    /// Wait for the output to settle, `last_output` the time output last
+    /// came; a reading at `deadline` once any came, else `None` then. The
+    /// reading at the deadline waits, at most a further [`KEY_WAIT`], for the
+    /// grid to draw what the reader received, but not for a pause.
+    async fn settle(
+        &mut self,
+        deadline: Instant,
+        mut last_output: Option<Instant>,
+    ) -> Option<Reading> {
+        loop {
+            let now = Instant::now();
+            match last_output {
+                Some(_) if now >= deadline => return Some(self.read_once_drawn().await),
+                Some(at) if now >= at + READ_QUIET && self.drawn() => return Some(self.read()),
+                None if now >= deadline => return None,
+                _ => {}
+            }
+            let wake = match last_output {
+                Some(at) if now >= at + READ_QUIET => now + FED_POLL,
+                Some(at) => at + READ_QUIET,
+                None => deadline,
+            };
+            if let Ok(received) =
+                tokio::time::timeout_at(wake.min(deadline), self.output.recv()).await
+            {
+                if !self.count(received) {
+                    return last_output.map(|_| self.read());
+                }
+                last_output = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Count one receipt of output; `false` once the output has ended.
+    fn count(&mut self, received: Result<Vec<u8>, broadcast::error::RecvError>) -> bool {
+        match received {
+            Ok(bytes) => {
+                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                self.seen = self.seen.saturating_add(len);
+                true
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                // The bytes lost are unknown: what the grid holds now counts
+                // as drawn, and the pause after it decides the reading.
+                tracing::debug!(skipped, "screen reader: output lagged");
+                let fed = lock(&self.screen).fed();
+                self.base = fed.wrapping_sub(self.seen);
+                true
+            }
+            Err(broadcast::error::RecvError::Closed) => false,
+        }
+    }
+
+    /// The screen once the grid has drawn every byte the reader received, or
+    /// as it stands after [`KEY_WAIT`] more.
+    async fn read_once_drawn(&self) -> Reading {
+        let limit = Instant::now() + KEY_WAIT;
+        while !self.drawn() && Instant::now() < limit {
+            tokio::time::sleep(FED_POLL).await;
+        }
+        if !self.drawn() {
+            tracing::debug!("screen reader: the grid never drew the output it received");
+        }
+        self.read()
+    }
+
+    /// Whether the grid has been fed every byte the reader received.
+    fn drawn(&self) -> bool {
+        lock(&self.screen).fed().wrapping_sub(self.base) >= self.seen
     }
 }
 
@@ -741,6 +942,126 @@ mod tests {
         chat: Option<&ChatScreen>,
     ) -> Vec<ReturnAction> {
         machine.on_reading(&claude(), view, chat, Instant::now())
+    }
+
+    /// The reader of a session's screen as its output arrives.
+    mod reader {
+        use super::*;
+        use crate::history::test_support::recording_pty;
+        use crate::screen::fixture_screen::screen_from;
+        use std::sync::Mutex;
+
+        /// Main with its box empty and holding the keys.
+        const V176: &str = include_str!("screen/fixtures/v176-main-heads-up-box-keys.txt");
+        const HANG: Duration = Duration::from_secs(30);
+
+        /// The bytes that draw v176 with `text` in its box.
+        fn frame(text: &str) -> Vec<u8> {
+            let rows: Vec<String> = V176
+                .lines()
+                .map(|row| {
+                    if row.trim_end() == "❯" {
+                        format!("❯ {text}")
+                    } else {
+                        row.to_owned()
+                    }
+                })
+                .collect();
+            format!("\x1b[H\x1b[2J{}", rows.join("\r\n")).into_bytes()
+        }
+
+        fn chunk(n: usize) -> Vec<u8> {
+            frame(&format!("chunk {n:04}"))
+        }
+
+        /// The text in the reading's box.
+        fn shown(reading: &Reading) -> Option<String> {
+            reading
+                .view
+                .as_ref()
+                .and_then(|view| view.box_first_line.clone())
+        }
+
+        fn grid() -> SharedScreen {
+            Arc::new(Mutex::new(screen_from(V176)))
+        }
+
+        /// The output never pauses for [`READ_QUIET`] and the grid stays one
+        /// chunk behind it while it flows, so the reader decides at its
+        /// deadline; the frame it reads holds every chunk it received.
+        #[tokio::test]
+        async fn a_reading_at_the_deadline_holds_every_chunk_it_saw() {
+            let (pty, _input, exit) = recording_pty();
+            let screen = grid();
+            let mut reader = ScreenReader::new(Arc::clone(&pty), Arc::clone(&screen), claude());
+            reader.arm();
+            let task = tokio::spawn(async move {
+                let reading = reader.after_key().await;
+                (reading, reader)
+            });
+            let mut sent = 0;
+            while !task.is_finished() && sent < 240 {
+                exit.chunk(chunk(sent)).await;
+                if sent > 0 {
+                    lock(&screen).feed(&chunk(sent - 1));
+                }
+                sent += 1;
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+            lock(&screen).feed(&chunk(sent - 1));
+            let (reading, reader) = tokio::time::timeout(HANG, task)
+                .await
+                .expect("hung: the reader never read")
+                .expect("the reader ran");
+            let size = u64::try_from(chunk(0).len()).expect("a chunk's size fits");
+            let received = reader.seen / size;
+            assert!(received > 0, "the reader received output");
+            let shown = shown(&reading).expect("a chunk is in the box");
+            let shown: u64 = shown
+                .strip_prefix("chunk ")
+                .and_then(|n| n.parse().ok())
+                .expect("the box shows a chunk");
+            assert!(
+                shown + 1 >= received,
+                "the reading shows chunk {shown}, but the reader received {received} chunks"
+            );
+        }
+
+        /// A chunk sent while the reader waits for the screen's lock to read
+        /// its base is one it receives, and the reading after it waits for
+        /// the grid to draw it.
+        #[tokio::test]
+        #[expect(
+            clippy::await_holding_lock,
+            reason = "the test holds the screen while the reader arms on another thread"
+        )]
+        async fn the_reader_subscribes_before_it_reads_its_base() {
+            let (pty, _input, exit) = recording_pty();
+            let screen = grid();
+            let mut reader = ScreenReader::new(Arc::clone(&pty), Arc::clone(&screen), claude());
+            let before = pty.output.receiver_count();
+            let held = lock(&screen);
+            let arming = std::thread::spawn(move || {
+                reader.arm();
+                reader
+            });
+            tokio::time::timeout(HANG, async {
+                while pty.output.receiver_count() == before {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("hung: the reader did not subscribe before reading its base");
+            let queued = frame("queued before the base");
+            exit.chunk(queued.clone()).await;
+            drop(held);
+            let mut reader = arming.join().expect("the reader armed");
+            lock(&screen).feed(&queued);
+            let reading = tokio::time::timeout(HANG, reader.after_key())
+                .await
+                .expect("hung: the reader never read");
+            assert_eq!(shown(&reading).as_deref(), Some("queued before the base"));
+        }
     }
 
     #[test]

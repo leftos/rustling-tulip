@@ -47,6 +47,10 @@ pub const RESUME_FAILED: &str = "resume_failed";
 /// A repo's or workspace's preset list could not be read: an unknown repo or
 /// workspace, or a `presets.json` that cannot be read or parsed.
 pub const PRESETS_FAILED: &str = "presets_failed";
+/// Another writer is typing into the session; retry.
+pub const BUSY: &str = "busy";
+/// The terminal's state does not take a chat message now.
+pub const CHAT_REFUSED: &str = "chat_refused";
 
 /// Every code in the catalogue.
 pub const ALL: &[&str] = &[
@@ -70,6 +74,8 @@ pub const ALL: &[&str] = &[
     SUMMARIZER_REFUSED,
     RESUME_FAILED,
     PRESETS_FAILED,
+    BUSY,
+    CHAT_REFUSED,
 ];
 
 #[cfg(test)]

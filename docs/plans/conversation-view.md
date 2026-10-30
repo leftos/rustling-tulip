@@ -138,7 +138,7 @@ The status watcher (`view_drive.rs`, `pty_state.rs`) types **return to main** fo
 
 A drive sends one key per settled read, at most three Downs in a row off the panel, at most 12 keys and 10 s, and forces a read 3 s after each key; it sends no key while a dialog is up.
 
-`ChatSend` and `ChatAnswer` type **return to main** first whenever an agent is in view, and go on only once a reading shows the main conversation; a reading that still shows the agent stops them with an `Error`.
+`ChatSend` and `ChatAnswer` type **return to main** first whenever an agent is in view, and go on only once a reading shows the main conversation; a reading that still shows the agent stops them with an `Error`. The runner they reuse from `server/chat.rs` is `ScreenReader` (`view_drive.rs`) and, for a send, `inject::type_message`.
 
 A draft in the subagent's box is never carried across. Before the switch the watcher saves it with `ctrl+s` (Claude Code's prompt stash, which empties the box and keeps a pasted-text placeholder whole). The stash is one slot shared by every view, and a second `ctrl+s` silently replaces the first: the watcher stashes only when the mode line shows no `› stashed`, and when a stash is held and the box holds a draft it does not switch and the client is told `WaitingInMain`.
 
@@ -160,13 +160,21 @@ No id in the body appears on the transcript's `assistant` record (`message.id`, 
 
 ### Typing a message
 
-`ChatSend` types the text into the PTY as one bracketed paste (`ESC [200~ … ESC [201~`) followed by Enter, through `pty.rs` `write_input`. The daemon reads the composer state first and refuses the send with an `Error` naming the reason unless the state is ready or working:
+`ChatSend` types the text into the PTY as one bracketed paste (`ESC [200~ … ESC [201~`) followed by Enter, in `inject::type_message`, spawned from `server/chat.rs`. It has no success reply. The text is checked first (`check_typed_text`): `\r\n` becomes `\n`, and empty text, C0, DEL or C1 control characters and text over 64 KiB are refused with `invalid_request`.
 
+The send then takes the session's **typing lane** (`typing_lane.rs`), the per-session turn every multi-key writer to the PTY takes (the watcher's view switch, the spawn injector, a send, later an answer). When a send or answer holds it the send is refused `busy` at once, otherwise it waits up to 250 ms and then refuses `busy`. The watcher skips its whole view switch while another writer holds the lane, and the user's own keys never take it but bump an owner epoch that writers check. A turn is released however its holder ends, with ceilings of 23 s for the watcher and 30 s for a send.
+
+With the lane held, the daemon gates on the current settled screen and refuses with `chat_refused` unless the composer is ready or working:
+
+- **pending prompt**: a hook-reported prompt is waiting.
 - **dialog**: the client offers the ride-on answers instead (below); the chat never types a message into the PTY while a dialog is up.
-- **draft**: "The terminal's input box holds text"; the user clears it in the terminal or sends it there.
-- **overlay**: "Open the terminal to close this first."
+- **draft**: the box holds text in any view; the user clears it in the terminal or sends it there.
+- **overlay or unknown state**: the terminal must be opened to close it first.
+- **ended agent**: the agent has ended in its shell.
 
-While a turn runs, the send goes straight to the CLI's own queue (D-I). The chat shows the message dimmed as `pending` until the transcript's `queued_command` attachment or `user` record for it arrives. A paste of 30 lines or more is shown in the terminal as `[Pasted text #1 +N lines]`; the transcript carries it whole and the chat shows it whole.
+When an agent's view is open the send drives to main key by key and gates again in main. It then pastes and waits for the text to show in the box. Under the record and screen locks it re-checks (no dialog, the paste shown, no owner key since the send began, no pending prompt), adds the pending chat entry (`ChatEntry::User { id: "pending:<n>", pending: true }`, sent to loaders just before the Enter) and presses Enter. A send is never an owner key. A `/` or `!` command adds no pending entry.
+
+While a turn runs, the send goes straight to the CLI's own queue (D-I). The chat shows the message dimmed as `pending` until the transcript's `queued_command` attachment or `user` record for it arrives (oldest pending entry first, by trimmed text; a restart, a conversation switch or the mirror's drop also removes it). A paste of 30 lines or more is shown in the terminal as `[Pasted text #1 +N lines]`; the transcript carries it whole and the chat shows it whole.
 
 **Orchestrator decision (not an owner ruling), D-O: refuse, never queue, in the daemon.** The 2026-10-21 ruling says nothing is held by the daemon. A send the screen cannot take now is refused at once, so the user sees why, and the text stays in the chat's composer to send again.
 
@@ -355,9 +363,9 @@ Each step is one brief on `feat/chat-mirror`. Steps that edit `crates/protocol/s
   New `crates/daemon/src/chat_mirror.rs`, new `crates/daemon/src/server/chat.rs`, `crates/daemon/src/server.rs` (dispatch arms), `crates/daemon/src/pty_state.rs` (hand each screen reading to the mirror), `crates/daemon/src/main.rs` (`mod` line): `LoadChat` / `UnloadChat`, the newest 500 (`CHAT_REPLY_CAP`) with `hidden`, `ChatAppend` (with `removed`) and `ChatScreenChanged` to loaders, live lines merged by `index` and replaced by the transcript's answer (matched through `prompt_key` and the user record's `promptId`, messages in one turn told apart by `message_key` and arrival order; the live answers of earlier prompts end at the next prompt), the tail following the conversation id. A replacement goes to a loader only for an entry at or after the first one its last `Chat` carried.
 
   Proof: server tests with a temp `CLAUDE_CONFIG_DIR` and scripted transcript writes: appends reach loaders only; the reply caps and echoes `request_id`; a missing transcript yields none; the last unload stops the tail; a `/clear` switches files; a fixture screen yields its `ChatScreen`. Depends on CV.2, CV.3, CV.4, CV.6.
-- [ ] **CV.8 Type chat messages into the PTY.** `crates/daemon/src/server/chat.rs` (`ChatSend`, gated by the composer state), `crates/daemon/src/inject.rs` (a bracketed paste then Enter helper), `crates/daemon/src/chat_mirror.rs` (the `pending` user entry, cleared by its `queued_command` or `user` record).
+- [x] **CV.8 Type chat messages into the PTY.** `crates/daemon/src/server/chat.rs` (`ChatSend`, spawning `inject::type_message`), `crates/daemon/src/inject.rs` (`check_typed_text`, the gated bracketed paste then Enter), `crates/daemon/src/typing_lane.rs` (the per-session lane every multi-key writer takes), `crates/daemon/src/chat_mirror.rs` (the `pending` user entry, cleared by its `queued_command` or `user` record), `crates/protocol/src/error_codes.rs` (`busy`, `chat_refused`).
 
-  Proof: tests against a recording PTY: a ready box gets the paste and Enter; a working session gets them too and the entry stays pending until its record; dialog, draft and overlay states answer `Error` and type nothing; with an agent in view the return recipe is typed first, and a reading that still shows the agent answers `Error` without the paste; the Enter waits for a reading that shows the paste in the box (CV.23 saw an Enter sent too soon left unsent). Depends on CV.7, CV.24.
+  Proof: tests against a recording PTY: a ready box gets the paste and Enter; a working session gets them too and the entry stays pending until its record; pending-prompt, dialog, draft, overlay and ended-agent states answer `chat_refused` and type nothing; a held lane answers `busy`; bad text answers `invalid_request`; with an agent in view the return recipe is typed first, and a reading that still shows the agent answers `Error` without the paste; the Enter waits for a reading that shows the paste in the box (CV.23 saw an Enter sent too soon left unsent). Depends on CV.7, CV.24.
 - [ ] **CV.9 Answer prompts by typing their recipes.** `crates/daemon/src/server/chat.rs` (`ChatAnswer`), `crates/daemon/src/chat_mirror.rs` (prompt ids, the screen check after each key group, answered elsewhere), `crates/daemon/src/server/sessions.rs` (the owner-key clear shared with `SendInput`, D-A).
 
   Proof: tests per dialog fixture: the right bytes per answer; the deny-then-send ride-on waits for the box; a stale `prompt_id` is refused; a screen that does not move stops the recipe; no recipe sends Esc Esc; with an agent in view the return recipe runs before the answer's keys. Depends on CV.5, CV.8, CV.24.

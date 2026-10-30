@@ -25,19 +25,31 @@
 //!
 //! Subsequent delays in the script (typically inter-keystroke pacing) are
 //! literal sleeps.
+//!
+//! It also types a chat message into a session ([`type_message`]): one
+//! bracketed paste, then Enter once the screen shows the paste in the input
+//! box, after returning the terminal to the main conversation when an agent
+//! is in view. [`check_typed_text`] decides which text may be typed that way.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_api::ReadySignal;
+use agent_api::{Key, KeyHolder, ReadySignal, ViewGoal, ViewStep};
 use base64::Engine as _;
-use protocol::{InjectorStartup, InjectorStep, PromptInjector};
+use protocol::error_codes::{BUSY, CHAT_REFUSED};
+use protocol::{AgentId, ComposerState, InjectorStartup, InjectorStep, PromptInjector};
 use tokio::sync::broadcast;
 use tokio::time::{Instant, sleep, timeout};
 use tracing::{debug, info, warn};
 
+use crate::chat_mirror::ChatMirror;
 use crate::pty::PtyHandle;
+use crate::screen::SharedScreen;
+use crate::screen::dialogs::next_view_key;
+use crate::session::{SessionRecord, SessionRegistry};
+use crate::sync::lock;
 use crate::typing_lane::{Holder, TypingTurn};
+use crate::view_drive::{DriveAction, KEY_WAIT, Reading, ScreenReader, ViewDrive};
 
 /// How long a chain waits for the typing lane when another writer holds it
 /// at the spawn.
@@ -585,6 +597,414 @@ async fn wait_until_ready_or_timeout(
     }
 }
 
+/// The most bytes a typed chat message may hold.
+pub const MAX_TYPED_BYTES: usize = 65_536;
+
+/// How long a chat send waits for the typing lane.
+const SEND_LANE_WAIT: Duration = Duration::from_millis(250);
+
+/// The longest a chat send types for, from taking the lane to its Enter.
+const SEND_CEILING: Duration = Duration::from_secs(30);
+
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+const NO_RESPONSE: &str = "the terminal did not respond";
+const LEFT_IN_BOX: &str = "the message was left in the box";
+const DRAFT: &str = "a draft is in the terminal's box";
+const DIALOG: &str = "a dialog is open in the terminal";
+const NOT_AT_PROMPT: &str = "the terminal is not at its prompt";
+const NO_RETURN: &str = "the terminal could not return to the main conversation";
+const OWNER_TYPED: &str = "someone typed in the terminal";
+const NOT_SHOWN: &str = "the message did not appear in the box; it may be left there";
+const AGENT_ENDED: &str = "the agent is not running in this session";
+
+/// `text` as a chat send types it: `\r\n` made `\n`.
+///
+/// # Errors
+///
+/// Why the text may not be typed: it is empty or only whitespace, it holds a
+/// C0 or C1 control character or DEL other than a newline or a tab (an
+/// escape could end the paste early and type keys), or it is over
+/// [`MAX_TYPED_BYTES`].
+pub fn check_typed_text(text: &str) -> Result<String, &'static str> {
+    let text = text.replace("\r\n", "\n");
+    if text.trim().is_empty() {
+        return Err("the message is empty");
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err("the message holds a control character");
+    }
+    if text.len() > MAX_TYPED_BYTES {
+        return Err("the message is too long");
+    }
+    Ok(text)
+}
+
+/// The session a chat message is typed into.
+pub struct TypeTarget {
+    pub session_id: String,
+    pub agent: AgentId,
+    pub pty: Arc<PtyHandle>,
+    pub screen: SharedScreen,
+    pub sessions: Arc<SessionRegistry>,
+    pub mirror: ChatMirror,
+}
+
+/// Why a chat message was not typed, or not sent: the `Error` that answers
+/// its send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeRefusal {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl TypeRefusal {
+    fn refused(message: impl Into<String>) -> Self {
+        Self {
+            code: CHAT_REFUSED,
+            message: message.into(),
+        }
+    }
+
+    /// A refusal after the paste, which stays in the terminal's box.
+    fn left_in_box(reason: &str) -> Self {
+        Self::refused(format!("{reason}; {LEFT_IN_BOX}"))
+    }
+
+    fn busy(holder: Option<Holder>) -> Self {
+        let message = match holder {
+            Some(Holder::ViewReturn) => "the terminal is switching views",
+            Some(Holder::Injector) => "the session is starting",
+            Some(Holder::ChatSend | Holder::ChatAnswer) => "another message is being typed",
+            None => "the terminal is busy",
+        };
+        Self {
+            code: BUSY,
+            message: message.to_owned(),
+        }
+    }
+}
+
+/// Type `text`, already passed by [`check_typed_text`], into `target`'s
+/// terminal as the user's message: return to the main conversation if an
+/// agent is in view, paste the text, and press Enter once the box shows it,
+/// adding the chat's pending entry for it just before. Holds the session's
+/// typing lane throughout, and gives it back one settled reading after the
+/// Enter. A send is not an owner key: it clears no pending prompt.
+///
+/// # Errors
+///
+/// The lane is held by another writer ([`BUSY`]), or the terminal's state
+/// does not take the message, or changed under the send, or did not answer
+/// within [`SEND_CEILING`] ([`CHAT_REFUSED`]).
+pub async fn type_message(target: &TypeTarget, text: &str) -> Result<(), TypeRefusal> {
+    let lane = target.pty.typing();
+    // Another message is refused at once, never queued behind the one typed.
+    if let Some(holder @ (Holder::ChatSend | Holder::ChatAnswer)) = lane.holder() {
+        return Err(TypeRefusal::busy(Some(holder)));
+    }
+    let turn = lane
+        .take(Holder::ChatSend, SEND_LANE_WAIT)
+        .await
+        .map_err(TypeRefusal::busy)?;
+    let mut reader = ScreenReader::new(
+        Arc::clone(&target.pty),
+        Arc::clone(&target.screen),
+        target.agent.clone(),
+    );
+    let mut pasted = false;
+    let typed = timeout(
+        SEND_CEILING,
+        send(target, &turn, &mut reader, text, &mut pasted),
+    )
+    .await;
+    match typed {
+        Ok(sent) => sent?,
+        Err(_) if pasted => return Err(TypeRefusal::left_in_box(NO_RESPONSE)),
+        Err(_) => return Err(TypeRefusal::refused(NO_RESPONSE)),
+    }
+    // The next writer starts from the frame the Enter brought.
+    reader.after_key().await;
+    drop(turn);
+    Ok(())
+}
+
+/// The send's steps up to its Enter; sets `pasted` once the paste is typed.
+async fn send(
+    target: &TypeTarget,
+    turn: &TypingTurn,
+    reader: &mut ScreenReader,
+    text: &str,
+    pasted: &mut bool,
+) -> Result<(), TypeRefusal> {
+    let reading = reader.current().await;
+    gate(target, &reading)?;
+    let in_agent_view = reading
+        .view
+        .as_ref()
+        .is_some_and(|view| view.agent_in_view.is_some());
+    let reading = if in_agent_view {
+        return_to_main(target, turn, reader, reading).await?
+    } else {
+        reading
+    };
+    gate_in_main(target, &reading)?;
+    reader.arm();
+    turn.press(&target.pty, bracketed_paste(text));
+    *pasted = true;
+    wait_for_paste(reader).await?;
+    press_enter(target, turn, reader, text)
+}
+
+/// `text` as one bracketed paste.
+fn bracketed_paste(text: &str) -> Vec<u8> {
+    [PASTE_START, text.as_bytes(), PASTE_END].concat()
+}
+
+/// Whether a send of `text` is a command (`/compact`, `!ls`), whose
+/// transcript record never becomes a user entry.
+fn is_command(text: &str) -> bool {
+    text.trim_start().starts_with(['/', '!'])
+}
+
+/// The refusal for a prompt the session's record says is waiting for an
+/// answer; `None` when none is (or the record is gone).
+fn waiting_prompt(target: &TypeTarget) -> Option<TypeRefusal> {
+    let record = target.sessions.get(&target.session_id)?;
+    let record = lock(&record);
+    waiting_refusal(target, &record)
+}
+
+/// The refusal for a prompt `record` says is waiting for an answer.
+fn waiting_refusal(target: &TypeTarget, record: &SessionRecord) -> Option<TypeRefusal> {
+    record.pending_input.is_some().then(|| {
+        let label = agent_registry::plugin(&target.agent).map_or_else(
+            || target.agent.0.clone(),
+            |plugin| plugin.descriptor().label.clone(),
+        );
+        TypeRefusal::refused(format!("{label} is waiting for an answer in the terminal"))
+    })
+}
+
+/// The refusal for a session whose record says its agent, typed into its
+/// shell, has ended: the shell would run the message as a command.
+fn agent_ended(target: &TypeTarget) -> Option<TypeRefusal> {
+    let record = target.sessions.get(&target.session_id)?;
+    let record = lock(&record);
+    let shell_named = record.shell_label.is_some() && record.program_name == record.shell_label;
+    (record.agent_in_shell && (record.agent_exit_announced || shell_named))
+        .then(|| TypeRefusal::refused(AGENT_ENDED))
+}
+
+/// Refuse a reading that cannot take a message in any view: the agent
+/// ended, a prompt waiting, a draft in the box, a dialog, or no prompt on
+/// screen.
+fn gate(target: &TypeTarget, reading: &Reading) -> Result<(), TypeRefusal> {
+    if let Some(refusal) = agent_ended(target).or_else(|| waiting_prompt(target)) {
+        return Err(refusal);
+    }
+    let Some(view) = reading.view.as_ref() else {
+        return Err(TypeRefusal::refused(NOT_AT_PROMPT));
+    };
+    let composer = reading.chat.as_ref().map(|chat| &chat.composer);
+    // A draft whose first row is blank shows no first line, but its
+    // composer reads as a draft.
+    if view.box_first_line.is_some() || composer == Some(&ComposerState::Draft) {
+        return Err(TypeRefusal::refused(DRAFT));
+    }
+    // An overlay also reads as a dialog in the view; it is named first.
+    if let None | Some(ComposerState::Overlay { .. } | ComposerState::Unknown) = composer {
+        return Err(TypeRefusal::refused(NOT_AT_PROMPT));
+    }
+    if view.dialog {
+        return Err(TypeRefusal::refused(DIALOG));
+    }
+    Ok(())
+}
+
+/// [`gate`], and the main conversation in view with its box empty and
+/// taking text.
+fn gate_in_main(target: &TypeTarget, reading: &Reading) -> Result<(), TypeRefusal> {
+    gate(target, reading)?;
+    let in_main = reading
+        .view
+        .as_ref()
+        .is_some_and(|view| next_view_key(&target.agent, ViewGoal::Main, view) == ViewStep::Done);
+    if !in_main {
+        return Err(TypeRefusal::refused(NO_RETURN));
+    }
+    match reading.chat.as_ref().map(|chat| &chat.composer) {
+        Some(ComposerState::Ready | ComposerState::Working) => Ok(()),
+        Some(ComposerState::Dialog) => Err(TypeRefusal::refused(DIALOG)),
+        _ => Err(TypeRefusal::refused(NOT_AT_PROMPT)),
+    }
+}
+
+/// Drive the terminal from an agent's view, read as `reading`, back to the
+/// main conversation, one key per settled reading; the reading that shows
+/// main.
+async fn return_to_main(
+    target: &TypeTarget,
+    turn: &TypingTurn,
+    reader: &mut ScreenReader,
+    mut reading: Reading,
+) -> Result<Reading, TypeRefusal> {
+    let mut drive = ViewDrive::new(ViewGoal::Main, Instant::now());
+    loop {
+        let Some(view) = reading.view.as_ref() else {
+            return Err(TypeRefusal::refused(NO_RETURN));
+        };
+        let step = next_view_key(&target.agent, ViewGoal::Main, view);
+        let key = match drive.step(view, step, Instant::now()) {
+            DriveAction::Press(key) => key,
+            DriveAction::Reached => break,
+            DriveAction::Failed(failure) => {
+                debug!(session_id = %target.session_id, ?failure, "chat send: the return to main failed");
+                return Err(TypeRefusal::refused(NO_RETURN));
+            }
+        };
+        if turn.owner_typed_since() {
+            return Err(TypeRefusal::refused(OWNER_TYPED));
+        }
+        if key == Key::Enter
+            && let Some(refusal) = waiting_prompt(target)
+        {
+            return Err(refusal);
+        }
+        reader.arm();
+        turn.press(&target.pty, key.to_bytes());
+        reading = reader.after_key().await;
+    }
+    let still_away = reading
+        .view
+        .as_ref()
+        .is_none_or(|view| view.agent_in_view.is_some());
+    if still_away {
+        return Err(TypeRefusal::refused(NO_RETURN));
+    }
+    Ok(reading)
+}
+
+/// Wait up to [`KEY_WAIT`] for a settled reading of main with the paste in
+/// its box, which holds the keys.
+async fn wait_for_paste(reader: &mut ScreenReader) -> Result<(), TypeRefusal> {
+    let deadline = Instant::now() + KEY_WAIT;
+    while let Some(reading) = reader.next_before(deadline).await {
+        let shows = reading.view.as_ref().is_some_and(|view| {
+            view.box_first_line.is_some()
+                && !view.dialog
+                && view.agent_in_view.is_none()
+                && view.key_holder == KeyHolder::Box
+        });
+        if shows {
+            return Ok(());
+        }
+    }
+    Err(TypeRefusal::refused(NOT_SHOWN))
+}
+
+/// Press Enter under the record's and the screen's locks, once the screen
+/// still shows the paste in main's box with no dialog and no owner key or
+/// waiting prompt came, adding the chat's pending entry just before (none
+/// for a command).
+fn press_enter(
+    target: &TypeTarget,
+    turn: &TypingTurn,
+    reader: &mut ScreenReader,
+    text: &str,
+) -> Result<(), TypeRefusal> {
+    #[cfg(test)]
+    enter_seam::run(&target.pty);
+    let output = reader.subscribe();
+    // The lock order is record, screen, mirror. Both are held from the
+    // check to the key, so no prompt or frame comes between them.
+    let record = target.sessions.get(&target.session_id);
+    let record = record.as_deref().map(lock);
+    let waiting = record
+        .as_deref()
+        .and_then(|record| waiting_refusal(target, record));
+    let screen = lock(&target.screen);
+    let reading = Reading::of(&target.agent, &screen);
+    if let Some(refusal) = enter_refusal(&reading, turn, waiting) {
+        return Err(refusal);
+    }
+    let pending = if is_command(text) {
+        None
+    } else {
+        target.mirror.note_sent(&target.session_id, text)
+    };
+    debug!(session_id = %target.session_id, ?pending, "chat send: pressing Enter");
+    reader.arm_at(output, screen.fed());
+    turn.press(&target.pty, Key::Enter.to_bytes());
+    Ok(())
+}
+
+/// Why the Enter may not be pressed on `reading`; `waiting` is the refusal
+/// for a prompt the record says is waiting.
+fn enter_refusal(
+    reading: &Reading,
+    turn: &TypingTurn,
+    waiting: Option<TypeRefusal>,
+) -> Option<TypeRefusal> {
+    let Some(view) = reading.view.as_ref() else {
+        return Some(TypeRefusal::left_in_box(NOT_AT_PROMPT));
+    };
+    if view.dialog {
+        return Some(TypeRefusal::left_in_box(DIALOG));
+    }
+    if view.box_first_line.is_none() {
+        return Some(TypeRefusal::refused(NOT_SHOWN));
+    }
+    if view.agent_in_view.is_some() {
+        return Some(TypeRefusal::left_in_box(NO_RETURN));
+    }
+    if turn.owner_typed_since() {
+        return Some(TypeRefusal::left_in_box(OWNER_TYPED));
+    }
+    waiting.map(|refusal| TypeRefusal::left_in_box(&refusal.message))
+}
+
+/// The enter seam: a test's hook that [`press_enter`] runs once the paste
+/// has shown and before it takes the locks for the Enter's check, so a test
+/// can change the screen or the record in that window.
+#[cfg(test)]
+pub(crate) mod enter_seam {
+    use std::sync::{Arc, Mutex};
+
+    use crate::pty::PtyHandle;
+    use crate::sync::lock;
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    /// The hooks set, each by the address of the terminal it is for.
+    static HOOKS: Mutex<Vec<(usize, Hook)>> = Mutex::new(Vec::new());
+
+    /// Run `hook` at the next Enter a chat send presses into `pty`.
+    pub(crate) fn set(pty: &Arc<PtyHandle>, hook: impl FnOnce() + Send + 'static) {
+        lock(&HOOKS).push((key(pty), Box::new(hook)));
+    }
+
+    /// Run and forget the hook set for `pty`, if any.
+    pub(super) fn run(pty: &Arc<PtyHandle>) {
+        let hook = {
+            let mut hooks = lock(&HOOKS);
+            let at = hooks.iter().position(|(held, _)| *held == key(pty));
+            at.map(|at| hooks.remove(at).1)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    fn key(pty: &Arc<PtyHandle>) -> usize {
+        Arc::as_ptr(pty).addr()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -869,6 +1289,36 @@ mod tests {
             elapsed <= VERIFY_WINDOW,
             "the wait never overruns the verify window; elapsed {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn check_typed_text_keeps_lines_and_tabs_and_normalises_crlf() {
+        assert_eq!(
+            check_typed_text("one\r\ntwo\n\tthree"),
+            Ok("one\ntwo\n\tthree".to_owned())
+        );
+    }
+
+    #[test]
+    fn check_typed_text_refuses_empty_control_and_long_text() {
+        let long = "a".repeat(MAX_TYPED_BYTES + 1);
+        let cases = [
+            ("", "the message is empty"),
+            (" \n\t\r\n ", "the message is empty"),
+            ("hi\x1b[201~\r", "the message holds a control character"),
+            ("stop\x03", "the message holds a control character"),
+            ("lone\rreturn", "the message holds a control character"),
+            ("del\x7f", "the message holds a control character"),
+            ("csi\u{9b}201~", "the message holds a control character"),
+            ("c1 start\u{80}", "the message holds a control character"),
+            ("c1 end\u{9f}", "the message holds a control character"),
+            (long.as_str(), "the message is too long"),
+        ];
+        for (text, why) in cases {
+            assert_eq!(check_typed_text(text), Err(why), "{text:?}");
+        }
+        let at_limit = "a".repeat(MAX_TYPED_BYTES);
+        assert_eq!(check_typed_text(&at_limit), Ok(at_limit.clone()));
     }
 
     #[test]

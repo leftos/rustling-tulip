@@ -118,10 +118,6 @@ impl Screen {
     /// How many bytes of output the grid has been fed, so a reader can tell
     /// whether output arrived since it last looked.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a chat send reads it in CV.8's second part")
-    )]
     pub fn fed(&self) -> u64 {
         self.fed
     }

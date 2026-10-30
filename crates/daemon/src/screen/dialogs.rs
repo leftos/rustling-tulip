@@ -867,6 +867,13 @@ mod tests {
         use KeyHolder::{Panel, TasksPill};
         const AGENT_A: &str = "Agent A python wait";
         const AGENT_B: &str = "Agent B python wait";
+        // v71 and v110 are of a named session: its name on the rule over
+        // the box is no agent in view.
+        const P71: [&str; 3] = [
+            "main",
+            "general-purpose  Count lines in .py files",
+            "general-purpose  Summarize README.md",
+        ];
         const P160: [&str; 2] = ["main", "general-purpose  Running Python sleep command"];
         const P161: [&str; 3] = [
             "main",
@@ -892,6 +899,19 @@ mod tests {
         let draft_b = "draft B for the stash test";
         let image = "[Image #1] what colour is this square? Reply with one word.";
         let cases: Vec<(&str, &str, ViewReading)> = vec![
+            (
+                "v71",
+                include_str!("fixtures/v71-agents-running.txt"),
+                main_view(&P71),
+            ),
+            (
+                "v110",
+                include_str!("fixtures/v110-paste-3lines.txt"),
+                ViewReading {
+                    box_first_line: Some(box_text("line one of a pasted message")),
+                    ..main_view(&[])
+                },
+            ),
             (
                 "v160",
                 include_str!("fixtures/v160-main-agents-panel.txt"),

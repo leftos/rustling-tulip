@@ -26,10 +26,6 @@ pub enum Holder {
     /// The preset injector, typing its chain.
     Injector,
     /// A chat message being typed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a chat send takes it in CV.8's second part")
-    )]
     ChatSend,
     /// A chat answer to a dialog being typed.
     #[expect(dead_code, reason = "a chat answer takes it in CV.9")]
@@ -129,10 +125,6 @@ impl TypingTurn {
     }
 
     /// Whether the owner typed a key since the turn began.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a chat send takes it in CV.8's second part")
-    )]
     pub fn owner_typed_since(&self) -> bool {
         self.lane.owner_epoch() != self.epoch
     }

@@ -1,13 +1,21 @@
 //! The chat requests: `LoadChat` makes the connection a loader of a session's
 //! chat and answers with the chat as it stands, and `UnloadChat` ends that;
 //! `LoadSummary` and `UnloadSummary` do the same for the session's summary
-//! lines (see [`crate::chat_mirror`]).
+//! lines (see [`crate::chat_mirror`]). `ChatSend` types a message into the
+//! session's terminal on a task of its own ([`crate::inject::type_message`]),
+//! answering only a refusal.
+
+use std::sync::Arc;
 
 use super::Hub;
 use super::connection::ConnCtx;
 use crate::chat_mirror::LoadError;
+use crate::inject::{TypeTarget, check_typed_text, type_message};
+use crate::sync::lock;
+use protocol::error_codes::{INVALID_REQUEST, NO_SCREEN, NOT_FOUND};
 use protocol::{ClientMessage, DaemonMessage};
-use tracing::warn;
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
 
 /// Handle the chat messages `dispatch` routes here.
 pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
@@ -20,7 +28,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 hub.chat_mirror
                     .load(&session_id, request_id.clone(), ctx.connection, ctx.out_tx);
             if let Err(err) = loaded {
-                refuse(ctx, err, request_id);
+                refuse_load(ctx, err, request_id);
             }
         }
         ClientMessage::UnloadChat { session_id } => {
@@ -37,22 +45,92 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 ctx.out_tx,
             );
             if let Err(err) = loaded {
-                refuse(ctx, err, request_id);
+                refuse_load(ctx, err, request_id);
             }
         }
         ClientMessage::UnloadSummary { session_id } => {
             hub.chat_mirror.unload_summary(&session_id, ctx.connection);
         }
+        ClientMessage::ChatSend {
+            session_id,
+            text,
+            request_id,
+        } => send(hub, ctx, &session_id, &text, request_id),
         other => warn!(?other, "chat::handle: routed a message it does not own"),
     }
 }
 
+/// Type `text` into `session_id`'s terminal on a task of its own, after the
+/// checks that need no waiting; a refusal, now or from the task, is answered
+/// with an `Error` carrying `request_id`.
+fn send(hub: &Hub, ctx: &ConnCtx<'_>, session_id: &str, text: &str, request_id: Option<String>) {
+    let target = match send_target(hub, session_id) {
+        Ok(target) => target,
+        Err((code, message)) => return refuse(ctx.out_tx, code, message, request_id),
+    };
+    let text = match check_typed_text(text) {
+        Ok(text) => text,
+        Err(why) => return refuse(ctx.out_tx, INVALID_REQUEST, why.to_owned(), request_id),
+    };
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        if let Err(refusal) = type_message(&target, &text).await {
+            debug!(
+                session_id = %target.session_id,
+                code = refusal.code,
+                message = %refusal.message,
+                "chat send refused"
+            );
+            refuse(&out_tx, refusal.code, refusal.message, request_id);
+        }
+    });
+}
+
+/// The terminal `session_id`'s message is typed into; the code and message
+/// of the refusal when the session is unknown or has no terminal.
+fn send_target(hub: &Hub, session_id: &str) -> Result<TypeTarget, (&'static str, String)> {
+    let record = hub
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| (NOT_FOUND, format!("unknown session: {session_id}")))?;
+    let (pty, screen, agent) = {
+        let record = lock(&record);
+        (
+            record.pty.clone(),
+            record.screen.clone(),
+            record.agent.clone(),
+        )
+    };
+    let (Some(pty), Some(screen)) = (pty, screen) else {
+        return Err((NO_SCREEN, "the session has no terminal".to_owned()));
+    };
+    Ok(TypeTarget {
+        session_id: session_id.to_owned(),
+        agent,
+        pty,
+        screen,
+        sessions: Arc::clone(&hub.sessions),
+        mirror: hub.chat_mirror.clone(),
+    })
+}
+
 /// Answer a load that failed with `err`, carrying its `request_id`.
-fn refuse(ctx: &ConnCtx<'_>, err: LoadError, request_id: Option<String>) {
+fn refuse_load(ctx: &ConnCtx<'_>, err: LoadError, request_id: Option<String>) {
+    refuse(ctx.out_tx, err.code, err.message, request_id);
+}
+
+/// Answer a request with an `Error` of `code` and `message`, carrying its
+/// `request_id`.
+fn refuse(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    code: &str,
+    message: String,
+    request_id: Option<String>,
+) {
     // A closed outbox is a connection already ending.
-    let _ = ctx.out_tx.send(DaemonMessage::Error {
-        message: err.message,
-        code: Some(err.code.to_owned()),
+    let _ = out_tx.send(DaemonMessage::Error {
+        message,
+        code: Some(code.to_owned()),
         request_id,
     });
 }
@@ -1584,6 +1662,719 @@ mod tests {
             let unique: HashSet<String> = ids.iter().cloned().collect();
             assert_eq!(unique.len(), ids.len(), "no line is sent twice");
             assert_eq!(unique, expected, "no line is missed");
+        }
+    }
+
+    /// Chat sends typed into a recording PTY while the test plays the TUI:
+    /// after each key it draws the captured frame that key brought up.
+    mod send {
+        use super::*;
+        use crate::chat_mirror::test_lines::queued;
+        use crate::history::test_support::{FakeExit, recording_pty};
+        use crate::inject::enter_seam;
+        use crate::pty::PtyHandle;
+        use crate::screen::{Screen, SharedScreen};
+        use crate::sync::lock;
+        use crate::typing_lane::Holder;
+        use protocol::error_codes::{BUSY, CHAT_REFUSED, UNSUPPORTED_MESSAGE};
+        use protocol::{ChatAnswerKind, PendingInput};
+
+        /// Main with the agents panel and a Heads up, the box empty and
+        /// holding the keys.
+        const V176: &str = include_str!("../screen/fixtures/v176-main-heads-up-box-keys.txt");
+        /// Sleeper A's view with a Heads up for main.
+        const V174: &str = include_str!("../screen/fixtures/v174-agent-view-heads-up-builtin.txt");
+        /// Main in view, the panel holding the keys.
+        const V175: &str = include_str!("../screen/fixtures/v175-main-heads-up-panel-keys.txt");
+        /// Main while a turn runs, the box empty.
+        const C32: &str = include_str!("../screen/fixtures/c32-ask-chat.txt");
+        /// The model picker overlay.
+        const V140: &str = include_str!("../screen/fixtures/v140-model-picker.txt");
+
+        /// v174's mode line, under the box of Sleeper A's view.
+        const V174_MODE_LINE: &str =
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 3 agents · ↓ to manage";
+
+        const DOWN: &[u8] = b"\x1b[B";
+        const UP: &[u8] = b"\x1b[A";
+        const ENTER: &[u8] = b"\r";
+
+        /// Built from v174: the panel holds the keys with its cursor on
+        /// `main`, the agent still in view. No capture shows this frame.
+        fn v174_panel_on_main() -> String {
+            assert!(V174.contains(V174_MODE_LINE) && V174.contains("  ◯ main"));
+            V174.replacen(V174_MODE_LINE, "  ↑/↓ to select · Enter to view", 1)
+                .replacen("  ◯ main", "❯ ◯ main", 1)
+        }
+
+        /// `capture` with `text` typed in its empty box: the paste shown, or
+        /// a draft. Built: the captures that show text in the box are of a
+        /// Claude Code whose rule over the box named the session, which reads
+        /// as an agent in view.
+        fn with_box(capture: &str, text: &str) -> String {
+            let mut typed = 0;
+            let rows: Vec<String> = capture
+                .lines()
+                .map(|row| {
+                    if row.trim_end() == "❯" {
+                        typed += 1;
+                        format!("❯ {text}")
+                    } else {
+                        row.to_owned()
+                    }
+                })
+                .collect();
+            assert_eq!(typed, 1, "the capture shows one empty box");
+            rows.join("\n")
+        }
+
+        /// The session's terminal, whose TUI the test plays.
+        struct Terminal {
+            pty: Arc<PtyHandle>,
+            screen: SharedScreen,
+            input: mpsc::UnboundedReceiver<Vec<u8>>,
+            exit: FakeExit,
+        }
+
+        impl Terminal {
+            /// Draw each of `captures` in turn and send them as one piece of
+            /// output, the way the TUI paints and the watcher draws it.
+            async fn show_all(&self, captures: &[&str]) {
+                let bytes: Vec<u8> = captures
+                    .iter()
+                    .flat_map(|capture| self.draw(capture))
+                    .collect();
+                self.exit.chunk(bytes).await;
+            }
+
+            async fn show(&self, capture: &str) {
+                self.show_all(&[capture]).await;
+            }
+
+            /// Draw `capture` whole on the grid, sized as `screen_from` sizes
+            /// it; the bytes that draw it.
+            fn draw(&self, capture: &str) -> Vec<u8> {
+                draw_on(&self.screen, capture)
+            }
+
+            /// The next write typed into the terminal.
+            async fn typed(&mut self) -> Vec<u8> {
+                tokio::time::timeout(HANG, self.input.recv())
+                    .await
+                    .expect("hung: nothing was typed")
+                    .expect("the PTY is open")
+            }
+
+            /// The writes typed and not yet read.
+            fn typed_now(&mut self) -> Vec<Vec<u8>> {
+                let mut writes = Vec::new();
+                while let Ok(write) = self.input.try_recv() {
+                    writes.push(write);
+                }
+                writes
+            }
+
+            /// Wait until no writer holds the typing lane.
+            async fn lane_free(&self) {
+                tokio::time::timeout(HANG, async {
+                    while self.pty.typing().holder().is_some() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("hung: the typing lane was never given back");
+            }
+        }
+
+        /// Draw `capture` whole on `screen`, sized as `screen_from` sizes it;
+        /// the bytes that draw it.
+        fn draw_on(screen: &SharedScreen, capture: &str) -> Vec<u8> {
+            let rows: Vec<&str> = capture.lines().collect();
+            let widest = rows.iter().map(|row| visible_width(row)).max();
+            let cols = u16::try_from(widest.unwrap_or(0) + 4).expect("a capture fits a grid");
+            let height = u16::try_from(rows.len() + 2).expect("a capture fits a grid");
+            let bytes = format!("\x1b[H\x1b[2J{}", rows.join("\r\n")).into_bytes();
+            let mut screen = lock(screen);
+            screen.resize(cols, height);
+            screen.feed(&bytes);
+            bytes
+        }
+
+        /// How many cells `row` shows, its escape sequences aside.
+        fn visible_width(row: &str) -> usize {
+            let mut width = 0;
+            let mut chars = row.chars();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    width += 1;
+                }
+            }
+            width
+        }
+
+        impl Fixture {
+            /// [`Fixture::new`] with `s1` given a recording PTY and a grid
+            /// that shows `first`.
+            fn with_terminal(
+                tag: &str,
+                conversation: Option<&str>,
+                first: &str,
+            ) -> (Self, Terminal) {
+                let fixture = Self::new(tag, conversation);
+                let (pty, input, exit) = recording_pty();
+                let terminal = Terminal {
+                    pty,
+                    screen: Arc::new(Mutex::new(Screen::new(1, 1))),
+                    input,
+                    exit,
+                };
+                terminal.draw(first);
+                fixture.hub.sessions.update("s1", |record| {
+                    record.pty = Some(Arc::clone(&terminal.pty));
+                    record.screen = Some(Arc::clone(&terminal.screen));
+                });
+                (fixture, terminal)
+            }
+
+            async fn send(&self, out_tx: &Outbox, text: &str) {
+                let msg = ClientMessage::ChatSend {
+                    session_id: "s1".to_owned(),
+                    text: text.to_owned(),
+                    request_id: Some("r-send".to_owned()),
+                };
+                dispatch_on(&self.hub, msg, 9, out_tx).await;
+            }
+        }
+
+        fn paste(text: &str) -> Vec<u8> {
+            format!("\x1b[200~{text}\x1b[201~").into_bytes()
+        }
+
+        /// Send `text` on main's empty box and play it through: the paste,
+        /// the frame showing it, the Enter and the frame after it, until the
+        /// send gives the lane back.
+        async fn send_through(fx: &Fixture, term: &mut Terminal, out_tx: &Outbox, text: &str) {
+            fx.send(out_tx, text).await;
+            assert_eq!(term.typed().await, paste(text));
+            term.show(&with_box(V176, text)).await;
+            assert_eq!(term.typed().await, ENTER);
+            term.show(V176).await;
+            term.lane_free().await;
+        }
+
+        /// The code and message of `msg`, which must be the send's `Error`.
+        fn refusal_of(msg: DaemonMessage) -> (String, String) {
+            match msg {
+                DaemonMessage::Error {
+                    message,
+                    code,
+                    request_id,
+                } => {
+                    assert_eq!(request_id.as_deref(), Some("r-send"));
+                    (code.unwrap_or_default(), message)
+                }
+                other => panic!("expected an Error, got {other:?}"),
+            }
+        }
+
+        async fn next_refusal(inbox: &mut Inbox) -> (String, String) {
+            refusal_of(next_message_within(inbox, HANG).await)
+        }
+
+        fn refused(code: &str, message: &str) -> (String, String) {
+            (code.to_owned(), message.to_owned())
+        }
+
+        /// The pending entries the `ChatAppend`s waiting on `inbox` add: id
+        /// and text.
+        fn pending_added(inbox: &mut Inbox) -> Vec<(String, String)> {
+            drain(inbox)
+                .into_iter()
+                .flat_map(|msg| match msg {
+                    DaemonMessage::ChatAppend { entries, .. } => entries,
+                    _ => Vec::new(),
+                })
+                .filter_map(|entry| match entry {
+                    ChatEntry::User {
+                        id,
+                        text,
+                        pending: true,
+                    } => Some((id, text)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn a_ready_box_gets_the_paste_then_enter() {
+            let (fx, mut term) = Fixture::with_terminal("send-ready", Some("conv-a"), V176);
+            fx.append("conv-a", &[user(1)]);
+            let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+            fx.load(1, &a_tx, "ra").await;
+            ids_until(&mut a_rx, "u-1").await;
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hello there").await;
+            assert_eq!(
+                term.typed().await,
+                paste("hello there"),
+                "the message is one bracketed paste"
+            );
+            assert!(
+                term.typed_now().is_empty(),
+                "no Enter before a frame shows the paste"
+            );
+            assert!(
+                pending_added(&mut a_rx).is_empty(),
+                "no entry before the Enter"
+            );
+            term.show(&with_box(V176, "hello there")).await;
+            assert_eq!(term.typed().await, ENTER);
+            let added = pending_added(&mut a_rx);
+            assert!(
+                matches!(added.as_slice(), [(id, text)]
+                    if id.starts_with("pending:") && text == "hello there"),
+                "the pending entry reached the loader before the Enter: {added:?}"
+            );
+            term.show(V176).await;
+            term.lane_free().await;
+            assert!(drain(&mut s_rx).is_empty(), "the send was not refused");
+        }
+
+        #[tokio::test]
+        async fn a_working_session_gets_it_too_and_the_entry_waits_for_its_record() {
+            let (fx, mut term) = Fixture::with_terminal("send-working", Some("conv-a"), C32);
+            fx.append("conv-a", &[user(1)]);
+            let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+            fx.load(1, &a_tx, "ra").await;
+            ids_until(&mut a_rx, "u-1").await;
+            let (s_tx, _s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "and then this").await;
+            assert_eq!(term.typed().await, paste("and then this"));
+            term.show(&with_box(C32, "and then this")).await;
+            assert_eq!(term.typed().await, ENTER, "the CLI queues it");
+            let added = pending_added(&mut a_rx);
+            let [(pending, _)] = added.as_slice() else {
+                panic!("expected one pending entry, got {added:?}");
+            };
+            fx.append("conv-a", &[queued("q-2", Some(2), "and then this")]);
+            let (entries, removed) = next_append(&mut a_rx).await;
+            assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["q-2"]);
+            assert_eq!(
+                removed,
+                std::slice::from_ref(pending),
+                "the record replaces the entry"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_dialog_a_draft_and_an_overlay_type_nothing() {
+            let draft = with_box(V176, "half a thought");
+            let cases = [
+                ("dialog", PERMISSION, "a dialog is open in the terminal"),
+                ("draft", draft.as_str(), "a draft is in the terminal's box"),
+                ("overlay", V140, "the terminal is not at its prompt"),
+            ];
+            for (name, frame, why) in cases {
+                let (fx, mut term) = Fixture::with_terminal(&format!("send-{name}"), None, frame);
+                let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+                fx.send(&s_tx, "hi").await;
+                assert_eq!(
+                    next_refusal(&mut s_rx).await,
+                    refused(CHAT_REFUSED, why),
+                    "{name}"
+                );
+                assert!(term.typed_now().is_empty(), "{name}: nothing is typed");
+            }
+        }
+
+        #[tokio::test]
+        async fn an_agent_in_view_returns_first() {
+            let (fx, mut term) = Fixture::with_terminal("send-agent-view", None, V174);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "back in main").await;
+            assert_eq!(term.typed().await, DOWN, "Down to the panel");
+            term.show(&v174_panel_on_main()).await;
+            assert_eq!(term.typed().await, ENTER, "Enter on main");
+            term.show(V175).await;
+            assert_eq!(term.typed().await, UP, "Up to the box");
+            term.show(V176).await;
+            assert_eq!(
+                term.typed().await,
+                paste("back in main"),
+                "the paste comes once main is in view"
+            );
+            term.show(&with_box(V176, "back in main")).await;
+            assert_eq!(term.typed().await, ENTER);
+            term.show(V176).await;
+            term.lane_free().await;
+            assert!(drain(&mut s_rx).is_empty(), "the send was not refused");
+        }
+
+        #[tokio::test]
+        async fn a_view_that_stays_on_the_agent_refuses_without_a_paste() {
+            let (fx, mut term) = Fixture::with_terminal("send-stays", None, V174);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            let mut keys = Vec::new();
+            let refusal = loop {
+                tokio::select! {
+                    key = term.input.recv() => {
+                        keys.push(key.expect("the PTY is open"));
+                        term.show(V174).await;
+                    }
+                    msg = next_message_within(&mut s_rx, HANG) => break refusal_of(msg),
+                }
+            };
+            assert_eq!(
+                refusal,
+                refused(
+                    CHAT_REFUSED,
+                    "the terminal could not return to the main conversation"
+                )
+            );
+            keys.extend(term.typed_now());
+            assert!(
+                !keys.is_empty() && keys.iter().all(|key| key == DOWN),
+                "only the drive's keys, no paste: {keys:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn no_enter_until_the_paste_shows() {
+            let (fx, mut term) = Fixture::with_terminal("send-no-paste", None, V176);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(term.typed().await, paste("hi"));
+            let refusal = tokio::time::timeout(HANG, async {
+                loop {
+                    term.show(V176).await;
+                    let next = tokio::time::timeout(Duration::from_millis(100), s_rx.recv());
+                    if let Ok(msg) = next.await {
+                        return msg.expect("the outbox is open");
+                    }
+                }
+            })
+            .await
+            .expect("hung: the send was never refused");
+            assert_eq!(
+                refusal_of(refusal),
+                refused(
+                    CHAT_REFUSED,
+                    "the message did not appear in the box; it may be left there"
+                )
+            );
+            assert!(term.typed_now().is_empty(), "no Enter");
+        }
+
+        #[tokio::test]
+        async fn a_dialog_drawn_before_the_enter_stops_it() {
+            let (fx, mut term) = Fixture::with_terminal("send-late-dialog", None, V176);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            let screen = Arc::clone(&term.screen);
+            enter_seam::set(&term.pty, move || {
+                draw_on(&screen, PERMISSION);
+            });
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(term.typed().await, paste("hi"));
+            term.show(&with_box(V176, "hi")).await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(
+                    CHAT_REFUSED,
+                    "a dialog is open in the terminal; the message was left in the box"
+                ),
+                "the paste showed, then the dialog came up before the Enter"
+            );
+            assert!(term.typed_now().is_empty(), "no Enter");
+        }
+
+        #[tokio::test]
+        async fn a_prompt_raised_before_the_enter_stops_it() {
+            let (fx, mut term) = Fixture::with_terminal("send-late-prompt", None, V176);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            let sessions = Arc::clone(&fx.hub.sessions);
+            enter_seam::set(&term.pty, move || {
+                sessions.update("s1", |record| {
+                    record.pending_input = Some(PendingInput::Permission {
+                        tool_name: "Bash".to_owned(),
+                        summary: "ls".to_owned(),
+                    });
+                });
+            });
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(term.typed().await, paste("hi"));
+            term.show(&with_box(V176, "hi")).await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(
+                    CHAT_REFUSED,
+                    "Claude is waiting for an answer in the terminal; the message was left in the box"
+                )
+            );
+            assert!(term.typed_now().is_empty(), "no Enter");
+        }
+
+        #[tokio::test]
+        async fn a_user_draft_that_starts_like_the_placeholder_refuses() {
+            let draft = with_box(V176, "Try \"npm test\" again");
+            let (fx, mut term) = Fixture::with_terminal("send-try-draft", None, &draft);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(CHAT_REFUSED, "a draft is in the terminal's box")
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        #[tokio::test]
+        async fn a_message_that_starts_like_the_placeholder_is_sent() {
+            let (fx, mut term) = Fixture::with_terminal("send-try-text", None, V176);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            send_through(&fx, &mut term, &s_tx, "Try \"npm test\" again").await;
+            assert!(drain(&mut s_rx).is_empty(), "the send was not refused");
+        }
+
+        #[tokio::test]
+        async fn a_message_shaped_like_the_placeholder_never_shows() {
+            let text = "Try \"npm test\"";
+            let (fx, mut term) = Fixture::with_terminal("send-try-whole", None, V176);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, text).await;
+            assert_eq!(term.typed().await, paste(text));
+            let refusal = tokio::time::timeout(HANG, async {
+                loop {
+                    term.show(&with_box(V176, text)).await;
+                    let next = tokio::time::timeout(Duration::from_millis(100), s_rx.recv());
+                    if let Ok(msg) = next.await {
+                        return msg.expect("the outbox is open");
+                    }
+                }
+            })
+            .await
+            .expect("hung: the send was never refused");
+            assert_eq!(
+                refusal_of(refusal),
+                refused(
+                    CHAT_REFUSED,
+                    "the message did not appear in the box; it may be left there"
+                ),
+                "the box reads as its placeholder"
+            );
+            assert!(term.typed_now().is_empty(), "no Enter");
+        }
+
+        #[tokio::test]
+        async fn a_draft_with_a_blank_first_row_refuses_in_an_agents_view() {
+            let placeholder = "❯\u{a0}Message @general-purpose…";
+            assert!(V174.contains(placeholder));
+            let draft = V174.replacen(placeholder, "❯\n  the rest of a draft", 1);
+            let (fx, mut term) = Fixture::with_terminal("send-blank-first-row", None, &draft);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(CHAT_REFUSED, "a draft is in the terminal's box")
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        #[tokio::test]
+        async fn a_command_adds_no_pending_entry() {
+            let (fx, mut term) = Fixture::with_terminal("send-command", Some("conv-a"), V176);
+            fx.append("conv-a", &[user(1)]);
+            let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+            fx.load(1, &a_tx, "ra").await;
+            ids_until(&mut a_rx, "u-1").await;
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            send_through(&fx, &mut term, &s_tx, "/compact").await;
+            send_through(&fx, &mut term, &s_tx, " !ls").await;
+            assert!(drain(&mut s_rx).is_empty(), "neither send was refused");
+            assert_eq!(
+                pending_added(&mut a_rx),
+                Vec::<(String, String)>::new(),
+                "a command's record never becomes a user entry"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_ended_agent_refuses() {
+            type End = fn(&mut crate::session::SessionRecord);
+            let ended: [(&str, End); 2] = [
+                ("announced", |record| record.agent_exit_announced = true),
+                ("shell-named", |record| {
+                    record.program_name = record.shell_label.clone();
+                }),
+            ];
+            for (name, end) in ended {
+                let (fx, mut term) =
+                    Fixture::with_terminal(&format!("send-ended-{name}"), None, V176);
+                fx.hub.sessions.update("s1", |record| {
+                    record.agent_in_shell = true;
+                    record.shell_label = Some("pwsh".to_owned());
+                    end(record);
+                });
+                let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+                fx.send(&s_tx, "hi").await;
+                assert_eq!(
+                    next_refusal(&mut s_rx).await,
+                    refused(CHAT_REFUSED, "the agent is not running in this session"),
+                    "{name}"
+                );
+                assert!(term.typed_now().is_empty(), "{name}: nothing is typed");
+            }
+        }
+
+        #[tokio::test]
+        async fn an_owner_key_mid_send_stops_it() {
+            let (fx, mut term) = Fixture::with_terminal("send-owner-key", None, V176);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(term.typed().await, paste("hi"));
+            term.pty.typing().owner_typed();
+            term.show(&with_box(V176, "hi")).await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(
+                    CHAT_REFUSED,
+                    "someone typed in the terminal; the message was left in the box"
+                )
+            );
+            assert!(term.typed_now().is_empty(), "no Enter");
+        }
+
+        #[tokio::test]
+        async fn a_pending_prompt_refuses() {
+            let (fx, mut term) = Fixture::with_terminal("send-pending-prompt", None, V176);
+            fx.hub.sessions.update("s1", |record| {
+                record.pending_input = Some(PendingInput::Permission {
+                    tool_name: "Bash".to_owned(),
+                    summary: "ls".to_owned(),
+                });
+            });
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(
+                    CHAT_REFUSED,
+                    "Claude is waiting for an answer in the terminal"
+                )
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        /// On a paused clock, so the refusal racing a 1 ms timer shows by the
+        /// order of events whether the send waited for the lane: no timer
+        /// fires while a task can still run.
+        #[tokio::test(start_paused = true)]
+        async fn a_second_send_is_busy() {
+            let (fx, mut term) = Fixture::with_terminal("send-busy", None, V176);
+            let _held = term
+                .pty
+                .typing()
+                .try_take(Holder::ChatSend)
+                .expect("a free lane");
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            let first = tokio::select! {
+                biased;
+                msg = s_rx.recv() => msg,
+                () = tokio::time::sleep(Duration::from_millis(1)) => None,
+            };
+            let refusal = first.expect("the send was refused before any wait for the lane");
+            assert_eq!(
+                refusal_of(refusal),
+                refused(BUSY, "another message is being typed")
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        #[tokio::test]
+        async fn a_send_waits_out_a_view_switch_then_refuses_busy() {
+            let (fx, mut term) = Fixture::with_terminal("send-busy-view", None, V176);
+            let _held = term
+                .pty
+                .typing()
+                .try_take(Holder::ViewReturn)
+                .expect("a free lane");
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            fx.send(&s_tx, "hi").await;
+            assert_eq!(
+                next_refusal(&mut s_rx).await,
+                refused(BUSY, "the terminal is switching views")
+            );
+            assert!(term.typed_now().is_empty(), "nothing is typed");
+        }
+
+        #[tokio::test]
+        async fn two_identical_sends_clear_in_order() {
+            let (fx, mut term) = Fixture::with_terminal("send-twice", Some("conv-a"), V176);
+            fx.append("conv-a", &[user(1)]);
+            let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+            fx.load(1, &a_tx, "ra").await;
+            ids_until(&mut a_rx, "u-1").await;
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            send_through(&fx, &mut term, &s_tx, "same").await;
+            send_through(&fx, &mut term, &s_tx, "same").await;
+            assert!(drain(&mut s_rx).is_empty(), "neither send was refused");
+            let pending: Vec<String> = pending_added(&mut a_rx)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(pending.len(), 2, "{pending:?}");
+            fx.append("conv-a", &[prompt("u-2", 2, None, "same")]);
+            let (entries, removed) = next_append(&mut a_rx).await;
+            assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["u-2"]);
+            assert_eq!(removed, [pending[0].clone()], "the oldest goes first");
+            fx.append("conv-a", &[prompt("u-3", 3, None, " same ")]);
+            let (entries, removed) = next_append(&mut a_rx).await;
+            assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["u-3"]);
+            assert_eq!(removed, [pending[1].clone()]);
+        }
+
+        #[tokio::test]
+        async fn an_unloaded_chat_adds_no_pending_entry() {
+            let (fx, mut term) = Fixture::with_terminal("send-unloaded", Some("conv-a"), V176);
+            fx.append("conv-a", &[user(1)]);
+            let (s_tx, mut s_rx) = mpsc::unbounded_channel();
+            send_through(&fx, &mut term, &s_tx, "solo").await;
+            assert!(drain(&mut s_rx).is_empty(), "the send was not refused");
+            let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+            fx.load(1, &a_tx, "ra").await;
+            let shown = ids_until(&mut a_rx, "u-1").await;
+            assert_eq!(shown, ["u-1"], "no pending entry was kept for a later load");
+        }
+
+        #[tokio::test]
+        async fn chat_answer_is_still_refused() {
+            let fx = Fixture::new("send-answer", None);
+            let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+            let msg = ClientMessage::ChatAnswer {
+                session_id: "s1".to_owned(),
+                prompt_id: "p1".to_owned(),
+                answer: ChatAnswerKind::Submit,
+                request_id: Some("r-answer".to_owned()),
+            };
+            dispatch_on(&fx.hub, msg, 1, &a_tx).await;
+            match next_message(&mut a_rx).await {
+                DaemonMessage::Error {
+                    message,
+                    code,
+                    request_id,
+                } => {
+                    assert_eq!(message, "sending from the chat is not supported yet");
+                    assert_eq!(code.as_deref(), Some(UNSUPPORTED_MESSAGE));
+                    assert_eq!(request_id.as_deref(), Some("r-answer"));
+                }
+                other => panic!("expected an Error, got {other:?}"),
+            }
         }
     }
 }

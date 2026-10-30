@@ -613,8 +613,9 @@ fn review_body(rows: &[String]) -> String {
 }
 
 /// The input box's state: the rows between the last two rules. Text after
-/// the prompt (other than the `Try "…"` placeholder), or more than one row,
-/// is a draft; an empty box is working while a spinner shows above it.
+/// the prompt (other than a whole-line `Try "…"` placeholder or an agent's
+/// `Message @…` one), or more than one row, is a draft; an empty box is working while a spinner shows above
+/// it.
 fn composer(rows: &[String]) -> ComposerState {
     let rules = rule_indices(rows);
     let [.., top, bottom] = rules[..] else {
@@ -630,7 +631,7 @@ fn composer(rows: &[String]) -> ComposerState {
     };
     let typed = if let Some(rest) = first.strip_prefix(CURSOR) {
         let rest = rest.trim();
-        !rest.is_empty() && !rest.starts_with("Try \"")
+        !rest.is_empty() && !is_try_placeholder(rest) && !is_agent_placeholder(rest)
     } else if let Some(rest) = first.strip_prefix('!') {
         !rest.trim().is_empty()
     } else {
@@ -643,6 +644,14 @@ fn composer(rows: &[String]) -> ComposerState {
     } else {
         ComposerState::Ready
     }
+}
+
+/// Whether `text`, a box's trimmed first line after the prompt, is the
+/// empty box's `Try "…"` placeholder: only the whole line counts, so a draft
+/// that starts the same way is text.
+fn is_try_placeholder(text: &str) -> bool {
+    const OPEN: &str = "Try \"";
+    text.len() > OPEN.len() && text.starts_with(OPEN) && text.ends_with('"')
 }
 
 /// Whether a turn's spinner shows among the last non-empty rows of `rows`.
@@ -1169,8 +1178,18 @@ pub(crate) fn read_view(rows: &[String]) -> ViewReading {
         read(rows).composer,
         ComposerState::Dialog | ComposerState::Overlay { .. }
     );
+    let panel_in_view = panel.iter().position(|row| row.in_view);
+    // A named session draws its name where an agent's description goes, so
+    // the rule's text is an agent only with more to say so: the panel's
+    // agent row in view, or with no panel, a dialog in the box's place or
+    // the agent's placeholder in the box.
+    let agent_shown = if panel.is_empty() {
+        dialog || box_first_row(rows, &rules).is_some_and(is_agent_placeholder)
+    } else {
+        panel_in_view.is_some_and(|row| row > 0)
+    };
     ViewReading {
-        agent_in_view: agent_in_view(rows, &rules),
+        agent_in_view: agent_in_view(rows, &rules).filter(|_| agent_shown),
         key_holder: key_holder(under, mode_line),
         stashed: mode_line.is_some_and(|line| line.ends_with(STASHED)),
         box_first_line: if dialog {
@@ -1180,7 +1199,7 @@ pub(crate) fn read_view(rows: &[String]) -> ViewReading {
         },
         dialog,
         panel_cursor: panel.iter().position(|row| row.cursor),
-        panel_in_view: panel.iter().position(|row| row.in_view),
+        panel_in_view,
         panel: panel.into_iter().map(|row| row.label).collect(),
     }
 }
@@ -1329,6 +1348,13 @@ fn panel_row(row: &str) -> Option<PanelRow> {
 /// The box's first line of text, its prompt taken off; `None` for an empty
 /// box or one showing only a placeholder.
 fn box_first_line(rows: &[String], rules: &[usize]) -> Option<String> {
+    let text = box_first_row(rows, rules)?;
+    let placeholder = is_try_placeholder(text) || is_agent_placeholder(text);
+    (!text.is_empty() && !placeholder).then(|| text.to_owned())
+}
+
+/// The box's first non-empty row, trimmed and its prompt taken off.
+fn box_first_row<'a>(rows: &'a [String], rules: &[usize]) -> Option<&'a str> {
     let [.., top, bottom] = rules[..] else {
         return None;
     };
@@ -1336,10 +1362,13 @@ fn box_first_line(rows: &[String], rules: &[usize]) -> Option<String> {
         .iter()
         .map(|row| row.trim())
         .find(|row| !row.is_empty())?;
-    let text = first.strip_prefix(CURSOR).map_or(first, str::trim);
-    let placeholder =
-        text.starts_with("Try \"") || (text.starts_with(AGENT_PLACEHOLDER) && text.ends_with('…'));
-    (!text.is_empty() && !placeholder).then(|| text.to_owned())
+    Some(first.strip_prefix(CURSOR).map_or(first, str::trim))
+}
+
+/// Whether `text`, a box's trimmed first line after the prompt, is the
+/// placeholder an agent's empty box shows (`Message @general-purpose…`).
+fn is_agent_placeholder(text: &str) -> bool {
+    text.starts_with(AGENT_PLACEHOLDER) && text.ends_with('…')
 }
 
 /// The one key that moves the screen read as `reading` towards `goal`.

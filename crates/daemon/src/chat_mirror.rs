@@ -73,6 +73,10 @@ static NEXT_PROMPT: AtomicU64 = AtomicU64::new(1);
 /// no two tails ever carry the same one.
 static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
+/// The number in the next pending entry's id, unique within the daemon's
+/// run.
+static NEXT_PENDING: AtomicU64 = AtomicU64::new(1);
+
 type Outbox = mpsc::UnboundedSender<DaemonMessage>;
 
 /// Every session's chat mirror. Cheap to clone; clones share one mirror.
@@ -313,6 +317,29 @@ impl ChatMirror {
         Ok(())
     }
 
+    /// Show `text`, which a chat send is about to submit in `session_id`'s
+    /// terminal, as a pending user entry after the chat's entries until the
+    /// transcript's record of it arrives, and send it to the chat loaders.
+    /// Returns its id; `None`, adding nothing, when no connection has the
+    /// chat loaded.
+    #[must_use]
+    pub fn note_sent(&self, session_id: &str, text: &str) -> Option<String> {
+        let mut sessions = lock(&self.inner.sessions);
+        let mirror = sessions.get_mut(session_id)?;
+        if !mirror.loaders.values().any(|loader| loader.chat) {
+            return None;
+        }
+        let id = format!("pending:{}", NEXT_PENDING.fetch_add(1, Ordering::Relaxed));
+        let entry = mirror.pending.add(&id, text);
+        let removed = mirror.pending.take_dropped();
+        mirror.tell(&DaemonMessage::ChatAppend {
+            session_id: session_id.to_owned(),
+            entries: vec![entry],
+            removed,
+        });
+        Some(id)
+    }
+
     /// `connection` no longer loads `session_id`'s chat; the last loader
     /// leaving drops the session's mirror and stops its tail.
     pub fn unload(&self, session_id: &str, connection: u64) {
@@ -443,6 +470,7 @@ impl ChatMirror {
         let path = conversation.as_ref().and_then(|c| c.path.clone());
         mirror.conversation = conversation;
         mirror.chat = ChatState::starting_with(head, path.is_some());
+        mirror.pending.drop_all();
         mirror.summary_sent.clear();
         if let Some(writer) = mirror.writer.as_mut() {
             writer.clear();
@@ -497,7 +525,10 @@ impl ChatMirror {
         };
         match event {
             TailEvent::Line(line) => mirror.apply_line(session_id, plugin, &line, &facts),
-            TailEvent::Restarted => mirror.chat.restart(),
+            TailEvent::Restarted => {
+                mirror.chat.restart();
+                mirror.pending.drop_all();
+            }
             TailEvent::CaughtUp => {
                 if mirror.chat.catch_up() {
                     mirror.reset(session_id);
@@ -1144,6 +1175,9 @@ struct SessionMirror {
     epoch: u64,
     tail: Option<TailHandle>,
     chat: ChatState,
+    /// The messages chat sends typed whose transcript record has not
+    /// arrived.
+    pending: PendingSends,
     screen: ScreenState,
     live_task: tokio::task::AbortHandle,
     /// The work the session's record holds, as its agent's last `Stop`
@@ -1183,6 +1217,7 @@ impl SessionMirror {
             epoch: 0,
             tail: None,
             chat: ChatState::default(),
+            pending: PendingSends::default(),
             screen: ScreenState::default(),
             live_task,
             work: BackgroundWork::default(),
@@ -1208,7 +1243,12 @@ impl SessionMirror {
         facts: &TranscriptLineFacts,
     ) {
         self.ended_tasks.extend(facts.ended_tasks.iter().cloned());
-        let change = self.chat.apply_line(plugin, line, facts);
+        let mut change = self.chat.apply_line(plugin, line, facts);
+        // A line applied while the first read catches up is an old one,
+        // which lands no pending entry.
+        if !self.chat.catching_up {
+            self.pending.clear_landed(&mut change);
+        }
         let changed = !(change.entries.is_empty() && change.removed.is_empty());
         if self.chat.catching_up {
             // Sent whole when the read ends, the strip with it.
@@ -1269,7 +1309,7 @@ impl SessionMirror {
         connection: u64,
         out_tx: &Outbox,
     ) -> DaemonMessage {
-        let floor = self.chat.reply_floor();
+        let floor = self.chat.reply_floor(self.pending.len());
         let reply = match kind {
             LoadKind::Chat => self.chat_message(session_id, request_id),
             LoadKind::Summary => self.summary_message(session_id, request_id),
@@ -1327,7 +1367,9 @@ impl SessionMirror {
     /// to the reply's first entry.
     fn reset(&mut self, session_id: &str) {
         let msg = self.chat_message(session_id, None);
-        let floor = self.chat.reply_floor();
+        // The fresh start leaves out the pending entries already dropped.
+        self.pending.take_dropped();
+        let floor = self.chat.reply_floor(self.pending.len());
         for loader in self.loaders.values_mut().filter(|loader| loader.chat) {
             loader.floor = floor;
         }
@@ -1440,7 +1482,7 @@ impl SessionMirror {
     /// The whole chat as one `Chat` message: a reply when `request_id` is
     /// set, a fresh start for the loaders when it is not.
     fn chat_message(&self, session_id: &str, request_id: Option<String>) -> DaemonMessage {
-        let (entries, hidden) = self.chat.reply();
+        let (entries, hidden) = self.chat.reply_with(&self.pending.entries);
         DaemonMessage::Chat {
             session_id: session_id.to_owned(),
             entries,
@@ -1464,10 +1506,11 @@ impl SessionMirror {
     fn flush_live(&mut self, session_id: &str) {
         let entries = self.chat.take_changed_live();
         if !entries.is_empty() {
+            let removed = self.pending.take_dropped();
             self.tell(&DaemonMessage::ChatAppend {
                 session_id: session_id.to_owned(),
                 entries,
-                removed: Vec::new(),
+                removed,
             });
         }
     }
@@ -1848,10 +1891,12 @@ impl ChatState {
             .collect()
     }
 
-    /// The place in `entries` of the first entry a reply carries; with live
-    /// answers filling the whole reply, the place the next entry takes.
-    fn reply_floor(&self) -> usize {
-        let hidden = (self.entries.len() + self.live.len()).saturating_sub(CHAT_REPLY_CAP);
+    /// The place in `entries` of the first entry a reply carries, `pending`
+    /// pending entries after the live answers; with those filling the whole
+    /// reply, the place the next entry takes.
+    fn reply_floor(&self, pending: usize) -> usize {
+        let hidden =
+            (self.entries.len() + self.live.len() + pending).saturating_sub(CHAT_REPLY_CAP);
         hidden.min(self.entries.len())
     }
 
@@ -1918,19 +1963,95 @@ impl ChatState {
             .collect()
     }
 
-    /// The newest [`CHAT_REPLY_CAP`] entries, live answers last, and how many
-    /// older ones are left out.
+    /// [`Self::reply_with`] no pending entries.
+    #[cfg(test)]
     fn reply(&self) -> (Vec<ChatEntry>, u32) {
-        let total = self.entries.len() + self.live.len();
+        self.reply_with(&[])
+    }
+
+    /// The newest [`CHAT_REPLY_CAP`] entries, then the live answers, then
+    /// `pending`, and how many older ones are left out.
+    fn reply_with(&self, pending: &[ChatEntry]) -> (Vec<ChatEntry>, u32) {
+        let total = self.entries.len() + self.live.len() + pending.len();
         let hidden = total.saturating_sub(CHAT_REPLY_CAP);
         let entries = self
             .entries
             .iter()
             .cloned()
             .chain(self.live.iter().map(LiveAnswer::entry))
+            .chain(pending.iter().cloned())
             .skip(hidden)
             .collect();
         (entries, u32::try_from(hidden).unwrap_or(u32::MAX))
+    }
+}
+
+/// The messages a chat send typed whose transcript record has not arrived,
+/// oldest first, shown as pending user entries after the chat's entries.
+/// They start no stretch: the summary reads only the transcript's entries.
+#[derive(Default)]
+struct PendingSends {
+    entries: Vec<ChatEntry>,
+    /// The ids of the entries a restart or a conversation switch dropped,
+    /// for the next append to remove.
+    dropped: Vec<String>,
+}
+
+impl PendingSends {
+    /// Add `text` as pending entry `id`; the entry.
+    fn add(&mut self, id: &str, text: &str) -> ChatEntry {
+        let entry = ChatEntry::User {
+            id: id.to_owned(),
+            text: text.to_owned(),
+            pending: true,
+        };
+        self.entries.push(entry.clone());
+        entry
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Drop every pending entry; the next append removes them.
+    fn drop_all(&mut self) {
+        let ids = self.entries.drain(..).filter_map(|entry| match entry {
+            ChatEntry::User { id, .. } => Some(id),
+            _ => None,
+        });
+        self.dropped.extend(ids);
+    }
+
+    /// The ids dropped since the last append.
+    fn take_dropped(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.dropped)
+    }
+
+    /// For each user message new in `change`, take away the oldest pending
+    /// entry with its text (both trimmed), adding its id to the change's
+    /// removals, as well as the ids dropped since the last append.
+    fn clear_landed(&mut self, change: &mut Change) {
+        for (entry, replaces) in change.entries.iter().zip(&change.replaces) {
+            if let (ChatEntry::User { text, pending, .. }, None) = (entry, replaces)
+                && !pending
+                && let Some(id) = self.take_oldest(text)
+            {
+                change.removed.push(id);
+            }
+        }
+        change.removed.append(&mut self.dropped);
+    }
+
+    /// Take away the oldest entry whose trimmed text is `text` trimmed; its
+    /// id.
+    fn take_oldest(&mut self, text: &str) -> Option<String> {
+        let at = self.entries.iter().position(|entry| {
+            matches!(entry, ChatEntry::User { text: held, .. } if held.trim() == text.trim())
+        })?;
+        match self.entries.remove(at) {
+            ChatEntry::User { id, .. } => Some(id),
+            _ => None,
+        }
     }
 }
 
@@ -2046,6 +2167,22 @@ mod tests {
             message_key: Some(message_id.to_owned()),
             prompt_key: Some(prompt_id.to_owned()),
         }
+    }
+
+    #[tokio::test]
+    async fn a_line_read_while_catching_up_leaves_the_pending_entry() {
+        let live_task = tokio::spawn(async {}).abort_handle();
+        let mut mirror = SessionMirror::new("s1", claude(), live_task);
+        mirror.chat = ChatState::starting_with(None, true);
+        mirror.pending.add("pending:1", "same");
+        let line = prompt("u-1", 1, None, "same");
+        let facts = claude().chat_line_facts(&line);
+        mirror.apply_line("s1", claude(), &line, &facts);
+        assert_eq!(
+            mirror.pending.len(),
+            1,
+            "an old line with the send's text is not its record"
+        );
     }
 
     #[test]

@@ -286,6 +286,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **UI theme**: the `UiTheme` the native client's window draws its colours with, one field per palette token; views read the active one with `theme(cx)` and `RootView::set_theme` swaps it (`apps/native/src/ui_theme.rs`), and the default is Nord (`theme_store::DEFAULT_THEME`).
 
   The boot picks it from `native-ui.json`'s `theme` through `ThemeStore` (`theme_store.rs`; user themes are `<config dir>/themes/<slug>.json`); its `terminal` part is the terminal's palette (`TerminalPalette`, `theme.rs`).
+- **Typing lane**: the per-session lock every multi-key writer to a session's PTY takes (the watcher's view switch, the spawn injector, a chat send), so one writer types at a time; the user's own keys never wait on it.
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
 - **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
 - **Unsummarized reports**: a session's pending `Stop` messages (at most 12, each capped at 8 KiB), waiting for the summarizer's next call.
