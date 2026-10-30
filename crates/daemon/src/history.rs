@@ -66,6 +66,12 @@ pub fn subscribe_changes() -> watch::Receiver<u64> {
 /// interleaved by two end paths racing on one session.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+/// How many [`write_if_absent`] calls have reached [`WRITE_LOCK`], counted
+/// just before each takes it, so a test holding the lock can see a writer
+/// parked on it.
+#[cfg(test)]
+static WRITERS_AT_LOCK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn entry_path(dirs: &Dirs, session_id: &str) -> PathBuf {
     dirs.history_dir().join(format!("{session_id}.json"))
 }
@@ -313,6 +319,8 @@ fn sidecar_modified(dirs: &Dirs, session_id: &str) -> Option<DateTime<Utc>> {
 /// Write `entry` unless the session already has one. Returns `Ok(true)` when
 /// this call wrote it and `Ok(false)` when an earlier end path got there first.
 pub fn write_if_absent(dirs: &Dirs, entry: &HistoryEntry) -> anyhow::Result<bool> {
+    #[cfg(test)]
+    WRITERS_AT_LOCK.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let _guard = lock(&WRITE_LOCK);
     let path = entry_path(dirs, &entry.session_id);
     if path.exists() {
@@ -1685,6 +1693,24 @@ pub(crate) mod test_support {
         crate::sync::lock(&super::WRITE_LOCK)
     }
 
+    /// How many history writers have reached the write lock so far; read it
+    /// before an end path starts, then [`wait_for_writer_at_lock`] past it.
+    pub fn writers_at_lock() -> usize {
+        super::WRITERS_AT_LOCK.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Poll until more than `seen` history writers have reached the write
+    /// lock, failing as hung when none has after [`HANG_GUARD`].
+    pub async fn wait_for_writer_at_lock(seen: usize) {
+        tokio::time::timeout(HANG_GUARD, async {
+            while writers_at_lock() <= seen {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("hung: no history writer reached the write lock"));
+    }
+
     /// Insert `rec` wired to `pty` the way a spawn does, exit watcher included.
     pub fn insert_live(
         registry: &Arc<SessionRegistry>,
@@ -1794,31 +1820,38 @@ pub(crate) mod test_support {
         crate::orphan::write_meta(dirs, &meta).expect("write meta");
     }
 
-    /// Wait for `id`'s sidecar to be gone, an exit watcher's last step;
-    /// returns whether it went. A passing run returns at once, so the bound
-    /// is only a hang guard.
-    pub async fn sidecar_gone(dirs: &Dirs, id: &str) -> bool {
-        for _ in 0..6000 {
-            if crate::orphan::load_meta(dirs, id).is_err() {
-                return true;
+    /// The bound on these waits: a hang guard a passing run never comes
+    /// near, failing as "hung".
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+
+    /// Poll until `id`'s sidecar is gone, an exit watcher's last step,
+    /// failing as hung when it is still on disk after [`HANG_GUARD`].
+    pub async fn sidecar_gone(dirs: &Dirs, id: &str) {
+        tokio::time::timeout(HANG_GUARD, async {
+            while crate::orphan::load_meta(dirs, id).is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        crate::orphan::load_meta(dirs, id).is_err()
+        })
+        .await
+        .unwrap_or_else(|_| panic!("hung: {id}'s sidecar is still on disk"));
     }
 
-    /// Wait up to five seconds for `session_id`'s history entry to appear.
+    /// Poll until `session_id`'s history entry appears, failing as hung when
+    /// it has not after [`HANG_GUARD`].
     pub async fn wait_for_entry(dirs: &Dirs, session_id: &str) -> HistoryEntry {
-        for _ in 0..500 {
-            if let Some(entry) = super::read_all(dirs)
-                .into_iter()
-                .find(|e| e.session_id == session_id)
-            {
-                return entry;
+        tokio::time::timeout(HANG_GUARD, async {
+            loop {
+                if let Some(entry) = super::read_all(dirs)
+                    .into_iter()
+                    .find(|e| e.session_id == session_id)
+                {
+                    return entry;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("no history entry for {session_id} within five seconds");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("hung: no history entry for {session_id}"))
     }
 }
 

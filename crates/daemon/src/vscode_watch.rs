@@ -621,7 +621,7 @@ mod tests {
         start(&state, &events);
 
         // A hang guard, never a bound a passing run comes near.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         loop {
             let event = tokio::time::timeout_at(deadline, rx.recv())
                 .await

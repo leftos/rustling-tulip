@@ -535,15 +535,9 @@ async fn accept_vscode_suggestion(
 mod tests {
     use super::*;
     use crate::server::test_support::{
-        dispatch_err, dispatch_one, repo_entry, test_hub, workspace_entry,
+        HANG_GUARD, dispatch_err, dispatch_one, repo_entry, test_hub, workspace_entry,
     };
     use std::path::Path;
-    use std::time::Duration;
-
-    /// The hang guard every wait in these tests runs under, never a bound a
-    /// passing run comes near: a regression fails as "hung" instead of
-    /// hanging the run.
-    const HANG_GUARD: Duration = Duration::from_secs(30);
 
     /// The scan reply on `out_rx`, waited for: the scan runs off the
     /// dispatch task, so it lands after `handle` returns.
@@ -848,10 +842,9 @@ mod tests {
             hub.state_events.clone(),
             Box::new(NoHold),
         );
-        let wait = std::time::Duration::from_secs(5);
-        let first = tokio::time::timeout(wait, next_keep_awake_mode(&mut events))
+        let first = tokio::time::timeout(HANG_GUARD, next_keep_awake_mode(&mut events))
             .await
-            .expect("the watcher publishes its first status");
+            .expect("hung: the watcher never published its first status");
         assert_eq!(first, KeepAwakeMode::WhenBusy, "the persisted default");
 
         let sent = dispatch_err(
@@ -869,9 +862,9 @@ mod tests {
             KeepAwakeMode::Always,
             "the mode reached state.json"
         );
-        let broadcast = tokio::time::timeout(wait, next_keep_awake_mode(&mut events))
+        let broadcast = tokio::time::timeout(HANG_GUARD, next_keep_awake_mode(&mut events))
             .await
-            .expect("the watcher broadcasts the new mode");
+            .expect("hung: the watcher never broadcast the new mode");
         assert_eq!(broadcast, KeepAwakeMode::Always);
     }
 
@@ -1091,7 +1084,6 @@ mod tests {
     async fn set_agent_settings_validates_persists_and_broadcasts() {
         let (hub, _scratch) = test_hub("agent-settings-save");
         let mut events = hub.state_events.subscribe();
-        let wait = std::time::Duration::from_secs(5);
         let claude = agent_registry::default_agent();
 
         let sent = dispatch_err(
@@ -1112,9 +1104,9 @@ mod tests {
             expected,
             "the validated settings reached state.json"
         );
-        let broadcast = tokio::time::timeout(wait, next_agent_settings(&mut events))
+        let broadcast = tokio::time::timeout(HANG_GUARD, next_agent_settings(&mut events))
             .await
-            .expect("the change is broadcast");
+            .expect("hung: the change was never broadcast");
         assert_eq!(broadcast, expected);
     }
 
@@ -1142,7 +1134,6 @@ mod tests {
     async fn set_agent_command_persists_broadcasts_and_a_blank_pair_clears_it() {
         let (hub, _scratch) = test_hub("agent-command-save");
         let mut events = hub.state_events.subscribe();
-        let wait = std::time::Duration::from_secs(5);
 
         let sent = dispatch_err(&hub, set_command("claude-wrapper", "--debug \"a b\"")).await;
         assert_eq!(sent, None, "a valid command is accepted");
@@ -1155,9 +1146,9 @@ mod tests {
             },
             "the command reached state.json"
         );
-        let broadcast = tokio::time::timeout(wait, next_agent_commands(&mut events))
+        let broadcast = tokio::time::timeout(HANG_GUARD, next_agent_commands(&mut events))
             .await
-            .expect("the change is broadcast");
+            .expect("hung: the change was never broadcast");
         assert_eq!(broadcast.len(), 1, "one entry per registered agent");
         let entry = &broadcast[0];
         assert_eq!(entry.agent, agent_registry::default_agent());
@@ -1170,9 +1161,9 @@ mod tests {
             hub.state.with_persisted(|s| s.agent_commands.is_empty()),
             "a blank pair removes the entry"
         );
-        let broadcast = tokio::time::timeout(wait, next_agent_commands(&mut events))
+        let broadcast = tokio::time::timeout(HANG_GUARD, next_agent_commands(&mut events))
             .await
-            .expect("the clear is broadcast");
+            .expect("hung: the clear was never broadcast");
         assert!(
             broadcast
                 .iter()

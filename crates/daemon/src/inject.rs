@@ -740,7 +740,7 @@ mod tests {
         assert!(matches!(outcome, MarkerOutcome::Found));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn marker_found_after_arriving_mid_window() {
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         let producer = tokio::spawn(async move {

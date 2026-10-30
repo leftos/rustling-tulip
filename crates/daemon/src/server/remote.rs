@@ -1267,9 +1267,9 @@ mod tests {
         events: &mut broadcast::Receiver<StateEvent>,
         mut pred: impl FnMut(bool, u16, &protocol::RemoteState) -> bool,
     ) -> (bool, u16, protocol::RemoteState) {
-        // A generous ceiling on the real clock: a missing broadcast fails
-        // here instead of hanging; every awaited one is a local event.
-        tokio::time::timeout(Duration::from_secs(30), async {
+        // A hang guard on the real clock: a missing broadcast fails here as
+        // hung; every awaited one is a local event.
+        tokio::time::timeout(Duration::from_secs(120), async {
             loop {
                 if let StateEvent::RemoteStatus {
                     enabled,
@@ -1286,7 +1286,7 @@ mod tests {
             }
         })
         .await
-        .expect("the awaited RemoteStatus is broadcast")
+        .expect("hung: the awaited RemoteStatus was never broadcast")
     }
 
     #[tokio::test]

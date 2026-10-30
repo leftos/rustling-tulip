@@ -1032,16 +1032,6 @@ mod tests {
         }
     }
 
-    /// Wait up to five seconds for `id`'s `meta.json` to be gone.
-    async fn wait_for_meta_gone(dirs: &crate::paths::Dirs, id: &str) {
-        for _ in 0..500 {
-            if crate::orphan::load_meta(dirs, id).is_err() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
     #[tokio::test]
     async fn tracer_eof_leaves_session_abandoned_and_keeps_sidecar() {
         let output = frame(&tracer_protocol::TracerResponse::Output {
@@ -1084,11 +1074,8 @@ mod tests {
     async fn child_exit_still_deletes_sidecar() {
         let exited = frame(&tracer_protocol::TracerResponse::Exited { code: 3 });
         let run = run_tracer_frames("child-exit-sidecar", exited).await;
-        wait_for_meta_gone(&run.dirs, "child-exit-sidecar").await;
-        assert!(
-            crate::orphan::load_meta(&run.dirs, "child-exit-sidecar").is_err(),
-            "a child exit deletes meta.json"
-        );
+        // A child exit deletes meta.json.
+        crate::history::test_support::sidecar_gone(&run.dirs, "child-exit-sidecar").await;
         let rec = run
             .registry
             .get("child-exit-sidecar")

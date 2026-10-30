@@ -295,15 +295,16 @@ mod tests {
     use crate::session::SessionRecord;
     use chrono::Utc;
     use protocol::{AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus};
-    use std::sync::mpsc::Receiver as StdReceiver;
     use std::time::Duration;
+    use tokio::sync::mpsc;
     use tokio::time::timeout;
 
-    /// Generous upper bound for "the watcher reacted"; the assertions return
-    /// as soon as the value arrives, so a healthy run never waits this long.
-    const WAIT: Duration = Duration::from_secs(5);
-    /// How long to watch for a hold that must never come.
-    const QUIET: Duration = Duration::from_millis(300);
+    /// The hang guard on "the watcher reacted", failing as "hung"; the waits
+    /// return as soon as the value arrives.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+    /// A virtual sleep on the paused clock. It ends only once every task is
+    /// idle, so after it the watcher has handled everything sent before it.
+    const SETTLE: Duration = Duration::from_millis(300);
 
     fn scratch_dirs(tag: &str) -> Dirs {
         let root = std::env::temp_dir().join(format!("rt-keep-awake-{}-{tag}", std::process::id()));
@@ -373,7 +374,7 @@ mod tests {
     }
 
     /// Records every `set` call instead of touching the host's power state.
-    struct Recorder(std::sync::mpsc::Sender<bool>);
+    struct Recorder(mpsc::UnboundedSender<bool>);
 
     impl Inhibitor for Recorder {
         fn set(&mut self, hold: bool) {
@@ -386,20 +387,22 @@ mod tests {
         mode_tx: watch::Sender<KeepAwakeMode>,
         status_rx: watch::Receiver<Status>,
         events_rx: broadcast::Receiver<StateEvent>,
-        holds: StdReceiver<bool>,
+        holds: mpsc::UnboundedReceiver<bool>,
     }
 
     impl Harness {
-        /// The watcher's next hold change, failing when none comes in time.
-        fn next_hold(&self) -> bool {
-            self.holds
-                .recv_timeout(WAIT)
-                .expect("the hold changes within the window")
+        /// The watcher's next hold change, failing as hung when none comes.
+        async fn next_hold(&mut self) -> bool {
+            timeout(HANG_GUARD, self.holds.recv())
+                .await
+                .expect("hung: the hold never changed")
+                .expect("the watcher holds the recorder")
         }
 
-        /// True when the hold does not change for a while.
-        fn stays_put(&self) -> bool {
-            self.holds.recv_timeout(QUIET).is_err()
+        /// True when the watcher, once idle, has made no hold change.
+        async fn stays_put(&mut self) -> bool {
+            tokio::time::sleep(SETTLE).await;
+            matches!(self.holds.try_recv(), Err(mpsc::error::TryRecvError::Empty))
         }
     }
 
@@ -412,7 +415,7 @@ mod tests {
         let (mode_tx, mode_rx) = watch::channel(mode);
         let (status_tx, status_rx) = watch::channel(status(mode, false));
         let (state_events, events_rx) = broadcast::channel(16);
-        let (hold_tx, holds) = std::sync::mpsc::channel();
+        let (hold_tx, holds) = mpsc::unbounded_channel();
         spawn(
             Arc::clone(&sessions),
             mode_rx,
@@ -443,162 +446,171 @@ mod tests {
         false
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn always_holds_while_any_session_is_live() {
-        let h = start("always", KeepAwakeMode::Always);
+        let mut h = start("always", KeepAwakeMode::Always);
         assert!(
-            h.stays_put(),
+            h.stays_put().await,
             "no sessions means nothing to keep the machine awake for"
         );
 
         h.sessions
             .insert(test_record("s1", SessionStatus::Idle, false));
-        assert!(h.next_hold(), "an idle live session engages the hold");
+        assert!(h.next_hold().await, "an idle live session engages the hold");
 
         h.sessions
             .update("s1", |r| r.status = SessionStatus::Stopped);
         assert!(
-            !h.next_hold(),
+            !h.next_hold().await,
             "the last session stopping must release the hold"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn off_never_holds() {
-        let h = start("off", KeepAwakeMode::Off);
+        let mut h = start("off", KeepAwakeMode::Off);
         h.sessions
             .insert(test_record("s1", SessionStatus::Working, false));
         h.sessions
             .insert(test_record("s2", SessionStatus::AwaitingInput, false));
-        assert!(h.stays_put(), "Off never holds the machine awake");
+        assert!(h.stays_put().await, "Off never holds the machine awake");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn when_busy_holds_only_while_a_session_is_busy() {
-        let h = start("busy", KeepAwakeMode::WhenBusy);
+        let mut h = start("busy", KeepAwakeMode::WhenBusy);
         h.sessions
             .insert(test_record("s1", SessionStatus::Idle, false));
-        assert!(h.stays_put(), "an idle session is not busy");
+        assert!(h.stays_put().await, "an idle session is not busy");
 
         h.sessions
             .update("s1", |r| r.status = SessionStatus::Working);
-        assert!(h.next_hold(), "a working session engages the hold");
+        assert!(h.next_hold().await, "a working session engages the hold");
 
         h.sessions.update("s1", |r| r.status = SessionStatus::Idle);
-        assert!(!h.next_hold(), "going idle releases the hold");
+        assert!(!h.next_hold().await, "going idle releases the hold");
 
         h.sessions
             .update("s1", |r| r.status = SessionStatus::Stopped);
-        assert!(h.stays_put(), "a stopped session is not busy either");
+        assert!(h.stays_put().await, "a stopped session is not busy either");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn when_busy_counts_a_printing_shell_and_awaiting_input() {
-        let h = start("busy-shell", KeepAwakeMode::WhenBusy);
+        let mut h = start("busy-shell", KeepAwakeMode::WhenBusy);
         h.sessions.insert(SessionRecord {
             mode: SessionMode::PlainShell,
             ..test_record("sh", SessionStatus::Idle, false)
         });
-        assert!(h.stays_put(), "a quiet shell is not busy");
+        assert!(h.stays_put().await, "a quiet shell is not busy");
 
         h.sessions
             .update("sh", |r| r.status = SessionStatus::Working);
-        assert!(h.next_hold(), "a shell printing output is busy");
+        assert!(h.next_hold().await, "a shell printing output is busy");
         h.sessions.update("sh", |r| r.status = SessionStatus::Idle);
-        assert!(!h.next_hold(), "the shell going quiet releases the hold");
+        assert!(
+            !h.next_hold().await,
+            "the shell going quiet releases the hold"
+        );
 
         h.sessions
             .insert(test_record("s2", SessionStatus::AwaitingInput, false));
-        assert!(h.next_hold(), "a session waiting on the user is busy");
+        assert!(h.next_hold().await, "a session waiting on the user is busy");
         h.sessions.update("s2", |r| {
             r.status = SessionStatus::Idle;
             r.background = true;
         });
-        assert!(h.stays_put(), "idle with background work is still busy");
+        assert!(
+            h.stays_put().await,
+            "idle with background work is still busy"
+        );
         h.sessions.update("s2", |r| r.background = false);
-        assert!(!h.next_hold(), "the background work ending releases it");
+        assert!(
+            !h.next_hold().await,
+            "the background work ending releases it"
+        );
 
         h.sessions
             .insert(test_record("s3", SessionStatus::Spawning, false));
-        assert!(h.next_hold(), "a spawning session is busy");
+        assert!(h.next_hold().await, "a spawning session is busy");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn when_busy_ignores_busy_excluded_sessions() {
-        let h = start("busy-excluded", KeepAwakeMode::WhenBusy);
+        let mut h = start("busy-excluded", KeepAwakeMode::WhenBusy);
         h.sessions.insert(SessionRecord {
             busy_excluded: true,
             ..test_record("dev-server", SessionStatus::Working, false)
         });
         assert!(
-            h.stays_put(),
+            h.stays_put().await,
             "a session marked Don't count as busy never holds the machine"
         );
 
         h.sessions
             .insert(test_record("s2", SessionStatus::Working, false));
-        assert!(h.next_hold(), "an ordinary busy session still does");
+        assert!(h.next_hold().await, "an ordinary busy session still does");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn setting_gates_the_hold() {
-        let h = start("setting", KeepAwakeMode::Off);
+        let mut h = start("setting", KeepAwakeMode::Off);
         h.sessions
             .insert(test_record("s1", SessionStatus::Idle, false));
         assert!(
-            h.stays_put(),
+            h.stays_put().await,
             "a live session must not engage the hold while the setting is off"
         );
 
         h.mode_tx.send_replace(KeepAwakeMode::Always);
         assert!(
-            h.next_hold(),
+            h.next_hold().await,
             "switching to Always with a live session engages the hold"
         );
 
         h.mode_tx.send_replace(KeepAwakeMode::WhenBusy);
         assert!(
-            !h.next_hold(),
+            !h.next_hold().await,
             "switching to When busy with only an idle session releases it"
         );
 
         h.mode_tx.send_replace(KeepAwakeMode::Always);
-        assert!(h.next_hold(), "back to Always engages it again");
+        assert!(h.next_hold().await, "back to Always engages it again");
 
         h.mode_tx.send_replace(KeepAwakeMode::Off);
         assert!(
-            !h.next_hold(),
+            !h.next_hold().await,
             "turning the setting off releases the hold immediately"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn abandoned_sessions_do_not_engage_the_hold() {
-        let h = start("abandoned", KeepAwakeMode::Always);
+        let mut h = start("abandoned", KeepAwakeMode::Always);
         h.sessions
             .insert(test_record("s1", SessionStatus::Working, true));
         assert!(
-            h.stays_put(),
+            h.stays_put().await,
             "an abandoned session has no live child to protect"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn status_is_published_on_the_watch_and_the_broadcast() {
         let mut h = start("status", KeepAwakeMode::Always);
         h.sessions
             .insert(test_record("s1", SessionStatus::Working, false));
-        assert!(h.next_hold());
+        assert!(h.next_hold().await);
 
         let engaged = status(KeepAwakeMode::Always, true);
         assert!(
-            timeout(WAIT, saw_status_event(&mut h.events_rx, engaged))
+            timeout(HANG_GUARD, saw_status_event(&mut h.events_rx, engaged))
                 .await
-                .expect("status broadcast within the window"),
+                .expect("hung: the status was never broadcast"),
             "clients must be told the hold engaged"
         );
 
-        timeout(WAIT, async {
+        timeout(HANG_GUARD, async {
             while *h.status_rx.borrow_and_update() != engaged {
                 if h.status_rx.changed().await.is_err() {
                     break;
@@ -606,7 +618,7 @@ mod tests {
             }
         })
         .await
-        .expect("status watch reflects the engaged hold");
+        .expect("hung: the status watch never reflected the engaged hold");
         assert_eq!(*h.status_rx.borrow(), engaged);
     }
 }

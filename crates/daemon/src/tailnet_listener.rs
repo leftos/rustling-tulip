@@ -2931,9 +2931,9 @@ mod tests {
                 }
             }
         };
-        tokio::time::timeout(Duration::from_secs(60), read_all)
+        tokio::time::timeout(Duration::from_secs(120), read_all)
             .await
-            .expect("the server ends the exchange");
+            .expect("hung: the server never ended the exchange");
         seen
     }
 
@@ -2982,9 +2982,9 @@ mod tests {
                 response.extend_from_slice(&chunk[..read]);
             }
         };
-        tokio::time::timeout(Duration::from_secs(60), read_all)
+        tokio::time::timeout(Duration::from_secs(120), read_all)
             .await
-            .expect("the server ends the response");
+            .expect("hung: the server never ended the response");
         String::from_utf8_lossy(&response).into_owned()
     }
 
@@ -3031,9 +3031,9 @@ mod tests {
                 }
             }
         };
-        tokio::time::timeout(Duration::from_secs(60), read_some)
+        tokio::time::timeout(Duration::from_secs(120), read_some)
             .await
-            .expect("the server ends the exchange");
+            .expect("hung: the server never ended the exchange");
         assert!(
             !seen.starts_with(b"HTTP/"),
             "plain HTTP got an HTTP response: {:?}",

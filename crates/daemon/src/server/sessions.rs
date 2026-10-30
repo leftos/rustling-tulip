@@ -1384,8 +1384,9 @@ mod tests {
     use crate::server::recovery::discard_abandoned;
     use crate::server::test_support::{
         MemClient, appearance_registry, deepseek_options, deepseek_spawn, dispatch_all, env_spawn,
-        hello, idle_record, mem_session, next_message, only_update, repo_entry, snapshot_of,
-        spawnless_test_hub, test_hub, test_peer, wait_until,
+        hello, idle_record, mem_session, messages_before_sentinel, next_message, only_update,
+        publish_sentinel, repo_entry, snapshot_of, spawnless_test_hub, test_hub, test_peer,
+        wait_until,
     };
     use chrono::Utc;
     use protocol::{SessionKind, SessionMode};
@@ -1434,9 +1435,9 @@ mod tests {
             ),
             "{first:?}"
         );
-        let second = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        let second = tokio::time::timeout(HANG_GUARD, out_rx.recv())
             .await
-            .expect("the new forwarder sends the queued output")
+            .expect("hung: the new forwarder never sent the queued output")
             .unwrap();
         let expected = base64::engine::general_purpose::STANDARD.encode(b"after");
         assert!(
@@ -2210,16 +2211,8 @@ mod tests {
         .expect("build meta");
         orphan::write_meta(&hub.dirs, &meta).expect("write meta");
         exit_tx.send(PtyExit::Code(0)).expect("report the exit");
-        for _ in 0..500 {
-            if orphan::load_meta(&hub.dirs, "s1").is_err() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            orphan::load_meta(&hub.dirs, "s1").is_err(),
-            "the exit watcher ran"
-        );
+        // The exit watcher's last step drops the sidecar.
+        crate::history::test_support::sidecar_gone(&hub.dirs, "s1").await;
         let entries = history::read_all(&hub.dirs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].end, SessionEnd::StoppedByUser);
@@ -2456,7 +2449,7 @@ mod tests {
                 .get("s1")
                 .is_some_and(|rec| crate::sync::lock(&rec).scrollback_snapshot_req.is_none())
         };
-        assert!(wait_until(watcher_ran).await, "the exit watcher ran");
+        wait_until("the exit watcher", watcher_ran).await;
         while let Ok(event) = events.try_recv() {
             assert!(
                 !matches!(event, SessionEvent::Attention { .. }),
@@ -2597,10 +2590,8 @@ mod tests {
                 .get("s1")
                 .is_some_and(|rec| crate::sync::lock(&rec).scrollback_snapshot_req.is_none())
         };
-        assert!(
-            wait_until(watcher_ran).await,
-            "the exit watcher ends a stopped session like any exit"
-        );
+        // The exit watcher ends a stopped session like any exit.
+        wait_until("the exit watcher", watcher_ran).await;
         let rec = hub.sessions.get("s1").expect("still listed");
         assert!(!crate::sync::lock(&rec).is_abandoned);
         assert!(
@@ -2631,7 +2622,7 @@ mod tests {
                 .get("s1")
                 .is_some_and(|rec| crate::sync::lock(&rec).is_abandoned)
         };
-        assert!(wait_until(abandoned).await, "the session is abandoned");
+        wait_until("the session to be abandoned", abandoned).await;
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
         discard_abandoned(&hub, "s1", &out_tx);
         assert!(hub.sessions.get("s1").is_none(), "dismissed");
@@ -2992,30 +2983,22 @@ mod tests {
         }
     }
 
-    /// The accent and `request_id` of each of the next `count` messages on
-    /// `rx`, which must all be `SessionUpdated`s; then checks nothing follows.
-    async fn next_updates(
+    /// The accent and `request_id` of every message on `rx` before the
+    /// sentinel, which must all be `SessionUpdated`s.
+    async fn updates_before_sentinel(
         rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
-        count: usize,
     ) -> Vec<(Option<String>, Option<String>)> {
-        let mut updates = Vec::new();
-        for _ in 0..count {
-            let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                .await
-                .expect("the forwarder delivers the update")
-                .expect("the channel is open");
-            let update = match msg {
+        messages_before_sentinel(rx)
+            .await
+            .into_iter()
+            .map(|msg| match msg {
                 DaemonMessage::SessionUpdated {
                     session,
                     request_id,
-                } => Some((session.appearance.accent_color, request_id)),
-                _ => None,
-            };
-            updates.push(update.expect("only SessionUpdated messages arrive"));
-        }
-        let extra = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
-        assert!(extra.is_err(), "one message per update: {extra:?}");
-        updates
+                } => (session.appearance.accent_color, request_id),
+                other => unreachable!("only SessionUpdated messages arrive, got {other:?}"),
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -3040,11 +3023,12 @@ mod tests {
             };
             set_session_appearance(&sessions, change, &out_tx);
         }
+        publish_sentinel(&sessions);
 
         let sky = Some("#38bdf8".to_string());
         let rose = Some("#fb7185".to_string());
         assert_eq!(
-            next_updates(&mut requester, 3).await,
+            updates_before_sentinel(&mut requester).await,
             [
                 (None, None),
                 (sky.clone(), Some("req-a".to_string())),
@@ -3053,7 +3037,7 @@ mod tests {
             "the requester's echoes follow the earlier broadcast, once each"
         );
         assert_eq!(
-            next_updates(&mut other, 3).await,
+            updates_before_sentinel(&mut other).await,
             [(None, None), (sky, None), (rose, None)],
             "another connection sees the same updates without the id"
         );
@@ -3077,6 +3061,7 @@ mod tests {
         // plain-shell spawn paths publish their record.
         let pending = sessions.insert_pending(idle_record("s2"));
         pending.publish_from(request_origin(1, Some("r1".to_string())));
+        publish_sentinel(&sessions);
 
         assert_eq!(
             only_update(&mut requester).await,
@@ -3106,6 +3091,7 @@ mod tests {
         // The duplicate's origin, published the way the headless spawn path
         // inserts its record.
         sessions.insert_from(idle_record("s2"), request_origin(2, Some("d1".to_string())));
+        publish_sentinel(&sessions);
         assert_eq!(
             only_update(&mut requester).await,
             ("s2".to_string(), Some("d1".to_string())),
@@ -3114,6 +3100,7 @@ mod tests {
         assert_eq!(only_update(&mut other).await, ("s2".to_string(), None));
 
         sessions.insert_from(idle_record("s3"), request_origin(2, None));
+        publish_sentinel(&sessions);
         assert_eq!(
             only_update(&mut requester).await,
             ("s3".to_string(), None),
@@ -3186,6 +3173,9 @@ mod tests {
             _ => None,
         };
         assert_eq!(listed, Some(3), "the resync lists every session first");
+        // The forwarder sends the list and the resent replies in one go, so
+        // the sentinel published now comes after all of them.
+        publish_sentinel(&sessions);
         assert_eq!(
             only_update(&mut rx).await,
             ("s2".to_string(), Some("r1".to_string())),

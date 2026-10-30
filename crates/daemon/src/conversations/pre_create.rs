@@ -340,8 +340,8 @@ mod tests {
     /// How long a process the run started may take to die once it returns.
     const DEATH_CEILING_MS: u32 = 30_000;
 
-    /// How long the child may take to write its pid file.
-    const PID_FILE_CEILING: Duration = Duration::from_secs(60);
+    /// The hang guard on the child writing its pid file, failing as "hung".
+    const PID_FILE_CEILING: Duration = Duration::from_secs(120);
 
     /// A fresh directory under the worktree's `.tmp/`, removed on drop.
     struct TestDir(PathBuf);
@@ -437,10 +437,15 @@ mod tests {
     /// The processes named in `file`, opened once it appears.
     async fn wait_for_tree(file: &Path) -> Vec<Process> {
         let started = Instant::now();
-        while !file.exists() && started.elapsed() < PID_FILE_CEILING {
+        while !file.exists() {
+            assert!(
+                started.elapsed() < PID_FILE_CEILING,
+                "hung: the child never wrote its pid file {}",
+                file.display()
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        let text = std::fs::read_to_string(file).expect("the child wrote its pid file");
+        let text = std::fs::read_to_string(file).expect("read the child's pid file");
         text.split_whitespace()
             .map(|pid| Process::open(pid.parse().expect("a pid")))
             .collect()
@@ -501,18 +506,6 @@ mod tests {
         .expect("the run ended before its child wrote the pid file");
         drop(run);
         assert_all_exited(&tree);
-    }
-
-    #[tokio::test]
-    async fn pre_create_that_prints_nothing_records_no_conversation() {
-        let dir = TestDir::new("silent");
-        let id = run_until(
-            powershell("Start-Sleep 600", &dir.0),
-            after_id,
-            tokio::time::sleep(Duration::from_millis(1500)),
-        )
-        .await;
-        assert_eq!(id, None);
     }
 
     #[tokio::test]

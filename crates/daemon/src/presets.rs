@@ -2605,9 +2605,10 @@ mod tests {
 
     async fn recv_job_update(rx: &mut broadcast::Receiver<PresetEvent>) -> PresetLaunchJobSnapshot {
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            // A hang guard a passing run never comes near.
+            let event = tokio::time::timeout(Duration::from_secs(120), rx.recv())
                 .await
-                .expect("timed out waiting for preset job update")
+                .expect("hung: no preset job update arrived")
                 .expect("preset event channel closed");
             if let PresetEvent::JobUpdated { job } = event {
                 return job;

@@ -374,7 +374,7 @@ mod tests {
         tokio::time::timeout(HANG_GUARD, handle.kill())
             .await
             .expect("kill returns");
-        assert!(sidecar_gone(&dirs, "h1").await, "the exit waiter ran");
+        sidecar_gone(&dirs, "h1").await;
 
         assert!(
             !stopped_attention(&mut events),
@@ -410,7 +410,7 @@ mod tests {
         let _handle =
             spawn(&spec, &registry, "h2".to_string(), dirs.clone()).expect("spawn headless child");
 
-        assert!(sidecar_gone(&dirs, "h2").await, "the exit waiter ran");
+        sidecar_gone(&dirs, "h2").await;
         assert!(
             stopped_attention(&mut events),
             "a self-exit asks for attention"
@@ -481,8 +481,14 @@ mod tests {
     /// double-signal. Repeat calls are no-ops.
     #[tokio::test]
     async fn kill_is_idempotent_and_safe_after_exit() {
+        use crate::history::test_support::{record, sidecar_gone, write_meta_for};
         let dirs = scratch_dirs();
         let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record(
+            "headless-idempotent",
+            protocol::SessionMode::Headless,
+        ));
+        write_meta_for(&dirs, "headless-idempotent");
         let spec = HeadlessSpec {
             program: if cfg!(windows) { "cmd" } else { "true" }.to_string(),
             args: if cfg!(windows) {
@@ -494,9 +500,16 @@ mod tests {
             env: Vec::new(),
             agent: agent_registry::default_agent(),
         };
-        let handle = spawn(&spec, &registry, "headless-idempotent".to_string(), dirs)
-            .expect("spawn short-lived headless child");
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let handle = spawn(
+            &spec,
+            &registry,
+            "headless-idempotent".to_string(),
+            dirs.clone(),
+        )
+        .expect("spawn short-lived headless child");
+        // The exit waiter drops the sidecar once the child has exited, so the
+        // kills below come after the exit.
+        sidecar_gone(&dirs, "headless-idempotent").await;
         handle.kill().await;
         handle.kill().await;
     }

@@ -616,12 +616,9 @@ mod tests {
                 check_hello_auth(&hub, &AuthKind::Tailnet(test_peer()), &token, &life)
             })
         };
-        let started = std::time::Instant::now();
+        // The handshake takes the live registry before the store; one that
+        // never does leaves this loop to nextest's hang guard.
         while !hub.live_devices.is_locked() {
-            assert!(
-                started.elapsed() < Duration::from_secs(120),
-                "the handshake takes the live registry before the store"
-            );
             std::thread::yield_now();
         }
         let blocking = {

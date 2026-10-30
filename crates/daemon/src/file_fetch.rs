@@ -371,11 +371,14 @@ mod tests {
         assert!(!is_not_found(&err));
     }
 
+    /// The hang guard on each wait for the stream, failing as "hung".
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+
     async fn collect(mut rx: mpsc::Receiver<DaemonMessage>) -> Vec<DaemonMessage> {
         let mut out = Vec::new();
-        while let Some(msg) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        while let Some(msg) = tokio::time::timeout(HANG_GUARD, rx.recv())
             .await
-            .expect("stream progresses")
+            .expect("hung: the stream stopped before closing")
         {
             out.push(msg);
         }
@@ -466,9 +469,9 @@ mod tests {
         assert!(matches!(first, DaemonMessage::FileFetchStarted { .. }));
         cancel.cancel();
         let rest = collect(rx).await;
-        tokio::time::timeout(Duration::from_secs(10), task)
+        tokio::time::timeout(HANG_GUARD, task)
             .await
-            .expect("stream task finishes after cancel")
+            .expect("hung: the stream task never finished after cancel")
             .expect("stream task");
         assert!(
             !rest

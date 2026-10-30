@@ -453,8 +453,14 @@ mod tests {
         LineSocket, MAX_LINE, NATIVE_PROTOCOL_VERSIONS, TEST_TIMEOUT, locate_with, test_over,
     };
 
-    /// How long a test waits on the socket before calling it hung.
-    const BACKSTOP: Duration = Duration::from_secs(30);
+    /// The hang guard on a wait for the socket or the host side, failing
+    /// as "hung"; a passing run never comes near it.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+
+    /// The answer timeout handed to [`test_over`] where the test is not
+    /// about that timeout: far past [`HANG_GUARD`], so a slow machine
+    /// never reaches it and a hang fails at the guard.
+    const NO_ANSWER_TIMEOUT: Duration = Duration::from_secs(3600);
 
     /// A socket over in-memory pipes: the host's stdout writer, its stdin
     /// reader, and the socket. Stderr is already ended.
@@ -470,9 +476,9 @@ mod tests {
     }
 
     async fn next(socket: &mut LineSocket) -> Option<Result<Message, String>> {
-        tokio::time::timeout(BACKSTOP, socket.next())
+        tokio::time::timeout(HANG_GUARD, socket.next())
             .await
-            .expect("the socket hung")
+            .expect("hung: the socket never yielded")
             .map(|item| item.map_err(|err| err.to_string()))
     }
 
@@ -507,14 +513,14 @@ mod tests {
     #[tokio::test]
     async fn a_message_is_written_with_a_newline_and_flushed() {
         let (_host_out, mut host_in, mut socket) = piped();
-        tokio::time::timeout(BACKSTOP, socket.send(Message::Text("{\"x\":1}".into())))
+        tokio::time::timeout(HANG_GUARD, socket.send(Message::Text("{\"x\":1}".into())))
             .await
-            .expect("the send hung")
+            .expect("hung: the send never finished")
             .expect("send a text message");
         let mut written = vec![0u8; "{\"x\":1}\n".len()];
-        tokio::time::timeout(BACKSTOP, host_in.read_exact(&mut written))
+        tokio::time::timeout(HANG_GUARD, host_in.read_exact(&mut written))
             .await
-            .expect("the line never arrived")
+            .expect("hung: the line never arrived")
             .expect("read the line");
         assert_eq!(written, b"{\"x\":1}\n");
         let refused = socket.send(Message::Binary(vec![1, 2].into())).await;
@@ -562,20 +568,20 @@ mod tests {
     async fn first_client_line(host_in: &mut tokio::io::DuplexStream) -> ClientMessage {
         let mut reader = tokio::io::BufReader::new(host_in);
         let mut line = String::new();
-        tokio::time::timeout(BACKSTOP, reader.read_line(&mut line))
+        tokio::time::timeout(HANG_GUARD, reader.read_line(&mut line))
             .await
-            .expect("the Hello never arrived")
+            .expect("hung: the Hello never arrived")
             .expect("read the Hello");
         serde_json::from_str(&line).expect("the Hello is a client message")
     }
 
     async fn test(socket: LineSocket) -> Result<(), String> {
         tokio::time::timeout(
-            BACKSTOP,
-            test_over(socket, TEST_TIMEOUT, futures::future::pending()),
+            HANG_GUARD,
+            test_over(socket, NO_ANSWER_TIMEOUT, futures::future::pending()),
         )
         .await
-        .expect("the test hung")
+        .expect("hung: the test never ended")
     }
 
     #[tokio::test]
@@ -663,16 +669,16 @@ mod tests {
     async fn test_connection_stops_at_cancel_and_closes_the_child() {
         let (_host_out, mut host_in, socket) = piped();
         let outcome = tokio::time::timeout(
-            BACKSTOP,
-            test_over(socket, TEST_TIMEOUT, futures::future::ready(())),
+            HANG_GUARD,
+            test_over(socket, NO_ANSWER_TIMEOUT, futures::future::ready(())),
         )
         .await
-        .expect("the cancelled test hung");
+        .expect("hung: the cancelled test never ended");
         assert_eq!(outcome, Err("The test was cancelled.".to_owned()));
         let mut rest = Vec::new();
-        tokio::time::timeout(BACKSTOP, host_in.read_to_end(&mut rest))
+        tokio::time::timeout(HANG_GUARD, host_in.read_to_end(&mut rest))
             .await
-            .expect("the child's stdin stayed open after the cancel")
+            .expect("hung: the child's stdin stayed open after the cancel")
             .expect("read the child's stdin");
     }
 

@@ -1824,6 +1824,10 @@ mod tests {
     use super::*;
     use crate::pty::PtyProducer;
 
+    /// The bound on these tests' waits: a hang guard a passing run never
+    /// comes near, failing as "hung".
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
     /// Scratch config dir for the replay-snapshot tests.
     fn scratch_dirs(tag: &str) -> Dirs {
         let root = std::env::temp_dir().join(format!("rt-session-{}-{tag}", std::process::id()));
@@ -2344,22 +2348,23 @@ mod tests {
     /// The exit watcher's history write must land before the `Stopped` update
     /// reaches clients: a client that reacts to that update by discarding the
     /// session writes its own `StoppedByUser` entry, and only the first write
-    /// survives. The history write lock is held across the broadcast so the
-    /// check cannot race the write it is checking for — the writer parks on
-    /// the lock, and the guard is only released afterwards.
+    /// survives. The test parks the history write on the write lock and
+    /// waits for the writer to reach it: no `Stopped` update is out while it
+    /// waits, and the entry is on disk once the update is observed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[expect(
         clippy::await_holding_lock,
-        reason = "holding the history write lock across the broadcast is this test's mechanism: \
+        reason = "holding the history write lock across the wait is this test's mechanism: \
                   it parks the writer so the check cannot race the write it is looking for"
     )]
     async fn exit_end_is_recorded_before_stopped_broadcast() {
         use crate::history::test_support::{
             fake_pty, hold_history_write_lock, insert_live, record, scratch_dirs, wait_for_entry,
+            wait_for_writer_at_lock, writers_at_lock,
         };
         use crate::pty::PtyExit;
         use protocol::SessionEnd;
-        use std::time::Duration;
+        use tokio::sync::broadcast::error::TryRecvError;
 
         let dirs = scratch_dirs("exit-end-before-broadcast");
         let registry = SessionRegistry::new(dirs.clone());
@@ -2373,18 +2378,28 @@ mod tests {
         let mut events = registry.subscribe();
 
         let guard = hold_history_write_lock();
+        let seen = writers_at_lock();
         let _ = exit_tx.send(PtyExit::Code(0));
-        let early =
-            tokio::time::timeout(Duration::from_millis(200), next_stopped(&mut events)).await;
-        assert!(
-            early.is_err(),
-            "no Stopped update reaches clients while the history write is parked"
-        );
+        wait_for_writer_at_lock(seen).await;
+        loop {
+            match events.try_recv() {
+                Ok(SessionEvent::Updated(snap, _)) => assert_ne!(
+                    snap.status,
+                    SessionStatus::Stopped,
+                    "no Stopped update reaches clients while the history write is parked"
+                ),
+                Ok(_) => {}
+                Err(err) => {
+                    assert_eq!(err, TryRecvError::Empty, "the session-event stream failed");
+                    break;
+                }
+            }
+        }
         drop(guard);
 
-        tokio::time::timeout(Duration::from_secs(5), next_stopped(&mut events))
+        tokio::time::timeout(HANG_GUARD, next_stopped(&mut events))
             .await
-            .expect("the Stopped update follows the history write");
+            .expect("hung: no Stopped update after the exit");
         let entry = crate::history::read_one(&dirs, "s1")
             .expect("the history entry exists when the Stopped update is observed");
         assert_eq!(entry.end, SessionEnd::Exited { code: 0 });
@@ -2412,7 +2427,6 @@ mod tests {
     async fn an_exited_session_drops_its_pending_input() {
         use crate::history::test_support::{fake_pty, insert_live, record, scratch_dirs};
         use crate::pty::PtyExit;
-        use std::time::Duration;
 
         let dirs = scratch_dirs("exit-drops-pending");
         let registry = SessionRegistry::new(dirs.clone());
@@ -2429,9 +2443,9 @@ mod tests {
         let mut events = registry.subscribe();
 
         exit_tx.send(PtyExit::Code(0)).expect("report the exit");
-        tokio::time::timeout(Duration::from_secs(5), next_stopped(&mut events))
+        tokio::time::timeout(HANG_GUARD, next_stopped(&mut events))
             .await
-            .expect("the Stopped update arrives");
+            .expect("hung: no Stopped update after the exit");
 
         let rec = registry.get("s1").expect("the session is still listed");
         let record = crate::sync::lock(&rec);
@@ -2468,7 +2482,7 @@ mod tests {
         });
 
         exit_tx.send(PtyExit::Code(1)).expect("report the exit");
-        assert!(sidecar_gone(&dirs, "s1").await, "the watcher ran");
+        sidecar_gone(&dirs, "s1").await;
 
         assert!(
             !drained_attention(&mut events).contains(&protocol::AttentionReason::Stopped),
@@ -2501,7 +2515,7 @@ mod tests {
         let mut events = registry.subscribe();
 
         exit_tx.send(PtyExit::Code(1)).expect("report the exit");
-        assert!(sidecar_gone(&dirs, "s1").await, "the watcher ran");
+        sidecar_gone(&dirs, "s1").await;
 
         assert!(
             drained_attention(&mut events).contains(&protocol::AttentionReason::Stopped),
@@ -2691,10 +2705,8 @@ mod tests {
                 code: STATUS_CONTROL_C_EXIT
             }
         );
-        assert!(
-            sidecar_gone(&dirs, "s1").await,
-            "an ordinary exit drops its sidecar"
-        );
+        // An ordinary exit drops its sidecar.
+        sidecar_gone(&dirs, "s1").await;
         assert!(
             drained_attention(&mut events).contains(&protocol::AttentionReason::Stopped),
             "an ordinary exit asks for attention"
@@ -2738,10 +2750,8 @@ mod tests {
 
         handle_exit_with(&registry, "s1", PtyExit::Code(1), Some(&dirs), true);
 
-        assert!(
-            sidecar_gone(&dirs, "s1").await,
-            "a stop during a shutdown still drops its sidecar"
-        );
+        // A stop during a shutdown still drops its sidecar.
+        sidecar_gone(&dirs, "s1").await;
         let entry = crate::history::read_one(&dirs, "s1").expect("the stop is recorded");
         assert_eq!(
             entry.end,
@@ -3487,11 +3497,11 @@ mod tests {
     /// clone the gate just before they lock it, so a count this high means
     /// that many of them are at the gate.
     fn wait_until_gate_is_shared(gate: &Arc<Mutex<SidecarGate>>, handles: usize) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         while Arc::strong_count(gate) < handles {
             assert!(
                 std::time::Instant::now() < deadline,
-                "only {} of {handles} handles reached the gate",
+                "hung: only {} of {handles} handles reached the gate",
                 Arc::strong_count(gate)
             );
             std::thread::yield_now();
@@ -3626,11 +3636,11 @@ mod tests {
     /// writes the sidecar; that late write must not leave a sidecar behind.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_spawn_write_after_the_session_ended_writes_nothing() {
+        use crate::history::test_support::sidecar_gone;
         use crate::history::test_support::{
             fake_pty, insert_live, record, scratch_dirs, write_meta_for,
         };
         use crate::pty::PtyExit;
-        use std::time::Duration;
         let dirs = scratch_dirs("sidecar-write-after-exit");
         write_meta_for(&dirs, "s1");
         let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
@@ -3644,13 +3654,8 @@ mod tests {
         );
 
         let _ = exit_tx.send(PtyExit::Code(0));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while meta_file(&dirs, "s1").exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the exit deletes the sidecar");
+        // The exit deletes the sidecar.
+        sidecar_gone(&dirs, "s1").await;
 
         registry.write_sidecar(&meta);
         assert!(
@@ -3818,14 +3823,14 @@ mod tests {
     }
 
     /// Receives from `live` until it has handed over `want` bytes; `None`
-    /// when it closes or stays silent for 60 s (hung).
+    /// when it closes or stays silent past the hang guard.
     async fn receive_bytes(
         live: &mut mpsc::UnboundedReceiver<Vec<u8>>,
         want: usize,
     ) -> Option<Vec<u8>> {
         let mut got = Vec::new();
         while got.len() < want {
-            let chunk = tokio::time::timeout(std::time::Duration::from_secs(60), live.recv())
+            let chunk = tokio::time::timeout(HANG_GUARD, live.recv())
                 .await
                 .ok()
                 .flatten()?;
@@ -3911,15 +3916,16 @@ mod tests {
         assert!(!dir_left, "the discard deleted the session's dir");
     }
 
-    /// Asks the lifecycle task for a snapshot, waiting at most 60 s.
+    /// Asks the lifecycle task for a snapshot, failing as hung past the hang
+    /// guard.
     async fn take_snapshot(snap_tx: &ScrollbackSnapshotReq) -> Result<ScrollbackSnapshot, String> {
         let (tx, rx) = oneshot::channel();
         snap_tx
             .send(tx)
             .map_err(|_| "the lifecycle task is gone".to_owned())?;
-        tokio::time::timeout(std::time::Duration::from_secs(60), rx)
+        tokio::time::timeout(HANG_GUARD, rx)
             .await
-            .map_err(|_| "no snapshot within 60 s".to_owned())?
+            .map_err(|_| "hung: no snapshot".to_owned())?
             .map_err(|_| "the lifecycle task dropped the snapshot reply".to_owned())
     }
 
@@ -3993,9 +3999,9 @@ mod tests {
             for _ in 0..400 {
                 let snap = take_snapshot(&session.snap_tx).await?;
                 let mut live = snap.live;
-                let first = tokio::time::timeout(std::time::Duration::from_secs(60), live.recv())
+                let first = tokio::time::timeout(HANG_GUARD, live.recv())
                     .await
-                    .map_err(|_| "no live chunk within 60 s".to_owned())?
+                    .map_err(|_| "hung: no live chunk".to_owned())?
                     .ok_or("the live receiver closed")?;
                 let first_seq = last_seq(&first).ok_or("a live chunk without a sequence number")?;
                 let expected = last_seq(&snap.data).map_or(0, |n| n + 1);
@@ -4027,7 +4033,7 @@ mod tests {
         let attached = async {
             let attached = take_snapshot(&session.snap_tx).await?.live;
             let start = sender.sent();
-            let waited = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let waited = tokio::time::timeout(HANG_GUARD, async {
                 let mut taken = 0_u64;
                 while taken < 200 || sender.sent() < start + 50 {
                     drop(take_snapshot(&session.snap_tx).await?);
@@ -4053,16 +4059,15 @@ mod tests {
         let seqs = async {
             let mut seqs = Vec::new();
             loop {
-                let chunk =
-                    tokio::time::timeout(std::time::Duration::from_secs(60), attached.recv())
-                        .await
-                        .map_err(|_| {
-                            format!(
-                                "hung: the attached client stopped receiving before chunk {}",
-                                total - 1
-                            )
-                        })?
-                        .ok_or_else(|| "the attached receiver closed".to_owned())?;
+                let chunk = tokio::time::timeout(HANG_GUARD, attached.recv())
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "hung: the attached client stopped receiving before chunk {}",
+                            total - 1
+                        )
+                    })?
+                    .ok_or_else(|| "the attached receiver closed".to_owned())?;
                 let seq = last_seq(&chunk);
                 seqs.push(seq);
                 if seq == Some(total - 1) {
@@ -4115,7 +4120,7 @@ mod tests {
 
         let mut first_wrong = None;
         for expected in 0..SENT {
-            let chunk = tokio::time::timeout(std::time::Duration::from_secs(60), attached.recv())
+            let chunk = tokio::time::timeout(HANG_GUARD, attached.recv())
                 .await
                 .ok()
                 .flatten();
@@ -4165,14 +4170,11 @@ mod tests {
             session.output.send(format!("<{capacity}>").into_bytes()),
         ));
         let next_waited = next.as_mut().poll(&mut cx).is_pending();
-        let next_completed = !next_waited
-            || tokio::time::timeout(std::time::Duration::from_secs(60), next)
-                .await
-                .is_ok();
+        let next_completed = !next_waited || tokio::time::timeout(HANG_GUARD, next).await.is_ok();
 
         let mut first_wrong = None;
         for expected in 0..=capacity {
-            let chunk = tokio::time::timeout(std::time::Duration::from_secs(60), attached.recv())
+            let chunk = tokio::time::timeout(HANG_GUARD, attached.recv())
                 .await
                 .ok()
                 .flatten();
@@ -4193,7 +4195,7 @@ mod tests {
         );
         assert!(
             next_completed,
-            "the waiting send did not complete within 60 s once the lifecycle task ran"
+            "hung: the waiting send never completed once the lifecycle task ran"
         );
         assert_eq!(
             first_wrong, None,
@@ -4224,9 +4226,9 @@ mod tests {
         };
         let flowing = async {
             let mut attached = take_snapshot(&session.snap_tx).await?.live;
-            tokio::time::timeout(std::time::Duration::from_secs(60), attached.recv())
+            tokio::time::timeout(HANG_GUARD, attached.recv())
                 .await
-                .map_err(|_| "no live chunk within 60 s".to_owned())?
+                .map_err(|_| "hung: no live chunk".to_owned())?
                 .ok_or("the live receiver closed")?;
             Ok::<_, String>(attached)
         }
@@ -4248,25 +4250,24 @@ mod tests {
     #[tokio::test]
     async fn a_client_live_receiver_closes_at_the_exit() {
         use crate::history::test_support::fake_pty;
-        use std::time::Duration;
         let dirs = scratch_dirs("live-closes");
         let registry = SessionRegistry::new(dirs.clone());
         let (pty, exit_tx) = fake_pty();
         let snap_tx = attach_lifecycle(&registry, "s".to_owned(), &pty, Some(dirs.clone()));
         let (tx, rx) = oneshot::channel();
         snap_tx.send(tx).expect("the lifecycle task is alive");
-        let snap = tokio::time::timeout(Duration::from_secs(60), rx)
+        let snap = tokio::time::timeout(HANG_GUARD, rx)
             .await
-            .expect("a snapshot within 60 s")
+            .expect("hung: no snapshot")
             .expect("a snapshot reply");
         let mut live = snap.live;
 
         exit_tx.finish(PtyExit::Code(0)).await;
         drop(pty);
 
-        let end = tokio::time::timeout(Duration::from_secs(60), live.recv())
+        let end = tokio::time::timeout(HANG_GUARD, live.recv())
             .await
-            .expect("the live receiver ends within 60 s");
+            .expect("hung: the live receiver never ended");
         assert!(end.is_none(), "no output after the session's exit: {end:?}");
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

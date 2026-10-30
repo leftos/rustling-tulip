@@ -88,8 +88,8 @@ mod tests {
     use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyLane};
     use crate::server::dispatch;
     use crate::server::test_support::{
-        ScratchDir, drain, git_init, git_ok, hello, idle_record, loopback_ws_client,
-        next_message_within, test_hub, ws_next, ws_send,
+        ScratchDir, drain, git_init, git_ok, hello, idle_record, loopback_ws_client, next_message,
+        test_hub, ws_next, ws_send,
     };
 
     /// One test connection: its id and the queue its messages land on.
@@ -409,20 +409,14 @@ mod tests {
         .expect("the dashboard is alive");
     }
 
-    /// Ask for `session_id`'s detail and return the reply its task sends,
-    /// waiting at most `guard`.
-    async fn ask_detail(
-        hub: &Hub,
-        conn: &mut Conn,
-        session_id: &str,
-        guard: Duration,
-    ) -> DaemonMessage {
+    /// Ask for `session_id`'s detail and return the reply its task sends.
+    async fn ask_detail(hub: &Hub, conn: &mut Conn, session_id: &str) -> DaemonMessage {
         let ask = ClientMessage::GetSessionDetail {
             session_id: session_id.to_owned(),
             request_id: Some("d1".to_owned()),
         };
         send(hub, conn, ask).await;
-        next_message_within(&mut conn.rx, guard).await
+        next_message(&mut conn.rx).await
     }
 
     #[tokio::test]
@@ -440,7 +434,7 @@ mod tests {
         send(&hub, &c1, ON).await;
         let _ = drain(&mut c1.rx);
 
-        let reply = ask_detail(&hub, &mut c1, "s1", Duration::from_secs(5)).await;
+        let reply = ask_detail(&hub, &mut c1, "s1").await;
         assert!(
             matches!(
                 reply,
@@ -451,7 +445,7 @@ mod tests {
             "{reply:?}"
         );
 
-        let reply = ask_detail(&hub, &mut c1, "nope", Duration::from_secs(5)).await;
+        let reply = ask_detail(&hub, &mut c1, "nope").await;
         assert!(
             matches!(
                 reply,
@@ -486,9 +480,9 @@ mod tests {
         git_ok(&repo, &["commit", "-m", "the first turn"]);
 
         let mut c1 = conn(1);
-        // The read shells out to git under its own 10 s timeout: this wait is
-        // a hang guard beyond that, not a deadline of its own.
-        let reply = ask_detail(&hub, &mut c1, "s1", Duration::from_secs(60)).await;
+        // The read shells out to git under its own 10 s timeout, well inside
+        // the reply's hang guard.
+        let reply = ask_detail(&hub, &mut c1, "s1").await;
         let work = match reply {
             DaemonMessage::SessionDetail { work, .. } => Some(work),
             _ => None,

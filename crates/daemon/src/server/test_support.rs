@@ -364,15 +364,20 @@ pub(super) fn snapshot_of(hub: &Hub, id: &str) -> protocol::SessionSnapshot {
         .expect("session is in the registry")
 }
 
-/// Wait up to five seconds for `cond` to hold; return whether it did.
-pub(super) async fn wait_until(cond: impl Fn() -> bool) -> bool {
-    for _ in 0..500 {
-        if cond() {
-            return true;
+/// The bound on every wait in these fixtures: a hang guard a passing run
+/// never comes near, failing as "hung".
+pub(super) const HANG_GUARD: Duration = Duration::from_secs(120);
+
+/// Poll until `cond` holds, failing as hung, naming `what`, when it still
+/// does not after [`HANG_GUARD`].
+pub(super) async fn wait_until(what: &str, cond: impl Fn() -> bool) {
+    let held = tokio::time::timeout(HANG_GUARD, async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    cond()
+    })
+    .await;
+    assert!(held.is_ok(), "hung waiting for {what}");
 }
 
 /// Every message dispatching `msg` puts on the wire, for a message that
@@ -481,42 +486,58 @@ pub(super) fn env_ref_repo_hub(tag: &str) -> (Hub, ScratchDir, PathBuf) {
     (hub, scratch, repo)
 }
 
-/// The next message on `rx`.
+/// The next message on `rx`, failing as hung when none arrives within
+/// [`HANG_GUARD`].
 pub(super) async fn next_message(rx: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> DaemonMessage {
-    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+    tokio::time::timeout(HANG_GUARD, rx.recv())
         .await
-        .expect("the forwarder delivers a message")
+        .expect("hung: no message arrived")
         .expect("the channel is open")
 }
 
-/// The next message on `rx`, failing as hung when none arrives within `guard`
-/// — for a reply whose own work may take longer than [`next_message`]'s
-/// guard.
-pub(super) async fn next_message_within(
+/// The terminal title [`publish_sentinel`] gives `s1`.
+const SENTINEL_TITLE: &str = "rt-test-sentinel";
+
+/// Publish an update to [`appearance_registry`]'s `s1` that marks the end of
+/// what a test published. A forwarder delivers its registry's events in the
+/// order they were sent, so once a connection reads the sentinel it has read
+/// everything published before it.
+pub(super) fn publish_sentinel(sessions: &SessionRegistry) {
+    sessions.update("s1", |record| {
+        record.terminal_title = Some(SENTINEL_TITLE.to_string());
+    });
+}
+
+/// Every message on `rx` before the next [`publish_sentinel`] update.
+pub(super) async fn messages_before_sentinel(
     rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
-    guard: Duration,
-) -> DaemonMessage {
-    tokio::time::timeout(guard, rx.recv())
-        .await
-        .expect("the reply hung: nothing arrived within its guard")
-        .expect("the channel is open")
+) -> Vec<DaemonMessage> {
+    let mut before = Vec::new();
+    loop {
+        let message = next_message(rx).await;
+        if let DaemonMessage::SessionUpdated { session, .. } = &message
+            && session.terminal_title.as_deref() == Some(SENTINEL_TITLE)
+        {
+            return before;
+        }
+        before.push(message);
+    }
 }
 
-/// The session id and `request_id` of the one message on `rx`, which
-/// must be a `SessionUpdated`; then checks nothing follows.
+/// The session id and `request_id` of the one message on `rx` before the
+/// sentinel, which must be a `SessionUpdated`.
 pub(super) async fn only_update(
     rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
 ) -> (String, Option<String>) {
-    let update = match next_message(rx).await {
+    let mut before = messages_before_sentinel(rx).await;
+    assert_eq!(before.len(), 1, "one message per update: {before:?}");
+    match before.remove(0) {
         DaemonMessage::SessionUpdated {
             session,
             request_id,
-        } => Some((session.id, request_id)),
-        _ => None,
-    };
-    let extra = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
-    assert!(extra.is_err(), "one message per update: {extra:?}");
-    update.expect("only a SessionUpdated arrives")
+        } => (session.id, request_id),
+        other => unreachable!("only a SessionUpdated arrives, got {other:?}"),
+    }
 }
 
 /// Seed `client_id` with one tab whose grid is two empty panes side by
