@@ -264,7 +264,7 @@ Every temp-file-and-rename write in the daemon (sidecars, `state.json`, `daemon.
 
 Sessions are deliberately **not** in `state.json` — they're rebuilt from sidecars on startup so the daemon can survive restarts without a single fragile state blob.
 
-**Orphan recovery + tracer reattach (Phase C.3).** On startup, `main.rs` reads all `meta.json` sidecars and partitions live vs dead via `orphan::is_session_alive` (sysinfo: a tracer-backed sidecar's `tracer_pid` must still be an `rt-tracer` process; a sidecar without tracer fields matches its `pid` against its `program_name`, which otherwise just names the program the user runs, the leaf's label).
+**Orphan recovery + tracer reattach (Phase C.3).** On startup, `main.rs` reads all `meta.json` sidecars and partitions live vs dead via `orphan::is_session_alive` (sysinfo: a tracer-backed sidecar's `tracer_pid` must still be an `rt-tracer` process whose start time equals the sidecar's `tracer_started_at`, stamped at spawn, so a reused pid is neither reattached nor killed (a sidecar without the stamp, from an older build or an unreadable start time, falls back to the name check); a sidecar without tracer fields matches its `pid` against its `program_name`, which otherwise just names the program the user runs, the leaf's label).
 
 For sidecars with `tracer_pid` + `tracer_pipe` set (post-C.3 spawns), `server::recovery::reattach_orphans` (`crates/daemon/src/server/recovery.rs`) connects to the still-running `rt-tracer.exe` over its named pipe and rebuilds a fully-functional `PtyHandle` — IO, resize, and kill all work as if the session had been freshly spawned.
 

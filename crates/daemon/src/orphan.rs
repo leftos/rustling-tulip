@@ -21,7 +21,7 @@ use protocol::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// On-disk schema version for `meta.json`. Bumped only when the shape changes
 /// in a way that older daemons can't tolerate (renames, removals, semantic
@@ -149,6 +149,13 @@ pub struct OrphanMeta {
     /// session is recoverable via pipe reattach.
     #[serde(default)]
     pub tracer_pid: Option<u32>,
+    /// The tracer process's start time in epoch seconds, as
+    /// [`sysinfo::Process::start_time`] reports it, recorded so a recycled
+    /// `tracer_pid` naming an unrelated `rt-tracer` does not pass for this
+    /// session's tracer. `None` when the sidecar predates this field or the
+    /// start time could not be read; either falls back to the name check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracer_started_at: Option<u64>,
     /// Named-pipe path the daemon reconnects to on startup. Stored alongside
     /// `tracer_pid` so the daemon doesn't have to recompute it (and so a
     /// future ABI shift in pipe naming doesn't break reattach for older
@@ -447,29 +454,28 @@ pub fn delete_session_dir(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Returns true iff the recorded pid exists *and* its executable name matches
-/// what we expected to spawn. The name check guards against PID reuse: if the
-/// pid was recycled to an unrelated process, the meta is stale and should be
-/// dropped.
+/// Returns true iff the recorded process still exists *and* is the one the
+/// sidecar recorded. The name check alone guards against PID reuse only until
+/// a pid is recycled to another session's `rt-tracer`, so a tracer-backed
+/// sidecar carrying `tracer_started_at` also has to match the tracer's start
+/// time exactly. A sidecar without a stamp (written by an older build, or a
+/// start time that could not be read) falls back to the name check, so an
+/// upgrade never abandons a session whose tracer is still running.
 ///
 /// Post-C.3, tracer-backed sessions carry `tracer_pid` + `tracer_pipe`; we
 /// check the tracer for liveness in that case (the underlying agent process
 /// lives behind the tracer's PTY and isn't a direct daemon child anymore).
 /// Pre-C.3 sidecars use the legacy `pid` + `program_name` path.
 pub fn is_session_alive(meta: &OrphanMeta) -> bool {
-    if let Some(tracer_pid) = meta.tracer_pid {
-        return pid_matches(tracer_pid, Some("rt-tracer"), &[]);
-    }
-    let agent = meta
-        .agent
-        .clone()
-        .unwrap_or_else(agent_registry::default_agent);
-    let fallback =
-        agent_registry::plugin(&agent).map_or(&[][..], |plugin| plugin.liveness_tokens());
-    pid_matches(meta.pid, meta.program_name.as_deref(), fallback)
+    let (sys, pid) = system_with_process(meta.tracer_pid.unwrap_or(meta.pid));
+    sys.process(pid)
+        .is_some_and(|process| recorded_process_matches(meta, process))
 }
 
-fn pid_matches(pid: u32, program_token: Option<&str>, fallback: &[&str]) -> bool {
+/// One `System` holding only `pid`, refreshed so its name and start time are
+/// the process's current ones. A single refresh feeds both the check and the
+/// kill in [`kill_pid`], so no pid can be recycled between them.
+fn system_with_process(pid: u32) -> (System, sysinfo::Pid) {
     let mut sys =
         System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
     let pid = sysinfo::Pid::from_u32(pid);
@@ -478,11 +484,49 @@ fn pid_matches(pid: u32, program_token: Option<&str>, fallback: &[&str]) -> bool
         false,
         ProcessRefreshKind::new(),
     );
-    let Some(process) = sys.process(pid) else {
-        return false;
-    };
+    (sys, pid)
+}
+
+/// Whether `process` is the process `meta` recorded: a tracer-backed sidecar
+/// needs the `rt-tracer` name and the tracer's recorded start time, and a
+/// pre-C.3 sidecar the recorded program name.
+fn recorded_process_matches(meta: &OrphanMeta, process: &sysinfo::Process) -> bool {
     let name = process.name().to_string_lossy().to_lowercase();
-    name_matches(&name, program_token, fallback)
+    if meta.tracer_pid.is_none() {
+        let agent = meta
+            .agent
+            .clone()
+            .unwrap_or_else(agent_registry::default_agent);
+        let fallback =
+            agent_registry::plugin(&agent).map_or(&[][..], |plugin| plugin.liveness_tokens());
+        return name_matches(&name, meta.program_name.as_deref(), fallback);
+    }
+    let Some(recorded) = meta.tracer_started_at else {
+        debug!(
+            session_id = %meta.session_id,
+            tracer_pid = meta.tracer_pid,
+            "sidecar has no tracer start time; falling back to the name check"
+        );
+        return name_matches(&name, Some("rt-tracer"), &[]);
+    };
+    let started_at = process.start_time();
+    started_at != 0 && started_at == recorded && name_matches(&name, Some("rt-tracer"), &[])
+}
+
+/// The start time, in epoch seconds, of the live process `pid`, or `None`
+/// when no such process exists or the OS would not open it. `sysinfo` reports
+/// `0` for a process it could not open, which reads as unknown here.
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    let mut sys =
+        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+    let pid = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::new(),
+    );
+    let started_at = sys.process(pid)?.start_time();
+    (started_at != 0).then_some(started_at)
 }
 
 /// Whether the lowercase process `name` is the program a sidecar recorded:
@@ -495,30 +539,27 @@ fn name_matches(name: &str, program_token: Option<&str>, fallback: &[&str]) -> b
     }
 }
 
-/// Send SIGKILL / `TerminateProcess` to the recorded pid, but only if it still
-/// matches the recorded program name. The name-match check guards against
-/// PID reuse (we don't want to kill an unrelated process that happens to
-/// have the same id). Used by `stop_session` when the in-memory PTY/headless
-/// handles are absent (i.e. orphan sessions reattached after daemon restart).
+/// Send SIGKILL / `TerminateProcess` to the recorded process, but only if the
+/// one refresh that finds it still matches the sidecar: a tracer-backed
+/// sidecar's tracer name and recorded start time (the name alone when the
+/// sidecar has no stamp), a pre-C.3 sidecar's recorded program name.
+/// Checking and killing the same process object guards
+/// against PID reuse (an unrelated process that happens to have the id) and
+/// against a pid recycled between the check and the kill. Used by
+/// `stop_session` when the in-memory PTY/headless handles are absent (i.e.
+/// orphan sessions reattached after daemon restart).
 ///
 /// Returns `true` when the process existed and was signalled; `false` when
-/// the pid is gone, the name no longer matches, or the kill call itself
+/// the pid is gone, the process no longer matches, or the kill call itself
 /// failed (e.g. permission denied).
 pub fn kill_pid(meta: &OrphanMeta) -> bool {
-    if !is_session_alive(meta) {
-        return false;
-    }
-    let mut sys =
-        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    let pid = sysinfo::Pid::from_u32(meta.pid);
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
-        false,
-        ProcessRefreshKind::new(),
-    );
+    let (sys, pid) = system_with_process(meta.tracer_pid.unwrap_or(meta.pid));
     let Some(process) = sys.process(pid) else {
         return false;
     };
+    if !recorded_process_matches(meta, process) {
+        return false;
+    }
     process.kill()
 }
 
@@ -586,6 +627,17 @@ pub fn meta_from_record(
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
     }
+    let tracer_started_at = tracer_pid.and_then(|tracer_pid| {
+        let started_at = process_start_time(tracer_pid);
+        if started_at.is_none() {
+            warn!(
+                %session_id,
+                tracer_pid,
+                "could not read the tracer's start time; its liveness check falls back to the name"
+            );
+        }
+        started_at
+    });
     Ok(OrphanMeta {
         on_disk_version: CURRENT_SIDECAR_VERSION,
         session_id,
@@ -616,6 +668,7 @@ pub fn meta_from_record(
         status_since: None,
         pending_input: None,
         tracer_pid,
+        tracer_started_at,
         tracer_pipe,
         tracer_exe_path,
         conversation_id,
@@ -950,6 +1003,7 @@ mod tests {
             status_since: None,
             pending_input: None,
             tracer_pid: Some(1234),
+            tracer_started_at: Some(1_700_000_000),
             tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
             conversation_id: None,
@@ -1375,6 +1429,199 @@ mod tests {
             loaded.spawn_config.map(|config| config.agent),
             Some(Some(options)),
             "a reattached session keeps its provider"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A live process whose executable name contains `rt-tracer`, standing in
+    /// for a tracer supervisor. It copies `cmd.exe` under a tracer-shaped name
+    /// and parks it in `pause`, holding the piped stdin open until the process
+    /// is killed or the guard drops.
+    #[cfg(windows)]
+    struct TracerLikeProcess {
+        child: std::process::Child,
+        dirs: Dirs,
+    }
+
+    #[cfg(windows)]
+    impl TracerLikeProcess {
+        fn spawn(tag: &str) -> Self {
+            Self::spawn_named(tag, "rt-tracer-test.exe")
+        }
+
+        /// Copies `cmd.exe` under `exe_name` in its own scratch dir, so a test
+        /// can stand up a process the tracer name check accepts and one it
+        /// rejects.
+        fn spawn_named(tag: &str, exe_name: &str) -> Self {
+            let dirs = scratch_dirs(tag);
+            let exe = dirs.config.join(exe_name);
+            let system_root = std::env::var_os("SystemRoot").expect("SystemRoot is set on Windows");
+            let cmd = std::path::Path::new(&system_root)
+                .join("System32")
+                .join("cmd.exe");
+            std::fs::copy(&cmd, &exe).expect("copy cmd.exe");
+            let child = std::process::Command::new(&exe)
+                .args(["/c", "pause"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn rt-tracer-test.exe");
+            Self { child, dirs }
+        }
+
+        fn pid(&self) -> u32 {
+            self.child.id()
+        }
+
+        fn started_at(&self) -> u64 {
+            process_start_time(self.pid()).expect("a live process reports a start time")
+        }
+
+        /// The spawn-time sidecar naming this process as its tracer.
+        fn meta(&self) -> OrphanMeta {
+            meta_from_record(
+                "s-tracer".to_string(),
+                self.pid(),
+                "s-tracer".to_string(),
+                SessionKind::Standalone,
+                SessionMode::Interactive,
+                vec![],
+                chrono::DateTime::from_timestamp(0, 0).unwrap(),
+                None,
+                Some("rt-tracer".to_string()),
+                Some(agent_registry::default_agent()),
+                None,
+                None,
+                None,
+                Some(self.pid()),
+                Some(r"\\.\pipe\rt-tracer-s-tracer".to_string()),
+                None,
+                None,
+            )
+            .expect("build meta")
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            self.child.try_wait()
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            self.child.wait()
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TracerLikeProcess {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.dirs.config);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tracer_sidecar_whose_start_time_differs_is_not_alive() {
+        let tracer = TracerLikeProcess::spawn("tracer-start-time-differs");
+        let mut meta = tracer.meta();
+        let real = meta
+            .tracer_started_at
+            .expect("the spawn path stamps the tracer's start time");
+        meta.tracer_started_at = Some(real + 5);
+        assert!(
+            !is_session_alive(&meta),
+            "a recycled tracer pid must not pass for this session's tracer"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tracer_sidecar_without_a_start_time_falls_back_to_the_name() {
+        let tracer = TracerLikeProcess::spawn("tracer-no-start-time");
+        let mut meta = tracer.meta();
+        meta.tracer_started_at = None;
+        assert!(
+            is_session_alive(&meta),
+            "an older sidecar's running tracer is kept on the name check"
+        );
+
+        let impostor =
+            TracerLikeProcess::spawn_named("tracer-no-start-time-impostor", "plain-cmd-test.exe");
+        let mut meta = impostor.meta();
+        meta.tracer_started_at = None;
+        assert!(
+            !is_session_alive(&meta),
+            "without a stamp the name check still has to pass"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_pid_kills_a_matching_tracer_without_a_start_time() {
+        let mut tracer = TracerLikeProcess::spawn("kill-pid-no-start-time");
+        let mut meta = tracer.meta();
+        meta.tracer_started_at = None;
+        assert!(kill_pid(&meta), "the name check still kills the tracer");
+        tracer.wait().expect("the killed process is reaped");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_pid_spares_a_process_whose_start_time_differs() {
+        let mut tracer = TracerLikeProcess::spawn("kill-pid-start-time");
+        let mut meta = tracer.meta();
+        let real = meta
+            .tracer_started_at
+            .expect("the spawn path stamps the tracer's start time");
+
+        meta.tracer_started_at = Some(real + 5);
+        assert!(!kill_pid(&meta), "a mismatched stamp must not be killed");
+        assert!(
+            matches!(tracer.try_wait(), Ok(None)),
+            "the process is still running"
+        );
+
+        meta.tracer_started_at = Some(real);
+        assert!(
+            matches!(tracer.try_wait(), Ok(None)),
+            "the process is still running right before the matching kill"
+        );
+        assert!(kill_pid(&meta), "the matching tracer is killed");
+        tracer.wait().expect("the killed process is reaped");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tracer_sidecar_with_its_start_time_is_alive() {
+        let tracer = TracerLikeProcess::spawn("tracer-start-time-match");
+        let meta = tracer.meta();
+        assert_eq!(
+            meta.tracer_started_at,
+            Some(tracer.started_at()),
+            "the stamp is the live process's own start time"
+        );
+        assert!(is_session_alive(&meta), "the live tracer keeps the session");
+    }
+
+    #[test]
+    fn tracer_started_at_round_trips_and_is_absent_for_a_pid_less_sidecar() {
+        let dirs = scratch_dirs("tracer-started-at");
+        let mut meta = s1_meta(None);
+        meta.tracer_started_at = Some(1_700_000_123);
+        write_meta(&dirs, &meta).expect("write meta");
+        let loaded = load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(loaded.tracer_pid, Some(4242));
+        assert_eq!(loaded.tracer_started_at, Some(1_700_000_123));
+
+        let mut shell = s1_meta(None);
+        shell.tracer_pid = None;
+        shell.tracer_pipe = None;
+        shell.tracer_started_at = None;
+        let json = serde_json::to_value(&shell).expect("serialize");
+        assert!(
+            json.get("tracer_started_at").is_none(),
+            "a sidecar with no tracer writes no start time: {json}"
         );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
