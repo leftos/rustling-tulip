@@ -37,6 +37,11 @@ use tokio::time::{Instant, sleep, timeout};
 use tracing::{debug, info, warn};
 
 use crate::pty::PtyHandle;
+use crate::typing_lane::{Holder, TypingTurn};
+
+/// How long a chain waits for the typing lane when another writer holds it
+/// at the spawn.
+const LANE_WAIT: Duration = Duration::from_secs(20);
 
 /// Minimum wait before declaring the TUI ready, even if no output has been
 /// observed. Raised from the original 1500 ms after observing that under
@@ -114,9 +119,31 @@ pub fn run_chain(
     // up synchronously with the caller's view of the PTY — otherwise a
     // fast-booting child could emit its banner before the spawned task
     // subscribes and we'd miss the startup output we want to track
-    // quiescence on.
+    // quiescence on. The typing lane is taken here too, so no other writer
+    // types between the spawn and the chain's first key.
     let mut output_rx = Some(pty.output.subscribe());
+    let turn = pty.typing().try_take(Holder::Injector);
     tokio::spawn(async move {
+        let turn = if let Some(turn) = turn {
+            turn
+        } else {
+            warn!(
+                session_id = %session_id,
+                holder = ?pty.typing().holder(),
+                "another writer holds the typing lane; the injector waits"
+            );
+            match pty.typing().take(Holder::Injector, LANE_WAIT).await {
+                Ok(turn) => turn,
+                Err(holder) => {
+                    warn!(
+                        session_id = %session_id,
+                        ?holder,
+                        "the typing lane stayed taken; the injector's chain is dropped"
+                    );
+                    return;
+                }
+            }
+        };
         for (index, injector) in injectors.into_iter().enumerate() {
             if index > 0
                 && let Some(agent_up) = &agent_up
@@ -129,9 +156,27 @@ pub fn run_chain(
                 return;
             }
             let rx = output_rx.take().unwrap_or_else(|| pty.output.subscribe());
-            run_one(&session_id, &pty, rx, injector, ready).await;
+            let typist = Typist {
+                pty: &pty,
+                turn: &turn,
+            };
+            run_one(&session_id, typist, rx, injector, ready).await;
         }
     });
+}
+
+/// The session's PTY and the typing lane held for it: everything a chain
+/// types goes through the turn.
+#[derive(Clone, Copy)]
+struct Typist<'a> {
+    pty: &'a PtyHandle,
+    turn: &'a TypingTurn,
+}
+
+impl Typist<'_> {
+    fn press(self, bytes: Vec<u8>) {
+        self.turn.press(self.pty, bytes);
+    }
 }
 
 /// Wait until `agent_up` answers true, asking every [`AGENT_UP_POLL`], for at
@@ -153,7 +198,7 @@ async fn wait_for_agent(agent_up: &(dyn Fn() -> bool + Send + Sync), cap: Durati
 /// `output_rx`.
 async fn run_one(
     session_id: &str,
-    pty: &Arc<PtyHandle>,
+    typist: Typist<'_>,
     output_rx: broadcast::Receiver<Vec<u8>>,
     injector: PromptInjector,
     ready: ReadySignal,
@@ -201,7 +246,7 @@ async fn run_one(
 
     // Phase 2: pre_input
     for (offset, step) in steps[cursor..pre_input_end].iter().enumerate() {
-        execute_step(session_id, pty, cursor + offset, step).await;
+        execute_step(session_id, typist, cursor + offset, step).await;
     }
 
     // Phase 3: verify the mode marker appeared, retry if not.
@@ -211,7 +256,7 @@ async fn run_one(
     if let (Some(marker), Some(_)) = (verify_marker.as_deref(), prompt_idx) {
         verify_and_retry(
             session_id,
-            pty,
+            typist,
             &mut output_rx,
             marker,
             &steps[cursor..pre_input_end],
@@ -222,13 +267,13 @@ async fn run_one(
 
     // Phase 4: prompt + post_input
     for (offset, step) in steps[pre_input_end..].iter().enumerate() {
-        execute_step(session_id, pty, pre_input_end + offset, step).await;
+        execute_step(session_id, typist, pre_input_end + offset, step).await;
     }
 
     debug!(session_id = %session_id, "injector finished");
 }
 
-async fn execute_step(session_id: &str, pty: &Arc<PtyHandle>, idx: usize, step: &InjectorStep) {
+async fn execute_step(session_id: &str, typist: Typist<'_>, idx: usize, step: &InjectorStep) {
     match step {
         InjectorStep::Delay { ms } => {
             debug!(session_id = %session_id, step = idx, ms, "injector delay");
@@ -243,7 +288,7 @@ async fn execute_step(session_id: &str, pty: &Arc<PtyHandle>, idx: usize, step: 
                         len = bytes.len(),
                         "injector write"
                     );
-                    pty.write_input(bytes);
+                    typist.press(bytes);
                 }
                 Err(err) => {
                     warn!(
@@ -267,7 +312,7 @@ async fn execute_step(session_id: &str, pty: &Arc<PtyHandle>, idx: usize, step: 
                 newline,
                 "injector text"
             );
-            pty.write_input(bytes);
+            typist.press(bytes);
         }
         InjectorStep::Unknown => {
             warn!(
@@ -281,7 +326,7 @@ async fn execute_step(session_id: &str, pty: &Arc<PtyHandle>, idx: usize, step: 
 
 async fn verify_and_retry(
     session_id: &str,
-    pty: &Arc<PtyHandle>,
+    typist: Typist<'_>,
     output: &mut broadcast::Receiver<Vec<u8>>,
     marker: &str,
     pre_input: &[InjectorStep],
@@ -320,7 +365,7 @@ async fn verify_and_retry(
                     "verify_mode_marker not seen; re-sending pre_input"
                 );
                 for (offset, step) in pre_input.iter().enumerate() {
-                    execute_step(session_id, pty, pre_input_start_idx + offset, step).await;
+                    execute_step(session_id, typist, pre_input_start_idx + offset, step).await;
                 }
             }
         }
@@ -544,6 +589,55 @@ async fn wait_until_ready_or_timeout(
 mod tests {
     use super::*;
     use tokio::sync::broadcast;
+
+    #[tokio::test(start_paused = true)]
+    async fn the_injector_holds_the_lane_for_its_chain() {
+        let (pty, mut input, _exit) = crate::history::test_support::recording_pty();
+        let injector = PromptInjector {
+            steps: vec![
+                InjectorStep::Text {
+                    content: "first".to_owned(),
+                    newline: true,
+                },
+                InjectorStep::Delay { ms: 1000 },
+                InjectorStep::Text {
+                    content: "second".to_owned(),
+                    newline: true,
+                },
+            ],
+            verify_mode_marker: None,
+            startup: InjectorStartup::AgentTui,
+        };
+        run(
+            "s1".to_owned(),
+            Arc::clone(&pty),
+            injector,
+            ReadySignal::default(),
+        );
+        assert_eq!(
+            pty.typing().holder(),
+            Some(Holder::Injector),
+            "the lane is taken before the chain's task runs"
+        );
+        sleep(Duration::from_millis(10)).await;
+        assert_eq!(input.try_recv().ok(), Some(b"first\r".to_vec()));
+        assert_eq!(
+            pty.typing().holder(),
+            Some(Holder::Injector),
+            "the lane is held between the chain's steps"
+        );
+        assert!(
+            pty.typing().try_take(Holder::ViewReturn).is_none(),
+            "no other writer gets in between"
+        );
+        sleep(Duration::from_secs(1)).await;
+        assert_eq!(input.try_recv().ok(), Some(b"second\r".to_vec()));
+        assert_eq!(
+            pty.typing().holder(),
+            None,
+            "the lane is given back once the chain ends"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn the_initial_prompt_waits_for_the_agent_to_start() {

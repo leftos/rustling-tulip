@@ -181,6 +181,11 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                     if let Some(tx) = notifier {
                         let _ = tx.send(bytes.len());
                     }
+                    // A run of keys under way learns the owner typed under
+                    // it; the owner never waits for the typing lane.
+                    if !automatic {
+                        pty.typing().owner_typed();
+                    }
                     pty.write_input(bytes);
                 }
             }
@@ -2093,6 +2098,39 @@ mod tests {
             snapshot.pending_input, None,
             "the pending prompt is cleared"
         );
+    }
+
+    /// An owner key bumps the typing lane's owner epoch; the terminal's own
+    /// reply does not, and neither takes the lane.
+    #[tokio::test]
+    async fn send_input_bumps_the_owner_epoch_only_for_an_owner_key() {
+        use crate::history::test_support::{insert_live, record};
+        let (hub, _scratch) = test_hub("send-input-owner-epoch");
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        let send = |bytes: &[u8], automatic: bool| ClientMessage::SendInput {
+            session_id: "s1".to_owned(),
+            data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            automatic,
+        };
+        dispatch_silently(&hub, send(b"\x1b[12;1R", true)).await;
+        assert_eq!(
+            pty.typing().owner_epoch(),
+            0,
+            "a terminal reply is no owner key"
+        );
+        dispatch_silently(&hub, send(b"y", false)).await;
+        assert_eq!(
+            pty.typing().owner_epoch(),
+            1,
+            "the owner's key bumps the epoch"
+        );
+        assert_eq!(pty.typing().holder(), None, "input never takes the lane");
     }
 
     /// The terminal's own replies never answer a hook-reported prompt.

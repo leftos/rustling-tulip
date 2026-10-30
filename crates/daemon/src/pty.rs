@@ -10,9 +10,11 @@
 
 use portable_pty::ChildKiller;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
+
+use crate::typing_lane::TypingLane;
 
 const MAX_PTY_INPUT_CHUNK_BYTES: usize = 2048;
 
@@ -204,6 +206,8 @@ pub struct PtyHandle {
     /// reader task observes EOF.
     killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
     pid: Option<u32>,
+    /// One typist at a time on this PTY.
+    typing: Arc<TypingLane>,
 }
 
 impl PtyHandle {
@@ -216,7 +220,14 @@ impl PtyHandle {
             resize_tx: parts.resize_tx,
             killer: Mutex::new(Some(parts.killer)),
             pid: parts.pid,
+            typing: Arc::new(TypingLane::default()),
         }
+    }
+
+    /// The lane a run of keys takes so no other run interleaves with it.
+    #[must_use]
+    pub fn typing(&self) -> &Arc<TypingLane> {
+        &self.typing
     }
 
     pub fn write_input(&self, data: Vec<u8>) {

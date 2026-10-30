@@ -195,9 +195,25 @@ pub struct ViewReturn {
     last_box: Option<(Option<String>, bool)>,
     task: Option<Task>,
     saved: Option<SavedDraft>,
+    /// The last reading pressed a key, and no reading has come since.
+    key_pending: bool,
 }
 
 impl ViewReturn {
+    /// Whether a drive is under way or a pressed key awaits its reading: the
+    /// terminal is mid-switch and its keys are not free.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.task.is_some() || self.key_pending
+    }
+
+    /// Stop the work under way, keeping any saved draft: no key is owed a
+    /// reading any more.
+    pub fn abandon(&mut self) {
+        self.task = None;
+        self.key_pending = false;
+    }
+
     /// The draft waiting to go back to its agent.
     #[must_use]
     #[cfg_attr(
@@ -249,6 +265,9 @@ impl ViewReturn {
             }
         }
         self.last_box = Some((view.agent_in_view.clone(), view.box_first_line.is_some()));
+        self.key_pending = out
+            .iter()
+            .any(|action| matches!(action, ReturnAction::Press(_)));
         out
     }
 

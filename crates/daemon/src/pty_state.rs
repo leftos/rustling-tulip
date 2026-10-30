@@ -28,7 +28,8 @@ use crate::pty::PtyHandle;
 use crate::screen::SharedScreen;
 use crate::screen::rules::{self, CompiledRules, Reading, ScreenState, Verdict};
 use crate::session::{SessionEvent, SessionRecord, SessionRegistry, push_recent_action};
-use crate::view_drive::{KEY_WAIT, ReturnAction, ViewReturn};
+use crate::typing_lane::{Holder, TypingTurn};
+use crate::view_drive::{DRIVE_LIMIT, KEY_WAIT, ReturnAction, ViewReturn};
 use agent_api::ViewReading;
 use protocol::{AgentId, AttentionReason, ChatScreen, SessionStatus};
 use std::collections::VecDeque;
@@ -85,6 +86,14 @@ const CONFIRM_CAP: Duration = Duration::from_millis(700);
 /// the status or the hook stamp, and after it starts: the grid may still show
 /// the frame from before the change.
 const FOREIGN_WRITE_HOLD: Duration = Duration::from_millis(700);
+
+/// How soon the view switch reads the screen again after another writer
+/// held the session's typing lane.
+const LANE_RETRY: Duration = Duration::from_millis(500);
+
+/// The longest the view switch holds the typing lane: two whole drives and a
+/// key's wait. Past it the switch is abandoned and the lane given back.
+const VIEW_TURN_LIMIT: Duration = DRIVE_LIMIT.saturating_mul(2).saturating_add(KEY_WAIT);
 
 pub struct AttentionEvent {
     pub session_id: String,
@@ -251,6 +260,11 @@ struct ScreenWatch {
     screen_set_background: bool,
     /// Takes the terminal back to main for a prompt seen in an agent's view.
     view_return: ViewReturn,
+    /// The session's typing lane, held by the view return from the reading
+    /// it first acts on until one leaves it idle.
+    view_turn: Option<TypingTurn>,
+    /// When the view return took the typing lane it holds.
+    view_turn_since: Option<Instant>,
     /// The record was seen with no PTY, and that was logged.
     no_pty_logged: bool,
     /// When the view return last typed a key, until a reading is handed to
@@ -412,6 +426,8 @@ impl ScreenWatch {
             dialog_edge_armed: true,
             screen_set_background: false,
             view_return: ViewReturn::default(),
+            view_turn: None,
+            view_turn_since: None,
             no_pty_logged: false,
             view_key_at: None,
         }
@@ -471,6 +487,7 @@ impl ScreenWatch {
     /// handed no reading to the view return never drops the read the key is
     /// owed.
     fn check(&mut self, now: Instant, mode: Mode) -> Checked {
+        self.mind_view_turn(now, mode);
         let checked = self.check_frame(now, mode);
         if let Some(deadline) = self
             .view_key_at
@@ -616,15 +633,46 @@ impl ScreenWatch {
         (!resized).then_some(read)
     }
 
+    /// Give back the typing lane when the session runs no agent, and when the
+    /// view return has held it longer than [`VIEW_TURN_LIMIT`]: then its
+    /// switch is abandoned too.
+    fn mind_view_turn(&mut self, now: Instant, mode: Mode) {
+        if mode == Mode::Shell {
+            self.release_view_turn();
+            return;
+        }
+        let Some(since) = self.view_turn_since else {
+            return;
+        };
+        if now.duration_since(since) > VIEW_TURN_LIMIT {
+            self.view_return.abandon();
+            self.release_view_turn();
+            warn!(
+                session_id = %self.session_id,
+                "the view switch held the typing lane too long; it is released"
+            );
+        }
+    }
+
+    fn release_view_turn(&mut self) {
+        self.view_turn = None;
+        self.view_turn_since = None;
+    }
+
     /// The session's PTY and agent, for the view return to type into and
-    /// read with; `None` when the record is gone or has no PTY (logged once).
+    /// read with; `None` when the record is gone or has no PTY (logged
+    /// once). Either way the view return gives back the typing lane.
     fn view_target(&mut self) -> Option<(Arc<PtyHandle>, AgentId)> {
-        let arc = self.registry.get(&self.session_id)?;
+        let Some(arc) = self.registry.get(&self.session_id) else {
+            self.release_view_turn();
+            return None;
+        };
         let (pty, agent) = {
             let record = crate::sync::lock(&arc);
             (record.pty.clone(), record.agent.clone())
         };
         let Some(pty) = pty else {
+            self.release_view_turn();
             if !self.no_pty_logged {
                 self.no_pty_logged = true;
                 info!(
@@ -641,6 +689,11 @@ impl ScreenWatch {
     /// answers: its keys go to the PTY (never as the owner's input), its
     /// notices to the clients. After a key the screen is read again
     /// [`KEY_WAIT`] later even when no output comes.
+    ///
+    /// The view return acts only while it holds the session's typing lane:
+    /// with another writer in it, the reading is skipped and the screen read
+    /// again [`LANE_RETRY`] later. The lane is given back after a reading
+    /// that pressed nothing and leaves no switch under way.
     fn drive_view(
         &mut self,
         pty: &PtyHandle,
@@ -649,12 +702,27 @@ impl ScreenWatch {
         chat: Option<&ChatScreen>,
         now: Instant,
     ) {
+        if self.view_turn.is_none() {
+            let Some(turn) = pty.typing().try_take(Holder::ViewReturn) else {
+                debug!(
+                    session_id = %self.session_id,
+                    holder = ?pty.typing().holder(),
+                    "another writer holds the typing lane; the view return waits"
+                );
+                self.confirm.read_by(now + LANE_RETRY);
+                return;
+            };
+            self.view_turn = Some(turn);
+            self.view_turn_since = Some(now);
+        }
         let mut pressed = false;
         for action in self.view_return.on_reading(agent, view, chat, now) {
             match action {
                 ReturnAction::Press(key) => {
                     debug!(session_id = %self.session_id, ?key, "view return key");
-                    pty.write_input(key.to_bytes());
+                    if let Some(turn) = &self.view_turn {
+                        turn.press(pty, key.to_bytes());
+                    }
                     pressed = true;
                 }
                 ReturnAction::Notice(notice) => {
@@ -665,6 +733,9 @@ impl ScreenWatch {
             }
         }
         self.view_key_at = pressed.then_some(now);
+        if !pressed && !self.view_return.busy() {
+            self.release_view_turn();
+        }
     }
 
     /// Publish the status the screen shows, at once or after its window;
@@ -2879,9 +2950,11 @@ mod hysteresis_tests {
     mod view_return {
         use super::*;
         use crate::history::test_support::{FakeExit, recording_pty};
+        use crate::pty::PtyHandle;
         use crate::screen::fixture_screen::screen_from;
         use crate::session::SessionEvent;
-        use crate::view_drive::KEY_WAIT;
+        use crate::typing_lane::Holder;
+        use crate::view_drive::{DRIVE_LIMIT, KEY_WAIT};
         use agent_api::{KeyHolder, ViewReading};
         use protocol::SessionNoticeKind;
 
@@ -2910,6 +2983,7 @@ mod hysteresis_tests {
             input: mpsc::UnboundedReceiver<Vec<u8>>,
             events: broadcast::Receiver<SessionEvent>,
             registry: Arc<SessionRegistry>,
+            pty: Arc<PtyHandle>,
             _attention: mpsc::UnboundedReceiver<super::super::AttentionEvent>,
             _exit: FakeExit,
         }
@@ -2919,7 +2993,7 @@ mod hysteresis_tests {
         async fn start_tui(tag: &str) -> Tui {
             let (pty, input, exit) = recording_pty();
             let mut record = test_record(SESSION);
-            record.pty = Some(pty);
+            record.pty = Some(Arc::clone(&pty));
             let screen: SharedScreen = Arc::new(Mutex::new(Screen::new(GRID.0, GRID.1)));
             record.screen = Some(Arc::clone(&screen));
             let rules = rules_for(&record.agent);
@@ -2951,6 +3025,7 @@ mod hysteresis_tests {
                 input,
                 events,
                 registry,
+                pty,
                 _attention: attention,
                 _exit: exit,
             }
@@ -3035,6 +3110,87 @@ mod hysteresis_tests {
             advance(KEY_WAIT * 2).await;
             assert!(tui.typed().is_empty(), "nothing more for the same notice");
             assert_eq!(tui.notices(), [], "no notice");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_watcher_skips_its_view_return_while_another_holds_the_lane() {
+            let mut tui = start_tui("view-lane-held").await;
+            let turn = tui
+                .pty
+                .typing()
+                .try_take(Holder::ChatSend)
+                .expect("the lane is free");
+            tui.show(V174).await;
+            advance(KEY_WAIT).await;
+            assert!(tui.typed().is_empty(), "no key while a send holds the lane");
+            drop(turn);
+            advance(ms(600)).await;
+            assert_eq!(
+                tui.typed(),
+                [DOWN],
+                "the next reading after the lane is free returns to main"
+            );
+            assert_eq!(tui.pty.typing().holder(), Some(Holder::ViewReturn));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_watcher_releases_the_lane_when_idle() {
+            let mut tui = start_tui("view-lane-idle").await;
+            tui.show(V174).await;
+            assert_eq!(tui.typed(), [DOWN], "Down to the panel");
+            assert_eq!(
+                tui.pty.typing().holder(),
+                Some(Holder::ViewReturn),
+                "the switch holds the lane between its keys"
+            );
+            tui.show(&v174_panel_on_main()).await;
+            assert_eq!(tui.typed(), [ENTER], "Enter on main");
+            tui.show(V175).await;
+            assert_eq!(tui.typed(), [UP], "Up to the box");
+            tui.show(V176).await;
+            assert!(tui.typed().is_empty(), "main is in view");
+            assert_eq!(
+                tui.pty.typing().holder(),
+                None,
+                "the lane is given back once main is in view"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_watcher_drops_a_lane_held_too_long() {
+            let mut tui = start_tui("view-lane-too-long").await;
+            tui.show(V174).await;
+            assert_eq!(tui.typed(), [DOWN], "Down to the panel");
+            // Output that never settles: the switch never reads again, and
+            // keeps the lane until its ceiling.
+            let ceiling = DRIVE_LIMIT * 2 + KEY_WAIT;
+            let step = ms(30);
+            let mut held = Duration::ZERO;
+            while held < ceiling.saturating_sub(Duration::from_secs(1)) {
+                tui.output
+                    .send(b"\x1b[0m".to_vec())
+                    .expect("watcher still subscribed");
+                advance(step).await;
+                held += step;
+            }
+            assert_eq!(
+                tui.pty.typing().holder(),
+                Some(Holder::ViewReturn),
+                "the lane is still held short of the ceiling"
+            );
+            while held < ceiling + Duration::from_secs(1) {
+                tui.output
+                    .send(b"\x1b[0m".to_vec())
+                    .expect("watcher still subscribed");
+                advance(step).await;
+                held += step;
+            }
+            assert_eq!(
+                tui.pty.typing().holder(),
+                None,
+                "the lane is given back past the ceiling"
+            );
+            assert!(tui.typed().is_empty(), "no key while the output runs on");
         }
 
         #[tokio::test(start_paused = true)]

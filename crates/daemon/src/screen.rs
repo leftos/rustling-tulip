@@ -80,6 +80,8 @@ pub struct Screen {
     cols: usize,
     rows: usize,
     title: Arc<Mutex<Option<String>>>,
+    /// How many bytes of output [`Self::feed`] has applied.
+    fed: u64,
 }
 
 impl Screen {
@@ -102,12 +104,26 @@ impl Screen {
             cols,
             rows,
             title,
+            fed: 0,
         }
     }
 
     /// Applies PTY output to the grid.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+        let count = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        self.fed = self.fed.wrapping_add(count);
+    }
+
+    /// How many bytes of output the grid has been fed, so a reader can tell
+    /// whether output arrived since it last looked.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "a chat send reads it in CV.8's second part")
+    )]
+    pub fn fed(&self) -> u64 {
+        self.fed
     }
 
     /// Drops any escape sequence the parser had half read, so the rest of the
@@ -245,6 +261,19 @@ fn last_non_empty(rows: &[String], n: usize) -> Vec<String> {
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feed_counts_the_bytes_it_applies() {
+        let mut screen = Screen::new(80, 10);
+        assert_eq!(screen.fed(), 0);
+        screen.feed(b"hello");
+        screen.feed(b"\x1b[2J");
+        screen.feed(b"");
+        assert_eq!(screen.fed(), 9, "every byte counts, escape sequences too");
+        screen.reset_parser();
+        screen.resize(40, 5);
+        assert_eq!(screen.fed(), 9, "only feeding moves the count");
+    }
 
     #[test]
     fn a_spinner_repainted_in_place_leaves_one_spinner_row() {
