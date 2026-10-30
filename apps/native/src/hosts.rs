@@ -12,6 +12,7 @@ use protocol::{
 
 use crate::RootView;
 use crate::connection::Connection;
+use crate::connection_picker::SavedHost;
 use crate::net::{HandshakeInfo, NetCommand};
 use crate::remote_access::RemoteStatusView;
 use crate::remote_mode::Capabilities;
@@ -47,6 +48,9 @@ pub(crate) struct HostConn {
     tx: UnboundedSender<NetCommand>,
     conn: Connection,
     handshake: Option<HandshakeInfo>,
+    /// The id the daemon named itself by in its last `Welcome` on this
+    /// connection, if it named one.
+    daemon_id: Option<String>,
     pub(crate) mirrors: HostMirrors,
 }
 
@@ -57,6 +61,7 @@ impl HostConn {
             tx,
             conn: Connection::for_target(target),
             handshake: None,
+            daemon_id: None,
             mirrors: HostMirrors::default(),
         }
     }
@@ -134,6 +139,17 @@ impl Hosts {
         self.remote.push((name, conn));
         true
     }
+
+    /// Takes remote host `key`'s connection out of the window; `None` when
+    /// the window holds none to it, and always for This PC, whose
+    /// connection the window never gives up.
+    pub(crate) fn remove(&mut self, key: &HostKey) -> Option<HostConn> {
+        let HostKey::Remote(name) = key else {
+            return None;
+        };
+        let index = self.remote.iter().position(|(held, _)| held == name)?;
+        Some(self.remote.remove(index).1)
+    }
 }
 
 impl RootView {
@@ -142,6 +158,84 @@ impl RootView {
     /// that assumes so, and it goes once the window holds one per host.
     pub(crate) fn conn(&self) -> &Connection {
         &self.hosts.local().conn
+    }
+
+    /// Every host the window holds a connection to: This PC first, then
+    /// the remote hosts in the order they joined.
+    #[must_use]
+    pub fn held_hosts(&self) -> Vec<HostKey> {
+        self.hosts.keys()
+    }
+
+    /// The host whose connection reached the same daemon before `host`'s
+    /// did, when `host`'s was dropped as its duplicate.
+    #[must_use]
+    pub fn duplicate_of(&self, host: &HostKey) -> Option<&HostKey> {
+        self.duplicate_of.get(host)
+    }
+
+    /// Drops the window's connection to remote host `host`: its network
+    /// thread quits once its sender is gone. Its sidebar slice stays.
+    /// Returns whether the window held one.
+    pub(crate) fn disconnect_host(&mut self, host: &HostKey) -> bool {
+        let held = self.hosts.remove(host).is_some();
+        if held {
+            tracing::info!(?host, "disconnected from the host");
+        }
+        held
+    }
+
+    /// `host`'s connection closed: the daemon id it last named no longer
+    /// holds that daemon for it.
+    pub(crate) fn forget_daemon_id(&mut self, host: &HostKey) {
+        if let Some(entry) = self.hosts.get_mut(host) {
+            entry.daemon_id = None;
+        }
+    }
+
+    /// Records the daemon id `host`'s `Welcome` named and, when another
+    /// held host already named it, drops the duplicate connection with its
+    /// slice and records which host it duplicates. The duplicate is `host`,
+    /// unless `host` is This PC, which always owns its own daemon. Returns
+    /// whether `host` itself was dropped.
+    pub(crate) fn drop_if_duplicate(
+        &mut self,
+        host: &HostKey,
+        daemon_id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(entry) = self.hosts.get_mut(host) {
+            entry.daemon_id = daemon_id.map(str::to_owned);
+        }
+        let Some(id) = daemon_id else {
+            return false;
+        };
+        let holder = self.hosts.keys().into_iter().find(|other| {
+            other != host
+                && self
+                    .hosts
+                    .get(other)
+                    .is_some_and(|entry| entry.daemon_id.as_deref() == Some(id))
+        });
+        let Some(holder) = holder else {
+            return false;
+        };
+        let (duplicate, owner) = if *host == HostKey::Local {
+            (holder, HostKey::Local)
+        } else {
+            (host.clone(), holder)
+        };
+        tracing::info!(
+            ?duplicate,
+            ?owner,
+            "two connections reach one daemon; dropping the later one"
+        );
+        self.disconnect_host(&duplicate);
+        self.clear_remote_slice(&duplicate, window, cx);
+        let dropped_self = duplicate == *host;
+        self.duplicate_of.insert(duplicate, owner);
+        dropped_self
     }
 
     /// `host`'s connection; `None` when the window has none to it.
@@ -207,8 +301,30 @@ impl RootView {
             return;
         }
         let (tx, events) = (self.open_host)(&target);
+        self.duplicate_of.remove(&HostKey::Remote(name.clone()));
         self.hosts.insert(name.clone(), HostConn::new(tx, target));
         Self::forward_net_events(HostKey::Remote(name), events, window, cx);
+    }
+
+    /// Opens a connection to each enabled saved host, in saved order, beside
+    /// This PC's.
+    pub(crate) fn connect_saved_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let saved: Vec<SavedHost> = self
+            .sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .filter(|host| host.enabled)
+            .cloned()
+            .collect();
+        for host in saved {
+            match host.target() {
+                Ok(target) => self.connect_host(target, window, cx),
+                Err(err) => {
+                    tracing::warn!(host = %host.name, "the saved host is not valid ({err}); not connected");
+                }
+            }
+        }
     }
 
     /// The handshake of the daemon the window shows, once it reported one.
@@ -381,4 +497,35 @@ fn command_name(command: &NetCommand) -> String {
         .next()
         .unwrap_or_default()
         .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::channel::mpsc::unbounded;
+
+    use super::{HostConn, Hosts};
+    use crate::target::{HostKey, Target};
+
+    const BOX: &str = "box.tail1234.ts.net";
+
+    fn conn(target: Target) -> HostConn {
+        HostConn::new(unbounded().0, target)
+    }
+
+    #[test]
+    fn removing_a_remote_host_drops_it_and_local_cannot_be_removed() {
+        let mut hosts = Hosts::new(conn(Target::Local));
+        let remote = HostKey::Remote(BOX.to_owned());
+        assert!(hosts.insert(BOX.to_owned(), conn(Target::tailnet(BOX, None))));
+
+        assert!(
+            hosts.remove(&remote).is_some(),
+            "the remote host is taken out"
+        );
+        assert_eq!(hosts.keys(), [HostKey::Local]);
+        assert!(hosts.get(&remote).is_none());
+        assert!(hosts.remove(&remote).is_none(), "nothing left to take");
+        assert!(hosts.remove(&HostKey::Local).is_none(), "This PC stays");
+        assert_eq!(hosts.keys(), [HostKey::Local]);
+    }
 }

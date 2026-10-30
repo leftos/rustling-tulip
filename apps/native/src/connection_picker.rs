@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use tailnet::{PeerStatus, Status, TailnetError};
 
 use crate::connection;
-use crate::sidebar::UiState;
 use crate::ssh::DEFAULT_REMOTE_COMMAND;
 use crate::target::{DEFAULT_TAILNET_PORT, HostNameError, SshHost, SshHostError, Target};
 
@@ -60,11 +59,28 @@ pub struct SavedHost {
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_command: Option<String>,
+    /// Whether the window connects to this host at launch; a record
+    /// without the key is enabled, and an enabled host is written without
+    /// it.
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_enabled")]
+    pub enabled: bool,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes the field by reference"
+)]
+fn is_enabled(enabled: &bool) -> bool {
+    *enabled
 }
 
 impl SavedHost {
-    /// The record of `target`, as a switch to it saves it; `None` for the
-    /// local daemon.
+    /// The record of `target`, enabled, as a switch to it saves it; `None`
+    /// for the local daemon.
     #[must_use]
     pub fn from_target(target: &Target) -> Option<Self> {
         match target {
@@ -74,12 +90,14 @@ impl SavedHost {
                 name: host.name().to_owned(),
                 port: host.port(),
                 remote_command: None,
+                enabled: true,
             }),
             Target::Ssh(host) => Some(Self {
                 kind: HostKind::Ssh,
                 name: host.name().to_owned(),
                 port: 0,
                 remote_command: host.remote_command().map(str::to_owned),
+                enabled: true,
             }),
         }
     }
@@ -114,14 +132,18 @@ impl SavedHost {
     /// This host in its normal form: a tailnet name as
     /// [`Target::parse_tailnet`] keeps it (lower-cased, without a trailing
     /// dot); an SSH host as typed, without a port and without a blank
-    /// remote command.
+    /// remote command. Its `enabled` flag is kept.
     ///
     /// # Errors
     ///
     /// As [`SavedHost::target`].
     pub fn normalised(&self) -> Result<Self, TypedHostError> {
         let target = self.target()?;
-        Ok(Self::from_target(&target).unwrap_or_else(|| self.clone()))
+        let normal = Self::from_target(&target).unwrap_or_else(|| self.clone());
+        Ok(Self {
+            enabled: self.enabled,
+            ..normal
+        })
     }
 }
 
@@ -737,32 +759,6 @@ pub fn typed_target(name: &str, port: &str) -> Result<Target, TypedHostError> {
     Target::parse_tailnet(name, Some(port)).map_err(TypedHostError::Name)
 }
 
-/// The target the client connects to at start: the last target when it is
-/// still a saved host of its kind and name, dialled as it was saved; else
-/// this PC. Tailscale and `ssh` are never asked, and a saved host that
-/// cannot be reached is still the boot target.
-#[must_use]
-pub fn resolve_boot_target(ui: &UiState) -> Target {
-    let Some(last) = &ui.last_target else {
-        return Target::Local;
-    };
-    let Some(host) = ui
-        .saved_hosts
-        .iter()
-        .find(|host| host.kind == last.kind && host.name == last.name)
-    else {
-        tracing::info!(
-            host = %last.name,
-            "the last target is not a saved host; starting on this PC"
-        );
-        return Target::Local;
-    };
-    host.target().unwrap_or_else(|err| {
-        tracing::warn!(host = %host.name, "the saved host is not valid ({err}); starting on this PC");
-        Target::Local
-    })
-}
-
 /// The last tailnet scan's outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Scan {
@@ -911,14 +907,20 @@ impl ConnectionPicker {
 
     /// Saves `host` after the others; a saved host of its kind and name is
     /// replaced by it, in its place, so a new port or remote command is
-    /// kept. A host of the other kind and the same name is left alone.
+    /// kept, and so is the saved record's `enabled` flag. A host of the
+    /// other kind and the same name is left alone.
     pub fn remember(&mut self, host: SavedHost) {
         match self
             .saved
             .iter_mut()
             .find(|saved| saved.kind == host.kind && saved.name == host.name)
         {
-            Some(saved) => *saved = host,
+            Some(saved) => {
+                *saved = SavedHost {
+                    enabled: saved.enabled,
+                    ..host
+                };
+            }
             None => self.saved.push(host),
         }
     }
@@ -976,9 +978,8 @@ mod tests {
     use super::{
         AddButton, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, Row, RowFacts,
         RowHost, RowKind, RowState, SCAN_PENDING, SSH_TESTING, SavedHost, Section, SshTest,
-        pairs_on_switch, resolve_boot_target, row_detail, typed_ssh_target, typed_target,
+        pairs_on_switch, row_detail, typed_ssh_target, typed_target,
     };
-    use crate::sidebar::UiState;
     use crate::target::{DEFAULT_TAILNET_PORT, Target};
     use tailnet::{PeerStatus, Status, TailnetError};
 
@@ -1026,6 +1027,7 @@ mod tests {
             name: name.to_owned(),
             port,
             remote_command: None,
+            enabled: true,
         }
     }
 
@@ -1292,83 +1294,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_boot_target_uses_a_saved_host() {
-        let ui = UiState {
-            saved_hosts: vec![
-                saved("a.tail1234.ts.net", 8787),
-                saved("box.tail1234.ts.net", 9443),
-            ],
-            last_target: Some(saved("box.tail1234.ts.net", 9443)),
-            ..UiState::default()
-        };
-        assert_eq!(
-            resolve_boot_target(&ui),
-            Target::tailnet("box.tail1234.ts.net", Some(9443))
-        );
-        assert_eq!(
-            resolve_boot_target(&UiState {
-                last_target: None,
-                ..ui
-            }),
-            Target::Local,
-            "no last target is this PC"
-        );
-    }
-
-    #[test]
-    fn boot_target_is_a_saved_ssh_host() {
-        let devbox = SavedHost {
-            kind: HostKind::Ssh,
-            name: "devbox".to_owned(),
-            port: 0,
-            remote_command: None,
-        };
-        let ui = UiState {
-            saved_hosts: vec![saved("devbox.tail1234.ts.net", 8787), devbox.clone()],
-            last_target: Some(devbox.clone()),
-            ..UiState::default()
-        };
-        assert_eq!(
-            Some(resolve_boot_target(&ui)),
-            Target::parse_ssh("devbox", None).ok()
-        );
-        let tailnet_only = UiState {
-            saved_hosts: vec![SavedHost {
-                kind: HostKind::Tailnet,
-                port: 8787,
-                ..devbox.clone()
-            }],
-            last_target: Some(devbox),
-            ..UiState::default()
-        };
-        assert_eq!(
-            resolve_boot_target(&tailnet_only),
-            Target::Local,
-            "a saved host of another kind is not the last target"
-        );
-    }
-
-    #[test]
-    fn missing_saved_host_falls_back_to_local() {
-        let last = Some(saved("box.tail1234.ts.net", 9443));
-        assert_eq!(
-            resolve_boot_target(&UiState {
-                last_target: last.clone(),
-                ..UiState::default()
-            }),
-            Target::Local
-        );
-        assert_eq!(
-            resolve_boot_target(&UiState {
-                saved_hosts: vec![saved("other.tail1234.ts.net", 9443)],
-                last_target: last,
-                ..UiState::default()
-            }),
-            Target::Local
-        );
-    }
-
-    #[test]
     fn tailscale_errors_show_their_display_text() {
         let mut picker = ConnectionPicker::new(vec![saved("box.tail1234.ts.net", 8787)]);
         picker.apply_scan(FailingSource(TailnetError::NotRunning).status());
@@ -1394,6 +1319,7 @@ mod tests {
             name: name.to_owned(),
             port: 0,
             remote_command: remote_command.map(str::to_owned),
+            enabled: true,
         }
     }
 
@@ -1438,6 +1364,38 @@ mod tests {
             picker.rows(),
             [this_pc(), ssh_row(BOX), row(RowKind::Peer, BOX, 8787)]
         );
+    }
+
+    #[test]
+    fn a_saved_host_without_enabled_loads_enabled() {
+        let host: SavedHost =
+            serde_json::from_value(serde_json::json!({ "name": BOX, "port": 8787 }))
+                .expect("a host record");
+        assert!(host.enabled);
+        let off: SavedHost = serde_json::from_value(
+            serde_json::json!({ "name": BOX, "port": 8787, "enabled": false }),
+        )
+        .expect("a host record");
+        assert!(!off.enabled);
+    }
+
+    #[test]
+    fn remembering_a_known_host_keeps_its_enabled_flag() {
+        let mut picker = ConnectionPicker::new(vec![SavedHost {
+            enabled: false,
+            ..saved(BOX, 8787)
+        }]);
+        picker.remember(saved(BOX, 9443));
+        assert_eq!(
+            picker.saved(),
+            [SavedHost {
+                enabled: false,
+                ..saved(BOX, 9443)
+            }],
+            "the new port is kept, and the host stays off"
+        );
+        picker.remember(saved("new.tail1234.ts.net", 8787));
+        assert!(picker.saved()[1].enabled, "a new host is enabled");
     }
 
     #[test]

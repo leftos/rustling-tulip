@@ -803,8 +803,8 @@ impl RootView {
     }
 
     /// Closes the picker and, unless `target` is the current one, sends the
-    /// switch and saves it as the boot target, a remote host also among the
-    /// saved hosts; only a tailnet host waits for a "not approved" to open
+    /// switch and saves a remote host among the saved hosts; only a tailnet
+    /// host waits for a "not approved" to open
     /// the pairing dialog. The current host, while it does not know this
     /// PC, opens the pairing dialog instead.
     fn switch_to_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
@@ -812,14 +812,13 @@ impl RootView {
         let pair_current = current && self.device_pairing_offered();
         if !current {
             let host = SavedHost::from_target(&target);
-            if let (Some(host), Some(dialog)) = (&host, &mut self.connection_picker) {
-                dialog.picker.remember(host.clone());
+            if let (Some(host), Some(dialog)) = (host, &mut self.connection_picker) {
+                dialog.picker.remember(host);
                 self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
             }
             if pairs_on_switch(&target) {
                 self.pair_on_not_approved();
             }
-            self.sidebar.set_last_target(host);
             self.save_ui();
             self.command_to(&HostKey::Local, NetCommand::SwitchTarget(target));
         }
@@ -848,7 +847,6 @@ impl RootView {
         dialog.focus = PickerControl::Row(index.min(rows.saturating_sub(1)));
         self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
         if was_current {
-            self.sidebar.set_last_target(None);
             self.command_to(&HostKey::Local, NetCommand::SwitchTarget(Target::Local));
         }
         self.save_ui();

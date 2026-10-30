@@ -11,21 +11,12 @@
 
 use crate::support;
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Instant;
-
-use futures::channel::mpsc::unbounded;
 use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, FilePicker, FolderPicker, NetCommand, RootDeps, RootView};
+use rustling_tulip_native::{Connection, NetCommand};
 use serde_json::json;
-use support::{
-    AutostartRecorder, Fixture, Harness, NotifyRecorder, OpenRecorder, TestDir, history_item, pane,
-    repo, session, split, tab,
-};
+use support::{Fixture, Harness, TestDir, history_item, pane, repo, session, split, tab};
 
 const HOST: &str = "box.tail1234.ts.net";
 
@@ -427,56 +418,6 @@ fn switch_back_to_local_restores_the_saved_active_tab(cx: &mut TestAppContext) {
         "back on this PC, its saved tab shows again"
     );
     assert_eq!(saved_active_tab(&dir).as_deref(), Some("t2"));
-}
-
-#[gpui::test]
-fn boot_on_a_saved_host_starts_on_that_target(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let host = json!({ "name": HOST, "port": 9443 });
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        json!({ "saved_hosts": [host.clone()], "last_target": host }).to_string(),
-    )
-    .expect("seed native-ui.json");
-    let (tx, mut commands) = unbounded();
-    let (_events, events) = unbounded();
-    let opened = Rc::new(RefCell::new(Vec::new()));
-    let quits = Rc::new(Cell::new(0));
-    let pick_folder: FolderPicker = Rc::new(|_, _| Box::pin(async { None }));
-    let pick_file: FilePicker = Rc::new(|_, _, _| Box::pin(async { None }));
-    let deps = RootDeps {
-        open_host: support::fake_transport((tx, events), &opened),
-        ui_dir: Some(dir.path().to_path_buf()),
-        paths: Err("specs have no config dir".to_owned()),
-        wanted: None,
-        now: Arc::new(Instant::now),
-        quit: support::quit_recorder(&quits),
-        open: Arc::new(OpenRecorder::default()),
-        notify: Arc::new(NotifyRecorder::default()),
-        pick_folder,
-        pick_file,
-        autostart: Arc::new(AutostartRecorder::default()),
-        tokens: Arc::new(daemon_client::device_tokens::MemoryTokens::default()),
-        updater: Arc::new(support::UpdaterRecorder::default()),
-    };
-
-    let (root, cx) =
-        cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
-    cx.run_until_parked();
-    assert_eq!(
-        root.read_with(cx, |root, _| root.connection_target().clone()),
-        Target::tailnet(HOST, Some(9443)),
-        "the window starts on the saved host, on its saved port"
-    );
-    assert_eq!(
-        *opened.borrow(),
-        vec![Target::tailnet(HOST, Some(9443))],
-        "the window opens one connection, to the saved host"
-    );
-    assert!(
-        commands.try_recv().is_err(),
-        "nothing asks the network thread to switch"
-    );
 }
 
 /// `s1` in repo `r1` loaded from the local daemon, with the exit dialog
