@@ -9,6 +9,8 @@ use protocol::{
     ClientMessage, RetryWorktreeTarget, WorktreeCleanupFailure, WorktreeLockingProcess,
 };
 
+use crate::target::HostKey;
+
 /// How many characters of a locking process's command line the dialog shows.
 pub(crate) const CMDLINE_MAX: usize = 80;
 
@@ -46,6 +48,9 @@ impl Control {
 /// which of them the user wants killed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CleanupFailed {
+    /// The host whose daemon reported the failure; every send and open
+    /// goes there.
+    host: HostKey,
     session_id: String,
     label: String,
     failures: Vec<WorktreeCleanupFailure>,
@@ -58,6 +63,7 @@ impl CleanupFailed {
     /// Every locking process once, in the order the failures name them, all
     /// ticked, with Ignore focused.
     pub(crate) fn new(
+        host: HostKey,
         session_id: String,
         label: String,
         failures: Vec<WorktreeCleanupFailure>,
@@ -73,6 +79,7 @@ impl CleanupFailed {
         }
         let ticked = processes.iter().map(|process| process.pid).collect();
         Self {
+            host,
             session_id,
             label,
             failures,
@@ -80,6 +87,10 @@ impl CleanupFailed {
             ticked,
             focused: Control::Ignore,
         }
+    }
+
+    pub(crate) fn host(&self) -> &HostKey {
+        &self.host
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -234,6 +245,7 @@ impl CleanupQueue {
     /// shown with. A session already queued has its entry replaced in place.
     pub(crate) fn push(
         &mut self,
+        host: HostKey,
         session_id: String,
         label: String,
         failures: Vec<WorktreeCleanupFailure>,
@@ -248,10 +260,10 @@ impl CleanupQueue {
             .iter_mut()
             .find(|entry| entry.session_id == session_id)
         {
-            *entry = CleanupFailed::new(session_id, label, failures);
+            *entry = CleanupFailed::new(host, session_id, label, failures);
         } else {
             self.entries
-                .push_back(CleanupFailed::new(session_id, label, failures));
+                .push_back(CleanupFailed::new(host, session_id, label, failures));
         }
     }
 
@@ -331,7 +343,12 @@ mod tests {
     }
 
     fn entry(failures: Vec<WorktreeCleanupFailure>) -> CleanupFailed {
-        CleanupFailed::new("s1".to_owned(), "feat/x".to_owned(), failures)
+        CleanupFailed::new(
+            HostKey::Local,
+            "s1".to_owned(),
+            "feat/x".to_owned(),
+            failures,
+        )
     }
 
     #[test]
@@ -413,11 +430,17 @@ mod tests {
     fn retry_keeps_first_label() {
         let mut queue = CleanupQueue::default();
         queue.push(
+            HostKey::Local,
             "s1".to_owned(),
             "feat/x".to_owned(),
             vec![failure("a", vec![])],
         );
-        queue.push("s1".to_owned(), "s1".to_owned(), vec![failure("b", vec![])]);
+        queue.push(
+            HostKey::Local,
+            "s1".to_owned(),
+            "s1".to_owned(),
+            vec![failure("b", vec![])],
+        );
         let head = queue.head().expect("queued");
         assert!(
             head.body()
@@ -430,16 +453,27 @@ mod tests {
     fn retry_after_pop_keeps_first_label() {
         let mut queue = CleanupQueue::default();
         queue.push(
+            HostKey::Local,
             "s1".to_owned(),
             "feat/x".to_owned(),
             vec![failure("a", vec![])],
         );
         queue.pop();
-        queue.push("s1".to_owned(), "s1".to_owned(), vec![failure("a", vec![])]);
+        queue.push(
+            HostKey::Local,
+            "s1".to_owned(),
+            "s1".to_owned(),
+            vec![failure("a", vec![])],
+        );
         let head = queue.head().expect("the retry's failure is queued");
         assert!(head.body().starts_with("Session feat/x stopped"));
         queue.clear();
-        queue.push("s1".to_owned(), "s1".to_owned(), vec![failure("a", vec![])]);
+        queue.push(
+            HostKey::Local,
+            "s1".to_owned(),
+            "s1".to_owned(),
+            vec![failure("a", vec![])],
+        );
         let fresh = queue.head().expect("queued after a clear");
         assert!(
             fresh.body().starts_with("Session s1 stopped"),
@@ -451,16 +485,19 @@ mod tests {
     fn same_session_replaces_queue_entry() {
         let mut queue = CleanupQueue::default();
         queue.push(
+            HostKey::Local,
             "s1".to_owned(),
             "one".to_owned(),
             vec![failure("a", vec![])],
         );
         queue.push(
+            HostKey::Local,
             "s2".to_owned(),
             "two".to_owned(),
             vec![failure("b", vec![])],
         );
         queue.push(
+            HostKey::Local,
             "s2".to_owned(),
             "s2".to_owned(),
             vec![failure("c", vec![]), failure("d", vec![])],

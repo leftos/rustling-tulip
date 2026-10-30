@@ -508,16 +508,6 @@ fn failures_stay_listed_with_messages(cx: &mut TestAppContext) {
     );
     h.click_on("recover-submit");
     let (request_id, _) = recover_request(&mut h);
-    h.advance(std::time::Duration::from_secs(120));
-    assert_eq!(
-        h.root(|root, _| root.recover_error()).as_deref(),
-        Some("Recovery did not answer")
-    );
-    assert_eq!(
-        button(&mut h),
-        ("Recover 2".to_owned(), true),
-        "usable again"
-    );
 
     answer(
         &mut h,

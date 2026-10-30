@@ -9,8 +9,10 @@ use gpui::{Modifiers, Pixels, Point, TestAppContext, point};
 use protocol::{
     AgentId, AttentionReason, ClientMessage, ContainerRef, DaemonMessage, DeviceInfo,
     KeepAwakeMode, OptionValue, RecoverItemResult, RemoteState, SessionSnapshot, TabEntry,
-    VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
+    VscodeWorkspaceFolder, VscodeWorkspaceSuggestion, WorktreeCleanupFailure,
+    WorktreeLockingProcess,
 };
+use rustling_tulip_native::ScKey;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent, toast_action_selector};
@@ -1066,5 +1068,166 @@ fn recover_lists_each_hosts_history_and_recovers_on_that_host(cx: &mut TestAppCo
     assert!(
         !h.root(|root, _| root.recover_open()),
         "both hosts answered with nothing failed"
+    );
+}
+
+#[gpui::test]
+fn a_remote_cleanup_failure_retries_on_that_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, vec![session("b1").in_repo("gone").build()]);
+    h.host(&remote()).sent();
+    // The daemon removes the session before it reports the failure, so
+    // the client no longer holds the session it names.
+    h.host(&remote())
+        .send(DaemonMessage::WorktreeCleanupFailed {
+            session_id: "b9".to_owned(),
+            session_label: "feat/x".to_owned(),
+            failures: vec![WorktreeCleanupFailure {
+                member_path: "C:/wts/wt.feat-x/a".to_owned(),
+                repo_path: "C:/src/a".to_owned(),
+                reason: "fs::remove_dir_all: access denied".to_owned(),
+                locking_processes: vec![WorktreeLockingProcess {
+                    pid: 10,
+                    name: "node.exe".to_owned(),
+                    cmdline: None,
+                }],
+            }],
+        });
+
+    h.click_on("cleanup-retry");
+
+    let retries = |sent: Vec<ClientMessage>| -> Vec<(String, Vec<u32>)> {
+        sent.into_iter()
+            .filter_map(|msg| match msg {
+                ClientMessage::RetryWorktreeCleanup {
+                    session_id,
+                    kill_pids,
+                    ..
+                } => Some((session_id, kill_pids)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        retries(h.host(&remote()).sent()),
+        [("b9".to_owned(), vec![10])],
+        "the retry goes to the host that reported the failure"
+    );
+    assert!(
+        retries(h.sent()).is_empty(),
+        "This PC kills nothing for a remote host's failure"
+    );
+}
+
+/// The commit input of This PC's r1 main tree.
+const COMMIT_INPUT: &str = "sc-commit-input-r1::";
+
+/// `repo_id`'s main-tree status with `a.rs` staged.
+fn staged_status(repo_id: &str) -> DaemonMessage {
+    serde_json::from_value(serde_json::json!({
+        "type": "repo_status",
+        "repo_id": repo_id,
+        "index_changes": [{ "path": "a.rs", "status": "M", "from_path": null }],
+        "worktree_changes": [],
+        "worktree_path": null,
+    }))
+    .expect("status fixture")
+}
+
+/// This PC's panel on r1 with `a.rs` staged and `fix` typed into its
+/// commit input, a pane beside it that could take the keyboard, and the
+/// tailnet host connected with r2, which the panel does not show.
+fn this_pc_drafting<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("a1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("a1", b"");
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "D:/src/r2")],
+    });
+    h.click_on("activity-source-control");
+    h.send(staged_status("r1"));
+    h.click_on(COMMIT_INPUT);
+    h.keys("f i x");
+    h.sent();
+    h.host(&remote()).sent();
+    h
+}
+
+fn this_pc_draft(h: &mut Harness<'_>) -> Option<String> {
+    let key = ScKey {
+        repo_id: "r1".to_owned(),
+        worktree: None,
+    };
+    h.root(move |root, cx| root.sc_commit_input(&key, cx))
+}
+
+#[gpui::test]
+fn a_parked_hosts_status_leaves_the_commit_box_focused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = this_pc_drafting(cx, &dir);
+
+    h.host(&remote()).send(staged_status("r2"));
+    h.keys("y");
+
+    assert_eq!(
+        this_pc_draft(&mut h).as_deref(),
+        Some("fixy"),
+        "typing still goes into This PC's commit box"
+    );
+}
+
+#[gpui::test]
+fn a_parked_hosts_write_error_keeps_this_pcs_commit_draft(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = this_pc_drafting(cx, &dir);
+
+    h.host(&remote()).send(DaemonMessage::GitWriteError {
+        repo_id: "r2".to_owned(),
+        operation: "commit".to_owned(),
+        error: "git commit failed: pre-commit hook rejected".to_owned(),
+        worktree_path: None,
+    });
+
+    assert_eq!(
+        this_pc_draft(&mut h).as_deref(),
+        Some("fix"),
+        "This PC's draft is left as typed"
+    );
+}
+
+/// The folders among `sent`'s VS Code workspace scans.
+fn scan_paths(sent: Vec<ClientMessage>) -> Vec<String> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ScanVscodeWorkspaces { path } => Some(path),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_remote_hosts_pending_scan_is_asked_again_after_it_reconnects(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let shell = || vec![session("b1").dir_shell("D:/remote/dir").build()];
+    let mut h = two_hosts(cx, &dir, shell());
+    assert_eq!(
+        scan_paths(h.host(&remote()).sent()),
+        ["D:\\remote\\dir"],
+        "the folder is scanned once; its answer never comes"
+    );
+
+    h.host(&remote())
+        .event(NetEvent::State(Connection::for_target(remote())));
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions { sessions: shell() });
+
+    assert_eq!(
+        scan_paths(h.host(&remote()).sent()),
+        ["D:\\remote\\dir"],
+        "the reconnected host is asked again"
     );
 }

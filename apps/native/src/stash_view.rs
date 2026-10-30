@@ -160,11 +160,12 @@ impl StashUi {
 impl RootView {
     /// Folds a daemon message into the stash store. An `Error` answering one
     /// of its list requests marks the repo failed and raises no toast; it
-    /// returns `true`, since nothing else is owed. A list that no longer
-    /// holds the stash the drop confirm names closes the confirm unsent.
+    /// returns `true`, since nothing else is owed. When the store is the
+    /// shown host's (`live`), a list that no longer holds the stash the drop
+    /// confirm names closes the confirm unsent.
     pub(crate) fn on_stash_message(
         &mut self,
-        _host: &crate::target::HostKey,
+        live: bool,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -172,7 +173,7 @@ impl RootView {
         if self.stash.model.apply(msg) {
             cx.notify();
         }
-        if let DaemonMessage::Stashes { repo_id, .. } = msg {
+        if live && let DaemonMessage::Stashes { repo_id, .. } = msg {
             let shifted = self.stash.drop.as_ref().is_some_and(|confirm| {
                 confirm.tree().repo_id == *repo_id
                     && !self.stash.model.holds(repo_id, confirm.stash())
