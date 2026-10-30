@@ -1031,13 +1031,6 @@ impl TabsModel {
         }
     }
 
-    /// Forgets the tab list and everything waiting on it, as a switch to
-    /// another daemon must: not loaded, no tabs, nothing pending, and
-    /// `restored_active` as the tab the next list shows first.
-    pub fn clear_for_switch(&mut self, restored_active: Option<String>) {
-        *self = Self::new(restored_active);
-    }
-
     /// Folds a tab message in; returns whether it was one.
     pub fn apply(&mut self, msg: &DaemonMessage) -> bool {
         match msg {
@@ -1617,44 +1610,6 @@ pub(crate) mod tests {
             "created_at": "2026-01-01T00:00:00Z",
         }))
         .expect("diff tab fixture")
-    }
-
-    #[test]
-    fn clear_for_switch_empties_tabs_and_marks_unloaded() {
-        let mut model = TabsModel::new(Some("t2".to_owned()));
-        model.apply(&DaemonMessage::Tabs {
-            tabs: vec![
-                tab("t1", &pane("p1", Some("s1"))),
-                tab("t2", &pane("p2", None)),
-            ],
-        });
-        assert!(model.is_loaded());
-        assert_eq!(model.active_id(), Some("t2"), "the restore hint applied");
-
-        model.clear_for_switch(None);
-
-        assert!(!model.is_loaded(), "the next host's list is awaited");
-        assert!(model.tabs().is_empty(), "the old daemon's tabs are gone");
-        assert_eq!(model.active_id(), None);
-        assert_eq!(model.take_focus_request(), None);
-        model.apply(&DaemonMessage::Tabs {
-            tabs: vec![tab("h1", &pane("p1", None)), tab("t2", &pane("p2", None))],
-        });
-        assert_eq!(
-            model.active_id(),
-            Some("h1"),
-            "nothing of the old list picks the new host's active tab"
-        );
-
-        model.clear_for_switch(Some("t2".to_owned()));
-        model.apply(&DaemonMessage::Tabs {
-            tabs: vec![tab("t1", &pane("p1", None)), tab("t2", &pane("p2", None))],
-        });
-        assert_eq!(
-            model.active_id(),
-            Some("t2"),
-            "a switch back to this PC restores its saved tab"
-        );
     }
 
     pub(crate) fn session(

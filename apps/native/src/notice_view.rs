@@ -526,7 +526,7 @@ impl RootView {
             self.appearance_focus.focus(window);
         } else if self.delete_dialog.is_some() {
             self.dialog_focus.focus(window);
-        } else if self.layout_chooser.is_some() || self.import_modal.is_some() {
+        } else if self.layout_chooser.is_some() {
             self.chooser_focus.focus(window);
         } else {
             self.focus_active_pane(window, cx);

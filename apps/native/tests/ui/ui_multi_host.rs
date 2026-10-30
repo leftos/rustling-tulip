@@ -546,49 +546,6 @@ fn removing_a_remote_repo_lists_its_own_hosts_sessions(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn a_remote_sessions_list_never_counts_as_this_pcs_import(cx: &mut TestAppContext) {
-    const HOME: &str = "home.tail1234.ts.net";
-    let dir = TestDir::new();
-    let ui = serde_json::json!({
-        "saved_hosts": [{ "name": HOME, "port": 8787 }],
-        "host_session_counts": { HOME: 3 },
-    });
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        serde_json::to_vec_pretty(&ui).expect("serialize native-ui.json"),
-    )
-    .expect("write native-ui.json");
-    let fixture = Fixture {
-        sessions: (1..=3).map(|i| session(&format!("s{i}")).build()).collect(),
-        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
-        ..Fixture::default()
-    };
-    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOME, None), &fixture);
-    assert!(
-        !h.root(|root, _| root.import_modal_open()),
-        "3 recorded, 3 arrived"
-    );
-
-    h.send_welcome(PROTOCOL);
-    let mut host = h.host(&remote());
-    host.connect();
-    host.send(DaemonMessage::Sessions {
-        sessions: vec![session("b1").build()],
-    });
-    h.send(DaemonMessage::Sessions {
-        sessions: fixture.sessions.clone(),
-    });
-    h.send(DaemonMessage::Tabs {
-        tabs: fixture.tabs.clone(),
-    });
-
-    assert!(
-        !h.root(|root, _| root.import_modal_open()),
-        "the other host's list is not the layout home's first list"
-    );
-}
-
-#[gpui::test]
 fn a_remote_session_asking_raises_a_notification_and_a_needs_you_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_hosts(
@@ -1260,7 +1217,7 @@ fn launch_connects_this_pc_and_every_enabled_saved_host_in_saved_order(cx: &mut 
             { "name": REMOTE, "port": 8787 },
         ] }),
     );
-    let mut h = Harness::open(cx, &dir);
+    let h = Harness::open(cx, &dir);
 
     assert_eq!(
         h.opened_targets(),
@@ -1271,11 +1228,6 @@ fn launch_connects_this_pc_and_every_enabled_saved_host_in_saved_order(cx: &mut 
             Target::tailnet(REMOTE, Some(8787)),
         ],
         "This PC first, then each saved host in saved order, on its saved port"
-    );
-    assert_eq!(
-        h.root(|root, _| root.connection_target().clone()),
-        Target::Local,
-        "This PC's slot is This PC"
     );
 }
 

@@ -976,15 +976,11 @@ impl ConnectionPicker {
         matched
     }
 
-    /// Forgets the saved host `target` dials. Returns whether it was
-    /// `current`, so the caller switches to this PC.
+    /// Forgets the saved host `target` dials.
     /// A tailnet name matches in its normal form, an SSH string as typed; a
     /// host of the other kind and the same name is left alone.
-    pub fn forget(&mut self, target: &Target, current: &Target) -> bool {
-        let before = self.saved.len();
+    pub fn forget(&mut self, target: &Target) {
         self.saved.retain(|host| !host.is_for(target));
-        let removed = self.saved.len() != before;
-        removed && SavedHost::from_target(target).is_some_and(|host| host.is_for(current))
     }
 }
 
@@ -1266,48 +1262,33 @@ mod tests {
             saved("a.tail1234.ts.net", 8787),
             saved("b.tail1234.ts.net", 9443),
         ]);
-        assert!(
-            !picker.forget(
-                &Target::tailnet("a.tail1234.ts.net", Some(8787)),
-                &Target::Local
-            ),
-            "a host that is not the current target"
-        );
+        picker.forget(&Target::tailnet("a.tail1234.ts.net", Some(8787)));
         assert_eq!(picker.saved(), [saved("b.tail1234.ts.net", 9443)]);
         assert_eq!(
             picker.rows(),
             [this_pc(), row(RowKind::Saved, "b.tail1234.ts.net", 9443)]
         );
 
-        assert!(
-            !picker.forget(
-                &Target::tailnet("c.tail1234.ts.net", Some(8787)),
-                &Target::Local
-            ),
-            "an unknown host"
+        picker.forget(&Target::tailnet("c.tail1234.ts.net", Some(8787)));
+        assert_eq!(
+            picker.saved(),
+            [saved("b.tail1234.ts.net", 9443)],
+            "an unknown host forgets nothing"
         );
-        assert_eq!(picker.saved(), [saved("b.tail1234.ts.net", 9443)]);
 
-        let current = Target::tailnet("b.tail1234.ts.net", Some(9443));
-        assert!(
-            picker.forget(&current, &current),
-            "the current host was forgotten"
-        );
+        picker.forget(&Target::tailnet("b.tail1234.ts.net", Some(9443)));
         assert_eq!(picker.saved(), [] as [SavedHost; 0]);
     }
 
     #[test]
     fn forget_matches_a_normalised_name() {
         let mut picker = ConnectionPicker::new(vec![saved("box.tail1234.ts.net", 9443)]);
-        let current = Target::tailnet("box.tail1234.ts.net", Some(9443));
-        assert!(
-            picker.forget(
-                &Target::tailnet("Box.Tail1234.ts.net.", Some(9443)),
-                &current
-            ),
-            "the current host was forgotten under another spelling of its name"
+        picker.forget(&Target::tailnet("Box.Tail1234.ts.net.", Some(9443)));
+        assert_eq!(
+            picker.saved(),
+            [] as [SavedHost; 0],
+            "the host was forgotten under another spelling of its name"
         );
-        assert_eq!(picker.saved(), [] as [SavedHost; 0]);
     }
 
     #[test]
@@ -1476,17 +1457,14 @@ mod tests {
     }
 
     #[test]
-    fn forget_an_ssh_host_matches_its_string_as_typed_and_reports_the_current_one() {
+    fn forget_an_ssh_host_matches_its_string_as_typed() {
         let mut picker = ConnectionPicker::new(vec![
             ssh_saved("Me@DevBox", None),
             ssh_saved("me@devbox", None),
         ]);
-        assert!(
-            picker.forget(&ssh("Me@DevBox"), &ssh("Me@DevBox")),
-            "the current SSH host was forgotten"
-        );
+        picker.forget(&ssh("Me@DevBox"));
         assert_eq!(picker.saved(), [ssh_saved("me@devbox", None)]);
-        assert!(!picker.forget(&ssh("me@devbox"), &Target::Local));
+        picker.forget(&ssh("me@devbox"));
         assert_eq!(picker.saved(), [] as [SavedHost; 0]);
     }
 
@@ -1494,14 +1472,11 @@ mod tests {
     fn forget_leaves_the_other_kind_of_one_name() {
         let tailnet = Target::tailnet(BOX, Some(8787));
         let mut picker = ConnectionPicker::new(vec![saved(BOX, 8787), ssh_saved(BOX, None)]);
-        assert!(
-            !picker.forget(&ssh(BOX), &tailnet),
-            "the tailnet host is current, not the SSH one"
-        );
+        picker.forget(&ssh(BOX));
         assert_eq!(picker.saved(), [saved(BOX, 8787)]);
 
         let mut picker = ConnectionPicker::new(vec![saved(BOX, 8787), ssh_saved(BOX, None)]);
-        assert!(!picker.forget(&tailnet, &ssh(BOX)));
+        picker.forget(&tailnet);
         assert_eq!(picker.saved(), [ssh_saved(BOX, None)]);
     }
 

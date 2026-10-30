@@ -978,7 +978,7 @@ impl RootView {
         let Some(row) = dialog.picker.rows().into_iter().nth(index) else {
             return;
         };
-        dialog.picker.forget(&row.target, &Target::Local);
+        dialog.picker.forget(&row.target);
         let rows = dialog.picker.rows().len();
         dialog.focus = PickerControl::Row(index.min(rows.saturating_sub(1)));
         self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());

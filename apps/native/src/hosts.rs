@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{Context, Window};
 use protocol::{
-    AgentCommandEntry, AgentId, ClientMessage, OptionValues, PresetTarget, SpawnTarget,
-    SuggestTarget,
+    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, OptionValues, PresetTarget,
+    SpawnTarget, SuggestTarget,
 };
 
 use crate::RootView;
@@ -153,11 +153,31 @@ impl Hosts {
 }
 
 impl RootView {
-    /// The connection the window shows. The window holds one connection,
-    /// under [`HostKey::Local`] whatever its target; this is the one place
-    /// that assumes so, and it goes once the window holds one per host.
+    /// This PC's connection, always to its own daemon.
     pub(crate) fn conn(&self) -> &Connection {
         &self.hosts.local().conn
+    }
+
+    /// A remote host's session list: its count is recorded in
+    /// `native-ui.json` while the host is saved, so its Connections row
+    /// reads "N sessions last time" once the host is switched off.
+    pub(crate) fn record_host_session_count(&mut self, host: &HostKey, msg: &DaemonMessage) {
+        let (HostKey::Remote(key), DaemonMessage::Sessions { sessions }) = (host, msg) else {
+            return;
+        };
+        let Some(target) = self.conn_of(host).map(|conn| conn.target().clone()) else {
+            return;
+        };
+        let saved = self
+            .sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .any(|saved| saved.is_for(&target));
+        let count = u32::try_from(sessions.len()).unwrap_or(u32::MAX);
+        if saved && self.sidebar.set_host_session_count(key, count) {
+            self.save_ui();
+        }
     }
 
     /// Every host the window holds a connection to: This PC first, then

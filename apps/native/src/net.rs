@@ -1100,7 +1100,7 @@ impl Net {
     /// Force-stop the local daemon; true when it was stopped. A tailnet
     /// host's daemon is never stopped from here.
     async fn stop(&mut self) -> bool {
-        if !self.conn.can_stop() {
+        if !self.conn.target().is_local() {
             warn!(daemon = ?self.conn.target(), "stop: not offered on a tailnet host; ignored");
             return false;
         }

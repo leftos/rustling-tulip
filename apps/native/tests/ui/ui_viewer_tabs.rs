@@ -12,9 +12,7 @@ use crate::support;
 use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, TabEntry};
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{
-    Connection, ToastKind, VIEWER_OPEN_FAILED_TITLE, ViewerLoad, ViewerOrigin,
-};
+use rustling_tulip_native::{ToastKind, VIEWER_OPEN_FAILED_TITLE, ViewerLoad, ViewerOrigin};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, session, tab};
 
@@ -105,15 +103,6 @@ fn drawn(h: &mut Harness<'_>, selector: &'static str) -> bool {
 fn ctrl_click(h: &mut Harness<'_>, selector: &str) {
     let at = h.center(selector);
     h.click(at, Modifiers::control());
-}
-
-/// An open connection to the tailnet host [`HOST`].
-fn remote() -> Connection {
-    let mut conn = Connection::for_target(Target::tailnet(HOST, None));
-    conn.on_connecting();
-    conn.on_socket_open(8787);
-    conn.on_welcome(support::PROTOCOL, support::daemon_features());
-    conn
 }
 
 #[gpui::test]
@@ -341,40 +330,5 @@ fn a_viewer_tab_offers_no_rename(cx: &mut TestAppContext) {
     assert!(
         !h.in_model("tab-menu-rename"),
         "a viewer tab's pill shows its file name, so a rename would show nothing"
-    );
-}
-
-#[gpui::test]
-fn target_switch_clears_viewer_tabs_without_sending(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &with_tabs(&[viewer_tab("v1", PATH)]));
-    let (open_id, _) = open_viewer(&mut h, r"C:\notes\b.md", None);
-    assert!(shown(&mut h, "v1").is_some());
-
-    h.set_connection(remote());
-    let sent = h.sent();
-    assert!(sent.is_empty(), "the switch sends nothing: {sent:?}");
-    assert_eq!(
-        shown(&mut h, "v1"),
-        None,
-        "the local daemon's viewer tab is gone"
-    );
-
-    h.load(&Fixture {
-        tabs: vec![
-            tab("ht1", &pane("hp1", None)),
-            viewer_tab_named("v2", r"C:\notes\b.md", "b.md"),
-        ],
-        ..Fixture::default()
-    });
-    h.send(opened(&open_id, "v2"));
-    assert_eq!(
-        active(&mut h).as_deref(),
-        Some("ht1"),
-        "the old daemon's open activates nothing on the host"
-    );
-    assert_eq!(
-        shown(&mut h, "v2").map(|shown| shown.0),
-        Some(ViewerOrigin::NotAvailable)
     );
 }
