@@ -42,10 +42,11 @@ mod tests {
     use super::super::Hub;
     use super::super::connection::AuthKind;
     use super::super::test_support::{
-        ScratchDir, dispatch_on, drain, hello, idle_record, mem_session, next_message, test_hub,
+        ScratchDir, dispatch_on, drain, hello, idle_record, mem_session, next_message,
+        next_message_within, test_hub,
     };
     use crate::chat_mirror::CHAT_REPLY_CAP;
-    use crate::chat_mirror::test_lines::{answer, live_body, prompt};
+    use crate::chat_mirror::test_lines::{answer, live_body, prompt, stamp};
     use crate::screen::fixture_screen::screen_from;
     use protocol::{
         ChatEntry, ChatPromptKind, ChatScreen, ClientMessage, DaemonMessage, SessionMode,
@@ -160,6 +161,27 @@ mod tests {
 
     fn user(n: usize) -> String {
         prompt(&format!("u-{n}"), n, None, &format!("line {n}"))
+    }
+
+    /// An answer record `uuid` at second `n` that calls tool `tool_id`.
+    fn tool_call(uuid: &str, n: usize, tool_id: &str) -> String {
+        serde_json::json!({
+            "type": "assistant", "uuid": uuid, "timestamp": stamp(n),
+            "message": {"id": format!("msg-{uuid}"), "role": "assistant", "type": "message",
+                "content": [{"type": "tool_use", "id": tool_id, "name": "Bash",
+                    "input": {"command": "ls"}}]},
+        })
+        .to_string()
+    }
+
+    /// A user record `uuid` at second `n` carrying tool `tool_id`'s result.
+    fn tool_done(uuid: &str, n: usize, tool_id: &str) -> String {
+        serde_json::json!({
+            "type": "user", "uuid": uuid, "timestamp": stamp(n),
+            "message": {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": "ok"}]},
+        })
+        .to_string()
     }
 
     fn id_of(entry: &ChatEntry) -> String {
@@ -580,6 +602,212 @@ mod tests {
         assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["live:m2"]);
         assert_eq!(removed, Vec::<String>::new());
         assert!(drain(&mut a_rx).is_empty(), "nothing follows m2");
+    }
+
+    #[tokio::test]
+    async fn a_replacement_outside_the_reply_window_is_not_sent() {
+        let fx = Fixture::new("chat-replace-window", Some("conv-a"));
+        let mut lines = vec![tool_call("c-old", 0, "t-old")];
+        lines.extend((1..=CHAT_REPLY_CAP).map(user));
+        lines.push(tool_call("c-new", CHAT_REPLY_CAP + 1, "t-new"));
+        fx.append("conv-a", &lines);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let shown = ids_until(&mut a_rx, "t-new").await;
+        assert!(
+            !shown.iter().any(|id| id == "t-old"),
+            "t-old is past the newest {CHAT_REPLY_CAP}"
+        );
+        fx.append(
+            "conv-a",
+            &[
+                tool_done("r-old", CHAT_REPLY_CAP + 2, "t-old"),
+                tool_done("r-new", CHAT_REPLY_CAP + 3, "t-new"),
+            ],
+        );
+        let (entries, removed) = next_append(&mut a_rx).await;
+        assert_eq!(
+            entries.iter().map(id_of).collect::<Vec<_>>(),
+            ["t-new"],
+            "only the replacement inside the window is sent"
+        );
+        assert_eq!(removed, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_replacement_below_a_loaders_reply_is_not_sent_after_live_rows_end() {
+        let fx = Fixture::new("chat-replace-floor", Some("conv-a"));
+        // 500 entries, P1's prompt the last one typed.
+        let mut lines = vec![tool_call("c-0", 0, "t-0"), tool_call("c-1", 1, "t-1")];
+        lines.extend((2..CHAT_REPLY_CAP - 2).map(user));
+        lines.push(prompt("u-p1", CHAT_REPLY_CAP - 2, Some("P1"), "go"));
+        lines.push(tool_call("c-mark", CHAT_REPLY_CAP - 1, "t-mark"));
+        fx.append("conv-a", &lines);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        ids_until(&mut a_rx, "t-mark").await;
+        fx.deliver(&live_body("P1", "m1", 0, "one"));
+        fx.deliver(&live_body("P1", "m2", 0, "two"));
+        ids_until(&mut a_rx, "live:m2").await;
+
+        // B's reply leaves out the two oldest entries: t-0 and t-1.
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        fx.load(2, &b_tx, "rb").await;
+        let (entries, hidden, _, _) = next_chat(&mut b_rx).await;
+        assert_eq!(hidden, 2);
+        assert_eq!(entries.first().map(id_of).as_deref(), Some("u-2"));
+
+        // P2 ends both live rows, so the chat is short enough again for t-1
+        // to fit a reply, but B never held it.
+        fx.append(
+            "conv-a",
+            &[
+                prompt("u-p2", CHAT_REPLY_CAP, Some("P2"), "again"),
+                tool_done("r-1", CHAT_REPLY_CAP + 1, "t-1"),
+                tool_done("r-mark", CHAT_REPLY_CAP + 2, "t-mark"),
+            ],
+        );
+        let (entries, removed) = next_append(&mut b_rx).await;
+        assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["u-p2"]);
+        assert_eq!(removed, ["live:m1", "live:m2"]);
+        let (entries, _) = next_append(&mut b_rx).await;
+        assert_eq!(
+            entries.iter().map(id_of).collect::<Vec<_>>(),
+            ["t-mark"],
+            "t-1 was never sent to B"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loaders_oldest_entry_is_replaced_past_a_long_open_live_row() {
+        let fx = Fixture::new("chat-replace-oldest", Some("conv-a"));
+        fx.append(
+            "conv-a",
+            &[
+                tool_call("c-0", 0, "t-0"),
+                prompt("u-p1", 1, Some("P1"), "go"),
+            ],
+        );
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        ids_until(&mut a_rx, "u-p1").await;
+        fx.deliver(&live_body("P1", "m1", 0, "still going"));
+        ids_until(&mut a_rx, "live:m1").await;
+
+        // The live row stays open while a reply's worth of entries arrives.
+        let last = CHAT_REPLY_CAP + 1;
+        let calls: Vec<String> = (2..=last)
+            .map(|n| tool_call(&format!("c-{n}"), n, &format!("t-{n}")))
+            .collect();
+        fx.append("conv-a", &calls);
+        ids_until(&mut a_rx, &format!("t-{last}")).await;
+
+        // t-{last}'s result follows, so a missing t-0 shows as the wrong append.
+        fx.append(
+            "conv-a",
+            &[
+                tool_done("r-0", last + 1, "t-0"),
+                tool_done("r-last", last + 2, &format!("t-{last}")),
+            ],
+        );
+        let (entries, _) = next_append(&mut a_rx).await;
+        assert_eq!(
+            entries.iter().map(id_of).collect::<Vec<_>>(),
+            ["t-0"],
+            "A has held t-0 since its first reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_prompt_ends_the_live_answers_of_earlier_prompts() {
+        let fx = Fixture::new("chat-live-ends", Some("conv-a"));
+        fx.append("conv-a", &[prompt("u-1", 1, Some("P1"), "go")]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        ids_until(&mut a_rx, "u-1").await;
+        fx.deliver(&live_body("P1", "m1", 0, "Hel"));
+        let (entries, _) = next_append(&mut a_rx).await;
+        assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["live:m1"]);
+
+        // P1's turn ended with no answer in the transcript (an Esc, a failed
+        // turn); the next prompt takes its live answer away.
+        fx.append("conv-a", &[prompt("u-2", 2, Some("P2"), "again")]);
+        let (entries, removed) = next_append(&mut a_rx).await;
+        assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["u-2"]);
+        assert_eq!(removed, ["live:m1"]);
+
+        // A late piece of m1 is dropped; m2, sent after it, is the next thing
+        // the loader hears.
+        fx.deliver(&live_body("P1", "m1", 1, "lo"));
+        fx.deliver(&live_body("P2", "m2", 0, "More"));
+        let (entries, removed) = next_append(&mut a_rx).await;
+        assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["live:m2"]);
+        assert_eq!(removed, Vec::<String>::new());
+        assert!(drain(&mut a_rx).is_empty(), "nothing follows m2");
+    }
+
+    #[tokio::test]
+    async fn a_lagging_live_follower_keeps_the_lines_its_channel_kept() {
+        // More pieces than the live-line channel holds.
+        const BURST: u64 = 300;
+        let fx = Fixture::new("chat-live-lag", Some("conv-a"));
+        fx.append("conv-a", &[prompt("u-1", 1, Some("P1"), "go")]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        ids_until(&mut a_rx, "u-1").await;
+        fx.deliver(&live_body("P1", "m1", 0, "p0"));
+        let (entries, _) = next_append(&mut a_rx).await;
+        assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["live:m1"]);
+
+        // On this one-thread runtime the follower runs only when the test
+        // awaits, so the whole burst lands before it reads any of it.
+        for index in 1..=BURST {
+            fx.deliver(&live_body("P1", "m1", index, &format!("p{index}")));
+        }
+        // The follower's first read is the lag, which resends the answers.
+        let (entries, _) = next_append(&mut a_rx).await;
+        let mut m1_text = match entries.as_slice() {
+            [ChatEntry::Answer { id, text, .. }] if id == "live:m1" => text.clone(),
+            other => panic!("expected m1 resent, got {other:?}"),
+        };
+        // m2 follows everything the channel kept.
+        fx.deliver(&live_body("P1", "m2", 0, "marker"));
+        let mut marker = false;
+        while !marker {
+            match next_message_within(&mut a_rx, HANG).await {
+                DaemonMessage::ChatAppend { entries, .. } => {
+                    for entry in entries {
+                        match entry {
+                            ChatEntry::Answer { id, text, .. } if id == "live:m1" => m1_text = text,
+                            ChatEntry::Answer { id, .. } if id == "live:m2" => marker = true,
+                            _ => {}
+                        }
+                    }
+                }
+                other => panic!("expected a ChatAppend, got {other:?}"),
+            }
+        }
+        let pieces: Vec<u64> = m1_text
+            .split('\n')
+            .map(|piece| {
+                piece
+                    .trim_start_matches('p')
+                    .parse()
+                    .expect("a piece's index")
+            })
+            .collect();
+        let (&first, kept) = pieces.split_first().expect("m1 has its first piece");
+        assert_eq!(first, 0);
+        let start = *kept.first().expect("the pieces after the lag are merged");
+        assert!(
+            start > 1,
+            "the channel dropped the oldest pieces: {pieces:?}"
+        );
+        assert_eq!(
+            kept,
+            (start..=BURST).collect::<Vec<_>>(),
+            "every piece the channel kept is merged"
+        );
     }
 
     /// One thread delivers tail lines while another loads the chat again and

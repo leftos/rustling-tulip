@@ -210,7 +210,13 @@ impl ChatMirror {
             {
                 mirror.observe(session_id, reading);
             }
-            mirror.loaders.insert(connection, out_tx.clone());
+            mirror.loaders.insert(
+                connection,
+                Loader {
+                    out: out_tx.clone(),
+                    floor: mirror.chat.reply_floor(),
+                },
+            );
             // A closed outbox is a connection already ending; its guard
             // unloads.
             let _ = out_tx.send(mirror.chat_message(session_id, request_id));
@@ -329,7 +335,7 @@ impl ChatMirror {
                 // The loaders show the old chat until the first read ends.
                 mirror.chat.stale = !mirror.loaders.is_empty();
             }
-            None => mirror.tell(&mirror.chat_message(session_id, None)),
+            None => mirror.reset(session_id),
         }
     }
 
@@ -380,17 +386,13 @@ impl ChatMirror {
                     // Sent whole when the read ends.
                     mirror.chat.stale = true;
                 } else {
-                    mirror.tell(&DaemonMessage::ChatAppend {
-                        session_id: session_id.to_owned(),
-                        entries: change.entries,
-                        removed: change.removed,
-                    });
+                    mirror.send_change(session_id, &change);
                 }
             }
             TailEvent::Restarted => mirror.chat.restart(),
             TailEvent::CaughtUp => {
                 if mirror.chat.catch_up() {
-                    mirror.tell(&mirror.chat_message(session_id, None));
+                    mirror.reset(session_id);
                 }
             }
         }
@@ -555,13 +557,9 @@ impl LiveFollower {
                         skipped,
                         "chat mirror: live lines lagged; resending the live answers"
                     );
-                    match ChatMirror::upgrade(&self.mirror) {
-                        Some(mirror) => {
-                            receiver = mirror.inner.live_lines.subscribe(&self.session_id);
-                            self.flush(true)
-                        }
-                        None => false,
-                    }
+                    // The receiver goes on from the oldest line the channel
+                    // still holds.
+                    self.flush(true)
                 }
                 Err(broadcast::error::RecvError::Closed) => false,
             };
@@ -642,11 +640,20 @@ impl Found {
     }
 }
 
+/// One connection that loaded a session's chat.
+struct Loader {
+    out: Outbox,
+    /// The place in the chat's entries of the oldest entry the loader holds:
+    /// the first one its last `Chat` carried. A replacement of an entry
+    /// before it is not sent to the loader.
+    floor: usize,
+}
+
 /// One mirrored session.
 struct SessionMirror {
     plugin: &'static dyn AgentPlugin,
-    /// Each loader's outbound messages, by connection.
-    loaders: HashMap<u64, Outbox>,
+    /// Each loader, by connection.
+    loaders: HashMap<u64, Loader>,
     conversation: Option<Conversation>,
     /// Set anew from the daemon-wide count by each switch; a tail event of
     /// any other epoch is dropped. Zero, which no tail carries, until the
@@ -680,10 +687,46 @@ impl SessionMirror {
 
     /// Send `msg` to every loader.
     fn tell(&self, msg: &DaemonMessage) {
-        for out_tx in self.loaders.values() {
+        for loader in self.loaders.values() {
             // A closed outbox is a connection already ending; its guard
             // unloads it.
-            let _ = out_tx.send(msg.clone());
+            let _ = loader.out.send(msg.clone());
+        }
+    }
+
+    /// Send every loader the whole chat as a fresh start, which moves each
+    /// loader's floor to the reply's first entry.
+    fn reset(&mut self, session_id: &str) {
+        let msg = self.chat_message(session_id, None);
+        let floor = self.chat.reply_floor();
+        for loader in self.loaders.values_mut() {
+            loader.floor = floor;
+        }
+        self.tell(&msg);
+    }
+
+    /// Send each loader what one transcript line changed: its new entries,
+    /// its replacements of entries the loader holds, and the live ids that
+    /// left. A loader with nothing to hear of it is sent nothing.
+    fn send_change(&self, session_id: &str, change: &Change) {
+        for loader in self.loaders.values() {
+            let entries: Vec<ChatEntry> = change
+                .entries
+                .iter()
+                .zip(&change.replaces)
+                .filter(|(_, at)| at.is_none_or(|at| at >= loader.floor))
+                .map(|(entry, _)| entry.clone())
+                .collect();
+            if entries.is_empty() && change.removed.is_empty() {
+                continue;
+            }
+            // A closed outbox is a connection already ending; its guard
+            // unloads it.
+            let _ = loader.out.send(DaemonMessage::ChatAppend {
+                session_id: session_id.to_owned(),
+                entries,
+                removed: change.removed.clone(),
+            });
         }
     }
 
@@ -850,6 +893,9 @@ struct ChatState {
     live_next: HashMap<String, usize>,
     /// The keys of live messages whose transcript answer has landed.
     finished: HashSet<String>,
+    /// The prompts whose turn a later prompt ended; their live pieces are
+    /// dropped.
+    ended_prompts: HashSet<String>,
     /// The keys of live messages changed since they were last sent.
     changed: HashSet<String>,
 }
@@ -883,6 +929,9 @@ impl LiveAnswer {
 #[derive(Default)]
 struct Change {
     entries: Vec<ChatEntry>,
+    /// For each of `entries`, the place of the entry it replaces; `None` for
+    /// a new one.
+    replaces: Vec<Option<usize>>,
     removed: Vec<String>,
 }
 
@@ -930,23 +979,31 @@ impl ChatState {
 
     /// Apply one transcript line: each entry it yields replaces the one with
     /// its id or goes at the end, and a new answer takes the place of the
-    /// live message it is the transcript's copy of.
+    /// live message it is the transcript's copy of. A new prompt ends the
+    /// turn before it and the live answers of the prompts before it.
     fn apply_line(
         &mut self,
         plugin: &dyn AgentPlugin,
         line: &str,
         facts: &TranscriptLineFacts,
     ) -> Change {
+        let mut change = Change::default();
         if facts.is_user_prompt {
+            if let Some(previous) = self.turn_prompt.take()
+                && facts.prompt_id.as_ref() != Some(&previous)
+            {
+                self.ended_prompts.insert(previous);
+            }
             self.turn_prompt.clone_from(&facts.prompt_id);
+            change.removed = self.end_live_before(facts.prompt_id.as_deref());
         }
         let produced = plugin.chat_entries(line, &|id| self.get(id));
-        let mut change = Change::default();
         for entry in produced {
             let Some(id) = entry_id(&entry).map(str::to_owned) else {
                 continue;
             };
-            if let Some(kept) = self.index.get(&id).and_then(|&at| self.entries.get_mut(at)) {
+            let replaces = self.index.get(&id).copied();
+            if let Some(kept) = replaces.and_then(|at| self.entries.get_mut(at)) {
                 kept.clone_from(&entry);
             } else {
                 if matches!(entry, ChatEntry::Answer { .. }) {
@@ -955,6 +1012,7 @@ impl ChatState {
                 self.push(entry.clone());
             }
             change.entries.push(entry);
+            change.replaces.push(replaces);
         }
         change
     }
@@ -978,6 +1036,32 @@ impl ChatState {
         Some(id)
     }
 
+    /// A prompt other than `prompt` was typed: the live answers of every
+    /// other prompt leave, their turns over, and their ids are returned. A
+    /// later piece of one of them is dropped.
+    fn end_live_before(&mut self, prompt: Option<&str>) -> Vec<String> {
+        let (ended, kept): (Vec<LiveAnswer>, Vec<LiveAnswer>) = std::mem::take(&mut self.live)
+            .into_iter()
+            .partition(|live| Some(live.prompt.as_str()) != prompt);
+        self.live = kept;
+        ended
+            .into_iter()
+            .map(|live| {
+                self.changed.remove(&live.key);
+                let id = live.id();
+                self.finished.insert(live.key);
+                id
+            })
+            .collect()
+    }
+
+    /// The place in `entries` of the first entry a reply carries; with live
+    /// answers filling the whole reply, the place the next entry takes.
+    fn reply_floor(&self) -> usize {
+        let hidden = (self.entries.len() + self.live.len()).saturating_sub(CHAT_REPLY_CAP);
+        hidden.min(self.entries.len())
+    }
+
     /// Put `entry` at the end.
     fn push(&mut self, entry: ChatEntry) {
         if let Some(id) = entry_id(&entry) {
@@ -987,12 +1071,16 @@ impl ChatState {
     }
 
     /// Merge one live piece. A piece with no prompt key has no turn to be
-    /// replaced in, so it is not shown; one arriving while catching up is
-    /// held; one of a message whose transcript answer landed is dropped.
+    /// replaced in, so it is not shown, nor is one of a prompt whose turn
+    /// ended; one arriving while catching up is held; one of a message whose
+    /// transcript answer landed is dropped.
     fn merge_live(&mut self, line: LiveLine) {
         let Some(prompt) = line.prompt_key.clone() else {
             return;
         };
+        if self.ended_prompts.contains(&prompt) {
+            return;
+        }
         if self.catching_up {
             self.held.push(line);
             self.stale = true;
@@ -1283,6 +1371,27 @@ mod tests {
         );
         let second = apply(&mut chat, &answer("a-2", 3, "the next one, in full"));
         assert_eq!(second.removed, ["live:m2"]);
+    }
+
+    #[test]
+    fn a_piece_of_an_ended_prompt_under_a_new_message_is_not_shown() {
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        apply(&mut chat, &prompt("u-2", 2, Some("P2"), "again"));
+        chat.merge_live(live("P1", "m9", 0, "late, under a new key"));
+        assert!(chat.take_changed_live().is_empty(), "P1's turn is over");
+        assert_eq!(ids(&chat.reply().0), ["u-1", "u-2"]);
+    }
+
+    #[test]
+    fn a_held_piece_of_a_prompt_the_first_read_ended_is_not_shown() {
+        let mut chat = ChatState::starting_with(None, true);
+        chat.merge_live(live("P1", "m1", 0, "held"));
+        apply(&mut chat, &prompt("u-1", 1, Some("P1"), "go"));
+        apply(&mut chat, &prompt("u-2", 2, Some("P2"), "again"));
+        chat.catch_up();
+        assert!(chat.take_changed_live().is_empty(), "P1's turn is over");
+        assert_eq!(ids(&chat.reply().0), ["u-1", "u-2"]);
     }
 
     #[test]
