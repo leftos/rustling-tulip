@@ -107,6 +107,16 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 - [ ] Fetch a page that names a missing image. **Expect:** `Some of <page>'s media didn't load`, and the page still opens.
 - [ ] Start a large page fetch and turn the host's switch off mid-fetch. **Expect:** `Couldn't fetch <page>'s media` with `The connection was lost.`, the page does not open, and no `.fetch-*.part` file is left beside the targets.
 
+## 11. The SSH bridge on a Windows host
+
+These need Windows OpenSSH Server running on the host and key login from the device (`ssh <host> echo ok` works with no prompt).
+
+- [ ] Install with the installer, then open a new SSH session: `ssh <host> where rustling-tulipd`. **Expect:** `%LOCALAPPDATA%\Programs\rustling-tulip\rustling-tulipd.exe`, and `HKCU\Environment\Path` on the host keeps its other entries unexpanded and its value kind.
+- [ ] With no daemon running on the host, from the device: `echo {"type":"hello","protocol_version":25,"protocol_versions":[25],"auth_token":""} | ssh -T <host> rustling-tulipd bridge`, with the host's current protocol version. **Expect:** a `welcome` line, the host's initial state one message per line, and the command back at the prompt about 5 s later.
+- [ ] Right after that, on the host: `Get-Process rustling-tulipd`. **Expect:** the daemon the bridge started is still running once the SSH session has ended, and so do any sessions it hosts.
+- [ ] Run setup again and pick another folder. **Expect:** the old folder is gone from the user PATH and the new one is on it.
+- [ ] Uninstall. **Expect:** the install folder is gone from the user PATH and every other entry is as it was.
+
 ## iPhone and PWA
 
 The iPhone checks (installing the PWA from Safari, pairing with the QR code or the typed code, push, and re-approving a wiped phone or one whose storage Safari evicted) are PW.8 (RT-369) in [plans/mobile-app.md](plans/mobile-app.md).
