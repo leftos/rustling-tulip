@@ -24,6 +24,7 @@ use crate::dashboard_rows::{
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::status_glyph::{GlyphSize, Shape, glyph, glyph_view};
+use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, UI_TEXT_SIZE};
 
@@ -75,7 +76,7 @@ impl RootView {
     /// the cells of its rows, as the view draws them.
     #[must_use]
     pub fn dashboard_view_rows(&self) -> Vec<(&'static str, Vec<RowCells>)> {
-        let model = dashboard::model(&self.sidebar, self.dashboard_facts.facts());
+        let model = dashboard::model(&self.sidebar, &self.dashboard_facts.facts());
         let now = Utc::now();
         GroupKind::ALL
             .into_iter()
@@ -94,7 +95,7 @@ impl RootView {
     /// The queue strip's chips, longest wait first; empty hides the strip.
     #[must_use]
     pub fn dashboard_queue(&self) -> Vec<QueueChip> {
-        let model = dashboard::model(&self.sidebar, self.dashboard_facts.facts());
+        let model = dashboard::model(&self.sidebar, &self.dashboard_facts.facts());
         let waits: Vec<RowInput<'_>> = model
             .waits()
             .iter()
@@ -106,7 +107,9 @@ impl RootView {
     /// The header's day figures, `None` while they are not known.
     #[must_use]
     pub fn dashboard_figures(&self) -> Option<HeaderFigures> {
-        header_figures(&self.dashboard_facts, Utc::now())
+        self.dashboard_facts
+            .store(&HostKey::Local)
+            .and_then(|store| header_figures(store, Utc::now()))
     }
 
     /// The columns the view's last laid-out width shows; every one before
@@ -120,7 +123,7 @@ impl RootView {
     pub(crate) fn dashboard_tab_element(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let columns = self.dashboard_columns();
-        let counts = dashboard::model(&self.sidebar, self.dashboard_facts.facts()).counts();
+        let counts = dashboard::model(&self.sidebar, &self.dashboard_facts.facts()).counts();
         let accents = self.sidebar.session_accents();
         let mut body: Vec<AnyElement> = Vec::new();
         let mut row_at: HashMap<String, usize> = HashMap::new();
@@ -319,7 +322,7 @@ impl RootView {
     /// activity is under a minute old, else every 30.
     fn dashboard_repaint_delay(&self) -> Duration {
         let now = Utc::now();
-        let model = dashboard::model(&self.sidebar, self.dashboard_facts.facts());
+        let model = dashboard::model(&self.sidebar, &self.dashboard_facts.facts());
         let fresh = GroupKind::ALL
             .into_iter()
             .flat_map(|kind| model.rows(kind))

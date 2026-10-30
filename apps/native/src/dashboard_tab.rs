@@ -10,6 +10,7 @@ use gpui::{Context, Window};
 use protocol::{ClientMessage, DaemonMessage, TabContent};
 
 use crate::RootView;
+use crate::connection::Connection;
 use crate::dashboard::{self, GroupKind};
 use crate::diff_tab::PENDING_ACTIVATE_TTL;
 use crate::notices::ToastKind;
@@ -118,7 +119,7 @@ impl RootView {
     /// owed it.
     pub(crate) fn on_dashboard_message(
         &mut self,
-        _host: &crate::target::HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -126,21 +127,23 @@ impl RootView {
         match msg {
             DaemonMessage::Welcome { .. } => {
                 // A new connection holds no watch, and the facts held are the
-                // old connection's.
-                self.dashboard_opens.reset();
-                self.dashboard_watch = false;
-                self.dashboard_facts.clear();
+                // old connection's. The open requests are the layout home's.
+                if *host == HostKey::Local {
+                    self.dashboard_opens.reset();
+                }
+                self.dashboard_watch.remove(host);
+                self.dashboard_facts.clear(host);
                 self.sync_dashboard_watch();
                 false
             }
             DaemonMessage::DashboardFacts { .. } => {
                 // Facts for a watch this client ended are the daemon's answer
                 // to nothing: held, they would show a tab nobody is watching.
-                if !self.dashboard_watch {
+                if !self.dashboard_watch.contains(host) {
                     return true;
                 }
-                self.dashboard_facts.apply(msg);
-                self.prune_dashboard_facts();
+                self.dashboard_facts.apply(host, msg);
+                self.prune_dashboard_facts(host);
                 cx.notify();
                 true
             }
@@ -186,37 +189,47 @@ impl RootView {
     /// Drops the facts of every session the Dashboard no longer lists: the
     /// daemon never resends an entry that did not change, so a removed
     /// session's would stay held for good.
-    fn prune_dashboard_facts(&mut self) {
-        let model = dashboard::model(&self.sidebar, self.dashboard_facts.facts());
+    fn prune_dashboard_facts(&mut self, host: &HostKey) {
+        let model = dashboard::model(&self.sidebar, &self.dashboard_facts.facts());
         let listed: Vec<String> = GroupKind::ALL
             .into_iter()
             .flat_map(|kind| model.rows(kind))
             .map(|row| row.session_id.clone())
             .collect();
         self.dashboard_facts
-            .prune(listed.iter().map(String::as_str));
+            .prune(host, listed.iter().map(String::as_str));
     }
 
-    /// Sends `WatchDashboard` when whether the active tab is a Dashboard
-    /// differs from the last one sent on this connection.
+    /// Sends `WatchDashboard` to each host where whether the active tab is
+    /// a Dashboard differs from the last one sent on that host's
+    /// connection: This PC always, a remote host while it is connected.
     pub(crate) fn sync_dashboard_watch(&mut self) {
         let on = self.dashboard_active();
-        if on != self.dashboard_watch {
-            self.dashboard_watch = on;
-            if !on {
+        for host in self.hosts.keys() {
+            let reachable =
+                host == HostKey::Local || self.conn_of(&host).is_some_and(Connection::is_open);
+            if !reachable || on == self.dashboard_watch.contains(&host) {
+                continue;
+            }
+            if on {
+                self.dashboard_watch.insert(host.clone());
+            } else {
                 // The daemon drops its cache when the last watcher leaves, so
                 // what is held is stale; the next watch is sent every fact.
-                self.dashboard_facts.clear();
+                self.dashboard_watch.remove(&host);
+                self.dashboard_facts.clear(&host);
             }
-            self.send_to(&HostKey::Local, ClientMessage::WatchDashboard { on });
+            self.send_to(&host, ClientMessage::WatchDashboard { on });
         }
     }
 
-    /// Forgets the open requests and the watch of a daemon the connection
-    /// left, sending nothing.
-    pub(crate) fn reset_dashboard_for_target(&mut self) {
-        self.dashboard_opens = DashboardOpens::default();
-        self.dashboard_watch = false;
-        self.dashboard_facts.clear();
+    /// Forgets `host`'s watch and facts, and for This PC the open requests,
+    /// as the connection leaves that daemon; sends nothing.
+    pub(crate) fn reset_dashboard_for_target(&mut self, host: &HostKey) {
+        if *host == HostKey::Local {
+            self.dashboard_opens = DashboardOpens::default();
+        }
+        self.dashboard_watch.remove(host);
+        self.dashboard_facts.clear(host);
     }
 }

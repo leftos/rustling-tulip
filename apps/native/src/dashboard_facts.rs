@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, HashSet};
 use chrono::{DateTime, Utc};
 use protocol::{DaemonMessage, DayTotals, SessionFacts};
 
+use crate::target::HostKey;
+
 /// The facts a Dashboard watcher holds: one entry per session, the day's
 /// totals and the issue cache's sync stamp.
 #[derive(Debug, Clone, Default)]
@@ -84,6 +86,66 @@ impl FactsStore {
     /// Forgets everything: a fresh watch is sent every fact again.
     pub(crate) fn clear(&mut self) {
         *self = Self::default();
+    }
+}
+
+/// The Dashboard's facts from every host the window watches, one store per
+/// host, so one host's relist, prune or reset leaves the others' alone.
+#[derive(Debug, Default)]
+pub(crate) struct HostFacts {
+    stores: Vec<(HostKey, FactsStore)>,
+}
+
+impl HostFacts {
+    /// Merges a `DashboardFacts` message from `host` into that host's store.
+    pub(crate) fn apply(&mut self, host: &HostKey, msg: &DaemonMessage) {
+        if let Some((_, store)) = self.stores.iter_mut().find(|(key, _)| key == host) {
+            store.apply(msg);
+        } else {
+            let mut store = FactsStore::default();
+            store.apply(msg);
+            self.stores.push((host.clone(), store));
+        }
+    }
+
+    /// Every host's facts by session id; session ids are unique across
+    /// hosts.
+    pub(crate) fn facts(&self) -> BTreeMap<String, SessionFacts> {
+        self.stores
+            .iter()
+            .flat_map(|(_, store)| store.facts())
+            .map(|(id, facts)| (id.clone(), facts.clone()))
+            .collect()
+    }
+
+    /// One session's facts from whichever host sent them, `None` until one
+    /// does.
+    pub(crate) fn facts_for(&self, session_id: &str) -> Option<&SessionFacts> {
+        self.stores
+            .iter()
+            .find_map(|(_, store)| store.facts_for(session_id))
+    }
+
+    /// `host`'s store, `None` before its first facts arrive.
+    pub(crate) fn store(&self, host: &HostKey) -> Option<&FactsStore> {
+        self.stores
+            .iter()
+            .find(|(key, _)| key == host)
+            .map(|(_, store)| store)
+    }
+
+    /// Drops `host`'s facts of every session `listed` does not name.
+    pub(crate) fn prune<'a>(&mut self, host: &HostKey, listed: impl IntoIterator<Item = &'a str>) {
+        if let Some((_, store)) = self.stores.iter_mut().find(|(key, _)| key == host) {
+            store.prune(listed);
+        }
+    }
+
+    /// Forgets `host`'s facts: its fresh watch is sent every fact again.
+    pub(crate) fn clear(&mut self, host: &HostKey) {
+        if let Some((_, store)) = self.stores.iter_mut().find(|(key, _)| key == host) {
+            store.clear();
+        }
     }
 }
 

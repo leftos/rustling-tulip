@@ -113,6 +113,18 @@ impl Hosts {
         }
     }
 
+    /// Every host the window holds a connection to: This PC first, then
+    /// the remote hosts in the order they joined.
+    pub(crate) fn keys(&self) -> Vec<HostKey> {
+        std::iter::once(HostKey::Local)
+            .chain(
+                self.remote
+                    .iter()
+                    .map(|(name, _)| HostKey::Remote(name.clone())),
+            )
+            .collect()
+    }
+
     /// Adds remote host `name`'s connection after the others; returns
     /// false, adding nothing, when the window already holds one to it.
     pub(crate) fn insert(&mut self, name: String, conn: HostConn) -> bool {

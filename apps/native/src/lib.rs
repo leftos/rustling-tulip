@@ -1040,9 +1040,9 @@ pub struct RootView {
     dashboard_opens: dashboard_tab::DashboardOpens,
     /// The last `WatchDashboard` sent on this connection: whether the
     /// daemon is streaming the Dashboard's facts to this client.
-    dashboard_watch: bool,
+    dashboard_watch: HashSet<HostKey>,
     /// The Dashboard's facts, as the daemon last streamed them.
-    dashboard_facts: dashboard_facts::FactsStore,
+    dashboard_facts: dashboard_facts::HostFacts,
     /// The Dashboard body's scroll, which a queue chip moves to its row.
     dashboard_scroll: gpui::ScrollHandle,
     /// Repaints the Dashboard while its tab is active, so the ages count.
@@ -1415,8 +1415,8 @@ impl RootView {
             viewer_opens: viewer_tab::ViewerOpens::default(),
             viewer_focus: cx.focus_handle(),
             dashboard_opens: dashboard_tab::DashboardOpens::default(),
-            dashboard_watch: false,
-            dashboard_facts: dashboard_facts::FactsStore::default(),
+            dashboard_watch: HashSet::new(),
+            dashboard_facts: dashboard_facts::HostFacts::default(),
             dashboard_scroll: gpui::ScrollHandle::new(),
             dashboard_timer: None,
             dashboard_width: None,
@@ -4045,6 +4045,7 @@ impl RootView {
             self.reset_host(host, window, cx);
             self.sidebar.clear_host(host);
             self.seen_sessions.remove(host);
+            self.reset_dashboard_for_target(host);
             self.drop_stale_session_ui(window, cx);
             self.prune_container_row_focus();
             cx.notify();
@@ -4088,7 +4089,7 @@ impl RootView {
         self.diff_opens = diff_tab::DiffOpens::default();
         self.viewer_tabs.clear();
         self.viewer_opens = viewer_tab::ViewerOpens::default();
-        self.reset_dashboard_for_target();
+        self.reset_dashboard_for_target(host);
         self.session_history = recover::SessionHistory::default();
         self.recover_requests.clear();
         self.recover_batches.clear();
