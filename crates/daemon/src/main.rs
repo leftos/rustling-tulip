@@ -65,6 +65,7 @@ mod tracer_client;
 mod tracer_log;
 mod transcript_tail;
 mod user_env;
+mod view_drive;
 mod vscode;
 mod vscode_watch;
 mod workspace;

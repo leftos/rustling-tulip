@@ -1686,6 +1686,23 @@ pub(crate) mod test_support {
         (Arc::new(handle), FakeExit { producer })
     }
 
+    /// A [`fake_pty`] that keeps what is written to it: every
+    /// [`PtyHandle::write_input`] arrives on the returned receiver.
+    pub fn recording_pty() -> (Arc<PtyHandle>, mpsc::UnboundedReceiver<Vec<u8>>, FakeExit) {
+        let (producer, lifecycle_output) = PtyProducer::channel(16);
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (resize_tx, _) = mpsc::unbounded_channel();
+        let handle = PtyHandle::from_parts(PtyHandleParts {
+            output: producer.output(),
+            lifecycle_output,
+            input_tx,
+            resize_tx,
+            killer: Box::new(NoopKiller),
+            pid: None,
+        });
+        (Arc::new(handle), input_rx, FakeExit { producer })
+    }
+
     /// Hold the history write lock until the returned guard drops. While a
     /// test holds it, an end path that comes after the lock is parked, so the
     /// test decides which of two competing writes lands first.

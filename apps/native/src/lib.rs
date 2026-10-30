@@ -3642,7 +3642,7 @@ impl RootView {
         if self.fold_tabs_and_drop_stale_menus(&msg, window, cx) {
             return;
         }
-        if self.on_resume_report(&msg, cx) || self.on_agent_exited(&msg, cx) {
+        if self.on_notice_message(&msg, cx) {
             return;
         }
         match msg {
@@ -3761,6 +3761,37 @@ impl RootView {
             notices::agent_exited_toast(session_id, label.as_deref()),
             cx,
         );
+        true
+    }
+
+    /// Shows the daemon's notices that raise only a toast: the start-up
+    /// resume, an agent's exit and a session notice. Returns whether `msg`
+    /// was one.
+    fn on_notice_message(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+        self.on_resume_report(msg, cx)
+            || self.on_agent_exited(msg, cx)
+            || self.on_session_notice(msg, cx)
+    }
+
+    /// Shows a notice about a session's terminal as one toast, keyed by the
+    /// session; a notice for a session this client does not list, or of a
+    /// kind it does not know, raises nothing. Returns whether `msg` was that
+    /// notice.
+    fn on_session_notice(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+        let DaemonMessage::SessionNotice { session_id, notice } = msg else {
+            return false;
+        };
+        let Some(session) = self.sidebar.session(session_id) else {
+            return true;
+        };
+        let label = session
+            .agent
+            .as_ref()
+            .and_then(|id| crate::agent_options::descriptor_for(&self.agents, id))
+            .map(|descriptor| descriptor.label.clone());
+        if let Some(spec) = notices::session_notice_toast(session_id, label.as_deref(), notice) {
+            self.push_toast_spec(spec, cx);
+        }
         true
     }
 

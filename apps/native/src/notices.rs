@@ -131,6 +131,36 @@ pub fn agent_exit_session_of(key: &str) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+/// The toast for [`protocol::DaemonMessage::SessionNotice`]: what the
+/// daemon did, or would not do, to session `session_id`'s terminal. `label`
+/// is the session agent's descriptor label; with none the toast says "The
+/// agent". A notice this build does not know raises none.
+#[must_use]
+pub fn session_notice_toast(
+    session_id: &str,
+    label: Option<&str>,
+    notice: &protocol::SessionNoticeKind,
+) -> Option<ToastSpec> {
+    let title = match notice {
+        protocol::SessionNoticeKind::WaitingInMain => format!(
+            "{} is waiting in the main conversation.",
+            label.unwrap_or("The agent")
+        ),
+        protocol::SessionNoticeKind::DraftReturnedToMain { agent } => format!(
+            "Your draft for {agent} is back in the main conversation: that agent has finished."
+        ),
+        protocol::SessionNoticeKind::Unknown => return None,
+    };
+    Some(ToastSpec {
+        kind: ToastKind::Info,
+        title,
+        detail: None,
+        key: Some(format!("session-notice:{session_id}")),
+        sticky: false,
+        actions: Vec::new(),
+    })
+}
+
 /// The key prefix of a spawn's "Spawning session…" toast.
 const SPAWNING_PREFIX: &str = "spawning:";
 
@@ -732,6 +762,43 @@ mod tests {
     fn agent_exited_toast_without_a_label_says_the_agent() {
         let toast = agent_exited_toast("s1", None);
         assert_eq!(toast.title, "The agent exited. The pane is a shell now.");
+    }
+
+    #[test]
+    fn session_notice_toast_titles() {
+        use protocol::SessionNoticeKind;
+        let waiting =
+            session_notice_toast("s1", Some("Test agent"), &SessionNoticeKind::WaitingInMain)
+                .expect("a known notice raises a toast");
+        assert_eq!(
+            waiting.title,
+            "Test agent is waiting in the main conversation."
+        );
+        assert_eq!(waiting.kind, ToastKind::Info);
+        assert_eq!(waiting.key.as_deref(), Some("session-notice:s1"));
+        assert!(!waiting.sticky && waiting.actions.is_empty());
+        assert_eq!(
+            session_notice_toast("s1", None, &SessionNoticeKind::WaitingInMain)
+                .expect("a toast")
+                .title,
+            "The agent is waiting in the main conversation."
+        );
+        assert_eq!(
+            session_notice_toast(
+                "s2",
+                Some("Test agent"),
+                &SessionNoticeKind::DraftReturnedToMain {
+                    agent: "Sleeper A".to_owned()
+                }
+            )
+            .expect("a toast")
+            .title,
+            "Your draft for Sleeper A is back in the main conversation: that agent has finished."
+        );
+        assert_eq!(
+            session_notice_toast("s1", Some("Test agent"), &SessionNoticeKind::Unknown),
+            None
+        );
     }
 
     #[test]

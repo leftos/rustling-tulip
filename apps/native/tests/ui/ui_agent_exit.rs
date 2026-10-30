@@ -5,7 +5,7 @@
 use crate::support;
 
 use gpui::TestAppContext;
-use protocol::{ClientMessage, DaemonMessage};
+use protocol::{ClientMessage, DaemonMessage, SessionNoticeKind};
 use rustling_tulip_native::toast_action_selector;
 use support::{Fixture, Harness, TestDir, session};
 
@@ -44,6 +44,26 @@ fn agent_exited_raises_the_shell_toast(cx: &mut TestAppContext) {
         toasts(&mut h),
         [("Claude exited. The pane is a shell now.".to_owned(), None)],
         "one toast says the pane is a shell"
+    );
+}
+
+#[gpui::test]
+fn a_session_notice_raises_its_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+
+    h.send(DaemonMessage::SessionNotice {
+        session_id: "s1".to_owned(),
+        notice: SessionNoticeKind::WaitingInMain,
+    });
+
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Claude is waiting in the main conversation.".to_owned(),
+            None
+        )],
+        "one toast names the agent that waits"
     );
 }
 

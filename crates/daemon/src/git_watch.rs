@@ -400,6 +400,7 @@ pub fn start(
                 Ok(
                     SessionEvent::Attention { .. }
                     | SessionEvent::AgentExited { .. }
+                    | SessionEvent::Notice { .. }
                     | SessionEvent::WaitingAlert { .. },
                 ) => {
                     // None of these changes the set of worktrees.

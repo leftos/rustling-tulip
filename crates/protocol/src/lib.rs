@@ -2719,6 +2719,25 @@ pub enum ChatPromptKind {
     Unknown,
 }
 
+/// What a [`DaemonMessage::SessionNotice`] tells the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionNoticeKind {
+    /// A prompt for the main conversation came up while an agent's view
+    /// was open with a draft in the box and a draft already stashed, so the
+    /// terminal was left on the agent: the main agent is waiting there.
+    WaitingInMain,
+    /// A draft typed in the view of the agent described as `agent` was put
+    /// back in the main conversation's box, since that agent has finished.
+    DraftReturnedToMain {
+        /// The agent's description, as the rule over its view showed it.
+        agent: String,
+    },
+    /// Forward-compat fallback: a notice the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
 /// One numbered choice on a prompt card.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatOption {
@@ -4291,6 +4310,13 @@ pub enum DaemonMessage {
     /// prompt is back on screen when no hook said so.
     AgentExited {
         session_id: String,
+    },
+    /// Something the daemon did, or would not do, to session `session_id`'s
+    /// terminal on its own, for the client to tell the user. Sent to every
+    /// client.
+    SessionNotice {
+        session_id: String,
+        notice: SessionNoticeKind,
     },
     /// Retired with LAN pairing: it stays decodable, and the daemon never
     /// sends it.
@@ -7986,6 +8012,52 @@ mod tests {
         assert!(
             matches!(&parsed, DaemonMessage::AgentExited { session_id } if session_id == "s1"),
             "the session id arrives as sent"
+        );
+    }
+
+    #[test]
+    fn session_notice_round_trips_each_kind() {
+        let cases = [
+            (
+                SessionNoticeKind::WaitingInMain,
+                serde_json::json!({"kind": "waiting_in_main"}),
+            ),
+            (
+                SessionNoticeKind::DraftReturnedToMain {
+                    agent: "Sleeper A".to_owned(),
+                },
+                serde_json::json!({"kind": "draft_returned_to_main", "agent": "Sleeper A"}),
+            ),
+        ];
+        for (notice, wire) in cases {
+            let msg = DaemonMessage::SessionNotice {
+                session_id: "s1".to_owned(),
+                notice: notice.clone(),
+            };
+            let value = serde_json::to_value(&msg).expect("it serializes");
+            assert_eq!(
+                value,
+                serde_json::json!({"type": "session_notice", "session_id": "s1", "notice": wire}),
+                "the wire shape of {notice:?}"
+            );
+            let parsed: DaemonMessage = serde_json::from_value(value).expect("it decodes");
+            assert!(
+                matches!(&parsed, DaemonMessage::SessionNotice { session_id, notice: got }
+                    if session_id == "s1" && *got == notice),
+                "{notice:?} arrives as sent: {parsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_notice_with_an_unknown_kind_decodes_as_unknown() {
+        let wire = r#"{"type":"session_notice","session_id":"s1",
+            "notice":{"kind":"future_notice","detail":"x"}}"#;
+        let parsed: DaemonMessage = serde_json::from_str(wire).expect("the message still decodes");
+        assert!(
+            matches!(&parsed, DaemonMessage::SessionNotice { session_id, notice: SessionNoticeKind::Unknown }
+                if session_id == "s1"),
+            "an unknown kind decodes in place: {parsed:?}"
         );
     }
 

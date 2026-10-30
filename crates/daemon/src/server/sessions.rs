@@ -791,6 +791,9 @@ fn session_event_message(event: SessionEvent, connection: u64) -> DaemonMessage 
             DaemonMessage::Attention { session_id, reason }
         }
         SessionEvent::AgentExited { session_id } => DaemonMessage::AgentExited { session_id },
+        SessionEvent::Notice { session_id, notice } => {
+            DaemonMessage::SessionNotice { session_id, notice }
+        }
         SessionEvent::WaitingAlert {
             session_id,
             kind,

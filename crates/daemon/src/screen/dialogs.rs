@@ -56,13 +56,6 @@ pub fn recipe_for(
     plugin.answer_recipe(prompt, answer)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the status watcher reads it in CV.24's second part"
-    )
-)]
 /// Which conversation `screen` shows and where its keys go, as `agent`'s
 /// plugin reads it; `None` for an agent with no registered plugin or one
 /// whose views the daemon does not switch.
@@ -78,13 +71,6 @@ pub fn read_view(agent: &AgentId, screen: &Screen) -> Option<ViewReading> {
     plugin.read_view(&screen.rows())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the status watcher reads it in CV.24's second part"
-    )
-)]
 /// The one key that moves `agent`'s screen, read as `reading`, towards
 /// `goal`; [`ViewRefusal::Unsupported`] for an agent with no registered
 /// plugin.

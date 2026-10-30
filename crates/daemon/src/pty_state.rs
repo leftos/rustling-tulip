@@ -24,10 +24,13 @@
 
 use crate::chat_mirror::ChatTap;
 use crate::osc_title::TitleActivity;
+use crate::pty::PtyHandle;
 use crate::screen::SharedScreen;
 use crate::screen::rules::{self, CompiledRules, Reading, ScreenState, Verdict};
 use crate::session::{SessionEvent, SessionRecord, SessionRegistry, push_recent_action};
-use protocol::{AttentionReason, SessionStatus};
+use crate::view_drive::{KEY_WAIT, ReturnAction, ViewReturn};
+use agent_api::ViewReading;
+use protocol::{AgentId, AttentionReason, ChatScreen, SessionStatus};
 use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -35,7 +38,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Silence required before a plain shell classifier's `Working` settles back
 /// to `Idle`. Deliberately asymmetric with promotion (which is immediate): a
@@ -246,6 +249,25 @@ struct ScreenWatch {
     /// screen clears only a flag it set. Any other writer's change to the
     /// record, and any status change, drops it.
     screen_set_background: bool,
+    /// Takes the terminal back to main for a prompt seen in an agent's view.
+    view_return: ViewReturn,
+    /// The record was seen with no PTY, and that was logged.
+    no_pty_logged: bool,
+    /// When the view return last typed a key, until a reading is handed to
+    /// it again: a reading after new output, or the one at the key's
+    /// deadline ([`KEY_WAIT`] after it), which every check re-arms.
+    view_key_at: Option<Instant>,
+}
+
+/// What one screen check read from one frame.
+struct ScreenRead {
+    reading: Reading,
+    /// The background rule that fires on the frame.
+    background: Option<Arc<str>>,
+    /// The last non-empty row is a shell's prompt.
+    prompt: bool,
+    /// The plugin's view and chat readings, when asked for.
+    view: Option<(ViewReading, Option<ChatScreen>)>,
 }
 
 /// When the next check runs, and the change it is confirming.
@@ -321,6 +343,11 @@ impl Confirm {
         }
     }
 
+    /// Read the screen at `at` at the latest.
+    fn read_by(&mut self, at: Instant) {
+        self.check_at = Some(self.check_at.map_or(at, |due| due.min(at)));
+    }
+
     /// Drop the window and any candidate, leave the screen unread for
     /// [`FOREIGN_WRITE_HOLD`] from `now`, and read it once the hold ends.
     fn hold(&mut self, now: Instant) {
@@ -384,6 +411,9 @@ impl ScreenWatch {
             last_verdict: None,
             dialog_edge_armed: true,
             screen_set_background: false,
+            view_return: ViewReturn::default(),
+            no_pty_logged: false,
+            view_key_at: None,
         }
     }
 
@@ -436,17 +466,52 @@ impl ScreenWatch {
         self.confirm.hold(Instant::now());
     }
 
+    /// One check of the screen; then, while a view key is outstanding, the
+    /// next read is due no later than the key's deadline, so a check that
+    /// handed no reading to the view return never drops the read the key is
+    /// owed.
+    fn check(&mut self, now: Instant, mode: Mode) -> Checked {
+        let checked = self.check_frame(now, mode);
+        if let Some(deadline) = self
+            .view_key_at
+            .map(|at| at + KEY_WAIT)
+            .filter(|&deadline| deadline > now)
+        {
+            self.confirm.read_by(deadline);
+        }
+        checked
+    }
+
     /// Read the record, then the screen, and act on what the screen shows
     /// when the rules allow it.
-    fn check(&mut self, now: Instant, mode: Mode) -> Checked {
+    fn check_frame(&mut self, now: Instant, mode: Mode) -> Checked {
         let (read, quiet) = match self.read_record(now, mode) {
             Ok(found) => found,
             Err(checked) => return checked,
         };
-        let Some((reading, background, prompt)) = self.read_screen(mode) else {
+        // A frame read after a view key but before any output came is the
+        // frame the key was pressed on: it is read again only at KEY_WAIT.
+        let view_due = self.view_key_at.is_none_or(|at| {
+            self.last_output.is_some_and(|output| output > at) || now >= at + KEY_WAIT
+        });
+        let target = if quiet && view_due && mode != Mode::Shell {
+            self.view_target()
+        } else {
+            None
+        };
+        let Some(ScreenRead {
+            reading,
+            background,
+            prompt,
+            view,
+        }) = self.read_screen(mode, target.as_ref().map(|(_, agent)| agent))
+        else {
             self.confirm.hold(now);
             return Checked::Done;
         };
+        if let (Some((pty, agent)), Some((view, chat))) = (&target, &view) {
+            self.drive_view(pty, agent, view, chat.as_ref(), now);
+        }
         debug!(
             session_id = %self.session_id,
             rule = ?reading.rule,
@@ -525,24 +590,81 @@ impl ScreenWatch {
     /// grid's size changed since the last executed check: the frame under the
     /// new size may be half drawn. A frame that is read, of an agent's
     /// screen (`mode` not [`Mode::Shell`]), goes to the chat mirror too.
-    fn read_screen(&mut self, mode: Mode) -> Option<(Reading, Option<Arc<str>>, bool)> {
-        let (size, resized, reading, background, prompt) = {
+    /// With `view_agent`, the same frame's view and chat readings by that
+    /// agent's plugin come back too.
+    fn read_screen(&mut self, mode: Mode, view_agent: Option<&AgentId>) -> Option<ScreenRead> {
+        let (size, resized, read) = {
             let screen = crate::sync::lock(&self.screen);
             let size = screen.size();
             let resized = self.size.is_some_and(|last| last != size);
             if !resized && mode != Mode::Shell {
                 self.chat.observe(&screen);
             }
-            (
-                size,
-                resized,
-                self.rules.read(&screen),
-                self.rules.read_background(&screen),
-                rules::last_row_is_shell_prompt(&screen),
-            )
+            let view = view_agent.filter(|_| !resized).and_then(|agent| {
+                let view = crate::screen::dialogs::read_view(agent, &screen)?;
+                Some((view, crate::screen::dialogs::read(agent, &screen)))
+            });
+            let read = ScreenRead {
+                reading: self.rules.read(&screen),
+                background: self.rules.read_background(&screen),
+                prompt: rules::last_row_is_shell_prompt(&screen),
+                view,
+            };
+            (size, resized, read)
         };
         self.size = Some(size);
-        (!resized).then_some((reading, background, prompt))
+        (!resized).then_some(read)
+    }
+
+    /// The session's PTY and agent, for the view return to type into and
+    /// read with; `None` when the record is gone or has no PTY (logged once).
+    fn view_target(&mut self) -> Option<(Arc<PtyHandle>, AgentId)> {
+        let arc = self.registry.get(&self.session_id)?;
+        let (pty, agent) = {
+            let record = crate::sync::lock(&arc);
+            (record.pty.clone(), record.agent.clone())
+        };
+        let Some(pty) = pty else {
+            if !self.no_pty_logged {
+                self.no_pty_logged = true;
+                info!(
+                    session_id = %self.session_id,
+                    "the session has no PTY; its terminal view is never switched"
+                );
+            }
+            return None;
+        };
+        Some((pty, agent))
+    }
+
+    /// Hand one settled reading to the view return and carry out what it
+    /// answers: its keys go to the PTY (never as the owner's input), its
+    /// notices to the clients. After a key the screen is read again
+    /// [`KEY_WAIT`] later even when no output comes.
+    fn drive_view(
+        &mut self,
+        pty: &PtyHandle,
+        agent: &AgentId,
+        view: &ViewReading,
+        chat: Option<&ChatScreen>,
+        now: Instant,
+    ) {
+        let mut pressed = false;
+        for action in self.view_return.on_reading(agent, view, chat, now) {
+            match action {
+                ReturnAction::Press(key) => {
+                    debug!(session_id = %self.session_id, ?key, "view return key");
+                    pty.write_input(key.to_bytes());
+                    pressed = true;
+                }
+                ReturnAction::Notice(notice) => {
+                    self.registry.announce_notice(&self.session_id, notice);
+                }
+                ReturnAction::Log(text) => info!(session_id = %self.session_id, "{text}"),
+                ReturnAction::Warn(text) => warn!(session_id = %self.session_id, "{text}"),
+            }
+        }
+        self.view_key_at = pressed.then_some(now);
     }
 
     /// Publish the status the screen shows, at once or after its window;
@@ -2749,6 +2871,260 @@ mod hysteresis_tests {
             }
         }
         count
+    }
+
+    /// The watcher typing the return to main into a recording PTY while the
+    /// test plays Claude's TUI: after each key it feeds the captured frame
+    /// that key brought up.
+    mod view_return {
+        use super::*;
+        use crate::history::test_support::{FakeExit, recording_pty};
+        use crate::screen::fixture_screen::screen_from;
+        use crate::session::SessionEvent;
+        use crate::view_drive::KEY_WAIT;
+        use agent_api::{KeyHolder, ViewReading};
+        use protocol::SessionNoticeKind;
+
+        const V174: &str = include_str!("screen/fixtures/v174-agent-view-heads-up-builtin.txt");
+        const V175: &str = include_str!("screen/fixtures/v175-main-heads-up-panel-keys.txt");
+        const V176: &str = include_str!("screen/fixtures/v176-main-heads-up-box-keys.txt");
+        const V179: &str =
+            include_str!("screen/fixtures/v179-agent-view-chat-in-main-draft-builtin.txt");
+        const V180: &str =
+            include_str!("screen/fixtures/v180-main-chat-in-main-draft-carried-builtin.txt");
+
+        const DOWN: &[u8] = b"\x1b[B";
+        const UP: &[u8] = b"\x1b[A";
+        const ENTER: &[u8] = b"\r";
+
+        /// v174's mode line, under the box of Sleeper A's view.
+        const V174_MODE_LINE: &str =
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 3 agents · ↓ to manage";
+
+        /// The session's grid: as wide and tall as `screen_from` makes it
+        /// for the 152 x 72 captures.
+        const GRID: (u16, u16) = (156, 74);
+
+        struct Tui {
+            output: broadcast::Sender<Vec<u8>>,
+            input: mpsc::UnboundedReceiver<Vec<u8>>,
+            events: broadcast::Receiver<SessionEvent>,
+            registry: Arc<SessionRegistry>,
+            _attention: mpsc::UnboundedReceiver<super::super::AttentionEvent>,
+            _exit: FakeExit,
+        }
+
+        /// An agent session's watcher over a recording PTY, past its
+        /// starting hold.
+        async fn start_tui(tag: &str) -> Tui {
+            let (pty, input, exit) = recording_pty();
+            let mut record = test_record(SESSION);
+            record.pty = Some(pty);
+            let screen: SharedScreen = Arc::new(Mutex::new(Screen::new(GRID.0, GRID.1)));
+            record.screen = Some(Arc::clone(&screen));
+            let rules = rules_for(&record.agent);
+            let registry = SessionRegistry::new(scratch_dirs(tag));
+            registry.insert(record);
+            let events = registry.subscribe();
+            let chat = crate::chat_mirror::ChatMirror::new(
+                Arc::clone(&registry),
+                crate::hook_status::LiveLines::default(),
+                Arc::new(tokio::sync::watch::channel(0usize).0),
+            )
+            .tap(SESSION, &agent_registry::default_agent());
+            let (output, output_rx) = broadcast::channel(64);
+            let (attention_tx, attention) = mpsc::unbounded_channel();
+            watch(
+                &registry,
+                SESSION.to_string(),
+                AgentStreams {
+                    output: output_rx,
+                    screen,
+                    rules,
+                    chat,
+                },
+                attention_tx,
+            );
+            pass_hold().await;
+            Tui {
+                output,
+                input,
+                events,
+                registry,
+                _attention: attention,
+                _exit: exit,
+            }
+        }
+
+        impl Tui {
+            /// Paint `capture` whole and let the watcher read it.
+            async fn show(&self, capture: &str) {
+                let rows: Vec<&str> = capture.lines().collect();
+                self.output
+                    .send(frame(&rows))
+                    .expect("watcher still subscribed");
+                advance(ms(100)).await;
+            }
+
+            /// The keys typed since the last call, one write each.
+            fn typed(&mut self) -> Vec<Vec<u8>> {
+                let mut keys = Vec::new();
+                while let Ok(key) = self.input.try_recv() {
+                    keys.push(key);
+                }
+                keys
+            }
+
+            fn notices(&mut self) -> Vec<SessionNoticeKind> {
+                let mut notices = Vec::new();
+                while let Ok(event) = self.events.try_recv() {
+                    if let SessionEvent::Notice { session_id, notice } = event {
+                        assert_eq!(session_id, SESSION);
+                        notices.push(notice);
+                    }
+                }
+                notices
+            }
+        }
+
+        fn view_of(capture: &str) -> ViewReading {
+            crate::screen::dialogs::read_view(
+                &agent_registry::default_agent(),
+                &screen_from(capture),
+            )
+            .expect("Claude's plugin reads views")
+        }
+
+        /// `capture` with `from` replaced by `to`, which must be in it.
+        fn edited(capture: &str, from: &str, to: &str) -> String {
+            assert!(capture.contains(from), "the capture shows {from:?}");
+            capture.replacen(from, to, 1)
+        }
+
+        /// Built from v174: the Down that left Sleeper A's box has the
+        /// panel holding the keys with its cursor on `main`, the agent still
+        /// in view. No capture shows this frame.
+        fn v174_panel_on_main() -> String {
+            let panel = edited(V174, V174_MODE_LINE, "  ↑/↓ to select · Enter to view");
+            let built = edited(&panel, "  ◯ main", "❯ ◯ main");
+            let view = view_of(&built);
+            assert_eq!(
+                (
+                    view.key_holder,
+                    view.panel_cursor,
+                    view.agent_in_view.as_deref()
+                ),
+                (KeyHolder::Panel, Some(0), Some("Sleeper A")),
+                "the built frame reads as meant"
+            );
+            built
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_heads_up_in_an_agents_view_returns_to_main_once() {
+            let mut tui = start_tui("view-heads-up").await;
+            tui.show(V174).await;
+            assert_eq!(tui.typed(), [DOWN], "Down to the panel");
+            tui.show(&v174_panel_on_main()).await;
+            assert_eq!(tui.typed(), [ENTER], "Enter on main");
+            tui.show(V175).await;
+            assert_eq!(tui.typed(), [UP], "Up to the box");
+            tui.show(V176).await;
+            assert!(tui.typed().is_empty(), "main is in view");
+            tui.show(V176).await;
+            advance(KEY_WAIT * 2).await;
+            assert!(tui.typed().is_empty(), "nothing more for the same notice");
+            assert_eq!(tui.notices(), [], "no notice");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_read_after_a_key_survives_an_earlier_check() {
+            let mut tui = start_tui("view-key-read").await;
+            tui.show(V174).await;
+            assert_eq!(tui.typed(), [DOWN], "Down to the panel");
+            // Another writer moves the record: the watcher holds, then checks
+            // the unchanged frame before KEY_WAIT has passed.
+            tui.registry
+                .update(SESSION, |record| record.last_hook_time = Some(1));
+            pass_hold().await;
+            assert!(
+                tui.typed().is_empty(),
+                "the frame the key was pressed on is not read again yet"
+            );
+            advance(KEY_WAIT).await;
+            assert_eq!(
+                tui.typed(),
+                [DOWN],
+                "the read at KEY_WAIT, with no output, takes the drive's next key"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_return_with_main_in_view() {
+            let mut tui = start_tui("view-main").await;
+            tui.show(V176).await;
+            advance(KEY_WAIT * 2).await;
+            assert!(tui.typed().is_empty(), "the notice is already in main");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_held_stash_with_a_draft_does_not_switch() {
+            // Built from v174: no capture shows a draft in an agent's box
+            // with `› stashed` held, as v181 shows it in main.
+            let with_draft = edited(
+                V174,
+                "❯\u{a0}Message @general-purpose…",
+                "❯ my draft for the sleeper",
+            );
+            let held = edited(
+                &with_draft,
+                V174_MODE_LINE,
+                &format!("{V174_MODE_LINE:<143}› stashed"),
+            );
+            let view = view_of(&held);
+            assert!(
+                view.stashed
+                    && view.box_first_line.as_deref() == Some("my draft for the sleeper")
+                    && view.agent_in_view.as_deref() == Some("Sleeper A"),
+                "the built frame reads as meant: {view:?}"
+            );
+            let mut tui = start_tui("view-stash-held").await;
+            tui.show(&held).await;
+            advance(KEY_WAIT * 2).await;
+            assert!(tui.typed().is_empty(), "no key, not even the stash");
+            assert_eq!(tui.notices(), [SessionNoticeKind::WaitingInMain]);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_notices_own_draft_is_carried_unstashed() {
+            let mut tui = start_tui("view-note-draft").await;
+            tui.show(V179).await;
+            assert_eq!(tui.typed(), [DOWN], "Down first, with no stash before it");
+            // Built from v179 and v180: the panel on `main` with the note
+            // still in Sleeper A's view, and main with the box holding the
+            // keys again. No capture shows either.
+            let panel = edited(
+                V179,
+                "  ⏵⏵ auto mode on (shift+tab to cycle)\n",
+                "  ↑/↓ to select · Enter to view\n",
+            );
+            tui.show(&edited(&panel, "  ◯ main", "❯ ◯ main")).await;
+            assert_eq!(tui.typed(), [ENTER]);
+            tui.show(V180).await;
+            assert_eq!(tui.typed(), [UP]);
+            let box_keys = edited(
+                V180,
+                "  ↑/↓ to select\n",
+                "  ⏵⏵ auto mode on (shift+tab to cycle)\n",
+            );
+            tui.show(&edited(&box_keys, "❯ ● main", "  ● main")).await;
+            advance(KEY_WAIT * 2).await;
+            assert!(
+                tui.typed().is_empty(),
+                "main is in view with the note in its box"
+            );
+            assert_eq!(tui.notices(), [], "no notice");
+        }
     }
 
     #[test]

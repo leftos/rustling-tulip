@@ -336,6 +336,8 @@ The screen sets it too, with no hook: while the record is `Idle` and the screen 
 
 A `Notification` `idle_prompt` does not leave `AwaitingInput` while a hook-reported prompt is pending.
 
+The status watcher also returns the terminal to the main conversation for every Claude session when an agent is in view and a Heads up notice is up, an AskUserQuestion closes, or the box holds the notice's own draft (`view_drive.rs`; design in `docs/plans/conversation-view.md`). It types its keys straight into the PTY, never as owner input: one key per settled read, at most 12 keys and 10 s per drive, no key while a dialog is up. A draft in the agent's box is stashed with ctrl+s only when no stash is held (the stash is one slot), restored in the agent's view afterwards or returned to main's box, and clients hear of it through `DaemonMessage::SessionNotice` on the session-event stream.
+
 An owner key sent to a hook-driven session with a pending prompt clears `AwaitingInput` and `pending_input` at once (a `SendInput` marked `automatic`, the client's query replies, wheel and pointer-motion reports, never does), and a status watcher write (a screen read or the shell classifier) that moves a session off `AwaitingInput` clears `pending_input` in the same update.
 
 Token and cost figures exist only for headless runs, where they come from the CLI's stream-json (`crates/agents/claude/src/lib.rs`, `parse_headless_line`, applied by `crates/daemon/src/headless.rs`), so an interactive session's snapshot carries none. Headless mode (`claude --print --output-format stream-json`) uses `crates/daemon/src/headless.rs` for structured events.

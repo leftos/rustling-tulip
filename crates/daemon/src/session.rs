@@ -109,6 +109,12 @@ pub enum SessionEvent {
     AgentExited {
         session_id: String,
     },
+    /// Something the status watcher did, or would not do, to the session's
+    /// terminal on its own, for the clients to tell the user.
+    Notice {
+        session_id: String,
+        notice: protocol::SessionNoticeKind,
+    },
     /// A finished turn was summarized into the session's ring; sent after the
     /// `Updated` that carries the line.
     WaitingAlert {
@@ -1027,6 +1033,14 @@ impl SessionRegistry {
     pub fn announce_agent_exited(&self, id: &str) {
         let _ = self.events.send(SessionEvent::AgentExited {
             session_id: id.to_owned(),
+        });
+    }
+
+    /// Tell every client `notice` about session `id`'s terminal.
+    pub fn announce_notice(&self, id: &str, notice: protocol::SessionNoticeKind) {
+        let _ = self.events.send(SessionEvent::Notice {
+            session_id: id.to_owned(),
+            notice,
         });
     }
 
