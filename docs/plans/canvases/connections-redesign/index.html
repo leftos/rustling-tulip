@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connections Redesign Options</title>
+<style>
+@font-face { font-family: "Geist"; font-weight: 400; src: url("../../../../apps/native/assets/fonts/Geist/Geist-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Geist"; font-weight: 500; src: url("../../../../apps/native/assets/fonts/Geist/Geist-Medium.ttf") format("truetype"); }
+@font-face { font-family: "Geist"; font-weight: 600; src: url("../../../../apps/native/assets/fonts/Geist/Geist-SemiBold.ttf") format("truetype"); }
+@font-face { font-family: "Geist"; font-weight: 700; src: url("../../../../apps/native/assets/fonts/Geist/Geist-Bold.ttf") format("truetype"); }
+@font-face { font-family: "Geist Mono"; font-weight: 400; src: url("../../../../apps/native/assets/fonts/GeistMono/GeistMono-Regular.ttf") format("truetype"); }
+
+/* palette.rs tokens */
+:root {
+  --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f;
+  --chip: #232129; --hover: #2c2a33; --line: #2a2830; --line-strong: #3a3742;
+  --text: #ede9e4; --text2: #a7a2ad; --subtle: #8c8794; --faint: #6e6a77;
+  --accent: #f07a62; --on-accent: #1c100d;
+  --ok: #3fb96a; --asking: #f6bc4e; --danger: #f26d6d; --danger-bg: #3a1c1f; --working: #6ca6ff;
+  --ask-wash: rgba(246, 188, 78, .07); --ask-border: rgba(246, 188, 78, .35);
+  --scrim: rgba(6, 5, 8, .66);
+  --ui: "Geist", "Segoe UI", system-ui, sans-serif;
+  --mono: "Geist Mono", "Cascadia Mono", Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: #0d0c0f; color: var(--text); font-family: var(--ui); font-size: 12px;
+  -webkit-font-smoothing: antialiased; padding: 22px 16px 28px; min-width: 1600px;
+}
+
+/* ---------- page chrome ---------- */
+.page-head { display: grid; grid-template-columns: 1fr 640px; gap: 28px; margin-bottom: 18px; align-items: start; }
+.page-head h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; letter-spacing: -.01em; }
+.page-head .issue { color: var(--subtle); font-family: var(--mono); font-size: 11.5px; }
+.page-head blockquote { margin: 10px 0 0; padding: 8px 12px; border-left: 2px solid var(--accent); color: var(--text2); font-size: 13px; background: var(--surface); border-radius: 0 8px 8px 0; }
+.page-head .keeps { margin-top: 10px; color: var(--text2); font-size: 12px; line-height: 1.55; }
+.state-table { width: 100%; border-collapse: collapse; font-size: 11.5px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.state-table td.cap { color: var(--text); font-weight: 600; font-size: 12px; border-top: 0; padding-top: 8px; }
+.state-table th, .state-table td { text-align: left; padding: 5px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+.state-table th { color: var(--subtle); font-weight: 500; width: 92px; }
+.state-table td { color: var(--text2); }
+.state-table code { font-family: var(--mono); font-size: 10.5px; color: var(--text); }
+
+.lanes { display: grid; grid-template-columns: 460px 620px 460px; gap: 14px; }
+.lane-head { padding: 0 2px 10px; min-height: 166px; }
+.lane-head .letter { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 14px; margin-right: 8px; vertical-align: middle; }
+.lane-head h2 { display: inline; font-size: 15px; font-weight: 600; vertical-align: middle; }
+.lane-head p { margin: 7px 0 0; color: var(--text2); font-size: 12px; line-height: 1.45; }
+.lane-head .worst { color: var(--text); }
+.lane-head .worst b { color: var(--asking); font-weight: 600; }
+
+.caption { color: var(--subtle); font-size: 11px; margin: 14px 2px 6px; text-transform: none; }
+.caption b { color: var(--text2); font-weight: 600; }
+
+/* the app window behind the modal: the real main window, dimmed */
+.window { position: relative; height: 601px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: var(--ground) url("backdrop.png") center top no-repeat; }
+.window::before { content: ""; position: absolute; inset: 0; background: var(--scrim); }
+.window > .modal { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.mini { border-radius: 10px; border: 1px solid var(--line); background: #08070a; padding: 14px 0; display: flex; justify-content: center; }
+.mini > .zoom { zoom: .78; }
+
+.notes { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 11.5px; line-height: 1.5; color: var(--text2); }
+.notes dt { color: var(--text); font-weight: 600; margin-top: 7px; }
+.notes dt:first-child { margin-top: 0; }
+.notes dd { margin: 1px 0 0; }
+.notes .has { color: var(--ok); }
+.notes .cheap { color: var(--asking); }
+.notes .nope { color: var(--subtle); }
+
+/* ---------- the client's controls ---------- */
+.modal { width: 440px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 30px 80px rgba(0, 0, 0, .6); font-size: 12px; color: var(--text); display: flex; flex-direction: column; }
+.m-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 8px 16px; }
+.m-head .title { font-size: 14px; font-weight: 600; }
+.m-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px 14px; }
+.m-foot.ruled { border-top: 1px solid var(--line); padding-top: 12px; }
+.x { width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; color: var(--text2); }
+
+.btn { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 7px; border: 1px solid var(--line-strong); background: transparent; color: var(--text); font-size: 12.5px; white-space: nowrap; }
+.btn.primary { background: var(--accent); border-color: transparent; color: var(--on-accent); font-weight: 700; }
+.btn.danger { color: var(--danger); }
+.btn.compact { height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12px; }
+.btn.ghost { border-color: transparent; color: var(--text2); }
+.btn .plus { font-size: 15px; line-height: 1; margin-top: -1px; color: var(--text2); }
+.ring::after { content: ""; position: absolute; inset: -3px; border: 2px solid var(--accent); border-radius: 9px; pointer-events: none; }
+.row.ring::after { border-radius: 10px; }
+.btn.compact.ring::after { border-radius: 8px; }
+
+.field { position: relative; display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 11px; border-radius: 7px; background: var(--ground); border: 1px solid var(--line-strong); color: var(--text); font-size: 12px; }
+.field .ph { color: var(--subtle); }
+.field .caret { display: inline-block; width: 1.5px; height: 14px; background: var(--accent); margin-left: 1px; vertical-align: -2px; }
+.field.mono, .field .mono { font-family: var(--mono); font-size: 11.5px; }
+
+.seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--raised); border: 1px solid var(--line); border-radius: 8px; }
+.seg span { padding: 4px 12px; border-radius: 6px; color: var(--text2); font-size: 12px; }
+.seg span.on { background: var(--hover); color: var(--text); font-weight: 600; }
+
+.kbd { display: inline-block; font-family: var(--mono); font-size: 10px; color: var(--text2); padding: 1px 5px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; background: var(--raised); line-height: 14px; }
+
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dot.ok { background: var(--ok); }
+.dot.idle { background: #838a96; }
+.dot.ask { background: var(--asking); }
+
+.tag { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 5px; font-size: 10.5px; font-weight: 500; white-space: nowrap; }
+.tag.warn { color: var(--asking); background: var(--ask-wash); border: 1px solid var(--ask-border); }
+.tag.plain { color: var(--text2); background: var(--raised); border: 1px solid var(--line); }
+
+.result { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text); }
+.result .check { width: 16px; height: 16px; border-radius: 50%; background: rgba(63, 185, 106, .16); color: var(--ok); display: grid; place-items: center; }
+
+.dom { color: var(--faint); font-weight: 400; }
+.mono { font-family: var(--mono); }
+
+/* kind glyph tile */
+.kind { width: 28px; height: 28px; border-radius: 7px; background: var(--raised); border: 1px solid var(--line); display: grid; place-items: center; color: var(--text2); flex: none; }
+.kind.small { width: 20px; height: 20px; border-radius: 5px; }
+.kind.big { width: 36px; height: 36px; border-radius: 9px; }
+.kind svg { display: block; }
+
+/* ---------- A: grouped list ---------- */
+.a-body { padding: 0 8px; display: flex; flex-direction: column; gap: 2px; }
+.sect { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 10px 4px; font-size: 11.5px; font-weight: 600; color: var(--text2); }
+.sect:first-child { padding-top: 2px; }
+.sect .count { font-weight: 400; color: var(--subtle); font-size: 11px; }
+.row { position: relative; display: grid; grid-template-columns: 28px 1fr auto; align-items: center; column-gap: 10px; min-height: 46px; padding: 7px 10px; border-radius: 8px; }
+.row.current { background: var(--chip); }
+.row.hovered { background: var(--hover); }
+.row .name { font-size: 12.5px; font-weight: 500; line-height: 1.25; }
+.row .sub { font-size: 11px; color: var(--subtle); margin-top: 2px; display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+.row .sub .mono { font-size: 10.5px; }
+.row .sub .sep { color: var(--faint); }
+.row .trail { display: flex; align-items: center; gap: 8px; color: var(--text2); font-size: 11.5px; }
+.a-form { margin: 6px 14px 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); display: flex; flex-direction: column; gap: 8px; }
+.a-form .top { display: flex; justify-content: space-between; align-items: center; }
+.a-form .top .label { font-weight: 600; font-size: 12.5px; }
+.a-form .frow { display: grid; grid-template-columns: 104px 1fr; align-items: center; gap: 8px; }
+.a-form .frow .lbl { color: var(--text2); }
+.a-form .btns { display: flex; justify-content: flex-end; gap: 6px; }
+.a-form .field { background: var(--ground); }
+
+/* ---------- B: two-pane ---------- */
+.modal.wide { width: 600px; }
+.b-body { display: grid; grid-template-columns: 200px 1fr; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); min-height: 372px; }
+.b-list { border-right: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 1px; }
+.b-list .grp { font-size: 11px; font-weight: 600; color: var(--subtle); padding: 8px 8px 3px; }
+.b-list .grp:first-child { padding-top: 2px; }
+.b-item { position: relative; display: grid; grid-template-columns: 20px 1fr auto; align-items: center; gap: 8px; height: 32px; padding: 0 8px 0 6px; border-radius: 7px; color: var(--text2); font-size: 12px; }
+.b-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.b-item.sel { background: var(--chip); color: var(--text); font-weight: 500; }
+.b-item.sel::after { border-radius: 9px; }
+.b-item.new { color: var(--text2); margin-top: auto; border: 1px dashed var(--line-strong); }
+.b-item.new.sel { border-style: solid; border-color: transparent; }
+.b-detail { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+.b-detail .who { display: flex; gap: 12px; align-items: center; }
+.b-detail .who .nm { font-size: 14px; font-weight: 600; }
+.b-detail .who .kd { font-size: 11.5px; color: var(--subtle); margin-top: 2px; }
+.kv { display: grid; grid-template-columns: 82px 1fr; row-gap: 9px; column-gap: 12px; font-size: 12px; }
+.kv dt { color: var(--subtle); }
+.kv dd { margin: 0; color: var(--text); }
+.kv dd .hint { display: block; color: var(--text2); font-size: 11.5px; margin-top: 4px; line-height: 1.4; }
+.b-detail .acts { display: flex; gap: 8px; margin-top: auto; }
+.b-detail .acts .spacer { flex: 1; }
+.b-form { display: flex; flex-direction: column; gap: 6px; }
+.b-form .lbl { color: var(--text2); font-size: 11.5px; margin-top: 4px; }
+.b-form .help { color: var(--subtle); font-size: 11px; }
+
+/* ---------- C: palette ---------- */
+.c-top { padding: 12px 12px 8px; }
+.c-top .field { min-height: 38px; font-size: 13px; }
+.c-top .crumb { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 5px; background: var(--chip); border: 1px solid var(--line-strong); font-size: 11.5px; color: var(--text); white-space: nowrap; }
+.c-list { padding: 0 8px 8px; display: flex; flex-direction: column; }
+.c-grp { font-size: 11px; color: var(--subtle); padding: 8px 8px 3px; display: flex; justify-content: space-between; }
+.c-row { position: relative; display: grid; grid-template-columns: 18px auto 1fr auto; align-items: center; gap: 9px; height: 32px; padding: 0 8px; border-radius: 7px; font-size: 12.5px; }
+.c-row .meta { color: var(--subtle); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 6px; align-items: center; }
+.c-row .meta .mono { font-size: 10.5px; }
+.c-row .end { display: flex; gap: 6px; align-items: center; color: var(--text2); font-size: 11px; }
+.c-row.hl { background: var(--hover); }
+.c-row.add { color: var(--text2); }
+.c-row .ico { color: var(--text2); display: grid; place-items: center; }
+.c-foot { display: flex; gap: 14px; align-items: center; padding: 8px 14px; background: var(--sunken); border-top: 1px solid var(--line); border-radius: 0 0 13px 13px; color: var(--subtle); font-size: 11px; }
+.c-foot span { display: inline-flex; gap: 5px; align-items: center; }
+.c-form { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.c-form .frow { display: grid; grid-template-columns: 112px 1fr; gap: 8px; align-items: center; }
+.c-form .lbl { color: var(--text2); }
+.c-form .btns { display: flex; justify-content: flex-end; gap: 6px; }
+</style>
+</head>
+<body>
+
+<!-- glyphs -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="g-pc" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="8.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 13.5h5M8 11v2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+    <symbol id="g-net" viewBox="0 0 16 16"><circle cx="8" cy="3.5" r="1.7" fill="currentColor"/><circle cx="3.5" cy="12" r="1.7" fill="currentColor"/><circle cx="12.5" cy="12" r="1.7" fill="currentColor"/><path d="M8 3.5 3.5 12h9L8 3.5" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" opacity=".7"/></symbol>
+    <symbol id="g-ssh" viewBox="0 0 16 16"><rect x="1.8" y="2.5" width="12.4" height="11" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="m4.6 6.2 2.2 1.8-2.2 1.8M8.2 10.4h3.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="g-x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="g-check" viewBox="0 0 16 16"><path d="m4 8.3 2.6 2.5L12 5.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="g-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.3" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m10.3 10.3 3.2 3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="g-plus" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="g-trash" viewBox="0 0 16 16"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.6 8.5h4.8l.6-8.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></symbol>
+  </defs>
+</svg>
+
+<header class="page-head">
+  <div>
+    <h1>Connections view: three layouts</h1>
+    <div class="issue">RT-541 · Redesign the Connections view: grouped hosts, one row shape, add flows in place</div>
+    <blockquote>"The Connections UI is kind of a mess, thrown together, with no sense of layout or organization or functionality."</blockquote>
+    <div class="keeps">Every lane keeps every function the picker has today: switch to This PC, a saved tailnet host, a saved SSH host or a discovered tailnet peer (a switch saves the host and sets <code class="mono">last_target</code>); Forget a saved host; add a tailnet host by name and port; add an SSH host with an optional remote command, with Test connection and its result; mark the current target; show <em>Not paired</em>; the scan's wait and error line; a typed host's refusal; Esc steps back, then closes. Sample data matches the current shots: current = This PC, saved <span class="mono">box.tail1234.ts.net</span> (tailnet, no device token) and <span class="mono">me@buildbox</span> (SSH), discovered <span class="mono">laptop.tail1234.ts.net</span>.</div>
+  </div>
+  <table class="state-table">
+    <tr><td colspan="2" class="cap">Per-host state the client knows (connection_picker.rs, connection_picker_view.rs, connection.rs, sidebar.rs)</td></tr>
+    <tr><th><span class="has">Has now</span></th><td>Current target (<code>row.target == conn.target()</code>) and, <em>for the current target only</em>, its live <code>connection::State</code>: Connecting, Open, Closed / Error with a reason, AuthFailed, NotApproved (needs pairing). <em>Not paired</em>: a saved tailnet host with no device token, read once when the picker opens. Kind (tailnet / SSH), port, remote command. Scan pending ("Looking for your devices…") or failed (<code>TailnetError</code> text). Test connection: Idle, Testing, Passed (<code>Connected: &lt;short&gt;</code>), Failed (ssh's text). Typed-host refusal.</td></tr>
+    <tr><th><span class="cheap">Cheap to add</span></th><td>Sessions last time: <code>host_session_counts</code> is already in native-ui.json per host (<code>ssh:&lt;host&gt;</code> for SSH). Online / offline for a <em>saved</em> tailnet host: the same <code>tailscale status</code> scan already lists it, the picker just filters offline peers out.</td></tr>
+    <tr><th><span class="nope">Not known</span></th><td>Whether a non-current host's daemon is up; whether an SSH host is reachable without running Test; a "last seen" time (nothing records one). No lane draws these.</td></tr>
+  </table>
+</header>
+
+<main class="lanes">
+
+<!-- ======================= A ======================= -->
+<section>
+  <div class="lane-head">
+    <span class="letter">A</span><h2>Grouped list</h2>
+    <p>Three sections in one 440 px modal, every host in one two-line row shape; click a row to switch. One <em>Add host</em> button opens an inline form with a Tailnet | SSH switch.</p>
+    <p class="worst"><b>Worst case:</b> with the add form open the modal is about 600 px tall with just these four rows, the whole 601 px window, so from the first extra host the list scrolls while adding (with 15 hosts, about 6 rows show, about 2 while adding). Forget shows only on hover or keyboard focus.</p>
+  </div>
+
+  <div class="window">
+    <div class="modal">
+      <div class="m-head"><span class="title">Connections</span><span class="x"><svg width="14" height="14"><use href="#g-x"/></svg></span></div>
+      <div class="a-body">
+        <div class="sect"><span>This PC</span></div>
+        <div class="row current ring">
+          <span class="kind"><svg width="16" height="16"><use href="#g-pc"/></svg></span>
+          <div><div class="name">This PC</div><div class="sub">This PC's daemon <span class="sep">·</span> 7 sessions</div></div>
+          <div class="trail"><span class="dot ok"></span>Connected</div>
+        </div>
+
+        <div class="sect"><span>Saved hosts</span><span class="count">2</span></div>
+        <div class="row">
+          <span class="kind"><svg width="16" height="16"><use href="#g-net"/></svg></span>
+          <div><div class="name">box<span class="dom">.tail1234.ts.net</span></div><div class="sub">Tailnet <span class="sep">·</span> port <span class="mono">8787</span> <span class="sep">·</span> 3 sessions last time</div></div>
+          <div class="trail"><span class="tag warn">Not paired</span></div>
+        </div>
+        <div class="row hovered">
+          <span class="kind"><svg width="16" height="16"><use href="#g-ssh"/></svg></span>
+          <div><div class="name">me@buildbox</div><div class="sub">SSH <span class="sep">·</span> <span class="mono">rustling-tulipd bridge</span></div></div>
+          <div class="trail"><span class="btn compact danger">Forget</span></div>
+        </div>
+
+        <div class="sect"><span>On your tailnet</span><span class="count">1 online</span></div>
+        <div class="row">
+          <span class="kind"><svg width="16" height="16"><use href="#g-net"/></svg></span>
+          <div><div class="name">laptop<span class="dom">.tail1234.ts.net</span></div><div class="sub"><span class="dot ok" style="width:6px;height:6px"></span> Online <span class="sep">·</span> port <span class="mono">8787</span> <span class="sep">·</span> connecting saves it</div></div>
+          <div class="trail"></div>
+        </div>
+      </div>
+      <div class="m-foot ruled" style="margin-top:10px">
+        <span class="btn"><span class="plus">+</span> Add host</span>
+        <span class="btn">Close</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="caption"><b>Add host, SSH</b>, after a passing Test connection (78%)</div>
+  <div class="mini"><div class="zoom">
+    <div class="modal">
+      <div class="m-head"><span class="title">Connections</span><span class="x"><svg width="14" height="14"><use href="#g-x"/></svg></span></div>
+      <div class="a-body">
+        <div class="sect"><span>This PC</span></div>
+        <div class="row current">
+          <span class="kind"><svg width="16" height="16"><use href="#g-pc"/></svg></span>
+          <div><div class="name">This PC</div><div class="sub">This PC's daemon <span class="sep">·</span> 7 sessions</div></div>
+          <div class="trail"><span class="dot ok"></span>Connected</div>
+        </div>
+        <div class="sect"><span>Saved hosts</span><span class="count">2</span></div>
+        <div class="row">
+          <span class="kind"><svg width="16" height="16"><use href="#g-net"/></svg></span>
+          <div><div class="name">box<span class="dom">.tail1234.ts.net</span></div><div class="sub">Tailnet <span class="sep">·</span> port <span class="mono">8787</span> <span class="sep">·</span> 3 sessions last time</div></div>
+          <div class="trail"><span class="tag warn">Not paired</span></div>
+        </div>
+        <div class="row">
+          <span class="kind"><svg width="16" height="16"><use href="#g-ssh"/></svg></span>
+          <div><div class="name">me@buildbox</div><div class="sub">SSH <span class="sep">·</span> <span class="mono">rustling-tulipd bridge</span></div></div>
+          <div class="trail"></div>
+        </div>
+        <div class="sect"><span>On your tailnet</span><span class="count">1 online</span></div>
+        <div class="row">
+          <span class="kind"><svg width="16" height="16"><use href="#g-net"/></svg></span>
+          <div><div class="name">laptop<span class="dom">.tail1234.ts.net</span></div><div class="sub"><span class="dot ok" style="width:6px;height:6px"></span> Online <span class="sep">·</span> port <span class="mono">8787</span> <span class="sep">·</span> connecting saves it</div></div>
+          <div class="trail"></div>
+        </div>
+      </div>
+      <div class="a-form">
+        <div class="top"><span class="label">Add host</span><span class="seg"><span>Tailnet</span><span class="on">SSH</span></span></div>
+        <div class="frow"><span class="lbl">Host</span><span class="field">me@devbox</span></div>
+        <div class="frow"><span class="lbl">Remote command</span><span class="field"><span class="ph mono">rustling-tulipd bridge</span></span></div>
+        <div class="frow"><span></span><span class="result"><span class="check"><svg width="11" height="11"><use href="#g-check"/></svg></span>Connected: devbox</span></div>
+        <div class="btns"><span class="btn">Cancel</span><span class="btn ring">Test connection</span><span class="btn primary">Add and connect</span></div>
+      </div>
+      <div class="m-foot"><span></span><span class="btn">Close</span></div>
+    </div>
+  </div></div>
+
+  <dl class="notes">
+    <dt>State shown</dt>
+    <dd><span class="has">Has now:</span> current (row fill, focus ring on open) with its live state ("Connected"; also Connecting…, the Closed / Error reason, "Needs pairing" for NotApproved), Not paired, kind, port, remote command, Test connection result. The scan's wait or error sits in the "On your tailnet" header's count slot.</dd>
+    <dd><span class="cheap">Cheap:</span> "3 sessions last time" (<code class="mono">host_session_counts</code>); a saved tailnet host's online dot from the same scan (not drawn here).</dd>
+    <dt>Drops</dt>
+    <dd>None. Tailnet segment holds Name + Port + Connect; Cancel is today's Back; Tab ring stays row, Forget, … , Close.</dd>
+  </dl>
+</section>
+
+<!-- ======================= B ======================= -->
+<section>
+  <div class="lane-head">
+    <span class="letter">B</span><h2>Two-pane</h2>
+    <p>Settings' layout: a 200 px list of targets grouped as in A on the left, the selected host's detail and actions on the right. <em>+ New host</em> is the list's last item and fills the right pane with the form.</p>
+    <p class="worst"><b>Worst case:</b> every switch costs a second action (select, then Connect, or a double-click / Enter); the modal grows to 600 px wide, and long MagicDNS names get cut to their machine name in the 200 px list.</p>
+  </div>
+
+  <div class="window">
+    <div class="modal wide">
+      <div class="m-head"><span class="title">Connections</span><span class="x"><svg width="14" height="14"><use href="#g-x"/></svg></span></div>
+      <div class="b-body">
+        <div class="b-list">
+          <div class="grp">This PC</div>
+          <div class="b-item"><span class="kind small"><svg width="12" height="12"><use href="#g-pc"/></svg></span><span class="nm">This PC</span><span class="dot ok"></span></div>
+          <div class="grp">Saved</div>
+          <div class="b-item sel ring"><span class="kind small"><svg width="12" height="12"><use href="#g-net"/></svg></span><span class="nm">box</span><span class="dot ask"></span></div>
+          <div class="b-item"><span class="kind small"><svg width="12" height="12"><use href="#g-ssh"/></svg></span><span class="nm">me@buildbox</span><span></span></div>
+          <div class="grp">On your tailnet</div>
+          <div class="b-item"><span class="kind small"><svg width="12" height="12"><use href="#g-net"/></svg></span><span class="nm">laptop</span><span></span></div>
+          <div class="b-item new" style="margin-top:auto"><span class="ico" style="display:grid;place-items:center;color:var(--text2)"><svg width="14" height="14"><use href="#g-plus"/></svg></span><span class="nm">New host</span><span></span></div>
+        </div>
+        <div class="b-detail">
+          <div class="who">
+            <span class="kind big"><svg width="18" height="18"><use href="#g-net"/></svg></span>
+            <div><div class="nm">box<span class="dom">.tail1234.ts.net</span></div><div class="kd">Saved tailnet host</div></div>
+          </div>
+          <dl class="kv">
+            <dt>Address</dt><dd class="mono" style="font-size:11.5px">box.tail1234.ts.net</dd>
+            <dt>Port</dt><dd class="mono" style="font-size:11.5px">8787</dd>
+            <dt>Pairing</dt><dd><span class="tag warn">Not paired</span><span class="hint">This PC holds no device token for it. Connecting asks the host to approve this PC; you type the code from <span class="mono">rustling-tulipd pair</span>.</span></dd>
+            <dt>Sessions</dt><dd>3 the last time you were on it</dd>
+            <dt>Status</dt><dd style="color:var(--text2)">Not connected</dd>
+          </dl>
+          <div class="acts"><span class="btn primary">Connect</span><span class="spacer"></span><span class="btn danger">Forget</span></div>
+        </div>
+      </div>
+      <div class="m-foot"><span></span><span class="btn">Close</span></div>
+    </div>
+  </div>
+
+  <div class="caption"><b>New host, SSH</b>, after a passing Test connection (78%)</div>
+  <div class="mini"><div class="zoom">
+    <div class="modal wide">
+      <div class="m-head"><span class="title">Connections</span><span class="x"><svg width="14" height="14"><use href="#g-x"/></svg></span></div>
+      <div class="b-body">
+        <div class="b-list">
+          <div class="grp">This PC</div>
+          <div class="b-item"><span class="kind small"><svg width="12" height="12"><use href="#g-pc"/></svg></span><span class="nm">This PC</span><span class="dot ok"></span></div>
+          <div class="grp">Saved</div>
+          <div class="b-item"><span class="kind small"><svg width="12" height="12"><use href="#g-net"/></svg></span><span class="nm">box</span><span class="dot ask"></span></div>
+          <div class="b-item"><span class="kind small"><svg width="12" height="12"><use href="#g-ssh"/></svg></span><span class="nm">me@buildbox</span><span></span></div>
+          <div class="grp">On your tailnet</div>
+          <div class="b-item"><span class="kind small"><svg width="12" height="12"><use href="#g-net"/></svg></span><span class="nm">laptop</span><span></span></div>
+          <div class="b-item new sel" style="margin-top:auto"><span style="display:grid;place-items:center;color:var(--text)"><svg width="14" height="14"><use href="#g-plus"/></svg></span><span class="nm">New host</span><span></span></div>
+        </div>
+        <div class="b-detail">
+          <div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:14px;font-weight:600">New host</span><span class="seg"><span>Tailnet</span><span class="on">SSH</span></span></div>
+          <div class="b-form">
+            <span class="lbl">Host</span>
+            <span class="field">me@devbox</span>
+            <span class="help">An alias from your SSH config, or user@host.</span>
+            <span class="lbl">Remote command</span>
+            <span class="field"><span class="ph mono">rustling-tulipd bridge</span></span>
+          </div>
+          <span class="result"><span class="check"><svg width="11" height="11"><use href="#g-check"/></svg></span>Connected: devbox</span>
+          <div class="acts"><span class="btn ring">Test connection</span><span class="spacer"></span><span class="btn primary">Add and connect</span></div>
+        </div>
+      </div>
+      <div class="m-foot"><span></span><span class="btn">Close</span></div>
+    </div>
+  </div></div>
+
+  <dl class="notes">
+    <dt>State shown</dt>
+    <dd><span class="has">Has now:</span> current (green dot; the detail's Status reads the live <code class="mono">connection::State</code> for it, "Not connected" for every other host), Not paired (amber dot in the list, tag and explanation in the detail), kind, port, remote command, Test connection result.</dd>
+    <dd><span class="cheap">Cheap:</span> Sessions from <code class="mono">host_session_counts</code>. The brief's "last seen" is <em>not</em> drawn: nothing records it. Test connection on a <em>saved</em> SSH host's detail is a cheap addition (the <code class="mono">SshTester</code> seam takes any host).</dd>
+    <dt>Drops</dt>
+    <dd>None. Single-click switching becomes select + Connect (Enter or double-click on a list item connects directly). The scan's wait or error goes under "On your tailnet".</dd>
+  </dl>
+</section>
+
+<!-- ======================= C ======================= -->
+<section>
+  <div class="lane-head">
+    <span class="letter">C</span><h2>Command palette</h2>
+    <p>A filter field on top, flat one-line rows grouped by kind (Local, Tailnet, SSH) with keyboard hints, and the two add flows as the last rows; picking one turns the palette into that form.</p>
+    <p class="worst"><b>Worst case:</b> Forget lives behind the Del key on a highlighted row, so a mouse user may not find it; the add forms are a level deeper than in A (row, then form), and a typed filter that matches nothing leaves only the add rows.</p>
+  </div>
+
+  <div class="window">
+    <div class="modal">
+      <div class="c-top">
+        <span class="field ring"><span style="color:var(--text2);display:grid"><svg width="15" height="15"><use href="#g-search"/></svg></span><span class="caret"></span><span class="ph" style="flex:1">Switch to a host, or add one</span><span class="kbd">Esc</span></span>
+      </div>
+      <div class="c-list">
+        <div class="c-grp"><span>Local</span></div>
+        <div class="c-row">
+          <span class="ico"><svg width="15" height="15"><use href="#g-pc"/></svg></span><span>This PC</span><span class="meta">7 sessions</span>
+          <span class="end"><span class="dot ok"></span>Current</span>
+        </div>
+        <div class="c-grp"><span>Tailnet</span><span>1 online not saved</span></div>
+        <div class="c-row hl">
+          <span class="ico"><svg width="15" height="15"><use href="#g-net"/></svg></span><span>box<span class="dom">.tail1234.ts.net</span></span><span class="meta"><span class="mono">:8787</span><span class="tag warn" style="height:16px;font-size:10px">Not paired</span></span>
+          <span class="end"><span class="kbd">↵</span><span class="kbd">Del</span></span>
+        </div>
+        <div class="c-row">
+          <span class="ico"><svg width="15" height="15"><use href="#g-net"/></svg></span><span>laptop<span class="dom">.tail1234.ts.net</span></span><span class="meta"><span class="dot ok" style="width:6px;height:6px"></span>online, new</span>
+          <span class="end"></span>
+        </div>
+        <div class="c-grp"><span>SSH</span></div>
+        <div class="c-row">
+          <span class="ico"><svg width="15" height="15"><use href="#g-ssh"/></svg></span><span>me@buildbox</span><span class="meta"><span class="mono">rustling-tulipd bridge</span></span>
+          <span class="end"></span>
+        </div>
+        <div class="c-grp"><span>Add</span></div>
+        <div class="c-row add">
+          <span class="ico"><svg width="14" height="14"><use href="#g-plus"/></svg></span><span>Add a tailnet host…</span><span></span><span class="end"></span>
+        </div>
+        <div class="c-row add">
+          <span class="ico"><svg width="14" height="14"><use href="#g-plus"/></svg></span><span>Add an SSH host…</span><span></span><span class="end"></span>
+        </div>
+      </div>
+      <div class="c-foot"><span><span class="kbd">↑</span><span class="kbd">↓</span> move</span><span><span class="kbd">↵</span> connect</span><span><span class="kbd">Del</span> forget</span><span><span class="kbd">Esc</span> close</span></div>
+    </div>
+  </div>
+
+  <div class="caption"><b>Add an SSH host…</b>, after a passing Test connection (78%)</div>
+  <div class="mini"><div class="zoom">
+    <div class="modal">
+      <div class="c-top">
+        <span class="field"><span class="crumb">SSH host</span><span>me@devbox</span></span>
+      </div>
+      <div class="c-form">
+        <div class="frow"><span class="lbl">Remote command</span><span class="field"><span class="ph mono">rustling-tulipd bridge</span></span></div>
+        <div class="frow"><span></span><span class="result"><span class="check"><svg width="11" height="11"><use href="#g-check"/></svg></span>Connected: devbox</span></div>
+        <div class="btns"><span class="btn ring">Test connection</span><span class="btn primary">Add and connect</span></div>
+      </div>
+      <div class="c-foot"><span><span class="kbd">↵</span> test</span><span><span class="kbd">Ctrl ↵</span> add and connect</span><span><span class="kbd">Esc</span> back</span></div>
+    </div>
+  </div></div>
+
+  <dl class="notes">
+    <dt>State shown</dt>
+    <dd><span class="has">Has now:</span> current ("Current" + dot; the live <code class="mono">connection::State</code> text replaces "Current" while Connecting, Closed, or NotApproved as "Needs pairing"), Not paired, kind, port, remote command, Test connection result. The scan's wait or error sits in the Tailnet group's right slot.</dd>
+    <dd><span class="cheap">Cheap:</span> "7 sessions" for This PC is live; for remote rows the last-time count from <code class="mono">host_session_counts</code> could sit in the meta slot.</dd>
+    <dt>Drops</dt>
+    <dd>None. Close is Esc or the clickable Esc cap at the field's end; Add a tailnet host… opens Name + Port + Connect in the same place as the SSH form. The filter is new; the Tab ring becomes ↑ ↓ over rows.</dd>
+  </dl>
+</section>
+
+</main>
+</body>
+</html>
