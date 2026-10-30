@@ -158,7 +158,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   When the host refuses a request that has gone out (the net thread emits `NetEvent::PairRequestSent` after writing it; a blocked device is refused this way), the dialog ends on "{host} did not accept this PC's request." with Ask again and Close, instead of spinning.
 
-  Denied, expired, superseded, ended, a dropped connection, "Could not save this device's token; pair again." and the host's own reason end on a line with Ask again and Close; a failed redial after Ask again withdraws the request. Esc sends `PairCancel` while a request is out. The typed code never reaches a log. One token store (`RootDeps.tokens`, passed to `net::spawn` and `NetDeps::production`) is shared by the net thread and the view.
+  Denied, expired, superseded, ended, a dropped connection, "Could not save this device's token; pair again." and the host's own reason end on a line with Ask again and Close; a failed redial after Ask again withdraws the request. Esc sends `PairCancel` while a request is out. The typed code never reaches a log. One token store (`RootDeps.tokens`) is shared by the net thread and the view: the production `Transport` captures it for `NetDeps::production`.
 
   `native.log` records at info "device pairing: the dialog opens" (fields `host`, `had_token`), "… asking the host", "… sending the code", "… withdrawing the request" and "… paired; the dialog closes", and warns "device pairing: the token was lost with no dialog open".
 
@@ -791,7 +791,7 @@ Esc has deliberate exceptions. It never dismisses the layout chooser (the import
 
 Three tiers, all Rust tests:
 
-- **UI specs** (`apps/native/tests/ui/`, one binary with a module per spec file): in-process, headless GPUI through the `test-support` feature (`VisualTestContext`), never touching the user's mouse or keyboard. `RootView::with_transport` takes the `NetCommand` / `NetEvent` channel pair, so specs script a fake daemon (`tests/support/mod.rs`), inject `DaemonMessage`s and assert on the `ClientMessage`s sent, grid text, selection and clipboard.
+- **UI specs** (`apps/native/tests/ui/`, one binary with a module per spec file): in-process, headless GPUI through the `test-support` feature (`VisualTestContext`), never touching the user's mouse or keyboard. `RootView::with_transport` takes a `Transport` (`RootDeps.open_host`), a factory from a `Target` to the `NetCommand` / `NetEvent` channel pair that it calls once for the boot target, so specs hand it `support::fake_transport`, script a fake daemon (`tests/support/mod.rs`), inject `DaemonMessage`s and assert on the `ClientMessage`s sent, grid text, selection and clipboard.
 
   `ui_dir` and the clock are injected, so specs never write the real native-ui.json. The test platform shapes text as fixed 0.6 em glyphs, so specs assert on cells, never on font pixels. Specs that rely on focus events call `window.activate_window()` first.
 - **Live e2e** (`tests/e2e_live.rs`, `tests/e2e_recover.rs`, `.\rt.ps1 native-e2e`): the same harness against a real daemon whose config, binaries and worktrees dirs are all under `.tmp/`, set on the child with `Command::envs`, never process-wide. Specs create sessions through a clone of the client's `NetCommand` sender. A spec using a fake agent CLI (fake-claude for Claude) with no `node` on PATH fails, never skips.
@@ -806,7 +806,7 @@ Three tiers, all Rust tests:
   Pixels are read with `PrintWindow(PW_RENDERFULLCONTENT)` from the threaded show and probed for known UI colours and for a change in the pane after typing; the spec checks the window is still cloaked and not foreground after each capture.
 - **Screenshots** (`examples/shot.rs`, `.\rt.ps1 native-shot [<view>] [-Out <path>]`): not a test tier but the way to look at a change.
 
-  It opens the real window cloaked over `RootView::with_transport` and a fake daemon scripted in the example (four repos, a workspace, seven sessions in every status, a split tab, a diff tab), drives it to the view with the app's own keys (a posted click for the rail), waits for two equal captures (5 s at most), and writes `.tmp\shots\<view>.png` with the smoke tier's `PrintWindow` capture.
+  It opens the real window cloaked over `RootView::with_transport` and a fake daemon behind a `Transport` scripted in the example (four repos, a workspace, seven sessions in every status, a split tab, a diff tab), drives it to the view with the app's own keys (a posted click for the rail), waits for two equal captures (5 s at most), and writes `.tmp\shots\<view>.png` with the smoke tier's `PrintWindow` capture.
 
   No daemon starts and no config dir is read. The Working spinner animates on wall-clock time, so two shots differ inside that glyph and nowhere else.
 

@@ -27,6 +27,7 @@ use crate::pairing::{
 };
 use crate::session_menu::backdrop;
 use crate::settings_view::SettingsTab;
+use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 
 /// What the Confirm phase says approving does.
@@ -225,11 +226,11 @@ impl RootView {
     /// a tailnet host's list is not this client's to approve.
     /// A toast press held for a list that cannot come is dropped.
     pub(crate) fn ask_pending_devices(&mut self) {
-        let local = self.conn.target().is_local();
-        let can_pair = self.conn.supports(FEATURE_DEVICE_PAIRING);
+        let local = self.conn().target().is_local();
+        let can_pair = self.conn().supports(FEATURE_DEVICE_PAIRING);
         log_dropped_presses(&self.pairing.toast_actions.connected(local, can_pair));
         if local && can_pair {
-            self.send(ClientMessage::ListPendingDevices);
+            self.send_to(&HostKey::Local, ClientMessage::ListPendingDevices);
         }
     }
 
@@ -244,7 +245,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match msg {
-            DaemonMessage::PendingDevices { requests } if !self.conn.target().is_local() => {
+            DaemonMessage::PendingDevices { requests } if !self.conn().target().is_local() => {
                 tracing::debug!(
                     requests = requests.len(),
                     "pairing: a remote host's waiting list ignored"
@@ -276,7 +277,7 @@ impl RootView {
         fresh: &[String],
         cx: &mut Context<Self>,
     ) {
-        if !self.conn.target().is_local() {
+        if !self.conn().target().is_local() {
             return;
         }
         for request in requests.iter().filter(|r| fresh.contains(&r.request_id)) {
@@ -466,7 +467,7 @@ impl RootView {
         }
         self.pairing.approving = true;
         tracing::info!(request = request_id, "pairing: approving a device");
-        self.send(approve_message(request_id));
+        self.send_to(&HostKey::Local, approve_message(request_id));
         cx.notify();
     }
 
@@ -478,7 +479,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         tracing::info!(request = request_id, "pairing: denying a device");
-        self.send(deny_message(request_id));
+        self.send_to(&HostKey::Local, deny_message(request_id));
         if self
             .pairing_dialog()
             .is_some_and(|dialog| dialog.request_id == request_id)

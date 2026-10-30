@@ -44,6 +44,7 @@ use crate::sidebar::{Container, ContainerKind, can_attach};
 use crate::spawn_form::{Lock, Prefill, Target};
 use crate::spawn_view::SpawnEntry;
 use crate::tabs::{collect_panes, find_tab_containing_session};
+use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
@@ -1605,10 +1606,13 @@ impl RootView {
             return_to: None,
         });
         if let Some(target) = target {
-            self.send(ClientMessage::ListPresets {
-                target,
-                request_id: preset_request,
-            });
+            self.send_to(
+                &self.host_of_preset_target(&target),
+                ClientMessage::ListPresets {
+                    target,
+                    request_id: preset_request,
+                },
+            );
         }
         self.check_container_targets(window, cx);
         self.menu_focus.focus(window);
@@ -1958,7 +1962,7 @@ impl RootView {
             self.duplicates.request(session_id, request_id, target)
         };
         if let Some(request) = request {
-            self.send(request);
+            self.send_to(&self.host_of_session(session_id), request);
         }
         self.close_session_menu(window, cx);
     }
@@ -2068,7 +2072,10 @@ impl RootView {
                 }
             }
             SessionRow::BusyExcluded { excluded } => {
-                self.send(busy_exclusion_message(session_id, excluded));
+                self.send_to(
+                    &self.host_of_session(session_id),
+                    busy_exclusion_message(session_id, excluded),
+                );
                 self.close_session_menu(window, cx);
             }
         }
@@ -2128,7 +2135,7 @@ impl RootView {
             }
             Step::Send(messages) => {
                 for msg in messages {
-                    self.send(msg);
+                    self.send_to(&self.host_of_session(session_id), msg);
                 }
                 self.close_session_menu(window, cx);
             }
@@ -2141,7 +2148,7 @@ impl RootView {
                     DuplicateTarget::Restart
                 };
                 if let Some(request) = self.duplicates.request(session_id, request_id, target) {
-                    self.send(request);
+                    self.send_to(&self.host_of_session(session_id), request);
                     self.close_session_menu(window, cx);
                 }
             }
@@ -2177,7 +2184,10 @@ impl RootView {
             move |this, input, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => {
                     let text = input.read(cx).text().to_owned();
-                    this.send(rename_message(&session_id, &text));
+                    this.send_to(
+                        &this.host_of_session(&session_id),
+                        rename_message(&session_id, &text),
+                    );
                     this.close_session_menu(window, cx);
                 }
                 TextInputEvent::Cancel => this.set_menu_mode(MenuMode::Actions, window, cx),
@@ -2228,7 +2238,7 @@ impl RootView {
         }
         for msg in placed.messages {
             self.tabs.note_layout_request(&msg);
-            self.send(msg);
+            self.send_to(&HostKey::Local, msg);
         }
         if matches!(placed.focus, PlacedFocus::Pane { .. } | PlacedFocus::Tab(_)) {
             self.after_tabs_change(window, cx);
@@ -3208,7 +3218,10 @@ impl RootView {
             return;
         }
         let confirm = DeleteWorktreeConfirm::new(session_id, (self.now)());
-        self.send(confirm.request());
+        self.send_to(
+            &self.host_of_session(confirm.session_id()),
+            confirm.request(),
+        );
         self.delete_dialog = Some(DeleteDialog {
             confirm,
             owner,
@@ -3302,7 +3315,7 @@ impl RootView {
         let session = self.sidebar.session(dialog.confirm.session_id()).cloned();
         if let (Some(branch), Some(session)) = (button.branch(), session) {
             for msg in confirm_messages(&session, branch) {
-                self.send(msg);
+                self.send_to(&self.host_of_session(&session.id), msg);
             }
         }
         self.focus_active_pane(window, cx);

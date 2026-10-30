@@ -57,6 +57,7 @@ mod history;
 mod history_view;
 mod host_path_prompt;
 mod host_path_prompt_view;
+mod hosts;
 mod html_media;
 mod keys;
 pub mod launch_last;
@@ -195,6 +196,7 @@ use crate::fetch_dialog_view::FetchDialog;
 use crate::footer::{CountSpan, StopConfirm, flyout_rows, log_paths, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::host_path_prompt_view::HostPathDialog;
+use crate::hosts::{HostConn, Hosts};
 use crate::needs_you_view::moves_needs_you;
 use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
@@ -229,6 +231,7 @@ use crate::tabs::{
     PaneTarget, Placement, TabsModel, auto_grid_resends, find_tab_containing_session, is_auto_grid,
     tab_pills,
 };
+use crate::target::HostKey;
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
 use crate::ui_theme::{UiTheme, theme};
@@ -371,12 +374,16 @@ pub(crate) enum Pick {
     File(FileFilter),
 }
 
+/// Opens the connection to `target`'s host: the sender its commands go to
+/// and the receiver its events arrive on.
+pub type Transport =
+    Rc<dyn Fn(&target::Target) -> (UnboundedSender<NetCommand>, UnboundedReceiver<NetEvent>)>;
+
 /// What the root view talks to and where it keeps its files.
 pub struct RootDeps {
-    /// Commands for the network thread (or a spec's fake daemon).
-    pub tx: UnboundedSender<NetCommand>,
-    /// What the network thread (or a spec) reports.
-    pub events: UnboundedReceiver<NetEvent>,
+    /// Opens a connection to a host: the network thread (or a spec's fake
+    /// daemon) behind it.
+    pub open_host: Transport,
     /// Where `native-ui.json` is loaded from and saved to; `None` keeps the
     /// layout in memory only.
     pub ui_dir: Option<PathBuf>,
@@ -704,12 +711,12 @@ impl Drag {
               the source-control picker, a drag-ending Esc), not to one state an enum could hold"
 )]
 pub struct RootView {
-    tx: UnboundedSender<NetCommand>,
+    /// The open connections, one per host: each one's command sender, its
+    /// state machine as its network thread last reported it, and the
+    /// daemon's handshake.
+    hosts: Hosts,
     /// The terminals' clock.
     now: Clock,
-    /// The connection state machine as the network thread last reported it.
-    conn: Connection,
-    handshake: Option<HandshakeInfo>,
     /// Repos, workspaces and every session the daemon knows, plus the
     /// sidebar layout.
     sidebar: SidebarModel,
@@ -1136,21 +1143,16 @@ impl RootView {
                 None
             }
         };
-        let ui = ui_dir
-            .as_deref()
-            .map_or_else(UiState::default, load_ui_state);
-        let (out_tx, out_rx) = unbounded();
-        let (in_tx, in_rx) = unbounded();
         let tokens = net::device_token_store();
-        net::spawn(
-            connection_picker::resolve_boot_target(&ui),
-            Arc::clone(&tokens),
-            out_rx,
-            in_tx,
-        );
+        let net_tokens = Arc::clone(&tokens);
+        let open_host: Transport = Rc::new(move |target: &target::Target| {
+            let (out_tx, out_rx) = unbounded();
+            let (in_tx, in_rx) = unbounded();
+            net::spawn(target.clone(), Arc::clone(&net_tokens), out_rx, in_tx);
+            (out_tx, in_rx)
+        });
         let deps = RootDeps {
-            tx: out_tx,
-            events: in_rx,
+            open_host,
             ui_dir,
             paths: config_dir
                 .map(|dir| log_paths(&dir))
@@ -1193,7 +1195,7 @@ impl RootView {
     /// The daemon the connection is on, or is trying to reach.
     #[must_use]
     pub fn connection_target(&self) -> &target::Target {
-        self.conn.target()
+        self.conn().target()
     }
 
     /// Follows the window's activation and bounds. Ctrl stays down in the
@@ -1259,8 +1261,7 @@ impl RootView {
     )]
     pub fn with_transport(deps: RootDeps, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let RootDeps {
-            tx,
-            events,
+            open_host,
             ui_dir,
             paths,
             wanted,
@@ -1276,11 +1277,13 @@ impl RootView {
         } = deps;
         Self::watch_window(window, cx);
         Self::watch_close_request(window, cx);
-        Self::forward_net_events(events, window, cx);
-        let drag_escape = Self::intercept_drag_escape(window, cx);
         let ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
+        let boot_target = connection_picker::resolve_boot_target(&ui);
+        let (tx, events) = open_host(&boot_target);
+        Self::forward_net_events(HostKey::Local, events, window, cx);
+        let drag_escape = Self::intercept_drag_escape(window, cx);
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
         fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
         fonts::set_ui_text_size(ui.ui_text_size, cx);
@@ -1291,10 +1294,8 @@ impl RootView {
         ui_theme::set_theme(theme, cx);
         let chat = chat_view::ChatPanes::new(chat_view::WallClock::starting_at(now()));
         let mut view = Self {
-            tx,
+            hosts: Hosts::new(HostConn::new(tx, boot_target)),
             now,
-            conn: Connection::for_target(connection_picker::resolve_boot_target(&ui)),
-            handshake: None,
             tabs: TabsModel::new(ui.active_tab_id.clone()),
             sidebar: {
                 let mut sidebar = SidebarModel::new(ui);
@@ -1501,8 +1502,10 @@ impl RootView {
         });
     }
 
-    /// Handles every event `events` delivers, until the view is gone.
+    /// Handles every event `host`'s `events` delivers, until the view is
+    /// gone.
     fn forward_net_events(
+        host: HostKey,
         mut events: UnboundedReceiver<NetEvent>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1510,7 +1513,7 @@ impl RootView {
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this
-                    .update_in(cx, |view, window, cx| view.on_net(event, window, cx))
+                    .update_in(cx, |view, window, cx| view.on_net(&host, event, window, cx))
                     .is_err()
                 {
                     break;
@@ -2095,7 +2098,7 @@ impl RootView {
     /// Asks the daemon to scan each DIR or SH container's folder for a
     /// `.code-workspace` file, once per distinct folder on a connection.
     fn scan_unseen_cwd_paths(&mut self) {
-        if !self.conn.is_open() {
+        if !self.conn().is_open() {
             return;
         }
         for container in self.sidebar.containers() {
@@ -2110,7 +2113,10 @@ impl RootView {
                 continue;
             }
             self.cwd_workspace_scans.insert(key, None);
-            self.send(ClientMessage::ScanVscodeWorkspaces { path });
+            self.send_to(
+                &HostKey::Local,
+                ClientMessage::ScanVscodeWorkspaces { path },
+            );
         }
     }
 
@@ -2178,12 +2184,15 @@ impl RootView {
         }
         let request_id = new_request_id();
         self.tabs.arm_create(&request_id);
-        self.send(Placement::NewTab.message(id, Some(request_id)));
+        self.send_to(
+            &HostKey::Local,
+            Placement::NewTab.message(id, Some(request_id)),
+        );
     }
 
     /// What the client may do on the daemon it connects to now.
     fn capabilities(&self) -> Capabilities {
-        Capabilities::for_target(self.conn.target())
+        Capabilities::for_target(self.conn().target())
     }
 
     /// Asks this PC's `pick` picker, opening at `start`, and hands its
@@ -2460,7 +2469,7 @@ impl RootView {
     /// A remote host's tab list prunes nothing: the saved entries are the
     /// local daemon's.
     fn prune_tab_font_sizes(&mut self) {
-        if !self.tabs.is_loaded() || !self.conn.target().is_local() {
+        if !self.tabs.is_loaded() || !self.conn().target().is_local() {
             return;
         }
         let live: HashSet<&str> = self.tabs.tabs().iter().map(|tab| tab.id.as_str()).collect();
@@ -2475,7 +2484,7 @@ impl RootView {
     /// snapshot no longer lists, saving when any went. A remote host's list
     /// prunes nothing: the saved entries are the local daemon's.
     fn prune_source_control(&mut self, repos: &[RepoEntry]) {
-        if self.conn.target().is_local() && self.sidebar.prune_source_control(repos) {
+        if self.conn().target().is_local() && self.sidebar.prune_source_control(repos) {
             self.save_ui();
         }
     }
@@ -2657,10 +2666,13 @@ impl RootView {
     pub fn auto_grid_resends_at(&mut self, aspect: f32) -> usize {
         let resends = auto_grid_resends(self.tabs.tabs(), aspect);
         for (tab_id, layout) in &resends {
-            self.send(ClientMessage::RearrangeTab {
-                tab_id: tab_id.clone(),
-                layout: *layout,
-            });
+            self.send_to(
+                &HostKey::Local,
+                ClientMessage::RearrangeTab {
+                    tab_id: tab_id.clone(),
+                    layout: *layout,
+                },
+            );
         }
         resends.len()
     }
@@ -2810,10 +2822,13 @@ impl RootView {
         if let Some(target) = launch_last::suggestion_target(&config) {
             let (generation, request_id) =
                 self.launch_last.begin(config, placement, target.clone());
-            self.send(ClientMessage::SuggestBranchName {
-                target,
-                request_id: Some(request_id),
-            });
+            self.send_to(
+                &self.host_of_suggest_target(&target),
+                ClientMessage::SuggestBranchName {
+                    target,
+                    request_id: Some(request_id),
+                },
+            );
             Self::arm_launch_last_timeout(generation, cx);
             return;
         }
@@ -2960,7 +2975,7 @@ impl RootView {
         };
         let msg = placement.message(&session.id, request_id);
         self.tabs.note_layout_request(&msg);
-        self.send(msg);
+        self.send_to(&HostKey::Local, msg);
     }
 
     /// Focuses the command line's session once, when the layout and the
@@ -3120,7 +3135,7 @@ impl RootView {
         self.sync_dashboard_repaint(cx);
         // The saved active tab is the local daemon's; a remote host's tab
         // ids are neither remembered nor saved.
-        if self.conn.target().is_local() && self.sidebar.set_active_tab(self.tabs.active_id()) {
+        if self.conn().target().is_local() && self.sidebar.set_active_tab(self.tabs.active_id()) {
             self.save_ui();
         }
         if self
@@ -3330,11 +3345,14 @@ impl RootView {
                 split_path,
                 ratio: Some(ratio),
                 ..
-            }) => self.send(ClientMessage::SetPaneRatio {
-                tab_id,
-                split_path,
-                ratio,
-            }),
+            }) => self.send_to(
+                &HostKey::Local,
+                ClientMessage::SetPaneRatio {
+                    tab_id,
+                    split_path,
+                    ratio,
+                },
+            ),
             Some(Drag::Divider { ratio: None, .. }) | None => {}
         }
     }
@@ -3426,16 +3444,6 @@ impl RootView {
         }
     }
 
-    fn command(&self, command: NetCommand) {
-        // Fails only once the network thread has exited, which it does only
-        // after this view drops its sender.
-        let _ = self.tx.unbounded_send(command);
-    }
-
-    fn send(&self, msg: ClientMessage) {
-        self.command(NetCommand::Send(Box::new(msg)));
-    }
-
     fn toggle_flyout(&mut self) {
         if self.flyout_open {
             self.close_flyout();
@@ -3454,8 +3462,8 @@ impl RootView {
     /// the new one.
     fn restart(&mut self) {
         self.pair_on_not_approved();
-        self.command(NetCommand::Restart);
-        self.handshake = None;
+        self.command_to(&HostKey::Local, NetCommand::Restart);
+        self.clear_handshake(&HostKey::Local);
         self.close_flyout();
     }
 
@@ -3465,13 +3473,19 @@ impl RootView {
             return;
         }
         if self.stop.click() {
-            self.command(NetCommand::Stop);
-            self.handshake = None;
+            self.command_to(&HostKey::Local, NetCommand::Stop);
+            self.clear_handshake(&HostKey::Local);
             self.close_flyout();
         }
     }
 
-    fn on_net(&mut self, event: NetEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_net(
+        &mut self,
+        host: &HostKey,
+        event: NetEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Only the connection and the session list move the exit dialog's
         // wait, walk and focus.
         let exit_relevant = match &event {
@@ -3496,7 +3510,7 @@ impl RootView {
                 // Everything the old target's daemon sent goes before the
                 // new target's state does, so the notices the rest of this
                 // arm raises survive it.
-                if conn.target() != self.conn.target() {
+                if conn.target() != self.conn().target() {
                     self.reset_for_target(conn.target(), window, cx);
                 }
                 if !conn.is_open() {
@@ -3507,22 +3521,22 @@ impl RootView {
                     self.launch_last.clear();
                 }
                 // The handshake is the old target's daemon's.
-                if conn.target() != self.conn.target() {
-                    self.handshake = None;
+                if conn.target() != self.conn().target() {
+                    self.clear_handshake(host);
                 }
                 // A fetch streams over the connection it was asked on, and
                 // the remote access status is that connection's daemon's.
-                if !conn.is_open() || conn.target() != self.conn.target() {
+                if !conn.is_open() || conn.target() != self.conn().target() {
                     self.end_fetches_on_disconnect(window, cx);
                     self.set_remote_status(None, cx);
                 }
-                self.conn = conn;
+                self.set_conn(host, conn);
                 self.follow_settings_target();
             }
-            NetEvent::Handshake(info) => self.handshake = Some(info),
+            NetEvent::Handshake(info) => self.set_handshake(host, info),
             NetEvent::Message(msg) => {
                 let reseed = moves_source_control_inputs(&msg);
-                self.on_message(*msg, window, cx);
+                self.on_message(host, *msg, window, cx);
                 let dropped_picker = self.drop_stale_sc_picker();
                 let dropped_changes = reseed && self.seed_source_control(window, cx);
                 if dropped_picker || dropped_changes {
@@ -3538,7 +3552,7 @@ impl RootView {
         }
         // The overlay covers the footer; a flyout left open under it would
         // reappear (possibly armed) when the overlay goes.
-        if self.conn.overlay().is_some() {
+        if self.conn().overlay().is_some() {
             self.close_flyout();
             self.close_spawn_dialog(window, cx);
             self.close_shell_dialog(window, cx);
@@ -3640,14 +3654,20 @@ impl RootView {
         }
     }
 
-    fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_message(
+        &mut self,
+        host: &HostKey,
+        msg: DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.
         let (moved, exit_discard, finished) = self.before_fold(&msg);
         self.fold_sidebar(&msg, cx);
         self.on_import_message(&msg, window, cx);
         if let Some(discard) = exit_discard {
-            self.send(discard);
+            self.send_to(host, discard);
         }
         // Windows deactivates a window it minimizes, so a minimized window
         // counts as not focused.
@@ -3671,6 +3691,18 @@ impl RootView {
         if self.on_notice_message(&msg, cx) {
             return;
         }
+        self.dispatch_message(msg, moved, window, cx);
+    }
+
+    /// Hands a daemon message the folds before it did not take to its
+    /// handler; `moved` is whether a session update moved the session.
+    fn dispatch_message(
+        &mut self,
+        msg: DaemonMessage,
+        moved: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match msg {
             DaemonMessage::Welcome { .. } => self.on_welcome(window, cx),
             DaemonMessage::Error {
@@ -3831,7 +3863,7 @@ impl RootView {
             .map(branch_fate::close_after_agent_exit)
             .unwrap_or_default();
         for msg in messages {
-            self.send(msg);
+            self.send_to(&self.host_of_session(session_id), msg);
         }
     }
 
@@ -4479,11 +4511,14 @@ impl RootView {
         let request_id = new_request_id();
         self.pending_appearance
             .push(session_id, request_id.clone(), change.clone());
-        self.send(ClientMessage::SetSessionAppearance {
-            session_id: session_id.to_owned(),
-            appearance,
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &self.host_of_session(session_id),
+            ClientMessage::SetSessionAppearance {
+                session_id: session_id.to_owned(),
+                appearance,
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// Whether `request_id` answers an appearance send, which the daemon
@@ -4651,13 +4686,13 @@ impl Render for RootView {
         if !cx.has_active_drag() {
             self.clear_drag_state();
         }
-        let footer = self.conn.footer(self.sidebar.sessions().len());
+        let footer = self.conn().footer(self.sidebar.sessions().len());
         let flyout = self
             .flyout_open
             .then(|| [flyout_backdrop(cx).into_any_element(), self.flyout(cx)]);
-        let restart_label = self.conn.restart_label();
+        let restart_label = self.conn().restart_label();
         let overlay = self
-            .conn
+            .conn()
             .overlay_text()
             .map(|text| connecting_overlay(text, restart_label, footer.dot, cx));
         // The quit's walk draws its confirm above the exit dialog.
@@ -4854,11 +4889,7 @@ impl RootView {
     fn flyout(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let manages_daemon = self.capabilities().manages_daemon();
-        let rows = flyout_rows(
-            &self.conn,
-            self.handshake.as_ref(),
-            self.sidebar.sessions().len(),
-        );
+        let rows = flyout_rows(self.conn(), self.handshake(), self.sidebar.sessions().len());
         let labels: Vec<&'static str> = rows.iter().map(|(label, _)| *label).collect();
         let details = div()
             .debug_selector(move || format!("flyout-details={}", labels.join("|")))
@@ -4970,7 +5001,7 @@ impl RootView {
             .child(
                 action_button(
                     "restart-daemon",
-                    self.conn.restart_label(),
+                    self.conn().restart_label(),
                     t.text,
                     true,
                     &t,

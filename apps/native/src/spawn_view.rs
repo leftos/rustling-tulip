@@ -526,7 +526,7 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.stash.drop.is_some()
             || self.notices.has_modal()
-            || self.conn.overlay().is_some()
+            || self.conn().overlay().is_some()
         {
             return Some("another dialog is open");
         }
@@ -922,7 +922,7 @@ impl RootView {
 
     fn send_all(&self, messages: Vec<protocol::ClientMessage>) {
         for msg in messages {
-            self.send(msg);
+            self.send_to(&self.host_of_request(&msg), msg);
         }
     }
 
@@ -973,7 +973,7 @@ impl RootView {
             }
             Outcome::Spawn(submission) => {
                 if let Some(msg) = submission.default_change {
-                    self.send(msg);
+                    self.send_to(&self.host_of_request(&msg), msg);
                 }
                 let aim = match &mut self.spawn_dialog {
                     Some(SpawnModal::Form(dialog)) => dialog.aim.take(),
@@ -1063,7 +1063,7 @@ impl RootView {
             _ => None,
         };
         if let Some(msg) = msg {
-            self.send(msg);
+            self.send_to(&self.host_of_request(&msg), msg);
         }
         cx.notify();
     }
@@ -1404,7 +1404,7 @@ impl RootView {
             .child(
                 tagged_text(
                     "spawn-no-repos-note",
-                    spawn_no_repos_note(self.conn.target()),
+                    spawn_no_repos_note(self.conn().target()),
                 )
                 .text_color(gpui::rgb(t.text_2)),
             )

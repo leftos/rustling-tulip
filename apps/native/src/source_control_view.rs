@@ -375,11 +375,14 @@ impl RootView {
     /// failure comes back to its section.
     fn request_sc_status(&mut self, key: ScKey) {
         let request_id = self.sc.request(key.clone());
-        self.send(ClientMessage::RepoStatus {
-            repo_id: key.repo_id,
-            worktree_path: key.worktree,
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &self.host_of_repo(&key.repo_id),
+            ClientMessage::RepoStatus {
+                repo_id: key.repo_id,
+                worktree_path: key.worktree,
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// Opens the picker's menu, closing any other menu, unless a dialog or
@@ -395,7 +398,7 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.stash.drop.is_some()
             || self.notices.has_modal()
-            || self.conn.overlay().is_some();
+            || self.conn().overlay().is_some();
         if blocked {
             return;
         }

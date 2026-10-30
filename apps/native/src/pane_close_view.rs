@@ -11,6 +11,7 @@ use crate::notice_view::modal_panel;
 use crate::overlay_owner::Overlay;
 use crate::pane_close::{Control, NOTE, PaneClose, TITLE};
 use crate::session_menu::{ConfirmOwner, backdrop, dialog_button, dialog_look};
+use crate::target::HostKey;
 use crate::ui_theme::theme;
 
 impl RootView {
@@ -63,11 +64,14 @@ impl RootView {
             let request_id = crate::new_request_id();
             self.tabs
                 .mark_closing_if_last_pane(tab_id, Some(&request_id));
-            self.send(ClientMessage::ClosePane {
-                tab_id: tab_id.to_owned(),
-                pane_id: pane_id.to_owned(),
-                request_id: Some(request_id),
-            });
+            self.send_to(
+                &HostKey::Local,
+                ClientMessage::ClosePane {
+                    tab_id: tab_id.to_owned(),
+                    pane_id: pane_id.to_owned(),
+                    request_id: Some(request_id),
+                },
+            );
             return;
         };
         let label = self.session_label(&session.id);
@@ -125,7 +129,7 @@ impl RootView {
                 let request_id = crate::new_request_id();
                 self.tabs
                     .mark_closing_if_last_pane(dialog.tab_id(), Some(&request_id));
-                self.send(dialog.close_pane_message(&request_id));
+                self.send_to(&HostKey::Local, dialog.close_pane_message(&request_id));
             }
             Control::Discard => {
                 tracing::info!(
@@ -136,8 +140,16 @@ impl RootView {
                 let request_id = crate::new_request_id();
                 self.tabs
                     .mark_closing_if_last_pane(dialog.tab_id(), Some(&request_id));
+                // The pane's close is the layout's, on Local; the session's
+                // discard goes to the session's host.
+                let session_host = self.host_of_session(dialog.session_id());
                 for msg in dialog.discard_keep_messages(&request_id) {
-                    self.send(msg);
+                    let host = if matches!(msg, ClientMessage::ClosePane { .. }) {
+                        HostKey::Local
+                    } else {
+                        session_host.clone()
+                    };
+                    self.send_to(&host, msg);
                 }
             }
             Control::Delete => {

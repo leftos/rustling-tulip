@@ -145,12 +145,15 @@ impl RootView {
             });
         };
         tracing::info!(%id, %host, rel = %rel_path, popup, "fetching a file");
-        self.send(ClientMessage::FetchFile {
-            id: id.clone(),
-            repo_id,
-            worktree_path,
-            path: rel_path,
-        });
+        self.send_to(
+            &self.host_of_repo(&repo_id),
+            ClientMessage::FetchFile {
+                id: id.clone(),
+                repo_id,
+                worktree_path,
+                path: rel_path,
+            },
+        );
         if !popup {
             self.push_toast_spec(
                 ToastSpec {
@@ -178,7 +181,7 @@ impl RootView {
     /// download folder.
     fn fetch_target(&self, request: &FetchRequest) -> Result<(String, PathBuf), Refusal> {
         let name = file_fetch::file_name(&request.rel_path);
-        let Some(host) = file_fetch::host_folder(self.conn.target()) else {
+        let Some(host) = file_fetch::host_folder(self.conn().target()) else {
             tracing::warn!(rel = %request.rel_path, "refusing a file fetch from the local daemon");
             return Err(Refusal {
                 kind: ToastKind::Warning,
@@ -229,12 +232,15 @@ impl RootView {
             return;
         };
         tracing::info!(%id, page = page_id, rel = %rel_path, "fetching a page's media file");
-        self.send(ClientMessage::FetchFile {
-            id,
-            repo_id,
-            worktree_path,
-            path: rel_path,
-        });
+        self.send_to(
+            &self.host_of_repo(&repo_id),
+            ClientMessage::FetchFile {
+                id,
+                repo_id,
+                worktree_path,
+                path: rel_path,
+            },
+        );
     }
 
     /// Starts the page `page_id`'s next media fetches; opens the page once
@@ -452,7 +458,10 @@ impl RootView {
         };
         tracing::info!(id, rel = %entry.request().rel_path, "cancelled a file fetch");
         abort_writer(id, &entry);
-        self.send(ClientMessage::CancelFetch { id: id.to_owned() });
+        self.send_to(
+            &self.host_of_repo(&entry.request().repo_id),
+            ClientMessage::CancelFetch { id: id.to_owned() },
+        );
         true
     }
 
@@ -685,7 +694,10 @@ impl RootView {
         tracing::warn!(id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");
         abort_writer(id, &entry);
         if cancel {
-            self.send(ClientMessage::CancelFetch { id: id.to_owned() });
+            self.send_to(
+                &self.host_of_repo(&entry.request().repo_id),
+                ClientMessage::CancelFetch { id: id.to_owned() },
+            );
         }
         if let Some(page_id) = entry.parent() {
             self.fetches.child_ended(page_id, MediaEnd::Failed);

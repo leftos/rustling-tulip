@@ -19,6 +19,7 @@ use crate::device_pairing::{DeviceButton, DevicePairing};
 use crate::net::{NetCommand, NetEvent};
 use crate::notice_view::modal_panel;
 use crate::session_menu::backdrop;
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 
@@ -205,18 +206,18 @@ impl RootView {
     /// Whether the connection is a pairing one, so the footer pill opens
     /// the dialog instead of the flyout.
     pub(crate) fn device_pairing_offered(&self) -> bool {
-        matches!(self.conn.state(), State::NotApproved { .. })
+        matches!(self.conn().state(), State::NotApproved { .. })
     }
 
     /// Opens the dialog for the connection's host in its Intro phase,
     /// replacing one already open; sends nothing.
     pub(crate) fn open_device_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let State::NotApproved { had_token, .. } = self.conn.state() else {
+        let State::NotApproved { had_token, .. } = self.conn().state() else {
             return;
         };
         let had_token = *had_token;
         let Some(host) = self
-            .conn
+            .conn()
             .target()
             .tailnet_host()
             .map(|h| h.name().to_owned())
@@ -261,7 +262,7 @@ impl RootView {
         };
         if dialog.model.cancels_request() {
             tracing::info!("device pairing: withdrawing the request");
-            self.command(NetCommand::PairCancel);
+            self.command_to(&HostKey::Local, NetCommand::PairCancel);
         }
         self.close_device_pairing(window, cx);
     }
@@ -275,7 +276,7 @@ impl RootView {
             dialog.control = None;
             clear_code_field(dialog, cx);
             tracing::info!("device pairing: asking the host");
-            self.command(NetCommand::PairRequest);
+            self.command_to(&HostKey::Local, NetCommand::PairRequest);
             self.apply_device_pairing_focus(window, cx);
         }
         self.sync_device_pairing(window, cx);
@@ -293,7 +294,7 @@ impl RootView {
         clear_code_field(dialog, cx);
         dialog.control = Some(DeviceControl::Field);
         tracing::info!("device pairing: sending the code");
-        self.command(NetCommand::PairRedeem { code });
+        self.command_to(&HostKey::Local, NetCommand::PairRedeem { code });
         self.apply_device_pairing_focus(window, cx);
     }
 
@@ -399,7 +400,7 @@ impl RootView {
     /// redial asks with no dialog to finish it. While the host is still
     /// being dialled the dialog stays as it is.
     fn follow_connection_for_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.conn.state() {
+        match self.conn().state() {
             State::NotApproved { .. } => {
                 if std::mem::take(&mut self.device_pairing.pair_on_not_approved) {
                     self.open_device_pairing(window, cx);

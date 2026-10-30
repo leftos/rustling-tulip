@@ -50,7 +50,7 @@ impl RootView {
             if self.repo_remove.armed() == Some(key.as_str()) {
                 self.repo_remove.disarm();
                 if let Some(msg) = remove_message(level) {
-                    self.send(msg);
+                    self.send_to(&self.host_of_container(&key), msg);
                 }
                 self.close_container_menu(window, cx);
                 cx.notify();
@@ -110,11 +110,14 @@ impl RootView {
         };
         if button == RepoRemoveButton::StopAndRemove {
             for session in dialog.sessions() {
-                self.send(stop_message(&session.id));
+                self.send_to(
+                    &self.host_of_session(&session.id),
+                    stop_message(&session.id),
+                );
             }
         }
         if let Some(msg) = remove_message(dialog.level()) {
-            self.send(msg);
+            self.send_to(&self.host_of_container(&container_key(dialog.level())), msg);
         }
         cx.notify();
     }

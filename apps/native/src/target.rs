@@ -266,15 +266,15 @@ impl Target {
         }
     }
 
-    /// The key a remote host's last session count is recorded under: a
-    /// tailnet host's `MagicDNS` name, an SSH host's string after `ssh:` so
-    /// the two never share a key; `None` for the local daemon.
+    /// The host's stable key: a tailnet host's `MagicDNS` name, an SSH
+    /// host's string after `ssh:` so the two never share a key; `None` for
+    /// the local daemon. A remote host's last session count is recorded
+    /// under it.
     #[must_use]
-    pub fn session_count_key(&self) -> Option<String> {
-        match self {
-            Self::Local => None,
-            Self::Tailnet(host) => Some(host.name().to_owned()),
-            Self::Ssh(host) => Some(format!("ssh:{}", host.name())),
+    pub fn host_key(&self) -> Option<String> {
+        match HostKey::of(self) {
+            HostKey::Local => None,
+            HostKey::Remote(key) => Some(key),
         }
     }
 
@@ -298,6 +298,70 @@ impl Target {
             Self::Tailnet(host) => Some(host.address()),
             Self::Ssh(host) => Some(host.name().to_owned()),
         }
+    }
+}
+
+/// Which host a connection, a message or a session belongs to: this PC's
+/// daemon, or a remote host by its [`Target::host_key`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HostKey {
+    Local,
+    Remote(String),
+}
+
+impl HostKey {
+    /// The key of `target`'s host.
+    #[must_use]
+    pub fn of(target: &Target) -> Self {
+        match target {
+            Target::Local => Self::Local,
+            Target::Tailnet(host) => Self::Remote(host.name().to_owned()),
+            Target::Ssh(host) => Self::Remote(format!("ssh:{}", host.name())),
+        }
+    }
+
+    /// The key as the wire's `host` value; `None` for this PC.
+    #[must_use]
+    pub fn wire(&self) -> Option<&str> {
+        match self {
+            Self::Local => None,
+            Self::Remote(key) => Some(key),
+        }
+    }
+}
+
+#[cfg(test)]
+mod host_key_tests {
+    use super::{HostKey, Target};
+
+    #[test]
+    fn host_key_of_local_is_local() {
+        assert_eq!(HostKey::of(&Target::Local), HostKey::Local);
+        assert_eq!(Target::Local.host_key(), None);
+    }
+
+    #[test]
+    fn host_key_of_a_tailnet_target_is_its_name() {
+        let target = Target::tailnet("box.tail1234.ts.net", Some(9443));
+        assert_eq!(
+            HostKey::of(&target),
+            HostKey::Remote("box.tail1234.ts.net".to_owned())
+        );
+        assert_eq!(target.host_key().as_deref(), Some("box.tail1234.ts.net"));
+        assert_eq!(HostKey::of(&target).wire(), Some("box.tail1234.ts.net"));
+    }
+
+    #[test]
+    fn host_key_of_an_ssh_target_is_prefixed() {
+        let target = Target::parse_ssh("me@devbox", None).ok();
+        let key = target.as_ref().map(HostKey::of);
+        assert_eq!(key, Some(HostKey::Remote("ssh:me@devbox".to_owned())));
+        assert_eq!(key.as_ref().and_then(HostKey::wire), Some("ssh:me@devbox"));
+    }
+
+    #[test]
+    fn wire_is_none_for_local() {
+        assert_eq!(HostKey::Local.wire(), None);
     }
 }
 
@@ -572,10 +636,7 @@ mod tests {
             panic!("a remote command was refused");
         };
         assert_eq!(target.short_name(), Some("box"));
-        assert_eq!(
-            target.session_count_key().as_deref(),
-            Some("ssh:me@box:2222")
-        );
+        assert_eq!(target.host_key().as_deref(), Some("ssh:me@box:2222"));
         assert_eq!(
             target.ssh_host().and_then(SshHost::remote_command),
             Some("C:\\rt\\rustling-tulipd.exe bridge")

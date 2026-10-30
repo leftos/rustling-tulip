@@ -26,6 +26,7 @@ use crate::open::OpenJob;
 use crate::open_view::{Origin, Route, Then};
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::{self, Highlighted, TokenClass};
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_find::{self, Match, Segment, Tint};
@@ -327,10 +328,13 @@ impl RootView {
             }
         };
         let id = self.viewer_opens.open_id(line);
-        self.send(ClientMessage::OpenViewerTab {
-            id,
-            path: normalised,
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::OpenViewerTab {
+                id,
+                path: normalised,
+            },
+        );
     }
 
     /// Gives every viewer tab its state, deriving where its file comes from,

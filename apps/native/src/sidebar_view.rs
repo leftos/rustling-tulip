@@ -35,6 +35,7 @@ use crate::sidebar::{
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
+use crate::target::HostKey;
 use crate::target::Target;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{Drag, RootView, UI_TEXT_SIZE, drag_handle, tagged_text, tooltip};
@@ -143,7 +144,11 @@ impl RootView {
         let filter_empty = self.sidebar.active_filter_empty(&containers);
         let body = body
             .when(no_repos, |body| {
-                body.child(no_repos_note(self.add_repo_gate(), self.conn.target(), cx))
+                body.child(no_repos_note(
+                    self.add_repo_gate(),
+                    self.conn().target(),
+                    cx,
+                ))
             })
             .when(filter_empty, |body| {
                 body.child(body_note(Some("sidebar-filter-empty"), NO_ACTIVE_REPOS, &t))
@@ -293,7 +298,7 @@ impl RootView {
                     menu_item(MORE_RESUME_ALL_ROW, label, false, &theme(cx)).on_click(cx.listener(
                         |this, _: &ClickEvent, window, cx| {
                             this.close_more_menu(window, cx);
-                            this.send(ClientMessage::ResumeAllAbandoned);
+                            this.send_to(&HostKey::Local, ClientMessage::ResumeAllAbandoned);
                         },
                     ))
                 });
@@ -465,14 +470,14 @@ impl RootView {
             self.save_ui();
         }
         tracing::info!("adding repo {} as {}", add.path, add.name);
-        self.send(add.message());
+        self.send_to(&HostKey::Local, add.message());
     }
 
     /// Add repo for a DIR or SH container's folder: the folder is registered
     /// straight away, with no picker and no change to the next pick's folder.
     pub(crate) fn add_repo_at(&mut self, path: String, _cx: &mut Context<Self>) {
         tracing::info!("adding repo {path}");
-        self.send(ClientMessage::AddRepo { path, name: None });
+        self.send_to(&HostKey::Local, ClientMessage::AddRepo { path, name: None });
     }
 
     /// Add workspace for a DIR or SH container's folder: accepts the
@@ -481,10 +486,13 @@ impl RootView {
         let Some(suggestion) = self.cwd_workspace_suggestion(path).cloned() else {
             return;
         };
-        self.send(ClientMessage::AcceptVscodeWorkspaceSuggestion {
-            suggestion,
-            watch: false,
-        });
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::AcceptVscodeWorkspaceSuggestion {
+                suggestion,
+                watch: false,
+            },
+        );
     }
 
     /// The layer under the open ⋯ menu that keeps a click outside it from
@@ -1102,7 +1110,10 @@ impl RootView {
             }
             Some(ClientMessage::ReorderContainers { ordered }) => {
                 self.sidebar.reorder_containers_local(&ordered);
-                self.send(ClientMessage::ReorderContainers { ordered });
+                self.send_to(
+                    &HostKey::Local,
+                    ClientMessage::ReorderContainers { ordered },
+                );
             }
             Some(ClientMessage::ReorderSessions {
                 container_id,
@@ -1110,10 +1121,13 @@ impl RootView {
             }) => {
                 self.sidebar
                     .reorder_sessions_local(&container_id, &ordered_ids);
-                self.send(ClientMessage::ReorderSessions {
-                    container_id,
-                    ordered_ids,
-                });
+                self.send_to(
+                    &self.host_of_container(&container_id),
+                    ClientMessage::ReorderSessions {
+                        container_id,
+                        ordered_ids,
+                    },
+                );
             }
             _ => {}
         }
@@ -2342,10 +2356,13 @@ impl RootView {
     fn click_detached_stop_all(&mut self, live: &[String], cx: &mut Context<Self>) {
         if self.detached_stop_all.click() {
             for session_id in live {
-                self.send(ClientMessage::StopSession {
-                    session_id: session_id.clone(),
-                    cleanup: Vec::new(),
-                });
+                self.send_to(
+                    &self.host_of_session(session_id),
+                    ClientMessage::StopSession {
+                        session_id: session_id.clone(),
+                        cleanup: Vec::new(),
+                    },
+                );
             }
         }
         cx.notify();

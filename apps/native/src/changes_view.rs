@@ -596,7 +596,7 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.stash.drop.is_some()
             || self.notices.has_modal()
-            || self.conn.overlay().is_some()
+            || self.conn().overlay().is_some()
     }
 
     /// Runs `action` on `paths` of the tree `key`: a stage or unstage is
@@ -617,19 +617,25 @@ impl RootView {
         let worktree_path = key.worktree.clone();
         match action {
             ScAction::Stage | ScAction::StageAll => {
-                self.send(ClientMessage::StageFiles {
-                    repo_id,
-                    paths,
-                    worktree_path,
-                });
+                self.send_to(
+                    &self.host_of_repo(&repo_id),
+                    ClientMessage::StageFiles {
+                        repo_id,
+                        paths,
+                        worktree_path,
+                    },
+                );
                 self.changes.writes.start(key.clone(), WriteOp::Stage);
             }
             ScAction::Unstage | ScAction::UnstageAll => {
-                self.send(ClientMessage::UnstageFiles {
-                    repo_id,
-                    paths,
-                    worktree_path,
-                });
+                self.send_to(
+                    &self.host_of_repo(&repo_id),
+                    ClientMessage::UnstageFiles {
+                        repo_id,
+                        paths,
+                        worktree_path,
+                    },
+                );
                 self.changes.writes.start(key.clone(), WriteOp::Unstage);
             }
             ScAction::Discard | ScAction::DiscardAll => {
@@ -797,11 +803,14 @@ impl RootView {
         };
         if button == DiscardButton::Discard {
             let key = confirm.tree().clone();
-            self.send(ClientMessage::DiscardChanges {
-                repo_id: key.repo_id.clone(),
-                paths: confirm.paths().to_vec(),
-                worktree_path: key.worktree.clone(),
-            });
+            self.send_to(
+                &self.host_of_repo(&key.repo_id),
+                ClientMessage::DiscardChanges {
+                    repo_id: key.repo_id.clone(),
+                    paths: confirm.paths().to_vec(),
+                    worktree_path: key.worktree.clone(),
+                },
+            );
             self.changes.writes.start(key, WriteOp::Discard);
         }
         self.after_notice_closed(window, cx);
@@ -1143,11 +1152,14 @@ impl RootView {
             return;
         }
         let message = draft.trim().to_owned();
-        self.send(ClientMessage::CommitRepo {
-            repo_id: key.repo_id.clone(),
-            message,
-            worktree_path: key.worktree.clone(),
-        });
+        self.send_to(
+            &self.host_of_repo(&key.repo_id),
+            ClientMessage::CommitRepo {
+                repo_id: key.repo_id.clone(),
+                message,
+                worktree_path: key.worktree.clone(),
+            },
+        );
         self.changes.writes.start(key.clone(), WriteOp::Commit);
         self.sync_commit_inputs(cx);
         cx.notify();

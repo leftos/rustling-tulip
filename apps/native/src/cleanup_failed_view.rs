@@ -152,12 +152,13 @@ impl RootView {
             }
             Control::Retry => {
                 let msg = dialog.retry_message();
+                let session_id = dialog.session_id().to_owned();
                 tracing::info!(
                     session = %dialog.session_id(),
                     kill = ?dialog.ticked_pids(),
                     "worktree cleanup: retrying"
                 );
-                self.send(msg);
+                self.send_to(&self.host_of_session(&session_id), msg);
                 self.close_cleanup_head(window, cx);
             }
             Control::Process(pid) => dialog.toggle(pid),

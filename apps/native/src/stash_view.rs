@@ -286,11 +286,14 @@ impl RootView {
     /// failure comes back to its part.
     fn request_stashes(&mut self, key: ScKey) {
         let request_id = self.stash.model.request(&key.repo_id);
-        self.send(ClientMessage::ListStashes {
-            repo_id: key.repo_id,
-            worktree_path: key.worktree,
-            request_id: Some(request_id),
-        });
+        self.send_to(
+            &self.host_of_repo(&key.repo_id),
+            ClientMessage::ListStashes {
+                repo_id: key.repo_id,
+                worktree_path: key.worktree,
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// Drops the push inputs and the drop confirm of trees that are no
@@ -403,11 +406,14 @@ impl RootView {
             return;
         };
         let message = input.read(cx).text().trim().to_owned();
-        self.send(ClientMessage::StashPush {
-            repo_id: key.repo_id.clone(),
-            message,
-            worktree_path: key.worktree.clone(),
-        });
+        self.send_to(
+            &self.host_of_repo(&key.repo_id),
+            ClientMessage::StashPush {
+                repo_id: key.repo_id.clone(),
+                message,
+                worktree_path: key.worktree.clone(),
+            },
+        );
         self.stash.model.start(&key.repo_id, StashOp::Push);
         input.update(cx, |input, cx| input.set_text("", cx));
         cx.notify();
@@ -435,19 +441,25 @@ impl RootView {
         let worktree_path = key.worktree.clone();
         match action {
             StashAction::Pop => {
-                self.send(ClientMessage::StashPop {
-                    repo_id: repo_id.clone(),
-                    stash_id: stash.id,
-                    worktree_path,
-                });
+                self.send_to(
+                    &self.host_of_repo(&repo_id),
+                    ClientMessage::StashPop {
+                        repo_id: repo_id.clone(),
+                        stash_id: stash.id,
+                        worktree_path,
+                    },
+                );
                 self.stash.model.start(&repo_id, StashOp::Pop);
             }
             StashAction::Apply => {
-                self.send(ClientMessage::StashApply {
-                    repo_id: repo_id.clone(),
-                    stash_id: stash.id,
-                    worktree_path,
-                });
+                self.send_to(
+                    &self.host_of_repo(&repo_id),
+                    ClientMessage::StashApply {
+                        repo_id: repo_id.clone(),
+                        stash_id: stash.id,
+                        worktree_path,
+                    },
+                );
                 self.stash.model.start(&repo_id, StashOp::Apply);
             }
             StashAction::Drop => {
@@ -474,7 +486,7 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.stash.drop.is_some()
             || self.notices.has_modal()
-            || self.conn.overlay().is_some()
+            || self.conn().overlay().is_some()
     }
 
     /// The open drop confirm, as text.
@@ -503,11 +515,14 @@ impl RootView {
         if button == DropButton::Drop && !self.stash.model.holds(&key.repo_id, confirm.stash()) {
             self.stash_list_changed(cx);
         } else if button == DropButton::Drop {
-            self.send(ClientMessage::StashDrop {
-                repo_id: key.repo_id.clone(),
-                stash_id: confirm.stash().id.clone(),
-                worktree_path: key.worktree.clone(),
-            });
+            self.send_to(
+                &self.host_of_repo(&key.repo_id),
+                ClientMessage::StashDrop {
+                    repo_id: key.repo_id.clone(),
+                    stash_id: confirm.stash().id.clone(),
+                    worktree_path: key.worktree.clone(),
+                },
+            );
             self.stash.model.start(&key.repo_id, StashOp::Drop);
         }
         self.after_notice_closed(window, cx);
