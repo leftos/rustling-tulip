@@ -13,7 +13,6 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
 use gpui::TestAppContext;
@@ -23,17 +22,6 @@ use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetCommand};
 use support::live::{LiveClient, LiveDaemon, REMOTE_HOST, commit_all, free_port, spawn_shell};
 use support::{Harness, Opened};
-
-const CONNECT: Duration = Duration::from_secs(20);
-/// Hang guard for the listener's first `whoami` and `cert`, each a run of
-/// the node shim.
-const SERVING: Duration = Duration::from_secs(60);
-/// Hang guard for the tailnet dial: TLS, the shim's `whois`, then `Hello`.
-const PAIRING: Duration = Duration::from_secs(60);
-const SPAWN: Duration = Duration::from_secs(30);
-const ECHO: Duration = Duration::from_secs(15);
-/// Hang guard for a page and its media crossing the tailnet connection.
-const FETCH: Duration = Duration::from_secs(60);
 
 /// The line the listener logs when the owner rule refuses a peer
 /// (`crates/daemon/src/tailnet_listener.rs`).
@@ -64,7 +52,7 @@ fn remote_listener_comes_up_for_the_fake_tailnet(
     let daemon = LiveDaemon::start_remote("remote-up");
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let daemon_port = daemon.handshake().port;
-    host.wait_until("the loopback client to connect", CONNECT, |_| {
+    host.wait_until("the loopback client to connect", |_| {
         host_client
             .latest()
             .is_some_and(|(port, overlay)| port == Some(daemon_port) && overlay.is_none())
@@ -76,7 +64,7 @@ fn remote_listener_comes_up_for_the_fake_tailnet(
         port: Some(remote_port),
     });
     let mut serving = None;
-    host.wait_until("remote access to report Serving", SERVING, |_| {
+    host.wait_until("remote access to report Serving", |_| {
         serving = host_client.find_message(|msg| match msg {
             DaemonMessage::RemoteStatus {
                 state: state @ RemoteState::Serving { .. },
@@ -110,7 +98,7 @@ fn remote_listener_comes_up_for_the_fake_tailnet(
         Some(daemon.tailnet_tls()),
         Arc::new(MemoryTokens::default()),
     );
-    device.wait_until("the host to refuse the unpaired device", PAIRING, |_| {
+    device.wait_until("the host to refuse the unpaired device", |_| {
         device_client
             .find_message(|msg| {
                 matches!(
@@ -217,17 +205,14 @@ fn paired_device_reconnects_with_its_token_and_drives_a_shell(
 
     client.send(spawn_shell(daemon.dir()));
     let pane = place_first_session(&mut h, &client);
-    h.wait_for_row(&pane, "the shell's prompt", SPAWN, |row| {
+    h.wait_for_row(&pane, "the shell's prompt", |row| {
         row.trim_end().ends_with('>')
     });
     let marker = format!("rt-remote-marker-{}", std::process::id());
     h.type_into(&pane, &format!("echo {marker}\n"));
-    h.wait_for_row(
-        &pane,
-        "the echoed marker on a line of its own",
-        ECHO,
-        |row| row.trim() == marker,
-    );
+    h.wait_for_row(&pane, "the echoed marker on a line of its own", |row| {
+        row.trim() == marker
+    });
 }
 
 /// A peer the owner rule refuses is dropped before the TLS handshake: no
@@ -251,7 +236,6 @@ fn non_owner_peer_is_dropped_before_the_handshake(
     let mut refusal = None;
     device.wait_until(
         "the listener to refuse the peer and the dial to end",
-        PAIRING,
         |_| {
             refusal = owner_rule_refusal(&daemon);
             refusal.is_some() && ended_attempts(&device_client.states()) >= 1
@@ -308,7 +292,7 @@ fn shutdown_and_remote_off_are_refused_from_the_tailnet_client(
         port: Some(port),
     });
     device_client.send(ClientMessage::ListRepos);
-    device.wait_until("the daemon to answer all three requests", CONNECT, |_| {
+    device.wait_until("the daemon to answer all three requests", |_| {
         device_client
             .find_message_from(from, |msg| {
                 matches!(msg, DaemonMessage::Repos { .. }).then_some(())
@@ -331,7 +315,7 @@ fn shutdown_and_remote_off_are_refused_from_the_tailnet_client(
     // one has reached the host before the checks.
     let round_trip = host_client.message_count();
     host_client.send(ClientMessage::ListRepos);
-    host.wait_until("the host's round trip after the refusals", CONNECT, |_| {
+    host.wait_until("the host's round trip after the refusals", |_| {
         host_client
             .find_message_from(round_trip, |msg| {
                 matches!(msg, DaemonMessage::Repos { .. }).then_some(())
@@ -388,7 +372,7 @@ fn revoke_while_connected_closes_the_connection_and_the_next_hello_lands_in_pair
 
     host_client.send(ClientMessage::ListDevices);
     let mut device_id = None;
-    host.wait_until("the paired device listed as connected", CONNECT, |_| {
+    host.wait_until("the paired device listed as connected", |_| {
         device_id = host_client.find_message(|msg| match msg {
             DaemonMessage::Devices { devices } => devices
                 .iter()
@@ -411,15 +395,11 @@ fn revoke_while_connected_closes_the_connection_and_the_next_hello_lands_in_pair
     host_client.send(ClientMessage::RevokeDevice {
         device_id: device_id.clone(),
     });
-    device.wait_until(
-        "the revoked device's redial to land in pairing",
-        PAIRING,
-        |_| {
-            device_client
-                .find_message_from(from, not_approved)
-                .is_some()
-        },
-    );
+    device.wait_until("the revoked device's redial to land in pairing", |_| {
+        device_client
+            .find_message_from(from, not_approved)
+            .is_some()
+    });
     let labels = device_client.footer_labels()[states_from..].to_vec();
     assert_eq!(
         labels.first().map(String::as_str),
@@ -445,7 +425,7 @@ fn revoke_while_connected_closes_the_connection_and_the_next_hello_lands_in_pair
         "the redial carried the blocked token"
     );
     let mut blocked = None;
-    host.wait_until("the host to list the device as blocked", CONNECT, |_| {
+    host.wait_until("the host to list the device as blocked", |_| {
         blocked = host_client.find_message_from(host_from, |msg| match msg {
             DaemonMessage::Devices { devices } => devices
                 .iter()
@@ -459,16 +439,12 @@ fn revoke_while_connected_closes_the_connection_and_the_next_hello_lands_in_pair
 
     let from = device_client.message_count();
     device_client.command(NetCommand::PairRequest);
-    device.wait_until(
-        "the host to refuse the blocked device's request",
-        PAIRING,
-        |_| {
-            device_client
-                .find_message_from(from, not_approved)
-                .is_some()
-                && daemon.daemon_log().contains(BLOCKED_PAIR_REFUSAL)
-        },
-    );
+    device.wait_until("the host to refuse the blocked device's request", |_| {
+        device_client
+            .find_message_from(from, not_approved)
+            .is_some()
+            && daemon.daemon_log().contains(BLOCKED_PAIR_REFUSAL)
+    });
     assert!(
         device_client
             .find_message_from(from, |msg| {
@@ -509,7 +485,7 @@ fn remote_html_fetch_brings_its_relative_media(
         name: None,
     });
     let mut repo_id = None;
-    host.wait_until("the fixture repo in state.json", SPAWN, |_| {
+    host.wait_until("the fixture repo in state.json", |_| {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
@@ -539,7 +515,7 @@ fn remote_html_fetch_brings_its_relative_media(
     device
         .root_update(move |view, _, cx| view.fetch_remote_file(request, cx))
         .expect("a fetch on the tailnet host starts");
-    device.wait_until("the page to open once its media landed", FETCH, |h| {
+    device.wait_until("the page to open once its media landed", |h| {
         !h.opened().is_empty()
     });
 
@@ -584,12 +560,12 @@ fn turning_remote_access_off_closes_served_connections(
         enabled: false,
         port: Some(port),
     });
-    host.wait_until("remote access to report Off", SERVING, |_| {
+    host.wait_until("remote access to report Off", |_| {
         matches!(remote_state(&host_client), Some(RemoteState::Off))
     });
     // The close, then at least one redial that ended without opening, and
     // the daemon's record of closing the served connection.
-    device.wait_until("the device to fail a redial", PAIRING, |_| {
+    device.wait_until("the device to fail a redial", |_| {
         ended_attempts(&device_client.states()[states_from..]) >= 2
             && daemon.daemon_log().contains(SERVER_ENDED_CLOSE)
     });
@@ -614,7 +590,7 @@ fn turning_remote_access_off_closes_served_connections(
 /// waits for it to serve; returns the port.
 fn serve_remote(host: &mut Harness<'_>, host_client: &LiveClient, daemon: &LiveDaemon) -> u16 {
     let daemon_port = daemon.handshake().port;
-    host.wait_until("the loopback client to connect", CONNECT, |_| {
+    host.wait_until("the loopback client to connect", |_| {
         host_client
             .latest()
             .is_some_and(|(port, overlay)| port == Some(daemon_port) && overlay.is_none())
@@ -624,7 +600,7 @@ fn serve_remote(host: &mut Harness<'_>, host_client: &LiveClient, daemon: &LiveD
         enabled: true,
         port: Some(port),
     });
-    host.wait_until("remote access to report Serving", SERVING, |_| {
+    host.wait_until("remote access to report Serving", |_| {
         matches!(
             remote_state(host_client),
             Some(RemoteState::Serving { port: serving, .. }) if serving == port
@@ -670,7 +646,7 @@ fn not_approved(msg: &DaemonMessage) -> Option<()> {
 /// Waits for a "device not approved" among the messages from index `from` on,
 /// with the view showing the device as not paired.
 fn wait_not_approved(h: &mut Harness<'_>, client: &LiveClient, from: usize) {
-    h.wait_until("the host to land the device in pairing", PAIRING, |_| {
+    h.wait_until("the host to land the device in pairing", |_| {
         client.find_message_from(from, not_approved).is_some()
             && client
                 .footer_labels()
@@ -681,7 +657,7 @@ fn wait_not_approved(h: &mut Harness<'_>, client: &LiveClient, from: usize) {
 
 /// Waits until the view's latest state is open.
 fn wait_open(h: &mut Harness<'_>, client: &LiveClient, what: &str) {
-    h.wait_until(what, PAIRING, |_| {
+    h.wait_until(what, |_| {
         client.states().last().is_some_and(Connection::is_open)
     });
 }
@@ -717,7 +693,7 @@ fn pair(
     let from = device_client.message_count();
     device_client.command(NetCommand::PairRequest);
     let mut request_id = None;
-    device.wait_until("the host to hold the pairing request", PAIRING, |_| {
+    device.wait_until("the host to hold the pairing request", |_| {
         request_id = device_client.find_message_from(from, |msg| match msg {
             DaemonMessage::DevicePairPending { request_id, .. } => Some(request_id.clone()),
             _ => None,
@@ -733,7 +709,7 @@ fn pair(
 
     host_client.send(ClientMessage::ListPendingDevices);
     let mut pending = None;
-    host.wait_until("the host to list the waiting device", CONNECT, |_| {
+    host.wait_until("the host to list the waiting device", |_| {
         pending = host_client.find_message(|msg| match msg {
             DaemonMessage::PendingDevices { requests } => requests
                 .iter()
@@ -753,7 +729,7 @@ fn pair(
         request_id: request_id.clone(),
     });
     let mut code = None;
-    host.wait_until("the code for the approved request", CONNECT, |_| {
+    host.wait_until("the code for the approved request", |_| {
         code = host_client.find_message(|msg| match msg {
             DaemonMessage::DevicePairCode {
                 request_id: Some(id),
@@ -777,7 +753,7 @@ fn pair(
 /// Waits for a session in the sidebar, has the daemon lay out every session
 /// for this client, and returns the pane it lands in.
 fn place_first_session(h: &mut Harness<'_>, client: &LiveClient) -> String {
-    h.wait_until("a session in the sidebar", SPAWN, |h| {
+    h.wait_until("a session in the sidebar", |h| {
         h.root(|root, _| {
             root.sidebar_containers()
                 .iter()
@@ -787,8 +763,6 @@ fn place_first_session(h: &mut Harness<'_>, client: &LiveClient) -> String {
     client.send(ClientMessage::InitLayout {
         kind: InitLayoutKind::AllSessions,
     });
-    h.wait_until("a pane for the session", SPAWN, |h| {
-        h.first_pane().is_some()
-    });
+    h.wait_until("a pane for the session", |h| h.first_pane().is_some());
     h.first_pane().expect("a pane was just laid out")
 }

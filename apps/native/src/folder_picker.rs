@@ -298,7 +298,9 @@ mod tests {
     use super::{filter_spec, start_folder_check};
     use crate::FileFilter;
 
-    const WAIT: Duration = Duration::from_secs(5);
+    /// A hang guard passed as the check's wait: a passing check answers long
+    /// before it.
+    const HANG_GUARD: Duration = Duration::from_secs(120);
 
     #[test]
     fn filter_spec_without_extensions_offers_every_file() {
@@ -328,7 +330,7 @@ mod tests {
     fn an_existing_folder_is_kept() {
         let dir = std::env::temp_dir();
         assert_eq!(
-            start_folder_check(dir.clone(), WAIT, Path::is_dir),
+            start_folder_check(dir.clone(), HANG_GUARD, Path::is_dir),
             Some(dir)
         );
     }
@@ -336,13 +338,16 @@ mod tests {
     #[test]
     fn a_missing_folder_is_dropped() {
         let missing = std::env::temp_dir().join("rt-folder-picker-no-such-folder");
-        assert_eq!(start_folder_check(missing, WAIT, Path::is_dir), None);
+        assert_eq!(start_folder_check(missing, HANG_GUARD, Path::is_dir), None);
     }
 
     #[test]
     fn a_check_that_outlasts_its_wait_is_dropped() {
-        let stuck = |_: &Path| {
-            std::thread::sleep(Duration::from_millis(500));
+        // The probe answers only once the test has its result, so only the
+        // check's own wait can end it.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let stuck = move |_: &Path| {
+            let _ = released.recv();
             true
         };
         let start = PathBuf::from("\\\\offline-host\\share");
@@ -351,5 +356,6 @@ mod tests {
             None,
             "an unreachable share is not waited out"
         );
+        drop(release);
     }
 }

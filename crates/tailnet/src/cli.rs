@@ -467,17 +467,19 @@ mod tests {
 
     #[tokio::test]
     async fn slow_cli_returns_timeout() {
-        // A stand-in that runs for about five seconds, against a 200 ms timeout. It is
-        // started directly, not through a shell, so the kill leaves no grandchild holding
-        // the output pipes open.
+        // A stand-in that never exits by itself, against a 1 ms timeout: only the
+        // timeout can end the run, so a load that delays either side changes nothing.
+        // A run that ignores its timeout hangs into nextest's hang guard. The stand-in
+        // is started directly, not through a shell, so the kill on drop leaves no
+        // grandchild holding the output pipes open.
         let (binary, argv) = if cfg!(windows) {
-            ("ping", args(&["-n", "6", "127.0.0.1"]))
+            ("ping", args(&["-t", "127.0.0.1"]))
         } else {
-            ("sleep", args(&["5"]))
+            ("sleep", args(&["100000"]))
         };
         let cli = Cli {
             binary: PathBuf::from(binary),
-            timeout: Duration::from_millis(200),
+            timeout: Duration::from_millis(1),
         };
         assert_eq!(
             cli.run(&argv, cli.timeout).await,

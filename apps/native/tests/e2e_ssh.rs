@@ -13,7 +13,6 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use daemon_client::device_tokens::MemoryTokens;
 use gpui::TestAppContext;
@@ -29,14 +28,6 @@ use support::{Harness, Opened};
 /// The saved host's string: the fake ssh ignores it, and the fetched-file
 /// folder is named after it.
 const HOST: &str = "devbox";
-/// Hang guard for `ssh`, the bridge's `ensure_running` and `Hello`.
-const CONNECT: Duration = Duration::from_secs(60);
-/// Hang guard for a connection whose bridge starts the daemon first.
-const COLD_CONNECT: Duration = Duration::from_secs(300);
-const SPAWN: Duration = Duration::from_secs(30);
-const ECHO: Duration = Duration::from_secs(15);
-/// Hang guard for a file crossing the SSH connection.
-const FETCH: Duration = Duration::from_secs(60);
 /// The refusal a denied login writes to stderr.
 const DENIED: &str = "me@devbox: Permission denied (publickey).";
 
@@ -97,17 +88,14 @@ fn a_session_over_ssh_echoes_typed_input(cx: &mut TestAppContext) {
 
     client.send(spawn_shell(daemon.dir()));
     let pane = place_first_session(&mut h, &client);
-    h.wait_for_row(&pane, "the shell's prompt", SPAWN, |row| {
+    h.wait_for_row(&pane, "the shell's prompt", |row| {
         row.trim_end().ends_with('>')
     });
     let marker = format!("rt-ssh-marker-{}", std::process::id());
     h.type_into(&pane, &format!("echo {marker}\n"));
-    h.wait_for_row(
-        &pane,
-        "the echoed marker on a line of its own",
-        ECHO,
-        |row| row.trim() == marker,
-    );
+    h.wait_for_row(&pane, "the echoed marker on a line of its own", |row| {
+        row.trim() == marker
+    });
 }
 
 /// A file fetched from an SSH host lands under the host's `ssh-` folder and
@@ -136,7 +124,7 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
         name: None,
     });
     let mut repo_id = None;
-    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+    h.wait_until("the fixture repo in state.json", |_| {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
@@ -160,9 +148,7 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
     };
     h.root_update(move |view, _, cx| view.fetch_remote_file(request, cx))
         .expect("a fetch on the ssh host starts");
-    h.wait_until("the fetched file to open", FETCH, |h| {
-        !h.opened().is_empty()
-    });
+    h.wait_until("the fetched file to open", |h| !h.opened().is_empty());
 
     let landed = root
         .join(format!("ssh-{HOST}"))
@@ -196,13 +182,13 @@ fn a_killed_ssh_reconnects(cx: &mut TestAppContext) {
     let from = client.message_count();
     kill_tree(first[0].pid);
 
-    h.wait_until("the client to reconnect through a new ssh", CONNECT, |_| {
+    h.wait_until("the client to reconnect through a new ssh", |_| {
         let states = client.states();
         let after = &states[states_from..];
         let closed = after.iter().any(|conn| !conn.is_open());
         closed && after.last().is_some_and(Connection::is_open) && fake.runs().len() >= 2
     });
-    h.wait_until("the session list on the new connection", CONNECT, |_| {
+    h.wait_until("the session list on the new connection", |_| {
         client
             .find_message_from(from, |msg| match msg {
                 DaemonMessage::Sessions { sessions } => (!sessions.is_empty()).then_some(()),
@@ -256,7 +242,7 @@ fn a_refused_ssh_login_shows_its_stderr(cx: &mut TestAppContext) {
     // The first attempt's reason may be a Hello write that failed before
     // ssh's stderr was read; an attempt that read it ends with it.
     let mut reason = None;
-    h.wait_until("a close reason ending with ssh's stderr", CONNECT, |_| {
+    h.wait_until("a close reason ending with ssh's stderr", |_| {
         reason = client.states().iter().find_map(|conn| {
             conn.reason()
                 .filter(|reason| reason.ends_with("Permission denied (publickey)."))
@@ -295,17 +281,17 @@ fn open_ssh<'a>(cx: &'a mut TestAppContext, daemon: &LiveDaemon) -> (Harness<'a>
     Harness::open_live_on(cx, daemon, target, None, Arc::new(MemoryTokens::default()))
 }
 
-/// Waits until the view's latest state is open; a spec whose bridge starts
-/// the daemon may need the longer guard.
+/// Waits until the view's latest state is open, bounded only by
+/// [`Harness::wait_until`]'s hang guard.
 fn wait_open(h: &mut Harness<'_>, client: &LiveClient, what: &str) {
-    h.wait_until(what, COLD_CONNECT, |_| {
+    h.wait_until(what, |_| {
         client.states().last().is_some_and(Connection::is_open)
     });
 }
 
 /// Waits for a session in the sidebar.
 fn wait_for_session(h: &mut Harness<'_>, what: &str) {
-    h.wait_until(what, SPAWN, |h| {
+    h.wait_until(what, |h| {
         h.root(|root, _| {
             root.sidebar_containers()
                 .iter()
@@ -321,8 +307,6 @@ fn place_first_session(h: &mut Harness<'_>, client: &LiveClient) -> String {
     client.send(ClientMessage::InitLayout {
         kind: InitLayoutKind::AllSessions,
     });
-    h.wait_until("a pane for the session", SPAWN, |h| {
-        h.first_pane().is_some()
-    });
+    h.wait_until("a pane for the session", |h| h.first_pane().is_some());
     h.first_pane().expect("a pane was just laid out")
 }

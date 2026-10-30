@@ -29,13 +29,15 @@ use tracer_protocol::{
 /// Same flag the daemon spawns the tracer with, so the tracer has no console
 /// of its own.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const READY_TIMEOUT: Duration = Duration::from_secs(15);
-const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The hang guard of every wait in this test: the socket, the ready marker,
+/// the exit after Stop and the cleanup. A passing run never reaches it, so a
+/// busy machine only makes the run slower; reaching it means a hang.
+const HANG_GUARD: Duration = Duration::from_secs(120);
 const READY_MARKER: &str = "RT_TRACER_READY";
 const CDB_PATH: &str = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe";
+/// How long the stack capture of an already hung tracer may run; it only
+/// shapes the failure report.
 const CDB_TIMEOUT: Duration = Duration::from_secs(30);
-const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Kills the tracer when the test ends, so a failing run leaves no stray
 /// process behind. Its kill-on-close job object takes the child tree with it.
@@ -85,8 +87,10 @@ async fn connect(pipe_name: &str) -> anyhow::Result<Stream> {
         let name = pipe_name.to_ns_name::<GenericNamespaced>()?;
         match Stream::connect(name).await {
             Ok(stream) => return Ok(stream),
-            Err(err) if started.elapsed() >= CONNECT_TIMEOUT => {
-                return Err(err).context("tracer socket never became connectable");
+            Err(err) if started.elapsed() >= HANG_GUARD => {
+                return Err(err).context(format!(
+                    "hung: the tracer socket was not connectable within {HANG_GUARD:?}"
+                ));
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
         }
@@ -141,7 +145,7 @@ where
 
 async fn wait_for_exit(tracer: &mut TracerProcess) -> anyhow::Result<Option<i32>> {
     let started = Instant::now();
-    while started.elapsed() < EXIT_TIMEOUT {
+    while started.elapsed() < HANG_GUARD {
         if let Some(status) = tracer.0.try_wait()? {
             return Ok(Some(status.code().unwrap_or(-1)));
         }
@@ -174,9 +178,11 @@ async fn tracer_exits_after_stop_while_a_grandchild_holds_the_console() -> anyho
         "tracer closed the socket before Welcome"
     );
 
-    tokio::time::timeout(READY_TIMEOUT, wait_for_ready(&mut reader, &mut write_half))
+    tokio::time::timeout(HANG_GUARD, wait_for_ready(&mut reader, &mut write_half))
         .await
-        .context("child never printed the ready marker")??;
+        .context(format!(
+            "hung: the child printed no ready marker within {HANG_GUARD:?}"
+        ))??;
 
     write_line(&mut write_half, &TracerRequest::Stop).await?;
 
@@ -184,7 +190,7 @@ async fn tracer_exits_after_stop_while_a_grandchild_holds_the_console() -> anyho
     if exited.is_none() {
         let stacks = capture_stacks(&tracer, &dir).await;
         bail!(
-            "tracer did not exit within {EXIT_TIMEOUT:?} after Stop (log: {}, {stacks})",
+            "hung: the tracer did not exit within {HANG_GUARD:?} after Stop (log: {}, {stacks})",
             dir.join("tracer.log").display()
         );
     }
@@ -236,14 +242,19 @@ async fn run_cdb(cdb: &Path, pid: u32, stacks: &Path) -> anyhow::Result<()> {
 
 /// Remove the test dir after a passing run. The job object takes the
 /// background `ping` (whose cwd is this dir) down as the tracer exits, which
-/// can lag the tracer's own exit by a moment, so removal is retried briefly.
+/// can lag the tracer's own exit, so removal is retried up to the hang guard.
 async fn remove_test_dir(dir: &Path) -> anyhow::Result<()> {
     let started = Instant::now();
     loop {
         match std::fs::remove_dir_all(dir) {
             Ok(()) => return Ok(()),
-            Err(err) if started.elapsed() >= CLEANUP_TIMEOUT => {
-                return Err(err).with_context(|| format!("removing {}", dir.display()));
+            Err(err) if started.elapsed() >= HANG_GUARD => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "hung: {} not removable within {HANG_GUARD:?}",
+                        dir.display()
+                    )
+                });
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }

@@ -27,15 +27,10 @@ use protocol::{
 use serde_json::{Value, json};
 use support::Harness;
 use support::live::{
-    LiveClient, LiveDaemon, STUB_MARKER, kill_process, processes_under,
+    HANG_GUARD, LiveClient, LiveDaemon, STUB_MARKER, kill_process, processes_under,
     spawn_default_agent_in_place, spawn_shell,
 };
 
-/// The deadline of every wait in these specs. It is a hang guard: a passing
-/// run never reaches it, so it is sized in minutes to clear any delay a
-/// loaded machine adds, and fires only when the product is broken
-/// (load-proof-tests, "Two kinds of bound").
-const HANG_GUARD: Duration = Duration::from_secs(300);
 /// The conversation the recovered shell resumes.
 const SHELL_CONVERSATION: &str = "abc-123";
 /// `DSR 6`: the pseudo console asks where the cursor is.
@@ -100,7 +95,7 @@ fn git_out(repo: &Path, args: &[&str]) -> String {
 /// connecting overlay.
 fn wait_connected(h: &mut Harness<'_>, client: &LiveClient, daemon: &LiveDaemon) {
     let port = daemon.handshake().port;
-    h.wait_until("the footer to show the daemon's port", HANG_GUARD, |_| {
+    h.wait_until("the footer to show the daemon's port", |_| {
         client
             .latest()
             .is_some_and(|(open_port, overlay)| open_port == Some(port) && overlay.is_none())
@@ -127,7 +122,7 @@ fn wait_snapshot(
     pick: impl Fn(&SessionSnapshot) -> bool,
 ) -> SessionSnapshot {
     let mut found = None;
-    h.wait_until(what, HANG_GUARD, |_| {
+    h.wait_until(what, |_| {
         found = snapshot(client, &pick);
         found.is_some()
     });
@@ -156,7 +151,7 @@ fn tracer_log_line(daemon: &LiveDaemon, session_id: &str, needle: &str) -> Optio
 
 fn wait_spawn_line(h: &mut Harness<'_>, daemon: &LiveDaemon, session_id: &str) -> String {
     let mut line = None;
-    h.wait_until("the tracer's spawn line", HANG_GUARD, |_| {
+    h.wait_until("the tracer's spawn line", |_| {
         line = tracer_log_line(daemon, session_id, SPAWN_LINE);
         line.is_some()
     });
@@ -176,7 +171,7 @@ fn history_entry(daemon: &LiveDaemon, session_id: &str) -> Option<Value> {
 /// when the session ended any other way than `tracer_lost`.
 fn wait_tracer_lost(h: &mut Harness<'_>, daemon: &LiveDaemon, session_id: &str) -> Value {
     let mut entry = None;
-    h.wait_until("a tracer_lost history entry", HANG_GUARD, |_| {
+    h.wait_until("a tracer_lost history entry", |_| {
         entry = history_entry(daemon, session_id);
         if let Some(found) = &entry {
             let end = &found["end"]["type"];
@@ -215,23 +210,19 @@ fn kill_session_tracer(h: &mut Harness<'_>, daemon: &LiveDaemon, session_id: &st
         .join("meta.json");
     let binaries = daemon.binaries_dir();
     let mut target: Option<(u32, PathBuf)> = None;
-    h.wait_until(
-        "the session's tracer in its sidecar and running",
-        HANG_GUARD,
-        |_| {
-            let pid = std::fs::read_to_string(&meta)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                .and_then(|meta| meta["tracer_pid"].as_u64())
-                .and_then(|pid| u32::try_from(pid).ok());
-            target = pid.and_then(|pid| {
-                processes_under(&binaries)
-                    .into_iter()
-                    .find(|(running, _)| *running == pid)
-            });
-            target.is_some()
-        },
-    );
+    h.wait_until("the session's tracer in its sidecar and running", |_| {
+        let pid = std::fs::read_to_string(&meta)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|meta| meta["tracer_pid"].as_u64())
+            .and_then(|pid| u32::try_from(pid).ok());
+        target = pid.and_then(|pid| {
+            processes_under(&binaries)
+                .into_iter()
+                .find(|(running, _)| *running == pid)
+        });
+        target.is_some()
+    });
     let (pid, _) = target.expect("the wait just found it");
     assert_running_tracer(pid, &binaries);
     #[cfg(windows)]
@@ -275,7 +266,7 @@ fn wait_child_bound(
     pid: u32,
     binaries: &Path,
 ) {
-    h.wait_until("the tracer's child bound to its job", HANG_GUARD, |_| {
+    h.wait_until("the tracer's child bound to its job", |_| {
         let log = tracer_log(daemon, session_id).unwrap_or_default();
         if line_with(&log, BIND_LINE).is_some() {
             return true;
@@ -340,7 +331,7 @@ fn list_history(
         request_id: Some(request_id.to_owned()),
     });
     let mut items = None;
-    h.wait_until("the session history reply", HANG_GUARD, |_| {
+    h.wait_until("the session history reply", |_| {
         items = client.find_message(|msg| match msg {
             DaemonMessage::SessionHistory {
                 request_id: Some(id),
@@ -369,7 +360,7 @@ fn recover(
         items: vec![item],
     });
     let mut results = None;
-    h.wait_until("the recover result", HANG_GUARD, |_| {
+    h.wait_until("the recover result", |_| {
         results = client.find_message(|msg| match msg {
             DaemonMessage::RecoverResult {
                 request_id: Some(id),
@@ -407,7 +398,7 @@ fn scrollback(
         request_id: Some(request_id.to_owned()),
     });
     let mut data = None;
-    h.wait_until("the scrollback reply", HANG_GUARD, |_| {
+    h.wait_until("the scrollback reply", |_| {
         data = client.take_message(|msg| match msg {
             DaemonMessage::Scrollback {
                 request_id: Some(id),
@@ -459,7 +450,7 @@ fn wait_scrollback_contains(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out after {HANG_GUARD:?} waiting for {want:?} in the scrollback; it holds {text:?}"
+            "hung: waited {HANG_GUARD:?} for {want:?} in the scrollback; it holds {text:?}"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -491,7 +482,7 @@ fn wait_typed_command(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out after {HANG_GUARD:?} waiting for the typed command to hold \
+            "hung: waited {HANG_GUARD:?} for the typed command to hold \
              {expected:?}; the scrollback holds {typed:?}"
         );
         attempt += 1;
@@ -511,7 +502,7 @@ fn register_repo(
         name: None,
     });
     let mut repo_id = None;
-    h.wait_until("the fixture repo in state.json", HANG_GUARD, |_| {
+    h.wait_until("the fixture repo in state.json", |_| {
         repo_id = daemon.repo_id(repo);
         repo_id.is_some()
     });
@@ -598,7 +589,7 @@ fn recover_claude_session(
         !typed.contains("--session-id"),
         "the recovered launch takes no fresh --session-id: {typed}"
     );
-    h.wait_until("recovered_at on the history entry", HANG_GUARD, |_| {
+    h.wait_until("recovered_at on the history entry", |_| {
         history_entry(daemon, &session.id).is_some_and(|entry| entry["recovered_at"].is_string())
     });
     let again = recover(h, client, "recover-claude-again", recover_item);
@@ -666,7 +657,7 @@ fn recover_shell_session(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out after {HANG_GUARD:?} waiting for the recovered shell to run \
+            "hung: waited {HANG_GUARD:?} for the recovered shell to run \
              {expected:?}; the scrollback holds {typed:?}"
         );
         std::thread::sleep(Duration::from_millis(100));
@@ -1020,7 +1011,7 @@ fn wait_env_report(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out after {HANG_GUARD:?} waiting for {want:?} in the scrollback; it holds {text:?}"
+            "hung: waited {HANG_GUARD:?} for {want:?} in the scrollback; it holds {text:?}"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1153,7 +1144,7 @@ struct LostClaude {
 /// the log shows the bind cannot happen.
 #[cfg(windows)]
 fn wait_bound(h: &mut Harness<'_>, daemon: &LiveDaemon, session_id: &str) {
-    h.wait_until("the tracer's child bound to its job", HANG_GUARD, |_| {
+    h.wait_until("the tracer's child bound to its job", |_| {
         let log = tracer_log(daemon, session_id).unwrap_or_default();
         let failure = BIND_FAILURES
             .iter()
@@ -1249,7 +1240,7 @@ fn assert_resumed(h: &mut Harness<'_>, client: &LiveClient, daemon: &LiveDaemon,
         "the resumed launch takes no fresh --session-id: {typed}"
     );
     let what = format!("a sidebar leaf for {} labelled {:?}", resumed.id, old.label);
-    h.wait_until(&what, HANG_GUARD, |h| {
+    h.wait_until(&what, |h| {
         h.root(|root, _| {
             root.sidebar_containers().iter().any(|container| {
                 container
@@ -1293,7 +1284,7 @@ fn live_sessions_a_reboot_killed_resume_on_the_next_start(cx: &mut TestAppContex
     wait_connected(&mut h, &client, &daemon);
 
     let mut report = None;
-    h.wait_until("the start-up resume's report", HANG_GUARD, |_| {
+    h.wait_until("the start-up resume's report", |_| {
         report = client.find_message(|msg| match msg {
             DaemonMessage::ResumeReport {
                 resumed,

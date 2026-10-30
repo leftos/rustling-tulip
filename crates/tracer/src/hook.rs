@@ -585,15 +585,15 @@ mod tests {
         "{\n  \"hook_event_name\": \"PreToolUse\",\n  \"prompt\": \"héllo → wörld\"\n}";
     const SESSION: &str = "1f0a4c3e-7b2d-4e5a-9c8b-2d6f0a1b3c4d";
     const TOKEN: &str = "tok-6f1c";
-    /// A hang guard, never a must-beat bound: a passing run returns in
-    /// milliseconds and never reaches it, while the tens of seconds a busy
-    /// machine stalls a `BelowNormal` command for cannot turn a correct run red.
+    /// A hang guard for the waits on a fake daemon's channel and the drain
+    /// counter, never a must-beat bound: a passing run never reaches it. A
+    /// `run` that never returns is killed by nextest's own hang guard.
     const GUARD: Duration = Duration::from_secs(120);
     /// The budget the passing cases pass. Only a run that waits for an EOF
     /// that never comes reaches it.
     const LONG_BUDGET: Duration = Duration::from_secs(120);
-    /// A budget long enough that waiting it out blows `GUARD`, so a case that
-    /// must decide at once is red when it does not.
+    /// A budget longer than nextest's 300 s hang guard, so a case that must
+    /// decide at once and waits out its budget instead is killed as TIMEOUT.
     const HELD_OPEN_BUDGET: Duration = Duration::from_secs(600);
 
     #[test]
@@ -639,8 +639,9 @@ mod tests {
         let fake = FakeDaemon::answering();
         let dir = scratch_dir("first-value");
         write_daemon_json(&dir, fake.port, TOKEN);
-        let started = Instant::now();
 
+        // A shim that waits for the EOF this reader never sends waits out
+        // `LONG_BUDGET` and gives up without posting, so the outcome is red.
         let outcome = run(
             BlockingAfter::new(INPUT.as_bytes().to_vec()),
             &dir,
@@ -649,10 +650,6 @@ mod tests {
             LONG_BUDGET,
         );
 
-        assert!(
-            started.elapsed() < GUARD,
-            "the shim hung on a blocking reader"
-        );
         assert_eq!(outcome, Outcome::Posted, "the reader never sent EOF");
         let request = fake.finish();
         assert!(request.ends_with(INPUT.as_bytes()));
@@ -661,20 +658,20 @@ mod tests {
 
     #[test]
     fn missing_daemon_json_drains_stdin_and_returns() {
-        // The directory exists but holds no `daemon.json`.
+        // The directory exists but holds no `daemon.json`. A shim that waits
+        // for one to appear waits out `HELD_OPEN_BUDGET`, past nextest's
+        // hang guard.
         let dir = scratch_dir("missing-daemon");
         let consumed = Arc::new(AtomicUsize::new(0));
-        let started = Instant::now();
 
         let outcome = run(
             CountingReader::new(INPUT.as_bytes().to_vec(), Arc::clone(&consumed)),
             &dir,
             SESSION,
             unix_nanos(),
-            LONG_BUDGET,
+            HELD_OPEN_BUDGET,
         );
 
-        assert!(started.elapsed() < GUARD);
         assert_eq!(outcome, Outcome::Skipped);
         assert_eq!(
             consumed.load(Ordering::SeqCst),
@@ -687,10 +684,28 @@ mod tests {
     #[test]
     fn failed_connect_returns() {
         // Port 0 is not a port anything can listen on, so the connect fails
-        // however the rest of the machine is loaded.
+        // however the rest of the machine is loaded. A shim that retries it
+        // waits out `HELD_OPEN_BUDGET`, past nextest's hang guard.
         let dir = scratch_dir("failed-connect");
         write_daemon_json(&dir, 0, TOKEN);
-        let started = Instant::now();
+
+        let outcome = run(
+            Cursor::new(INPUT.as_bytes().to_vec()),
+            &dir,
+            SESSION,
+            unix_nanos(),
+            HELD_OPEN_BUDGET,
+        );
+
+        assert_eq!(outcome, Outcome::Skipped);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_listener_that_closes_without_answering_is_no_response() {
+        let (port, head_rx) = closing_daemon();
+        let dir = scratch_dir("silent");
+        write_daemon_json(&dir, port, TOKEN);
 
         let outcome = run(
             Cursor::new(INPUT.as_bytes().to_vec()),
@@ -700,36 +715,10 @@ mod tests {
             LONG_BUDGET,
         );
 
-        assert!(started.elapsed() < GUARD, "the connect must not hang");
-        assert_eq!(outcome, Outcome::Skipped);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_silent_listener_is_no_response() {
-        let (port, head_rx) = silent_daemon();
-        let dir = scratch_dir("silent");
-        write_daemon_json(&dir, port, TOKEN);
-        let started = Instant::now();
-
-        let outcome = run(
-            Cursor::new(INPUT.as_bytes().to_vec()),
-            &dir,
-            SESSION,
-            unix_nanos(),
-            // The product's own short budget, through the seam: this test
-            // pins the give-up path and asserts nothing about how long it took.
-            Duration::from_millis(200),
-        );
-
-        assert!(
-            started.elapsed() < GUARD,
-            "the shim hung on a silent listener"
-        );
         assert_eq!(
             outcome,
             Outcome::NoResponse,
-            "the proof request was sent and never answered"
+            "the proof request was sent and the connection closed unanswered"
         );
         let head = head_rx
             .recv_timeout(GUARD)
@@ -744,6 +733,40 @@ mod tests {
             "a challenge header: {head}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_proof_answer_read_after_the_deadline_is_no_response() {
+        // A listener that accepts and never answers, read with a deadline
+        // already spent: the give-up path, with no clock to wait out.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the silent listener");
+        let addr = listener.local_addr().expect("silent listener addr");
+        let stream = std::net::TcpStream::connect(addr).expect("connect to the listener");
+        let (_held, _) = listener.accept().expect("accept the shim's connection");
+        let mut reader = BufReader::new(&stream);
+        let spent = Instant::now();
+
+        let proof = read_proof(&mut reader, &stream, spent, &[0u8; 32], &[0u8; 32]);
+
+        assert_eq!(proof, Proof::NoResponse);
+    }
+
+    #[test]
+    fn a_silent_listener_held_open_is_no_response_once_the_read_times_out() {
+        // A listener that accepts, never answers and keeps the connection
+        // open: no EOF and no error ends the read, so only the read timeout
+        // armed from the deadline does. Without it the read never returns
+        // and nextest's hang guard kills the case.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the silent listener");
+        let addr = listener.local_addr().expect("silent listener addr");
+        let stream = std::net::TcpStream::connect(addr).expect("connect to the listener");
+        let (_held, _) = listener.accept().expect("accept the shim's connection");
+        let mut reader = BufReader::new(&stream);
+        let deadline = Instant::now() + Duration::from_millis(1);
+
+        let proof = read_proof(&mut reader, &stream, deadline, &[0u8; 32], &[0u8; 32]);
+
+        assert_eq!(proof, Proof::NoResponse);
     }
 
     #[test]
@@ -1011,9 +1034,8 @@ mod tests {
     fn blocked_stdin_with_an_unusable_prefix_returns_at_once() {
         // The input can never become a value, so the shim must not wait for
         // the EOF this reader never sends: `HELD_OPEN_BUDGET` is long enough
-        // that waiting it out blows the guard.
+        // that waiting it out blows nextest's hang guard.
         let dir = scratch_dir("held-open-useless");
-        let started = Instant::now();
 
         let outcome = run(
             BlockingAfter::new(b"]".to_vec()),
@@ -1023,10 +1045,6 @@ mod tests {
             HELD_OPEN_BUDGET,
         );
 
-        assert!(
-            started.elapsed() < GUARD,
-            "the shim waited for an EOF that never comes"
-        );
         assert_eq!(outcome, Outcome::Skipped);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1169,20 +1187,17 @@ mod tests {
             .and_then(tracer_protocol::parse_lower_hex32)
     }
 
-    /// A fake daemon that reads the request head and then never answers, on a
-    /// standard-library channel so no sleep or poll is involved.
-    fn silent_daemon() -> (u16, mpsc::Receiver<Vec<u8>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the silent daemon");
-        let port = listener.local_addr().expect("silent daemon addr").port();
+    /// A fake daemon that reads the request head, hands it to the test and
+    /// closes the connection without answering.
+    fn closing_daemon() -> (u16, mpsc::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the closing daemon");
+        let port = listener.local_addr().expect("closing daemon addr").port();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept the shim");
             let head = read_head(&mut stream);
             let _ = tx.send(head);
-            // Hold the connection open without answering: the shim must give
-            // up on its own budget, not on this server.
-            let (_keep, held) = mpsc::channel::<()>();
-            let _ = held.recv();
+            drop(stream);
         });
         (port, rx)
     }
@@ -1325,7 +1340,7 @@ mod tests {
         assert_eq!(
             consumed.load(Ordering::SeqCst),
             expected,
-            "stdin was not drained"
+            "hung: stdin was not drained within {GUARD:?}"
         );
     }
 }

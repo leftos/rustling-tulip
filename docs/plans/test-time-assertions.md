@@ -21,6 +21,8 @@ Convention already in the code (not in any doc): a "hang guard" is >= 120 s and 
 
 ## A. crates/tracer
 
+Status: done (part A).
+
 ### A1. tests/shutdown.rs (test `tracer_exits_after_stop_while_a_grandchild_holds_the_console`, the only test in the file)
 All four are shared-by-this-one-test helpers; fix the helper, the test is unchanged.
 - :82-94 `connect()`: poll `Stream::connect` every 50 ms, fails when `started.elapsed() >= CONNECT_TIMEOUT` (10 s, :32). Category: deadline poll failing the test. Replace: keep the retry loop but bound it by a hang guard (>= 120 s); or wait on an event: the tracer's pipe appears when it is ready, no seam needed. 
@@ -45,6 +47,8 @@ All four are shared-by-this-one-test helpers; fix the helper, the test is unchan
 
 ## B. crates/tailnet
 
+Status: done (part A).
+
 - cli.rs:468-486 `slow_cli_returns_timeout`: 200 ms product timeout (`Cli.timeout`) against a stand-in (`ping -n 6` / `sleep 5`) that runs about 5 s. Category: short real-time product timeout; a passing run needs the 200 ms timer to fire before the child exits and, on a loaded host, the spawn to finish.
 
   Product already uses `tokio::time::timeout(timeout, finish)` (cli.rs:153) so it IS on tokio's clock. Replace: `#[tokio::test(start_paused = true)]`; with paused time the timer auto-advances while the child is pending; needs tokio `test-util` in crates/tailnet dev-dependencies (not verified). No product change.
@@ -53,6 +57,8 @@ All four are shared-by-this-one-test helpers; fix the helper, the test is unchan
 ---------------------------------------------------------------------------------------------------
 
 ## C. crates/daemon (src, all inside `#[cfg(test)]`; no tests/ dir exists in any crate except tracer)
+
+Status: open (part B).
 
 ### C0. COMPLIANT, do not touch
 - Every `#[tokio::test(start_paused = true)]` test: idle_exit.rs (:364-453, 9 tests, `assert_no_shutdown_for` absence windows are virtual), pty_state.rs (all 63 tokio tests at :1754-3345 are start_paused; the `advance` helper is a virtual sleep), inject.rs (:548-722, :756; the `elapsed` asserts at :560/:574/:771 read the paused clock), discovery.rs (:780-842).
@@ -104,6 +110,11 @@ All four are shared-by-this-one-test helpers; fix the helper, the test is unchan
 
 ## D. apps/native
 
+Status: done (part A), except the open site below.
+
+- Open for part B: `apps/native/src/ssh.rs` tests use a 30 s `BACKSTOP` as a failing `tokio::time::timeout` (about :457, 7 uses), the same form as the `net.rs` BACKSTOP; not in the inventory above.
+- `apps/native/tests/e2e_ssh.rs` is not inventoried either; it dropped its bounds through the shared `Harness::wait_until` and `wait_for_row`, which take no timeout now.
+
 ### D1. Shared helper: tests/support/live.rs `Harness::wait_until` (:1016-1034) and `wait_for_row` (:1038-1062)
 Both take a caller `timeout: Duration`, spin `run_until_parked` + `thread::sleep(50 ms)` and `assert!` on the deadline. Category: shared helper, short failing timeout. The callers pass:
 - e2e_live.rs constants CONNECT 20 s (:30), SPAWN 30 s (:31), ECHO 15 s (:32); e2e_remote.rs CONNECT 20 s (:27), SERVING 60 s (:30), PAIRING 60 s (:32), SPAWN 30 s (:33), ECHO 15 s (:34), FETCH 60 s (:36); ui_quit.rs 10 s x2 (:756, :766).
@@ -119,7 +130,7 @@ Both take a caller `timeout: Duration`, spin `run_until_parked` + `thread::sleep
   The same rule is pinned with a paused clock in pty_state.rs (`advance(5 s)` tests at :1808-1819 and :2025-2039: verify before deleting). Replace: delete the sleep and the assertion (rely on the paused pty_state tests); if a live check is wanted, use the status stream as barrier: wait for N more status checks, which the daemon does not expose today.
 - :427-436 `survivors_under` (used once, :462 in `live_kill_leaves_no_tracer_behind`): polls `processes_under` for `EXIT` 5 s (:34) and returns survivors, then the test asserts empty. Category: short failing deadline. Replace: poll to a hang guard; `EXIT` constant deleted.
 
-### D3. tests/ui/ui_quit.rs `shutdown_does_not_reconnect_after_close` (:732-779) and its `fake_daemon` (:683-729)
+### D3. tests/ui/ui_quit.rs `shutdown_drains_the_daemon_then_quits` (was `shutdown_does_not_reconnect_after_close`; :732-779) and its `fake_daemon` (:683-729)
 - :693 `set_read_timeout(10 s)` on the daemon socket (failing via expect), :718-725 `deadline = now + 1500 ms` counting later connections (absence window), plus the two 10 s `h.wait_until` (:756, :766; D1).
 - Replace: the positive assertions (`drain == Some(true)`, `ensures == 1`, quit requested once) stay. For "no reconnect after the close" there is no event; move the pin to the connection state machine unit test (`apps/native/src/connection.rs` mod tests; `backoff_delay` connection.rs:108) and delete the 1.5 s window, or give the net thread a clock seam: OPEN DECISION 6. The read timeout becomes a guard.
 - The sibling `stuck_shutdown_offers_force_quit_after_five_seconds` (:781) uses `h.advance` (TestClock): COMPLIANT.
@@ -180,6 +191,8 @@ Then the shared helpers: `apps/native/tests/support/live.rs` (`wait_until`, `wai
 1. Hang-guard size. Code today uses 120 s (hook.rs, headless.rs, daemon tests, smoke_window.rs) and 300 s (e2e_recover.rs, live.rs START_TIMEOUT). 60 s (history `sidecar_gone`, pre_create `PID_FILE_CEILING`, session.rs x8, tailnet_listener x3) and 30 s (remote.rs, net.rs BACKSTOP) are in between. Pick one floor (suggest 120 s for in-process, 300 s for live/smoke) and say whether smoke_window's 120 s stays.
 2. Whether nextest enforces the guard (`slow-timeout = { period = "60s", terminate-after = N }`, per-binary overrides for the serial-live group) or each helper does, and whether a test that merely hangs without a helper should be killed by nextest.
 3. tracer hook `a_silent_listener_is_no_response`: keep the deadline branch covered (needs an injectable clock in `hook::run`: the std `Instant` deadline and `TcpStream::set_*_timeout` make a fake clock impractical) or cover only the "connection closed" branch and drop the 200 ms budget test.
+
+   Decided (orchestrator, amended): the 200 ms test became a unit test of the proof read with a deadline already spent (`hook::tests::a_proof_answer_read_after_the_deadline_is_no_response`) plus an end-to-end test on `LONG_BUDGET` against a fake daemon that closes after the request head (`a_listener_that_closes_without_answering_is_no_response`).
 4. session.rs `exit_end_is_recorded_before_stopped_broadcast` absence: drop the 200 ms "no Stopped yet" window (ordering is still proven by the history read at :1682) or add a test hook that signals "writer parked on the history lock".
 5. instance_lock `acquire`: add a retry hook / injectable sleeper to prove "waited for the holder" without time, or reduce the test to the released-flag ordering.
 6. apps/native net absence tests (`wait_out_a_reconnect` x2, ui_quit `fake_daemon` 1.5 s window): add a clock seam to the net thread's runtime (and which timers) or move the no-redial rule to `connection.rs` unit tests and delete the integration absence checks.

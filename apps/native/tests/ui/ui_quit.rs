@@ -15,9 +15,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use gpui::TestAppContext;
+use gpui::{TestAppContext, px};
 use protocol::{
     BranchCleanup, BranchFate, CleanupAction, ClientMessage, DaemonHandshake, DaemonMessage,
     MemberBranchFate, SessionSnapshot,
@@ -681,16 +681,17 @@ fn cancel_in_the_walk_returns_to_the_exit_dialog_and_sends_nothing(cx: &mut Test
 }
 
 /// A daemon on a loopback port that answers `Hello` with `Welcome` and
-/// `sessions`, closes the connection on the first `Shutdown`, then counts
-/// any connection that comes after for 1.5 s. Its thread returns the
-/// shutdown's `drain` and that count.
-fn fake_daemon(sessions: Vec<SessionSnapshot>) -> (u16, JoinHandle<(Option<bool>, usize)>) {
+/// `sessions` and closes the connection on the first `Shutdown`. Its thread
+/// returns the shutdown's `drain`. That no reconnect follows the close is
+/// pinned on the state machine (`connection.rs`, `stop_suppresses_reconnect`).
+fn fake_daemon(sessions: Vec<SessionSnapshot>) -> (u16, JoinHandle<Option<bool>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
     let port = listener.local_addr().expect("listener address").port();
     let daemon = std::thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept the client");
+        // A hang guard: a passing run never waits it out.
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(Duration::from_secs(120)))
             .expect("set a read timeout");
         let mut ws = tungstenite::accept(stream).expect("websocket upgrade");
         let _hello = ws.read().expect("the client's Hello");
@@ -712,24 +713,13 @@ fn fake_daemon(sessions: Vec<SessionSnapshot>) -> (u16, JoinHandle<(Option<bool>
             }
         };
         drop(ws);
-        listener
-            .set_nonblocking(true)
-            .expect("poll for later connections");
-        let deadline = Instant::now() + Duration::from_millis(1_500);
-        let mut later = 0;
-        while Instant::now() < deadline {
-            if listener.accept().is_ok() {
-                later += 1;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        (drain, later)
+        drain
     });
     (port, daemon)
 }
 
 #[gpui::test]
-fn shutdown_does_not_reconnect_after_close(cx: &mut TestAppContext) {
+fn shutdown_drains_the_daemon_then_quits(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (port, daemon) = fake_daemon(vec![session("s1").in_repo("r1").build()]);
     let ensures = Arc::new(AtomicUsize::new(0));
@@ -757,7 +747,7 @@ fn shutdown_does_not_reconnect_after_close(cx: &mut TestAppContext) {
         tls: None,
     };
     let mut h = Harness::open_on_net(cx, &dir, net);
-    h.wait_until("the daemon's session list", Duration::from_secs(10), |h| {
+    h.wait_until_in_process("the daemon's session list", |h| {
         h.root(|root, _| {
             root.sidebar_containers()
                 .iter()
@@ -767,14 +757,17 @@ fn shutdown_does_not_reconnect_after_close(cx: &mut TestAppContext) {
 
     assert!(!close(&mut h));
     h.click_on("exit-stop-keep-worktrees");
-    h.wait_until(
-        "the quit once the daemon closed",
-        Duration::from_secs(10),
-        |h| h.quit_requests() == 1,
-    );
-    let (drain, later) = daemon.join().expect("the fake daemon finishes");
+    h.wait_until_in_process("the quit once the daemon closed", |h| {
+        h.quit_requests() == 1
+    });
+    let drain = daemon.join().expect("the fake daemon finishes");
     assert_eq!(drain, Some(true), "the daemon was asked to drain");
-    assert_eq!(later, 0, "no reconnect after the close");
+    // The close arrived on a connection already stopped, so it schedules no
+    // reconnect: the pill reads "stopped", never "disconnected".
+    assert!(
+        h.bounds("daemon-pill=daemon · stopped").origin.x >= px(0.0),
+        "the quit's close left the connection unstopped"
+    );
     assert_eq!(
         ensures.load(Ordering::SeqCst),
         1,

@@ -31,10 +31,15 @@ use serde_json::{Value, json};
 
 use super::{Harness, NotifyRecorder, OpenRecorder, Outbox, PickRecorder, TestClock};
 
-/// Hang guard for the daemon writing `daemon.json` and answering `/health`:
-/// a passing run never reaches it (load-proof-tests), and the wait already
-/// fails at once when the daemon exits.
-const START_TIMEOUT: Duration = Duration::from_secs(300);
+/// The hang guard of every wait in the live and OS tiers: the daemon writing
+/// `daemon.json` and answering `/health`, its processes leaving after a kill,
+/// and every [`Harness::wait_until`] / [`Harness::wait_for_row`]. A passing run
+/// never reaches it (load-proof-tests); reaching it fails as "hung".
+pub const HANG_GUARD: Duration = Duration::from_secs(300);
+/// The hang guard of [`Harness::wait_until_in_process`], for the in-process
+/// UI specs: under nextest's 300 s kill, so a hang fails with its own
+/// "hung" message rather than as TIMEOUT.
+pub const IN_PROCESS_HANG_GUARD: Duration = Duration::from_secs(120);
 /// The id file the native client keeps its identity in.
 const CLIENT_ID_FILE: &str = "client-id-native";
 const MISSING_DAEMON: &str = "rustling-tulipd.exe not found next to the test binary; \
@@ -175,7 +180,7 @@ impl LiveDaemon {
     }
 
     fn wait_healthy(&mut self) -> DaemonHandshake {
-        let deadline = Instant::now() + START_TIMEOUT;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             let exited = self.child.try_wait().ok().flatten();
             assert!(
@@ -191,7 +196,7 @@ impl LiveDaemon {
             }
             assert!(
                 Instant::now() < deadline,
-                "rustling-tulipd wrote no healthy daemon.json within {START_TIMEOUT:?}"
+                "hung: rustling-tulipd wrote no healthy daemon.json within {HANG_GUARD:?}"
             );
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -304,7 +309,7 @@ impl LiveDaemon {
         for (pid, _) in processes_under(&binaries) {
             kill_process(pid);
         }
-        let deadline = Instant::now() + START_TIMEOUT;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             let running = processes_under(&binaries);
             if running.is_empty() {
@@ -312,7 +317,7 @@ impl LiveDaemon {
             }
             assert!(
                 Instant::now() < deadline,
-                "processes still run from {} {START_TIMEOUT:?} after the kill: {running:?}",
+                "hung: processes still run from {} {HANG_GUARD:?} after the kill: {running:?}",
                 binaries.display()
             );
             std::thread::sleep(Duration::from_millis(100));
@@ -337,7 +342,7 @@ impl LiveDaemon {
             status.success(),
             "rustling-tulipd shutdown failed: {status}"
         );
-        let deadline = Instant::now() + START_TIMEOUT;
+        let deadline = Instant::now() + HANG_GUARD;
         while self
             .child
             .try_wait()
@@ -346,7 +351,7 @@ impl LiveDaemon {
         {
             assert!(
                 Instant::now() < deadline,
-                "rustling-tulipd still runs {START_TIMEOUT:?} after its shutdown"
+                "hung: rustling-tulipd still runs {HANG_GUARD:?} after its shutdown"
             );
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1185,16 +1190,27 @@ impl<'a> Harness<'a> {
         )
     }
 
-    /// Lets the view settle and asks `done` until it holds, sleeping real
-    /// time between polls: the daemon and the network thread run on real
-    /// clocks, which the test executor never advances.
-    pub fn wait_until(
+    /// Lets the view settle and asks `done` until it holds: a wait on the
+    /// observation, polled with a real sleep because the daemon and the
+    /// network thread run on real clocks the test executor never advances.
+    /// Its only bound is [`HANG_GUARD`], the live and OS tiers' guard.
+    pub fn wait_until(&mut self, what: &str, done: impl FnMut(&mut Self) -> bool) {
+        self.wait_within(HANG_GUARD, what, done);
+    }
+
+    /// [`Self::wait_until`] for an in-process UI spec, whose loopback fakes
+    /// answer at once: its only bound is [`IN_PROCESS_HANG_GUARD`].
+    pub fn wait_until_in_process(&mut self, what: &str, done: impl FnMut(&mut Self) -> bool) {
+        self.wait_within(IN_PROCESS_HANG_GUARD, what, done);
+    }
+
+    fn wait_within(
         &mut self,
+        guard: Duration,
         what: &str,
-        timeout: Duration,
         mut done: impl FnMut(&mut Self) -> bool,
     ) {
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + guard;
         loop {
             self.cx.run_until_parked();
             if done(self) {
@@ -1202,22 +1218,16 @@ impl<'a> Harness<'a> {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out after {timeout:?} waiting for {what}"
+                "hung: waited {guard:?} for {what}"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
-    /// Waits until a row of `pane` satisfies `row`; on a timeout the failure
-    /// shows what the pane holds.
-    pub fn wait_for_row(
-        &mut self,
-        pane: &str,
-        what: &str,
-        timeout: Duration,
-        row: impl Fn(&str) -> bool,
-    ) {
-        let deadline = Instant::now() + timeout;
+    /// Waits until a row of `pane` satisfies `row`, up to [`HANG_GUARD`]; a
+    /// hang's failure shows what the pane holds.
+    pub fn wait_for_row(&mut self, pane: &str, what: &str, row: impl Fn(&str) -> bool) {
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             self.cx.run_until_parked();
             let root = self.root.clone();
@@ -1230,7 +1240,7 @@ impl<'a> Harness<'a> {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out after {timeout:?} waiting for {what}; pane {pane} shows {rows:#?}"
+                "hung: waited {HANG_GUARD:?} for {what}; pane {pane} shows {rows:#?}"
             );
             std::thread::sleep(Duration::from_millis(50));
         }

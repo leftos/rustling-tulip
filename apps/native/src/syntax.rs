@@ -451,13 +451,17 @@ mod tests {
     fn a_set_cancel_flag_gives_up_with_nothing() {
         let syntax = syntax_for("rust").expect("rust");
         let text = "fn a() {}\n".repeat(MAX_LINES);
-        let started = Instant::now();
         let cancelled = AtomicBool::new(true);
         assert_eq!(
-            highlight(&text, syntax, syntax_set(), started + SLOW, &cancelled),
+            highlight(
+                &text,
+                syntax,
+                syntax_set(),
+                Instant::now() + SLOW,
+                &cancelled
+            ),
             Err(Uncoloured::Cancelled)
         );
-        assert!(started.elapsed() < TIME_LIMIT, "stops at once");
     }
 
     #[test]

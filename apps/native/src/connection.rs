@@ -656,6 +656,24 @@ mod tests {
         conn
     }
 
+    /// A host that has not approved this device is dialled again only on a
+    /// command: neither its close nor a later error schedules a reconnect.
+    #[test]
+    fn not_approved_survives_close() {
+        for had_token in [false, true] {
+            let mut conn = not_approved(had_token);
+            assert_eq!(conn.on_closed("closed".to_owned()), None, "close");
+            assert_eq!(conn.on_error("later".to_owned()), None, "error");
+            assert_eq!(
+                conn.state(),
+                &State::NotApproved {
+                    reason: protocol::DEVICE_NOT_APPROVED.to_owned(),
+                    had_token,
+                }
+            );
+        }
+    }
+
     #[test]
     fn not_approved_footer_says_not_paired() {
         let conn = not_approved(false);

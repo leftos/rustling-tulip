@@ -24,20 +24,15 @@ use protocol::{
 use serde_json::{Value, json};
 use support::Harness;
 use support::live::{
-    LiveClient, LiveDaemon, kill_tree, processes_under, spawn_default_agent_in_place, spawn_shell,
+    HANG_GUARD, LiveClient, LiveDaemon, kill_tree, processes_under, spawn_default_agent_in_place,
+    spawn_shell,
 };
-
-const CONNECT: Duration = Duration::from_secs(20);
-const SPAWN: Duration = Duration::from_secs(30);
-const ECHO: Duration = Duration::from_secs(15);
-/// How long a force-killed process gets to leave the process list.
-const EXIT: Duration = Duration::from_secs(5);
 
 /// Waits until the view's latest state is open on `daemon`'s port with no
 /// connecting overlay.
 fn wait_connected(h: &mut Harness<'_>, client: &LiveClient, daemon: &LiveDaemon) {
     let port = daemon.handshake().port;
-    h.wait_until("the footer to show the daemon's port", CONNECT, |_| {
+    h.wait_until("the footer to show the daemon's port", |_| {
         client
             .latest()
             .is_some_and(|(open_port, overlay)| open_port == Some(port) && overlay.is_none())
@@ -47,7 +42,7 @@ fn wait_connected(h: &mut Harness<'_>, client: &LiveClient, daemon: &LiveDaemon)
 /// Waits for a session in the sidebar, has the daemon lay out every session
 /// for this client, and returns the pane it lands in.
 fn place_first_session(h: &mut Harness<'_>, client: &LiveClient) -> String {
-    h.wait_until("a session in the sidebar", SPAWN, |h| {
+    h.wait_until("a session in the sidebar", |h| {
         h.root(|root, _| {
             root.sidebar_containers()
                 .iter()
@@ -57,9 +52,7 @@ fn place_first_session(h: &mut Harness<'_>, client: &LiveClient) -> String {
     client.send(ClientMessage::InitLayout {
         kind: InitLayoutKind::AllSessions,
     });
-    h.wait_until("a pane for the session", SPAWN, |h| {
-        h.first_pane().is_some()
-    });
+    h.wait_until("a pane for the session", |h| h.first_pane().is_some());
     h.first_pane().expect("a pane was just laid out")
 }
 
@@ -93,7 +86,7 @@ fn wait_snapshot(
     pick: impl Fn(&SessionSnapshot) -> bool,
 ) -> SessionSnapshot {
     let mut found = None;
-    h.wait_until(what, SPAWN, |_| {
+    h.wait_until(what, |_| {
         found = snapshot(client, &pick);
         found.is_some()
     });
@@ -112,14 +105,10 @@ fn wait_status(
     want: SessionStatus,
 ) -> SessionSnapshot {
     let mut found = None;
-    h.wait_until(
-        &format!("session {session_id} to report {want:?}"),
-        SPAWN,
-        |_| {
-            found = snapshot_from(client, from, |s| s.id == session_id && s.status == want);
-            found.is_some()
-        },
-    );
+    h.wait_until(&format!("session {session_id} to report {want:?}"), |_| {
+        found = snapshot_from(client, from, |s| s.id == session_id && s.status == want);
+        found.is_some()
+    });
     found.expect("the wait just found it")
 }
 
@@ -127,7 +116,7 @@ fn wait_status(
 /// PTY child is its shell, which the daemon types the agent into, so a cue
 /// typed before then reaches the shell.
 fn wait_claude_prompt(h: &mut Harness<'_>, pane: &str) {
-    h.wait_for_row(pane, "fake-claude's prompt box", SPAWN, |row| {
+    h.wait_for_row(pane, "fake-claude's prompt box", |row| {
         row.trim_start().starts_with('\u{276f}')
     });
 }
@@ -154,17 +143,14 @@ fn live_plain_shell_appears_in_pane_and_echoes_input(cx: &mut TestAppContext) {
 
     client.send(spawn_shell(daemon.dir()));
     let pane = place_first_session(&mut h, &client);
-    h.wait_for_row(&pane, "the shell's prompt", SPAWN, |row| {
+    h.wait_for_row(&pane, "the shell's prompt", |row| {
         row.trim_end().ends_with('>')
     });
     h.type_into(&pane, "echo rt-e2e-marker\n");
 
-    h.wait_for_row(
-        &pane,
-        "the echoed marker on a line of its own",
-        ECHO,
-        |row| row.trim() == "rt-e2e-marker",
-    );
+    h.wait_for_row(&pane, "the echoed marker on a line of its own", |row| {
+        row.trim() == "rt-e2e-marker"
+    });
 }
 
 #[gpui::test]
@@ -185,7 +171,7 @@ fn live_fake_claude_streams_ready_banner(cx: &mut TestAppContext) {
         name: None,
     });
     let mut repo_id = None;
-    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+    h.wait_until("the fixture repo in state.json", |_| {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
@@ -194,7 +180,7 @@ fn live_fake_claude_streams_ready_banner(cx: &mut TestAppContext) {
     ));
     let pane = place_first_session(&mut h, &client);
 
-    h.wait_for_row(&pane, "fake-claude's ready banner", SPAWN, |row| {
+    h.wait_for_row(&pane, "fake-claude's ready banner", |row| {
         row.contains("[fake-claude] ready")
     });
 }
@@ -220,7 +206,7 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
         name: None,
     });
     let mut repo_id = None;
-    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+    h.wait_until("the fixture repo in state.json", |_| {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
@@ -274,13 +260,6 @@ fn live_hook_status_reports_working_asking_and_idle(cx: &mut TestAppContext) {
         working.pending_input, None,
         "submitting a prompt leaves nothing pending"
     );
-    std::thread::sleep(Duration::from_secs(4));
-    let newest = snapshot_from(&client, from, |s| s.id == id).map(|s| s.status);
-    assert_eq!(
-        newest,
-        Some(SessionStatus::Working),
-        "a quiet screen showing the spinner left Working"
-    );
 
     let from = client.message_count();
     h.type_into(&pane, "/rt-hook ask\n");
@@ -326,7 +305,7 @@ fn live_esc_mid_turn_drops_working_to_idle_from_the_screen(cx: &mut TestAppConte
         name: None,
     });
     let mut repo_id = None;
-    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+    h.wait_until("the fixture repo in state.json", |_| {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
@@ -344,12 +323,10 @@ fn live_esc_mid_turn_drops_working_to_idle_from_the_screen(cx: &mut TestAppConte
     let from = client.message_count();
     h.type_into(&pane, "/rt-hook prompt\n");
     wait_status(&mut h, &client, from, &id, SessionStatus::Working);
-    h.wait_for_row(&pane, "the turn's spinner", ECHO, |row| {
-        row.contains("Cooking…")
-    });
+    h.wait_for_row(&pane, "the turn's spinner", |row| row.contains("Cooking…"));
     let from = client.message_count();
     h.keys("escape");
-    h.wait_for_row(&pane, "the interrupt row", ECHO, |row| {
+    h.wait_for_row(&pane, "the interrupt row", |row| {
         row.contains("Interrupted ·")
     });
     let idle = wait_status(&mut h, &client, from, &id, SessionStatus::Idle);
@@ -379,7 +356,7 @@ fn live_hook_status_reports_background_beside_idle(cx: &mut TestAppContext) {
         name: None,
     });
     let mut repo_id = None;
-    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+    h.wait_until("the fixture repo in state.json", |_| {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
@@ -405,7 +382,6 @@ fn live_hook_status_reports_background_beside_idle(cx: &mut TestAppContext) {
     let mut found = None;
     h.wait_until(
         &format!("session {id} to report Idle with background work"),
-        SPAWN,
         |_| {
             found = snapshot_from(&client, from, |s| {
                 s.id == id && s.status == SessionStatus::Idle && s.background
@@ -422,10 +398,10 @@ fn live_hook_status_reports_background_beside_idle(cx: &mut TestAppContext) {
     assert!(!working.background, "a new turn clears the background flag");
 }
 
-/// The processes still running from under `dir` once they have had
-/// [`EXIT`] to go.
+/// The processes still running from under `dir`: none once they are gone,
+/// else the ones left at [`HANG_GUARD`].
 fn survivors_under(dir: &Path) -> Vec<(u32, PathBuf)> {
-    let deadline = Instant::now() + EXIT;
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         let survivors = processes_under(dir);
         if survivors.is_empty() || Instant::now() >= deadline {
@@ -443,18 +419,14 @@ fn live_kill_leaves_no_tracer_behind(cx: &mut TestAppContext) {
     let (mut h, client) = Harness::open_live(cx, &daemon);
     wait_connected(&mut h, &client, &daemon);
     client.send(spawn_shell(daemon.dir()));
-    h.wait_until(
-        "the shell in the sidebar and its tracer running",
-        SPAWN,
-        |h| {
-            let listed = h.root(|root, _| {
-                root.sidebar_containers()
-                    .iter()
-                    .any(|c| !c.leaves.is_empty())
-            });
-            listed && !processes_under(&binaries).is_empty()
-        },
-    );
+    h.wait_until("the shell in the sidebar and its tracer running", |h| {
+        let listed = h.root(|root, _| {
+            root.sidebar_containers()
+                .iter()
+                .any(|c| !c.leaves.is_empty())
+        });
+        listed && !processes_under(&binaries).is_empty()
+    });
 
     daemon.kill();
     drop(daemon);
@@ -466,7 +438,7 @@ fn live_kill_leaves_no_tracer_behind(cx: &mut TestAppContext) {
     }
     assert!(
         survivors.is_empty(),
-        "processes from {} outlived the daemon's drop: {survivors:#?}",
+        "hung: processes from {} still ran {HANG_GUARD:?} after the daemon's drop: {survivors:#?}",
         binaries.display()
     );
 }
@@ -483,7 +455,6 @@ fn live_daemon_death_shows_reconnecting(cx: &mut TestAppContext) {
 
     h.wait_until(
         "the footer to show the drop, then a reconnect attempt",
-        CONNECT,
         |_| {
             let labels = client.footer_labels();
             let after = &labels[before..];

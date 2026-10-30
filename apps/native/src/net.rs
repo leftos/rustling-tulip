@@ -1271,9 +1271,9 @@ mod tests {
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
-    /// How long the TLS tests wait for an event before calling it missing: a
-    /// backstop only, never the expected wait.
-    const BACKSTOP: Duration = Duration::from_secs(30);
+    /// The hang guard of every wait in these tests: a passing run never
+    /// reaches it, and reaching it fails as "hung".
+    const HANG_GUARD: Duration = Duration::from_secs(120);
 
     /// The `open_local` of every test that is not about the proof: a plain
     /// loopback connection.
@@ -1344,24 +1344,6 @@ mod tests {
         })
     }
 
-    /// Wait up to 5 s for a state event whose state is `Closed { reason }`.
-    fn saw_closed(events: &mut UnboundedReceiver<NetEvent>, reason: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            match events.try_recv() {
-                Ok(NetEvent::State(conn)) if conn.reason() == Some(reason) => {
-                    if matches!(conn.state(), State::Closed { .. }) {
-                        return true;
-                    }
-                }
-                Ok(_) => {}
-                Err(err) if err.is_closed() => return false,
-                Err(_) => std::thread::yield_now(),
-            }
-        }
-        false
-    }
-
     static CLOSED_POLLS: AtomicUsize = AtomicUsize::new(0);
     static RESTART_POLLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -1380,15 +1362,17 @@ mod tests {
         })
     }
 
-    fn reaches(count: &AtomicUsize, at_least: usize) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if count.load(Ordering::SeqCst) >= at_least {
-                return true;
-            }
-            std::thread::yield_now();
+    /// Wait until `count` reaches `at_least`, polling up to [`HANG_GUARD`].
+    #[track_caller]
+    fn wait_for_count(count: &AtomicUsize, at_least: usize, what: &str) {
+        let deadline = Instant::now() + HANG_GUARD;
+        while count.load(Ordering::SeqCst) < at_least {
+            assert!(
+                Instant::now() < deadline,
+                "hung: waited {HANG_GUARD:?} for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
         }
-        false
     }
 
     #[test]
@@ -1426,16 +1410,14 @@ mod tests {
             );
         });
 
-        assert!(
-            reaches(&RESTART_POLLS, 1),
-            "the first attempt never started"
-        );
+        wait_for_count(&RESTART_POLLS, 1, "the first attempt to start");
         view_tx
             .unbounded_send(NetCommand::Restart)
             .expect("net thread is running");
-        assert!(
-            reaches(&RESTART_POLLS, 2),
-            "Restart during ensure did not start a new attempt"
+        wait_for_count(
+            &RESTART_POLLS,
+            2,
+            "Restart during ensure to start a new attempt",
         );
         drop(view_tx);
         net.join()
@@ -1458,12 +1440,16 @@ mod tests {
         });
 
         assert!(
-            saw_closed(&mut view_rx, "no welcome from daemon"),
+            saw_state(&mut view_rx, |conn| {
+                matches!(conn.state(), State::Closed { .. })
+                    && conn.reason() == Some("no welcome from daemon")
+            }),
             "a daemon that never answers Hello was not dropped"
         );
-        assert!(
-            reaches(&SILENT_ACCEPTS, 2),
-            "no reconnect after the welcome timeout"
+        wait_for_count(
+            &SILENT_ACCEPTS,
+            2,
+            "the reconnect after the welcome timeout",
         );
         let sockets = server.join().expect("silent server finishes");
         drop(view_tx);
@@ -1589,7 +1575,9 @@ mod tests {
             }),
             // The production open, with the proof's budget as a hang guard.
             open_local: Box::new(|port, token| {
-                Box::pin(async move { daemon_client::connect_proven(port, &token, BACKSTOP).await })
+                Box::pin(
+                    async move { daemon_client::connect_proven(port, &token, HANG_GUARD).await },
+                )
             }),
             ..deps(ensure_silent_server)
         };
@@ -1607,8 +1595,8 @@ mod tests {
         );
         stop_net(view_tx, net);
         let first = received
-            .recv_timeout(BACKSTOP)
-            .expect("the connection opened before the proof was closed");
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the connection opened before the proof was closed");
         for bytes in std::iter::once(first).chain(received.try_iter()) {
             assert!(
                 bytes.is_empty(),
@@ -2004,25 +1992,35 @@ mod tests {
     }
 
     /// What `seen` reports, up to and including the first event `done`
-    /// accepts; `None` when [`BACKSTOP`] passes first.
+    /// accepts; `None` when the fake daemon is gone first. Fails as hung
+    /// after [`HANG_GUARD`].
+    #[track_caller]
     fn seen_until(
         seen: &mpsc::Receiver<Seen>,
         mut done: impl FnMut(&Seen) -> bool,
     ) -> Option<Vec<Seen>> {
-        let deadline = Instant::now() + BACKSTOP;
+        let deadline = Instant::now() + HANG_GUARD;
         let mut log = Vec::new();
-        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let event = seen.recv_timeout(left).ok()?;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let received = seen.recv_timeout(left);
+            assert!(
+                !matches!(received, Err(mpsc::RecvTimeoutError::Timeout)),
+                "hung: waited {HANG_GUARD:?} for the fake daemon; it saw {log:?}"
+            );
+            let Ok(event) = received else {
+                return None;
+            };
             let finished = done(&event);
             log.push(event);
             if finished {
                 return Some(log);
             }
         }
-        None
     }
 
     /// The token of the next `Hello` the fake daemon sees.
+    #[track_caller]
     fn next_hello(seen: &mpsc::Receiver<Seen>) -> Option<String> {
         match seen_until(seen, |event| matches!(event, Seen::Hello(_)))?.pop() {
             Some(Seen::Hello(token)) => Some(token),
@@ -2030,13 +2028,15 @@ mod tests {
         }
     }
 
-    /// Wait for an event `want` accepts, up to [`BACKSTOP`].
+    /// Wait for an event `want` accepts; false when the network thread is
+    /// gone first. Fails as hung after [`HANG_GUARD`].
+    #[track_caller]
     fn saw(events: &mut UnboundedReceiver<NetEvent>, want: impl Fn(&NetEvent) -> bool) -> bool {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .expect("build a test runtime");
-        runtime.block_on(async {
+        let found = runtime.block_on(async {
             let found = async {
                 while let Some(event) = events.next().await {
                     if want(&event) {
@@ -2045,11 +2045,13 @@ mod tests {
                 }
                 false
             };
-            tokio::time::timeout(BACKSTOP, found).await.unwrap_or(false)
-        })
+            tokio::time::timeout(HANG_GUARD, found).await
+        });
+        found.expect("hung: no matching net event within HANG_GUARD")
     }
 
     /// Wait for a state event whose connection `want` accepts.
+    #[track_caller]
     fn saw_state(
         events: &mut UnboundedReceiver<NetEvent>,
         want: impl Fn(&Connection) -> bool,
@@ -2060,13 +2062,15 @@ mod tests {
         )
     }
 
-    /// The next state event, up to [`BACKSTOP`].
+    /// The next state event; `None` when the network thread is gone first.
+    /// Fails as hung after [`HANG_GUARD`].
+    #[track_caller]
     fn next_state(events: &mut UnboundedReceiver<NetEvent>) -> Option<Connection> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .expect("build a test runtime");
-        runtime.block_on(async {
+        let found = runtime.block_on(async {
             let found = async {
                 while let Some(event) = events.next().await {
                     if let NetEvent::State(conn) = event {
@@ -2075,8 +2079,9 @@ mod tests {
                 }
                 None
             };
-            tokio::time::timeout(BACKSTOP, found).await.ok().flatten()
-        })
+            tokio::time::timeout(HANG_GUARD, found).await
+        });
+        found.expect("hung: no state event within HANG_GUARD")
     }
 
     /// The network thread on `deps`, connecting to `target` first.
@@ -2274,12 +2279,6 @@ mod tests {
         )
     }
 
-    /// Long enough for a reconnect on the backoff to have dialled again; the
-    /// passing run always waits it out.
-    fn wait_out_a_reconnect() {
-        std::thread::sleep(crate::connection::backoff_delay(0) * 4);
-    }
-
     #[test]
     fn untokened_tailnet_pick_dials_with_an_empty_token() {
         let ca = TestCa::new();
@@ -2363,7 +2362,7 @@ mod tests {
     }
 
     #[test]
-    fn not_approved_does_not_reconnect() {
+    fn not_approved_survives_the_close_and_restart_redials() {
         let ca = TestCa::new();
         let (port, seen) = tls_daemon_answering(&ca, Answer::NotApprovedThenClose);
         let (view_tx, mut view_rx, net) = run_net(
@@ -2386,13 +2385,8 @@ mod tests {
             next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, false)),
             "the close must keep the not-approved state"
         );
-
-        wait_out_a_reconnect();
-        assert_eq!(
-            seen.try_recv().ok(),
-            None,
-            "a not-approved host was dialled again without a command"
-        );
+        // That a not-approved close dials nothing until a command is pinned on
+        // the state machine: `connection.rs`, `not_approved_survives_close`.
         view_tx
             .unbounded_send(NetCommand::Restart)
             .expect("net thread is running");
@@ -2804,7 +2798,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_token_save_reports_and_does_not_reconnect_silently() {
+    fn failed_token_save_reports_and_leaves_the_host_not_approved() {
         let ca = TestCa::new();
         let (port, seen) = tls_daemon_answering(&ca, Answer::Pairing);
         let deps = NetDeps {
@@ -2829,12 +2823,6 @@ mod tests {
         assert!(
             next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, false)),
             "the close after a failed save must leave the host not approved"
-        );
-        wait_out_a_reconnect();
-        assert_eq!(
-            seen.try_recv().ok(),
-            None,
-            "the host was dialled again after the token was lost"
         );
         stop_net(view_tx, net);
     }
@@ -3252,16 +3240,16 @@ mod tests {
         stderr: tokio::io::DuplexStream,
     }
 
-    /// Run `work` on a fresh runtime, failing as hung after [`BACKSTOP`].
+    /// Run `work` on a fresh runtime, failing as hung after [`HANG_GUARD`].
     fn on_test_runtime<F: std::future::Future>(work: F) -> F::Output {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .expect("build a test runtime");
         runtime.block_on(async {
-            tokio::time::timeout(BACKSTOP, work)
+            tokio::time::timeout(HANG_GUARD, work)
                 .await
-                .expect("the scripted child hung")
+                .expect("hung: the scripted child")
         })
     }
 
@@ -3351,8 +3339,8 @@ mod tests {
 
     fn next_child(children: &mpsc::Receiver<ScriptedChild>) -> ScriptedChild {
         children
-            .recv_timeout(BACKSTOP)
-            .expect("ssh was never started")
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: ssh was never started")
     }
 
     #[test]
@@ -3447,11 +3435,11 @@ mod tests {
             "a failed ssh start is not an error state"
         );
         opened
-            .recv_timeout(BACKSTOP)
-            .expect("ssh was never started");
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: ssh was never started");
         opened
-            .recv_timeout(BACKSTOP)
-            .expect("the backoff never started ssh again");
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the backoff never started ssh again");
         stop_net(view_tx, net);
     }
 
@@ -3514,7 +3502,7 @@ mod tests {
         }
         children
             .recv_timeout(Duration::ZERO)
-            .expect("ssh was never started")
+            .expect("hung: ssh was never started")
     }
 
     /// Lets every ready task run without moving the paused clock.
@@ -3586,6 +3574,36 @@ mod tests {
                         if reason == "no welcome from daemon: bridge: the daemon did not start"
                 )),
                 "the welcome timeout's reason does not end with ssh's stderr: {states:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_refused_connection_that_closes_is_never_redialled() {
+        on_paused_clock(|mut view_rx, children| async move {
+            let mut child = started(&children).await;
+            assert_eq!(child.next_line().await["type"], "hello");
+            child
+                .send(&DaemonMessage::AuthFailed {
+                    reason: "bad token".to_owned(),
+                })
+                .await;
+            drop(child);
+            settle().await;
+            let states = states_so_far(&mut view_rx);
+            assert!(
+                states
+                    .iter()
+                    .any(|conn| matches!(conn.state(), State::AuthFailed { .. })),
+                "the refusal never reached the view: {states:?}"
+            );
+
+            tokio::time::advance(crate::connection::backoff_delay(0) + Duration::from_secs(1))
+                .await;
+            settle().await;
+            assert!(
+                children.try_recv().is_err(),
+                "a refused connection's close dialled the host again"
             );
         });
     }
