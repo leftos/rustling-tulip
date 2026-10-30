@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use gpui::TestAppContext;
 use protocol::{
-    ClientMessage, DaemonMessage, InitLayoutKind, PendingInput, PendingQuestion, SessionSnapshot,
-    SessionStatus,
+    ChatEntry, ClientMessage, DaemonMessage, InitLayoutKind, PendingInput, PendingQuestion,
+    SessionSnapshot, SessionStatus, SplitDirection, SplitPlace,
 };
 use serde_json::{Value, json};
 use support::Harness;
@@ -470,4 +470,217 @@ fn live_daemon_death_shows_reconnecting(cx: &mut TestAppContext) {
         "no startup overlay once the client has connected"
     );
     assert_eq!(port, None, "no port while the daemon is gone");
+}
+
+/// Waits until the chat rows of `session_id` satisfy `done`; on a timeout
+/// the failure shows the rows, what the composer holds and says, and the
+/// chat messages `client` received.
+fn wait_chat(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    session_id: &str,
+    what: &str,
+    done: impl Fn(&[ChatEntry]) -> bool,
+) {
+    let deadline = Instant::now() + SPAWN;
+    loop {
+        h.cx.run_until_parked();
+        let rows = h.root(|root, _| root.chat_rows(session_id));
+        if done(&rows) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let composer = h.root(|root, cx| {
+                (
+                    root.chat_composer_text(session_id, cx),
+                    root.chat_composer_note(session_id),
+                    root.chat_composer_error(session_id),
+                )
+            });
+            let newest = client.find_message(|msg| match msg {
+                DaemonMessage::Chat { .. } | DaemonMessage::ChatAppend { .. } => {
+                    Some(format!("{msg:?}"))
+                }
+                _ => None,
+            });
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {SPAWN:?} waiting for {what}; composer (text, note, error) {composer:?}; rows {rows:#?}; newest chat message {newest:?}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Registers the daemon's fixture repo, spawns the default agent (the fake
+/// claude) in it, and waits for its prompt box and `Idle`. Returns the pane
+/// the session landed in and the session's id.
+fn spawn_fake_claude(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    daemon: &LiveDaemon,
+) -> (String, String) {
+    let node = Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    assert!(node, "node not on PATH; fake-claude needs it");
+    let repo = daemon.git_fixture();
+    client.send(ClientMessage::AddRepo {
+        path: repo.to_string_lossy().into_owned(),
+        name: None,
+    });
+    let mut repo_id = None;
+    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+        repo_id = daemon.repo_id(&repo);
+        repo_id.is_some()
+    });
+    client.send(spawn_default_agent_in_place(
+        &repo_id.expect("the repo was registered"),
+    ));
+    let pane = place_first_session(h, client);
+    let id = wait_snapshot(h, client, "the claude session", |_| true).id;
+    wait_claude_prompt(h, &pane);
+    wait_status(h, client, 0, &id, SessionStatus::Idle);
+    (pane, id)
+}
+
+/// Splits `pane` with a second pane on session `session_id` to its right
+/// and returns the new pane once it shows the fake's prompt box.
+fn split_beside(h: &mut Harness<'_>, client: &LiveClient, pane: &str, session_id: &str) -> String {
+    let tab = h
+        .root(|root, _| root.active_tab_id().map(str::to_owned))
+        .expect("a tab holds the session's pane");
+    client.send(ClientMessage::SplitPane {
+        tab_id: tab,
+        pane_id: pane.to_owned(),
+        direction: SplitDirection::Horizontal,
+        place: SplitPlace::Second,
+        new_session_id: Some(session_id.to_owned()),
+        request_id: None,
+    });
+    h.wait_until("a second pane beside the first", SPAWN, |h| {
+        h.root(|root, _| root.active_pane_ids().len() == 2)
+    });
+    let second = h
+        .root(|root, _| root.active_pane_ids())
+        .into_iter()
+        .find(|p| p != pane)
+        .expect("the split made a second pane");
+    wait_claude_prompt(h, &second);
+    second
+}
+
+/// What the chat spec types: it holds fake-claude's permission cue.
+const CHAT_MESSAGE: &str = "please rt-perm now";
+/// fake-claude's answer once the permitted tool call has run.
+const TOOL_ANSWER: &str = "Ran echo rt-fake and it printed rt-fake.";
+
+/// The chat mirror end to end: a message typed into the chat reaches
+/// fake-claude through its prompt box, the transcript it writes comes back as
+/// the chat's entries, the permission it asks shows as a card whose Allow once
+/// answers the dialog, and the turn ends in the chat and in the terminal pane
+/// beside it.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_chat_mirror_sends_a_message_allows_the_prompt_and_sees_the_turn_end(
+    cx: &mut TestAppContext,
+) {
+    let daemon = LiveDaemon::start("chat-mirror");
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    let (pane, id) = spawn_fake_claude(&mut h, &client, &daemon);
+    let terminal = split_beside(&mut h, &client, &pane, &id);
+
+    // The split focuses the new pane; a click on the first pane's terminal
+    // gives the key to the first. The test window starts inactive and gets
+    // no focus events until it is activated, as the desktop does.
+    h.cx.update(|window, _| window.activate_window());
+    h.type_into(&pane, "");
+    h.wait_until("the first pane to take the focus", SPAWN, |h| {
+        h.root(|root, _| root.focused_pane()).as_deref() == Some(pane.as_str())
+    });
+    h.keys("ctrl-shift-m");
+    h.wait_until("the first pane to show its chat", SPAWN, |h| {
+        h.root(|root, _| root.pane_shows_chat(&pane))
+    });
+    assert!(
+        !h.root(|root, _| root.pane_shows_chat(&terminal)),
+        "the second pane keeps its terminal"
+    );
+    h.wait_until("the chat's composer", SPAWN, |h| {
+        h.bounds("chat-composer").origin.x >= gpui::px(0.0)
+    });
+    h.click_on("chat-composer");
+    let keys: Vec<String> = CHAT_MESSAGE
+        .chars()
+        .map(|c| {
+            if c == ' ' {
+                "space".to_owned()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    h.keys(&keys.join(" "));
+    h.keys("ctrl-enter");
+
+    wait_chat(
+        &mut h,
+        &client,
+        &id,
+        "the message as a sent user entry",
+        |rows| {
+            rows.iter().any(|entry| {
+            matches!(entry, ChatEntry::User { text, pending: false, .. } if text == CHAT_MESSAGE)
+        })
+        },
+    );
+    h.wait_for_row(&terminal, "the permission dialog", SPAWN, |row| {
+        row.contains("Do you want to proceed?")
+    });
+    h.wait_until("the permission card", SPAWN, |h| {
+        h.root(|root, _| root.chat_card(&id).is_some())
+            && h.bounds("chat-card-1").origin.x >= gpui::px(0.0)
+    });
+
+    let from = client.message_count();
+    h.click_on("chat-card-1");
+    wait_chat(
+        &mut h,
+        &client,
+        &id,
+        "the answer, then the turn's end",
+        |rows| {
+            let answer = rows.iter().position(
+                |entry| matches!(entry, ChatEntry::Answer { text, .. } if text == TOOL_ANSWER),
+            );
+            let end = rows
+                .iter()
+                .rposition(|entry| matches!(entry, ChatEntry::TurnEnd { .. }));
+            matches!((answer, end), (Some(answer), Some(end)) if answer < end)
+        },
+    );
+    let rows = h.root(|root, _| root.chat_rows(&id));
+    assert!(
+        rows.iter().any(|entry| matches!(
+            entry,
+            ChatEntry::Tool { name, result: Some(outcome), .. } if name == "Bash" && !outcome.is_error
+        )),
+        "the allowed tool call carries its result: {rows:#?}"
+    );
+    h.wait_until("the answered card to leave the chat", SPAWN, |h| {
+        h.root(|root, _| root.chat_card(&id).is_none())
+    });
+    let idle = wait_status(&mut h, &client, from, &id, SessionStatus::Idle);
+    assert_eq!(
+        idle.pending_input, None,
+        "the turn's end leaves nothing pending"
+    );
+    h.wait_for_row(
+        &terminal,
+        "the turn's answer in the terminal pane",
+        ECHO,
+        |row| row.contains(TOOL_ANSWER),
+    );
 }

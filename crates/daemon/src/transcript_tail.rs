@@ -258,6 +258,8 @@ async fn tail_task(
     };
     let mut poll = tokio::time::interval(POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // A closed wake channel means no watcher wakes the task; the poll goes on.
+    let mut watched = true;
     loop {
         let has_clients = *client_count.borrow_and_update() > 0;
         #[cfg(test)]
@@ -268,8 +270,12 @@ async fn tail_task(
                 changed = client_count.changed() => {
                     if changed.is_err() { break; }
                 }
-                woken = wake.recv() => {
-                    if woken.is_none() { break; }
+                woken = wake.recv(), if watched => {
+                    if woken.is_none() {
+                        watched = false;
+                        debug!(path = %path.display(), "transcript_tail: no watcher; polling only");
+                        continue;
+                    }
                     drain(&mut wake);
                     read_wake(&path, &mut cursor, &shared, &mut on_event);
                 }
@@ -288,8 +294,12 @@ async fn tail_task(
                         read_wake(&path, &mut cursor, &shared, &mut on_event);
                     }
                 }
-                woken = wake.recv() => {
-                    if woken.is_none() { break; }
+                woken = wake.recv(), if watched => {
+                    if woken.is_none() {
+                        watched = false;
+                        debug!(path = %path.display(), "transcript_tail: no watcher; polling only");
+                        continue;
+                    }
                     drain(&mut wake);
                 }
                 _ = poll.tick() => {
@@ -571,6 +581,20 @@ mod tests {
 
         // The file appears only after the task has found it missing.
         wait_for_a_missing_read(&tail).await;
+        write_file(&path, "first\n");
+        assert_eq!(next_event(&mut events).await, line("first"));
+    }
+
+    #[tokio::test]
+    async fn a_tail_started_before_its_folder_exists_still_delivers_lines_written_later() {
+        let scratch = ScratchDir::new("tail-no-folder");
+        let folder = scratch.path().join("projects").join("not-yet");
+        let path = folder.join("session.jsonl");
+        let (_clients, clients_rx) = watch::channel(1usize);
+        // No folder to watch: the tail runs on its poll alone.
+        let (_tail, mut events) = tail(path.clone(), 0, clients_rx);
+
+        std::fs::create_dir_all(&folder).expect("create the transcript's folder");
         write_file(&path, "first\n");
         assert_eq!(next_event(&mut events).await, line("first"));
     }

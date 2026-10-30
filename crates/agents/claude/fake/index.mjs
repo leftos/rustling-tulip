@@ -22,6 +22,19 @@
  *     key: it interrupts a running turn, painting the interrupt row and
  *     running no hook, as Claude fires none on Esc; outside a turn it is
  *     ignored. An Esc with anything after it is ordinary input.
+ *   - Echoes the draft typed or pasted into the prompt box as `❯ <text>`
+ *     (one row, paste markers and control bytes left out, nothing while an
+ *     EOT paste is buffered), so the daemon's chat send sees it there.
+ *   - Runs a turn for any submitted line that is not blank or a `/` command:
+ *     a `user` transcript record and `UserPromptSubmit`, the spinner, then the
+ *     answer, a `system` `turn_duration` record, `Stop` and the idle box. A
+ *     message holding "rt-perm" first writes a `Bash` `tool_use` record, runs
+ *     `PermissionRequest` and paints the permission dialog; a bare `1`/`2`
+ *     there writes the `tool_result`, runs `PostToolUse` and answers, a `3`
+ *     denies it and runs `Stop`.
+ *   - Writes that transcript to
+ *     `<CLAUDE_CONFIG_DIR>/projects/<encoded cwd>/<id>.jsonl`, the id from
+ *     `--session-id` or `--resume`; nothing without either.
  *   - Echoes lines from stdin back so input from the harness is observable.
  *   - Reports the exact byte count + sha256 of an EOT-terminated payload as
  *     "RT_PASTE_RESULT bytes=<n> sha=<hex>" for paste byte-fidelity assertions
@@ -45,10 +58,10 @@
  *     `--model`, and `--permission-mode` flags the daemon may pass.
  */
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /// Prefix every line this shim prints carries, so its output names the agent
 /// it is standing in for.
@@ -59,6 +72,40 @@ const READY_BANNER = `${TAG} ready`;
 const STOP_AFTER_MS = 5000;
 /// The status row under the prompt box in auto mode.
 const AUTO_FOOTER = "  ⏵⏵ auto mode on (shift+tab to cycle)";
+/// The substring that makes a submitted message's turn ask a tool permission.
+const PERMISSION_CUE = "rt-perm";
+/// The pause between the steps of a message's turn, so each step reaches the
+/// screen and the transcript on its own.
+const TURN_STEP_MS = 300;
+/// The tool call the permission cue asks to run.
+const FAKE_TOOL = { command: "echo rt-fake", description: "Print the fake's marker" };
+/// What the turn answers once the permitted tool call has run.
+const TOOL_ANSWER = "Ran echo rt-fake and it printed rt-fake.";
+/// Bracketed-paste markers, kept out of a draft and a submitted line when
+/// they reach this process.
+const PASTE_MARKERS = /\x1b\[20[01]~/g;
+/// The states whose region holds the prompt box a draft is echoed into.
+const PROMPT_BOX_STATES = new Set(["idle", "working", "interrupted", "background"]);
+
+// Terminator for a paste-fidelity payload. A real bracketed paste's
+// \x1b[200~/\x1b[201~ markers do NOT survive ConPTY's raw-mode input delivery
+// to a non-native (Node) child — ConPTY interprets and strips them — but the
+// payload bytes and a plain control byte like EOT pass through intact. So the
+// paste e2e frames its payload with a trailing EOT and we checksum everything
+// received up to it, which verifies byte-exact delivery of the payload content
+// (where a dropped "middle" would show up) end-to-end.
+const PASTE_EOT = "\x04";
+
+/// Input received and not yet handled: the draft the prompt box echoes.
+let buffer = "";
+/// The draft painted last in the prompt box.
+let paintedDraft = "";
+/// The uuid of the transcript record written last, the next one's parent.
+let lastRecordUuid = null;
+/// When the running message turn started.
+let turnStartedAt = 0;
+/// The id of the tool call the permission dialog on screen asks about.
+let pendingToolId = null;
 
 /// The row strings of the bottom region painted last; empty while none is on
 /// screen.
@@ -108,6 +155,9 @@ const flags = parseArgs(args);
 // missing or malformed stays hookless with a line naming the path, because the
 // daemon itself spawns without hooks when it cannot write the file.
 const settingsDoc = loadSettings(flags.settings);
+// The transcript a message turn writes, where the daemon's chat mirror reads
+// it; null (nothing written) without a conversation id or a Claude home.
+const transcriptFile = transcriptPath(flags.conversationId);
 
 process.stdout.write(`${READY_BANNER} (pid: ${process.pid})\r\n`);
 if (flags.addDirs.length > 0) {
@@ -134,16 +184,6 @@ process.stdout.on("resize", () => {
   paint(paintedState);
 });
 
-// Terminator for a paste-fidelity payload. A real bracketed paste's
-// \x1b[200~/\x1b[201~ markers do NOT survive ConPTY's raw-mode input delivery
-// to a non-native (Node) child — ConPTY interprets and strips them — but the
-// payload bytes and a plain control byte like EOT pass through intact. So the
-// paste e2e frames its payload with a trailing EOT and we checksum everything
-// received up to it, which verifies byte-exact delivery of the payload content
-// (where a dropped "middle" would show up) end-to-end.
-const PASTE_EOT = "\x04";
-
-let buffer = "";
 // Behave like a real agent TUI: raw mode so input bytes arrive immediately
 // rather than being held (and length-capped) by ConPTY's cooked line
 // discipline. A large payload with no trailing newline would otherwise never
@@ -160,6 +200,7 @@ process.stdin.on("data", (chunk) => {
   }
   buffer += chunk;
   pump();
+  echoDraft();
   // An Esc left alone may be the start of a key sequence split across
   // chunks; it is the Esc key only if nothing follows it in time.
   if (buffer === "\x1b") {
@@ -182,6 +223,14 @@ process.stdin.on("end", () => process.exit(0));
  */
 function pump() {
   for (;;) {
+    // A digit while the permission dialog is up answers it, with no Enter.
+    if (paintedState === "permission" && /^[123]/.test(buffer)) {
+      const digit = buffer[0];
+      buffer = buffer.slice(1);
+      answerPermission(digit);
+      continue;
+    }
+
     const eot = buffer.indexOf(PASTE_EOT);
     const lineBreak = findLineBreak(buffer);
 
@@ -196,7 +245,7 @@ function pump() {
     if (lineBreak !== -1) {
       const line = buffer.slice(0, lineBreak);
       buffer = buffer.slice(lineBreak + lineBreakLength(buffer, lineBreak));
-      handleLine(line);
+      handleLine(line.replace(PASTE_MARKERS, ""));
       continue;
     }
 
@@ -212,6 +261,39 @@ function emitPasteResult(text) {
   const bytes = Buffer.byteLength(text, "utf8");
   const sha = createHash("sha256").update(text, "utf8").digest("hex");
   paint("idle", [`${TAG} RT_PASTE_RESULT bytes=${bytes} sha=${sha}`]);
+}
+
+/**
+ * The text typed so far and not yet submitted, as the prompt box shows it:
+ * paste markers and control bytes dropped, a backspace taking the character
+ * before it. Empty while an EOT-terminated payload is buffered, so a
+ * paste-fidelity payload is never echoed.
+ *
+ * @returns {string}
+ */
+function draftText() {
+  if (buffer.includes(PASTE_EOT)) {
+    return "";
+  }
+  const chars = [];
+  for (const char of buffer.replace(PASTE_MARKERS, "")) {
+    if (char === "\x7f" || char === "\b") {
+      chars.pop();
+    } else if (char >= " ") {
+      chars.push(char);
+    }
+  }
+  return chars.join("");
+}
+
+/**
+ * Repaints the prompt box when the draft in it changed, the way Claude echoes
+ * what is typed or pasted into its box.
+ */
+function echoDraft() {
+  if (PROMPT_BOX_STATES.has(paintedState) && draftText() !== paintedDraft) {
+    paint(paintedState);
+  }
 }
 
 /**
@@ -233,7 +315,10 @@ function interrupt() {
 function regionFor(state) {
   const cols = Math.max(20, terminalWidth() - 2);
   const rule = "─".repeat(cols);
-  const promptBox = [rule, "❯ ", rule];
+  // One row only: a longer draft is cut on screen, as a wrapped row would
+  // shift the region's rows.
+  const draft = [...draftText()].slice(0, cols - 2).join("");
+  const promptBox = [rule, `❯ ${draft}`, rule];
   switch (state) {
     case "idle":
       return [...promptBox, AUTO_FOOTER];
@@ -255,6 +340,8 @@ function regionFor(state) {
       ];
     case "asking":
       return questionRows(cols);
+    case "permission":
+      return permissionRows(cols);
     default:
       throw new Error(`no region for state ${state}`);
   }
@@ -287,6 +374,31 @@ function questionRows(cols) {
 }
 
 /**
+ * The permission dialog the `rt-perm` cue asks, in place of the prompt box:
+ * one rule, the tool and its command, and the three numbered answers over the
+ * `Esc to cancel · Tab to amend` footer.
+ *
+ * @param {number} cols
+ * @returns {string[]}
+ */
+function permissionRows(cols) {
+  return [
+    "─".repeat(cols),
+    " Bash command",
+    "",
+    `   ${FAKE_TOOL.command}`,
+    `   ${FAKE_TOOL.description}`,
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    `   2. Yes, and don't ask again for: ${FAKE_TOOL.command} *`,
+    "   3. No",
+    "",
+    " Esc to cancel · Tab to amend",
+  ];
+}
+
+/**
  * Redraw the bottom region as `state`, with `logLines` printed above it:
  * the previous region is cleared from its first row down, the lines join the
  * log, and the new region follows with the cursor left on its last row. The
@@ -308,6 +420,7 @@ function paint(state, logLines = []) {
   paintedRegion = rows;
   paintedRows = terminalRows(rows, terminalWidth());
   paintedState = state;
+  paintedDraft = draftText();
 }
 
 /**
@@ -450,7 +563,186 @@ function handleLine(line) {
     }, STOP_AFTER_MS);
     return;
   }
-  paint("idle", [`${TAG} echo: ${line}`]);
+  if (line.trim() === "" || line.startsWith("/")) {
+    paint("idle", [`${TAG} echo: ${line}`]);
+    return;
+  }
+  startTurn(line);
+}
+
+/**
+ * A submitted message's turn: the user record and `UserPromptSubmit`, the
+ * spinner, then either the permission dialog (a message holding the cue) or
+ * the answer and the turn's end.
+ *
+ * @param {string} text
+ */
+function startTurn(text) {
+  turnStartedAt = Date.now();
+  appendRecord({
+    type: "user",
+    promptId: randomUUID(),
+    message: { role: "user", content: text },
+  });
+  runHooks("UserPromptSubmit", {
+    hook_event_name: "UserPromptSubmit",
+    prompt: text,
+    permission_mode: "auto",
+  });
+  paint("working", [`${TAG} echo: ${text}`]);
+  const next = text.includes(PERMISSION_CUE)
+    ? askPermission
+    : () => endTurn(`Done: ${text}`);
+  setTimeout(next, TURN_STEP_MS);
+}
+
+/**
+ * The turn's tool call asks its permission: the `tool_use` record, the
+ * `PermissionRequest` hooks, and the dialog that waits for a digit.
+ */
+function askPermission() {
+  pendingToolId = `toolu_${randomUUID().replaceAll("-", "")}`;
+  appendRecord({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: pendingToolId, name: "Bash", input: FAKE_TOOL },
+      ],
+    },
+  });
+  runHooks(
+    "PermissionRequest",
+    {
+      hook_event_name: "PermissionRequest",
+      tool_name: "Bash",
+      tool_input: FAKE_TOOL,
+    },
+    "Bash",
+  );
+  paint("permission");
+}
+
+/**
+ * The digit typed at the permission dialog: `1` or `2` runs the tool and
+ * answers, `3` denies it and ends the turn as Claude does on a refusal.
+ *
+ * @param {string} digit
+ */
+function answerPermission(digit) {
+  const allowed = digit !== "3";
+  appendRecord({
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: pendingToolId,
+          content: allowed ? "rt-fake" : "The user doesn't want to proceed with this tool use.",
+          is_error: !allowed,
+        },
+      ],
+    },
+  });
+  pendingToolId = null;
+  if (!allowed) {
+    appendRecord({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "[Request interrupted by user for tool use]" }],
+      },
+    });
+    runHooks("Stop", { hook_event_name: "Stop", last_assistant_message: "" });
+    paint("idle", [`${TAG} denied: ${FAKE_TOOL.command}`]);
+    return;
+  }
+  runHooks(
+    "PostToolUse",
+    {
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: FAKE_TOOL,
+      tool_response: { stdout: "rt-fake", stderr: "", interrupted: false },
+    },
+    "Bash",
+  );
+  paint("working", [`${TAG} ran: ${FAKE_TOOL.command}`]);
+  setTimeout(() => endTurn(TOOL_ANSWER), TURN_STEP_MS);
+}
+
+/**
+ * The turn's end: the answer and `turn_duration` records, the `Stop` hooks,
+ * and the idle box under the answer.
+ *
+ * @param {string} answer
+ */
+function endTurn(answer) {
+  appendRecord({
+    type: "assistant",
+    message: { role: "assistant", content: [{ type: "text", text: answer }] },
+  });
+  appendRecord({
+    type: "system",
+    subtype: "turn_duration",
+    durationMs: Date.now() - turnStartedAt,
+  });
+  runHooks("Stop", { hook_event_name: "Stop", last_assistant_message: answer });
+  paint("idle", [`${TAG} answer: ${answer}`]);
+}
+
+/**
+ * Where the transcript of conversation `id` lives: under the Claude home the
+ * daemon gives the run (`CLAUDE_CONFIG_DIR`), in the folder named after the
+ * working directory, which the daemon started the session in. Null without
+ * an id or a home.
+ *
+ * @param {string | null} id
+ * @returns {string | null}
+ */
+function transcriptPath(id) {
+  const home = process.env.CLAUDE_CONFIG_DIR;
+  if (id === null || home === undefined || home === "") {
+    return null;
+  }
+  return join(home, "projects", encodeProjectDir(process.cwd()), `${id}.jsonl`);
+}
+
+/**
+ * The folder name Claude gives a working directory: every character outside
+ * `[A-Za-z0-9-]` becomes `-`, one per code point, case kept.
+ *
+ * @param {string} cwd
+ * @returns {string}
+ */
+function encodeProjectDir(cwd) {
+  return cwd.replace(/[^A-Za-z0-9-]/gu, "-");
+}
+
+/**
+ * Appends one transcript record, chained to the one before it, carrying the
+ * conversation id, the working directory and the time; writes nothing when
+ * the run has no transcript.
+ *
+ * @param {object} fields
+ */
+function appendRecord(fields) {
+  if (transcriptFile === null) {
+    return;
+  }
+  const uuid = randomUUID();
+  const record = {
+    parentUuid: lastRecordUuid,
+    uuid,
+    sessionId: flags.conversationId,
+    cwd: process.cwd(),
+    timestamp: new Date().toISOString(),
+    ...fields,
+  };
+  mkdirSync(dirname(transcriptFile), { recursive: true });
+  appendFileSync(transcriptFile, `${JSON.stringify(record)}\n`);
+  lastRecordUuid = uuid;
 }
 
 /**
@@ -613,7 +905,7 @@ function lineBreakLength(value, index) {
  * @param {string[]} argv
  */
 function parseArgs(argv) {
-  /** @type {{addDirs: string[], prompt: string | null, model: string | null, permissionMode: string | null, skipPermissions: boolean, settings: string | null}} */
+  /** @type {{addDirs: string[], prompt: string | null, model: string | null, permissionMode: string | null, skipPermissions: boolean, settings: string | null, conversationId: string | null}} */
   const out = {
     addDirs: [],
     prompt: null,
@@ -621,6 +913,7 @@ function parseArgs(argv) {
     permissionMode: null,
     skipPermissions: false,
     settings: null,
+    conversationId: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -634,6 +927,8 @@ function parseArgs(argv) {
       out.permissionMode = argv[++i];
     } else if (a === "--settings" && argv[i + 1] !== undefined) {
       out.settings = argv[++i];
+    } else if ((a === "--session-id" || a === "--resume") && argv[i + 1] !== undefined) {
+      out.conversationId = argv[++i];
     } else if (a === "--dangerously-skip-permissions") {
       out.skipPermissions = true;
     }
