@@ -246,7 +246,6 @@ fn forget_the_current_host_switches_to_local(cx: &mut TestAppContext) {
         &dir,
         &json!({
             "saved_hosts": [{ "name": HOST, "port": 8787 }],
-            "last_target": { "name": HOST, "port": 8787 },
         }),
     );
     let mut h = Harness::on_target(
@@ -267,7 +266,6 @@ fn forget_the_current_host_switches_to_local(cx: &mut TestAppContext) {
     assert_eq!(switches(&mut h), [Target::Local]);
     let ui = saved_ui(&dir);
     assert_eq!(ui["saved_hosts"], json!([]));
-    assert!(ui["last_target"].is_null(), "{}", ui["last_target"]);
 }
 
 #[gpui::test]
@@ -277,7 +275,6 @@ fn forget_the_current_host_drops_its_session_count_for_good(cx: &mut TestAppCont
         &dir,
         &json!({
             "saved_hosts": [{ "name": HOST, "port": 8787 }],
-            "last_target": { "name": HOST, "port": 8787 },
             "host_session_counts": { HOST: 1 },
         }),
     );
@@ -355,7 +352,6 @@ fn switching_host_saves_last_target(cx: &mut TestAppContext) {
     h.click_on(&row(PEER));
 
     let ui = saved_ui(&dir);
-    assert_eq!(ui["last_target"], json!({ "name": PEER, "port": 8787 }));
     assert_eq!(
         ui["saved_hosts"],
         json!([{ "name": PEER, "port": 8787 }]),
@@ -414,7 +410,6 @@ fn picking_this_pc_switches_to_local(cx: &mut TestAppContext) {
         &dir,
         &json!({
             "saved_hosts": [{ "name": HOST, "port": 8787 }],
-            "last_target": { "name": HOST, "port": 8787 },
         }),
     );
     let mut h = Harness::on_target(
@@ -430,7 +425,6 @@ fn picking_this_pc_switches_to_local(cx: &mut TestAppContext) {
 
     assert_eq!(switches(&mut h), [Target::Local]);
     let ui = saved_ui(&dir);
-    assert!(ui["last_target"].is_null(), "{}", ui["last_target"]);
     assert_eq!(
         ui["saved_hosts"],
         json!([{ "name": HOST, "port": 8787 }]),
@@ -472,7 +466,6 @@ fn typed_known_host_on_a_new_port_updates_the_saved_port(cx: &mut TestAppContext
     assert_eq!(switches(&mut h), [Target::tailnet(HOST, Some(9443))]);
     let ui = saved_ui(&dir);
     assert_eq!(ui["saved_hosts"], json!([{ "name": HOST, "port": 9443 }]));
-    assert_eq!(ui["last_target"], json!({ "name": HOST, "port": 9443 }));
 }
 
 #[gpui::test]
@@ -755,7 +748,6 @@ fn adding_an_ssh_host_without_a_test_saves_it_and_switches(cx: &mut TestAppConte
     let saved = json!({ "kind": "ssh", "name": SSH_HOST, "remote_command": "rtd.cmd" });
     let ui = saved_ui(&dir);
     assert_eq!(ui["saved_hosts"], json!([saved.clone()]), "no port");
-    assert_eq!(ui["last_target"], saved);
 }
 
 #[gpui::test]
@@ -843,7 +835,6 @@ fn forget_the_current_ssh_host_returns_to_this_pc(cx: &mut TestAppContext) {
         &dir,
         &json!({
             "saved_hosts": [{ "kind": "ssh", "name": SSH_HOST }],
-            "last_target": { "kind": "ssh", "name": SSH_HOST },
         }),
     );
     let mut h = Harness::on_target(cx, &dir, ssh(SSH_HOST), &Fixture::default());
@@ -859,7 +850,6 @@ fn forget_the_current_ssh_host_returns_to_this_pc(cx: &mut TestAppContext) {
     assert_eq!(switches(&mut h), [Target::Local]);
     let ui = saved_ui(&dir);
     assert_eq!(ui["saved_hosts"], json!([]));
-    assert!(ui["last_target"].is_null(), "{}", ui["last_target"]);
 }
 
 #[gpui::test]
@@ -1052,7 +1042,6 @@ fn opening_the_picker_on_a_saved_host_shows_its_state_chip(cx: &mut TestAppConte
         &dir,
         &json!({
             "saved_hosts": [{ "name": HOST, "port": 8787 }],
-            "last_target": { "name": HOST, "port": 8787 },
         }),
     );
     let tailnet = Target::tailnet(HOST, Some(8787));

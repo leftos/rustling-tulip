@@ -811,6 +811,14 @@ pub struct RootView {
     /// How far this launch's reopening of the pop-outs saved at the last
     /// quit has come.
     popout_restore: PopoutRestore,
+    /// The saved pop-outs of remote hosts' sessions the launch's restore
+    /// left for their host's session list, in saved order.
+    popouts_awaiting_hosts: Vec<SavedPopout>,
+    /// The remote hosts whose session list has arrived this launch.
+    remote_lists_in: HashSet<HostKey>,
+    /// Each host whose connection was dropped because another host's had
+    /// reached the same daemon first, with that other host.
+    duplicate_of: HashMap<HostKey, HostKey>,
     /// Whether moving a window records its place for the next launch: only
     /// real, visible windows do, since gpui's test windows panic when asked
     /// for their handle and a cloaked window's place means nothing.
@@ -1213,7 +1221,7 @@ impl RootView {
         root
     }
 
-    /// The daemon the connection is on, or is trying to reach.
+    /// The daemon This PC's connection is on, or is trying to reach.
     #[must_use]
     pub fn connection_target(&self) -> &target::Target {
         self.conn().target()
@@ -1302,8 +1310,7 @@ impl RootView {
         let mut ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
-        let boot_target = connection_picker::resolve_boot_target(&ui);
-        let (tx, events) = open_host(&boot_target);
+        let (tx, events) = open_host(&target::Target::Local);
         Self::forward_net_events(HostKey::Local, events, window, cx);
         let drag_escape = Self::intercept_drag_escape(window, cx);
         let themes_dir = ui_dir
@@ -1326,7 +1333,7 @@ impl RootView {
         ui_theme::set_theme(theme, cx);
         let chat = chat_view::ChatPanes::new(chat_view::WallClock::starting_at(now()));
         let mut view = Self {
-            hosts: Hosts::new(HostConn::new(tx, boot_target)),
+            hosts: Hosts::new(HostConn::new(tx, target::Target::Local)),
             open_host,
             now,
             tabs: TabsModel::new(ui.active_tab_id.clone()),
@@ -1357,6 +1364,9 @@ impl RootView {
             popout_windows: HashMap::new(),
             popout_focused: None,
             popout_restore: PopoutRestore::Waiting,
+            popouts_awaiting_hosts: Vec::new(),
+            remote_lists_in: HashSet::new(),
+            duplicate_of: HashMap::new(),
             remembers_window_places: false,
             root_focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
@@ -1511,6 +1521,7 @@ impl RootView {
         };
         view.arm_needs_you_repaint(cx);
         view.start_update_checks(cx);
+        view.connect_saved_hosts(window, cx);
         view
     }
 
@@ -3089,6 +3100,7 @@ impl RootView {
         let main_was_active = window.is_window_active();
         let earlier = self.sidebar.take_saved_popouts();
         let saved = popouts::follow_saved_moves(earlier.clone(), self.tabs.tabs());
+        let (saved, awaiting) = self.split_awaited_popouts(saved);
         let (mut tried, mut reopened) = (0_usize, 0_usize);
         for entry in saved {
             if self.popouts.is_open(&entry.key) {
@@ -3108,11 +3120,13 @@ impl RootView {
             tracing::info!(reopened, dropped, "saved pop-outs dropped at launch");
         }
         let restored = self.sidebar.take_saved_popouts();
-        let open = self.open_popouts_saved(&[restored, earlier.clone()].concat());
-        if open != earlier {
+        let mut kept = self.open_popouts_saved(&[restored, earlier.clone()].concat());
+        kept.extend(awaiting.iter().cloned());
+        if kept != earlier {
             self.schedule_ui_save(cx);
         }
-        self.sidebar.set_saved_popouts(open);
+        self.sidebar.set_saved_popouts(kept);
+        self.popouts_awaiting_hosts = awaiting;
         if reopened > 0 && main_was_active && !offscreen::requested() {
             // Each pop-out window opens deferred; this runs after them.
             let main = window.window_handle();
@@ -3121,6 +3135,81 @@ impl RootView {
                     tracing::debug!("the main window closed as pop-outs reopened: {err:#}");
                 }
             });
+        }
+    }
+
+    /// Splits the saved pop-outs into those the restore tries now and the
+    /// remote sessions' ones that wait for their host's session list. A
+    /// pop-out of a remote host the window holds no connection to is
+    /// dropped.
+    fn split_awaited_popouts(
+        &self,
+        saved: Vec<SavedPopout>,
+    ) -> (Vec<SavedPopout>, Vec<SavedPopout>) {
+        let (mut now, mut awaiting) = (Vec::new(), Vec::new());
+        for entry in saved {
+            let host = entry.key.host();
+            if host == HostKey::Local || self.remote_lists_in.contains(&host) {
+                now.push(entry);
+            } else if self.hosts.get(&host).is_some() {
+                awaiting.push(entry);
+            } else {
+                tracing::info!(key = ?entry.key, "a saved pop-out's host is not connected; dropped");
+            }
+        }
+        (now, awaiting)
+    }
+
+    /// `host`'s session list arrived: the saved pop-outs that waited for it
+    /// reopen in the main window, and one whose session it does not list is
+    /// dropped.
+    fn restore_awaited_popouts(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .popouts_awaiting_hosts
+            .iter()
+            .any(|entry| entry.key.host() == *host)
+        {
+            return;
+        }
+        if self.is_main_window(window) {
+            self.reopen_awaited_popouts(host, window, cx);
+        } else {
+            let host = host.clone();
+            Self::in_window(self.layouts.main(), cx, move |root, window, cx| {
+                root.reopen_awaited_popouts(&host, window, cx);
+            });
+        }
+    }
+
+    fn reopen_awaited_popouts(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (due, rest): (Vec<SavedPopout>, Vec<SavedPopout>) =
+            std::mem::take(&mut self.popouts_awaiting_hosts)
+                .into_iter()
+                .partition(|entry| entry.key.host() == *host);
+        self.popouts_awaiting_hosts = rest;
+        let mut dropped = false;
+        for entry in due {
+            if self.popouts.is_open(&entry.key) {
+                continue;
+            }
+            let place = PopoutPlace::Restored(entry.window.clone());
+            if self.open_popout_at(entry.key.clone(), &place, window, cx) != OpenOutcome::Opened {
+                tracing::info!(key = ?entry.key, "a saved pop-out's session is not on its host; dropped");
+                dropped |= self.sidebar.forget_saved_popout(&entry.key);
+            }
+        }
+        if dropped {
+            self.schedule_ui_save(cx);
         }
     }
 
@@ -3554,6 +3643,13 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.hosts.get(host).is_none() {
+            tracing::debug!(
+                ?host,
+                "dropping an event from a host the window no longer holds"
+            );
+            return;
+        }
         // Only the connection and the session list move the exit dialog's
         // wait, walk and focus.
         let exit_relevant = match &event {
@@ -3589,6 +3685,7 @@ impl RootView {
                 if !conn.is_open() {
                     self.forget_agents(host);
                     self.forget_daemon_settings(host);
+                    self.forget_daemon_id(host);
                 }
                 if !conn.is_open() && *host == HostKey::Local {
                     self.agent_tabs.forget_applies();
@@ -3737,6 +3834,18 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.hosts.get(host).is_none() {
+            tracing::debug!(
+                ?host,
+                "dropping an event from a host the window no longer holds"
+            );
+            return;
+        }
+        if let DaemonMessage::Welcome { daemon_id, .. } = &msg
+            && self.drop_if_duplicate(host, daemon_id.as_deref(), window, cx)
+        {
+            return;
+        }
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.
         let (moved, exit_discard, finished) = self.before_fold(host, &msg);
@@ -4114,16 +4223,7 @@ impl RootView {
     ) {
         tracing::info!("connection target changed: clearing the old daemon's state");
         if *host != HostKey::Local {
-            self.reset_host(host, window, cx);
-            self.sidebar.clear_host(host);
-            self.seen_sessions.remove(host);
-            self.reset_dashboard_for_target(host);
-            self.forget_sc_host(host);
-            self.session_history.forget(host);
-            self.refresh_recover();
-            self.drop_stale_session_ui(window, cx);
-            self.prune_container_row_focus();
-            cx.notify();
+            self.clear_remote_slice(host, window, cx);
             return;
         }
         if self.popout_restore == PopoutRestore::Waiting {
@@ -4179,6 +4279,28 @@ impl RootView {
         if self.exit.is_some() {
             self.close_exit_dialog(window, cx);
         }
+        cx.notify();
+    }
+
+    /// Forgets everything remote host `host`'s daemon sent: its sessions,
+    /// repos and workspaces, and the panels and history that read them.
+    /// Sends nothing.
+    pub(crate) fn clear_remote_slice(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reset_host(host, window, cx);
+        self.sidebar.clear_host(host);
+        self.seen_sessions.remove(host);
+        self.remote_lists_in.remove(host);
+        self.reset_dashboard_for_target(host);
+        self.forget_sc_host(host);
+        self.session_history.forget(host);
+        self.refresh_recover();
+        self.drop_stale_session_ui(window, cx);
+        self.prune_container_row_focus();
         cx.notify();
     }
 
@@ -4347,6 +4469,8 @@ impl RootView {
         // The layout home's list gates the wanted session and the pop-outs.
         if *host == HostKey::Local {
             self.sessions_loaded = true;
+        } else {
+            self.remote_lists_in.insert(host.clone());
         }
         for view in self.pane_views(None) {
             view.update(cx, |pane, _| {
@@ -4357,6 +4481,9 @@ impl RootView {
         self.apply_pane_fonts(false, cx);
         self.try_wanted_session(window, cx);
         self.try_restore_popouts(window, cx);
+        if *host != HostKey::Local {
+            self.restore_awaited_popouts(host, window, cx);
+        }
         self.scan_unseen_cwd_paths();
     }
 

@@ -69,6 +69,17 @@ pub fn welcome(protocol_version: u32) -> DaemonMessage {
     }
 }
 
+/// The fake daemon's `Welcome` on `protocol_version` as [`welcome`] sends
+/// it, naming the daemon `daemon_id`.
+pub fn welcome_with_id(protocol_version: u32, daemon_id: &str) -> DaemonMessage {
+    DaemonMessage::Welcome {
+        protocol_version,
+        supported_versions: vec![protocol_version],
+        features: daemon_features(),
+        daemon_id: Some(daemon_id.to_owned()),
+    }
+}
+
 /// A connection to `target` open on `port`, welcomed with `features`.
 fn connected_to(target: Target, port: u16, features: Vec<String>) -> Connection {
     let mut conn = Connection::for_target(target);

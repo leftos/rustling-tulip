@@ -22,7 +22,7 @@ use support::{
 };
 
 #[gpui::test]
-fn the_window_opens_one_connection_for_the_boot_target(cx: &mut TestAppContext) {
+fn the_window_opens_one_connection_for_this_pc_with_no_saved_hosts(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
 
@@ -1230,4 +1230,258 @@ fn a_remote_hosts_pending_scan_is_asked_again_after_it_reconnects(cx: &mut TestA
         ["D:\\remote\\dir"],
         "the reconnected host is asked again"
     );
+}
+
+/// Writes `ui` as the `native-ui.json` the window opens over.
+fn seed_ui(dir: &TestDir, ui: &serde_json::Value) {
+    std::fs::write(dir.path().join("native-ui.json"), ui.to_string())
+        .expect("write native-ui.json");
+}
+
+/// The `native-ui.json` the window last saved.
+fn saved_ui(dir: &TestDir) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    serde_json::from_str(&text).expect("native-ui.json is JSON")
+}
+
+/// A second tailnet host the launch specs save.
+const OTHER: &str = "den.tail1234.ts.net";
+
+#[gpui::test]
+fn launch_connects_this_pc_and_every_enabled_saved_host_in_saved_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": OTHER, "port": 9443 },
+            { "kind": "ssh", "name": "me@devbox" },
+            { "name": REMOTE, "port": 8787 },
+        ] }),
+    );
+    let mut h = Harness::open(cx, &dir);
+
+    assert_eq!(
+        h.opened_targets(),
+        [
+            Target::Local,
+            Target::tailnet(OTHER, Some(9443)),
+            Target::parse_ssh("me@devbox", None).expect("an SSH host string"),
+            Target::tailnet(REMOTE, Some(8787)),
+        ],
+        "This PC first, then each saved host in saved order, on its saved port"
+    );
+    assert_eq!(
+        h.root(|root, _| root.connection_target().clone()),
+        Target::Local,
+        "This PC's slot is This PC"
+    );
+}
+
+#[gpui::test]
+fn launch_skips_a_disabled_saved_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": OTHER, "port": 8787, "enabled": false },
+            { "name": REMOTE, "port": 8787 },
+        ] }),
+    );
+    let h = Harness::open(cx, &dir);
+
+    assert_eq!(
+        h.opened_targets(),
+        [Target::Local, Target::tailnet(REMOTE, Some(8787))],
+        "a host switched off is not dialled"
+    );
+}
+
+#[gpui::test]
+fn launch_with_an_unpaired_saved_host_opens_no_pairing_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::open(cx, &dir);
+    let mut refused = Connection::for_target(Target::tailnet(REMOTE, Some(8787)));
+    refused.on_connecting();
+    refused.on_socket_open(8787);
+    refused.on_not_approved(protocol::DEVICE_NOT_APPROVED.to_owned(), false);
+
+    let mut host = h.host(&Target::tailnet(REMOTE, Some(8787)));
+    host.event(NetEvent::State(refused));
+    assert!(host.commands().is_empty(), "nothing asks the host to pair");
+    assert!(
+        !h.root(|root, _| root.device_pairing_open()),
+        "a host that does not know this PC opens nothing at launch"
+    );
+}
+
+#[gpui::test]
+fn a_remote_sessions_saved_popout_reopens_once_its_host_connects_at_launch(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let saved = serde_json::json!({
+        "key": { "kind": "session", "session_id": "b1", "host": REMOTE },
+        "window": null,
+    });
+    let unsaved_host = serde_json::json!({
+        "key": { "kind": "session", "session_id": "c1", "host": OTHER },
+        "window": null,
+    });
+    seed_ui(
+        &dir,
+        &serde_json::json!({
+            "saved_hosts": [{ "name": REMOTE, "port": 8787 }],
+            "popouts": [saved, unsaved_host],
+        }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(h.window_count(), 1, "the host's list has not arrived");
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        serde_json::json!([saved]),
+        "kept while its host connects; one whose host is not saved is dropped at once"
+    );
+
+    let mut host = h.host(&Target::tailnet(REMOTE, Some(8787)));
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+
+    assert_eq!(
+        h.window_count(),
+        2,
+        "the pop-out reopened on its host's list"
+    );
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        serde_json::json!([saved]),
+        "the saved entry stays as it was"
+    );
+}
+
+/// The daemon id the dedupe specs give a daemon reached twice.
+const DAEMON: &str = "6f1e2d3c-0000-4000-8000-000000000001";
+
+fn ssh_box() -> Target {
+    Target::parse_ssh("me@devbox", None).expect("an SSH host string")
+}
+
+/// Opens `target`'s connection beside This PC's and has its daemon say
+/// `Welcome`, naming itself `id` when there is one.
+fn welcome_as(h: &mut Harness<'_>, target: &Target, id: Option<&str>) {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(PROTOCOL, support::daemon_features());
+    let mut host = h.host(target);
+    host.event(NetEvent::State(conn));
+    host.send(id.map_or_else(
+        || welcome(PROTOCOL),
+        |id| support::welcome_with_id(PROTOCOL, id),
+    ));
+}
+
+fn duplicate_of(h: &mut Harness<'_>, target: &Target) -> Option<HostKey> {
+    let key = HostKey::of(target);
+    h.root(move |root, _| root.duplicate_of(&key).cloned())
+}
+
+#[gpui::test]
+fn a_second_host_on_the_same_daemon_is_dropped_and_named(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    welcome_as(&mut h, &remote(), Some(DAEMON));
+    h.host(&remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    h.host(&ssh_box()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+
+    assert_eq!(
+        duplicate_of(&mut h, &ssh_box()),
+        Some(HostKey::of(&remote())),
+        "the later host names the one that reached the daemon first"
+    );
+    assert_eq!(duplicate_of(&mut h, &remote()), None);
+    assert_eq!(
+        shown_leaves(&mut h),
+        ["a1", "b1"],
+        "the daemon's session shows once"
+    );
+    assert_eq!(
+        h.root(|root, _| root.held_hosts()),
+        [HostKey::Local, HostKey::of(&remote())],
+        "the duplicate's connection is gone"
+    );
+}
+
+#[gpui::test]
+fn a_remote_alias_of_this_pc_is_dropped_even_when_it_welcomes_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    welcome_as(&mut h, &remote(), Some(DAEMON));
+    h.host(&remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("a1").build()],
+    });
+
+    h.send(support::welcome_with_id(PROTOCOL, DAEMON));
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("a1").build()],
+    });
+
+    assert_eq!(
+        duplicate_of(&mut h, &remote()),
+        Some(HostKey::Local),
+        "This PC owns its own daemon"
+    );
+    assert_eq!(shown_leaves(&mut h), ["a1"], "This PC's session shows once");
+}
+
+#[gpui::test]
+fn a_not_approved_duplicate_is_dropped_before_pairing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.send(support::welcome_with_id(PROTOCOL, DAEMON));
+    let mut refused = Connection::for_target(remote());
+    refused.on_connecting();
+    refused.on_socket_open(8787);
+    refused.on_not_approved(protocol::DEVICE_NOT_APPROVED.to_owned(), false);
+
+    let mut host = h.host(&remote());
+    host.event(NetEvent::State(refused));
+    host.send(support::welcome_with_id(PROTOCOL, DAEMON));
+
+    assert_eq!(duplicate_of(&mut h, &remote()), Some(HostKey::Local));
+    assert!(
+        !h.root(|root, _| root.device_pairing_open()),
+        "no pairing for a daemon already connected"
+    );
+}
+
+#[gpui::test]
+fn a_welcome_without_a_daemon_id_is_never_a_duplicate(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    welcome_as(&mut h, &remote(), None);
+    h.host(&remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+    welcome_as(&mut h, &ssh_box(), None);
+    h.host(&ssh_box()).send(DaemonMessage::Sessions {
+        sessions: vec![session("c1").build()],
+    });
+
+    assert_eq!(duplicate_of(&mut h, &remote()), None);
+    assert_eq!(duplicate_of(&mut h, &ssh_box()), None);
+    assert_eq!(shown_leaves(&mut h), ["a1", "b1", "c1"]);
 }
