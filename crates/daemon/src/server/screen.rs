@@ -96,6 +96,7 @@ fn verdict_text(verdict: Verdict) -> &'static str {
         Verdict::State(ScreenState::AwaitingInput) => "awaiting_input",
         Verdict::State(ScreenState::Idle) => "idle",
         Verdict::Keep => "keep",
+        Verdict::Background => "background",
         Verdict::NoMatch => "no_match",
     }
 }

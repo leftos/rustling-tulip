@@ -119,7 +119,7 @@ The agent plugin's `map_hook_event` (Claude's calls `agent_api::hook_vocabulary:
 | `PermissionRequest` (other tools) | `AwaitingInput` | `Permission { tool_name, summary }` (`command`, `file_path` or the first 200 chars of `tool_input`) |
 | `Notification` `permission_prompt` / `elicitation_*` | `AwaitingInput` | kept, else `Other { message }` |
 | `Elicitation` | `AwaitingInput` | `Other { message }` naming the MCP server |
-| `Notification` `idle_prompt`, `Stop`, `StopFailure` | `Idle` | cleared; an `idle_prompt` is ignored while a hook-reported prompt is pending; a main-agent `Stop` whose `background_tasks` lists a running task, or whose `session_crons` holds a one-shot cron, also sets the snapshot's `background` flag |
+| `Notification` `idle_prompt`, `Stop`, `StopFailure` | `Idle` | cleared; an `idle_prompt` is ignored while a hook-reported prompt is pending; a main-agent `Stop` whose `background_tasks` lists a running task, or whose `session_crons` holds a one-shot cron, also sets the snapshot's `background` flag (the screen's footer rules can set it too, see "Coexisting with the screen rules") |
 | `SessionEnd` | unchanged | cleared |
 
 `Stop` maps to `Idle`, keeping today's meaning of the two states (see open question 3). The daemon keeps `Stop`'s `last_assistant_message` (capped at 8 KiB) on the session record, off the wire, for the alerts summarizer. `StopFailure` adds a `recent_actions` line. Hook transitions go through the same transition path as the heuristic, so `Attention { AwaitingInput }` still fires on entry to `AwaitingInput` and nowhere else.
@@ -140,6 +140,7 @@ A hook event applies at once. A plain shell's `SessionEnd`, or its prompt row co
 - The screen owns the exits no hook reports, behind hysteresis (3 agreeing checks 150 ms apart, capped at 700 ms): `Working` to `Idle` once the spinner is gone and the prompt box or the `Interrupted` row shows (`Stop` does not fire on a user interrupt, Esc mid-tool or mid-text), and `AwaitingInput` to `Idle` once the dialog footer is gone (rejecting a plan, denying a permission and dismissing a question fire no hook).
 
   There is no silence demotion: a quiet screen that still shows the spinner stays `Working` however long the PTY is silent.
+- The screen also reads `background` beside `Idle`, with no hook: a `· N shell(s)` mode-line item or a running-subagent row (verdict `background`, `CompiledRules::read_background`) sets the flag after the confirmation window, only while the record is `Idle` and the screen body reads `Idle`. It clears only a flag it set itself, so a flag a `Stop` set survives a frame without the footer; any status change still clears either.
 - A screen write is refused unless the record still holds the status, hook stamp and hook-driven flag the check read, so a hook event that lands during a confirmation window wins. After any hook or owner-key write the screen is left unread for 700 ms, so a grid still showing the frame from before the change cannot undo it.
 - The owner's own input also leaves `AwaitingInput`: any key the owner sends to a session while it shows a pending prompt clears `AwaitingInput` at once and clears `pending_input`. A later `PreToolUse` or `PostToolUse` promotes the session again, so an answered prompt that continues the turn returns to `Working`.
 

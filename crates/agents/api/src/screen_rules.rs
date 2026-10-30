@@ -246,6 +246,10 @@ pub enum ScreenVerdict {
     Idle,
     /// An overlay is open: leave the status as it is.
     Keep,
+    /// Work runs on in the background beside the session's state. Such a
+    /// rule is a second reading of the screen, evaluated apart from the
+    /// first-match state rules, and never decides the state.
+    Background,
     /// A verdict this build does not know, carried from a newer plugin.
     Unknown,
 }
@@ -257,6 +261,7 @@ impl From<String> for ScreenVerdict {
             "awaiting_input" => Self::AwaitingInput,
             "idle" => Self::Idle,
             "keep" => Self::Keep,
+            "background" => Self::Background,
             _ => Self::Unknown,
         }
     }
@@ -269,6 +274,7 @@ impl From<ScreenVerdict> for String {
             ScreenVerdict::AwaitingInput => "awaiting_input".to_string(),
             ScreenVerdict::Idle => "idle".to_string(),
             ScreenVerdict::Keep => "keep".to_string(),
+            ScreenVerdict::Background => "background".to_string(),
             ScreenVerdict::Unknown => "unknown".to_string(),
         }
     }

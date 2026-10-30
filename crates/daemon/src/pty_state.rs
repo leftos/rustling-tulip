@@ -125,6 +125,12 @@ pub struct AgentStreams {
 /// against the same record. A reading taken from the title alone, an overlay,
 /// or a screen no rule matches never writes and breaks any open window.
 ///
+/// Beside an `Idle` record whose screen body reads `Idle`, the agent's
+/// background rules ([`CompiledRules::read_background`]) set the record's
+/// `background` flag after the same window, and clear it after one only when
+/// this watcher set it: a flag a hook set, or one set before another writer's
+/// change or a status change, is left for its own writer to clear.
+///
 /// When another writer (a hook event, the owner's key, an exit) changes the
 /// record's status, hook stamp or hook-driven flag, the screen is left unread
 /// for [`FOREIGN_WRITE_HOLD`], and so it is when the watcher starts (while a
@@ -216,6 +222,10 @@ struct ScreenWatch {
     /// shows, until a check reads anything other than a dialog. A dialog left
     /// painted after the owner's key cleared it raises nothing.
     dialog_edge_armed: bool,
+    /// Whether the record's background flag is this watcher's own write: the
+    /// screen clears only a flag it set. Any other writer's change to the
+    /// record, and any status change, drops it.
+    screen_set_background: bool,
 }
 
 /// When the next check runs, and the change it is confirming.
@@ -242,6 +252,8 @@ enum Target {
     AgentShown,
     /// The agent's screen gone, in a shell running an agent.
     AgentGone,
+    /// The background flag the screen shows beside `Idle`.
+    Background(bool),
 }
 
 /// A gated change being confirmed: what it would publish, the record it was
@@ -351,6 +363,7 @@ impl ScreenWatch {
             size: None,
             last_verdict: None,
             dialog_edge_armed: true,
+            screen_set_background: false,
         }
     }
 
@@ -410,7 +423,7 @@ impl ScreenWatch {
             Ok(found) => found,
             Err(checked) => return checked,
         };
-        let Some((reading, prompt)) = self.read_screen() else {
+        let Some((reading, background, prompt)) = self.read_screen() else {
             self.confirm.hold(now);
             return Checked::Done;
         };
@@ -419,6 +432,7 @@ impl ScreenWatch {
             rule = ?reading.rule,
             verdict = ?reading.verdict,
             from_title = reading.from_title,
+            background = ?background,
             prompt,
             status = ?read.status,
             ?mode,
@@ -440,7 +454,7 @@ impl ScreenWatch {
                 Checked::Done
             }
             Mode::Agent | Mode::ShellAgent => {
-                self.follow_screen(read, &reading, quiet, now);
+                self.follow_screen(read, &reading, background.is_some(), quiet, now);
                 Checked::Done
             }
         }
@@ -486,37 +500,91 @@ impl ScreenWatch {
         Ok((read, quiet))
     }
 
-    /// The screen's reading, and whether its last non-empty row is a shell's
-    /// prompt; `None` when the grid's size changed since the last executed
-    /// check: the frame under the new size may be half drawn.
-    fn read_screen(&mut self) -> Option<(Reading, bool)> {
-        let (size, reading, prompt) = {
+    /// The screen's reading, the background rule that fires on it, and
+    /// whether its last non-empty row is a shell's prompt; `None` when the
+    /// grid's size changed since the last executed check: the frame under the
+    /// new size may be half drawn.
+    fn read_screen(&mut self) -> Option<(Reading, Option<Arc<str>>, bool)> {
+        let (size, reading, background, prompt) = {
             let screen = crate::sync::lock(&self.screen);
             (
                 screen.size(),
                 self.rules.read(&screen),
+                self.rules.read_background(&screen),
                 rules::last_row_is_shell_prompt(&screen),
             )
         };
         let resized = self.size.is_some_and(|last| last != size);
         self.size = Some(size);
-        (!resized).then_some((reading, prompt))
+        (!resized).then_some((reading, background, prompt))
     }
 
-    /// Publish the status the screen shows, at once or after its window.
-    fn follow_screen(&mut self, read: StatusRead, reading: &Reading, quiet: bool, now: Instant) {
+    /// Publish the status the screen shows, at once or after its window;
+    /// with no status to publish, follow the background work it shows
+    /// (`background`).
+    fn follow_screen(
+        &mut self,
+        read: StatusRead,
+        reading: &Reading,
+        background: bool,
+        quiet: bool,
+        now: Instant,
+    ) {
         let Some(target) = screen_target(reading).filter(|&target| target != read.status) else {
-            self.confirm.window = None;
             self.confirm.candidate = None;
+            self.follow_background(read, reading, background, now);
             return;
         };
         if publishes_at_once(read.status, target) {
             self.publish_at_once(read, target, quiet);
         } else {
             self.confirm.candidate = None;
-            if self.confirm.agree(read, Target::Status(target), now) {
-                self.publish(read, target);
+            if self.confirm.agree(read, Target::Status(target), now) && self.publish(read, target) {
+                // The background window opens on the check that published.
+                let after = StatusRead {
+                    status: target,
+                    ..read
+                };
+                self.follow_background(after, reading, background, now);
             }
+        }
+    }
+
+    /// Set the record's background flag after a window of checks showing
+    /// background work (`shown`), or clear one this watcher set after a window
+    /// showing none. Only an `Idle` record whose screen body reads `Idle`
+    /// counts; anything else breaks the window.
+    fn follow_background(
+        &mut self,
+        read: StatusRead,
+        reading: &Reading,
+        shown: bool,
+        now: Instant,
+    ) {
+        let Some(on) = self.background_target(read, reading, shown) else {
+            self.confirm.window = None;
+            return;
+        };
+        if self.confirm.agree(read, Target::Background(on), now)
+            && apply_screen_background(&self.registry, &self.session_id, read, on)
+        {
+            self.screen_set_background = on;
+        }
+    }
+
+    /// The background flag the screen asks the record for, or `None` when it
+    /// asks for no change: the record or the screen body is not `Idle`, the
+    /// flag already says what the screen shows, or the screen shows none and
+    /// the flag is another writer's.
+    fn background_target(&self, read: StatusRead, reading: &Reading, shown: bool) -> Option<bool> {
+        let idle_body = reading.verdict == Verdict::State(ScreenState::Idle) && !reading.from_title;
+        if !idle_body || read.status != SessionStatus::Idle {
+            return None;
+        }
+        match (shown, record_background(&self.registry, &self.session_id)?) {
+            (true, false) => Some(true),
+            (false, true) if self.screen_set_background => Some(false),
+            _ => None,
         }
     }
 
@@ -558,6 +626,7 @@ impl ScreenWatch {
         match hand_shell_back(&self.registry, &self.session_id, read) {
             Some(after) => {
                 self.wake.seen = Some(after);
+                self.screen_set_background = false;
                 Checked::AgentEnded
             }
             None => Checked::Done,
@@ -581,30 +650,36 @@ impl ScreenWatch {
         }
     }
 
-    /// Write `next` over `from`; a write that lands is this watcher's own, so
-    /// its broadcast starts no hold.
-    fn publish(&mut self, from: StatusRead, next: SessionStatus) {
-        if apply_screen_status(
+    /// Write `next` over `from`; answers whether it wrote. A write that lands
+    /// is this watcher's own, so its broadcast starts no hold; the status
+    /// change cleared the background flag.
+    fn publish(&mut self, from: StatusRead, next: SessionStatus) -> bool {
+        let wrote = apply_screen_status(
             &self.registry,
             &self.session_id,
             from,
             next,
             &self.attention_tx,
-        ) {
+        );
+        if wrote {
             self.wake.seen = Some(StatusRead {
                 status: next,
                 ..from
             });
+            self.screen_set_background = false;
             if next == SessionStatus::AwaitingInput {
                 self.dialog_edge_armed = false;
             }
         }
+        wrote
     }
 
     /// The record moved from `before` to what the wake now holds. A shell's
     /// hook-driven flip is left to the shell watcher; a shell not running
     /// an agent ignores any other move; otherwise the screen is held off.
+    /// Whichever, a background flag the screen set is no longer its own.
     fn record_moved(&mut self, before: Option<StatusRead>, mode: Mode, now: Instant) -> Moved {
+        self.screen_set_background = false;
         let hooks = |read: Option<StatusRead>| read.is_some_and(|read| read.hook_driven);
         if mode != Mode::Agent && hooks(before) != hooks(self.wake.seen) {
             return Moved::HooksFlipped;
@@ -641,7 +716,7 @@ fn screen_target(reading: &Reading) -> Option<SessionStatus> {
         Verdict::State(ScreenState::Working) => Some(SessionStatus::Working),
         Verdict::State(ScreenState::AwaitingInput) => Some(SessionStatus::AwaitingInput),
         Verdict::State(ScreenState::Idle) => Some(SessionStatus::Idle),
-        Verdict::Keep | Verdict::NoMatch => None,
+        Verdict::Keep | Verdict::Background | Verdict::NoMatch => None,
     }
 }
 
@@ -706,6 +781,38 @@ fn apply_screen_status(
         announce_awaiting_input(session_id, attention_tx);
     }
     wrote
+}
+
+/// Write the background flag `on` the screen shows, refused unless the record
+/// still holds the status, hook stamp and hook-driven flag of `from` and is
+/// `Idle`; answers whether it wrote.
+///
+/// Only the flag changes: never the status or its time, the hook stamp,
+/// `hook_driven` or the pending prompt, so it raises no Attention, and it never
+/// reaches the sidecar, which holds no background flag.
+fn apply_screen_background(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    from: StatusRead,
+    on: bool,
+) -> bool {
+    let mut wrote = false;
+    registry.update_if_changed(session_id, |rec| {
+        if moved_since(rec, from) || rec.status != SessionStatus::Idle || rec.background == on {
+            return false;
+        }
+        rec.background = on;
+        wrote = true;
+        true
+    });
+    wrote
+}
+
+/// The record's background flag; `None` once the record is gone.
+fn record_background(registry: &Arc<SessionRegistry>, session_id: &str) -> Option<bool> {
+    let arc = registry.get(session_id)?;
+    let background = crate::sync::lock(&arc).background;
+    Some(background)
 }
 
 /// Hand a shell whose agent has ended back to its own classifier: clear
@@ -3270,6 +3377,7 @@ mod hysteresis_tests {
             SessionStatus::Idle,
             "subagent rows read as a turn"
         );
+        assert!(h.background(), "running subagent rows set no background");
         let mut titled = "\x1b]0;◐ Fixing tests\x07".as_bytes().to_vec();
         titled.extend(idle_frame(&[]));
         h.chunk(titled);
@@ -3279,6 +3387,154 @@ mod hysteresis_tests {
             SessionStatus::Idle,
             "a working title over the idle box promoted"
         );
+    }
+
+    fn status_since(h: &Harness) -> Option<chrono::DateTime<Utc>> {
+        let rec = h.registry.get(SESSION).expect("session registered");
+        rec.lock().expect("record lock").status_since
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_screen_sets_background_beside_idle_without_hooks() {
+        let mut h = start("screen-background", false);
+        let since = status_since(&h);
+        pass_hold().await;
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the footer's shell set no background");
+        assert_eq!(h.attentions(), 0, "background raised Attention");
+        assert_eq!(status_since(&h), since, "background moved status_since");
+        assert!(!h.hook_driven(), "background made the session hook-driven");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hook_driven_idle_gets_background_from_the_screen_after_a_restart() {
+        let h = start_record(
+            "hook-background-restart",
+            false,
+            hook_record(SessionStatus::Idle),
+        );
+        pass_hold().await;
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the footer's shell set no background");
+        let read = record_status(&h.registry, SESSION).expect("session registered");
+        assert!(read.hook_driven, "the screen write cleared hook_driven");
+        assert_eq!(
+            read.last_hook_time,
+            Some(1),
+            "the screen write moved the stamp"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reattached_idle_restores_background_from_the_replayed_screen() {
+        let h = start_from("reattach-background", false, SessionStatus::Idle);
+        settle().await;
+        h.chunk(background_shell_frame());
+        advance(FOREIGN_WRITE_HOLD.saturating_sub(ms(10))).await;
+        assert!(!h.background(), "the replay was read during the hold");
+        advance(ms(20)).await;
+        assert!(
+            !h.background(),
+            "the replay set background before the window closed"
+        );
+        advance(ms(800)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the replayed footer restored no background");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_screen_clears_only_the_background_it_set() {
+        let h = start("screen-clears-own", false);
+        pass_hold().await;
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(2)).await;
+        assert!(h.background(), "the footer's shell set no background");
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(
+            !h.background(),
+            "the footer's shell went and the screen kept its flag"
+        );
+
+        let mut record = hook_record(SessionStatus::Idle);
+        record.background = true;
+        let h = start_record("hook-background-survives", false, record);
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(
+            h.background(),
+            "a footer-less frame cleared the hooks' background"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flag_flicker_below_the_window_does_not_publish() {
+        let h = start("background-flicker", false);
+        pass_hold().await;
+        for _ in 0..10 {
+            h.chunk(background_shell_frame());
+            advance(ms(50)).await;
+            assert!(!h.background(), "one footer frame published background");
+            h.chunk(idle_frame(&[]));
+            advance(ms(50)).await;
+            assert!(!h.background(), "a flickering footer published background");
+        }
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(2)).await;
+        assert!(h.background(), "a steady footer set no background");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_status_change_clears_a_screen_set_flag() {
+        let h = start("background-status-change", false);
+        pass_hold().await;
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(2)).await;
+        assert!(h.background(), "the footer's shell set no background");
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(50)).await;
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert!(!h.background(), "the promotion kept background");
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(3)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the window restored no background");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dialog_over_the_footer_leaves_the_flag_alone() {
+        let h = start("background-overlay", false);
+        pass_hold().await;
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(2)).await;
+        assert!(h.background(), "the footer's shell set no background");
+        h.chunk(transcript_overlay_frame());
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(
+            h.background(),
+            "an overlay over the footer cleared background"
+        );
+
+        let h = start_record(
+            "background-dialog",
+            false,
+            hook_record(SessionStatus::AwaitingInput),
+        );
+        pass_hold().await;
+        let mut dialog = permission_frame();
+        dialog.extend_from_slice("\r\n  ⏵⏵ auto mode on · 1 shell".as_bytes());
+        h.chunk(dialog);
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(h.status(), SessionStatus::AwaitingInput);
+        assert!(!h.background(), "a dialog's screen set background");
     }
 
     #[tokio::test(start_paused = true)]

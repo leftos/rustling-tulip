@@ -312,7 +312,11 @@ The record's `program_name` becomes the shell's label then and `claude` again on
 
 A subagent's hook event (an `agent_id` in its input) never ends or replaces the main agent's pending prompt and never promotes the session to `Working`, and a subagent `PermissionRequest` raises one only when none is pending.
 
-A main-agent `Stop` whose `background_tasks` lists a running task, or whose `session_crons` holds a one-shot cron, sets the snapshot's `background` flag beside `Idle` (RT-84); any status change, a stop, a park or an exit clears it, and it is never written to the sidecar. A `Notification` `idle_prompt` does not leave `AwaitingInput` while a hook-reported prompt is pending.
+A main-agent `Stop` whose `background_tasks` lists a running task, or whose `session_crons` holds a one-shot cron, sets the snapshot's `background` flag beside `Idle` (RT-84); any status change, a stop, a park or an exit clears it, and it is never written to the sidecar.
+
+The screen sets it too, with no hook: while the record is `Idle` and the screen body reads `Idle`, a `· N shell(s)` item on the mode line under the prompt box or a running-subagent row in the panel (the Claude table's `background_shell` and `background_subagents` rules, verdict `background`, read apart from the state rules by `CompiledRules::read_background`) sets the flag after the same confirmation window as a state change. The screen clears only a flag it set itself, so a hook-set flag survives a footer-less frame, and after a reattach the flag comes back from the replayed screen.
+
+A `Notification` `idle_prompt` does not leave `AwaitingInput` while a hook-reported prompt is pending.
 
 An owner key sent to a hook-driven session with a pending prompt clears `AwaitingInput` and `pending_input` at once (a `SendInput` marked `automatic`, the client's query replies, wheel and pointer-motion reports, never does), and a status watcher write (a screen read or the shell classifier) that moves a session off `AwaitingInput` clears `pending_input` in the same update.
 

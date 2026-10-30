@@ -5,7 +5,8 @@
 //! highest-priority rule whose matcher hits its region, and none of whose
 //! guards does, gives the reading. An overlay rule keeps whatever state the
 //! session already has, since the overlay is drawn over a turn that may be
-//! running or done.
+//! running or done. The two background rules read the footer apart from the
+//! state rules: a shell count on the mode line, or a running subagent's row.
 
 use agent_api::{LineMatcher, ReadySignal, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
 use std::sync::LazyLock;
@@ -20,6 +21,16 @@ const SPINNER: &str = r"^\s*[·✢*✶✻✽✳]\s+\p{Lu}[\p{L}'’-]*…(?:\s+�
 /// across a hook-reported stop or tool start, so the line is not a turn of its
 /// own.
 const HOOKS_RUNNING: &str = r"^\s*[·✢*✶✻✽✳]\s+\S.*\(running \p{L}+ hooks…";
+
+/// The mode line under the prompt box counting the shells still running in
+/// the background: the mode's glyph, then `· 1 shell` or `· N shells` as one
+/// of its `·`-separated items.
+const BACKGROUND_SHELLS: &str = r"^\s*(?:⏵⏵|⏸) .* · \d+ shells?(?: ·.*)?\s*$";
+
+/// A running subagent's row in the panel under the prompt box: the hollow
+/// marker, the agent type, two spaces, its task, then its elapsed time and
+/// token count.
+const RUNNING_SUBAGENT: &str = r"^\s+◯ \S+  \S.*\s\d+s · [↑↓] \S+ tokens\s*$";
 
 /// How much output and how long a silence the daemon waits for before it
 /// types a prompt into Claude's TUI: the banner tuning the heuristic was
@@ -145,6 +156,22 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             verdict: ScreenVerdict::Idle,
         },
         ScreenRule {
+            name: "background_shell".to_string(),
+            priority: 930,
+            region: ScreenRegion::AfterLastRule,
+            matcher: LineMatcher::Regex(BACKGROUND_SHELLS.to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Background,
+        },
+        ScreenRule {
+            name: "background_subagents".to_string(),
+            priority: 925,
+            region: ScreenRegion::AfterLastRule,
+            matcher: LineMatcher::Regex(RUNNING_SUBAGENT.to_string()),
+            not: Vec::new(),
+            verdict: ScreenVerdict::Background,
+        },
+        ScreenRule {
             name: "title_working".to_string(),
             priority: 200,
             region: ScreenRegion::Title,
@@ -216,11 +243,13 @@ mod tests {
                 ("overlay_heads_up", 960),
                 ("idle_interrupted", 950),
                 ("idle_prompt_box", 940),
+                ("background_shell", 930),
+                ("background_subagents", 925),
                 ("title_working", 200),
                 ("title_idle", 100),
             ]
         );
-        assert_eq!(screen_rules().rules.len(), 16);
+        assert_eq!(screen_rules().rules.len(), 18);
     }
 
     #[test]

@@ -19,6 +19,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A long-running session's history now starts at a line when reopened, instead of mid colour code with stray characters at the top of the pane.
 - A power cut or a sleep the PC never wakes from no longer leaves sessions, settings or saved hosts as empty or half-written files.
 - Sessions no longer end when the terminal, IDE task or tool that started the app closes and takes its child processes with it.
+- After a restart, or when Claude's hooks don't run, a session still running a background shell or subagent is no longer reported as finished.
 
 ### Changed
 

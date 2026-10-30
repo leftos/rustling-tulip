@@ -8,7 +8,9 @@
 //! regions [`Screen`] reads back, by priority: the highest-priority rule whose
 //! matcher hits its region, and none of whose guards does, decides the
 //! reading. An overlay rule keeps whatever state the session already has,
-//! since the overlay is drawn over a turn that may be running or done. An
+//! since the overlay is drawn over a turn that may be running or done. A
+//! background rule never decides the state: [`CompiledRules::read_background`]
+//! reads those rules apart, as a second reading of the same screen. An
 //! agent session's status watcher ([`crate::pty_state::watch`]) and the
 //! plain-shell watcher ([`crate::pty_state::watch_plain_shell`]) read its
 //! screen through the rules of the session's agent ([`rules_for`]).
@@ -42,6 +44,10 @@ pub enum Verdict {
     State(ScreenState),
     /// An overlay is open: leave the status as it is.
     Keep,
+    /// Work runs on in the background. Only a background rule gives it, and
+    /// [`CompiledRules::read_background`] reads those rules apart from the
+    /// state rules, so a [`Reading`] never carries it.
+    Background,
     /// No rule matched.
     NoMatch,
 }
@@ -173,7 +179,20 @@ impl CompiledRules {
         self.evaluate(screen, None)
     }
 
-    /// The state the screen shows, with what every rule saw on the way.
+    /// The background rule that fires on the screen, by priority: the name of
+    /// the first one, or `None` when none does. The state rules play no part.
+    #[must_use]
+    pub fn read_background(&self, screen: &Screen) -> Option<Arc<str>> {
+        let mut regions = RegionLines::default();
+        self.rules
+            .iter()
+            .filter(|rule| rule.verdict == Verdict::Background)
+            .find(|rule| rule.outcome(regions.get(screen, rule.region)) == Outcome::Matched)
+            .map(|rule| Arc::clone(&rule.name))
+    }
+
+    /// The state the screen shows, with what every rule saw on the way, the
+    /// background rules among them.
     #[must_use]
     pub fn explain(&self, screen: &Screen) -> Explanation {
         let mut rules = Vec::with_capacity(self.rules.len());
@@ -186,15 +205,20 @@ impl CompiledRules {
     }
 
     /// The one evaluation [`Self::read`] and [`Self::explain`] share: the
-    /// first rule that fires decides the reading. Without a trace to fill it
-    /// stops there; with one it goes on and traces every rule.
+    /// first state rule that fires decides the reading. Without a trace to
+    /// fill it skips the background rules and stops there; with one it goes on
+    /// and traces every rule.
     fn evaluate(&self, screen: &Screen, mut trace: Option<&mut Vec<RuleTrace>>) -> Reading {
         let mut regions = RegionLines::default();
         let mut winner: Option<&CompiledRule> = None;
         for rule in &self.rules {
+            let state_rule = rule.verdict != Verdict::Background;
+            if !state_rule && trace.is_none() {
+                continue;
+            }
             let lines = regions.get(screen, rule.region);
             let outcome = rule.outcome(lines);
-            if winner.is_none() && outcome == Outcome::Matched {
+            if winner.is_none() && state_rule && outcome == Outcome::Matched {
                 winner = Some(rule);
             }
             match trace.as_deref_mut() {
@@ -370,6 +394,7 @@ fn verdict_of(verdict: ScreenVerdict) -> Option<Verdict> {
         ScreenVerdict::AwaitingInput => Some(Verdict::State(ScreenState::AwaitingInput)),
         ScreenVerdict::Idle => Some(Verdict::State(ScreenState::Idle)),
         ScreenVerdict::Keep => Some(Verdict::Keep),
+        ScreenVerdict::Background => Some(Verdict::Background),
         ScreenVerdict::Unknown => None,
     }
 }
@@ -539,7 +564,109 @@ mod tests {
     fn claude_rules_all_compile() {
         let compiled =
             CompiledRules::try_compile(claude_table()).expect("Claude's rule table compiles");
-        assert_eq!(compiled.rules.len(), 16, "no Claude rule was dropped");
+        assert_eq!(compiled.rules.len(), 18, "no Claude rule was dropped");
+        let background = compiled
+            .rules
+            .iter()
+            .filter(|rule| rule.verdict == Verdict::Background)
+            .count();
+        assert_eq!(background, 2, "two of them read background work");
+    }
+
+    /// The background rule Claude's rules read on `text`, as a screen.
+    fn read_background_claude(text: &str) -> Option<Arc<str>> {
+        rules_for(&agent_registry::default_agent()).read_background(&screen_from(text))
+    }
+
+    #[test]
+    fn background_footer_is_read_from_fixtures() {
+        let shown = [
+            (
+                "claude--idle-background-shell",
+                include_str!("fixtures/claude--idle-background-shell.txt"),
+                "background_shell",
+            ),
+            (
+                "claude--v2301-done-shell-running--w100",
+                include_str!("fixtures/claude--v2301-done-shell-running--w100.txt"),
+                "background_shell",
+            ),
+            (
+                "claude--v2302-working-agents-panel--w119",
+                include_str!("fixtures/claude--v2302-working-agents-panel--w119.txt"),
+                "background_subagents",
+            ),
+            (
+                "v71-agents-running",
+                include_str!("fixtures/v71-agents-running.txt"),
+                "background_shell",
+            ),
+        ];
+        for (name, text, rule) in shown {
+            assert_eq!(
+                read_background_claude(text).as_deref(),
+                Some(rule),
+                "{name}: background work not read"
+            );
+        }
+        let absent = [
+            (
+                "claude--fresh-idle",
+                include_str!("fixtures/claude--fresh-idle.txt"),
+            ),
+            ("claude--done", include_str!("fixtures/claude--done.txt")),
+            ("v03-ready", include_str!("fixtures/v03-ready.txt")),
+            ("c11-turn1-end", include_str!("fixtures/c11-turn1-end.txt")),
+            (
+                "claude--working",
+                include_str!("fixtures/claude--working.txt"),
+            ),
+            (
+                "claude--permission-bash",
+                include_str!("fixtures/claude--permission-bash.txt"),
+            ),
+        ];
+        for (name, text) in absent {
+            assert_eq!(
+                read_background_claude(text),
+                None,
+                "{name}: background work read where none runs"
+            );
+        }
+    }
+
+    #[test]
+    fn background_rule_ignores_prose() {
+        let capture = include_str!("fixtures/v03-ready.txt");
+        let prose = with_rows_above_the_box(
+            capture,
+            &[
+                "  ran 2 shell commands · 1 shell",
+                "  ⏵⏵ auto mode on · 1 shell",
+                "✻ Worked for 6s · done 12:36 PM · 1 shell still running",
+            ],
+        );
+        assert_eq!(
+            read_background_claude(&prose),
+            None,
+            "a transcript row above the box read as background work"
+        );
+        let mode_line = "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents";
+        assert!(capture.contains(mode_line));
+        let footer = capture.replace(mode_line, "  ⏵⏵ auto mode on · 2 shells · ← 2 agents");
+        assert_eq!(
+            read_background_claude(&footer).as_deref(),
+            Some("background_shell"),
+            "the footer's shell count was not read"
+        );
+        let rule = line_rule("background_shell");
+        for other in [
+            "  ran 2 shell commands · 1 shell commands",
+            "✻ Worked for 6s · done 12:36 PM · 1 shell still running",
+            "  ⏵⏵ auto mode on · 1 shell still running",
+        ] {
+            assert!(!rule.is_match(other), "read as a shell count: {other:?}");
+        }
     }
 
     #[test]
