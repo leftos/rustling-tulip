@@ -37,12 +37,14 @@ use crate::remote_access::{
 use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button};
-use crate::sidebar::{LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView};
+use crate::sidebar::{
+    CountMode, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView,
+};
 use crate::spawn_view::{
     DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
     dialog_title_bar, field, muted, segmented,
 };
-use crate::tabs::tab_session_counts;
+use crate::tabs::{TabCounts, tab_session_counts};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::window_title::compute_title;
 use crate::{Pick, RootView, TEXT, tooltip};
@@ -258,6 +260,9 @@ const SESSIONS_UNDER_REPOS_CHOICES: [SessionsUnderRepos; 3] = [
 /// The General tab's Sort repos choices, in the order they show.
 const REPO_SORT_CHOICES: [RepoSort; 3] = [RepoSort::Manual, RepoSort::Active, RepoSort::NeedsYou];
 
+/// The App title tab's count choices, in the order they show.
+const COUNT_MODE_CHOICES: [CountMode; 3] = [CountMode::NeedsYou, CountMode::Busy, CountMode::Idle];
+
 /// The Notifications tab's skip choices, in the order they show.
 const NOTIFY_SKIP_CHOICES: [NotifySkip; 3] =
     [NotifySkip::OnScreen, NotifySkip::Focused, NotifySkip::Never];
@@ -272,6 +277,7 @@ pub(crate) enum SettingsControl {
     RepoSort(RepoSort),
     OpenTextExternally,
     CopyOnSelect,
+    CountMode(CountMode),
     TitleCount,
     TitleSuffix,
     NotifySettingsLink,
@@ -340,7 +346,10 @@ impl SettingsControl {
             Self::RepoSort(RepoSort::NeedsYou) => "settings-repo-sort-needs-you",
             Self::OpenTextExternally => "settings-general-open-text-externally",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
-            Self::TitleCount => "settings-title-busy-count",
+            Self::CountMode(CountMode::NeedsYou) => "settings-count-needs-you",
+            Self::CountMode(CountMode::Busy) => "settings-count-busy",
+            Self::CountMode(CountMode::Idle) => "settings-count-idle",
+            Self::TitleCount => "settings-title-count",
             Self::TitleSuffix => "settings-title-product-suffix",
             Self::NotifySettingsLink => "settings-open-windows-notifications",
             Self::NotifyNeedsYou => "settings-notify-needs-you",
@@ -883,15 +892,19 @@ impl RootView {
     }
 
     /// The App title tab's preview: the title for a tab named "Tab name"
-    /// with one of three terminals busy.
+    /// with three terminals, one waiting on the owner and two idle.
     #[must_use]
     pub fn title_preview(&self) -> String {
-        let title = &self.sidebar.ui_state().title;
+        let sample = TabCounts {
+            busy: 1,
+            idle: 2,
+            needs_you: 1,
+            total: 3,
+        };
         let preview = compute_title(
-            Some((1, 3)),
+            Some(sample),
             Some("Tab name"),
-            title.show_count,
-            title.suffix,
+            &self.sidebar.ui_state().title,
         );
         if preview.is_empty() {
             "(empty)".to_owned()
@@ -922,9 +935,11 @@ impl RootView {
     fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
             SettingsTab::General => general_controls(self.keep_awake.is_some()),
-            SettingsTab::AppTitle => {
-                vec![SettingsControl::TitleCount, SettingsControl::TitleSuffix]
-            }
+            SettingsTab::AppTitle => COUNT_MODE_CHOICES
+                .map(SettingsControl::CountMode)
+                .into_iter()
+                .chain([SettingsControl::TitleCount, SettingsControl::TitleSuffix])
+                .collect(),
             SettingsTab::Notifications => [
                 SettingsControl::NotifySettingsLink,
                 SettingsControl::NotifyNeedsYou,
@@ -1760,6 +1775,7 @@ impl RootView {
             SettingsControl::RepoSort(sort) => self.set_repo_sort(sort, cx),
             SettingsControl::OpenTextExternally => self.toggle_open_text_externally(cx),
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
+            SettingsControl::CountMode(mode) => self.set_count_mode(mode, window, cx),
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
             SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
@@ -2589,6 +2605,12 @@ impl RootView {
         cx.notify();
     }
 
+    fn set_count_mode(&mut self, mode: CountMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar.set_count_mode(mode) {
+            self.after_title_setting(window, cx);
+        }
+    }
+
     fn toggle_title_count(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let on = !self.sidebar.ui_state().title.show_count;
         self.sidebar.set_title_show_count(on);
@@ -2610,14 +2632,12 @@ impl RootView {
     /// The title the window should show now: the active tab's name and
     /// counts as the App title settings shape them.
     fn wanted_window_title(&self) -> String {
-        let title = &self.sidebar.ui_state().title;
         let tab = self.tabs.active_tab();
         let counts = tab.and_then(|tab| tab_session_counts(tab, self.sidebar.sessions()));
         compute_title(
             counts,
             tab.map(|tab| tab.name.as_str()),
-            title.show_count,
-            title.suffix,
+            &self.sidebar.ui_state().title,
         )
     }
 
@@ -3356,13 +3376,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let title = &self.sidebar.ui_state().title;
+        let modes = count_mode_choices(title.count);
         let count = toggle(
             SettingsControl::TitleCount,
             ToggleState {
                 checked: title.show_count,
                 enabled: true,
             },
-            "Show busy/total terminal count",
+            "Show the count in the window title",
             focused,
             cx,
         );
@@ -3389,11 +3410,22 @@ impl RootView {
             .child(hint(
                 "Controls what the OS window title bar shows for the main window.",
             ))
+            .child(choice_row(
+                "Tab and title count",
+                &modes,
+                RowLock::Live,
+                focused,
+                cx,
+            ))
+            .child(hint(
+                "What the tab pills and the window title count. Needs you counts the \
+                 terminals waiting on you and shows nothing at 0; Busy / total and Idle / \
+                 total count the busy or idle terminals out of all of them.",
+            ))
             .child(count)
             .child(hint(
-                "Renders (M/N) before the tab name where M is the number of non-idle \
-                 terminals in the active tab and N is the total terminal count. Hidden \
-                 when the tab has no terminals.",
+                "Renders the count in parentheses before the active tab's name. Hidden \
+                 when the tab has nothing to count.",
             ))
             .child(suffix)
             .child(hint(
@@ -3843,6 +3875,18 @@ fn repo_sort_choices(current: RepoSort) -> [(SettingsControl, &'static str, bool
             RepoSort::NeedsYou => "Needs you on top",
         };
         (SettingsControl::RepoSort(choice), text, choice == current)
+    })
+}
+
+/// The App title tab's count choices, `current` selected.
+fn count_mode_choices(current: CountMode) -> [(SettingsControl, &'static str, bool); 3] {
+    COUNT_MODE_CHOICES.map(|choice| {
+        let text = match choice {
+            CountMode::NeedsYou => "Needs you",
+            CountMode::Busy => "Busy / total",
+            CountMode::Idle => "Idle / total",
+        };
+        (SettingsControl::CountMode(choice), text, choice == current)
     })
 }
 

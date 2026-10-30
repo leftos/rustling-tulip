@@ -693,14 +693,32 @@ impl Default for GeneralSettings {
     }
 }
 
-/// What the main window's title shows.
+/// What the tab pills' badges and the window title's count count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CountMode {
+    /// Busy terminals over all live ones.
+    Busy,
+    /// Idle terminals over all live ones.
+    Idle,
+    /// The terminals waiting on the owner, nothing at 0; also what a value
+    /// this build does not know loads as (`serde(other)` must be the last
+    /// variant).
+    #[default]
+    #[serde(other)]
+    NeedsYou,
+}
+
+/// What the main window's title shows, and what the tab pills count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TitleSettings {
-    /// The active tab's busy/total terminal count before its name.
+    /// The active tab's count before its name.
     pub show_count: bool,
     /// ` — rustling-tulip` after it.
     pub suffix: bool,
+    /// What the window title's count and the tab pills' badges count.
+    pub count: CountMode,
 }
 
 impl Default for TitleSettings {
@@ -708,6 +726,7 @@ impl Default for TitleSettings {
         Self {
             show_count: true,
             suffix: true,
+            count: CountMode::NeedsYou,
         }
     }
 }
@@ -1279,9 +1298,19 @@ impl SidebarModel {
         true
     }
 
-    /// Whether the window title shows the active tab's busy/total count.
+    /// Whether the window title shows the active tab's count.
     pub fn set_title_show_count(&mut self, on: bool) {
         self.ui.title.show_count = on;
+    }
+
+    /// Records what the tab pills and the window title count; returns
+    /// whether it changed.
+    pub fn set_count_mode(&mut self, mode: CountMode) -> bool {
+        if self.ui.title.count == mode {
+            return false;
+        }
+        self.ui.title.count = mode;
+        true
     }
 
     /// Whether the window title ends with the product name.
@@ -3928,6 +3957,7 @@ pub(crate) mod tests {
             title: TitleSettings {
                 show_count: false,
                 suffix: false,
+                count: CountMode::Idle,
             },
             notifications: NotificationSettings {
                 awaiting_input: false,
@@ -4331,11 +4361,54 @@ pub(crate) mod tests {
         assert!(loaded.general.copy_on_select);
         assert!(loaded.title.show_count);
         assert!(loaded.title.suffix);
+        assert_eq!(loaded.title.count, CountMode::NeedsYou);
 
         std::fs::write(dir.0.join(UI_FILE), r#"{ "title": { "suffix": false } }"#).expect("write");
         let loaded = load_ui_state(&dir.0);
         assert!(loaded.title.show_count, "a group missing a field fills it");
         assert!(!loaded.title.suffix);
+    }
+
+    #[test]
+    fn count_mode_loads_needs_you_when_missing_or_unknown() {
+        let dir = TestDir::new("count-mode");
+        let mut model = SidebarModel::new(UiState::default());
+        assert_eq!(
+            model.ui_state().title.count,
+            CountMode::NeedsYou,
+            "the default"
+        );
+        for (mode, saved) in [
+            (CountMode::Busy, "busy"),
+            (CountMode::Idle, "idle"),
+            (CountMode::NeedsYou, "needs_you"),
+        ] {
+            assert!(model.set_count_mode(mode), "{saved}");
+            assert!(!model.set_count_mode(mode), "unchanged");
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let written: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(written["title"]["count"], saved);
+            assert_eq!(load_ui_state(&dir.0).title.count, mode);
+        }
+
+        for older in [
+            r#"{ "sidebar_collapsed": true }"#,
+            r#"{ "title": { "suffix": false } }"#,
+        ] {
+            std::fs::write(dir.0.join(UI_FILE), older).expect("write");
+            assert_eq!(
+                load_ui_state(&dir.0).title.count,
+                CountMode::NeedsYou,
+                "{older}"
+            );
+        }
+
+        let unknown = r#"{ "title": { "suffix": false, "count": "newest" } }"#;
+        std::fs::write(dir.0.join(UI_FILE), unknown).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.title.count, CountMode::NeedsYou);
+        assert!(!loaded.title.suffix, "the rest of the group loads");
     }
 
     #[test]

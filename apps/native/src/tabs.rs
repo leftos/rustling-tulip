@@ -9,6 +9,8 @@ use protocol::{
     SessionStatus, SplitDirection, SplitPlace, TabEntry,
 };
 
+use crate::sidebar::CountMode;
+
 /// The divider ratios the daemon accepts; it clamps to the same range.
 pub const MIN_RATIO: f32 = 0.05;
 pub const MAX_RATIO: f32 = 0.95;
@@ -709,16 +711,67 @@ fn is_busy(session: &SessionSnapshot) -> bool {
     }
 }
 
-/// The busy and total live terminals of `tab`, as `(busy, total)`: every
-/// pane holding a session the daemon lists and has not marked inactive
-/// counts, so a session shown in two panes counts twice. A session marked
-/// "Don't count as busy" counts in total but never in busy. `None` for a tab
-/// that is not a pane grid (a diff tab).
+/// A grid tab's live terminals, counted per pane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TabCounts {
+    /// Busy ones, leaving out those marked "Don't count as busy".
+    pub busy: usize,
+    /// Idle ones with no background work.
+    pub idle: usize,
+    /// Sessions waiting on the owner's answer, each once however many panes
+    /// show it, leaving out abandoned ones.
+    pub needs_you: usize,
+    /// Every live one.
+    pub total: usize,
+}
+
+/// What a grid tab's count badge, and the window title's count, show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabBadge {
+    /// How many terminals need the owner; never 0.
+    NeedsYou(usize),
+    /// Busy terminals over all live ones.
+    Busy { busy: usize, total: usize },
+    /// Idle terminals over all live ones.
+    Idle { idle: usize, total: usize },
+}
+
+impl TabCounts {
+    /// The badge `mode` shows for these counts: none for a tab with no live
+    /// terminal, and none in [`CountMode::NeedsYou`] while nothing needs
+    /// the owner.
+    #[must_use]
+    pub fn badge(self, mode: CountMode) -> Option<TabBadge> {
+        if self.total == 0 {
+            return None;
+        }
+        match mode {
+            CountMode::NeedsYou => {
+                (self.needs_you > 0).then_some(TabBadge::NeedsYou(self.needs_you))
+            }
+            CountMode::Busy => Some(TabBadge::Busy {
+                busy: self.busy,
+                total: self.total,
+            }),
+            CountMode::Idle => Some(TabBadge::Idle {
+                idle: self.idle,
+                total: self.total,
+            }),
+        }
+    }
+}
+
+/// The live terminals of `tab`: every pane holding a session the daemon
+/// lists and has not parked counts, so a session shown in two panes counts
+/// twice in busy, idle and total. Needs you counts each session once, as
+/// the footer does. A session marked "Don't count as busy" counts in total,
+/// idle and needs you but never in busy. `None` for a tab that is not a
+/// pane grid (a diff tab).
 #[must_use]
-pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Option<(usize, usize)> {
+pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Option<TabCounts> {
     let grid = tab.grid()?;
-    let mut busy = 0;
-    let mut total = 0;
+    let mut counts = TabCounts::default();
+    let mut asking = HashSet::new();
     for pane in collect_panes(grid) {
         let Some(id) = pane.session else {
             continue;
@@ -729,12 +782,19 @@ pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Optio
         if session.is_inactive {
             continue;
         }
-        total += 1;
+        counts.total += 1;
         if is_busy(session) && !session.busy_excluded {
-            busy += 1;
+            counts.busy += 1;
+        }
+        if session.status == SessionStatus::Idle && !session.background {
+            counts.idle += 1;
+        }
+        if session.status == SessionStatus::AwaitingInput && !session.is_abandoned {
+            asking.insert(session.id.as_str());
         }
     }
-    Some((busy, total))
+    counts.needs_you = asking.len();
+    Some(counts)
 }
 
 /// How many of `grid`'s panes hold a session.
@@ -2976,6 +3036,11 @@ pub(crate) mod tests {
         s
     }
 
+    /// `tab`'s busy and total counts.
+    fn busy_total(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Option<(usize, usize)> {
+        tab_session_counts(tab, sessions).map(|counts| (counts.busy, counts.total))
+    }
+
     #[test]
     fn tab_counts_busy_among_live_panes() {
         let grid = split(
@@ -2989,10 +3054,7 @@ pub(crate) mod tests {
             with_status("idle", SessionStatus::Idle),
             with_status("ask", SessionStatus::AwaitingInput),
         ];
-        assert_eq!(
-            tab_session_counts(&tab("t", &grid), &sessions),
-            Some((2, 3))
-        );
+        assert_eq!(busy_total(&tab("t", &grid), &sessions), Some((2, 3)));
     }
 
     #[test]
@@ -3007,7 +3069,7 @@ pub(crate) mod tests {
         gone.is_inactive = true;
         let sessions = [gone, with_status("spawn", SessionStatus::Spawning)];
         assert_eq!(
-            tab_session_counts(&tab("t", &grid), &sessions),
+            busy_total(&tab("t", &grid), &sessions),
             Some((1, 1)),
             "an inactive session, an empty pane and an unlisted session do not count"
         );
@@ -3017,10 +3079,7 @@ pub(crate) mod tests {
     fn tab_counts_a_session_in_two_panes_once_per_pane() {
         let grid = split(H, 0.5, pane("a", Some("s")), pane("b", Some("s")));
         let sessions = [with_status("s", SessionStatus::Working)];
-        assert_eq!(
-            tab_session_counts(&tab("t", &grid), &sessions),
-            Some((2, 2))
-        );
+        assert_eq!(busy_total(&tab("t", &grid), &sessions), Some((2, 2)));
     }
 
     #[test]
@@ -3030,7 +3089,7 @@ pub(crate) mod tests {
         server.busy_excluded = true;
         let sessions = [server, with_status("work", SessionStatus::Working)];
         assert_eq!(
-            tab_session_counts(&tab("t", &grid), &sessions),
+            busy_total(&tab("t", &grid), &sessions),
             Some((1, 2)),
             "the excluded working session leaves busy"
         );
@@ -3044,7 +3103,7 @@ pub(crate) mod tests {
         let mut idle = with_status("idle", SessionStatus::Idle);
         idle.busy_excluded = true;
         assert_eq!(
-            tab_session_counts(&tab("t", &grid), &[ask, idle]),
+            busy_total(&tab("t", &grid), &[ask, idle]),
             Some((0, 2)),
             "excluded sessions stay in total whatever their status"
         );
@@ -3065,7 +3124,7 @@ pub(crate) mod tests {
         server.busy_excluded = true;
         let sessions = [bg, with_status("idle", SessionStatus::Idle), server];
         assert_eq!(
-            tab_session_counts(&tab("t", &grid), &sessions),
+            busy_total(&tab("t", &grid), &sessions),
             Some((1, 3)),
             "idle with background work is busy, unless marked not to count"
         );
@@ -3074,6 +3133,118 @@ pub(crate) mod tests {
     #[test]
     fn a_diff_tab_has_no_counts() {
         assert_eq!(tab_session_counts(&diff_tab("d"), &[]), None);
+    }
+
+    #[test]
+    fn a_tab_counts_the_sessions_that_need_you() {
+        let grid = split(
+            H,
+            0.5,
+            split(V, 0.5, pane("a", Some("ask")), pane("b", Some("again"))),
+            split(V, 0.5, pane("c", Some("left")), pane("d", Some("work"))),
+        );
+        let mut again = with_status("again", SessionStatus::AwaitingInput);
+        again.busy_excluded = true;
+        let mut left = with_status("left", SessionStatus::AwaitingInput);
+        left.is_abandoned = true;
+        let sessions = [
+            with_status("ask", SessionStatus::AwaitingInput),
+            again,
+            left,
+            with_status("work", SessionStatus::Working),
+        ];
+        let counts = tab_session_counts(&tab("t", &grid), &sessions).expect("a grid tab");
+        assert_eq!(
+            counts.needs_you, 2,
+            "an excluded asking session still needs you; an abandoned one does not"
+        );
+        assert_eq!(
+            counts.badge(CountMode::NeedsYou),
+            Some(TabBadge::NeedsYou(2))
+        );
+        let none = [with_status("work", SessionStatus::Working)];
+        let calm = tab_session_counts(&tab("t", &pane("a", Some("work"))), &none);
+        assert_eq!(
+            calm.and_then(|counts| counts.badge(CountMode::NeedsYou)),
+            None,
+            "nothing needs you, so no badge"
+        );
+    }
+
+    #[test]
+    fn a_tab_counts_its_idle_sessions_without_background_work() {
+        let grid = split(
+            H,
+            0.5,
+            split(V, 0.5, pane("a", Some("idle")), pane("b", Some("bg"))),
+            split(V, 0.5, pane("c", Some("server")), pane("d", Some("ask"))),
+        );
+        let mut bg = with_status("bg", SessionStatus::Idle);
+        bg.background = true;
+        let mut server = with_status("server", SessionStatus::Idle);
+        server.busy_excluded = true;
+        let sessions = [
+            with_status("idle", SessionStatus::Idle),
+            bg,
+            server,
+            with_status("ask", SessionStatus::AwaitingInput),
+        ];
+        let counts = tab_session_counts(&tab("t", &grid), &sessions).expect("a grid tab");
+        assert_eq!(counts.idle, 2, "background work is not idle");
+        assert_eq!(
+            counts.badge(CountMode::Idle),
+            Some(TabBadge::Idle { idle: 2, total: 4 })
+        );
+        assert_eq!(
+            counts.badge(CountMode::Busy),
+            Some(TabBadge::Busy { busy: 2, total: 4 })
+        );
+        let working = [with_status("w", SessionStatus::Working)];
+        let none_idle = tab_session_counts(&tab("t", &pane("a", Some("w"))), &working);
+        assert_eq!(
+            none_idle.and_then(|counts| counts.badge(CountMode::Idle)),
+            Some(TabBadge::Idle { idle: 0, total: 1 }),
+            "idle over total shows at 0"
+        );
+    }
+
+    #[test]
+    fn parked_sessions_count_in_no_mode() {
+        let grid = split(H, 0.5, pane("a", Some("ask")), pane("b", Some("idle")));
+        let mut ask = with_status("ask", SessionStatus::AwaitingInput);
+        ask.is_inactive = true;
+        let mut idle = with_status("idle", SessionStatus::Idle);
+        idle.is_inactive = true;
+        let counts = tab_session_counts(&tab("t", &grid), &[ask, idle]).expect("a grid tab");
+        assert_eq!(counts, TabCounts::default());
+        for mode in [CountMode::NeedsYou, CountMode::Busy, CountMode::Idle] {
+            assert_eq!(counts.badge(mode), None, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_session_in_two_panes_needs_you_once() {
+        let grid = split(
+            H,
+            0.5,
+            split(V, 0.5, pane("a", Some("ask")), pane("b", Some("ask"))),
+            pane("c", Some("idle")),
+        );
+        let sessions = [
+            with_status("ask", SessionStatus::AwaitingInput),
+            with_status("idle", SessionStatus::Idle),
+        ];
+        let counts = tab_session_counts(&tab("t", &grid), &sessions).expect("a grid tab");
+        assert_eq!(
+            counts,
+            TabCounts {
+                busy: 2,
+                idle: 1,
+                needs_you: 1,
+                total: 3,
+            },
+            "needs you counts the session once; busy, idle and total count panes"
+        );
     }
 
     const STRIP: [&str; 4] = ["a", "b", "c", "d"];

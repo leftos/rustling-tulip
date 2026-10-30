@@ -747,7 +747,7 @@ impl Fixture {
             .collect::<Result<Vec<_>>>()?;
         let mut tabs = vec![
             grid_tab("t-tulip", "tulip", &tulip_grid()),
-            grid_tab("t-yaat", "yaat", &pane("p3", "s-metar")),
+            grid_tab("t-yaat", "yaat", &yaat_grid()),
         ];
         if view == View::Diff {
             tabs.push(json!({
@@ -816,6 +816,16 @@ fn tulip_grid() -> GridNode {
         ratio: 0.58,
         first: Box::new(pane("p1", "s-petal")),
         second: Box::new(pane("p2", "s-shell")),
+    }
+}
+
+/// The METAR session beside the asking flight plan session.
+fn yaat_grid() -> GridNode {
+    GridNode::Split {
+        direction: SplitDirection::Horizontal,
+        ratio: 0.5,
+        first: Box::new(pane("p3", "s-metar")),
+        second: Box::new(pane("p4", "s-ask")),
     }
 }
 
@@ -920,6 +930,14 @@ fn session_rows() -> Vec<Row> {
             members: json!([member(YAAT, "main", YAAT_PATH)]),
             minutes: 25,
             extra: json!({ "background": true }),
+        },
+        Row {
+            id: "s-ask",
+            label: "Flight plan parser",
+            status: "awaiting_input",
+            members: json!([member(YAAT, "main", YAAT_PATH)]),
+            minutes: 3,
+            extra: json!({}),
         },
         Row {
             id: "s-proto",
@@ -1351,6 +1369,15 @@ fn dashboard_facts(now: DateTime<Utc>) -> Result<DaemonMessage> {
                 "activity": [3, 2, 1, 0, 0, 0, 0, 0, 0, 0],
                 "last_activity_at": ago(6),
                 "issue": "RT-444",
+            },
+            {
+                "session_id": "s-ask",
+                "now": { "kind": "unknown", "text": "" },
+                "context_percent": 32,
+                "tokens_in": 410_000,
+                "cost_usd": 0.21,
+                "activity": [2, 3, 1, 0, 0, 0, 0, 0, 0, 0],
+                "last_activity_at": ago(3),
             },
             {
                 "session_id": "s-metar",

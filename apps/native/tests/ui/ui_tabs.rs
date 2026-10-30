@@ -9,7 +9,7 @@
 
 use crate::support;
 
-use rustling_tulip_native::RootView;
+use rustling_tulip_native::{RootView, TabBadge};
 
 use gpui::{Modifiers, MouseButton, TestAppContext, point, px, size};
 use protocol::{
@@ -392,15 +392,24 @@ fn menu_text(h: &mut Harness) -> Vec<String> {
     h.root(|root, _| root.tab_menu_text())
 }
 
-#[gpui::test]
-fn badge_shows_busy_over_total_and_hides_at_zero(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
+/// Sets the tab and title count to `mode` (`busy` or `idle`) in Settings,
+/// then closes Settings.
+fn count_mode(h: &mut Harness, mode: &str) {
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-app-title");
+    h.click_on(&format!("settings-count-{mode}"));
+    h.keys("escape");
+}
+
+/// Tab `t1` holds the working `s1` and the idle `s2`, `t2` an empty pane,
+/// and `t3` the idle `s3`.
+fn counted_tabs() -> Fixture {
     let grid = split(
         SplitDirection::Horizontal,
         pane("p1", Some("s1")),
         pane("p2", Some("s2")),
     );
-    let fixture = Fixture {
+    Fixture {
         sessions: vec![
             session("s1").status("working").build(),
             session("s2").build(),
@@ -412,10 +421,101 @@ fn badge_shows_busy_over_total_and_hides_at_zero(cx: &mut TestAppContext) {
             tab("t3", &pane("p4", Some("s3"))),
         ],
         ..Fixture::default()
+    }
+}
+
+#[gpui::test]
+fn a_tab_pill_shows_how_many_sessions_need_you(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        split(
+            SplitDirection::Vertical,
+            pane("p2", Some("s2")),
+            pane("p3", Some("s3")),
+        ),
+    );
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").status("awaiting_input").build(),
+            session("s2").status("awaiting_input").build(),
+            session("s3").status("working").build(),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
     };
     let mut h = Harness::with(cx, &dir, &fixture);
 
-    assert_eq!(h.root(|root, _| root.tab_badge("t1")), Some((1, 2)));
+    assert_eq!(
+        h.root(|root, _| root.tab_badge("t1")),
+        Some(TabBadge::NeedsYou(2)),
+        "the default mode counts the sessions waiting on you"
+    );
+    assert!(h.bounds("tab-badge-t1").origin.x >= px(0.0), "drawn");
+    assert!(
+        h.bounds("tab-badge-glyph-t1-working").origin.x < px(0.0),
+        "no working glyph in the Needs you pill"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        h.root(|root, _| root.tab_badge("t1")),
+        Some(TabBadge::NeedsYou(1)),
+        "an answered session leaves the count"
+    );
+}
+
+#[gpui::test]
+fn a_tab_with_no_session_needing_you_shows_no_badge(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &counted_tabs());
+
+    for id in ["t1", "t2", "t3"] {
+        assert_eq!(h.root(|root, _| root.tab_badge(id)), None, "{id}");
+        assert!(
+            h.bounds(&format!("tab-badge-{id}")).origin.x < px(0.0),
+            "{id} draws no pill"
+        );
+    }
+}
+
+#[gpui::test]
+fn the_idle_mode_shows_idle_over_total(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &counted_tabs());
+    count_mode(&mut h, "idle");
+
+    assert_eq!(
+        h.root(|root, _| root.tab_badge("t1")),
+        Some(TabBadge::Idle { idle: 1, total: 2 })
+    );
+    assert!(h.bounds("tab-badge-t1").origin.x >= px(0.0), "drawn");
+    assert!(
+        h.bounds("tab-badge-glyph-t1-working").origin.x < px(0.0),
+        "no glyph in the idle pill"
+    );
+    assert_eq!(
+        h.root(|root, _| root.tab_badge("t3")),
+        Some(TabBadge::Idle { idle: 1, total: 1 })
+    );
+    assert_eq!(h.root(|root, _| root.tab_badge("t2")), None, "no session");
+    assert!(h.bounds("tab-badge-t2").origin.x < px(0.0), "not drawn");
+}
+
+#[gpui::test]
+fn the_busy_mode_brings_back_busy_over_total(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &counted_tabs());
+    count_mode(&mut h, "busy");
+
+    assert_eq!(
+        h.root(|root, _| root.tab_badge("t1")),
+        Some(TabBadge::Busy { busy: 1, total: 2 })
+    );
     assert!(h.bounds("tab-badge-t1").origin.x >= px(0.0), "drawn");
     let pill = h.bounds("tab-badge-t1");
     let glyph = h.bounds("tab-badge-glyph-t1-working");
@@ -425,7 +525,10 @@ fn badge_shows_busy_over_total_and_hides_at_zero(cx: &mut TestAppContext) {
     );
     assert_eq!(glyph.size.width, px(9.0), "the pill's 9 px glyph");
 
-    assert_eq!(h.root(|root, _| root.tab_badge("t3")), Some((0, 1)));
+    assert_eq!(
+        h.root(|root, _| root.tab_badge("t3")),
+        Some(TabBadge::Busy { busy: 0, total: 1 })
+    );
     assert!(h.bounds("tab-badge-t3").origin.x >= px(0.0), "0/1 is drawn");
     assert!(
         h.bounds("tab-badge-glyph-t3-working").origin.x < px(0.0),

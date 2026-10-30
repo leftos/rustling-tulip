@@ -274,7 +274,7 @@ pub use crate::spawns::{OpenIn, PaneAim};
 pub use crate::stash_view::{
     ScStashPush, ScStashRow, ScStashes, StashAction, StashButton, StashDropView,
 };
-pub use crate::tabs::TabPill;
+pub use crate::tabs::{TabBadge, TabPill};
 pub use crate::text_input::bind_keys;
 pub use crate::undo::{TabSnapshot, UndoEntry};
 pub use crate::viewer_tab::{

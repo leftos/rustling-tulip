@@ -27,6 +27,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - The Connections picker groups this PC, your saved hosts and the devices on your tailnet, shows each host's state, and adds a tailnet or SSH host from one form.
+- Tab pills and the window title count the sessions that need you, showing nothing at zero; Settings › App title brings back busy/total or shows idle/total.
 
 ## v0.5.1-alpha
 

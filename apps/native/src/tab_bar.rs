@@ -16,12 +16,14 @@ use crate::assets::{DASHBOARD_ICON, TAB_CLOSE_ICON, TAB_NEW_ICON};
 use crate::drag::{self, DragPayload, Side};
 use crate::fonts;
 use crate::overlay_owner::Overlay;
-use crate::palette::{ACCENT, CHIP, GROUND, LINE_STRONG, RAISED, SUBTLE, SURFACE, WORKING};
+use crate::palette::{
+    ACCENT, ASKING, CHIP, GROUND, LINE_STRONG, ON_ASKING, RAISED, SUBTLE, SURFACE, WORKING,
+};
 use crate::popouts::PopoutKey;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator, muted_row};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, head_lines, merge_lines, rearrange_lines};
-use crate::tabs::{PillClick, bound_pane_count, collect_panes, tab_session_counts};
+use crate::tabs::{PillClick, TabBadge, bound_pane_count, collect_panes, tab_session_counts};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::undo;
 use crate::viewer_tab::display_name;
@@ -146,12 +148,13 @@ impl RootView {
             .collect()
     }
 
-    /// The `(busy, total)` badge `tab_id`'s pill shows; `None` when it
-    /// shows none: a diff tab, or no live session in its panes.
+    /// The count badge `tab_id`'s pill shows in the chosen count mode;
+    /// `None` when it shows none: a diff tab, no live session in its panes,
+    /// or nothing needing the owner in the Needs you mode.
     #[must_use]
-    pub fn tab_badge(&self, tab_id: &str) -> Option<(usize, usize)> {
+    pub fn tab_badge(&self, tab_id: &str) -> Option<TabBadge> {
         let tab = self.tabs.tab(tab_id)?;
-        tab_session_counts(tab, self.sidebar.sessions()).filter(|(_, total)| *total > 0)
+        tab_session_counts(tab, self.sidebar.sessions())?.badge(self.sidebar.ui_state().title.count)
     }
 
     /// Every line of `menu`: the Grid submenu alone while it is open, else
@@ -595,7 +598,7 @@ impl RootView {
         let armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
         let badge = self
             .tab_badge(&tab.id)
-            .map(|(busy, total)| busy_badge(&tab.id, busy, total));
+            .map(|badge| count_badge(&tab.id, badge));
         let dashboard = matches!(tab.content, TabContent::Dashboard);
         let icon = dashboard.then(|| dashboard_icon(&tab.id));
         let need_badge = dashboard
@@ -1152,33 +1155,57 @@ fn pill_label(tab: &TabEntry) -> String {
     }
 }
 
-/// What a grid tab's busy pill shows.
+/// What a grid tab's count pill shows.
 #[derive(Debug, PartialEq, Eq)]
-struct BusyPill {
-    /// `{busy}/{total}`.
+struct CountPill {
+    /// The count: `{n}`, or `{busy}/{total}` or `{idle}/{total}`.
     text: String,
-    /// Whether the working glyph leads the text: only while a pane is busy.
+    /// Whether the working glyph leads the text: only while a pane is busy
+    /// in the busy mode.
     glyph: bool,
     /// The text's colour, `0xRRGGBB`.
     color: u32,
+    /// The pill's colour, `0xRRGGBB`.
+    background: u32,
+    /// What hovering the pill says.
+    tooltip: String,
 }
 
-impl BusyPill {
-    /// The working colour with its glyph while a pane is busy, else a grey
-    /// `0/N`.
-    fn of(busy: usize, total: usize) -> Self {
-        Self {
-            text: format!("{busy}/{total}"),
-            glyph: busy > 0,
-            color: if busy > 0 { WORKING } else { SUBTLE },
+impl CountPill {
+    /// Needs you: the count on the asking amber. Busy: the working colour
+    /// with its glyph while a pane is busy, else a grey `0/N`. Idle: a grey
+    /// `idle/total`.
+    fn of(badge: TabBadge) -> Self {
+        match badge {
+            TabBadge::NeedsYou(n) => Self {
+                text: badge_text(n).unwrap_or_default(),
+                glyph: false,
+                color: ON_ASKING,
+                background: ASKING,
+                tooltip: format!("{n} need you"),
+            },
+            TabBadge::Busy { busy, total } => Self {
+                text: format!("{busy}/{total}"),
+                glyph: busy > 0,
+                color: if busy > 0 { WORKING } else { SUBTLE },
+                background: CHIP,
+                tooltip: format!("{busy} of {total} panes busy"),
+            },
+            TabBadge::Idle { idle, total } => Self {
+                text: format!("{idle}/{total}"),
+                glyph: false,
+                color: SUBTLE,
+                background: CHIP,
+                tooltip: format!("{idle} of {total} panes idle"),
+            },
         }
     }
 }
 
-/// The busy pill after a grid tab's name, tagged `tab-badge-<id>`; its glyph
-/// is tagged `tab-badge-glyph-<id>-working`.
-fn busy_badge(tab_id: &str, busy: usize, total: usize) -> Stateful<Div> {
-    let pill = BusyPill::of(busy, total);
+/// The count pill after a grid tab's name, tagged `tab-badge-<id>`; its
+/// working glyph is tagged `tab-badge-glyph-<id>-working`.
+fn count_badge(tab_id: &str, badge: TabBadge) -> Stateful<Div> {
+    let pill = CountPill::of(badge);
     let name = format!("tab-badge-{tab_id}");
     let glyph_id = format!("tab-badge-glyph-{tab_id}");
     div()
@@ -1191,11 +1218,11 @@ fn busy_badge(tab_id: &str, busy: usize, total: usize) -> Stateful<Div> {
         .h(px(BUSY_PILL_HEIGHT))
         .px(px(6.0))
         .rounded(px(BUSY_PILL_HEIGHT / 2.0))
-        .bg(gpui::rgb(CHIP))
+        .bg(gpui::rgb(pill.background))
         .font_family(fonts::DEFAULT_FAMILY)
         .text_size(px(BUSY_PILL_TEXT_SIZE))
         .text_color(gpui::rgb(pill.color))
-        .tooltip(tooltip(format!("{busy} of {total} panes busy")))
+        .tooltip(tooltip(pill.tooltip))
         .when(pill.glyph, |row| {
             row.child(glyph_view(
                 glyph(
@@ -1284,13 +1311,13 @@ fn insertion_mark(tab_id: &str, side: Side) -> Div {
     }
 }
 
-/// The small copy of a dragged pill that follows the pointer: its busy
+/// The small copy of a dragged pill that follows the pointer: its count
 /// badge, when it has one, and its label.
 pub(crate) struct PillGhost {
     tab_id: String,
     label: SharedString,
-    /// The pill's busy and total pane counts.
-    badge: Option<(usize, usize)>,
+    /// The pill's count badge.
+    badge: Option<TabBadge>,
     /// Where the pointer sat in the pill when the drag started. gpui draws
     /// the ghost that far up and left of the pointer; the ghost moves back
     /// by it.
@@ -1299,8 +1326,8 @@ pub(crate) struct PillGhost {
 
 impl Render for PillGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let badge = self.badge.map(|(busy, total)| {
-            let pill = BusyPill::of(busy, total);
+        let badge = self.badge.map(|badge| {
+            let pill = CountPill::of(badge);
             let glyph_id = format!("tab-ghost-glyph-{}", self.tab_id);
             div()
                 .flex()
@@ -1310,7 +1337,7 @@ impl Render for PillGhost {
                 .h(px(GHOST_BADGE_HEIGHT))
                 .px(px(5.0))
                 .rounded(px(GHOST_BADGE_HEIGHT / 2.0))
-                .bg(gpui::rgb(CHIP))
+                .bg(gpui::rgb(pill.background))
                 .font_family(fonts::DEFAULT_FAMILY)
                 .text_size(px(GHOST_BADGE_TEXT_SIZE))
                 .text_color(gpui::rgb(pill.color))
@@ -1448,11 +1475,13 @@ mod tests {
     #[test]
     fn busy_pill_shows_the_working_glyph_while_a_pane_is_busy() {
         assert_eq!(
-            BusyPill::of(1, 2),
-            BusyPill {
+            CountPill::of(TabBadge::Busy { busy: 1, total: 2 }),
+            CountPill {
                 text: "1/2".to_owned(),
                 glyph: true,
                 color: WORKING,
+                background: CHIP,
+                tooltip: "1 of 2 panes busy".to_owned(),
             }
         );
     }
@@ -1460,11 +1489,41 @@ mod tests {
     #[test]
     fn idle_busy_pill_is_a_grey_zero_over_total_with_no_glyph() {
         assert_eq!(
-            BusyPill::of(0, 3),
-            BusyPill {
+            CountPill::of(TabBadge::Busy { busy: 0, total: 3 }),
+            CountPill {
                 text: "0/3".to_owned(),
                 glyph: false,
                 color: SUBTLE,
+                background: CHIP,
+                tooltip: "0 of 3 panes busy".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn needs_you_pill_is_the_count_on_amber() {
+        assert_eq!(
+            CountPill::of(TabBadge::NeedsYou(2)),
+            CountPill {
+                text: "2".to_owned(),
+                glyph: false,
+                color: ON_ASKING,
+                background: ASKING,
+                tooltip: "2 need you".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn idle_pill_is_grey_idle_over_total() {
+        assert_eq!(
+            CountPill::of(TabBadge::Idle { idle: 2, total: 3 }),
+            CountPill {
+                text: "2/3".to_owned(),
+                glyph: false,
+                color: SUBTLE,
+                background: CHIP,
+                tooltip: "2 of 3 panes idle".to_owned(),
             }
         );
     }

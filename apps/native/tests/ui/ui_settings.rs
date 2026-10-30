@@ -17,7 +17,7 @@ use protocol::{
     OptionValues, SplitDirection, TabEntry, error_codes,
 };
 use rustling_tulip_native::{
-    Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, SidebarView, fonts,
+    Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, SidebarView, TabBadge, fonts,
 };
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
@@ -521,25 +521,74 @@ fn app_title_preview_follows_toggles(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-app-title");
     let preview = |h: &mut Harness<'_>| h.root(|root, _| root.title_preview());
-    assert_eq!(preview(&mut h), "(1/3) Tab name — rustling-tulip");
+    assert_eq!(preview(&mut h), "(1) Tab name — rustling-tulip");
     assert!(h.bounds("settings-title-preview").origin.x >= px(0.0));
 
-    h.click_on("settings-title-busy-count");
+    h.click_on("settings-title-count");
     assert_eq!(preview(&mut h), "Tab name — rustling-tulip");
     h.click_on("settings-title-product-suffix");
     assert_eq!(preview(&mut h), "Tab name");
-    h.click_on("settings-title-busy-count");
-    assert_eq!(preview(&mut h), "(1/3) Tab name");
+    h.click_on("settings-title-count");
+    assert_eq!(preview(&mut h), "(1) Tab name");
 
     let saved = saved_ui(&dir);
     assert_eq!(saved["title"]["show_count"], true);
     assert_eq!(saved["title"]["suffix"], false);
 }
 
+/// Sets the tab and title count to Busy / total in Settings, closes
+/// Settings, and lets the title settle.
+fn busy_mode(h: &mut Harness<'_>) {
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-app-title");
+    h.click_on("settings-count-busy");
+    h.keys("escape");
+    h.advance(Duration::from_millis(400));
+}
+
+#[gpui::test]
+fn the_count_setting_switches_the_pills_and_the_title(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").status("awaiting_input").build(),
+        request_id: None,
+    });
+    h.advance(Duration::from_millis(400));
+    let badge = |h: &mut Harness<'_>| h.root(|root, _| root.tab_badge("t1"));
+    assert_eq!(
+        title(&mut h),
+        "(1) work — rustling-tulip",
+        "Needs you, the default"
+    );
+    assert_eq!(badge(&mut h), Some(TabBadge::NeedsYou(1)));
+
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-app-title");
+    h.click_on("settings-count-busy");
+    h.advance(Duration::from_millis(400));
+    assert_eq!(title(&mut h), "(2/2) work — rustling-tulip");
+    assert_eq!(badge(&mut h), Some(TabBadge::Busy { busy: 2, total: 2 }));
+    assert_eq!(saved_ui(&dir)["title"]["count"], "busy", "saved at once");
+
+    h.click_on("settings-count-idle");
+    h.advance(Duration::from_millis(400));
+    assert_eq!(title(&mut h), "(0/2) work — rustling-tulip");
+    assert_eq!(badge(&mut h), Some(TabBadge::Idle { idle: 0, total: 2 }));
+    assert_eq!(saved_ui(&dir)["title"]["count"], "idle");
+
+    h.click_on("settings-count-needs-you");
+    h.advance(Duration::from_millis(400));
+    assert_eq!(title(&mut h), "(1) work — rustling-tulip");
+    assert_eq!(badge(&mut h), Some(TabBadge::NeedsYou(1)));
+    assert_eq!(saved_ui(&dir)["title"]["count"], "needs_you");
+}
+
 #[gpui::test]
 fn window_title_debounced_350ms(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
+    busy_mode(&mut h);
     assert_eq!(title(&mut h), "(1/2) work — rustling-tulip");
 
     let grid = split(
@@ -573,6 +622,7 @@ fn window_title_debounced_350ms(cx: &mut TestAppContext) {
 fn window_title_debounce_restarts_on_second_change(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
+    busy_mode(&mut h);
     let grid = split(
         SplitDirection::Horizontal,
         pane("p1", Some("s1")),
@@ -603,6 +653,7 @@ fn window_title_debounce_restarts_on_second_change(cx: &mut TestAppContext) {
 fn window_title_follows_a_local_tab_switch(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
+    busy_mode(&mut h);
     h.click_on("tab-t2");
     h.advance(Duration::from_millis(300));
     assert_eq!(title(&mut h), "(1/2) work — rustling-tulip", "not yet");
@@ -764,7 +815,9 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     h.keys("down down down down down down");
     assert_eq!(shown_tab(&mut h), "App title");
     h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-title-busy-count"));
+    assert_eq!(settings_focus(&mut h), Some("settings-count-needs-you"));
+    h.keys("tab tab tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-title-count"));
     h.keys("space");
     assert_eq!(saved_ui(&dir)["title"]["show_count"], false);
     h.keys("tab");
@@ -3016,10 +3069,11 @@ fn window_title_without_suffix_or_count(cx: &mut TestAppContext) {
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
     h.click_on("settings-tab-app-title");
+    h.click_on("settings-count-busy");
     h.click_on("settings-title-product-suffix");
     h.advance(Duration::from_millis(360));
     assert_eq!(title(&mut h), "(1/2) work");
-    h.click_on("settings-title-busy-count");
+    h.click_on("settings-title-count");
     h.advance(Duration::from_millis(360));
     assert_eq!(title(&mut h), "work");
     h.click_on("settings-title-product-suffix");
