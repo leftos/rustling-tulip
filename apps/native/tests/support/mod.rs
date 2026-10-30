@@ -1230,6 +1230,7 @@ pub struct Outbox {
     unread: Vec<ClientMessage>,
     commands: Vec<NetCommand>,
     scrollback_ids: HashMap<String, Vec<String>>,
+    preset_ids: Vec<String>,
 }
 
 /// A quit that only counts itself in `quits`, as the test platform's quit
@@ -1673,9 +1674,27 @@ impl<'a> Harness<'a> {
                         .or_default()
                         .push(id.clone());
                 }
+                if let ClientMessage::ListPresets {
+                    request_id: Some(id),
+                    ..
+                } = msg.as_ref()
+                {
+                    self.outbox.preset_ids.push(id.clone());
+                }
                 self.outbox.unread.push(*msg);
             }
         }
+    }
+
+    /// The id of the latest `ListPresets` the client sent, read without
+    /// taking the request from [`Self::sent`].
+    pub fn preset_request(&mut self) -> String {
+        self.drain();
+        self.outbox
+            .preset_ids
+            .last()
+            .cloned()
+            .expect("the client asked for a preset list with an id")
     }
 
     /// The ids of `session`'s scrollback requests so far, oldest first.

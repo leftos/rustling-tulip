@@ -403,7 +403,7 @@ fn preset_requests(h: &mut Harness<'_>) -> Vec<PresetTarget> {
     h.sent()
         .into_iter()
         .filter_map(|msg| match msg {
-            ClientMessage::ListPresets { target } => Some(target),
+            ClientMessage::ListPresets { target, .. } => Some(target),
             _ => None,
         })
         .collect()
@@ -440,9 +440,11 @@ fn the_preset_row_loads_on_every_open(cx: &mut TestAppContext) {
         "the loading row cannot be pressed"
     );
 
+    let request_id = Some(h.preset_request());
     h.send(DaemonMessage::Presets {
         target: repo_target("r1"),
         entries: Vec::new(),
+        request_id,
     });
     h.keys("escape");
     open(&mut h, "container-repo:r1");
@@ -470,10 +472,11 @@ fn a_failed_list_shows_the_error_without_a_toast(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     open(&mut h, "container-repo:r1");
+    let request_id = Some(h.preset_request());
     h.send(DaemonMessage::Error {
         message: "presets.json: expected value at line 1".to_owned(),
-        request_id: None,
-        code: None,
+        request_id,
+        code: Some(protocol::error_codes::PRESETS_FAILED.to_owned()),
     });
 
     assert_eq!(preset_labels(&mut h), ["Launch preset… (failed to load)"]);
@@ -504,9 +507,11 @@ fn no_presets_shows_the_none_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     open(&mut h, "container-repo:r1");
+    let request_id = Some(h.preset_request());
     h.send(DaemonMessage::Presets {
         target: repo_target("r1"),
         entries: Vec::new(),
+        request_id,
     });
 
     assert_eq!(preset_labels(&mut h), ["Launch preset… (none defined)"]);
@@ -521,9 +526,11 @@ fn listed_presets_get_a_row_each(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     open(&mut h, "container-repo:r1");
+    let request_id = Some(h.preset_request());
     h.send(DaemonMessage::Presets {
         target: repo_target("r1"),
         entries: vec![preset("a", "Bug triage"), preset("b", "Docs sweep")],
+        request_id,
     });
 
     assert_eq!(
@@ -550,9 +557,11 @@ fn a_preset_row_closes_the_menu_and_opens_the_wizard(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     open(&mut h, "container-repo:r1");
+    let request_id = Some(h.preset_request());
     h.send(DaemonMessage::Presets {
         target: repo_target("r1"),
         entries: vec![preset("a", "Bug triage"), preset("b", "Docs sweep")],
+        request_id,
     });
     h.click_on("container-menu-launch-preset-1");
 
@@ -567,55 +576,68 @@ fn a_preset_row_closes_the_menu_and_opens_the_wizard(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_reply_for_another_container_is_dropped(cx: &mut TestAppContext) {
+fn a_reply_with_another_id_is_dropped(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     open(&mut h, "container-repo:r1");
-    h.send(DaemonMessage::Presets {
-        target: repo_target("r2"),
-        entries: vec![preset("a", "Elsewhere")],
-    });
-    assert_eq!(preset_labels(&mut h), ["Launch preset… (loading)"]);
-
-    h.keys("escape");
+    let first = h.preset_request();
     h.send(DaemonMessage::Presets {
         target: repo_target("r1"),
-        entries: vec![preset("a", "Late")],
+        entries: vec![preset("a", "Broadcast")],
+        request_id: None,
     });
-    open(&mut h, "container-repo:r2");
     h.send(DaemonMessage::Presets {
         target: repo_target("r1"),
-        entries: vec![preset("a", "Moved")],
+        entries: vec![preset("a", "Another request's")],
+        request_id: Some(format!("{first}-other")),
     });
     assert_eq!(
         preset_labels(&mut h),
         ["Launch preset… (loading)"],
-        "a reply for a closed or moved menu fills nothing"
+        "a list without the menu's id fills nothing, even for its container"
+    );
+
+    h.keys("escape");
+    open(&mut h, "container-repo:r1");
+    h.send(DaemonMessage::Presets {
+        target: repo_target("r1"),
+        entries: vec![preset("a", "Late")],
+        request_id: Some(first),
+    });
+    assert_eq!(
+        preset_labels(&mut h),
+        ["Launch preset… (loading)"],
+        "a reply for a closed menu fills nothing, even after a reopen"
     );
 }
 
 #[gpui::test]
-fn a_failed_row_takes_its_own_list_when_it_arrives(cx: &mut TestAppContext) {
+fn an_unrouted_error_toasts_and_leaves_the_rows_loading(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     open(&mut h, "container-repo:r1");
-    h.keys("escape");
-    open(&mut h, "container-repo:r2");
     h.send(DaemonMessage::Error {
-        message: "r1's presets.json is malformed".to_owned(),
+        message: "the registry is read-only".to_owned(),
         request_id: None,
         code: None,
     });
-    assert_eq!(preset_labels(&mut h), ["Launch preset… (failed to load)"]);
+    assert_eq!(
+        h.root(|root, _| root.toasts().len()),
+        1,
+        "the unrouted error raises its own toast"
+    );
+    assert_eq!(preset_labels(&mut h), ["Launch preset… (loading)"]);
 
+    let request_id = Some(h.preset_request());
     h.send(DaemonMessage::Presets {
-        target: repo_target("r2"),
+        target: repo_target("r1"),
         entries: vec![preset("a", "Bug triage")],
+        request_id,
     });
     assert_eq!(
         preset_labels(&mut h),
         ["Launch preset · Bug triage"],
-        "the menu's own list replaces a failure it was charged with"
+        "the menu's own list fills the rows"
     );
 }
 

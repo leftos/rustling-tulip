@@ -221,15 +221,6 @@ fn a_refusal_drops_the_armed_row_and_toasts(cx: &mut TestAppContext) {
         Some("repo:r1".to_owned()),
         "the row waits for its second click"
     );
-    // The preset rows have loaded, so the refusal is not taken as their
-    // list's failure.
-    h.send(DaemonMessage::Presets {
-        target: PresetTarget::Repo {
-            repo_id: "r1".to_owned(),
-        },
-        entries: Vec::new(),
-    });
-
     h.send(DaemonMessage::Error {
         message: "the registry is read-only".to_owned(),
         request_id: None,
@@ -248,6 +239,32 @@ fn a_refusal_drops_the_armed_row_and_toasts(cx: &mut TestAppContext) {
         "the generic toast a refusal without a request id raises"
     );
     assert!(!dialog_open(&mut h), "and no dialog was ever opened");
+    assert_eq!(
+        preset_labels(&mut h),
+        ["Launch preset… (loading)"],
+        "the refusal is not taken as the loading preset list's failure"
+    );
+
+    let request_id = Some(h.preset_request());
+    h.send(DaemonMessage::Presets {
+        target: PresetTarget::Repo {
+            repo_id: "r1".to_owned(),
+        },
+        entries: Vec::new(),
+        request_id,
+    });
+    assert_eq!(
+        preset_labels(&mut h),
+        ["Launch preset… (none defined)"],
+        "the list with the menu's id still fills the rows"
+    );
+}
+
+fn preset_labels(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| root.container_menu_labels())
+        .into_iter()
+        .filter(|label| label.starts_with("Launch preset"))
+        .collect()
 }
 
 #[gpui::test]

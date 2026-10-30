@@ -3481,9 +3481,12 @@ pub enum ClientMessage {
     /// Request the list of presets available for a repo or workspace. The
     /// daemon reads `.rustling-tulip/presets.json` from the target repo (or
     /// from each member repo of a workspace) and replies with
-    /// [`DaemonMessage::Presets`].
+    /// [`DaemonMessage::Presets`] carrying this `request_id`, or with an
+    /// [`DaemonMessage::Error`] carrying it when the list cannot be read.
     ListPresets {
         target: PresetTarget,
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// Batch-spawn N sessions from a preset. The daemon expands the prompt
     /// source into raw prompts, renders templates with `variable_values`,
@@ -4421,10 +4424,12 @@ pub enum DaemonMessage {
     VscodeWorkspaceParsed {
         suggestion: VscodeWorkspaceSuggestion,
     },
-    /// Response to [`ClientMessage::ListPresets`].
+    /// Response to [`ClientMessage::ListPresets`], echoing its `request_id`.
     Presets {
         target: PresetTarget,
         entries: Vec<PresetEntry>,
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// Streamed updates while a `LaunchPreset` batch runs. UI uses
     /// `current_tab_id` to auto-switch into the freshly populated tab.
@@ -4498,8 +4503,9 @@ pub enum DaemonMessage {
         /// The `request_id` of the spawn, duplicate, session appearance
         /// change or git read (`RepoStatus`, `ListStashes`, `ListCommits`,
         /// `GetCommit`, `GetRemoteUrl`), spawn preview (`PreviewSpawn`,
-        /// `PreviewWorkspaceSpawn`) or branch-name suggestion
-        /// (`SuggestBranchName`) that failed, on the reply to its requester.
+        /// `PreviewWorkspaceSpawn`), branch-name suggestion
+        /// (`SuggestBranchName`) or preset list (`ListPresets`) that failed,
+        /// on the reply to its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         /// The failure's stable machine-readable code, one of
@@ -8757,6 +8763,64 @@ mod tests {
             msg,
             ClientMessage::ListSessionHistory { request_id: Some(ref id) } if id == "r1"
         ));
+    }
+
+    #[test]
+    fn list_presets_round_trips_its_request_id() {
+        let msg: ClientMessage = assert_round_trip(
+            r#"{"type":"list_presets","target":{"kind":"repo","repo_id":"r1"},"request_id":"p1"}"#,
+        );
+        assert!(matches!(
+            msg,
+            ClientMessage::ListPresets { request_id: Some(ref id), .. } if id == "p1"
+        ));
+    }
+
+    #[test]
+    fn list_presets_without_a_request_id_decodes() {
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"list_presets","target":{"kind":"repo","repo_id":"r1"}}"#,
+        )
+        .expect("decode");
+        assert!(matches!(
+            msg,
+            ClientMessage::ListPresets {
+                request_id: None,
+                ..
+            }
+        ));
+        assert_round_trip::<ClientMessage>(
+            r#"{"type":"list_presets","target":{"kind":"repo","repo_id":"r1"},"request_id":null}"#,
+        );
+    }
+
+    #[test]
+    fn presets_round_trips_its_request_id() {
+        let msg: DaemonMessage = assert_round_trip(
+            r#"{"type":"presets","target":{"kind":"repo","repo_id":"r1"},"entries":[],"request_id":"p1"}"#,
+        );
+        assert!(matches!(
+            msg,
+            DaemonMessage::Presets { request_id: Some(ref id), .. } if id == "p1"
+        ));
+    }
+
+    #[test]
+    fn presets_without_a_request_id_decodes() {
+        let msg: DaemonMessage = serde_json::from_str(
+            r#"{"type":"presets","target":{"kind":"repo","repo_id":"r1"},"entries":[]}"#,
+        )
+        .expect("decode");
+        assert!(matches!(
+            msg,
+            DaemonMessage::Presets {
+                request_id: None,
+                ..
+            }
+        ));
+        assert_round_trip::<DaemonMessage>(
+            r#"{"type":"presets","target":{"kind":"repo","repo_id":"r1"},"entries":[],"request_id":null}"#,
+        );
     }
 
     const SESSION_HISTORY_JSON: &str = r#"{"type":"session_history","request_id":"r1","items":[

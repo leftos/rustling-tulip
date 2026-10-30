@@ -21,6 +21,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Sessions no longer end when the terminal, IDE task or tool that started the app closes and takes its child processes with it.
 - After a restart, or when Claude's hooks don't run, a session still running a background shell or subagent is no longer reported as finished.
 - A worktrees folder that can't be created in Settings now shows why, such as "Access is denied".
+- An error that arrives while a repo's menu loads its presets now shows its own message, instead of marking the presets as failed to load.
 
 ### Changed
 

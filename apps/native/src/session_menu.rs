@@ -691,6 +691,10 @@ pub(crate) struct ContainerMenu {
     /// The presets its preset rows show; a tab container's list stays
     /// empty and unshown.
     presets: MenuPresets,
+    /// The `request_id` of this open's `ListPresets`; only the `Presets` or
+    /// `Error` carrying it fills the preset rows. `None` for a tab
+    /// container, which asks for none.
+    preset_request: Option<String>,
     /// Which of its open rows' targets are gone; the rows stay enabled
     /// while the check runs.
     targets: MenuTargets,
@@ -1561,6 +1565,7 @@ impl RootView {
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
         let target = container.preset_target();
+        let preset_request = target.as_ref().map(|_| crate::new_request_id());
         let presets = if target.is_some() {
             MenuPresets::Loading
         } else {
@@ -1572,13 +1577,17 @@ impl RootView {
             submenu: ContainerSubmenu::None,
             max_height: window.viewport_size().height * MENU_MAX_SHARE,
             presets,
+            preset_request: preset_request.clone(),
             targets: MenuTargets::Checking,
             check: NEXT_TARGET_CHECK.fetch_add(1, Ordering::Relaxed),
             highlight: None,
             return_to: None,
         });
         if let Some(target) = target {
-            self.send(ClientMessage::ListPresets { target });
+            self.send(ClientMessage::ListPresets {
+                target,
+                request_id: preset_request,
+            });
         }
         self.check_container_targets(window, cx);
         self.menu_focus.focus(window);
@@ -1693,35 +1702,47 @@ impl RootView {
         }
     }
 
-    /// A `Presets` reply fills the open menu's preset rows when it is that
-    /// menu's container's list and the rows still load or show a failure:
-    /// an unrouted `Error` may have been another list's, so the menu's own
-    /// list replaces it. Any other reply is dropped.
+    /// A `Presets` reply fills the open menu's preset rows when it carries
+    /// that open's request id and the rows still load. Any other reply, a
+    /// broadcast or another open's included, is dropped.
     pub(crate) fn on_preset_message(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
-        let DaemonMessage::Presets { target, entries } = msg else {
+        let DaemonMessage::Presets {
+            target,
+            entries,
+            request_id,
+        } = msg
+        else {
             return;
         };
-        let waiting = self.container_menu.as_mut().filter(|menu| {
-            matches!(menu.presets, MenuPresets::Loading | MenuPresets::Failed(_))
-                && menu.container.preset_target().as_ref() == Some(target)
-        });
-        let Some(menu) = waiting else {
-            tracing::debug!("dropping a preset list no open menu waits for: {target:?}");
+        let Some(menu) = self.preset_menu_waiting(request_id.as_deref()) else {
+            tracing::debug!(
+                ?request_id,
+                "dropping a preset list no open menu waits for: {target:?}"
+            );
             return;
         };
         menu.presets = MenuPresets::Listed(entries.clone());
         cx.notify();
     }
 
-    /// An unrouted `Error` while the open menu's preset rows load is the
-    /// list's failure (`ListPresets` carries no request id): the rows show
-    /// it. Returns whether the menu took it.
-    pub(crate) fn on_preset_list_error(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
-        let Some(menu) = self
-            .container_menu
-            .as_mut()
-            .filter(|menu| matches!(menu.presets, MenuPresets::Loading))
-        else {
+    /// The open menu whose preset rows still load for `request_id`.
+    fn preset_menu_waiting(&mut self, request_id: Option<&str>) -> Option<&mut ContainerMenu> {
+        let request_id = request_id?;
+        self.container_menu.as_mut().filter(|menu| {
+            matches!(menu.presets, MenuPresets::Loading)
+                && menu.preset_request.as_deref() == Some(request_id)
+        })
+    }
+
+    /// A refusal carrying the open menu's preset request id is its list's
+    /// failure: the rows show it. Returns whether the menu took it.
+    pub(crate) fn on_preset_list_failed(
+        &mut self,
+        request_id: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(menu) = self.preset_menu_waiting(Some(request_id)) else {
             return false;
         };
         menu.presets = MenuPresets::Failed(message.to_owned());

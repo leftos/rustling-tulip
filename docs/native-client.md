@@ -29,7 +29,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   When the container has a stored config, `Launch last again ▸` follows: that submenu replaces the rows with `‹ Back`, `Current tab`, `New tab`, one row per grid tab by name, then `Edit first…` (the spawn dialog prefilled and locked to the container instead of a replay).
 
-  Then `Appearance…` and `Launch preset…`, `Launch preset…` lists the container's presets (repo and workspace containers alike): a loading row until the daemon's `Presets` reply arrives, a failed row when it errors (replaced only by that menu's own reply) and a none-defined row; picking a preset opens the preset wizard.
+  Then `Appearance…` and `Launch preset…`, `Launch preset…` lists the container's presets (repo and workspace containers alike): a loading row until the `Presets` reply carrying that menu's own request id arrives, a failed row when the `Error` carrying that id answers instead (an error without the id toasts on its own and leaves the row loading) and a none-defined row; picking a preset opens the preset wizard.
 
   Below a separator sit `Open in Explorer`, `Open in VS Code` and `Copy path`; the danger Remove row follows below another separator. Explorer and Copy path act on a repo's folder; a workspace has no single folder, so both are disabled with the tooltip `This container has no folder`, as is VS Code when a workspace yields neither a linked file nor a folder.
 

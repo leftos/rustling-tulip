@@ -3729,8 +3729,9 @@ impl RootView {
     /// and a refused worktrees root (by its `code`) ends that tab's save,
     /// whose message still toasts. A routed refusal (`Some`) answers its own
     /// request: a launch-command refusal of an apply, by its `code`, shows
-    /// under its row with no toast; refused Settings values end their apply
-    /// and toast; any other takes the generic path.
+    /// under its row with no toast; a preset list's failure shows in the
+    /// container menu's preset row with no toast; refused Settings values
+    /// end their apply and toast; any other takes the generic path.
     fn on_refusal(
         &mut self,
         message: String,
@@ -3743,10 +3744,11 @@ impl RootView {
             self.on_worktrees_root_error(code, cx);
         }
         let inline = match request_id {
-            None => self.on_creator_error(&message, cx) || self.on_preset_list_error(&message, cx),
+            None => self.on_creator_error(&message, cx),
             Some(id) => {
                 self.on_agent_setting_refused(id, &message, cx);
                 self.on_agent_command_error(id, code, &message, cx)
+                    || self.on_preset_list_failed(id, &message, cx)
             }
         };
         self.repo_remove.disarm();

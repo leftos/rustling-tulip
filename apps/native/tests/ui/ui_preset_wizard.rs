@@ -68,11 +68,13 @@ fn all_sources() -> serde_json::Value {
 /// Opens r1's menu, answers it with `entry` and presses its row.
 fn open_wizard(h: &mut Harness<'_>, entry: PresetEntry) {
     h.right_click_on("container-repo:r1");
+    let request_id = Some(h.preset_request());
     h.send(DaemonMessage::Presets {
         target: PresetTarget::Repo {
             repo_id: "r1".to_owned(),
         },
         entries: vec![entry],
+        request_id,
     });
     h.click_on("container-menu-launch-preset-0");
     assert!(

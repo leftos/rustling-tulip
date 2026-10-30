@@ -44,6 +44,9 @@ pub const WORKTREES_ROOT_REFUSED: &str = "worktrees_root_refused";
 pub const SUMMARIZER_REFUSED: &str = "summarizer_refused";
 /// Resuming a session failed.
 pub const RESUME_FAILED: &str = "resume_failed";
+/// A repo's or workspace's preset list could not be read: an unknown repo or
+/// workspace, or a `presets.json` that cannot be read or parsed.
+pub const PRESETS_FAILED: &str = "presets_failed";
 
 /// Every code in the catalogue.
 pub const ALL: &[&str] = &[
@@ -66,6 +69,7 @@ pub const ALL: &[&str] = &[
     WORKTREES_ROOT_REFUSED,
     SUMMARIZER_REFUSED,
     RESUME_FAILED,
+    PRESETS_FAILED,
 ];
 
 #[cfg(test)]

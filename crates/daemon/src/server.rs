@@ -566,6 +566,30 @@ async fn shutdown_handler(State(hub): State<Hub>, headers: HeaderMap) -> Respons
     (StatusCode::ACCEPTED, "shutting down").into_response()
 }
 
+/// The answer to a `ListPresets`: the target's presets, or the `Error` that
+/// says why they cannot be read, each carrying the request's id.
+async fn list_presets(
+    hub: &Hub,
+    target: protocol::PresetTarget,
+    request_id: Option<String>,
+) -> DaemonMessage {
+    match crate::presets::list(hub, &target).await {
+        Ok(entries) => DaemonMessage::Presets {
+            target,
+            entries,
+            request_id,
+        },
+        Err(err) => {
+            warn!(?err, ?target, "listing presets failed");
+            DaemonMessage::Error {
+                message: format!("{err:#}"),
+                request_id,
+                code: Some(protocol::error_codes::PRESETS_FAILED.to_owned()),
+            }
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "dispatch is a flat match over the protocol message set; \
@@ -738,9 +762,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         ClientMessage::ConfigureRemote { enabled, port } => {
             configure_remote(hub, enabled, port, out_tx).await?;
         }
-        ClientMessage::ListPresets { target } => {
-            let entries = crate::presets::list(hub, &target).await?;
-            let _ = out_tx.send(DaemonMessage::Presets { target, entries });
+        ClientMessage::ListPresets { target, request_id } => {
+            let _ = out_tx.send(list_presets(hub, target, request_id).await);
         }
         ClientMessage::LaunchPreset {
             job_id,
@@ -969,10 +992,12 @@ mod child_env_probe {
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use protocol::{ClientMessage, DaemonMessage, TabContent, TabEntry};
+    use protocol::{ClientMessage, DaemonMessage, PresetTarget, TabContent, TabEntry};
 
     use super::bind_loopback;
-    use super::test_support::{dispatch_one, seed_dashboard_tab, seed_two_pane_layout, test_hub};
+    use super::test_support::{
+        dispatch_one, repo_entry, seed_dashboard_tab, seed_two_pane_layout, test_hub,
+    };
 
     /// A socket that sets `SO_REUSEADDR` still cannot take the daemon's
     /// loopback port: on Windows the daemon's socket keeps the address
@@ -1018,6 +1043,69 @@ mod tests {
                 &reply,
                 DaemonMessage::Error { message, request_id: Some(id), .. }
                     if message == "not supported yet" && id == "d1"
+            ),
+            "{reply:?}"
+        );
+    }
+
+    /// A preset list echoes its request's id, so the requester can tell its
+    /// own list from another request's.
+    #[tokio::test]
+    async fn a_preset_list_echoes_its_request_id() {
+        let (hub, scratch) = test_hub("presets-echo");
+        hub.state
+            .mutate(|s| s.repos.push(repo_entry("r1", "r1", scratch.path())))
+            .expect("register the repo");
+        let target = PresetTarget::Repo {
+            repo_id: "r1".to_owned(),
+        };
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::ListPresets {
+                target: target.clone(),
+                request_id: Some("p1".to_owned()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Presets { target: listed, entries, request_id: Some(id) }
+                    if *listed == target && entries.is_empty() && id == "p1"
+            ),
+            "{reply:?}"
+        );
+    }
+
+    /// A preset list that cannot be read is answered with an `Error` that
+    /// carries the request's id and the presets code, so the requester's
+    /// menu shows the failure and no other request takes it.
+    #[tokio::test]
+    async fn a_failed_preset_list_is_refused_with_its_request_id() {
+        let (hub, scratch) = test_hub("presets-failed");
+        let folder = scratch.path().join(".rustling-tulip");
+        std::fs::create_dir_all(&folder).expect("create the presets folder");
+        std::fs::write(folder.join("presets.json"), "not json").expect("write presets.json");
+        hub.state
+            .mutate(|s| s.repos.push(repo_entry("r1", "r1", scratch.path())))
+            .expect("register the repo");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::ListPresets {
+                target: PresetTarget::Repo {
+                    repo_id: "r1".to_owned(),
+                },
+                request_id: Some("p1".to_owned()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
+                    if id == "p1"
+                        && code == protocol::error_codes::PRESETS_FAILED
+                        && message.contains("presets.json")
             ),
             "{reply:?}"
         );
