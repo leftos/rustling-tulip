@@ -4,8 +4,9 @@
 use crate::support;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use gpui::{Modifiers, Pixels, Point, TestAppContext, point};
+use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
     AgentId, AttentionReason, ClientMessage, ContainerRef, DaemonMessage, DeviceInfo,
     KeepAwakeMode, OptionValue, RecoverItemResult, RemoteState, SessionSnapshot, TabEntry,
@@ -13,6 +14,7 @@ use protocol::{
     WorktreeLockingProcess,
 };
 use rustling_tulip_native::ScKey;
+use rustling_tulip_native::connection_picker::PeerSource;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, toast_action_selector};
@@ -1583,5 +1585,200 @@ fn quit_sends_shutdown_only_to_this_pc(cx: &mut TestAppContext) {
             .iter()
             .any(|command| matches!(command, NetCommand::Shutdown { .. } | NetCommand::Stop)),
         "the remote host's daemon is neither shut down nor stopped: {remote_commands:?}"
+    );
+}
+
+/// The saved host [`REMOTE`] as launch dials it.
+fn saved_remote() -> Target {
+    Target::tailnet(REMOTE, Some(8787))
+}
+
+/// The remote host's repo row, keyed with its host in front.
+fn remote_repo_key() -> String {
+    format!("{REMOTE}::repo:r2")
+}
+
+/// A window on This PC listing `a1` in repo `r1`, with [`REMOTE`] saved,
+/// connected and listing `b1` in repo `r2`.
+fn saved_remote_listing<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(
+        cx,
+        dir,
+        &Fixture::single(session("a1").in_repo("r1").build()),
+    );
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    let mut host = h.host(&saved_remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").in_repo("r2").build()],
+    });
+    h.sent();
+    assert!(
+        shown_folds(&mut h)
+            .iter()
+            .any(|(key, _)| *key == remote_repo_key()),
+        "the remote repo row shows"
+    );
+    h
+}
+
+/// Whether the remote host's repo row and its session's row draw dimmed,
+/// as a pair.
+fn remote_rows_dimmed(h: &mut Harness<'_>) -> (bool, bool) {
+    h.root(|root, _| {
+        (
+            root.container_dimmed(&remote_repo_key()),
+            root.session_dimmed("b1"),
+        )
+    })
+}
+
+/// A connection to `target` that was open and dropped.
+fn dropped(target: Target) -> Connection {
+    let mut conn = Connection::for_target(target);
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(PROTOCOL, Vec::new());
+    let _ = conn.on_closed("socket closed".to_owned());
+    conn
+}
+
+#[gpui::test]
+fn an_offline_hosts_rows_dim_and_come_back_when_it_reconnects(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_listing(cx, &dir);
+    assert_eq!(
+        remote_rows_dimmed(&mut h),
+        (false, false),
+        "open: not dimmed"
+    );
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+    assert_eq!(
+        remote_rows_dimmed(&mut h),
+        (true, true),
+        "the dropped host's repo and session rows dim"
+    );
+    assert_eq!(shown_leaves(&mut h), ["a1", "b1"], "and stay listed");
+
+    h.host(&saved_remote()).connect();
+    assert_eq!(
+        remote_rows_dimmed(&mut h),
+        (false, false),
+        "they come back when it reconnects"
+    );
+}
+
+/// A Tailscale that sees no peers: Connections lists only the saved hosts.
+struct NoPeers;
+
+impl PeerSource for NoPeers {
+    fn status(&self) -> Result<tailnet::Status, tailnet::TailnetError> {
+        Ok(tailnet::Status::default())
+    }
+}
+
+#[gpui::test]
+fn a_switched_off_hosts_rows_stay_dimmed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_listing(cx, &dir);
+    assert_eq!(remote_rows_dimmed(&mut h), (false, false), "on: not dimmed");
+    h.root_update(|root, _, _| root.set_peer_source(Arc::new(NoPeers)));
+    h.click_on("footer-connections");
+
+    h.click_on(&format!("connections-row-{REMOTE}-enabled"));
+
+    assert_eq!(h.root(|root, _| root.held_hosts()), [HostKey::Local]);
+    assert_eq!(shown_leaves(&mut h), ["a1", "b1"], "its rows stay");
+    assert_eq!(
+        remote_rows_dimmed(&mut h),
+        (true, true),
+        "a switched-off host's rows draw dimmed"
+    );
+}
+
+#[gpui::test]
+fn this_pcs_rows_never_dim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_listing(cx, &dir);
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+
+    h.set_connection(dropped(Target::Local));
+
+    assert_eq!(
+        h.root(|root, _| (
+            root.host_dimmed(&HostKey::Local),
+            root.container_dimmed("repo:r1"),
+            root.session_dimmed("a1"),
+        )),
+        (false, false, false),
+        "This PC's rows stay at full strength while its daemon is away"
+    );
+}
+
+/// Whether the footer drew `text` under `selector`; gpui keeps what it
+/// painted, so a spec asks about a text only before it was ever drawn.
+fn footer_shows(h: &mut Harness<'_>, selector: &str, text: &str) -> bool {
+    h.bounds(&format!("{selector}={text}")).origin.x >= px(0.0)
+}
+
+#[gpui::test]
+fn the_footer_counts_hosts_online(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": REMOTE, "port": 8787 },
+            { "name": OTHER, "port": 8787 },
+            { "name": "off.tail1234.ts.net", "port": 8787, "enabled": false },
+        ] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    assert!(
+        footer_shows(&mut h, "footer-hosts", "1/3 hosts online"),
+        "This PC is open, both enabled hosts still connecting; the switched-off host is not counted"
+    );
+
+    h.host(&saved_remote()).connect();
+    assert!(footer_shows(&mut h, "footer-hosts", "2/3 hosts online"));
+    h.host(&Target::tailnet(OTHER, Some(8787))).connect();
+    assert!(footer_shows(&mut h, "footer-hosts", "3/3 hosts online"));
+    assert!(
+        footer_shows(&mut h, "daemon-pill", "daemon · 0 sessions · :4242"),
+        "the pill stays This PC's"
+    );
+
+    h.click_on("footer-hosts");
+    assert!(
+        h.root(|root, _| root.connection_picker_open()),
+        "the count opens Connections"
+    );
+}
+
+#[gpui::test]
+fn the_footer_hides_the_count_with_one_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": REMOTE, "port": 8787, "enabled": false },
+        ] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    assert!(
+        h.bounds("footer-hosts").origin.x < px(0.0),
+        "only This PC is on: the count was never drawn"
     );
 }

@@ -205,6 +205,25 @@ pub fn log_paths(config_dir: &Path) -> LogPaths {
     }
 }
 
+/// The footer's `{n}/{m} hosts online` text beside This PC's pill: `m`
+/// counts This PC and each enabled saved host, `n` those whose connection
+/// is open, This PC's being `this_pc`. An enabled host the window holds no
+/// connection to (one dropped as another host's duplicate) is `None` in
+/// `enabled_hosts`. `None` when This PC is the only host.
+#[must_use]
+pub fn hosts_online(this_pc: &Connection, enabled_hosts: &[Option<&Connection>]) -> Option<String> {
+    if enabled_hosts.is_empty() {
+        return None;
+    }
+    let total = 1 + enabled_hosts.len();
+    let open = usize::from(this_pc.is_open())
+        + enabled_hosts
+            .iter()
+            .filter(|conn| conn.is_some_and(Connection::is_open))
+            .count();
+    Some(format!("{open}/{total} hosts online"))
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -212,8 +231,8 @@ pub fn log_paths(config_dir: &Path) -> LogPaths {
 )]
 mod tests {
     use super::{
-        CountKind, CountSpan, LogPaths, StatusCounts, StopConfirm, flyout_rows, log_paths,
-        status_counts,
+        CountKind, CountSpan, LogPaths, StatusCounts, StopConfirm, flyout_rows, hosts_online,
+        log_paths, status_counts,
     };
     use crate::connection::Connection;
     use crate::net::HandshakeInfo;
@@ -472,6 +491,55 @@ mod tests {
 
     fn row(label: &'static str, value: &str) -> (&'static str, String) {
         (label, value.to_owned())
+    }
+
+    fn remote_open() -> Connection {
+        let mut conn = Connection::for_target(Target::tailnet("box.tail1234.ts.net", None));
+        conn.on_connecting();
+        conn.on_socket_open(8787);
+        conn.on_welcome(HANDSHAKE.protocol_version, Vec::new());
+        conn
+    }
+
+    fn remote_closed() -> Connection {
+        let mut conn = Connection::for_target(Target::tailnet("den.tail1234.ts.net", None));
+        conn.on_connecting();
+        let _ = conn.on_closed("connection refused".to_owned());
+        conn
+    }
+
+    #[test]
+    fn hosts_online_counts_this_pc_and_enabled_hosts() {
+        let (up, down) = (remote_open(), remote_closed());
+        assert_eq!(
+            hosts_online(&open(), &[Some(&up), Some(&down)]).as_deref(),
+            Some("2/3 hosts online")
+        );
+        assert_eq!(
+            hosts_online(&Connection::new(), &[Some(&up)]).as_deref(),
+            Some("1/2 hosts online"),
+            "This PC counts only while its connection is open"
+        );
+        assert_eq!(
+            hosts_online(&open(), &[Some(&up)]).as_deref(),
+            Some("2/2 hosts online")
+        );
+    }
+
+    #[test]
+    fn hosts_online_is_hidden_with_one_host() {
+        assert_eq!(hosts_online(&open(), &[]), None);
+        assert_eq!(hosts_online(&Connection::new(), &[]), None);
+    }
+
+    #[test]
+    fn a_duplicate_host_does_not_count_as_online() {
+        let up = remote_open();
+        assert_eq!(
+            hosts_online(&open(), &[Some(&up), None]).as_deref(),
+            Some("2/3 hosts online"),
+            "an enabled host with no connection counts in m and not in n"
+        );
     }
 
     #[test]

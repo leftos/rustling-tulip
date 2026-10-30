@@ -43,11 +43,6 @@ fn remote() -> Connection {
     open_on(Target::tailnet(HOST, None), 8787)
 }
 
-/// An open connection to the local daemon, on the fake daemon's port.
-fn local() -> Connection {
-    open_on(Target::Local, 4242)
-}
-
 /// [`HOST`] as a target to open on.
 fn remote_target() -> Target {
     Target::tailnet(HOST, None)
@@ -493,36 +488,6 @@ fn quit_does_not_shut_down_remote_daemon(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn flyout_hides_stop_handshake_and_daemon_log_on_remote(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    let kept = ["restart-daemon", "open-native-log", "reveal-config"];
-    let local_only = ["stop-daemon", "copy-handshake", "open-daemon-log"];
-
-    h.set_connection(remote());
-    h.click_on("daemon-pill");
-    for selector in kept {
-        assert!(drawn(&mut h, selector), "{selector} shows on a remote host");
-    }
-    for selector in local_only {
-        assert!(
-            !drawn(&mut h, selector),
-            "{selector} is hidden on a remote host"
-        );
-    }
-    h.click_on("daemon-pill");
-
-    h.set_connection(local());
-    h.click_on("daemon-pill");
-    for selector in kept.into_iter().chain(local_only) {
-        assert!(
-            drawn(&mut h, selector),
-            "{selector} shows on the local daemon"
-        );
-    }
-}
-
 /// A connection to `target` that is still connecting.
 fn connecting(target: Target) -> Connection {
     let mut conn = Connection::for_target(target);
@@ -531,46 +496,26 @@ fn connecting(target: Target) -> Connection {
 }
 
 #[gpui::test]
-fn footer_pill_and_overlay_name_the_remote_host(cx: &mut TestAppContext) {
+fn a_remote_host_never_draws_the_overlay(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture::single(session("s1").build());
     let mut h = Harness::with(cx, &dir, &fixture);
-    assert!(shows(&mut h, "daemon-pill", "daemon · 1 session · :4242"));
-    h.set_connection(connecting(Target::Local));
+    let host = Target::tailnet(HOST, None);
+
+    h.host(&host)
+        .event(NetEvent::State(connecting(host.clone())));
     assert!(
-        shows(&mut h, "overlay-restart", "Restart daemon"),
-        "the local overlay offers a restart"
+        !drawn(&mut h, "connecting-overlay"),
+        "a remote host connecting beside This PC draws no overlay"
     );
-
-    h.set_connection(remote());
-    h.load(&fixture);
-    assert!(shows(&mut h, "daemon-pill", "box · 1 session"));
-
-    h.set_connection(connecting(Target::tailnet(HOST, None)));
+    h.host(&host).connect();
+    h.host(&host).event(NetEvent::State(dropped_remote()));
+    assert!(!drawn(&mut h, "connecting-overlay"), "nor does its drop");
+    h.host(&host).connect();
+    assert!(!drawn(&mut h, "connecting-overlay"), "nor its reconnect");
     assert!(
-        shows(&mut h, "connecting-overlay", "Connecting to box…"),
-        "the overlay names the host too"
-    );
-    assert!(shows(&mut h, "overlay-restart", "Reconnect now"));
-}
-
-#[gpui::test]
-fn restart_reads_reconnect_now_on_remote(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.click_on("daemon-pill");
-    assert!(shows(&mut h, "restart-daemon", "Restart daemon"));
-    h.click_on("daemon-pill");
-
-    h.set_connection(remote());
-    h.commands();
-    h.click_on("daemon-pill");
-    assert!(shows(&mut h, "restart-daemon", "Reconnect now"));
-    h.click_on("restart-daemon");
-    let commands = h.commands();
-    assert!(
-        matches!(commands.as_slice(), [NetCommand::Restart]),
-        "the button asks the network thread to reconnect"
+        shows(&mut h, "daemon-pill", "daemon · 1 session · :4242"),
+        "This PC's pill is unchanged"
     );
 }
 
@@ -624,23 +569,6 @@ fn dropped_remote() -> Connection {
     let mut conn = remote();
     conn.on_closed("socket closed".to_owned());
     conn
-}
-
-#[gpui::test]
-fn reconnect_from_a_dropped_remote_connection_sends_restart(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.set_connection(dropped_remote());
-    h.commands();
-
-    h.click_on("daemon-pill");
-    assert!(shows(&mut h, "restart-daemon", "Reconnect now"));
-    h.click_on("restart-daemon");
-    let commands = h.commands();
-    assert!(
-        matches!(commands.as_slice(), [NetCommand::Restart]),
-        "the button asks for one Reconnect: no stop, shutdown or target switch"
-    );
 }
 
 /// A failed cleanup of one worktree folder, held by nothing.
