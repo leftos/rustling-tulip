@@ -62,23 +62,15 @@
 
 - [ ] RT-51 Chat mirror: a Claude session as a chat over its live terminal, with interactive cards · release vNext
   - [ ] RT-107 Running-work strip: subagents, background shells and wakeups over the chat · release vNext
-    - [ ] RT-518 Keep the Stop payload's background tasks and wakeup (CV.16) · release vNext
-    - [ ] RT-519 Count running work on the screen and send the strip (CV.17) · release vNext
-    - [ ] RT-520 Draw the strip over the composer (CV.18) · release vNext
   - [ ] RT-111 Summary view: one line per stretch of work, expandable into the chat · release vNext
-    - [ ] RT-521 Split the chat into stretches with template lines (CV.19) · release vNext
-    - [ ] RT-522 Write summary lines with the summarizer (CV.20) · release vNext
     - [ ] RT-523 Draw the summary view (CV.21) · release vNext
     - [ ] RT-524 Document the strip and the summary view, and retire the design file (CV.22) · release vNext
-  - [ ] RT-510 Type chat messages into the PTY (CV.8) · release vNext
-  - [ ] RT-511 Answer prompts by typing their recipes (CV.9) · release vNext
   - [ ] RT-514 Answer prompts and send messages from the chat (CV.12) · release vNext
   - [ ] RT-516 Prove the mirror end to end (CV.14) · release vNext
   - [ ] RT-517 Document the mirror (CV.15) · release vNext
   - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
   - [ ] RT-527 Merge feat/chat-mirror to main (#203)
   - [ ] RT-549 Check an older Claude Code still runs the status hooks beside MessageDisplay
-  - [ ] RT-552 Return the terminal to the main conversation for a Heads up (CV.24) · release vNext
   - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
 - [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
@@ -284,3 +276,10 @@
 - [ ] RT-548 Read running-subagent rows past an hour in the background rule
 - [ ] RT-550 Keep an armed Remove row when a preset list fails
 - [ ] RT-554 Make the UI specs' absence checks able to fail
+- [ ] RT-556 Fix one-shot wakeup times across daylight-saving changes
+- [ ] RT-557 Read the "Background this session?" dialog as a dialog
+- [ ] RT-558 Fix three edge cases in the summary view's stretch lines
+- [ ] RT-559 Fix two narrow running-work strip defects: a duplicate ChatWork, the panel's first row
+- [ ] RT-560 Close three gaps in answering prompts from the chat: repeated prompt ids, the last key, a subagent's denial
+- [ ] RT-561 Read the running-work strip's ages from the wall clock, not a startup base
+- [ ] RT-562 Keep a multi-question AskUserQuestion pending until its last answer
