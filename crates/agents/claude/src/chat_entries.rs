@@ -6,6 +6,7 @@
 //! block's id (so its result upserts the card), a receipt `receipt:<that id>`.
 
 use agent_api::TranscriptLineFacts;
+use chrono::{DateTime, Utc};
 use protocol::{ChatEntry, ToolOutcome};
 use serde_json::{Map, Value};
 
@@ -52,10 +53,11 @@ pub(crate) fn chat_entries(line: &str, known: Known<'_>) -> Vec<ChatEntry> {
     }
 }
 
-/// The prompt id and whether one transcript line is a prompt sent to
-/// Claude: a `user` record carrying text (a string, or a text block beside
-/// any tool results) that is neither meta nor a compact summary. A line that
-/// does not parse has neither.
+/// The prompt id, the record's time and whether one transcript line is a
+/// prompt sent to Claude: a `user` record carrying text (a string, or a text
+/// block beside any tool results) that is neither meta nor a compact summary.
+/// A line that does not parse has none of them; a `timestamp` that is
+/// missing or not RFC 3339 is no time.
 pub(crate) fn line_facts(line: &str) -> TranscriptLineFacts {
     let Ok(record) = serde_json::from_str::<Value>(line) else {
         return TranscriptLineFacts::default();
@@ -63,6 +65,9 @@ pub(crate) fn line_facts(line: &str) -> TranscriptLineFacts {
     TranscriptLineFacts {
         prompt_id: str_at(&record, "promptId").map(str::to_owned),
         is_user_prompt: is_user_prompt(&record),
+        timestamp: str_at(&record, "timestamp")
+            .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
+            .map(|stamp| stamp.with_timezone(&Utc)),
     }
 }
 
@@ -596,6 +601,7 @@ fn cap_chars(text: &str, max: usize) -> String {
 mod tests {
     use super::{TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, chat_entries, line_facts};
     use agent_api::TranscriptLineFacts;
+    use chrono::{TimeDelta, TimeZone as _, Utc};
     use protocol::{ChatEntry, ToolOutcome};
     use serde_json::{Value, json};
 
@@ -612,8 +618,39 @@ mod tests {
             TranscriptLineFacts {
                 prompt_id: Some("p-1".to_owned()),
                 is_user_prompt: true,
+                timestamp: Utc
+                    .with_ymd_and_hms(2026, 9, 27, 10, 0, 1)
+                    .single()
+                    .map(|second| second + TimeDelta::milliseconds(500)),
             }
         );
+    }
+
+    #[test]
+    fn a_line_carries_its_records_time_and_none_for_a_missing_or_bad_one() {
+        let stamped = json!({
+            "type": "assistant", "uuid": uid("06"), "timestamp": "2026-09-27T10:00:02+02:00",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        });
+        assert_eq!(
+            line_facts(&stamped.to_string()).timestamp,
+            Utc.with_ymd_and_hms(2026, 9, 27, 8, 0, 2).single()
+        );
+        let missing = json!({
+            "type": "assistant", "uuid": uid("07"),
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        });
+        let bad = json!({
+            "type": "assistant", "uuid": uid("08"), "timestamp": "yesterday",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        });
+        let number = json!({
+            "type": "assistant", "uuid": uid("09"), "timestamp": 1_790_000_000,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        });
+        for record in [missing, bad, number] {
+            assert_eq!(line_facts(&record.to_string()).timestamp, None, "{record}");
+        }
     }
 
     #[test]

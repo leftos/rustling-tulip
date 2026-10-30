@@ -195,6 +195,8 @@ pub struct TranscriptLineFacts {
     pub prompt_id: Option<String>,
     /// Whether the line is a prompt sent to the agent, which starts a turn.
     pub is_user_prompt: bool,
+    /// The line's own time, from the transcript record.
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the

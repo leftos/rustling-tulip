@@ -175,7 +175,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Linked workspace file**: the `.code-workspace` path a workspace stores as `linked_vscode_workspace`, whose folders the workspace creator and the detected prompt turn into members; a workspace created with Create & watch (`watch_vscode_workspace`) follows it as it changes.
 - **Live line**: one `MessageDisplay` hook call's piece of an answer being written (`agent_api::LiveLine`: text, `index`, message and prompt keys), carried to the session's `hook_status::LiveLines` broadcast with no status effect; the chat mirror shows it until the transcript has the answer.
 - **Liveness tokens**: the process-name fragments the orphan check accepts for a dead-or-alive test of a sidecar that names no program (`Agent::liveness_tokens`; Claude's are `claude` and `node`).
-- **Loader**: a connection that has loaded a session's chat (`LoadChat`) and is sent that chat's appends and screen changes until it unloads or closes.
+- **Loader**: a connection that has loaded a session's chat (`LoadChat`) or its summary (`LoadSummary`), or both, and is sent the loaded view's appends (and, for the chat, its screen changes) until it unloads or closes.
 - **Locked key**: a routing variable choosing the endpoint or the credential, which a session's environment rows may not set; a spawn that tries is refused.
 - **Lost at start**: a session whose sidecar the daemon finds dead at startup with no history entry; it gets a `TracerLost` entry (or its true end from the tracer log) before anything spawns, and is then a candidate for auto-resume.
 - **MA1, MA2, …**: item ids in `docs/plans/mobile-app.md`, the iOS and Android app's phases (distinct from the macOS plan's M0–M4).

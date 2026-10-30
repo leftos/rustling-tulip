@@ -56,6 +56,7 @@ mod spawn_detached;
 mod spawn_plan;
 mod state;
 mod summarizer;
+mod summary_lines;
 mod sync;
 mod tabs;
 mod tailnet_listener;

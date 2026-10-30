@@ -1,19 +1,22 @@
 //! A session's chat as the connections that loaded it (its loaders) see it:
 //! the entries read off the agent's transcript, the answers still arriving as
-//! live lines, and the composer and dialog read off the screen.
+//! live lines, and the composer and dialog read off the screen. A loader
+//! loads the chat, the summary (the chat's stretch lines,
+//! [`crate::summary_lines`]), or both, and hears only of what it loaded.
 //!
-//! A session is mirrored while at least one connection has its chat loaded:
-//! its transcript is tailed from the start, its live lines are followed, and
-//! its status watcher hands over each screen it reads ([`ChatTap`]). The last
-//! unload, the last loader's connection ending, or the session's removal
-//! drops the mirror; a session that ended stays mirrored, read-only.
+//! A session is mirrored while at least one connection has its chat or
+//! summary loaded: its transcript is tailed from the start, its live lines
+//! are followed, and its status watcher hands over each screen it reads
+//! ([`ChatTap`]). The last unload, the last loader's connection ending, or
+//! the session's removal drops the mirror; a session that ended stays
+//! mirrored, read-only.
 //!
 //! One lock orders everything a loader is sent. A loader is registered and
-//! sent its `Chat` reply under it, and every append, live merge, screen change
-//! and conversation switch is applied and sent under it, so a reply holds
-//! exactly what was applied before it and each later message is new to the
-//! loader. The lock is taken inside a screen's grid lock, never the reverse,
-//! and is never held across an await.
+//! sent its `Chat` or `Summary` reply under it, and every append, live merge,
+//! screen change and conversation switch is applied and sent under it, so a
+//! reply holds exactly what was applied before it and each later message is
+//! new to the loader. The lock is taken inside a screen's grid lock, never
+//! the reverse, and is never held across an await.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -23,7 +26,10 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use agent_api::{AgentPlugin, LiveLine, TranscriptLineFacts};
-use protocol::{AgentId, ChatEntry, ChatPrompt, ChatScreen, ComposerState, DaemonMessage};
+use chrono::{DateTime, Utc};
+use protocol::{
+    AgentId, ChatEntry, ChatPrompt, ChatScreen, ComposerState, DaemonMessage, StretchLine,
+};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -31,6 +37,7 @@ use tracing::{debug, warn};
 use crate::hook_status::LiveLines;
 use crate::screen::{Screen, SharedScreen, dialogs};
 use crate::session::{SessionEvent, SessionRegistry};
+use crate::summary_lines::{self, TimedEntry};
 use crate::sync::lock;
 use crate::transcript_tail::{self, TailEvent, TailHandle};
 
@@ -96,6 +103,13 @@ impl Drop for Running {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// What a connection loads of a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadKind {
+    Chat,
+    Summary,
 }
 
 /// Why a session's chat cannot be loaded, as the `Error` that answers it.
@@ -164,8 +178,8 @@ impl ChatMirror {
     /// `session_id`'s chat and send it the chat as it stands, carrying
     /// `request_id`. A session already mirrored keeps its tail; a new one
     /// starts reading its transcript from the start, so its first reply is
-    /// sent before that read and the read's end sends every loader the whole
-    /// chat as one unsolicited `Chat`.
+    /// sent before that read and the read's end sends every chat loader the
+    /// whole chat as one unsolicited `Chat`.
     ///
     /// # Errors
     ///
@@ -173,6 +187,42 @@ impl ChatMirror {
     /// is registered then.
     pub fn load(
         &self,
+        session_id: &str,
+        request_id: Option<String>,
+        connection: u64,
+        out_tx: &Outbox,
+    ) -> Result<(), LoadError> {
+        self.load_as(LoadKind::Chat, session_id, request_id, connection, out_tx)
+    }
+
+    /// Make `connection`, whose messages go to `out_tx`, a summary loader of
+    /// `session_id` and send it every stretch line as it stands, carrying
+    /// `request_id`, the way [`Self::load`] does the chat; the first read's
+    /// end sends every summary loader the lines as one unsolicited `Summary`.
+    ///
+    /// # Errors
+    ///
+    /// The session is unknown, or its agent has no registered plugin; nothing
+    /// is registered then.
+    pub fn load_summary(
+        &self,
+        session_id: &str,
+        request_id: Option<String>,
+        connection: u64,
+        out_tx: &Outbox,
+    ) -> Result<(), LoadError> {
+        self.load_as(
+            LoadKind::Summary,
+            session_id,
+            request_id,
+            connection,
+            out_tx,
+        )
+    }
+
+    fn load_as(
+        &self,
+        kind: LoadKind,
         session_id: &str,
         request_id: Option<String>,
         connection: u64,
@@ -210,16 +260,10 @@ impl ChatMirror {
             {
                 mirror.observe(session_id, reading);
             }
-            mirror.loaders.insert(
-                connection,
-                Loader {
-                    out: out_tx.clone(),
-                    floor: mirror.chat.reply_floor(),
-                },
-            );
+            let reply = mirror.register(kind, session_id, request_id, connection, out_tx);
             // A closed outbox is a connection already ending; its guard
             // unloads.
-            let _ = out_tx.send(mirror.chat_message(session_id, request_id));
+            let _ = out_tx.send(reply);
         }
         drop(grid);
         // The record was read before the lock: a conversation change or a
@@ -231,12 +275,32 @@ impl ChatMirror {
     /// `connection` no longer loads `session_id`'s chat; the last loader
     /// leaving drops the session's mirror and stops its tail.
     pub fn unload(&self, session_id: &str, connection: u64) {
+        self.unload_as(LoadKind::Chat, session_id, connection);
+    }
+
+    /// `connection` no longer loads `session_id`'s summary; the last loader
+    /// leaving drops the session's mirror and stops its tail.
+    pub fn unload_summary(&self, session_id: &str, connection: u64) {
+        self.unload_as(LoadKind::Summary, session_id, connection);
+    }
+
+    fn unload_as(&self, kind: LoadKind, session_id: &str, connection: u64) {
         let mut sessions = lock(&self.inner.sessions);
-        if let Entry::Occupied(mut held) = sessions.entry(session_id.to_owned()) {
-            held.get_mut().loaders.remove(&connection);
-            if held.get().loaders.is_empty() {
-                held.remove();
+        let Entry::Occupied(mut held) = sessions.entry(session_id.to_owned()) else {
+            return;
+        };
+        let loaders = &mut held.get_mut().loaders;
+        if let Entry::Occupied(mut loader) = loaders.entry(connection) {
+            match kind {
+                LoadKind::Chat => loader.get_mut().chat = false,
+                LoadKind::Summary => loader.get_mut().summary = false,
             }
+            if !loader.get().loads_any() {
+                loader.remove();
+            }
+        }
+        if held.get().loaders.is_empty() {
+            held.remove();
         }
     }
 
@@ -329,6 +393,7 @@ impl ChatMirror {
         let path = conversation.as_ref().and_then(|c| c.path.clone());
         mirror.conversation = conversation;
         mirror.chat = ChatState::starting_with(head, path.is_some());
+        mirror.summary_sent.clear();
         match path {
             Some(path) => {
                 mirror.tail = Some(self.start_tail(session_id, path, mirror.epoch, mirror.plugin));
@@ -640,13 +705,23 @@ impl Found {
     }
 }
 
-/// One connection that loaded a session's chat.
+/// One connection that loaded a session's chat, its summary, or both.
 struct Loader {
     out: Outbox,
     /// The place in the chat's entries of the oldest entry the loader holds:
     /// the first one its last `Chat` carried. A replacement of an entry
     /// before it is not sent to the loader.
     floor: usize,
+    /// Whether the loader is sent the chat's messages.
+    chat: bool,
+    /// Whether the loader is sent the summary's messages.
+    summary: bool,
+}
+
+impl Loader {
+    fn loads_any(&self) -> bool {
+        self.chat || self.summary
+    }
 }
 
 /// One mirrored session.
@@ -654,6 +729,8 @@ struct SessionMirror {
     plugin: &'static dyn AgentPlugin,
     /// Each loader, by connection.
     loaders: HashMap<u64, Loader>,
+    /// The stretch lines as the summary loaders were last sent them, by id.
+    summary_sent: HashMap<String, StretchLine>,
     conversation: Option<Conversation>,
     /// Set anew from the daemon-wide count by each switch; a tail event of
     /// any other epoch is dropped. Zero, which no tail carries, until the
@@ -676,6 +753,7 @@ impl SessionMirror {
         Self {
             plugin,
             loaders: HashMap::new(),
+            summary_sent: HashMap::new(),
             conversation: None,
             epoch: 0,
             tail: None,
@@ -685,31 +763,86 @@ impl SessionMirror {
         }
     }
 
-    /// Send `msg` to every loader.
+    /// Register `connection`, whose messages go to `out_tx`, as a loader of
+    /// what `kind` names, and return its reply carrying `request_id`.
+    fn register(
+        &mut self,
+        kind: LoadKind,
+        session_id: &str,
+        request_id: Option<String>,
+        connection: u64,
+        out_tx: &Outbox,
+    ) -> DaemonMessage {
+        let floor = self.chat.reply_floor();
+        let reply = match kind {
+            LoadKind::Chat => self.chat_message(session_id, request_id),
+            LoadKind::Summary => self.summary_message(session_id, request_id),
+        };
+        let loader = self.loaders.entry(connection).or_insert_with(|| Loader {
+            out: out_tx.clone(),
+            floor,
+            chat: false,
+            summary: false,
+        });
+        match kind {
+            LoadKind::Chat => {
+                loader.chat = true;
+                loader.floor = floor;
+            }
+            LoadKind::Summary => loader.summary = true,
+        }
+        reply
+    }
+
+    /// Send `msg` to every chat loader.
     fn tell(&self, msg: &DaemonMessage) {
-        for loader in self.loaders.values() {
+        for loader in self.loaders.values().filter(|loader| loader.chat) {
             // A closed outbox is a connection already ending; its guard
             // unloads it.
             let _ = loader.out.send(msg.clone());
         }
     }
 
-    /// Send every loader the whole chat as a fresh start, which moves each
-    /// loader's floor to the reply's first entry.
+    /// Send `msg` to every summary loader.
+    fn tell_summary(&self, msg: &DaemonMessage) {
+        for loader in self.loaders.values().filter(|loader| loader.summary) {
+            // A closed outbox is a connection already ending; its guard
+            // unloads it.
+            let _ = loader.out.send(msg.clone());
+        }
+    }
+
+    fn has_summary_loader(&self) -> bool {
+        self.loaders.values().any(|loader| loader.summary)
+    }
+
+    /// Send every chat loader the whole chat and every summary loader every
+    /// stretch line as a fresh start, which moves each chat loader's floor
+    /// to the reply's first entry.
     fn reset(&mut self, session_id: &str) {
         let msg = self.chat_message(session_id, None);
         let floor = self.chat.reply_floor();
-        for loader in self.loaders.values_mut() {
+        for loader in self.loaders.values_mut().filter(|loader| loader.chat) {
             loader.floor = floor;
         }
         self.tell(&msg);
+        if self.has_summary_loader() {
+            let summary = self.summary_message(session_id, None);
+            self.tell_summary(&summary);
+        }
     }
 
-    /// Send each loader what one transcript line changed: its new entries,
-    /// its replacements of entries the loader holds, and the live ids that
-    /// left. A loader with nothing to hear of it is sent nothing.
-    fn send_change(&self, session_id: &str, change: &Change) {
-        for loader in self.loaders.values() {
+    /// Send each chat loader what one transcript line changed: its new
+    /// entries, its replacements of entries the loader holds, and the live
+    /// ids that left; a loader with nothing to hear of it is sent nothing.
+    /// Then send the summary loaders the stretch lines it changed.
+    fn send_change(&mut self, session_id: &str, change: &Change) {
+        self.send_chat_change(session_id, change);
+        self.send_summary_change(session_id);
+    }
+
+    fn send_chat_change(&self, session_id: &str, change: &Change) {
+        for loader in self.loaders.values().filter(|loader| loader.chat) {
             let entries: Vec<ChatEntry> = change
                 .entries
                 .iter()
@@ -727,6 +860,46 @@ impl SessionMirror {
                 entries,
                 removed: change.removed.clone(),
             });
+        }
+    }
+
+    /// Send the summary loaders the stretch lines whose content changed since
+    /// they were last sent, in one `SummaryAppend`; nothing when none did.
+    fn send_summary_change(&mut self, session_id: &str) {
+        if !self.has_summary_loader() {
+            return;
+        }
+        let changed: Vec<StretchLine> = self
+            .chat
+            .stretch_lines()
+            .into_iter()
+            .filter(|line| self.summary_sent.get(&line.id) != Some(line))
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        for line in &changed {
+            self.summary_sent.insert(line.id.clone(), line.clone());
+        }
+        self.tell_summary(&DaemonMessage::SummaryAppend {
+            session_id: session_id.to_owned(),
+            lines: changed,
+        });
+    }
+
+    /// Every stretch line as one `Summary` message, which the summary
+    /// loaders then hold: a reply when `request_id` is set, a fresh start
+    /// for the summary loaders when it is not.
+    fn summary_message(&mut self, session_id: &str, request_id: Option<String>) -> DaemonMessage {
+        let lines = self.chat.stretch_lines();
+        self.summary_sent = lines
+            .iter()
+            .map(|line| (line.id.clone(), line.clone()))
+            .collect();
+        DaemonMessage::Summary {
+            session_id: session_id.to_owned(),
+            lines,
+            request_id,
         }
     }
 
@@ -871,6 +1044,12 @@ struct ChatState {
     entries: Vec<ChatEntry>,
     /// Each entry's place in `entries`, by id.
     index: HashMap<String, usize>,
+    /// Each entry's time, by id: the time of the transcript line that first
+    /// wrote it, kept through its replacements.
+    times: HashMap<String, Option<DateTime<Utc>>>,
+    /// The ids of the entries that began a turn: each prompt line's first
+    /// entry, a user message or a row such as a `!` command's.
+    turn_starts: HashSet<String>,
     /// The id of the prompt whose turn the transcript is in.
     turn_prompt: Option<String>,
     /// How many answers the transcript wrote in each prompt's turn.
@@ -980,7 +1159,8 @@ impl ChatState {
     /// Apply one transcript line: each entry it yields replaces the one with
     /// its id or goes at the end, and a new answer takes the place of the
     /// live message it is the transcript's copy of. A new prompt ends the
-    /// turn before it and the live answers of the prompts before it.
+    /// turn before it and the live answers of the prompts before it, and its
+    /// first entry begins a turn.
     fn apply_line(
         &mut self,
         plugin: &dyn AgentPlugin,
@@ -997,24 +1177,61 @@ impl ChatState {
             self.turn_prompt.clone_from(&facts.prompt_id);
             change.removed = self.end_live_before(facts.prompt_id.as_deref());
         }
+        let mut starts_turn = facts.is_user_prompt;
         let produced = plugin.chat_entries(line, &|id| self.get(id));
         for entry in produced {
             let Some(id) = entry_id(&entry).map(str::to_owned) else {
                 continue;
             };
-            let replaces = self.index.get(&id).copied();
-            if let Some(kept) = replaces.and_then(|at| self.entries.get_mut(at)) {
-                kept.clone_from(&entry);
-            } else {
-                if matches!(entry, ChatEntry::Answer { .. }) {
-                    change.removed.extend(self.answer_landed());
-                }
-                self.push(entry.clone());
+            if starts_turn {
+                starts_turn = false;
+                self.turn_starts.insert(id.clone());
             }
+            let replaces = self.upsert(id, &entry, facts.timestamp, &mut change.removed);
             change.entries.push(entry);
             change.replaces.push(replaces);
         }
         change
+    }
+
+    /// Put `entry` in place of the entry with `id`, returning that one's
+    /// place, or at the end with the time `at`; a new answer takes the place
+    /// of its live message, whose id goes to `removed`.
+    fn upsert(
+        &mut self,
+        id: String,
+        entry: &ChatEntry,
+        at: Option<DateTime<Utc>>,
+        removed: &mut Vec<String>,
+    ) -> Option<usize> {
+        let replaces = self.index.get(&id).copied();
+        if let Some(kept) = replaces.and_then(|place| self.entries.get_mut(place)) {
+            kept.clone_from(entry);
+        } else {
+            if matches!(entry, ChatEntry::Answer { .. }) {
+                removed.extend(self.answer_landed());
+            }
+            self.times.entry(id).or_insert(at);
+            self.push(entry.clone());
+        }
+        replaces
+    }
+
+    /// The chat's stretch lines: its turns and their windows of activity.
+    fn stretch_lines(&self) -> Vec<StretchLine> {
+        let timed: Vec<TimedEntry<'_>> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let id = entry_id(entry);
+                TimedEntry {
+                    entry,
+                    at: id.and_then(|id| self.times.get(id).copied().flatten()),
+                    starts_turn: id.is_some_and(|id| self.turn_starts.contains(id)),
+                }
+            })
+            .collect();
+        summary_lines::stretch_lines(&timed)
     }
 
     /// The transcript wrote the next answer of the current turn: the live
@@ -1146,7 +1363,8 @@ fn live_key(message_key: Option<&str>, prompt_key: &str) -> String {
     message_key.map_or_else(|| format!("prompt:{prompt_key}"), str::to_owned)
 }
 
-fn entry_id(entry: &ChatEntry) -> Option<&str> {
+/// The id of `entry`; `None` for a kind this build does not know.
+pub(crate) fn entry_id(entry: &ChatEntry) -> Option<&str> {
     match entry {
         ChatEntry::User { id, .. }
         | ChatEntry::Answer { id, .. }
@@ -1229,7 +1447,7 @@ pub(crate) mod test_lines {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::test_lines::{answer, prompt, queued};
+    use super::test_lines::{answer, prompt, queued, stamp};
     use super::*;
 
     fn claude() -> &'static dyn AgentPlugin {
@@ -1392,6 +1610,57 @@ mod tests {
         chat.catch_up();
         assert!(chat.take_changed_live().is_empty(), "P1's turn is over");
         assert_eq!(ids(&chat.reply().0), ["u-1", "u-2"]);
+    }
+
+    #[test]
+    fn a_replacement_entry_keeps_its_first_time() {
+        let call = serde_json::json!({
+            "type": "assistant", "uuid": "c-1", "timestamp": stamp(10),
+            "message": {"id": "msg-c-1", "role": "assistant", "type": "message",
+                "content": [{"type": "tool_use", "id": "t-1", "name": "Bash",
+                    "input": {"command": "ls"}}]},
+        })
+        .to_string();
+        let done = serde_json::json!({
+            "type": "user", "uuid": "r-1", "timestamp": stamp(70),
+            "message": {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t-1", "content": "ok"}]},
+        })
+        .to_string();
+        let mut chat = ChatState::default();
+        apply(&mut chat, &call);
+        let change = apply(&mut chat, &done);
+        assert!(
+            ids(&change.entries).contains(&"t-1"),
+            "the result replaces the card"
+        );
+        let first: DateTime<Utc> = stamp(10).parse().expect("a valid time");
+        assert_eq!(chat.times.get("t-1"), Some(&Some(first)));
+    }
+
+    #[test]
+    fn a_system_prompt_row_starts_its_own_stretch() {
+        let hour = 3600;
+        let bang = serde_json::json!({
+            "type": "user", "uuid": "bang", "timestamp": stamp(14 * hour),
+            "message": {"role": "user", "content": "<bash-input>git status</bash-input>"},
+        })
+        .to_string();
+        let mut chat = ChatState::default();
+        apply(&mut chat, &prompt("p", 10 * hour, Some("P1"), "Fix it"));
+        apply(&mut chat, &answer("a", 10 * hour + 120, "Done"));
+        apply(&mut chat, &bang);
+        let lines = chat.stretch_lines();
+        let line_ids: Vec<&str> = lines.iter().map(|line| line.id.as_str()).collect();
+        assert_eq!(line_ids, ["p", "bang"]);
+        assert_eq!(lines[0].text, "Fix it (2m)");
+        assert_eq!(lines[0].to_entry, "a", "nothing after 10:02 joins p");
+        let answered: DateTime<Utc> = stamp(10 * hour + 120).parse().expect("a valid time");
+        assert_eq!(lines[0].ended_at, Some(answered));
+        assert_eq!(
+            (lines[1].from_entry.as_str(), lines[1].text.as_str()),
+            ("bang", "! git status (<1m)")
+        );
     }
 
     #[test]

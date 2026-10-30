@@ -1,9 +1,11 @@
 //! The chat requests: `LoadChat` makes the connection a loader of a session's
-//! chat and answers with the chat as it stands, and `UnloadChat` ends that
-//! (see [`crate::chat_mirror`]).
+//! chat and answers with the chat as it stands, and `UnloadChat` ends that;
+//! `LoadSummary` and `UnloadSummary` do the same for the session's summary
+//! lines (see [`crate::chat_mirror`]).
 
 use super::Hub;
 use super::connection::ConnCtx;
+use crate::chat_mirror::LoadError;
 use protocol::{ClientMessage, DaemonMessage};
 use tracing::warn;
 
@@ -18,18 +20,41 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 hub.chat_mirror
                     .load(&session_id, request_id.clone(), ctx.connection, ctx.out_tx);
             if let Err(err) = loaded {
-                let _ = ctx.out_tx.send(DaemonMessage::Error {
-                    message: err.message,
-                    code: Some(err.code.to_owned()),
-                    request_id,
-                });
+                refuse(ctx, err, request_id);
             }
         }
         ClientMessage::UnloadChat { session_id } => {
             hub.chat_mirror.unload(&session_id, ctx.connection);
         }
+        ClientMessage::LoadSummary {
+            session_id,
+            request_id,
+        } => {
+            let loaded = hub.chat_mirror.load_summary(
+                &session_id,
+                request_id.clone(),
+                ctx.connection,
+                ctx.out_tx,
+            );
+            if let Err(err) = loaded {
+                refuse(ctx, err, request_id);
+            }
+        }
+        ClientMessage::UnloadSummary { session_id } => {
+            hub.chat_mirror.unload_summary(&session_id, ctx.connection);
+        }
         other => warn!(?other, "chat::handle: routed a message it does not own"),
     }
+}
+
+/// Answer a load that failed with `err`, carrying its `request_id`.
+fn refuse(ctx: &ConnCtx<'_>, err: LoadError, request_id: Option<String>) {
+    // A closed outbox is a connection already ending.
+    let _ = ctx.out_tx.send(DaemonMessage::Error {
+        message: err.message,
+        code: Some(err.code.to_owned()),
+        request_id,
+    });
 }
 
 #[cfg(test)]
@@ -50,7 +75,7 @@ mod tests {
     use crate::screen::fixture_screen::screen_from;
     use protocol::{
         ChatEntry, ChatPromptKind, ChatScreen, ClientMessage, DaemonMessage, SessionMode,
-        SpawnConfig, SpawnTarget,
+        SpawnConfig, SpawnTarget, StretchLine,
     };
     use std::collections::HashSet;
     use std::io::Write as _;
@@ -136,6 +161,21 @@ mod tests {
 
         async fn unload(&self, connection: u64, out_tx: &Outbox) {
             let msg = ClientMessage::UnloadChat {
+                session_id: "s1".to_owned(),
+            };
+            dispatch_on(&self.hub, msg, connection, out_tx).await;
+        }
+
+        async fn load_summary(&self, connection: u64, out_tx: &Outbox, request_id: &str) {
+            let msg = ClientMessage::LoadSummary {
+                session_id: "s1".to_owned(),
+                request_id: Some(request_id.to_owned()),
+            };
+            dispatch_on(&self.hub, msg, connection, out_tx).await;
+        }
+
+        async fn unload_summary(&self, connection: u64, out_tx: &Outbox) {
+            let msg = ClientMessage::UnloadSummary {
                 session_id: "s1".to_owned(),
             };
             dispatch_on(&self.hub, msg, connection, out_tx).await;
@@ -250,6 +290,55 @@ mod tests {
             fold(&mut ids, next_message(inbox).await);
         }
         ids
+    }
+
+    /// The next message, which must be a `Summary`: its lines and request id.
+    async fn next_summary(inbox: &mut Inbox) -> (Vec<StretchLine>, Option<String>) {
+        match next_message(inbox).await {
+            DaemonMessage::Summary {
+                lines, request_id, ..
+            } => (lines, request_id),
+            other => panic!("expected a Summary, got {other:?}"),
+        }
+    }
+
+    /// The next message, which must be a `SummaryAppend`: its lines.
+    async fn next_summary_append(inbox: &mut Inbox) -> Vec<StretchLine> {
+        match next_message(inbox).await {
+            DaemonMessage::SummaryAppend { lines, .. } => lines,
+            other => panic!("expected a SummaryAppend, got {other:?}"),
+        }
+    }
+
+    /// Apply one summary message to the lines a client shows, in order: a
+    /// `Summary` replaces them, an append replaces a known line by id and
+    /// adds the rest.
+    fn fold_summary(shown: &mut Vec<StretchLine>, msg: DaemonMessage) {
+        match msg {
+            DaemonMessage::Summary { lines, .. } => *shown = lines,
+            DaemonMessage::SummaryAppend { lines, .. } => {
+                for line in lines {
+                    match shown.iter_mut().find(|held| held.id == line.id) {
+                        Some(held) => *held = line,
+                        None => shown.push(line),
+                    }
+                }
+            }
+            other => panic!("expected summary messages, got {other:?}"),
+        }
+    }
+
+    /// The lines a summary loader shows once the line `last` arrives.
+    async fn summary_until(inbox: &mut Inbox, last: &str) -> Vec<StretchLine> {
+        let mut shown = Vec::new();
+        while !shown.iter().any(|line: &StretchLine| line.id == last) {
+            fold_summary(&mut shown, next_message(inbox).await);
+        }
+        shown
+    }
+
+    fn line_ids(lines: &[StretchLine]) -> Vec<&str> {
+        lines.iter().map(|line| line.id.as_str()).collect()
     }
 
     /// Wait until no live-line follower runs; an abort ends one at its task's
@@ -808,6 +897,101 @@ mod tests {
             (start..=BURST).collect::<Vec<_>>(),
             "every piece the channel kept is merged"
         );
+    }
+
+    #[tokio::test]
+    async fn load_summary_echoes_its_request_id() {
+        let fx = Fixture::new("summary-reply", Some("conv-a"));
+        fx.append("conv-a", &[user(1), tool_call("c-1", 2, "t-1"), user(3)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load_summary(1, &a_tx, "ra").await;
+        summary_until(&mut a_rx, "u-3").await;
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        fx.load_summary(2, &b_tx, "rb").await;
+        let (lines, request_id) = next_summary(&mut b_rx).await;
+        assert_eq!(request_id.as_deref(), Some("rb"));
+        assert_eq!(line_ids(&lines), ["u-1", "u-3"]);
+        assert_eq!(
+            (lines[0].from_entry.as_str(), lines[0].to_entry.as_str()),
+            ("u-1", "t-1")
+        );
+        assert_eq!(lines[0].text, "line 1 (<1m, 1 tool)");
+        assert_eq!(lines[1].text, "line 3 (<1m)");
+        assert!(drain(&mut a_rx).is_empty(), "B's load sends A nothing");
+    }
+
+    #[tokio::test]
+    async fn summary_append_sends_only_changed_lines() {
+        let fx = Fixture::new("summary-append", Some("conv-a"));
+        fx.append("conv-a", &[user(1), user(2)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load_summary(1, &a_tx, "ra").await;
+        summary_until(&mut a_rx, "u-2").await;
+        fx.append("conv-a", &[tool_call("c-3", 3, "t-3")]);
+        let lines = next_summary_append(&mut a_rx).await;
+        assert_eq!(line_ids(&lines), ["u-2"], "u-1's line did not change");
+        assert_eq!(lines[0].to_entry, "t-3");
+        assert_eq!(lines[0].text, "line 2 (<1m, 1 tool)");
+        assert!(drain(&mut a_rx).is_empty(), "one append per change");
+    }
+
+    #[tokio::test]
+    async fn chat_loaders_get_no_summary_messages_and_back() {
+        let fx = Fixture::new("summary-apart", Some("conv-a"));
+        fx.append("conv-a", &[user(1)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        // Each fold fails on a message of the other kind.
+        fx.load(1, &a_tx, "ra").await;
+        ids_until(&mut a_rx, "u-1").await;
+        fx.load_summary(2, &b_tx, "rb").await;
+        summary_until(&mut b_rx, "u-1").await;
+        fx.append("conv-a", &[user(2)]);
+        let (entries, _) = next_append(&mut a_rx).await;
+        assert_eq!(entries.iter().map(id_of).collect::<Vec<_>>(), ["u-2"]);
+        assert_eq!(line_ids(&next_summary_append(&mut b_rx).await), ["u-2"]);
+        assert!(
+            drain(&mut a_rx).is_empty(),
+            "the chat loader hears no summary"
+        );
+        assert!(
+            drain(&mut b_rx).is_empty(),
+            "the summary loader hears no chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_mirror_lives_while_either_load_holds() {
+        let fx = Fixture::new("summary-lifetime", Some("conv-a"));
+        fx.append("conv-a", &[user(1)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "rc").await;
+        fx.load_summary(1, &a_tx, "rs").await;
+        let (mut ids, mut lines) = (Vec::new(), Vec::new());
+        while !(ids.iter().any(|id| id == "u-1") && line_ids(&lines).contains(&"u-1")) {
+            match next_message(&mut a_rx).await {
+                msg @ (DaemonMessage::Chat { .. } | DaemonMessage::ChatAppend { .. }) => {
+                    fold(&mut ids, msg);
+                }
+                msg => fold_summary(&mut lines, msg),
+            }
+        }
+        fx.unload(1, &a_tx).await;
+        assert_eq!(
+            fx.hub.chat_mirror.mirror_count(),
+            1,
+            "the summary still holds the mirror"
+        );
+        fx.append("conv-a", &[user(2)]);
+        assert_eq!(line_ids(&next_summary_append(&mut a_rx).await), ["u-2"]);
+        assert!(
+            drain(&mut a_rx).is_empty(),
+            "the unloaded chat hears nothing"
+        );
+        fx.unload_summary(1, &a_tx).await;
+        assert_eq!(fx.hub.chat_mirror.tail_count(), 0);
+        assert_eq!(fx.hub.chat_mirror.mirror_count(), 0);
+        no_live_task_remains(&fx.hub).await;
     }
 
     /// One thread delivers tail lines while another loads the chat again and

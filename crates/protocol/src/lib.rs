@@ -2621,6 +2621,27 @@ pub struct ToolOutcome {
     pub is_error: bool,
 }
 
+/// One line of a session's summary view: a stretch of its chat (a turn, or a
+/// window of a long turn's activity) and the chat entries it covers, from
+/// `from_entry` to `to_entry` in chat order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StretchLine {
+    /// The stretch's id: its turn's first entry id, `#<n>` added for the
+    /// `n`th window of a long turn.
+    pub id: String,
+    pub from_entry: String,
+    pub to_entry: String,
+    /// The first time the stretch's entries carry, when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    /// The last time the stretch's entries carry, when one does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    pub text: String,
+    /// Whether a model call or a fixed template wrote the line.
+    pub source: SummarySource,
+}
+
 /// What the agent's input box and dialog look like right now, so the client
 /// can draw the card and say whether the composer may send.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3806,6 +3827,21 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Load a session's summary for this connection: every stretch line as
+    /// it stands, answered with [`DaemonMessage::Summary`] carrying this
+    /// `request_id`, then the changed lines as
+    /// [`DaemonMessage::SummaryAppend`].
+    LoadSummary {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Stop sending a session's summary to this connection. The daemon keeps
+    /// reading the session while a connection has its chat or summary
+    /// loaded.
+    UnloadSummary {
+        session_id: String,
+    },
 }
 
 /// One history entry to recover, and how.
@@ -4737,8 +4773,8 @@ pub enum DaemonMessage {
         /// `GetCommit`, `GetRemoteUrl`), spawn preview (`PreviewSpawn`,
         /// `PreviewWorkspaceSpawn`), branch-name suggestion
         /// (`SuggestBranchName`), preset list (`ListPresets`) or chat request
-        /// (`LoadChat`, `ChatSend`, `ChatAnswer`) that failed, on the reply to
-        /// its requester.
+        /// (`LoadChat`, `LoadSummary`, `ChatSend`, `ChatAnswer`) that failed,
+        /// on the reply to its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         /// The failure's stable machine-readable code, one of
@@ -4854,6 +4890,25 @@ pub enum DaemonMessage {
     ChatScreenChanged {
         session_id: String,
         screen: ChatScreen,
+    },
+    /// The answer to [`ClientMessage::LoadSummary`], sent to the requester
+    /// with its `request_id`: every stretch line of the session's chat as it
+    /// stands. Sent unsolicited (`request_id` `None`) to summary loaders as a
+    /// fresh start, after the transcript's first read and after the chat
+    /// started over.
+    Summary {
+        session_id: String,
+        #[serde(default)]
+        lines: Vec<StretchLine>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// The stretch lines that changed since the last summary message, sent to
+    /// summary loaders only. A line whose id is already known replaces it.
+    SummaryAppend {
+        session_id: String,
+        #[serde(default)]
+        lines: Vec<StretchLine>,
     },
 }
 
@@ -10225,6 +10280,123 @@ mod tests {
                 assert!(prompt.multi);
                 assert_eq!(prompt.cursor, Some(2));
                 assert!(prompt.questions[0].current);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    fn sample_stretch_lines() -> Vec<StretchLine> {
+        let at = |text: &str| text.parse::<DateTime<Utc>>().expect("a valid time");
+        vec![
+            StretchLine {
+                id: "u-1".to_string(),
+                from_entry: "u-1".to_string(),
+                to_entry: "t-2".to_string(),
+                started_at: Some(at("2026-10-30T10:00:00Z")),
+                ended_at: Some(at("2026-10-30T10:04:00Z")),
+                text: "Fix the login bug (4m, 1 tool)".to_string(),
+                source: SummarySource::Template,
+            },
+            StretchLine {
+                id: "u-1#1".to_string(),
+                from_entry: "a-3".to_string(),
+                to_entry: "a-3".to_string(),
+                started_at: None,
+                ended_at: None,
+                text: "Done".to_string(),
+                source: SummarySource::Model,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_stretch_line_round_trips_and_leaves_out_unknown_times() {
+        let lines = sample_stretch_lines();
+        for line in &lines {
+            let json = serde_json::to_string(line).expect("serialize");
+            assert_eq!(
+                json.contains("started_at"),
+                line.started_at.is_some(),
+                "{json}"
+            );
+            let decoded: StretchLine = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(&decoded, line);
+        }
+        let json = serde_json::to_string(&lines[0]).expect("serialize");
+        assert!(json.contains(r#""source":"template""#), "{json}");
+        assert!(json.contains(r#""from_entry":"u-1""#), "{json}");
+    }
+
+    #[test]
+    fn load_summary_message_round_trips() {
+        let msg = ClientMessage::LoadSummary {
+            session_id: "s1".to_string(),
+            request_id: Some("req-summary".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"load_summary""#));
+        assert!(json.contains(r#""request_id":"req-summary""#));
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::LoadSummary {
+                session_id,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-summary"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unload_summary_message_round_trips() {
+        let msg = ClientMessage::UnloadSummary {
+            session_id: "s1".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(json, r#"{"type":"unload_summary","session_id":"s1"}"#);
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::UnloadSummary { session_id } => assert_eq!(session_id, "s1"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn summary_message_round_trips() {
+        let msg = DaemonMessage::Summary {
+            session_id: "s1".to_string(),
+            lines: sample_stretch_lines(),
+            request_id: Some("req-summary".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"summary""#));
+        assert!(json.contains(r#""request_id":"req-summary""#));
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::Summary {
+                session_id,
+                lines,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(lines, sample_stretch_lines());
+                assert_eq!(request_id.as_deref(), Some("req-summary"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn summary_append_message_round_trips() {
+        let msg = DaemonMessage::SummaryAppend {
+            session_id: "s1".to_string(),
+            lines: sample_stretch_lines(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"summary_append""#));
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::SummaryAppend { session_id, lines } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(lines, sample_stretch_lines());
             }
             other => panic!("unexpected variant: {other:?}"),
         }

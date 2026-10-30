@@ -637,7 +637,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             // snapshot read. Kept in the protocol for back-compat with
             // older clients that send it.
         }
-        m @ (ClientMessage::LoadChat { .. } | ClientMessage::UnloadChat { .. }) => {
+        m @ (ClientMessage::LoadChat { .. }
+        | ClientMessage::UnloadChat { .. }
+        | ClientMessage::LoadSummary { .. }
+        | ClientMessage::UnloadSummary { .. }) => {
             chat::handle(hub, m, ctx);
         }
         m @ (ClientMessage::ListRepos
