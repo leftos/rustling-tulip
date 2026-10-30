@@ -15,6 +15,7 @@ use protocol::{
 };
 
 use crate::spawn_form::human_relative_time;
+use crate::target::HostKey;
 
 /// Unexpected ends this close to the previous one in a burst join it.
 const BURST_GAP_SECS: i64 = 60;
@@ -49,6 +50,39 @@ impl SessionHistory {
     }
 }
 
+/// Each host's ended-session history, as its daemon last sent it.
+#[derive(Debug, Default)]
+pub struct HostHistories {
+    by_host: HashMap<HostKey, SessionHistory>,
+}
+
+impl HostHistories {
+    /// Takes `host`'s `SessionHistory` reply or broadcast as its whole
+    /// list. Returns whether `msg` was one.
+    pub fn apply(&mut self, host: &HostKey, msg: &DaemonMessage) -> bool {
+        if !matches!(msg, DaemonMessage::SessionHistory { .. }) {
+            return false;
+        }
+        self.by_host.entry(host.clone()).or_default().apply(msg)
+    }
+
+    /// `host`'s history; empty until its daemon sent one.
+    pub fn items(&self, host: &HostKey) -> &[SessionHistoryItem] {
+        self.by_host.get(host).map_or(&[], SessionHistory::items)
+    }
+
+    /// Forgets `host`'s history.
+    pub fn forget(&mut self, host: &HostKey) {
+        self.by_host.remove(host);
+    }
+
+    /// The rail badge: every host's sessions lost unexpectedly and not yet
+    /// recovered.
+    pub fn badge_count(&self) -> usize {
+        self.by_host.values().map(SessionHistory::badge_count).sum()
+    }
+}
+
 /// Whether `entry` counts toward the badge.
 fn counts(entry: &HistoryEntry) -> bool {
     entry.end.is_unexpected() && entry.recovered_at.is_none()
@@ -68,6 +102,11 @@ pub enum GroupKind {
 /// A titled group of rows, newest first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
+    /// The host whose history the rows are.
+    pub host: HostKey,
+    /// The host's name, drawn over its first group while more than one
+    /// host lists rows.
+    pub header: Option<String>,
     pub kind: GroupKind,
     /// A burst's latest end, as its title shows it.
     clock: String,
@@ -101,12 +140,23 @@ fn only_other_rows(groups: &[Group]) -> bool {
             .all(|group| group.rows.is_empty())
 }
 
-/// The history grouped for the dialog: the unknown-time losses, then the
-/// bursts of losses (newest first), then everything else.
-pub fn groups<Tz: TimeZone>(items: &[SessionHistoryItem], now: &DateTime<Tz>) -> Vec<Group>
+/// One host's history grouped for the dialog: the unknown-time losses,
+/// then the bursts of losses (newest first), then everything else.
+pub fn groups<Tz: TimeZone>(
+    host: &HostKey,
+    items: &[SessionHistoryItem],
+    now: &DateTime<Tz>,
+) -> Vec<Group>
 where
     Tz::Offset: Display,
 {
+    let group = |kind: GroupKind, clock: String, rows: Vec<String>| Group {
+        host: host.clone(),
+        header: None,
+        kind,
+        clock,
+        rows,
+    };
     let mut entries: Vec<&HistoryEntry> = items.iter().map(|item| &item.entry).collect();
     entries.sort_by(|a, b| {
         b.ended_at
@@ -122,30 +172,53 @@ where
         lost.into_iter().partition(|e| !e.end_time_known);
     let mut out = Vec::new();
     if !unknown.is_empty() {
-        out.push(Group {
-            kind: GroupKind::UnknownTime,
-            clock: String::new(),
-            rows: ids(&unknown),
-        });
+        out.push(group(GroupKind::UnknownTime, String::new(), ids(&unknown)));
     }
     for burst in bursts(&known) {
         let Some(latest) = burst.first() else {
             continue;
         };
-        out.push(Group {
-            kind: GroupKind::Burst,
-            clock: clock(latest.ended_at, now),
-            rows: ids(&burst),
-        });
+        out.push(group(
+            GroupKind::Burst,
+            clock(latest.ended_at, now),
+            ids(&burst),
+        ));
     }
     if !other.is_empty() {
-        out.push(Group {
-            kind: GroupKind::Other,
-            clock: String::new(),
-            rows: ids(&other),
-        });
+        out.push(group(GroupKind::Other, String::new(), ids(&other)));
     }
     out
+}
+
+/// Names the host over its first group when the groups hold more than one
+/// host's rows, and over none otherwise.
+fn set_headers(groups: &mut [Group], labels: &[(HostKey, String)]) {
+    let mut hosts: Vec<&HostKey> = Vec::new();
+    for group in groups.iter() {
+        if !hosts.contains(&&group.host) {
+            hosts.push(&group.host);
+        }
+    }
+    let several = hosts.len() > 1;
+    let mut named: Vec<HostKey> = Vec::new();
+    for group in groups.iter_mut() {
+        let first = !named.contains(&group.host);
+        group.header = (several && first).then(|| label_of(labels, &group.host));
+        if first {
+            named.push(group.host.clone());
+        }
+    }
+}
+
+/// `host`'s name among `labels`; its key's text for a host not listed.
+fn label_of(labels: &[(HostKey, String)], host: &HostKey) -> String {
+    labels.iter().find(|(key, _)| key == host).map_or_else(
+        || match host {
+            HostKey::Local => "This PC".to_owned(),
+            HostKey::Remote(name) => name.clone(),
+        },
+        |(_, label)| label.clone(),
+    )
 }
 
 /// `newest_first` split where an end comes more than a minute before the
@@ -447,6 +520,8 @@ fn last_segment(path: &str) -> &str {
 pub struct Row {
     /// The history id.
     pub id: String,
+    /// The host whose history lists it, which recovers it.
+    pub host: HostKey,
     pub label: String,
     pub place: String,
     pub ended: String,
@@ -464,10 +539,15 @@ pub struct Row {
 }
 
 impl Row {
-    fn new<Tz: TimeZone>(item: &SessionHistoryItem, names: &Names, now: &DateTime<Tz>) -> Self
+    fn new<Tz: TimeZone>(
+        history: &HostHistory<'_>,
+        item: &SessionHistoryItem,
+        now: &DateTime<Tz>,
+    ) -> Self
     where
         Tz::Offset: Display,
     {
+        let names = history.names;
         let entry = &item.entry;
         let (options, option) = recover_options(item, names);
         let disabled = match entry.recovered_at {
@@ -483,6 +563,7 @@ impl Row {
             .collect();
         Self {
             id: entry.session_id.clone(),
+            host: history.host.clone(),
             label: row_label(entry),
             place: row_where(entry, names),
             ended: ended_text(entry, now),
@@ -574,9 +655,21 @@ pub struct Outcome {
     pub recovered_session_ids: Vec<String>,
 }
 
-/// The request waiting for its answer.
+/// One host's ended sessions as the dialog lists them.
+#[derive(Debug)]
+pub struct HostHistory<'a> {
+    pub host: HostKey,
+    /// The host's name in the dialog's headers and errors.
+    pub label: String,
+    pub items: &'a [SessionHistoryItem],
+    /// The host's registry names and agents.
+    pub names: &'a Names,
+}
+
+/// A host's request waiting for its answer.
 #[derive(Debug)]
 struct InFlight {
+    host: HostKey,
     request_id: String,
     sent_at: Instant,
     /// The history ids it asked for; the answer is judged against these.
@@ -600,7 +693,14 @@ pub struct RecoverDialog {
     /// them by [`Self::new`]'s rule.
     other_touched: bool,
     focus: Option<Control>,
-    in_flight: Option<InFlight>,
+    /// One request per host asked, each until its host answers.
+    in_flight: Vec<InFlight>,
+    /// The hosts the last recovery asked, in host order.
+    asked: Vec<HostKey>,
+    /// The failures of the hosts that answered while others are still out.
+    held_failed: HashMap<String, String>,
+    /// Each host's name, in host order.
+    labels: Vec<(HostKey, String)>,
     error: Option<String>,
     /// Only the rows a recovery failed on are listed, so a fresh history
     /// adds none.
@@ -608,27 +708,31 @@ pub struct RecoverDialog {
 }
 
 impl RecoverDialog {
-    /// The dialog over `items`: the unrecovered losses ticked, and the other
-    /// recent sessions open when they are the only rows there are.
-    pub fn new<Tz: TimeZone>(
-        items: &[SessionHistoryItem],
-        names: &Names,
-        now: &DateTime<Tz>,
-    ) -> Self
+    /// The dialog over each host's history, in host order: the unrecovered
+    /// losses ticked, and the other recent sessions open when they are the
+    /// only rows there are.
+    pub fn over<Tz: TimeZone>(hosts: &[HostHistory<'_>], now: &DateTime<Tz>) -> Self
     where
         Tz::Offset: Display,
     {
-        let rows: HashMap<String, Row> = items
+        let mut rows: HashMap<String, Row> = HashMap::new();
+        let mut ticked: HashSet<String> = HashSet::new();
+        let mut grouped: Vec<Group> = Vec::new();
+        for history in hosts {
+            for item in history.items {
+                let row = Row::new(history, item, now);
+                if counts(&item.entry) && row.enabled() {
+                    ticked.insert(row.id.clone());
+                }
+                rows.insert(row.id.clone(), row);
+            }
+            grouped.extend(groups(&history.host, history.items, now));
+        }
+        let labels: Vec<(HostKey, String)> = hosts
             .iter()
-            .map(|item| (item.entry.session_id.clone(), Row::new(item, names, now)))
+            .map(|history| (history.host.clone(), history.label.clone()))
             .collect();
-        let ticked: HashSet<String> = items
-            .iter()
-            .filter(|item| counts(&item.entry))
-            .map(|item| item.entry.session_id.clone())
-            .filter(|id| rows.get(id).is_some_and(Row::enabled))
-            .collect();
-        let grouped = groups(items, now);
+        set_headers(&mut grouped, &labels);
         let mut dialog = Self {
             other_expanded: only_other_rows(&grouped),
             groups: grouped,
@@ -637,7 +741,10 @@ impl RecoverDialog {
             ticked,
             other_touched: false,
             focus: None,
-            in_flight: None,
+            in_flight: Vec::new(),
+            asked: Vec::new(),
+            held_failed: HashMap::new(),
+            labels,
             error: None,
             failed_only: false,
         };
@@ -645,26 +752,40 @@ impl RecoverDialog {
         dialog
     }
 
-    /// Takes a fresh history while open. A row still listed keeps its
-    /// conversation, "Recover as" choice and error, and its tick while it
-    /// can be recovered; a row gone from `items` drops. New rows join, the
-    /// losses ticked, unless only a recovery's failed rows are listed. A
-    /// tick the pre-tick rule made follows the rule again; a tick or untick
-    /// the user made stands.
-    pub fn refresh<Tz: TimeZone>(
-        &mut self,
-        items: &[SessionHistoryItem],
-        names: &Names,
-        now: &DateTime<Tz>,
-    ) where
+    /// Takes each host's fresh history while open. A row still listed keeps
+    /// its conversation, "Recover as" choice and error, and its tick while
+    /// it can be recovered; a row gone from the histories drops. New rows
+    /// join, the losses ticked, unless only a recovery's failed rows are
+    /// listed. A tick the pre-tick rule made follows the rule again; a tick
+    /// or untick the user made stands.
+    pub fn refresh_over<Tz: TimeZone>(&mut self, hosts: &[HostHistory<'_>], now: &DateTime<Tz>)
+    where
         Tz::Offset: Display,
     {
-        let items: Vec<SessionHistoryItem> = items
+        let kept: Vec<Vec<SessionHistoryItem>> = hosts
             .iter()
-            .filter(|item| !self.failed_only || self.rows.contains_key(&item.entry.session_id))
-            .cloned()
+            .map(|history| {
+                history
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        !self.failed_only || self.rows.contains_key(&item.entry.session_id)
+                    })
+                    .cloned()
+                    .collect()
+            })
             .collect();
-        let mut fresh = Self::new(&items, names, now);
+        let hosts: Vec<HostHistory<'_>> = hosts
+            .iter()
+            .zip(&kept)
+            .map(|(history, items)| HostHistory {
+                host: history.host.clone(),
+                label: history.label.clone(),
+                items,
+                names: history.names,
+            })
+            .collect();
+        let mut fresh = Self::over(&hosts, now);
         for (id, row) in &mut fresh.rows {
             if let Some(old) = self.rows.get(id) {
                 keep_choices(old, row);
@@ -694,7 +815,9 @@ impl RecoverDialog {
         if self.other_touched {
             fresh.other_expanded = self.other_expanded;
         }
-        fresh.in_flight = self.in_flight.take();
+        fresh.in_flight = std::mem::take(&mut self.in_flight);
+        fresh.asked = std::mem::take(&mut self.asked);
+        fresh.held_failed = std::mem::take(&mut self.held_failed);
         fresh.error = self.error.take();
         fresh.failed_only = self.failed_only;
         let order = fresh.focus_order();
@@ -760,7 +883,7 @@ impl RecoverDialog {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.in_flight.as_ref().is_some_and(|f| f.busy)
+        self.in_flight.iter().any(|f| f.busy)
     }
 
     fn ticked_count(&self) -> usize {
@@ -847,12 +970,15 @@ impl RecoverDialog {
         }
     }
 
-    /// The controls that take the keyboard, in Tab order.
+    /// The controls that take the keyboard, in Tab order. One toggle shows
+    /// or hides every host's other recent sessions, at the first such group.
     pub fn focus_order(&self) -> Vec<Control> {
         let mut out = Vec::new();
         for group in &self.groups {
             if group.kind == GroupKind::Other {
-                out.push(Control::OtherToggle);
+                if !out.contains(&Control::OtherToggle) {
+                    out.push(Control::OtherToggle);
+                }
                 if !self.other_expanded {
                     continue;
                 }
@@ -942,79 +1068,91 @@ impl RecoverDialog {
         Activation::Handled
     }
 
-    /// The request recovering the ticked rows in display order, sent as
-    /// `request_id` at `now`. None while busy or with nothing ticked.
-    pub fn recover_message(&mut self, request_id: &str, now: Instant) -> Option<ClientMessage> {
+    /// The requests recovering the ticked rows at `now`, one per host in
+    /// host order, each carrying only its host's rows in display order and
+    /// sent under the id `request_id` gives it. Empty while busy or with
+    /// nothing ticked.
+    pub fn recover_messages(
+        &mut self,
+        mut request_id: impl FnMut() -> String,
+        now: Instant,
+    ) -> Vec<(HostKey, ClientMessage)> {
         if !self.recover_enabled() {
-            return None;
+            return Vec::new();
         }
-        let items: Vec<RecoverItem> = self
+        let mut by_host: Vec<(HostKey, Vec<RecoverItem>)> = Vec::new();
+        for row in self
             .ordered_rows()
             .filter(|id| self.ticked.contains(*id))
-            .filter_map(|id| self.rows.get(id).and_then(Row::item))
-            .collect();
-        if items.is_empty() {
-            return None;
+            .filter_map(|id| self.rows.get(id))
+        {
+            let Some(item) = row.item() else {
+                continue;
+            };
+            match by_host.iter_mut().find(|(host, _)| *host == row.host) {
+                Some((_, items)) => items.push(item),
+                None => by_host.push((row.host.clone(), vec![item])),
+            }
+        }
+        if by_host.is_empty() {
+            return Vec::new();
         }
         self.error = None;
         for row in self.rows.values_mut() {
             row.error = None;
         }
-        self.in_flight = Some(InFlight {
-            request_id: request_id.to_owned(),
-            sent_at: now,
-            requested: items.iter().map(|i| i.history_id.clone()).collect(),
-            busy: true,
-        });
-        Some(ClientMessage::RecoverSessions {
-            request_id: Some(request_id.to_owned()),
-            items,
-        })
+        self.held_failed.clear();
+        self.in_flight.clear();
+        self.asked = by_host.iter().map(|(host, _)| host.clone()).collect();
+        let mut out = Vec::new();
+        for (host, items) in by_host {
+            let id = request_id();
+            self.in_flight.push(InFlight {
+                host: host.clone(),
+                request_id: id.clone(),
+                sent_at: now,
+                requested: items.iter().map(|i| i.history_id.clone()).collect(),
+                busy: true,
+            });
+            let msg = ClientMessage::RecoverSessions {
+                request_id: Some(id),
+                items,
+            };
+            out.push((host, msg));
+        }
+        out
     }
 
-    /// The daemon's answer to `request_id`. All recovered: the dialog
-    /// closes. Otherwise only the failed rows stay, ticked, each with its
-    /// error. An answer to another request changes nothing.
+    /// A daemon's answer to `request_id`. Its recovered sessions are
+    /// reported at once and its failures held until every host asked has
+    /// answered. Then, all recovered: the dialog closes; otherwise only the
+    /// failed rows stay, ticked, each with its error. An answer to another
+    /// request changes nothing.
     pub fn on_result(
         &mut self,
         request_id: Option<&str>,
         results: &[RecoverItemResult],
     ) -> Outcome {
-        let ours = self
+        let Some(index) = self
             .in_flight
-            .as_ref()
-            .is_some_and(|f| Some(f.request_id.as_str()) == request_id);
-        if !ours {
+            .iter()
+            .position(|f| Some(f.request_id.as_str()) == request_id)
+        else {
             return Outcome::default();
-        }
-        let requested = self
-            .in_flight
-            .take()
-            .map(|flight| flight.requested)
-            .unwrap_or_default();
+        };
+        let requested = self.in_flight.remove(index).requested;
         let recovered_session_ids: Vec<String> = results
             .iter()
             .filter_map(|r| r.session_id.clone())
             .collect();
-        let mut failed: HashMap<String, String> = HashMap::new();
-        for result in results {
-            if result.session_id.is_none() || result.error.is_some() {
-                let error = result
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "No session was started".to_owned());
-                failed.insert(result.history_id.clone(), error);
-            }
+        self.held_failed.extend(failures(&requested, results));
+        if !self.in_flight.is_empty() {
+            return Outcome {
+                close: false,
+                recovered_session_ids,
+            };
         }
-        let answered: HashSet<&str> = results.iter().map(|r| r.history_id.as_str()).collect();
-        for id in &requested {
-            if !answered.contains(id.as_str()) {
-                failed.insert(
-                    id.clone(),
-                    "Recovery did not answer for this session".to_owned(),
-                );
-            }
-        }
+        let failed = std::mem::take(&mut self.held_failed);
         if failed.is_empty() {
             return Outcome {
                 close: true,
@@ -1040,6 +1178,7 @@ impl RecoverDialog {
             group.rows.retain(|id| self.rows.contains_key(id));
         }
         self.groups.retain(|g| !g.rows.is_empty());
+        set_headers(&mut self.groups, &self.labels);
         self.ticked = self.rows.keys().cloned().collect();
         self.user_set = self.rows.keys().cloned().collect();
         self.failed_only = true;
@@ -1052,20 +1191,56 @@ impl RecoverDialog {
         self.focus = self.focus_order().into_iter().next();
     }
 
-    /// Ends the wait once the request has gone unanswered for
+    /// Ends the wait once a host's request has gone unanswered for
     /// [`RECOVER_TIMEOUT`] at `now`: the controls work again and the error
-    /// line says so. Returns whether it timed out now.
+    /// line names the hosts that did not answer (no host when only This PC
+    /// was asked). A late answer still applies. Returns whether it timed
+    /// out now.
     pub fn check_timeout(&mut self, now: Instant) -> bool {
-        let Some(flight) = self.in_flight.as_mut() else {
-            return false;
-        };
-        if !flight.busy || now.saturating_duration_since(flight.sent_at) < RECOVER_TIMEOUT {
+        let late: Vec<String> = self
+            .in_flight
+            .iter()
+            .filter(|f| f.busy && now.saturating_duration_since(f.sent_at) >= RECOVER_TIMEOUT)
+            .map(|f| label_of(&self.labels, &f.host))
+            .collect();
+        if late.is_empty() {
             return false;
         }
-        flight.busy = false;
-        self.error = Some("Recovery did not answer".to_owned());
+        for flight in &mut self.in_flight {
+            flight.busy = false;
+        }
+        self.error = Some(if self.asked == [HostKey::Local] {
+            "Recovery did not answer".to_owned()
+        } else {
+            format!("Recovery did not answer on {}", late.join(", "))
+        });
         true
     }
+}
+
+/// The rows of `requested` that `results` did not recover, each with its
+/// error; a row the answer leaves out did not answer.
+fn failures(requested: &HashSet<String>, results: &[RecoverItemResult]) -> HashMap<String, String> {
+    let mut failed: HashMap<String, String> = HashMap::new();
+    for result in results {
+        if result.session_id.is_none() || result.error.is_some() {
+            let error = result
+                .error
+                .clone()
+                .unwrap_or_else(|| "No session was started".to_owned());
+            failed.insert(result.history_id.clone(), error);
+        }
+    }
+    let answered: HashSet<&str> = results.iter().map(|r| r.history_id.as_str()).collect();
+    for id in requested {
+        if !answered.contains(id.as_str()) {
+            failed.insert(
+                id.clone(),
+                "Recovery did not answer for this session".to_owned(),
+            );
+        }
+    }
+    failed
 }
 
 /// Carries `old`'s conversation and "Recover as" choice (where `row` still
@@ -1196,6 +1371,172 @@ mod tests {
         RecoverDialog::new(items, &names(), &now())
     }
 
+    /// This PC's history alone, as a window with no other host lists it.
+    fn local<'a>(items: &'a [SessionHistoryItem], names: &'a Names) -> HostHistory<'a> {
+        HostHistory {
+            host: HostKey::Local,
+            label: "This PC".to_owned(),
+            items,
+            names,
+        }
+    }
+
+    /// The single-host forms the specs below were written against.
+    impl RecoverDialog {
+        fn new<Tz: TimeZone>(
+            items: &[SessionHistoryItem],
+            names: &Names,
+            now: &DateTime<Tz>,
+        ) -> Self
+        where
+            Tz::Offset: Display,
+        {
+            Self::over(&[local(items, names)], now)
+        }
+
+        fn refresh<Tz: TimeZone>(
+            &mut self,
+            items: &[SessionHistoryItem],
+            names: &Names,
+            now: &DateTime<Tz>,
+        ) where
+            Tz::Offset: Display,
+        {
+            self.refresh_over(&[local(items, names)], now);
+        }
+
+        fn recover_message(&mut self, request_id: &str, now: Instant) -> Option<ClientMessage> {
+            let mut messages = self.recover_messages(|| request_id.to_owned(), now);
+            assert!(messages.len() <= 1, "one host asked");
+            messages.pop().map(|(_, msg)| msg)
+        }
+    }
+
+    const BOX: &str = "box";
+
+    /// A dialog over This PC's `ours` and host "box"'s `theirs`.
+    fn two_host_dialog(
+        ours: &[SessionHistoryItem],
+        theirs: &[SessionHistoryItem],
+    ) -> RecoverDialog {
+        let names = names();
+        RecoverDialog::over(
+            &[
+                local(ours, &names),
+                HostHistory {
+                    host: HostKey::Remote(BOX.to_owned()),
+                    label: BOX.to_owned(),
+                    items: theirs,
+                    names: &names,
+                },
+            ],
+            &now(),
+        )
+    }
+
+    /// Sends the ticked rows: each host's request id ("q-local", "q-box")
+    /// with the history ids it carries.
+    fn send_both(dialog: &mut RecoverDialog, at: Instant) -> Vec<(HostKey, String, Vec<String>)> {
+        let mut ids = ["q-local", "q-box"].into_iter();
+        dialog
+            .recover_messages(|| ids.next().expect("two hosts").to_owned(), at)
+            .into_iter()
+            .filter_map(|(host, msg)| match msg {
+                ClientMessage::RecoverSessions { request_id, items } => Some((
+                    host,
+                    request_id.expect("an id"),
+                    items.into_iter().map(|item| item.history_id).collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_hosts_close_only_after_the_second_answer() {
+        let mut dialog = two_host_dialog(
+            &[lost("a", "2026-09-28T09:00:00Z")],
+            &[lost("b", "2026-09-28T09:00:00Z")],
+        );
+        let sent = send_both(&mut dialog, Instant::now());
+        assert_eq!(
+            sent,
+            [
+                (HostKey::Local, "q-local".to_owned(), vec!["a".to_owned()]),
+                (
+                    HostKey::Remote(BOX.to_owned()),
+                    "q-box".to_owned(),
+                    vec!["b".to_owned()]
+                ),
+            ],
+            "each host recovers only its own rows"
+        );
+
+        let first = dialog.on_result(Some("q-local"), &[ok("a")]);
+        assert_eq!(
+            first,
+            Outcome {
+                close: false,
+                recovered_session_ids: vec!["new-a".to_owned()],
+            },
+            "the first answer's session is reported at once"
+        );
+        assert!(dialog.is_busy(), "box has not answered");
+
+        let second = dialog.on_result(Some("q-box"), &[ok("b")]);
+        assert_eq!(
+            second,
+            Outcome {
+                close: true,
+                recovered_session_ids: vec!["new-b".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn one_hosts_failure_keeps_only_its_rows_once_both_answer() {
+        let mut dialog = two_host_dialog(
+            &[lost("a", "2026-09-28T09:00:00Z")],
+            &[lost("b", "2026-09-28T09:00:00Z")],
+        );
+        send_both(&mut dialog, Instant::now());
+
+        let first = dialog.on_result(Some("q-box"), &[failed("b", "worktree gone")]);
+        assert!(!first.close);
+        assert_eq!(
+            dialog.visible_rows(),
+            ["a", "b"],
+            "nothing is dropped while This PC is still out"
+        );
+
+        let second = dialog.on_result(Some("q-local"), &[ok("a")]);
+        assert!(!second.close, "a row failed");
+        assert_eq!(dialog.visible_rows(), ["b"], "only the failed row stays");
+        assert_eq!(
+            dialog.row("b").expect("row").error.as_deref(),
+            Some("worktree gone")
+        );
+        assert!(!dialog.is_busy());
+    }
+
+    #[test]
+    fn a_host_that_times_out_is_named() {
+        let mut dialog = two_host_dialog(
+            &[lost("a", "2026-09-28T09:00:00Z")],
+            &[lost("b", "2026-09-28T09:00:00Z")],
+        );
+        let at = Instant::now();
+        send_both(&mut dialog, at);
+        dialog.on_result(Some("q-local"), &[ok("a")]);
+
+        assert!(dialog.check_timeout(at + RECOVER_TIMEOUT));
+
+        assert!(!dialog.is_busy(), "the controls work again");
+        assert_eq!(dialog.error(), Some("Recovery did not answer on box"));
+        let late = dialog.on_result(Some("q-box"), &[ok("b")]);
+        assert!(late.close, "a late answer still applies");
+    }
+
     /// The registry's Claude descriptor.
     fn claude_descriptor() -> protocol::AgentDescriptor {
         agent_registry::descriptors()
@@ -1310,7 +1651,7 @@ mod tests {
             lost("d", "2026-09-28T09:20:00Z"),
             lost("e", "2026-09-27T09:20:00Z"),
         ];
-        let groups = groups(&items, &now());
+        let groups = groups(&HostKey::Local, &items, &now());
         assert_eq!(
             titles(&groups),
             [
@@ -1332,7 +1673,7 @@ mod tests {
             lost("a", "2026-09-28T09:29:00Z"),
             unknown,
         ];
-        let groups = groups(&items, &now());
+        let groups = groups(&HostKey::Local, &items, &now());
         assert_eq!(
             titles(&groups),
             [
@@ -1619,7 +1960,7 @@ mod tests {
 
         let mut no_candidate = item.clone();
         no_candidate.candidates.clear();
-        let row = Row::new(&no_candidate, &names, &now());
+        let row = Row::new(&local(&[], &names), &no_candidate, &now());
         assert_eq!(row.disabled.as_deref(), Some("nothing to resume"));
     }
 
@@ -1649,7 +1990,7 @@ mod tests {
 
         let mut no_candidate = item.clone();
         no_candidate.candidates.clear();
-        let row = Row::new(&no_candidate, &names, &now());
+        let row = Row::new(&local(&[], &names), &no_candidate, &now());
         assert_eq!(row.disabled.as_deref(), Some("no conversation found"));
 
         let mut shell = item.clone();

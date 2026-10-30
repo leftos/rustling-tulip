@@ -1591,7 +1591,7 @@ impl RootView {
     ) -> Option<AnyElement> {
         match key {
             PopoutKey::Pane { tab_id, pane_id } => self.popped_pane(key, tab_id, pane_id, cx),
-            PopoutKey::Session { session_id } => Some(self.popped_session(session_id, cx)),
+            PopoutKey::Session { session_id, .. } => Some(self.popped_session(session_id, cx)),
             PopoutKey::Tab { tab_id } => self.popped_tab(tab_id, here, cx),
         }
     }

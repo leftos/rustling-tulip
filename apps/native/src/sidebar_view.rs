@@ -200,7 +200,10 @@ impl RootView {
                     let add_workspace = container
                         .path
                         .as_deref()
-                        .and_then(|path| self.cwd_workspace_suggestion(path))
+                        .and_then(|path| {
+                            let host = self.host_of_container(&container.key);
+                            self.cwd_workspace_suggestion_on(&host, path)
+                        })
                         .map(|suggestion| suggestion.suggested_name.clone());
                     container_rows(container, add_workspace.as_deref(), &rows, window, cx)
                 })

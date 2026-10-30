@@ -2075,9 +2075,7 @@ impl RootView {
             SessionRow::PopOut => {
                 let key = match pane_to_pop(session_id, self.tabs.tabs(), self.tabs.active_id()) {
                     Some((tab_id, pane_id)) => PopoutKey::Pane { tab_id, pane_id },
-                    None => PopoutKey::Session {
-                        session_id: session_id.to_owned(),
-                    },
+                    None => PopoutKey::session(&self.host_of_session(session_id), session_id),
                 };
                 self.close_session_menu(window, cx);
                 self.open_popout(key, window, cx);
@@ -2186,9 +2184,7 @@ impl RootView {
     /// so a stop keeps it listed.
     fn is_shown(&self, session_id: &str) -> bool {
         find_tab_containing_session(self.tabs.tabs(), session_id).is_some()
-            || self.popouts.is_open(&PopoutKey::Session {
-                session_id: session_id.to_owned(),
-            })
+            || self.popouts.session_key(session_id).is_some()
     }
 
     /// Swaps the menu's rows for a name editor seeded with the name the

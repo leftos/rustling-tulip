@@ -569,6 +569,7 @@ fn pop_out_row(session_id: &str, tabs: &TabsModel, popouts: &Popouts) -> Offered
         Some((tab_id, pane_id)) => PopoutKey::Pane { tab_id, pane_id },
         None => PopoutKey::Session {
             session_id: session_id.to_owned(),
+            host: None,
         },
     };
     let disabled = popouts
@@ -1679,6 +1680,7 @@ mod tests {
         popped.open(
             PopoutKey::Session {
                 session_id: s.id.clone(),
+                host: None,
             },
             &entries,
         );

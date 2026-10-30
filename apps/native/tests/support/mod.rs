@@ -1494,8 +1494,16 @@ impl HostHandle<'_, '_> {
 
     /// Reports this host's connection open and welcomed, then what its
     /// daemon sends first: `Welcome`, its agents and their Settings values.
-    /// A tailnet host reports no handshake.
+    /// A tailnet host reports no handshake. What the client sends on
+    /// `Welcome` is drained.
     pub fn connect(&mut self) {
+        self.connect_keeping_sent();
+        self.sent();
+    }
+
+    /// Connects as [`Self::connect`] does, leaving what the client sent on
+    /// `Welcome` for [`Self::sent`] to read.
+    pub fn connect_keeping_sent(&mut self) {
         let target = self.target.clone();
         self.event(NetEvent::State(connected_to(
             target,
@@ -1509,7 +1517,6 @@ impl HostHandle<'_, '_> {
         self.send(DaemonMessage::AgentSettings {
             settings: BTreeMap::new(),
         });
-        self.sent();
     }
 
     /// Every message the client sent on this host's connection since the

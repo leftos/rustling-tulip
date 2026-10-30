@@ -950,8 +950,9 @@ pub struct RootView {
     /// The prompt's keyboard focus, so Esc, Enter and Tab reach it.
     vscode_prompt_focus: FocusHandle,
     /// The `.code-workspace` scan answers for the DIR and SH container
-    /// folders, keyed by normalized path; `None` until the answer arrives.
-    cwd_workspace_scans: HashMap<String, Option<VscodeWorkspaceSuggestion>>,
+    /// folders, keyed by host and normalized path; `None` until the answer
+    /// arrives.
+    cwd_workspace_scans: HashMap<(HostKey, String), Option<VscodeWorkspaceSuggestion>>,
     /// The toasts, the action-failed notice and the checkout prompt.
     notices: Notices,
     /// Wakes the view when the next toast's time is up.
@@ -1107,8 +1108,9 @@ pub struct RootView {
     worktrees_manager: Option<worktrees_manager::WorktreesManager>,
     /// The Manage worktrees modal's keyboard focus.
     worktrees_focus: FocusHandle,
-    /// The ended sessions the daemon keeps, which the Recover dialog lists.
-    session_history: recover::SessionHistory,
+    /// The ended sessions each host's daemon keeps, which the Recover
+    /// dialog lists.
+    session_history: recover::HostHistories,
     /// The Recover dialog, while open.
     recover: Option<recover::RecoverDialog>,
     /// The Recover dialog's keyboard focus.
@@ -1482,7 +1484,7 @@ impl RootView {
             worktrees_tab: None,
             worktrees_manager: None,
             worktrees_focus: cx.focus_handle(),
-            session_history: recover::SessionHistory::default(),
+            session_history: recover::HostHistories::default(),
             recover: None,
             recover_focus: cx.focus_handle(),
             pairing: pairing_view::PairingView::new(
@@ -1575,9 +1577,12 @@ impl RootView {
     ) -> OpenOutcome {
         let opens = match &key {
             PopoutKey::Pane { .. } => true,
-            PopoutKey::Session { session_id } => {
-                self.sidebar.session(session_id).is_some_and(can_attach)
-            }
+            PopoutKey::Session { session_id, .. } => self
+                .sidebar
+                .sessions_of(&key.host())
+                .iter()
+                .find(|session| session.id == *session_id)
+                .is_some_and(can_attach),
             PopoutKey::Tab { tab_id } => self.tabs.tab(tab_id).is_some_and(|tab| {
                 !matches!(
                     tab.content,
@@ -1592,7 +1597,7 @@ impl RootView {
         let outcome = self.popouts.open(key.clone(), self.tabs.tabs());
         match &outcome {
             OpenOutcome::Opened => {
-                if let PopoutKey::Session { session_id } = &key {
+                if let PopoutKey::Session { session_id, .. } = &key {
                     self.open_session_slot(session_id, window, cx);
                 }
                 let saved_place = match place {
@@ -1671,12 +1676,7 @@ impl RootView {
                 (display_id, bounds, false)
             }
         };
-        let title = popouts::title(
-            &key,
-            self.tabs.tabs(),
-            self.sidebar.local_sessions(),
-            self.sidebar.agents(&crate::target::HostKey::Local),
-        );
+        let title = self.popout_title(&key);
         let focus = self.popout_focus(&key, cx);
         let opening = PopoutOpening {
             key,
@@ -1758,10 +1758,10 @@ impl RootView {
     fn popout_focused_session(&self) -> Option<String> {
         let pane_id = self.popout_focused.as_deref()?;
         if let Some(session_id) = popouts::slot_session(pane_id) {
-            let key = PopoutKey::Session {
-                session_id: session_id.to_owned(),
-            };
-            return self.popouts.is_open(&key).then(|| session_id.to_owned());
+            return self
+                .popouts
+                .session_key(session_id)
+                .map(|_| session_id.to_owned());
         }
         if self.tab_popout_of_pane(pane_id).is_some() {
             return self.panes.get(pane_id)?.session().map(str::to_owned);
@@ -1849,7 +1849,7 @@ impl RootView {
         }
         let closed = self.popouts.close(key);
         if closed {
-            if let PopoutKey::Session { session_id } = key {
+            if let PopoutKey::Session { session_id, .. } = key {
                 self.drop_session_slot(session_id, cx);
             }
             self.update_pane_roles(cx);
@@ -1927,24 +1927,21 @@ impl RootView {
     /// Whether session `session_id` has a pop-out window of its own, so a
     /// restart from any window reopens the copy there.
     pub(crate) fn has_session_popout(&self, session_id: &str) -> bool {
-        self.popout_windows.contains_key(&PopoutKey::Session {
-            session_id: session_id.to_owned(),
-        })
+        self.popouts
+            .session_key(session_id)
+            .is_some_and(|key| self.popout_windows.contains_key(key))
     }
 
-    /// A restart of `old`, whose session pop-out is open, arrived as `new`: the
-    /// pop-out, its window and its terminal now show `new`.
+    /// A restart of `old`, whose session pop-out is open, arrived as `new`
+    /// on the same host: the pop-out, its window and its terminal now show
+    /// `new`.
     pub(crate) fn rekey_session_popout(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
-        let old_key = PopoutKey::Session {
-            session_id: old.to_owned(),
-        };
-        let new_key = PopoutKey::Session {
-            session_id: new.to_owned(),
-        };
-        if !self.popouts.rekey(&old_key, new_key.clone()) {
+        let Some(old_key) = self.popouts.session_key(old).cloned() else {
             tracing::debug!(%old, "the restarted session's pop-out has closed");
             return;
-        }
+        };
+        let new_key = PopoutKey::session(&old_key.host(), new);
+        self.popouts.rekey(&old_key, new_key.clone());
         if self.sidebar.rekey_saved_popout(&old_key, new_key.clone()) {
             self.schedule_ui_save(cx);
         }
@@ -1969,13 +1966,15 @@ impl RootView {
     /// Sets each open pop-out window's title to what its content now reads,
     /// after a rename or a re-bind; a title that did not change is left.
     fn refresh_popout_titles(&mut self, cx: &mut Context<Self>) {
-        let (tabs, sessions, agents) = (
-            self.tabs.tabs(),
-            self.sidebar.local_sessions(),
-            self.sidebar.agents(&crate::target::HostKey::Local),
-        );
-        for (key, popout) in &mut self.popout_windows {
-            let title = popouts::title(key, tabs, sessions, agents);
+        let titles: Vec<(PopoutKey, String)> = self
+            .popout_windows
+            .keys()
+            .map(|key| (key.clone(), self.popout_title(key)))
+            .collect();
+        for (key, title) in titles {
+            let Some(popout) = self.popout_windows.get_mut(&key) else {
+                continue;
+            };
             if title == popout.title {
                 continue;
             }
@@ -1987,6 +1986,18 @@ impl RootView {
                 Err(err) => tracing::debug!(?key, "retitling a pop-out window: {err:#}"),
             }
         }
+    }
+
+    /// What `key`'s pop-out window is titled, read against its host's
+    /// sessions and agents.
+    fn popout_title(&self, key: &PopoutKey) -> String {
+        let host = key.host();
+        popouts::title(
+            key,
+            self.tabs.tabs(),
+            self.sidebar.sessions_of(&host),
+            self.sidebar.agents(&host),
+        )
     }
 
     /// `key`'s terminal, or a tab's every terminal, moves between windows or
@@ -2007,7 +2018,7 @@ impl RootView {
         let keys: Vec<PopoutKey> = self.popout_windows.keys().cloned().collect();
         for key in keys {
             self.popouts.close(&key);
-            if let PopoutKey::Session { session_id } = &key {
+            if let PopoutKey::Session { session_id, .. } = &key {
                 self.drop_session_slot(session_id, cx);
             }
             if let Some(handle) = self.take_popout_window(&key) {
@@ -2117,21 +2128,32 @@ impl RootView {
         }
     }
 
-    /// The `.code-workspace` file a DIR or SH container's folder holds, once
-    /// its scan answered; `None` while the answer is pending or empty.
+    /// The `.code-workspace` file This PC's DIR or SH container folder at
+    /// `path` holds, once its scan answered; `None` while the answer is
+    /// pending or empty.
     #[must_use]
     pub fn cwd_workspace_suggestion(&self, path: &str) -> Option<&VscodeWorkspaceSuggestion> {
+        self.cwd_workspace_suggestion_on(&HostKey::Local, path)
+    }
+
+    /// The `.code-workspace` file `host`'s DIR or SH container folder at
+    /// `path` holds, once its scan answered; `None` while the answer is
+    /// pending or empty.
+    #[must_use]
+    pub fn cwd_workspace_suggestion_on(
+        &self,
+        host: &HostKey,
+        path: &str,
+    ) -> Option<&VscodeWorkspaceSuggestion> {
         self.cwd_workspace_scans
-            .get(&scan_key(path))
+            .get(&(host.clone(), scan_key(path)))
             .and_then(Option::as_ref)
     }
 
     /// Asks each DIR or SH container's own host to scan its folder for a
-    /// `.code-workspace` file, once per distinct folder on a connection.
+    /// `.code-workspace` file, once per distinct folder on each host's
+    /// connection, while that connection is open.
     fn scan_unseen_cwd_paths(&mut self) {
-        if !self.conn().is_open() {
-            return;
-        }
         for container in self.sidebar.containers() {
             if !matches!(container.kind, ContainerKind::Shell | ContainerKind::Dir) {
                 continue;
@@ -2139,15 +2161,17 @@ impl RootView {
             let Some(path) = container.path else {
                 continue;
             };
-            let key = scan_key(&path);
+            let host = self.host_of_container(&container.key);
+            if !self.conn_of(&host).is_some_and(Connection::is_open) {
+                continue;
+            }
+            let key = (host, scan_key(&path));
             if self.cwd_workspace_scans.contains_key(&key) {
                 continue;
             }
+            let host = key.0.clone();
             self.cwd_workspace_scans.insert(key, None);
-            self.send_to(
-                &self.host_of_container(&container.key),
-                ClientMessage::ScanVscodeWorkspaces { path },
-            );
+            self.send_to(&host, ClientMessage::ScanVscodeWorkspaces { path });
         }
     }
 
@@ -3612,7 +3636,8 @@ impl RootView {
             self.close_workspace_creator(window, cx);
             self.close_preset_wizard(window, cx);
             self.vscode_suggestions.clear();
-            self.cwd_workspace_scans.clear();
+            self.cwd_workspace_scans
+                .retain(|(host, _), _| *host != HostKey::Local);
             self.close_appearance_editor(window, cx);
             self.close_discard_confirm(window, cx);
             self.close_stash_drop_confirm(window, cx);
@@ -4049,9 +4074,9 @@ impl RootView {
     ) {
         self.on_cleanup_failed_message(msg, window, cx);
         self.on_worktrees_message(host, msg, cx);
-        self.on_recover_message(msg, window, cx);
-        self.on_pairing_message(msg, window, cx);
-        self.on_devices_message(msg, window, cx);
+        self.on_recover_message(host, msg, window, cx);
+        self.on_pairing_message(host, msg, window, cx);
+        self.on_devices_message(host, msg, window, cx);
         self.on_preset_message(msg, cx);
         self.on_preset_launch_message(msg, window, cx);
         if let DaemonMessage::SpawnConfigReply { session_id, config } = msg {
@@ -4065,6 +4090,7 @@ impl RootView {
     fn on_welcome(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.reset_host(host, window, cx);
         if *host != HostKey::Local {
+            self.ask_history(host);
             return;
         }
         self.reset_recover(window, cx);
@@ -4093,6 +4119,8 @@ impl RootView {
             self.seen_sessions.remove(host);
             self.reset_dashboard_for_target(host);
             self.forget_sc_host(host);
+            self.session_history.forget(host);
+            self.refresh_recover();
             self.drop_stale_session_ui(window, cx);
             self.prune_container_row_focus();
             cx.notify();
@@ -4138,7 +4166,7 @@ impl RootView {
         self.viewer_tabs.clear();
         self.viewer_opens = viewer_tab::ViewerOpens::default();
         self.reset_dashboard_for_target(host);
-        self.session_history = recover::SessionHistory::default();
+        self.session_history.forget(host);
         self.recover_requests.clear();
         self.recover_batches.clear();
         self.close_recover_on_overlay(window, cx);
@@ -4186,7 +4214,8 @@ impl RootView {
         self.reset_preset_launches(cx);
         self.launched_highlight.clear();
         self.vscode_suggestions.clear();
-        self.cwd_workspace_scans.clear();
+        self.cwd_workspace_scans
+            .retain(|(host, _), _| *host != HostKey::Local);
         self.close_appearance_editor(window, cx);
         self.close_discard_confirm(window, cx);
         self.close_stash_drop_confirm(window, cx);
