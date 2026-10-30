@@ -31,8 +31,8 @@ use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::palette::{
-    ASK_BORDER, ASK_WASH, ASKING, CHIP, DANGER, DANGER_BG, FAINT, HOVER, LINE, OK_WASH, RAISED,
-    STATUS_IDLE, STATUS_OK, SUBTLE, TEXT, TEXT_2,
+    ASK_BORDER, ASK_WASH, ASKING, CARD_EDGE, DANGER, DANGER_BG, FAINT, HOVER, LINE, OK_WASH,
+    RAISED, SELECTION, STATUS_IDLE, STATUS_OK, SUBTLE, TEXT, TEXT_2,
 };
 use crate::session_menu::backdrop;
 use crate::ssh::DEFAULT_REMOTE_COMMAND;
@@ -1117,7 +1117,7 @@ fn host_row(
         .py(px(7.0))
         .rounded(px(ROW_RADIUS))
         .cursor_pointer()
-        .when(facts.current, |row| row.bg(gpui::rgb(CHIP)))
+        .when(facts.current, |row| row.bg(gpui::rgb(SELECTION)))
         .hover(|style| style.bg(gpui::rgb(HOVER)))
         .child(kind_tile(facts.host))
         .child(text)
@@ -1187,7 +1187,7 @@ fn kind_tile(host: RowHost) -> Div {
         .rounded(px(7.0))
         .bg(gpui::rgb(RAISED))
         .border_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(CARD_EDGE))
         .flex()
         .items_center()
         .justify_center()

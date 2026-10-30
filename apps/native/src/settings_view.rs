@@ -28,7 +28,7 @@ use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
-use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
+use crate::palette::{CARD_EDGE, CHIP, HOVER, MODAL_INSET, SELECTION, SUBTLE, TEXT_2, TRANSPARENT};
 use crate::remote_access::{
     PortError, RemoteStatusView, address, apply_port_message, autostart_failure_line,
     autostart_read_failure_line, cert_line, controls_enabled, parse_port, state_line,
@@ -2749,9 +2749,9 @@ impl RootView {
             .w(px(TAB_LIST_WIDTH))
             .px(px(10.0))
             .py(px(12.0))
-            .bg(gpui::rgb(RAISED))
+            .bg(gpui::rgb(MODAL_INSET))
             .border_r_1()
-            .border_color(gpui::rgb(LINE))
+            .border_color(gpui::rgb(CARD_EDGE))
             .children(tabs)
     }
 
@@ -2785,7 +2785,7 @@ impl RootView {
             .font_weight(weight)
             .text_color(gpui::rgb(text))
             .cursor_pointer()
-            .when(shown, |row| row.bg(gpui::rgb(CHIP)))
+            .when(shown, |row| row.bg(gpui::rgb(SELECTION)))
             .when(!shown, |row| {
                 row.hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
             })

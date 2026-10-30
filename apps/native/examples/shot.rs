@@ -13,7 +13,8 @@
 //! over a Markdown file, rendered), `dashboard`, `connections` (the host
 //! picker with a saved tailnet host and a saved SSH host) and
 //! `connections-ssh` (its add form switched to SSH, filled in, after a
-//! passing Test connection). The PNG goes to
+//! passing Test connection), and `menu` (the sessions panel's ⋯ menu open
+//! over the repo rows, with a toast over the panes). The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -47,7 +48,7 @@ use rustling_tulip_native::target::SshHost;
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, ViewerLoad, bind_keys,
+    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, ToastKind, ToastSpec, ViewerLoad, bind_keys,
     remote_access::Autostart,
 };
 use serde_json::{Value, json};
@@ -136,10 +137,11 @@ enum View {
     Dashboard,
     Connections,
     ConnectionsSsh,
+    Menu,
 }
 
 impl View {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -152,6 +154,7 @@ impl View {
         Self::Dashboard,
         Self::Connections,
         Self::ConnectionsSsh,
+        Self::Menu,
     ];
 
     fn name(self) -> &'static str {
@@ -168,6 +171,7 @@ impl View {
             Self::Dashboard => "dashboard",
             Self::Connections => "connections",
             Self::ConnectionsSsh => "connections-ssh",
+            Self::Menu => "menu",
         }
     }
 
@@ -230,6 +234,7 @@ impl View {
                 root.connection_picker_ssh_result().as_deref()
                     == Some(&*format!("Connected: {SHOT_SSH_SHORT}"))
             }
+            Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
         }
     }
 }
@@ -285,7 +290,8 @@ impl Shot {
             | View::Spawn
             | View::Dashboard
             | View::Connections
-            | View::ConnectionsSsh => None,
+            | View::ConnectionsSsh
+            | View::Menu => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -622,7 +628,32 @@ fn drive(
         }
         View::Connections => open_picker(window, cx),
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
+        View::Menu => open_menu(window, cx),
     }
+}
+
+/// Opens the sessions panel's ⋯ menu, which lies over the repo rows, and
+/// raises a sticky toast over the panes, so both floating surfaces show.
+fn open_menu(window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| {
+        root.push_toast_spec(
+            ToastSpec {
+                kind: ToastKind::Info,
+                title: "Resumed 2 sessions after restart".to_owned(),
+                detail: Some("1 stays in Recover".to_owned()),
+                key: None,
+                sticky: true,
+                actions: Vec::new(),
+            },
+            cx,
+        );
+        root.open_more_menu(window, cx);
+    });
+    Ok(())
 }
 
 fn press(key: &str, window: &mut Window, cx: &mut App) -> Result<()> {

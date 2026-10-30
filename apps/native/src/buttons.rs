@@ -7,8 +7,8 @@
 use gpui::{Div, ElementId, FontWeight, MouseButton, SharedString, Stateful, div, prelude::*, px};
 
 use crate::palette::{
-    ACCENT, ACCENT_HOVER, ACCENT_PRESSED, DANGER, GROUND, HOVER, LINE_STRONG, ON_ACCENT, TEXT,
-    TRANSPARENT,
+    ACCENT, DANGER, GROUND, HOVER, LINE_STRONG, ON_ACCENT, PRIMARY, PRIMARY_HOVER, PRIMARY_PRESSED,
+    TEXT, TRANSPARENT,
 };
 
 /// The opacity of a disabled button.
@@ -122,9 +122,9 @@ pub(crate) fn button_look(kind: ButtonKind, size: ButtonSize, enabled: bool) -> 
             FontWeight::NORMAL,
         ),
         ButtonKind::Primary => (
-            Some(ACCENT),
-            ACCENT_HOVER,
-            ACCENT_PRESSED,
+            Some(PRIMARY),
+            PRIMARY_HOVER,
+            PRIMARY_PRESSED,
             None,
             ON_ACCENT,
             FontWeight::BOLD,
@@ -333,12 +333,12 @@ mod tests {
     #[test]
     fn primary_button_is_accent_with_on_accent_bold() {
         let look = button_look(ButtonKind::Primary, ButtonSize::Compact, true);
-        assert_eq!(look.fill, Some(ACCENT));
+        assert_eq!(look.fill, Some(PRIMARY));
         assert_eq!(look.text, ON_ACCENT);
         assert_eq!(look.weight, FontWeight::BOLD);
         assert_eq!(look.border, None, "no visible border");
-        assert_eq!(look.hover_fill, Some(ACCENT_HOVER));
-        assert_eq!(look.pressed_fill, Some(ACCENT_PRESSED));
+        assert_eq!(look.hover_fill, Some(PRIMARY_HOVER));
+        assert_eq!(look.pressed_fill, Some(PRIMARY_PRESSED));
         let outlined = button_look(ButtonKind::Outlined, ButtonSize::Compact, true);
         assert_eq!(
             (look.height, look.pad_x),

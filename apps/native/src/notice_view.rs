@@ -13,7 +13,10 @@ use crate::notices::{
     ActionFailedNotice, CLOSE_SESSION, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast,
     ToastKind, ToastSpec, agent_exit_session_of, spawning_key, toast_action_selector,
 };
-use crate::palette::{ACCENT, CHIP, DIALOG_SHADOW, LINE_STRONG, SURFACE, TOAST_SHADOW};
+use crate::palette::{
+    ACCENT, DIALOG_SHADOW, LINE_STRONG, MODAL, MODAL_EDGE, MODAL_HIGHLIGHT, POPOVER, POPOVER_EDGE,
+    POPOVER_HIGHLIGHT, TOAST_SHADOW,
+};
 use crate::preset_launch::job_id_of;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawns::OpenIn;
@@ -757,19 +760,36 @@ fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
 }
 
 /// The card a toast, an undo entry and the copied chip sit in, tagged `id`:
-/// the chip fill with a strong edge, which an error or a warning recolours.
+/// the popover fill with its edge, which an error or a warning recolours.
 pub(crate) fn toast_frame(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
         .px(px(14.0))
         .py(px(12.0))
-        .bg(gpui::rgb(CHIP))
+        .bg(gpui::rgb(POPOVER))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(POPOVER_EDGE))
         .rounded(px(TOAST_RADIUS))
         .shadow(vec![drop_shadow(TOAST_SHADOW, 18.0, 40.0)])
         .text_size(px(UI_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
+        .relative()
+        .children(top_highlight(POPOVER_HIGHLIGHT, TOAST_RADIUS))
+}
+
+/// The 1 px line of `color` (`0xRRGGBBAA`) along a floating card's top
+/// edge, inside its border and clear of its `radius` corners; none when
+/// `color` is fully transparent. The card must be `relative`.
+pub(crate) fn top_highlight(color: u32, radius: f32) -> Option<Div> {
+    (color & 0xff != 0).then(|| {
+        div()
+            .absolute()
+            .top_0()
+            .left(px(radius))
+            .right(px(radius))
+            .h(px(1.0))
+            .bg(gpui::rgba(color))
+    })
 }
 
 /// A soft shadow of `color` (`0xRRGGBBAA`) cast `drop` px down and blurred
@@ -792,13 +812,15 @@ pub(crate) fn modal_panel(id: &'static str) -> Stateful<Div> {
         .gap(px(10.0))
         .w(px(MODAL_WIDTH))
         .p(px(14.0))
-        .bg(gpui::rgb(SURFACE))
+        .bg(gpui::rgb(MODAL))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(MODAL_EDGE))
         .rounded(px(MODAL_RADIUS))
         .shadow(vec![drop_shadow(DIALOG_SHADOW, 30.0, 80.0)])
         .text_size(px(UI_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
+        .relative()
+        .children(top_highlight(MODAL_HIGHLIGHT, MODAL_RADIUS))
 }
 
 /// What the "Spawning session…" toast says under its title, which is what

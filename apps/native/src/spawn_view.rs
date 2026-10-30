@@ -23,7 +23,7 @@ use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::notices;
 use crate::overlay_owner::Overlay;
 use crate::palette::{
-    ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, ON_ACCENT, RAISED, SPAWN_BADGE_OK, SUBTLE,
+    ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, MODAL_INSET, ON_ACCENT, SPAWN_BADGE_OK, SUBTLE,
     TEXT_2, TRANSPARENT,
 };
 use crate::remote_mode::spawn_no_repos_note;
@@ -1515,7 +1515,7 @@ pub(crate) fn dialog_footer() -> Div {
         .py(px(14.0))
         .border_t_1()
         .border_color(gpui::rgb(LINE))
-        .bg(gpui::rgb(RAISED))
+        .bg(gpui::rgb(MODAL_INSET))
         .rounded_b(px(MODAL_RADIUS - 1.0))
 }
 
