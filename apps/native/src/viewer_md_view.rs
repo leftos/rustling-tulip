@@ -908,7 +908,14 @@ impl RootView {
         let folder = file_dir(tab.path());
         match target {
             LinkTarget::Url(url) => {
-                self.dispatch_open(OpenJob::Url(url), Then::Nothing, window, cx);
+                let job = OpenJob::Url(url);
+                self.dispatch_open(
+                    &crate::target::HostKey::Local,
+                    job,
+                    Then::Nothing,
+                    window,
+                    cx,
+                );
             }
             LinkTarget::File { path, .. } => {
                 let candidate = TerminalLinkCandidate {

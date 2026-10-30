@@ -40,6 +40,8 @@ use crate::{RootView, tooltip};
 /// The open wizard: its model and the entities of its text fields.
 pub(crate) struct PresetWizardDialog {
     wizard: PresetWizard,
+    /// The host that owns the repo or workspace the preset launches on.
+    host: HostKey,
     inline_input: Entity<TextInput>,
     issues_input: Entity<TextInput>,
     max_per_tab_input: Entity<TextInput>,
@@ -123,9 +125,13 @@ impl RootView {
             .iter()
             .find(|repo| repo.id == entry.source_repo_id)
             .map(|repo| repo.path.clone());
+        let host_key = self.host_of_preset_target(&target);
         let mut wizard = PresetWizard::new(entry, target, repo_path.as_deref());
-        let host = (!self.capabilities().opens_local_files())
-            .then(|| self.conn().target().short_name().map(str::to_owned))
+        let host = (!self.capabilities_of(&host_key).opens_local_files())
+            .then(|| {
+                let conn = self.conn_of(&host_key).unwrap_or_else(|| self.conn());
+                conn.target().short_name().map(str::to_owned)
+            })
             .flatten();
         wizard.set_host(host.clone());
         let inline_input = cx
@@ -165,6 +171,7 @@ impl RootView {
         };
         self.preset_wizard = Some(PresetWizardDialog {
             wizard,
+            host: host_key,
             inline_input,
             issues_input,
             max_per_tab_input,
@@ -553,7 +560,7 @@ impl RootView {
                 .text_color(gpui::rgb(t.muted))
                 .child(text)
         });
-        let pick_refusal = self.capabilities().local_files_refusal();
+        let pick_refusal = self.capabilities_of(&dialog.host).local_files_refusal();
         let body = match wizard.stage() {
             Stage::Source => source_body(dialog, pick_refusal, cx),
             Stage::Variables => variables_body(dialog, pick_refusal, cx),

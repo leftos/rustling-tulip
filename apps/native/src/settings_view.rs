@@ -894,13 +894,13 @@ impl RootView {
     /// reported one and the choices are locked.
     #[must_use]
     pub fn keep_awake_mode(&self) -> Option<KeepAwakeMode> {
-        self.keep_awake.map(|state| state.mode)
+        self.mirrors().keep_awake.map(|state| state.mode)
     }
 
     /// The keep-awake status line.
     #[must_use]
     pub fn keep_awake_status(&self) -> &'static str {
-        keep_awake_status(self.keep_awake)
+        keep_awake_status(self.mirrors().keep_awake)
     }
 
     /// The App title tab's preview: the title for a tab named "Tab name"
@@ -946,7 +946,7 @@ impl RootView {
     /// left out.
     fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
-            SettingsTab::General => general_controls(self.keep_awake.is_some()),
+            SettingsTab::General => general_controls(self.mirrors().keep_awake.is_some()),
             SettingsTab::AppTitle => COUNT_MODE_CHOICES
                 .map(SettingsControl::CountMode)
                 .into_iter()
@@ -1067,7 +1067,7 @@ impl RootView {
 
     /// Agent `agent`'s launch command as the daemon last reported it.
     fn agent_command(&self, agent: &AgentId) -> Option<&AgentCommandEntry> {
-        self.agent_commands.as_ref()?.get(agent)
+        self.mirrors().agent_commands.as_ref()?.get(agent)
     }
 
     /// The agent page last selected and its fields, while Settings has
@@ -1384,17 +1384,28 @@ impl RootView {
     /// The daemon's launch commands. Each echo answers the oldest apply
     /// still waiting, and every agent page takes the broadcast as
     /// [`AgentTab::on_echo`] says.
-    pub(crate) fn on_agent_commands(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+    pub(crate) fn on_agent_commands(
+        &mut self,
+        host: &HostKey,
+        msg: DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
         let DaemonMessage::AgentCommands { commands } = msg else {
             return;
         };
-        let previous = self.agent_commands.take();
-        self.agent_commands = Some(
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
+        let previous = mirrors.agent_commands.replace(
             commands
                 .into_iter()
                 .map(|entry| (entry.agent.clone(), entry))
                 .collect(),
         );
+        // The agent pages edit This PC's launch commands only.
+        if *host != HostKey::Local {
+            return;
+        }
         let answered = self.agent_tabs.applies.pop_front().map(|(_, agent)| agent);
         let agents: Vec<AgentId> = self.agent_tabs.tabs.keys().cloned().collect();
         for agent in agents {
@@ -1469,22 +1480,27 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let Some(at) = self
+            .mirrors()
             .agent_setting_applies
             .iter()
             .position(|apply| apply.id == request_id)
         else {
             return;
         };
-        let Some(apply) = self.agent_setting_applies.remove(at) else {
+        let Some(apply) = self.mirrors_mut().agent_setting_applies.remove(at) else {
             return;
         };
         tracing::warn!(agent = %apply.agent.0, request_id, message, "settings: the daemon refused an agent's values");
         let stored = self
+            .mirrors()
             .agent_settings
             .get(&apply.agent)
             .and_then(|values| values.get(&apply.key))
             .cloned();
-        if let Some(pending) = self.agent_settings_pending.get_mut(&apply.agent)
+        if let Some(pending) = self
+            .mirrors_mut()
+            .agent_settings_pending
+            .get_mut(&apply.agent)
             && pending.get(&apply.key) == Some(&apply.value)
         {
             match stored {
@@ -1521,11 +1537,6 @@ impl RootView {
         tab.awaiting = tab.awaiting.saturating_sub(1);
         tab.saved = false;
         cx.notify();
-    }
-
-    /// Forgets the daemon's launch commands, as a disconnect does.
-    pub(crate) fn forget_agent_commands(&mut self) {
-        self.agent_commands = None;
     }
 
     /// The control holding the keyboard, if one does; none while Settings
@@ -1853,7 +1864,7 @@ impl RootView {
 
     /// The worktrees root the user set, if they set one.
     fn worktrees_override(&self) -> Option<&str> {
-        match &self.worktrees_root {
+        match &self.mirrors().worktrees_root {
             Some((root, true)) => Some(root),
             _ => None,
         }
@@ -1869,7 +1880,7 @@ impl RootView {
     /// The Worktrees tab's line on the root in use.
     #[must_use]
     pub fn worktrees_active_line(&self) -> String {
-        match &self.worktrees_root {
+        match &self.mirrors().worktrees_root {
             Some((root, true)) => format!("Active: {root} — user override"),
             Some((root, false)) => format!("Active: {root} — default (env or platform fallback)"),
             None => format!("Active: {NOT_CONNECTED} — default (env or platform fallback)"),
@@ -1900,6 +1911,7 @@ impl RootView {
     fn new_worktrees_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> WorktreesTab {
         let draft = self.worktrees_override().unwrap_or("").to_owned();
         let placeholder = self
+            .mirrors()
             .worktrees_root
             .as_ref()
             .map_or(NOT_CONNECTED, |(root, _)| root.as_str())
@@ -1977,7 +1989,8 @@ impl RootView {
         // daemon uses.
         let current = tab.input.read(cx).text().trim().to_owned();
         let start = if current.is_empty() {
-            self.worktrees_root
+            self.mirrors()
+                .worktrees_root
                 .as_ref()
                 .map(|(root, _)| PathBuf::from(root))
         } else {
@@ -2014,11 +2027,12 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let previous = self
+            .mirrors()
             .worktrees_root
             .as_ref()
             .filter(|(_, was_overridden)| *was_overridden)
             .map_or_else(String::new, |(root, _)| root.clone());
-        self.worktrees_root = Some((root.to_owned(), is_override));
+        self.mirrors_mut().worktrees_root = Some((root.to_owned(), is_override));
         if let Some(tab) = &mut self.worktrees_tab {
             let placeholder = root.to_owned();
             tab.input
@@ -2045,21 +2059,28 @@ impl RootView {
 
     /// Forgets the root and the tab's field, as a new connection does.
     pub(crate) fn reset_worktrees_tab(&mut self) {
-        self.worktrees_root = None;
+        self.mirrors_mut().worktrees_root = None;
         self.worktrees_tab = None;
     }
 
-    /// The daemon's last `RemoteStatus`, or `None` when this connection has
-    /// not reported one. A port field that is empty or still shows the old
-    /// port takes the new one.
+    /// `host`'s daemon's last `RemoteStatus`, or `None` when its connection
+    /// has not reported one. On This PC's, a port field that is empty or
+    /// still shows the old port takes the new one.
     pub(crate) fn set_remote_status(
         &mut self,
+        host: &HostKey,
         status: Option<RemoteStatusView>,
         cx: &mut Context<Self>,
     ) {
-        let old = self.remote_status.as_ref().map(|status| status.port);
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
+        let old = mirrors.remote_status.as_ref().map(|status| status.port);
         let new = status.as_ref().map(|status| status.port);
-        self.remote_status = status;
+        mirrors.remote_status = status;
+        if *host != HostKey::Local {
+            return;
+        }
         if let Some(tab) = &mut self.remote_access_tab {
             let untouched = tab.draft.trim().is_empty() || parse_port(&tab.draft).ok() == old;
             if untouched && old != new {
@@ -2071,8 +2092,13 @@ impl RootView {
         cx.notify();
     }
 
-    /// The daemon's `RemoteStatus`; any other message is left alone.
-    pub(crate) fn on_remote_status(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+    /// `host`'s daemon's `RemoteStatus`; any other message is left alone.
+    pub(crate) fn on_remote_status(
+        &mut self,
+        host: &HostKey,
+        msg: DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
         if let DaemonMessage::RemoteStatus {
             enabled,
             port,
@@ -2084,14 +2110,14 @@ impl RootView {
                 port,
                 state,
             };
-            self.set_remote_status(Some(status), cx);
+            self.set_remote_status(host, Some(status), cx);
         }
     }
 
     /// The Remote access page's line on what remote access is doing.
     #[must_use]
     pub fn remote_status_line(&self) -> String {
-        self.remote_status.as_ref().map_or_else(
+        self.mirrors().remote_status.as_ref().map_or_else(
             || NOT_CONNECTED.to_owned(),
             |status| state_line(&status.state, status.port),
         )
@@ -2101,7 +2127,7 @@ impl RootView {
     /// be pressed.
     #[must_use]
     pub fn remote_toggle(&self) -> (bool, bool) {
-        let status = self.remote_status.as_ref();
+        let status = self.mirrors().remote_status.as_ref();
         (
             status.is_some_and(|status| status.enabled),
             controls_enabled(status),
@@ -2111,7 +2137,8 @@ impl RootView {
     /// The address other devices reach this PC at, while it serves.
     #[must_use]
     pub fn remote_address(&self) -> Option<String> {
-        self.remote_status
+        self.mirrors()
+            .remote_status
             .as_ref()
             .and_then(|status| address(&status.state))
     }
@@ -2123,7 +2150,7 @@ impl RootView {
                 cert_expires_at, ..
             },
             ..
-        }) = &self.remote_status
+        }) = &self.mirrors().remote_status
         else {
             return None;
         };
@@ -2143,7 +2170,7 @@ impl RootView {
     /// What Apply sends: the field's port with the switch as it is, once
     /// the daemon has reported and only for a valid port other than its own.
     fn remote_apply_message(&self) -> Option<ClientMessage> {
-        let status = self.remote_status.as_ref()?;
+        let status = self.mirrors().remote_status.as_ref()?;
         let tab = self.remote_access_tab.as_ref()?;
         apply_port_message(status, &tab.draft)
     }
@@ -2192,7 +2219,7 @@ impl RootView {
     /// port, and the login launch once it was read.
     fn remote_access_controls(&self) -> Vec<SettingsControl> {
         let mut controls = Vec::new();
-        if controls_enabled(self.remote_status.as_ref()) {
+        if controls_enabled(self.mirrors().remote_status.as_ref()) {
             controls.extend([SettingsControl::RemoteToggle, SettingsControl::RemotePort]);
         }
         if self.remote_port_apply() {
@@ -2212,6 +2239,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> RemoteAccessTab {
         let draft = self
+            .mirrors()
             .remote_status
             .as_ref()
             .map_or_else(String::new, |status| status.port.to_string());
@@ -2253,7 +2281,7 @@ impl RootView {
     }
 
     fn toggle_remote_access(&self) {
-        if let Some(status) = &self.remote_status {
+        if let Some(status) = &self.mirrors().remote_status {
             tracing::info!(
                 enabled = !status.enabled,
                 "settings: switching remote access"
@@ -2464,15 +2492,17 @@ impl RootView {
         let request_id = crate::new_request_id();
         tracing::info!(agent = %agent.0, key, %request_id, "settings: setting an agent option");
         let options = self.merge_agent_setting(agent, key, value.clone());
-        self.agent_setting_applies.push_back(SettingApply {
-            id: request_id.clone(),
-            agent: agent.clone(),
-            key: key.to_owned(),
-            value,
-            from_text,
-        });
-        while self.agent_setting_applies.len() > WAITING_SETTING_APPLIES {
-            self.agent_setting_applies.pop_front();
+        self.mirrors_mut()
+            .agent_setting_applies
+            .push_back(SettingApply {
+                id: request_id.clone(),
+                agent: agent.clone(),
+                key: key.to_owned(),
+                value,
+                from_text,
+            });
+        while self.mirrors().agent_setting_applies.len() > WAITING_SETTING_APPLIES {
+            self.mirrors_mut().agent_setting_applies.pop_front();
         }
         self.send_to(
             &HostKey::Local,
@@ -2565,23 +2595,20 @@ impl RootView {
             || self.appearance_field_focused(window, cx)
     }
 
-    /// The daemon's keep-awake state, or `None` when this connection has
-    /// not reported it.
-    pub(crate) fn set_keep_awake(&mut self, state: Option<KeepAwake>) {
-        self.keep_awake = state;
-    }
-
-    /// Takes the daemon's [`DaemonMessage::KeepAwakeStatus`].
-    pub(crate) fn on_keep_awake_status(&mut self, msg: &DaemonMessage) {
-        if let DaemonMessage::KeepAwakeStatus { mode, active, .. } = *msg {
-            self.set_keep_awake(Some(KeepAwake { mode, active }));
+    /// Takes `host`'s daemon's [`DaemonMessage::KeepAwakeStatus`] into that
+    /// host's settings.
+    pub(crate) fn on_keep_awake_status(&mut self, host: &HostKey, msg: &DaemonMessage) {
+        if let DaemonMessage::KeepAwakeStatus { mode, active, .. } = *msg
+            && let Some(mirrors) = self.mirrors_of_mut(host)
+        {
+            mirrors.keep_awake = Some(KeepAwake { mode, active });
         }
     }
 
     /// Asks the daemon for `mode`; the choice follows its echo. Nothing is
     /// sent while the daemon is not connected.
     fn choose_keep_awake_mode(&mut self, mode: KeepAwakeMode) {
-        if self.keep_awake.is_some() {
+        if self.mirrors().keep_awake.is_some() {
             self.send_to(&HostKey::Local, ClientMessage::SetKeepAwakeMode { mode });
         }
     }

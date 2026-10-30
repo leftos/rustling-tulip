@@ -105,7 +105,7 @@ impl RootView {
             || self.stash.drop.is_some()
             || self.notices.has_modal()
             || self.conn().overlay().is_some();
-        if blocked || self.capabilities().opens_local_files() {
+        if blocked || self.focused_capabilities().opens_local_files() {
             return;
         }
         let Some(session_id) = self.focused_session() else {

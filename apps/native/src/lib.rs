@@ -563,6 +563,13 @@ enum SavedRemoval {
     UnlessQuitFollows,
 }
 
+/// A daemon `Error`: what it says, the request it answers and its code.
+struct DaemonFailure<'a> {
+    message: String,
+    request_id: Option<&'a str>,
+    code: Option<&'a str>,
+}
+
 /// What a pop-out window opens with, gathered from the root view.
 struct PopoutOpening {
     key: PopoutKey,
@@ -857,24 +864,8 @@ pub struct RootView {
     /// last render saw it; when it leaves the ring the keyboard moves on
     /// from its place.
     settings_ring_control: Option<settings_view::SettingsControl>,
-    /// The daemon's keep-awake state as this connection last heard it.
-    keep_awake: Option<settings_view::KeepAwake>,
-    /// The daemon's remote access status as this connection last heard it.
-    remote_status: Option<remote_access::RemoteStatusView>,
     /// The Remote access page's port field and login launch, once shown.
     remote_access_tab: Option<settings_view::RemoteAccessTab>,
-    /// Each agent's launch command as this connection last heard it.
-    agent_commands: Option<HashMap<protocol::AgentId, protocol::AgentCommandEntry>>,
-    /// Each agent's Settings page values as this connection last heard them.
-    agent_settings: std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues>,
-    /// Whether this connection has heard the agents' Settings values.
-    agent_settings_received: bool,
-    /// Each agent's Settings values as its page last sent them, until a
-    /// daemon broadcast naming the agent answers.
-    agent_settings_pending: std::collections::BTreeMap<protocol::AgentId, protocol::OptionValues>,
-    /// The Settings values sent and not yet answered, oldest first, so a
-    /// refusal finds the one it answers by its request id.
-    agent_setting_applies: std::collections::VecDeque<settings_view::SettingApply>,
     /// The agent pages' launch-command and text fields, each kept per
     /// agent once its page was shown, while Settings is open.
     agent_tabs: settings_view::AgentTabs,
@@ -1082,9 +1073,6 @@ pub struct RootView {
     /// How many times the launch toasts' buttons were refitted; specs read
     /// it to see a terminal frame skip that upkeep.
     preset_launch_syncs: u64,
-    /// The worktrees root and whether the user set it, as this connection
-    /// last heard.
-    worktrees_root: Option<(String, bool)>,
     /// The Settings Worktrees tab's path field and its save in flight.
     worktrees_tab: Option<settings_view::WorktreesTab>,
     /// The Manage worktrees modal, while open.
@@ -1356,14 +1344,7 @@ impl RootView {
             settings_scroll: scrollbar::Scrollbar::default(),
             settings_control: None,
             settings_ring_control: None,
-            keep_awake: None,
-            remote_status: None,
             remote_access_tab: None,
-            agent_commands: None,
-            agent_settings: std::collections::BTreeMap::new(),
-            agent_settings_received: false,
-            agent_settings_pending: std::collections::BTreeMap::new(),
-            agent_setting_applies: std::collections::VecDeque::new(),
             agent_tabs: settings_view::AgentTabs::default(),
             autostart,
             window_title: String::new(),
@@ -1453,7 +1434,6 @@ impl RootView {
             vscode_suggestions: VscodeSuggestions::default(),
             vscode_prompt_focus: cx.focus_handle(),
             cwd_workspace_scans: HashMap::new(),
-            worktrees_root: None,
             worktrees_tab: None,
             worktrees_manager: None,
             worktrees_focus: cx.focus_handle(),
@@ -3527,10 +3507,9 @@ impl RootView {
                 // as it last stood. Its agents go with the connection.
                 if !conn.is_open() {
                     self.forget_agents(host);
+                    self.forget_daemon_settings(host);
                 }
                 if !conn.is_open() && *host == HostKey::Local {
-                    self.set_keep_awake(None);
-                    self.forget_agent_commands();
                     self.agent_tabs.forget_applies();
                     self.launch_last.clear();
                 }
@@ -3540,9 +3519,11 @@ impl RootView {
                 }
                 // A fetch streams over the connection it was asked on, and
                 // the remote access status is that connection's daemon's.
-                if (!conn.is_open() || moved) && *host == HostKey::Local {
-                    self.end_fetches_on_disconnect(window, cx);
-                    self.set_remote_status(None, cx);
+                if !conn.is_open() || moved {
+                    if *host == HostKey::Local {
+                        self.end_fetches_on_disconnect(window, cx);
+                    }
+                    self.set_remote_status(host, None, cx);
                 }
                 self.set_conn(host, conn);
                 if *host == HostKey::Local {
@@ -3694,7 +3675,7 @@ impl RootView {
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
         self.on_launch_last_message(&msg, cx);
-        self.on_dialog_message(&msg, window, cx);
+        self.on_dialog_message(host, &msg, window, cx);
         if self.on_vscode_message(&msg, window, cx) {
             return;
         }
@@ -3729,7 +3710,14 @@ impl RootView {
                 message,
                 request_id: id,
                 code,
-            } => self.on_daemon_failure(message, id.as_deref(), code.as_deref(), window, cx),
+            } => {
+                let failure = DaemonFailure {
+                    message,
+                    request_id: id.as_deref(),
+                    code: code.as_deref(),
+                };
+                self.on_daemon_failure(host, failure, window, cx);
+            }
             DaemonMessage::ActionFailed {
                 title,
                 detail,
@@ -3792,9 +3780,9 @@ impl RootView {
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
             DaemonMessage::Repos { repos } => self.on_repos(host, &repos, cx),
             DaemonMessage::Workspaces { workspaces } => self.on_workspaces(&workspaces, window, cx),
-            msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(&msg),
-            msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(msg, cx),
-            msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(msg, cx),
+            msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(host, &msg),
+            msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(host, msg, cx),
+            msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(host, msg, cx),
             other => self.fold_chat_or_agents(host, other, cx),
         }
     }
@@ -3897,19 +3885,18 @@ impl RootView {
     /// toast.
     fn on_daemon_failure(
         &mut self,
-        message: String,
-        request_id: Option<&str>,
-        code: Option<&str>,
+        host: &HostKey,
+        failure: DaemonFailure<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = request_id {
+        if let Some(id) = failure.request_id {
             let _ = self.launch_last.take_request(id);
         }
-        if self.on_chat_refused(&message, request_id, code, cx) {
+        if self.on_chat_refused(failure.message, failure.request_id, failure.code, cx) {
             return;
         }
-        self.on_refusal(message, request_id, code, window, cx);
+        self.on_refusal(host, failure, window, cx);
     }
 
     /// A daemon refusal: an unrouted one (`None`) while the workspace creator
@@ -3919,23 +3906,32 @@ impl RootView {
     /// request: a launch-command refusal of an apply, by its `code`, shows
     /// under its row with no toast; a preset list's failure shows in the
     /// container menu's preset row with no toast; refused Settings values
-    /// end their apply and toast; any other takes the generic path.
+    /// end their apply and toast; any other takes the generic path. The
+    /// Settings modal edits This PC's daemon only, so another host's
+    /// refusal ends none of its saves.
     fn on_refusal(
         &mut self,
-        message: String,
-        request_id: Option<&str>,
-        code: Option<&str>,
+        host: &HostKey,
+        failure: DaemonFailure<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if request_id.is_none() {
+        let DaemonFailure {
+            message,
+            request_id,
+            code,
+        } = failure;
+        let settings = *host == HostKey::Local;
+        if settings && request_id.is_none() {
             self.on_worktrees_root_error(code, cx);
         }
         let inline = match request_id {
             None => self.on_creator_error(&message, cx),
             Some(id) => {
-                self.on_agent_setting_refused(id, &message, cx);
-                self.on_agent_command_error(id, code, &message, cx)
+                if settings {
+                    self.on_agent_setting_refused(id, &message, cx);
+                }
+                (settings && self.on_agent_command_error(id, code, &message, cx))
                     || self.on_preset_list_failed(id, &message, cx)
             }
         };
@@ -3977,12 +3973,13 @@ impl RootView {
     /// and a spawn config to the Shift-duplicate waiting for it.
     fn on_dialog_message(
         &mut self,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.on_cleanup_failed_message(msg, window, cx);
-        self.on_worktrees_message(msg, cx);
+        self.on_worktrees_message(host, msg, cx);
         self.on_recover_message(msg, window, cx);
         self.on_pairing_message(msg, window, cx);
         self.on_devices_message(msg, window, cx);
@@ -4091,14 +4088,16 @@ impl RootView {
     /// what showed one of its sessions closes; the window's dialogs stay.
     fn reset_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.forget_agents(host);
+        self.forget_daemon_settings(host);
+        self.set_remote_status(host, None, cx);
         if *host != HostKey::Local {
+            if let Some(mirrors) = self.mirrors_of_mut(host) {
+                mirrors.worktrees_root = None;
+            }
             self.drop_stale_session_ui(window, cx);
             return;
         }
-        self.set_keep_awake(None);
-        self.forget_agent_commands();
         self.agent_tabs = settings_view::AgentTabs::default();
-        self.set_remote_status(None, cx);
         self.reset_panes(cx);
         self.pending_appearance.clear();
         self.container_sends.clear();

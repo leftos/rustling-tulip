@@ -167,7 +167,16 @@ impl RootView {
 
     fn open_forge(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         match open::validate_http_url(url) {
-            Ok(url) => self.dispatch_open(OpenJob::Url(url.to_owned()), Then::Nothing, window, cx),
+            Ok(url) => {
+                let job = OpenJob::Url(url.to_owned());
+                self.dispatch_open(
+                    &crate::target::HostKey::Local,
+                    job,
+                    Then::Nothing,
+                    window,
+                    cx,
+                );
+            }
             Err(err) => {
                 tracing::warn!("refusing forge link {url}: {err}");
                 self.push_toast(ToastKind::Error, COULD_NOT_OPEN, Some(err), cx);

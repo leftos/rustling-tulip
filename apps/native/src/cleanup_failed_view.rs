@@ -115,7 +115,14 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let open_folders = self.capabilities().opens_local_files();
+        let open_folders = self
+            .cleanup_failed
+            .head()
+            .map_or_else(
+                || self.capabilities(),
+                |dialog| self.cleanup_capabilities(dialog),
+            )
+            .opens_local_files();
         let Some(dialog) = self.cleanup_failed.head_mut() else {
             return false;
         };
@@ -142,6 +149,12 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let host = self
+            .cleanup_failed
+            .head()
+            .map_or(crate::target::HostKey::Local, |dialog| {
+                self.host_of_session(dialog.session_id())
+            });
         let Some(dialog) = self.cleanup_failed.head_mut() else {
             return;
         };
@@ -168,7 +181,7 @@ impl RootView {
                     .get(index)
                     .map(|failure| open_folder_target(&failure.member_path));
                 if let Some(target) = target {
-                    self.dispatch_open(OpenJob::Reveal(target), Then::Nothing, window, cx);
+                    self.dispatch_open(&host, OpenJob::Reveal(target), Then::Nothing, window, cx);
                 }
             }
         }
@@ -202,6 +215,11 @@ impl RootView {
         }
     }
 
+    /// What the host of `dialog`'s session lets this client do there.
+    fn cleanup_capabilities(&self, dialog: &CleanupFailed) -> crate::remote_mode::Capabilities {
+        self.capabilities_of(&self.host_of_session(dialog.session_id()))
+    }
+
     /// The dialog over a backdrop that takes every click beneath it.
     pub(crate) fn cleanup_failed_layer(
         &self,
@@ -210,7 +228,7 @@ impl RootView {
     ) -> Option<AnyElement> {
         let t = theme(cx);
         let dialog = self.cleanup_failed.head()?;
-        let refusal = self.capabilities().local_files_refusal();
+        let refusal = self.cleanup_capabilities(dialog).local_files_refusal();
         let mut button =
             |control: Control, danger: bool| cleanup_button(dialog, control, danger, refusal, cx);
         let header = div()

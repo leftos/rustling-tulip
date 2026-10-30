@@ -118,6 +118,7 @@ impl RootView {
             return Vec::new();
         };
         let known = self
+            .mirrors()
             .worktrees_root
             .as_ref()
             .map(|(root, is_override)| (root.as_str(), *is_override));
@@ -179,7 +180,22 @@ impl RootView {
 
     /// The daemon's worktrees root, and the snapshots and errors that
     /// answer the manager's requests. Every other message is left alone.
-    pub(crate) fn on_worktrees_message(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
+    /// Another host's root goes to that host's settings, and its other
+    /// worktree messages are left alone: the manager is This PC's.
+    pub(crate) fn on_worktrees_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        if *host != HostKey::Local {
+            if let DaemonMessage::WorktreesRootChanged { root, is_override } = msg
+                && let Some(mirrors) = self.mirrors_of_mut(host)
+            {
+                mirrors.worktrees_root = Some((root.clone(), *is_override));
+            }
+            return;
+        }
         match msg {
             DaemonMessage::WorktreesRootChanged { root, is_override } => {
                 self.on_worktrees_root_changed(root, *is_override, cx);

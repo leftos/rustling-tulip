@@ -1,21 +1,53 @@
 //! The window's connections, one per host, and the routing that picks which
 //! host a message goes to.
 
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{Context, Window};
-use protocol::{ClientMessage, PresetTarget, SpawnTarget, SuggestTarget};
+use protocol::{
+    AgentCommandEntry, AgentId, ClientMessage, OptionValues, PresetTarget, SpawnTarget,
+    SuggestTarget,
+};
 
 use crate::RootView;
 use crate::connection::Connection;
 use crate::net::{HandshakeInfo, NetCommand};
+use crate::remote_access::RemoteStatusView;
+use crate::remote_mode::Capabilities;
+use crate::settings_view::{KeepAwake, SettingApply};
 use crate::target::{HostKey, Target};
 
+/// One host's daemon settings as its daemon last reported them: each is
+/// empty until that daemon reports it, and goes with its connection.
+#[derive(Default)]
+pub(crate) struct HostMirrors {
+    /// The daemon's keep-awake state.
+    pub(crate) keep_awake: Option<KeepAwake>,
+    /// The daemon's remote access status.
+    pub(crate) remote_status: Option<RemoteStatusView>,
+    /// The daemon's launch commands, by agent.
+    pub(crate) agent_commands: Option<HashMap<AgentId, AgentCommandEntry>>,
+    /// Each agent's Settings page values.
+    pub(crate) agent_settings: BTreeMap<AgentId, OptionValues>,
+    /// Whether the daemon has reported its agents' Settings values.
+    pub(crate) agent_settings_received: bool,
+    /// Each agent's Settings values as changed but not yet echoed back.
+    pub(crate) agent_settings_pending: BTreeMap<AgentId, OptionValues>,
+    /// The Settings value changes sent and still waiting on an answer.
+    pub(crate) agent_setting_applies: VecDeque<SettingApply>,
+    /// The daemon's worktrees root, and whether it is an override.
+    pub(crate) worktrees_root: Option<(String, bool)>,
+}
+
 /// One host's connection: where its commands go, its state machine as its
-/// network thread last reported it, and its daemon's handshake.
+/// network thread last reported it, its daemon's handshake and its daemon's
+/// settings.
 pub(crate) struct HostConn {
     tx: UnboundedSender<NetCommand>,
     conn: Connection,
     handshake: Option<HandshakeInfo>,
+    pub(crate) mirrors: HostMirrors,
 }
 
 impl HostConn {
@@ -25,6 +57,7 @@ impl HostConn {
             tx,
             conn: Connection::for_target(target),
             handshake: None,
+            mirrors: HostMirrors::default(),
         }
     }
 }
@@ -49,6 +82,11 @@ impl Hosts {
     /// This PC's connection.
     pub(crate) fn local(&self) -> &HostConn {
         &self.local
+    }
+
+    /// This PC's connection, to update.
+    pub(crate) fn local_mut(&mut self) -> &mut HostConn {
+        &mut self.local
     }
 
     /// `key`'s connection; `None` when the window has none to it.
@@ -97,6 +135,48 @@ impl RootView {
     /// `host`'s connection; `None` when the window has none to it.
     pub(crate) fn conn_of(&self, host: &HostKey) -> Option<&Connection> {
         self.hosts.get(host).map(|entry| &entry.conn)
+    }
+
+    /// What the daemon on `host` can do for this client, by the target the
+    /// window's connection to it holds; This PC's for a host the window
+    /// has no connection to.
+    pub(crate) fn capabilities_of(&self, host: &HostKey) -> Capabilities {
+        let conn = self.conn_of(host).unwrap_or_else(|| self.conn());
+        Capabilities::for_target(conn.target())
+    }
+
+    /// What the host of the focused pane's session lets this client do;
+    /// This PC's with no pane focused.
+    pub(crate) fn focused_capabilities(&self) -> Capabilities {
+        let host = self
+            .focused_session()
+            .map_or(HostKey::Local, |id| self.host_of_session(&id));
+        self.capabilities_of(&host)
+    }
+
+    /// This PC's daemon settings, which the Settings modal shows and edits.
+    pub(crate) fn mirrors(&self) -> &HostMirrors {
+        &self.hosts.local().mirrors
+    }
+
+    /// This PC's daemon settings, to update.
+    pub(crate) fn mirrors_mut(&mut self) -> &mut HostMirrors {
+        &mut self.hosts.local_mut().mirrors
+    }
+
+    /// `host`'s daemon settings, to update; `None` when the window has no
+    /// connection to it.
+    pub(crate) fn mirrors_of_mut(&mut self, host: &HostKey) -> Option<&mut HostMirrors> {
+        self.hosts.get_mut(host).map(|entry| &mut entry.mirrors)
+    }
+
+    /// Forgets `host`'s daemon's keep-awake state and launch commands, as
+    /// a disconnect does.
+    pub(crate) fn forget_daemon_settings(&mut self, host: &HostKey) {
+        if let Some(mirrors) = self.mirrors_of_mut(host) {
+            mirrors.keep_awake = None;
+            mirrors.agent_commands = None;
+        }
     }
 
     /// Opens a connection to `target`'s host beside the ones the window

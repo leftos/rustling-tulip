@@ -832,7 +832,7 @@ impl RootView {
                     &self.tabs,
                     self.sidebar.local_sessions(),
                     &self.popouts,
-                    self.capabilities(),
+                    self.capabilities_of(&self.host_of_session(&session.id)),
                 )
             })
             .unwrap_or_default()
@@ -1163,7 +1163,9 @@ impl RootView {
             has_vscode_job: self.container_vscode_job(container).is_some(),
             vscode_gone: self.container_vscode_gone(container),
             has_copy_path: self.container_copy_path(container).is_some(),
-            local_files_refusal: self.capabilities().local_files_refusal(),
+            local_files_refusal: self
+                .capabilities_of(&self.host_of_menu_container(container))
+                .local_files_refusal(),
         }
     }
 
@@ -1500,8 +1502,27 @@ impl RootView {
         let Some(job) = job else {
             return;
         };
+        let host = self.container_menu_host();
         self.close_container_menu(window, cx);
-        self.dispatch_open(job, Then::Nothing, window, cx);
+        self.dispatch_open(&host, job, Then::Nothing, window, cx);
+    }
+
+    /// The host that owns the repo or workspace `container` names; This PC
+    /// for a tab, which is This PC's layout.
+    fn host_of_menu_container(&self, container: &MenuContainer) -> HostKey {
+        match container {
+            MenuContainer::Repo(id) => self.host_of_repo(id),
+            MenuContainer::Workspace(id) => self.host_of_workspace(id),
+            MenuContainer::Tab(_) => HostKey::Local,
+        }
+    }
+
+    /// The host of the container the open container menu acts on; This PC
+    /// while none is open.
+    fn container_menu_host(&self) -> HostKey {
+        self.container_menu.as_ref().map_or(HostKey::Local, |menu| {
+            self.host_of_menu_container(&menu.container)
+        })
     }
 
     /// Closes the container menu and puts the container's path on the
@@ -1623,7 +1644,11 @@ impl RootView {
     /// Code targets still exist. Nothing is checked on a host that opens no
     /// local files, whose rows are disabled anyway.
     fn check_container_targets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.capabilities().local_files_refusal().is_some() {
+        if self
+            .capabilities_of(&self.container_menu_host())
+            .local_files_refusal()
+            .is_some()
+        {
             return;
         }
         let Some((container, check)) = self
@@ -2062,13 +2087,14 @@ impl RootView {
                     .session(session_id)
                     .and_then(worktree_to_reveal)
                     .map(PathBuf::from);
+                let host = self.host_of_session(session_id);
                 self.close_session_menu(window, cx);
                 if let Some(path) = path {
                     let job = OpenJob::DefaultApp {
                         path,
                         confirmed: true,
                     };
-                    self.dispatch_open(job, Then::Nothing, window, cx);
+                    self.dispatch_open(&host, job, Then::Nothing, window, cx);
                 }
             }
             SessionRow::BusyExcluded { excluded } => {

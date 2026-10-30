@@ -409,7 +409,7 @@ impl RootView {
     /// not on this PC, and with a pane focused, whose session's repos the
     /// dialog fetches from.
     fn more_fetch_file_row(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        if self.capabilities().opens_local_files() || self.focused_session().is_none() {
+        if self.focused_capabilities().opens_local_files() || self.focused_session().is_none() {
             return None;
         }
         Some(
