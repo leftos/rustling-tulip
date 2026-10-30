@@ -23,6 +23,7 @@ impl RootView {
     /// file fills the creator's pending parse. Returns whether it was one.
     pub(crate) fn on_vscode_message(
         &mut self,
+        _host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,

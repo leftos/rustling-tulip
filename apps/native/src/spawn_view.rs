@@ -1203,9 +1203,11 @@ impl RootView {
     }
 
     /// A daemon message the dialog follows. Suggestions are cached whether
-    /// or not it is open.
+    /// or not it is open. The dialog lists This PC's registry, so another
+    /// host's repo or workspace list is not for it.
     pub(crate) fn on_spawn_dialog_message(
         &mut self,
+        host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1215,6 +1217,9 @@ impl RootView {
             msg,
             DaemonMessage::Repos { .. } | DaemonMessage::Workspaces { .. }
         );
+        if registry && *host != crate::target::HostKey::Local {
+            return;
+        }
         let suggestion = matches!(msg, DaemonMessage::BranchNameSuggestion { .. });
         // The dialog asks without a request id, so a reply carrying one
         // answers a launch-last wait instead.

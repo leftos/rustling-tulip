@@ -45,7 +45,7 @@ use gpui::{
     StyledText, Svg, TextRun, Window, anchored, canvas, deferred, div, font, point, prelude::*, px,
     svg,
 };
-use protocol::{ClientMessage, SessionStatus};
+use protocol::{ClientMessage, ContainerRef, SessionStatus};
 
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
 pub(crate) const ROW_PADDING: f32 = 8.0;
@@ -1095,6 +1095,27 @@ impl RootView {
         drag::sidebar_reorder(payload, &self.sidebar.containers(), row, side)
     }
 
+    /// Splits a container order over every host's containers into one per
+    /// host, each keeping its containers' order, and takes and sends each to
+    /// its own host.
+    fn reorder_containers_by_host(&mut self, ordered: Vec<ContainerRef>) {
+        let mut by_host: Vec<(HostKey, Vec<ContainerRef>)> = Vec::new();
+        for container in ordered {
+            let host = match &container {
+                ContainerRef::Repo(id) => self.host_of_repo(id),
+                ContainerRef::Workspace(id) => self.host_of_workspace(id),
+            };
+            match by_host.iter_mut().find(|(owner, _)| *owner == host) {
+                Some((_, refs)) => refs.push(container),
+                None => by_host.push((host, vec![container])),
+            }
+        }
+        for (host, ordered) in by_host {
+            self.sidebar.reorder_containers_local(&host, &ordered);
+            self.send_to(&host, ClientMessage::ReorderContainers { ordered });
+        }
+    }
+
     /// A drop on the sidebar row `row` where the line stands: the new order
     /// shows at once and goes to the daemon, whose broadcast then agrees. A
     /// tab reorders the strip as a pill drop does.
@@ -1112,12 +1133,7 @@ impl RootView {
                 self.reorder_tabs_by_drop(ordered_ids);
             }
             Some(ClientMessage::ReorderContainers { ordered }) => {
-                self.sidebar
-                    .reorder_containers_local(&HostKey::Local, &ordered);
-                self.send_to(
-                    &HostKey::Local,
-                    ClientMessage::ReorderContainers { ordered },
-                );
+                self.reorder_containers_by_host(ordered);
             }
             Some(ClientMessage::ReorderSessions {
                 container_id,

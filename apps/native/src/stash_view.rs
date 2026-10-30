@@ -164,6 +164,7 @@ impl RootView {
     /// holds the stash the drop confirm names closes the confirm unsent.
     pub(crate) fn on_stash_message(
         &mut self,
+        _host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,

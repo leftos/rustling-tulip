@@ -118,6 +118,7 @@ impl RootView {
     /// owed it.
     pub(crate) fn on_dashboard_message(
         &mut self,
+        _host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,

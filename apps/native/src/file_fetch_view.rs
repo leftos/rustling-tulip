@@ -498,6 +498,7 @@ impl RootView {
     /// Folds in a fetch's reply; returns whether it was one.
     pub(crate) fn on_fetch_message(
         &mut self,
+        _host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,

@@ -405,6 +405,7 @@ impl RootView {
     /// keyboard.
     pub(crate) fn notify_on(
         &mut self,
+        _host: &crate::target::HostKey,
         msg: &DaemonMessage,
         finished: bool,
         window_focused: bool,

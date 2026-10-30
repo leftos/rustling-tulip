@@ -45,12 +45,13 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let key = container_key(level);
-        let sessions = live_owned_sessions(level, self.sidebar.local_sessions(), &self.sidebar);
+        let host = self.host_of_container(&key);
+        let sessions = live_owned_sessions(level, self.sidebar.sessions_of(&host), &self.sidebar);
         if sessions.is_empty() {
             if self.repo_remove.armed() == Some(key.as_str()) {
                 self.repo_remove.disarm();
                 if let Some(msg) = remove_message(level) {
-                    self.send_to(&self.host_of_container(&key), msg);
+                    self.send_to(&host, msg);
                 }
                 self.close_container_menu(window, cx);
                 cx.notify();

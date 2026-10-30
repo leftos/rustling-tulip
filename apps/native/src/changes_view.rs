@@ -435,6 +435,7 @@ impl RootView {
     /// pane.
     pub(crate) fn on_sc_message(
         &mut self,
+        _host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
