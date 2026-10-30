@@ -42,9 +42,16 @@ winreg = "0.56"
 windows-native-keyring-store = { version = "1.1", default-features = false }
 # `OpenProcess` / `TerminateProcess` / `WaitForSingleObject`: a daemon's pid is
 # pinned by a process handle before its proof, and killed only through it.
+# COM, OLE, RPC, Variant and WMI: `src/wmi_launch.rs` starts the daemon through
+# `Win32_Process.Create` when the caller's job forbids breakaway.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Rpc",
     "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]

@@ -214,7 +214,7 @@ async fn spawn_current_daemon(
         .parent()
         .map(std::path::Path::to_path_buf)
         .ok_or_else(|| anyhow!("template has no parent dir"))?;
-    spawn_daemon(&current.cached, &template_dir)?;
+    spawn_daemon(&current.cached, &template_dir).await?;
 
     wait_for_handshake(client_versions).await
 }
@@ -841,40 +841,112 @@ fn hash_prefix(bytes: &[u8]) -> String {
 }
 
 #[cfg(windows)]
-fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
+async fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
+    spawn_daemon_with(bin, &[], template_dir, crate::wmi_launch::launch)
+        .await
+        .map(drop)
+}
+
+/// How long the WMI launch may take before the daemon is spawned inside the
+/// caller's job instead.
+#[cfg(windows)]
+const WMI_LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Starts the daemon outside the caller's job and returns its pid: with
+/// `CREATE_BREAKAWAY_FROM_JOB`, else (the job forbids breakaway) through
+/// `launch_outside_job`, else inside the caller's job, so it always starts.
+///
+/// An SSH session, a terminal, an IDE task runner or a supervisor can run its
+/// command in a job that kills every process in it when it closes, and the
+/// daemon (with every tracer it starts) must outlive whoever started it.
+#[cfg(windows)]
+async fn spawn_daemon_with(
+    bin: &std::path::Path,
+    args: &[std::ffi::OsString],
+    template_dir: &std::path::Path,
+    launch_outside_job: impl FnOnce(
+        &std::path::Path,
+        &[std::ffi::OsString],
+        &std::path::Path,
+    ) -> anyhow::Result<u32>
+    + Send
+    + 'static,
+) -> anyhow::Result<u32> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
-    /// Start the daemon outside the caller's job. An SSH session runs its
-    /// command in a job that kills every process in it when the session
-    /// closes, and the daemon must outlive whoever started it.
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
     /// What `CreateProcess` returns when the caller's job forbids breakaway.
     const ERROR_ACCESS_DENIED: i32 = 5;
 
     let flags = CREATE_NO_WINDOW | DETACHED_PROCESS;
-    let spawned =
-        match spawn_daemon_with_flags(bin, template_dir, flags | CREATE_BREAKAWAY_FROM_JOB) {
-            Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
-                info!("the caller's job forbids breakaway; the daemon will end with that job");
-                spawn_daemon_with_flags(bin, template_dir, flags)
-            }
-            other => other,
-        };
-    spawned
-        .map(|child| {
-            // We intentionally don't await the child — the daemon outlives us.
-            drop(child);
-        })
-        .context("failed to spawn daemon")
+    match spawn_daemon_with_flags(bin, args, template_dir, flags | CREATE_BREAKAWAY_FROM_JOB) {
+        Ok(child) => {
+            info!("daemon launched with breakaway from the caller's job");
+            return pid_of(&child);
+        }
+        Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {}
+        Err(err) => return Err(err).context("failed to spawn daemon"),
+    }
+    match launch_bounded(bin, args, template_dir, launch_outside_job).await {
+        Ok(pid) => {
+            info!("daemon launched through WMI, outside the caller's job (it forbids breakaway)");
+            return Ok(pid);
+        }
+        Err(err) => warn!("the WMI launch of the daemon failed: {err:#}"),
+    }
+    let child = spawn_daemon_with_flags(bin, args, template_dir, flags)
+        .context("failed to spawn daemon")?;
+    info!("daemon launched inside the caller's job (WMI launch failed)");
+    pid_of(&child)
+}
+
+/// Runs `launch` on a blocking thread, so a slow WMI call never stalls the
+/// caller's runtime, and gives up after [`WMI_LAUNCH_TIMEOUT`].
+#[cfg(windows)]
+async fn launch_bounded(
+    bin: &std::path::Path,
+    args: &[std::ffi::OsString],
+    template_dir: &std::path::Path,
+    launch: impl FnOnce(
+        &std::path::Path,
+        &[std::ffi::OsString],
+        &std::path::Path,
+    ) -> anyhow::Result<u32>
+    + Send
+    + 'static,
+) -> anyhow::Result<u32> {
+    let bin = bin.to_path_buf();
+    let args = args.to_vec();
+    let template_dir = template_dir.to_path_buf();
+    let task = tokio::task::spawn_blocking(move || launch(&bin, &args, &template_dir));
+    match tokio::time::timeout(WMI_LAUNCH_TIMEOUT, task).await {
+        Ok(Ok(launched)) => launched,
+        Ok(Err(join)) => Err(anyhow!("the WMI launch task ended abnormally: {join}")),
+        Err(_) => Err(anyhow!(
+            "timed out after {} s",
+            WMI_LAUNCH_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// The pid of a just-spawned daemon. The child is not awaited: the daemon
+/// outlives us.
+#[cfg(windows)]
+fn pid_of(child: &tokio::process::Child) -> anyhow::Result<u32> {
+    child
+        .id()
+        .ok_or_else(|| anyhow!("the spawned daemon has no pid"))
 }
 
 #[cfg(windows)]
 fn spawn_daemon_with_flags(
     bin: &std::path::Path,
+    args: &[std::ffi::OsString],
     template_dir: &std::path::Path,
     creation_flags: u32,
 ) -> std::io::Result<tokio::process::Child> {
     let mut cmd = Command::new(bin);
+    cmd.args(args);
     cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -884,7 +956,11 @@ fn spawn_daemon_with_flags(
 }
 
 #[cfg(not(windows))]
-fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
+#[expect(
+    clippy::unused_async,
+    reason = "async in step with the Windows spawn, which awaits the WMI launch"
+)]
+async fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
     let mut cmd = Command::new(bin);
     cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
     cmd.stdin(Stdio::null())
@@ -1005,34 +1081,49 @@ async fn wait_for_handshake_in(
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    #[cfg(windows)]
-    use super::spawn_daemon;
     use super::{
         Action, ExistingKind, action_for, classify_existing_daemon_in, daemon_exe_matches_expected,
         dev_workspace_root, is_daemon_image, path_is_under, protocol_compatible, protocol_kind,
         wait_for_handshake_in,
     };
+    #[cfg(windows)]
+    use super::{spawn_daemon, spawn_daemon_with};
     use crate::supervisor::retire_daemon_in;
     use crate::test_fakes::{
         FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
     };
     use protocol::DaemonHandshake;
+    #[cfg(windows)]
+    use std::ffi::OsString;
+    #[cfg(windows)]
+    use std::io::{Read as _, Write as _};
+    #[cfg(windows)]
+    use std::os::windows::io::AsRawHandle as _;
     use std::path::Path;
+    #[cfg(windows)]
+    use std::process::Stdio;
     use std::time::Duration;
     #[cfg(windows)]
-    use windows::Win32::Foundation::HANDLE;
+    use std::time::Instant;
+    #[cfg(windows)]
+    use tracing::warn;
+    #[cfg(windows)]
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
     #[cfg(windows)]
     use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT,
-        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-        QueryInformationJobObject, SetInformationJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_LIMIT_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     };
     #[cfg(windows)]
-    use windows::Win32::System::Threading::GetCurrentProcess;
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE, TerminateProcess,
+    };
     #[cfg(windows)]
-    use windows::core::PCWSTR;
+    use windows::core::{BOOL, PCWSTR};
 
     const SUPPORTED: &[u32] = protocol::SUPPORTED_PROTOCOL_VERSIONS;
     /// Only a hang guard: no test asserts how long anything took.
@@ -1206,6 +1297,18 @@ mod tests {
     /// jobs nest on Windows 8 and later, so joining another one still works.
     #[cfg(windows)]
     fn join_new_job(flags: JOB_OBJECT_LIMIT) -> HANDLE {
+        let job = new_job(flags);
+        // SAFETY: `job` is a live job handle and GetCurrentProcess returns a pseudo handle.
+        unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) }.expect(
+            "join the test process to a new job; jobs nest only on Windows 8 and later, \
+             so this test cannot prove anything without one",
+        );
+        job
+    }
+
+    /// A fresh job with the extended limit `flags`.
+    #[cfg(windows)]
+    fn new_job(flags: JOB_OBJECT_LIMIT) -> HANDLE {
         // SAFETY: no security attributes and no name; the handle lives as long as the test process.
         let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.expect("create a job object");
         // The breakaway flags are extended limits, which the basic class refuses.
@@ -1228,11 +1331,6 @@ mod tests {
             )
         }
         .expect("set the job's limit flags");
-        // SAFETY: `job` is a live job handle and GetCurrentProcess returns a pseudo handle.
-        unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) }.expect(
-            "join the test process to a new job; jobs nest only on Windows 8 and later, \
-             so this test cannot prove anything without one",
-        );
         job
     }
 
@@ -1259,7 +1357,10 @@ mod tests {
     /// `cmd.exe` stands in for the daemon: with a null stdin it reads EOF and exits.
     #[cfg(windows)]
     fn spawn_stand_in_daemon() -> anyhow::Result<()> {
-        block_on(async { spawn_daemon(Path::new("cmd.exe"), Path::new("unused-templates")) })
+        block_on(spawn_daemon(
+            Path::new("cmd.exe"),
+            Path::new("unused-templates"),
+        ))
     }
 
     #[cfg(windows)]
@@ -1278,16 +1379,230 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn spawned_daemon_still_starts_in_a_job_that_forbids_breakaway() {
+    fn spawned_daemon_escapes_a_job_that_forbids_breakaway() {
         let job = join_new_job(JOB_OBJECT_LIMIT(0));
 
-        spawn_stand_in_daemon().expect("spawn the stand-in daemon without breakaway");
+        spawn_stand_in_daemon().expect("spawn the stand-in daemon outside the job");
+
+        assert_eq!(
+            processes_ever_in(job),
+            1,
+            "the daemon started inside the caller's job instead of escaping it"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plain_spawn_when_the_wmi_launch_fails() {
+        let job = join_new_job(JOB_OBJECT_LIMIT(0));
+
+        block_on(spawn_daemon_with(
+            Path::new("cmd.exe"),
+            &[],
+            Path::new("unused-templates"),
+            |_, _, _| Err(anyhow::anyhow!("injected WMI launch failure")),
+        ))
+        .expect("spawn the stand-in daemon inside the job");
 
         assert_eq!(
             processes_ever_in(job),
             2,
             "the daemon should have started inside the caller's job"
         );
+    }
+
+    /// Set on the re-executed child of the kill-on-close test, to the path of
+    /// the file it writes the stand-in daemon's pid to.
+    #[cfg(windows)]
+    const KILL_ON_CLOSE_CHILD_ENV: &str = "RT_TEST_KILL_ON_CLOSE_CHILD_PID_FILE";
+    /// Only a hang guard, generous because a WMI launch is slow on a busy machine.
+    #[cfg(windows)]
+    const LAUNCH_HANG_GUARD: Duration = Duration::from_secs(120);
+
+    /// The daemon must survive the job it was started from. Closing a job the
+    /// test process sits in would kill the test, so the test binary re-runs
+    /// itself as a child inside a kill-on-close job that forbids breakaway,
+    /// the child starts the stand-in daemon, and the parent closes the job.
+    #[cfg(windows)]
+    #[test]
+    fn daemon_survives_closing_a_kill_on_close_job_that_forbids_breakaway() {
+        if let Some(pid_file) = std::env::var_os(KILL_ON_CLOSE_CHILD_ENV) {
+            spawn_long_lived_stand_in(Path::new(&pid_file));
+            return;
+        }
+        let scratch = ScratchDir::new("kill-on-close");
+        let pid_file = scratch.0.join("stand-in.pid");
+        let job = new_job(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("the test binary's path"),
+        )
+        .args([
+            "--exact",
+            "supervisor::tests::daemon_survives_closing_a_kill_on_close_job_that_forbids_breakaway",
+            "--nocapture",
+        ])
+        .env(KILL_ON_CLOSE_CHILD_ENV, &pid_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("re-run the test binary as the job's child");
+        // SAFETY: `job` is live, and the child's handle lives as long as `child`.
+        unsafe { AssignProcessToJobObject(job, HANDLE(child.as_raw_handle())) }
+            .expect("put the child in the kill-on-close job");
+        child
+            .stdin
+            .take()
+            .expect("the child's stdin")
+            .write_all(b"go\n")
+            .expect("tell the child to start the stand-in");
+
+        let stand_in = KillOnDrop(wait_for_pid_file(&pid_file, &mut child));
+        assert!(
+            !is_in_job(stand_in.0, job),
+            "the daemon started inside the caller's kill-on-close job"
+        );
+        // SAFETY: `job` is our only handle to the job, closed once, here.
+        unsafe { CloseHandle(job) }.expect("close the kill-on-close job");
+        child.wait().expect("wait for the job's child to end");
+
+        assert!(
+            is_running(stand_in.0),
+            "the daemon died with the caller's job"
+        );
+    }
+
+    /// The re-executed child: waits for the parent's go line (sent once the
+    /// child is in the job), starts a long-lived stand-in daemon and writes its
+    /// pid to `pid_file`.
+    #[cfg(windows)]
+    fn spawn_long_lived_stand_in(pid_file: &Path) {
+        let mut go = String::new();
+        std::io::stdin()
+            .read_line(&mut go)
+            .expect("read the parent's go line");
+        if go.trim_end() != "go" {
+            // EOF or anything else: the parent never put this child in its job.
+            return;
+        }
+        let args: Vec<OsString> = ["-n", "600", "127.0.0.1"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let pid = block_on(spawn_daemon_with(
+            Path::new(r"C:\Windows\System32\PING.EXE"),
+            &args,
+            Path::new("unused-templates"),
+            crate::wmi_launch::launch,
+        ))
+        .expect("spawn the long-lived stand-in daemon");
+        let staged = pid_file.with_extension("tmp");
+        std::fs::write(&staged, pid.to_string()).expect("write the stand-in's pid");
+        std::fs::rename(&staged, pid_file).expect("move the stand-in's pid file in place");
+    }
+
+    /// The pid the child wrote to `pid_file`, failing as hung after
+    /// [`LAUNCH_HANG_GUARD`] and at once when the child ends without writing it.
+    #[cfg(windows)]
+    fn wait_for_pid_file(pid_file: &Path, child: &mut std::process::Child) -> u32 {
+        let deadline = Instant::now() + LAUNCH_HANG_GUARD;
+        while !pid_file.exists() {
+            if let Some(status) = child.try_wait().expect("poll the job's child") {
+                if pid_file.exists() {
+                    break;
+                }
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    pipe.read_to_string(&mut stderr)
+                        .expect("read the child's stderr");
+                }
+                assert!(
+                    status.success(),
+                    "the job's child failed ({status}): {stderr}"
+                );
+                assert!(
+                    pid_file.exists(),
+                    "the job's child ended without writing the pid: {stderr}"
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hung: the job's child wrote no stand-in pid"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::fs::read_to_string(pid_file)
+            .expect("read the stand-in's pid")
+            .trim()
+            .parse()
+            .expect("the pid file holds a pid")
+    }
+
+    /// Whether the process `pid` is in `job`.
+    #[cfg(windows)]
+    fn is_in_job(pid: u32, job: HANDLE) -> bool {
+        // SAFETY: no pointer arguments; the handle is closed below.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .expect("open the stand-in daemon");
+        let mut inside = BOOL::default();
+        // SAFETY: both handles are live and `inside` is a live BOOL.
+        let checked = unsafe { IsProcessInJob(process, Some(job), &raw mut inside) };
+        // SAFETY: `process` was opened above and is closed once, here.
+        unsafe { CloseHandle(process) }.expect("close the stand-in's handle");
+        checked.expect("ask whether the stand-in is in the job");
+        inside.as_bool()
+    }
+
+    /// Whether the process `pid` is still running.
+    #[cfg(windows)]
+    fn is_running(pid: u32) -> bool {
+        // SAFETY: no pointer arguments; the handle is closed below.
+        let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+        else {
+            return false;
+        };
+        let mut code = 0;
+        // SAFETY: `process` is live and `code` is a live u32.
+        let read = unsafe { GetExitCodeProcess(process, &raw mut code) };
+        // SAFETY: `process` was opened above and is closed once, here.
+        unsafe { CloseHandle(process) }.expect("close the stand-in's handle");
+        read.expect("read the stand-in's exit code");
+        code == STILL_ACTIVE.0.cast_unsigned()
+    }
+
+    /// Terminates the process with this pid on drop, so a test leaves no
+    /// stand-in daemon behind.
+    #[cfg(windows)]
+    struct KillOnDrop(u32);
+
+    #[cfg(windows)]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            // SAFETY: no pointer arguments; the returned handle is closed below.
+            let handle = match unsafe { OpenProcess(PROCESS_TERMINATE, false, self.0) } {
+                Ok(handle) => handle,
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        pid = self.0,
+                        "cannot open the stand-in daemon to end it"
+                    );
+                    return;
+                }
+            };
+            // SAFETY: `handle` was opened above with PROCESS_TERMINATE.
+            if let Err(err) = unsafe { TerminateProcess(handle, 1) } {
+                warn!(?err, pid = self.0, "cannot end the stand-in daemon");
+            }
+            // SAFETY: `handle` was opened above and is closed once, here.
+            if let Err(err) = unsafe { CloseHandle(handle) } {
+                warn!(
+                    ?err,
+                    pid = self.0,
+                    "cannot close the stand-in daemon's handle"
+                );
+            }
+        }
     }
 
     #[cfg(windows)]

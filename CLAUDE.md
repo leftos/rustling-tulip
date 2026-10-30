@@ -101,7 +101,7 @@ Nothing calls `gate.exe` directly. The wrapper hands the call to the installed g
 
 It exits 0 when the daemon closes the WebSocket, and after stdin EOF once the daemon has closed or 5 s have passed (it relays replies still in flight and sends its Close only then, since the daemon drops queued replies once it reads one); a daemon it starts on Windows inherits none of its standard handles. On failure it prints one stderr line `rustling-tulipd bridge: <error>`, leaves stdout empty and exits 1. It starts no tracing, takes no instance lock, rotates no log, creates no folders and attaches no console.
 
-The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect.
+The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The spawn breaks away from the caller's job; when that job forbids breakaway it launches the daemon through WMI `Win32_Process.Create` with the caller's full environment, outside the job (`wmi_launch.rs`, bounded at 30 s), and only if that fails starts it inside the job, logging which path ran. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect.
 
 A daemon sharing none of the client's versions is retired and replaced. The native client speaks only the current version, and the daemon's `supported` (`protocol-version.json`) lists only the current version too.
 

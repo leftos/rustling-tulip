@@ -19,6 +19,8 @@ mod proof;
 mod supervisor;
 #[cfg(test)]
 mod test_fakes;
+#[cfg(windows)]
+mod wmi_launch;
 
 pub use proof::{Proof, ProvenConnectError, connect_proven};
 pub use supervisor::{PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running};
