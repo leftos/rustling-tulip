@@ -34,6 +34,7 @@ use windows::core::{BSTR, HSTRING, IUnknown, Interface as _, PCWSTR};
 
 const CREATE_NO_WINDOW: i32 = 0x0800_0000;
 const DETACHED_PROCESS: i32 = 0x0000_0008;
+const CREATE_UNICODE_ENVIRONMENT: i32 = 0x0000_0400;
 const TEMPLATES_VAR: &str = "RUSTLING_TULIP_BIN_TEMPLATES";
 const QUOTE: u16 = b'"' as u16;
 const BACKSLASH: u16 = b'\\' as u16;
@@ -144,7 +145,7 @@ fn create_process(
     put(
         &startup,
         "CreateFlags",
-        &Variant::i4(CREATE_NO_WINDOW | DETACHED_PROCESS),
+        &Variant::i4(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_UNICODE_ENVIRONMENT),
     )?;
     put(
         &startup,
@@ -378,4 +379,74 @@ fn wide_without_nul(s: &OsStr) -> anyhow::Result<Vec<u16>> {
         bail!("holds a NUL character");
     }
     Ok(wide)
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod tests {
+    use super::launch;
+    use crate::test_fakes::ScratchDir;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    const HANG_GUARD: Duration = Duration::from_secs(120);
+    /// Not representable in code page 1252, so an ANSI environment block mangles it.
+    const PROBE: &str = "Łukasz-日本";
+
+    /// The launched process reads a non-ANSI environment value exactly as the
+    /// caller passed it. The value rides in `RUSTLING_TULIP_BIN_TEMPLATES`,
+    /// which `launch` adds to the caller's environment, so the test leaves its
+    /// own environment alone.
+    #[test]
+    #[ignore = "launches a real process through WMI; run by hand"]
+    fn the_launched_process_reads_a_non_ansi_environment_value_intact() {
+        let scratch = ScratchDir::new("wmi-unicode-env");
+        let out = scratch.0.join("probe.txt");
+        let staged = scratch.0.join("probe.tmp");
+        let (out_text, staged_text) = (out.display(), staged.display());
+        // PowerShell exits at once without a console, so the detached child is
+        // cmd, whose /u writes an internal command's output as UTF-16LE.
+        // No inner quotes: `launch` escapes a quote with a backslash, which cmd
+        // does not read; the scratch path holds no space.
+        let script = format!(
+            "echo %RUSTLING_TULIP_BIN_TEMPLATES%>{staged_text}&& move /y {staged_text} {out_text} >nul"
+        );
+        let args: Vec<OsString> = ["/d", "/u", "/s", "/c", script.as_str()]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let system_root = std::env::var_os("SystemRoot").expect("SystemRoot is set");
+        let cmd = PathBuf::from(system_root).join(r"System32\cmd.exe");
+
+        launch(&cmd, &args, Path::new(PROBE)).expect("launch the probe through WMI");
+
+        let written = wait_for_file(&out);
+        let (pairs, rest) = written.as_chunks::<2>();
+        assert!(rest.is_empty(), "odd-length UTF-16 output: {written:02x?}");
+        let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        let read = String::from_utf16_lossy(&units);
+        assert_eq!(
+            read.strip_suffix("\r\n").unwrap_or(&read),
+            PROBE,
+            "the launched process read a different value (bytes {written:02x?})"
+        );
+    }
+
+    /// The bytes of `path` once it exists, failing as hung after [`HANG_GUARD`].
+    fn wait_for_file(path: &Path) -> Vec<u8> {
+        let deadline = Instant::now() + HANG_GUARD;
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "hung: the launched process wrote no {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::fs::read(path).expect("read the launched process's output")
+    }
 }
