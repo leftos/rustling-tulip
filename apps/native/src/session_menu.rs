@@ -22,12 +22,15 @@ use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, outlined_button};
 use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP, TAB_DOCK_BACK_TIP};
 use crate::launch_last;
-use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
+use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel, top_highlight};
 use crate::notices::ToastKind;
 use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscode_target};
 use crate::open_view::Then;
 use crate::overlay_owner::Overlay;
-use crate::palette::{CHIP, DIALOG_SHADOW, LINE_STRONG, SCRIM, SURFACE};
+use crate::palette::{
+    DIALOG_SHADOW, MENU_RULE, MODAL, MODAL_EDGE, MODAL_HIGHLIGHT, POPOVER, POPOVER_EDGE,
+    POPOVER_HIGHLIGHT, POPOVER_SHADOW, SCRIM,
+};
 use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, pane_to_pop};
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, HEADLESS_UNSUPPORTED_TIP, MenuEntry, MenuMode,
@@ -78,18 +81,21 @@ pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyEleme
 /// The corner radius of a menu and of a popover.
 const POPOVER_RADIUS: f32 = 10.0;
 
-/// The card a popover sits in, tagged `id`: the chip fill with a strong
-/// edge, taking the pointer from whatever is under it.
+/// The card a popover sits in, tagged `id`: the popover fill with its edge
+/// and shadow, taking the pointer from whatever is under it.
 pub(crate) fn popover_frame(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
-        .bg(gpui::rgb(CHIP))
+        .bg(gpui::rgb(POPOVER))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(POPOVER_EDGE))
         .rounded(px(POPOVER_RADIUS))
+        .shadow(vec![drop_shadow(POPOVER_SHADOW, 8.0, 24.0)])
         .text_size(px(UI_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
+        .relative()
+        .children(top_highlight(POPOVER_HIGHLIGHT, POPOVER_RADIUS))
         .occlude()
 }
 
@@ -3004,11 +3010,13 @@ fn overlay_card(id: String) -> Div {
         .gap(px(10.0))
         .px(px(24.0))
         .py(px(16.0))
-        .bg(gpui::rgb(SURFACE))
+        .bg(gpui::rgb(MODAL))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(MODAL_EDGE))
         .rounded(px(MODAL_RADIUS))
         .shadow(vec![drop_shadow(DIALOG_SHADOW, 30.0, 80.0)])
+        .relative()
+        .children(top_highlight(MODAL_HIGHLIGHT, MODAL_RADIUS))
 }
 
 fn overlay_buttons(buttons: Vec<AnyElement>) -> Div {
@@ -3524,7 +3532,7 @@ fn slot_row(selector: &str, slot: Div, label: &'static str) -> Stateful<Div> {
 
 /// A thin line between groups of menu rows.
 pub(crate) fn menu_separator() -> Div {
-    div().h(px(1.0)).my(px(4.0)).bg(gpui::rgb(LINE_STRONG))
+    div().h(px(1.0)).my(px(4.0)).bg(gpui::rgb(MENU_RULE))
 }
 
 /// A small text button in a pane header.

@@ -19,8 +19,9 @@ use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::palette::{
-    ACCENT, ASKING, CHIP, GROUND, HOVER, LAUNCHED_TINT, LILAC, LINE, LINE_STRONG, ON_ACCENT,
-    ON_ASKING, RAISED, SUBTLE, TEXT_2, TRANSPARENT,
+    ACCENT, ASKING, CHIP, GROUND, HOVER, LAUNCHED_TINT, LILAC, LINE, LINE_STRONG, MENU_GROUP_RULES,
+    ON_ACCENT, ON_ASKING, RAISED, ROW_CARD, ROW_EDGE, ROW_GAP, ROW_HOVER, SELECTION,
+    SELECTION_EDGE, SUBTLE, TEXT_2, TRANSPARENT,
 };
 use crate::preset_launch::LaunchHighlight;
 use crate::remote_mode::{Capabilities, sidebar_no_repos_note};
@@ -322,6 +323,7 @@ impl RootView {
             )
             .child(shell)
             .children(fetch_file)
+            .when(MENU_GROUP_RULES, |frame| frame.child(menu_separator()))
             .child(add_repo)
             .child(add_workspace);
             let frame = if let Some(row) = resume {
@@ -1887,7 +1889,10 @@ fn leaf_row(
         .copied()
         .unwrap_or(appearance::BUILTIN_ACCENT);
     let ground = leaf_ground(selected, ctx.highlighted.contains(id));
-    let row = leaf_frame(leaf, ground, accent, ctx.density, cx);
+    let edge = if selected { SELECTION_EDGE } else { ROW_EDGE };
+    let row = leaf_frame(leaf, ground, accent, ctx.density, cx).when(ROW_EDGE & 0xff != 0, |row| {
+        row.border_1().border_color(gpui::rgba(edge))
+    });
     match ctx.density {
         LeafDensity::Compact => {
             let chips = leaf_chips(leaf, ctx.pill(id), ctx.attachable(id), ChipSize::Row, cx);
@@ -1925,7 +1930,7 @@ impl RootView {
 /// `highlighted` by Select launched; None leaves the ground, lit on hover.
 fn leaf_ground(selected: bool, highlighted: bool) -> Option<u32> {
     if selected {
-        Some(CHIP)
+        Some(SELECTION)
     } else if highlighted {
         Some(LAUNCHED_TINT)
     } else {
@@ -1951,14 +1956,15 @@ fn leaf_frame(
         .relative()
         .flex()
         .flex_none()
-        .my(px(1.0))
+        .my(px(ROW_GAP))
         .pl(px(LEAF_PAD_LEFT))
         .pr(px(ROW_PADDING))
         .rounded(px(6.0))
         .cursor_pointer()
         .when_some(ground, |row, ground| row.bg(gpui::rgb(ground)))
         .when(ground.is_none(), |row| {
-            row.hover(|style| style.bg(gpui::rgb(RAISED)))
+            row.bg(gpui::rgba(ROW_CARD))
+                .hover(|style| style.bg(gpui::rgb(ROW_HOVER)))
         })
         .tooltip(tooltip(leaf.hover(density)))
         .child(

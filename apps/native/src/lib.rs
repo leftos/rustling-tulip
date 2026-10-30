@@ -647,7 +647,8 @@ pub use activity_bar::{ITEM_HEIGHT as RAIL_ITEM_HEIGHT, RAIL_WIDTH};
 pub use palette::{BAR_BG, PANEL_BG};
 pub(crate) use palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, TEXT, WARNING};
 use palette::{
-    CHIP, LINE_STRONG, SCRIM, STATUS_ERR, STATUS_IDLE, STATUS_OK, SUNKEN, SURFACE, TEXT_2,
+    LINE_STRONG, MODAL, MODAL_EDGE, POPOVER, POPOVER_EDGE, SCRIM, STATUS_ERR, STATUS_IDLE,
+    STATUS_OK, SUNKEN, TEXT_2,
 };
 
 /// What a press on a drag handle is resizing.
@@ -4889,9 +4890,9 @@ fn connecting_overlay(
         .px(px(40.0))
         .py(px(32.0))
         .min_w(px(280.0))
-        .bg(gpui::rgb(SURFACE))
+        .bg(gpui::rgb(MODAL))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(MODAL_EDGE))
         .rounded(px(MODAL_RADIUS))
         .child(status_dot(dot, "overlay-dot"))
         .child(tagged_text("connecting-overlay", text).text_color(gpui::rgb(TEXT)))
@@ -5019,9 +5020,9 @@ impl Render for Tip {
             .px(px(6.0))
             .py(px(2.0))
             .font_family(fonts::ui_family(cx))
-            .bg(gpui::rgb(CHIP))
+            .bg(gpui::rgb(POPOVER))
             .border_1()
-            .border_color(gpui::rgb(LINE_STRONG))
+            .border_color(gpui::rgb(POPOVER_EDGE))
             .rounded(px(10.0))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
