@@ -363,7 +363,7 @@ fn sidebar_click_on_an_unbound_session_fills_the_empty_pane(cx: &mut TestAppCont
     h.click_on("leaf-s1");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id }]
+        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id, host: None }]
             if tab_id == "t1" && pane_id == "p1" && session_id.as_deref() == Some("s1")),
         "sent {sent:?}"
     );

@@ -86,6 +86,7 @@ fn opens(h: &mut Harness<'_>) -> Vec<Open> {
                 path,
                 against,
                 worktree_path,
+                host: None,
             } => {
                 assert_eq!(repo_id, "r1");
                 Some((id, path, against, worktree_path))

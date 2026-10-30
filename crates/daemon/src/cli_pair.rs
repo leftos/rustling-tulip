@@ -402,6 +402,7 @@ mod tests {
             protocol_version: protocol::PROTOCOL_VERSION,
             supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
             features: Vec::new(),
+            daemon_id: None,
         });
         assert_eq!(classify(&welcome, false), Step::Mint);
         assert_eq!(

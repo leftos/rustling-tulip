@@ -1129,7 +1129,7 @@ struct TabState {
     cap: Option<u32>,
     tab_ids: Vec<String>,
     current_tab_id: Option<String>,
-    current_panes: Vec<(String, Option<String>)>,
+    current_panes: Vec<tabs::PaneRef>,
     tab_count: u32,
     /// Per-client layout key the launched tabs belong to.
     client_id: String,
@@ -1708,9 +1708,11 @@ fn attach_to_tab(
         open_new_tab(hub, state, session_ids)?;
     }
     let pane_id = Uuid::new_v4().to_string();
-    state
-        .current_panes
-        .push((pane_id, Some(session_id.to_string())));
+    state.current_panes.push(tabs::PaneRef {
+        pane_id,
+        session_id: Some(session_id.to_string()),
+        host: None,
+    });
     let new_grid = match build_layout {
         TabBuildLayout::Linear(dir) => tabs::build_balanced(&state.current_panes, dir),
         TabBuildLayout::AutoGrid => tabs::build_grid(&state.current_panes, 0, None),
@@ -1768,6 +1770,7 @@ fn open_new_tab(
             grid: GridNode::Pane {
                 pane_id: Uuid::new_v4().to_string(),
                 session_id: None,
+                host: None,
             },
         },
         created_at: Utc::now(),
@@ -2630,6 +2633,7 @@ mod tests {
                         grid: GridNode::Pane {
                             pane_id: "p0".to_string(),
                             session_id: Some("s0".to_string()),
+                            host: None,
                         },
                     },
                     created_at: Utc::now(),
@@ -2643,7 +2647,11 @@ mod tests {
             cap: None,
             tab_ids: vec!["t1".to_string()],
             current_tab_id: Some("t1".to_string()),
-            current_panes: vec![("p0".to_string(), Some("s0".to_string()))],
+            current_panes: vec![tabs::PaneRef {
+                pane_id: "p0".to_string(),
+                session_id: Some("s0".to_string()),
+                host: None,
+            }],
             tab_count: 1,
             client_id: "test-client".to_string(),
         };
@@ -2927,6 +2935,7 @@ mod tests {
             state,
             sessions,
             auth_token: "test-token".to_string(),
+            daemon_id: "test-daemon-id".to_string(),
             proof_key: tracer_protocol::daemon_proof_key("test-token"),
             tailnet_handshake_timeout: crate::server::TAILNET_HANDSHAKE_TIMEOUT,
             attention_tx,

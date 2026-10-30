@@ -542,7 +542,7 @@ fn shell_reply_is_placed_in_the_current_tab_and_focused(cx: &mut TestAppContext)
     assert!(
         placed.iter().any(|m| matches!(
             m,
-            ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id) }
+            ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: None }
                 if tab_id == "t1" && pane_id == "p2" && id == "new"
         )),
         "the empty pane of the current tab: {placed:?}"

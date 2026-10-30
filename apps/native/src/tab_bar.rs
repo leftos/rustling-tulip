@@ -1049,6 +1049,7 @@ impl RootView {
         self.send(ClientMessage::CreateTab {
             name: None,
             initial_session_id: None,
+            host: None,
             request_id: Some(request_id),
         });
     }

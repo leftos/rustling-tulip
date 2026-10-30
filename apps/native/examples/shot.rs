@@ -1079,6 +1079,7 @@ fn pane(id: &str, session: &str) -> GridNode {
     GridNode::Pane {
         pane_id: id.to_owned(),
         session_id: Some(session.to_owned()),
+        host: None,
     }
 }
 
@@ -1309,6 +1310,7 @@ impl FakeDaemon {
             protocol_version: version,
             supported_versions: vec![version],
             features,
+            daemon_id: None,
         })?;
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),

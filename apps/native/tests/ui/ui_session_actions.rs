@@ -368,7 +368,7 @@ fn restart_duplicates_then_replaces_pane_and_discards_old(cx: &mut TestAppContex
     let placed = placements(h.sent());
     assert!(
         matches!(placed.as_slice(), [
-            ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new) },
+            ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new), host: None },
             discard,
         ] if tab_id == "t1" && pane_id == "p1" && new == "s4" && is_discard(discard, "s1", &[])),
         "sent {placed:?}"
@@ -970,6 +970,7 @@ fn duplicate_new_tab_sends_duplicate_then_create_tab(cx: &mut TestAppContext) {
             ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some(new),
+                host: None,
                 request_id: Some(create_id),
             },
         ] if new == "s2" => create_id.clone(),
@@ -1233,7 +1234,7 @@ fn duplicate_into_tab_places_the_copy_and_switches_to_it(cx: &mut TestAppContext
     let placed = placements(h.sent());
     assert!(
         matches!(placed.as_slice(), [
-            ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new) },
+            ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new), host: None },
         ] if tab_id == "t2" && pane_id == "p2" && new == "s2"),
         "the copy takes t2's empty pane: sent {placed:?}"
     );
@@ -1602,7 +1603,7 @@ fn unbound_session_add_to_current_places_it_in_the_active_tab(cx: &mut TestAppCo
     h.click_on("session-menu-add-current");
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id) }]
+        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: None }]
             if tab_id == "t1" && pane_id == "p1" && id == "s1"),
         "the active tab's empty pane takes it: sent {sent:?}"
     );
