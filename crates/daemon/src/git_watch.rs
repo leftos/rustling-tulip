@@ -190,11 +190,27 @@ fn classify_git_internal(tail: &[&str]) -> Option<RefreshFlags> {
         // Any other ref change (branches, tags, remotes) can shift what
         // `git status` reports as "ahead/behind", so refresh status.
         ["refs", ..] => Some(RefreshFlags::STATUS),
+        // Reftable backend (`extensions.refStorage = reftable`): refs live in
+        // `.git/reftable/` — `tables.list` plus `<start>-<end>-<hash>.ref`
+        // tables — instead of `.git/refs/**`. A table rewrite is the only
+        // signal that a ref moved there, and a stash in such a repo is one of
+        // them, so run both refreshes. The `.lock` leaf a rewrite goes through
+        // stays ignored like every other lock file.
+        ["reftable", ..] if !is_lock_leaf(tail) => Some(RefreshFlags::BOTH),
         // Everything else under .git/ — objects/, logs/ (non-stash),
         // lock files, FETCH_HEAD, COMMIT_EDITMSG, info/, hooks/, etc.
         // — is ignored.
         _ => None,
     }
+}
+
+/// Whether the last component of a `.git/`-relative path is a lock file.
+/// Git replaces a file through a `*.lock` sibling, so the lock churns on
+/// every update while saying nothing the file it guards does not.
+fn is_lock_leaf(tail: &[&str]) -> bool {
+    tail.last()
+        .and_then(|leaf| Path::new(*leaf).extension())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lock"))
 }
 
 /// Owns a per-repo watcher pair. Dropping this stops the OS-level
@@ -978,6 +994,53 @@ mod tests {
     fn ref_write_triggers_status() {
         assert_eq!(
             classify_event(&repo(), &p(&[".git", "refs", "heads", "feature"])),
+            Some(RefreshFlags::STATUS)
+        );
+    }
+
+    #[test]
+    fn reftable_table_write_triggers_status() {
+        // A repo with `extensions.refStorage = reftable` keeps its refs in
+        // `.git/reftable/` (`tables.list` plus `<start>-<end>-<hash>.ref`
+        // tables), never under `.git/refs/**`. A table rewrite is the only
+        // signal a ref moved there, a stash included.
+        assert_eq!(
+            classify_event(
+                &repo(),
+                &p(&[
+                    ".git",
+                    "reftable",
+                    "0x000000000001-0x000000000003-1a2b3c4d.ref"
+                ])
+            ),
+            Some(RefreshFlags::BOTH)
+        );
+    }
+
+    #[test]
+    fn reftable_tables_list_write_triggers_status() {
+        assert_eq!(
+            classify_event(&repo(), &p(&[".git", "reftable", "tables.list"])),
+            Some(RefreshFlags::BOTH)
+        );
+    }
+
+    #[test]
+    fn reftable_lock_files_are_ignored() {
+        // A ref update rewrites `tables.list` through `tables.list.lock`;
+        // the lock churn must not wake a second refresh.
+        assert_eq!(
+            classify_event(&repo(), &p(&[".git", "reftable", "tables.list.lock"])),
+            None
+        );
+    }
+
+    #[test]
+    fn a_reftable_dir_outside_git_is_a_working_tree_path() {
+        // Only `.git/reftable/` is reftable storage; a source tree folder
+        // that happens to be called `reftable` is an ordinary edit.
+        assert_eq!(
+            classify_event(&repo(), &p(&["src", "reftable", "foo.rs"])),
             Some(RefreshFlags::STATUS)
         );
     }

@@ -332,7 +332,7 @@ So does an agent that runs through cmd.exe (a `.cmd` or `.bat` shim, or cmd.exe 
 
 A hosted launch logs "spawn_interactive_session: the agent is typed into the shell".
 
-**Live git watcher** (`crates/daemon/src/git_watch.rs`). Each registered repo gets a recursive `notify`-based watcher with a 750 ms debounce. Inside the debouncer callback, `classify_event` filters paths against a hand-maintained allowlist: only `.git/index`, `.git/HEAD`, `.git/refs/**`, a handful of in-progress operation markers, and any non-excluded working-tree path can wake the refresher.
+**Live git watcher** (`crates/daemon/src/git_watch.rs`). Each registered repo gets a recursive `notify`-based watcher with a 750 ms debounce. Inside the debouncer callback, `classify_event` filters paths against a hand-maintained allowlist: only `.git/index`, `.git/HEAD`, `.git/refs/**`, `.git/reftable/**` (a reftable-backend repo's refs; it wakes the stash refresh too), a handful of in-progress operation markers, and any non-excluded working-tree path can wake the refresher.
 
 `.git/objects/`, `.git/logs/HEAD`, `FETCH_HEAD`, lock files, and well-known build/cache dirs (`target/`, `node_modules/`, `dist/`, `.next/`, `.venv/`, `__pycache__/`, …) are ignored so a `cargo build` or `pnpm install` doesn't spin up `git status` forever.
 
