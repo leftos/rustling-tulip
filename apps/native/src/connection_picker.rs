@@ -404,13 +404,6 @@ pub fn typed_ssh_target(host: &str, remote_command: &str) -> Result<Target, Type
     Target::parse_ssh(host, Some(remote_command)).map_err(TypedHostError::SshName)
 }
 
-/// Whether a switch to `target` waits for a "not approved" to open the
-/// pairing dialog: only a tailnet host pairs.
-#[must_use]
-pub fn pairs_on_switch(target: &Target) -> bool {
-    matches!(target, Target::Tailnet(_))
-}
-
 /// Which kind of choice a row is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
@@ -540,8 +533,8 @@ pub enum LiveState {
 }
 
 impl LiveState {
-    /// What `state` puts on the current row; `None` before the first connect
-    /// attempt, when there is nothing to report yet.
+    /// What `state` puts on a held host's row; `None` before the first
+    /// connect attempt, when there is nothing to report yet.
     #[must_use]
     pub fn from_state(state: &connection::State) -> Option<Self> {
         match state {
@@ -557,7 +550,7 @@ impl LiveState {
         }
     }
 
-    /// The chip this state puts on the current row.
+    /// The chip this state puts on a held host's row.
     fn row_state(&self) -> RowState {
         match self {
             Self::Connecting => RowState::Connecting,
@@ -573,34 +566,41 @@ impl LiveState {
 /// The chip at a row's trail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowState {
-    /// The current row's daemon answered.
+    /// The row's daemon answered.
     Connected,
-    /// The current row is connecting.
+    /// The row's host is connecting.
     Connecting,
-    /// The current row's host has not approved this device.
+    /// The row's host has not approved this device.
     NeedsPairing,
     /// A saved tailnet host this PC holds no device token for.
     NotPaired,
-    /// The current row is disconnected, with the reason.
+    /// The row's host is disconnected, with the reason.
     Disconnected { reason: String },
+    /// A saved host switched off.
+    Off,
+    /// A saved host whose connection reached a daemon another host already
+    /// holds, named by that host's label.
+    SameDaemonAs { owner: String },
 }
 
 impl RowState {
     /// The chip's text.
     #[must_use]
-    pub const fn label(&self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            Self::Connected => "Connected",
-            Self::Connecting => "Connecting…",
-            Self::NeedsPairing => "Needs pairing",
-            Self::NotPaired => "Not paired",
-            Self::Disconnected { .. } => "Disconnected",
+            Self::Connected => "Connected".to_owned(),
+            Self::Connecting => "Connecting…".to_owned(),
+            Self::NeedsPairing => "Needs pairing".to_owned(),
+            Self::NotPaired => "Not paired".to_owned(),
+            Self::Disconnected { .. } => "Disconnected".to_owned(),
+            Self::Off => "Off".to_owned(),
+            Self::SameDaemonAs { owner } => format!("Same daemon as {owner}"),
         }
     }
 }
 
-/// What the picker knows about one row when it draws its second line and
-/// state chip.
+/// What the picker knows about one row when it draws its second line,
+/// state chip and buttons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowFacts {
     /// What kind of host the row offers.
@@ -610,17 +610,41 @@ pub struct RowFacts {
     pub port: Option<u16>,
     /// An SSH row's remote command, as saved.
     pub remote_command: Option<String>,
-    /// Whether this row is the target the client is on.
-    pub current: bool,
-    /// The live connection state; read only on the current row.
+    /// Whether a saved host is switched on; true for every other row.
+    pub enabled: bool,
+    /// Whether the window holds a connection to the row's host.
+    pub held: bool,
+    /// The live state of the window's connection to the row's host.
     pub live: Option<LiveState>,
+    /// The label of the host whose connection reached the row's daemon
+    /// first, when the row's own was dropped as its duplicate.
+    pub duplicate_of: Option<String>,
     /// Whether this PC holds a device token for a saved tailnet host.
     pub has_token: bool,
     /// The sessions the row's host last had, from `host_session_counts`.
     pub sessions_last_time: Option<usize>,
-    /// The live session count of the row's host; read only while it is
-    /// current.
+    /// The live session count of the row's host, while the window holds
+    /// its connection.
     pub live_sessions: Option<usize>,
+}
+
+/// Whether the row draws a Pair button: a saved tailnet host the window
+/// holds that has not approved this PC, or that this PC holds no device
+/// token for.
+#[must_use]
+pub fn offers_pair(facts: &RowFacts) -> bool {
+    facts.host == RowHost::Tailnet
+        && facts.held
+        && (facts.live == Some(LiveState::NotApproved) || !facts.has_token)
+}
+
+/// Whether the row draws Reconnect now: a saved host the window holds
+/// whose connection is not open.
+#[must_use]
+pub fn offers_reconnect(facts: &RowFacts) -> bool {
+    matches!(facts.host, RowHost::Tailnet | RowHost::Ssh)
+        && facts.held
+        && facts.live != Some(LiveState::Open)
 }
 
 /// A row's second line and the chip at its trail.
@@ -647,9 +671,7 @@ fn detail_line(facts: &RowFacts) -> String {
     match facts.host {
         RowHost::ThisPc => {
             parts.push("This PC's daemon".to_owned());
-            if facts.current {
-                parts.extend(session_count(facts.live_sessions, false));
-            }
+            parts.extend(session_count(facts.live_sessions, false));
         }
         RowHost::Tailnet => {
             parts.push("Tailnet".to_owned());
@@ -683,10 +705,10 @@ fn port_clause(port: Option<u16>) -> Option<String> {
     port.map(|port| format!("port {port}"))
 }
 
-/// The sessions part of a saved host's row: its live count while it is the
-/// current target, else the count it had last time.
+/// The sessions part of a saved host's row: its live count while the
+/// window holds its connection, else the count it had last time.
 fn saved_host_sessions(facts: &RowFacts) -> Option<String> {
-    if facts.current {
+    if facts.held {
         session_count(facts.live_sessions, false)
     } else {
         session_count(facts.sessions_last_time, true)
@@ -694,7 +716,7 @@ fn saved_host_sessions(facts: &RowFacts) -> Option<String> {
 }
 
 /// The sessions part of a row: "3 sessions", or "3 sessions last time" for a
-/// host that is not current. None is left out, as is zero.
+/// host the window does not hold. None is left out, as is zero.
 fn session_count(count: Option<usize>, last_time: bool) -> Option<String> {
     let count = count.filter(|count| *count > 0)?;
     let noun = if count == 1 { "session" } else { "sessions" };
@@ -705,12 +727,20 @@ fn session_count(count: Option<usize>, last_time: bool) -> Option<String> {
     })
 }
 
-/// The chip a row shows: the current row's live state when there is one,
-/// else "Not paired" for a saved tailnet host this PC holds no token for.
+/// The chip a row shows: Off for a saved host switched off, "Same daemon
+/// as" for one dropped as a duplicate, else the live state of the window's
+/// connection to it, else "Not paired" for a saved tailnet host this PC
+/// holds no token for.
 fn detail_state(facts: &RowFacts) -> Option<RowState> {
-    if facts.current
-        && let Some(live) = &facts.live
-    {
+    if !facts.enabled {
+        return Some(RowState::Off);
+    }
+    if let Some(owner) = &facts.duplicate_of {
+        return Some(RowState::SameDaemonAs {
+            owner: owner.clone(),
+        });
+    }
+    if let Some(live) = &facts.live {
         return Some(live.row_state());
     }
     match facts.host {
@@ -925,6 +955,27 @@ impl ConnectionPicker {
         }
     }
 
+    /// Whether the saved host `target` dials is switched on; true for a
+    /// target no saved host dials.
+    #[must_use]
+    pub fn enabled(&self, target: &Target) -> bool {
+        self.saved
+            .iter()
+            .find(|host| host.is_for(target))
+            .is_none_or(|host| host.enabled)
+    }
+
+    /// Switches the saved host `target` dials on or off. Returns whether a
+    /// saved host matched.
+    pub fn set_enabled(&mut self, target: &Target, enabled: bool) -> bool {
+        let mut matched = false;
+        for host in self.saved.iter_mut().filter(|host| host.is_for(target)) {
+            host.enabled = enabled;
+            matched = true;
+        }
+        matched
+    }
+
     /// Forgets the saved host `target` dials. Returns whether it was
     /// `current`, so the caller switches to this PC.
     /// A tailnet name matches in its normal form, an SSH string as typed; a
@@ -978,7 +1029,7 @@ mod tests {
     use super::{
         AddButton, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, Row, RowFacts,
         RowHost, RowKind, RowState, SCAN_PENDING, SSH_TESTING, SavedHost, Section, SshTest,
-        pairs_on_switch, row_detail, typed_ssh_target, typed_target,
+        offers_pair, offers_reconnect, row_detail, typed_ssh_target, typed_target,
     };
     use crate::target::{DEFAULT_TAILNET_PORT, Target};
     use tailnet::{PeerStatus, Status, TailnetError};
@@ -1455,13 +1506,6 @@ mod tests {
     }
 
     #[test]
-    fn only_a_switch_to_a_tailnet_host_arms_pairing() {
-        assert!(pairs_on_switch(&Target::tailnet(BOX, Some(8787))));
-        assert!(!pairs_on_switch(&ssh("devbox")));
-        assert!(!pairs_on_switch(&Target::Local));
-    }
-
-    #[test]
     fn ssh_test_states_say_what_the_form_shows() {
         let target = ssh("me@devbox:2222");
         let host = target.ssh_host().expect("an SSH target");
@@ -1505,12 +1549,185 @@ mod tests {
             host,
             port: None,
             remote_command: None,
-            current: false,
+            enabled: true,
+            held: false,
             live: None,
+            duplicate_of: None,
             has_token: true,
             sessions_last_time: None,
             live_sessions: None,
         }
+    }
+
+    #[test]
+    fn a_held_saved_host_shows_its_live_session_count() {
+        let tailnet = RowFacts {
+            port: Some(8787),
+            held: true,
+            sessions_last_time: Some(3),
+            live_sessions: Some(4),
+            ..facts(RowHost::Tailnet)
+        };
+        assert_eq!(
+            row_detail(&tailnet).line,
+            "Tailnet · port 8787 · 4 sessions"
+        );
+        let ssh = RowFacts {
+            held: true,
+            sessions_last_time: Some(2),
+            live_sessions: Some(1),
+            ..facts(RowHost::Ssh)
+        };
+        assert_eq!(
+            row_detail(&ssh).line,
+            "SSH · rustling-tulipd bridge · 1 session"
+        );
+    }
+
+    #[test]
+    fn every_held_rows_live_state_wins_over_not_paired() {
+        let held = |live: LiveState| RowFacts {
+            port: Some(8787),
+            held: true,
+            live: Some(live),
+            has_token: false,
+            ..facts(RowHost::Tailnet)
+        };
+        assert_eq!(
+            row_detail(&held(LiveState::Open)).state,
+            Some(RowState::Connected)
+        );
+        assert_eq!(
+            row_detail(&held(LiveState::Connecting)).state,
+            Some(RowState::Connecting)
+        );
+        assert_eq!(
+            row_detail(&held(LiveState::NotApproved)).state,
+            Some(RowState::NeedsPairing)
+        );
+        let down = row_detail(&held(LiveState::Down {
+            reason: "connection reset".to_owned(),
+        }));
+        assert_eq!(
+            down.state,
+            Some(RowState::Disconnected {
+                reason: "connection reset".to_owned()
+            })
+        );
+        assert_eq!(RowState::Connected.label(), "Connected");
+        assert_eq!(RowState::Connecting.label(), "Connecting…");
+        assert_eq!(RowState::NeedsPairing.label(), "Needs pairing");
+        assert_eq!(RowState::NotPaired.label(), "Not paired");
+        assert_eq!(
+            down.state.map(|state| state.label()).as_deref(),
+            Some("Disconnected")
+        );
+    }
+
+    #[test]
+    fn a_switched_off_host_shows_off_over_everything_else() {
+        let off = RowFacts {
+            port: Some(8787),
+            enabled: false,
+            has_token: false,
+            sessions_last_time: Some(3),
+            duplicate_of: Some("box".to_owned()),
+            ..facts(RowHost::Tailnet)
+        };
+        let detail = row_detail(&off);
+        assert_eq!(detail.state, Some(RowState::Off));
+        assert_eq!(detail.line, "Tailnet · port 8787 · 3 sessions last time");
+        assert_eq!(RowState::Off.label(), "Off");
+    }
+
+    #[test]
+    fn a_duplicate_shows_same_daemon_as_its_owner() {
+        let duplicate = RowFacts {
+            duplicate_of: Some("box".to_owned()),
+            ..facts(RowHost::Ssh)
+        };
+        let state = row_detail(&duplicate).state;
+        assert_eq!(
+            state,
+            Some(RowState::SameDaemonAs {
+                owner: "box".to_owned()
+            })
+        );
+        assert_eq!(
+            state.map(|state| state.label()).as_deref(),
+            Some("Same daemon as box")
+        );
+    }
+
+    #[test]
+    fn pair_and_reconnect_are_offered_only_on_held_saved_hosts() {
+        let held = |host: RowHost, live: Option<LiveState>, has_token: bool| RowFacts {
+            held: true,
+            live,
+            has_token,
+            ..facts(host)
+        };
+        let down = || {
+            Some(LiveState::Down {
+                reason: "connection reset".to_owned(),
+            })
+        };
+        assert!(offers_pair(&held(
+            RowHost::Tailnet,
+            Some(LiveState::NotApproved),
+            true
+        )));
+        assert!(
+            offers_pair(&held(RowHost::Tailnet, None, false)),
+            "no token"
+        );
+        assert!(!offers_pair(&held(
+            RowHost::Tailnet,
+            Some(LiveState::Open),
+            true
+        )));
+        assert!(
+            !offers_pair(&held(RowHost::Ssh, Some(LiveState::NotApproved), false)),
+            "an SSH host never pairs"
+        );
+        assert!(!offers_pair(&held(RowHost::ThisPc, None, false)));
+        let not_held = RowFacts {
+            has_token: false,
+            ..facts(RowHost::Tailnet)
+        };
+        assert!(!offers_pair(&not_held), "a host the window does not hold");
+
+        assert!(offers_reconnect(&held(RowHost::Tailnet, down(), true)));
+        assert!(offers_reconnect(&held(
+            RowHost::Ssh,
+            Some(LiveState::Connecting),
+            true
+        )));
+        assert!(!offers_reconnect(&held(
+            RowHost::Ssh,
+            Some(LiveState::Open),
+            true
+        )));
+        assert!(!offers_reconnect(&held(RowHost::ThisPc, down(), true)));
+        assert!(!offers_reconnect(&facts(RowHost::Tailnet)), "not held");
+    }
+
+    #[test]
+    fn set_enabled_switches_a_saved_host() {
+        let mut picker = ConnectionPicker::new(vec![saved(BOX, 8787)]);
+        let target = Target::tailnet(BOX, Some(8787));
+        assert!(picker.enabled(&target));
+        assert!(picker.set_enabled(&target, false));
+        assert!(!picker.saved()[0].enabled);
+        assert!(!picker.enabled(&target));
+        assert!(
+            !picker.set_enabled(&Target::tailnet("other.tail1234.ts.net", None), true),
+            "no saved host matched"
+        );
+        assert!(
+            picker.enabled(&Target::Local),
+            "no saved host dials This PC"
+        );
     }
 
     /// The sections the picker draws, in draw order.
@@ -1664,26 +1881,15 @@ mod tests {
 
     #[test]
     fn this_pc_detail_line() {
-        let current = RowFacts {
-            current: true,
+        let held = RowFacts {
+            held: true,
             live: Some(LiveState::Open),
             live_sessions: Some(7),
             ..facts(RowHost::ThisPc)
         };
-        let detail = row_detail(&current);
+        let detail = row_detail(&held);
         assert_eq!(detail.line, "This PC's daemon · 7 sessions");
         assert_eq!(detail.state, Some(RowState::Connected));
-
-        let other = RowFacts {
-            live_sessions: Some(7),
-            ..facts(RowHost::ThisPc)
-        };
-        let detail = row_detail(&other);
-        assert_eq!(
-            detail.line, "This PC's daemon",
-            "its live count is known only while it is current"
-        );
-        assert_eq!(detail.state, None);
     }
 
     #[test]
@@ -1743,31 +1949,6 @@ mod tests {
     }
 
     #[test]
-    fn the_current_saved_host_shows_its_live_session_count() {
-        let tailnet = RowFacts {
-            port: Some(8787),
-            current: true,
-            sessions_last_time: Some(3),
-            live_sessions: Some(4),
-            ..facts(RowHost::Tailnet)
-        };
-        assert_eq!(
-            row_detail(&tailnet).line,
-            "Tailnet · port 8787 · 4 sessions"
-        );
-        let ssh = RowFacts {
-            current: true,
-            sessions_last_time: Some(2),
-            live_sessions: Some(1),
-            ..facts(RowHost::Ssh)
-        };
-        assert_eq!(
-            row_detail(&ssh).line,
-            "SSH · rustling-tulipd bridge · 1 session"
-        );
-    }
-
-    #[test]
     fn session_counts_are_singular_at_one_and_hidden_at_zero() {
         let tailnet = |sessions_last_time: Option<usize>| RowFacts {
             port: Some(8787),
@@ -1790,7 +1971,7 @@ mod tests {
         );
 
         let this_pc_row = |live_sessions: Option<usize>| RowFacts {
-            current: true,
+            held: true,
             live: Some(LiveState::Open),
             live_sessions,
             ..facts(RowHost::ThisPc)
@@ -1801,56 +1982,6 @@ mod tests {
         );
         assert_eq!(row_detail(&this_pc_row(Some(0))).line, "This PC's daemon");
         assert_eq!(row_detail(&this_pc_row(None)).line, "This PC's daemon");
-    }
-
-    #[test]
-    fn a_live_state_on_the_current_row_wins_over_not_paired() {
-        let current = |live: LiveState| RowFacts {
-            port: Some(8787),
-            current: true,
-            live: Some(live),
-            has_token: false,
-            ..facts(RowHost::Tailnet)
-        };
-        assert_eq!(
-            row_detail(&current(LiveState::Open)).state,
-            Some(RowState::Connected)
-        );
-        assert_eq!(
-            row_detail(&current(LiveState::Connecting)).state,
-            Some(RowState::Connecting)
-        );
-        assert_eq!(
-            row_detail(&current(LiveState::NotApproved)).state,
-            Some(RowState::NeedsPairing)
-        );
-        let down = row_detail(&current(LiveState::Down {
-            reason: "connection reset".to_owned(),
-        }));
-        assert_eq!(
-            down.state,
-            Some(RowState::Disconnected {
-                reason: "connection reset".to_owned()
-            })
-        );
-
-        let other = RowFacts {
-            port: Some(8787),
-            has_token: false,
-            live: Some(LiveState::Open),
-            ..facts(RowHost::Tailnet)
-        };
-        assert_eq!(
-            row_detail(&other).state,
-            Some(RowState::NotPaired),
-            "another row's live state is not read"
-        );
-
-        assert_eq!(RowState::Connected.label(), "Connected");
-        assert_eq!(RowState::Connecting.label(), "Connecting…");
-        assert_eq!(RowState::NeedsPairing.label(), "Needs pairing");
-        assert_eq!(RowState::NotPaired.label(), "Not paired");
-        assert_eq!(down.state.map(|state| state.label()), Some("Disconnected"));
     }
 
     #[test]

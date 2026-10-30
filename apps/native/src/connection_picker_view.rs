@@ -1,11 +1,12 @@
 //! The Connections picker on screen: the rows under their This PC, Saved
-//! hosts and On your tailnet headers, each row a two-line choice with its
-//! state chip and, on a saved host, a Forget button shown on hover or focus;
-//! below them `+ Add host`, which opens the inline add form with its Tailnet
-//! | SSH switch (Name and Port; or Host, Remote command and Test
+//! hosts and On your tailnet headers, each row a two-line entry with its
+//! state chip; a saved host's row adds its Connected switch, Pair and
+//! Reconnect now while they apply, and a Forget button shown on hover or
+//! focus. Below them `+ Add host` opens the inline add form with its
+//! Tailnet | SSH switch (Name and Port; or Host, Remote command and Test
 //! connection). Its rows and rules live in [`crate::connection_picker`]; a
-//! pick goes to the network thread as [`NetCommand::SwitchTarget`], and the
-//! reset for the new target runs when its state comes back.
+//! switch, an add or a Forget opens or drops that host's connection beside
+//! This PC's, which no row can switch off.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -23,14 +24,15 @@ use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_f
 use crate::connection_picker::{
     AddButton, AddField, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, PickerSection,
     Row, RowDetail, RowFacts, RowHost, RowKind, RowState, SCAN_PENDING, SavedHost, Section,
-    SshTest, SshTester, TypedHostError, pairs_on_switch, row_detail, typed_ssh_target,
-    typed_target,
+    SshTest, SshTester, TypedHostError, offers_pair, offers_reconnect, row_detail,
+    typed_ssh_target, typed_target,
 };
 use crate::fonts::DEFAULT_FAMILY;
 use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::session_menu::backdrop;
+use crate::spawn_view::checkbox_row;
 use crate::ssh::DEFAULT_REMOTE_COMMAND;
 use crate::target::HostKey;
 use crate::target::{DEFAULT_TAILNET_PORT, SshHost, TailnetHost, Target};
@@ -47,6 +49,8 @@ const PANEL_MARGIN: f32 = 24.0;
 const FIELD_LABEL_WIDTH: f32 = 104.0;
 /// A row's corner radius.
 const ROW_RADIUS: f32 = 8.0;
+/// The least width of a saved row's chip slot: room for its Forget button.
+const FORGET_ROOM: f32 = 64.0;
 
 /// A control of the picker, in the order Tab walks them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +59,12 @@ enum PickerControl {
     Row(usize),
     /// The Forget button of the saved host at this row index.
     Forget(usize),
+    /// The Connected switch of the saved host at this row index.
+    Switch(usize),
+    /// The Pair button of the row at this index.
+    Pair(usize),
+    /// The Reconnect now button of the row at this index.
+    Reconnect(usize),
     /// `+ Add host`: opens the add form.
     AddHost,
     ModeTailnet,
@@ -80,6 +90,9 @@ impl PickerControl {
         match self {
             Self::Row(index) => format!("connections-row-{}", key(index)),
             Self::Forget(index) => format!("connections-forget-{}", key(index)),
+            Self::Switch(index) => format!("connections-row-{}-enabled", key(index)),
+            Self::Pair(index) => format!("connections-row-{}-pair", key(index)),
+            Self::Reconnect(index) => format!("connections-row-{}-reconnect", key(index)),
             Self::AddHost => "connections-add-host".to_owned(),
             Self::ModeTailnet => "connections-add-mode-tailnet".to_owned(),
             Self::ModeSsh => "connections-add-mode-ssh".to_owned(),
@@ -120,17 +133,49 @@ impl PickerControl {
     }
 }
 
-/// Every control of a picker showing `rows`, in Tab order: each row then
-/// its Forget button; then `+ Add host`, or, while the add form shows in
-/// `add`'s mode, its two segments, that mode's fields and its buttons;
-/// Close last.
-fn control_ring(rows: &[Row], add: Option<AddMode>) -> Vec<PickerControl> {
+/// The controls a row draws beside itself, each after the row in Tab
+/// order: a saved host's switch, Pair and Reconnect now while they apply,
+/// and a saved host's Forget.
+#[derive(Debug, Clone, Copy, Default)]
+struct RowControls {
+    /// A saved host's switch and Forget.
+    saved: bool,
+    pair: bool,
+    reconnect: bool,
+}
+
+impl RowControls {
+    /// The controls `row` draws, by what the picker knows about it.
+    fn of(row: &Row, facts: &RowFacts) -> Self {
+        Self {
+            saved: row.kind == RowKind::Saved,
+            pair: offers_pair(facts),
+            reconnect: offers_reconnect(facts),
+        }
+    }
+
+    /// The row at `index`'s own controls, in Tab order after the row.
+    fn ring(self, index: usize) -> impl Iterator<Item = PickerControl> {
+        [
+            (self.saved, PickerControl::Switch(index)),
+            (self.pair, PickerControl::Pair(index)),
+            (self.reconnect, PickerControl::Reconnect(index)),
+            (self.saved, PickerControl::Forget(index)),
+        ]
+        .into_iter()
+        .filter_map(|(shown, control)| shown.then_some(control))
+    }
+}
+
+/// Every control of a picker whose rows draw `rows`, in Tab order: each
+/// row then its own controls; then `+ Add host`, or, while the add form
+/// shows in `add`'s mode, its two segments, that mode's fields and its
+/// buttons; Close last.
+fn control_ring(rows: &[RowControls], add: Option<AddMode>) -> Vec<PickerControl> {
     let mut ring = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         ring.push(PickerControl::Row(index));
-        if row.kind == RowKind::Saved {
-            ring.push(PickerControl::Forget(index));
-        }
+        ring.extend(row.ring(index));
     }
     match add {
         None => ring.push(PickerControl::AddHost),
@@ -142,6 +187,12 @@ fn control_ring(rows: &[Row], add: Option<AddMode>) -> Vec<PickerControl> {
     }
     ring.push(PickerControl::Close);
     ring
+}
+
+/// The host a row's connection is held under: This PC's or a saved host's;
+/// `None` for a peer, which the window never holds as a peer.
+fn row_host(row: &Row) -> Option<HostKey> {
+    (row.kind != RowKind::Peer).then(|| HostKey::of(&row.target))
 }
 
 /// The open picker: its model, the add form while it shows, the focus, the
@@ -228,7 +279,8 @@ impl RootView {
         self.connection_picker.is_some()
     }
 
-    /// Each row's label and whether it is the current target.
+    /// Each row's label and whether the window holds a connection to its
+    /// host.
     #[must_use]
     pub fn connection_picker_rows(&self) -> Vec<(String, bool)> {
         let Some(dialog) = &self.connection_picker else {
@@ -239,8 +291,8 @@ impl RootView {
             .rows()
             .into_iter()
             .map(|row| {
-                let current = row.target == *self.conn().target();
-                (row.label, current)
+                let held = row_host(&row).is_some_and(|key| self.conn_of(&key).is_some());
+                (row.label, held)
             })
             .collect()
     }
@@ -291,9 +343,11 @@ impl RootView {
         })
     }
 
-    /// What the picker knows about `row` for its second line and chip.
+    /// What the picker knows about `row` for its second line, chip and
+    /// buttons: a held host's state is that host's own connection's.
     fn row_facts(&self, dialog: &ConnectionPickerDialog, row: &Row) -> RowFacts {
-        let current = row.target == *self.conn().target();
+        let key = row_host(row);
+        let conn = key.as_ref().and_then(|key| self.conn_of(key));
         let host = match (row.kind, &row.target) {
             (RowKind::Local, _) => RowHost::ThisPc,
             (RowKind::Peer, _) => RowHost::Peer,
@@ -305,6 +359,10 @@ impl RootView {
             .host_key()
             .and_then(|key| self.sidebar.host_session_count(&key))
             .and_then(|count| usize::try_from(count).ok());
+        let live_sessions = key
+            .as_ref()
+            .filter(|_| conn.is_some())
+            .map(|key| self.sidebar.sessions_of(key).len());
         RowFacts {
             host,
             port: row.target.tailnet_host().map(TailnetHost::port),
@@ -313,16 +371,39 @@ impl RootView {
                 .ssh_host()
                 .and_then(SshHost::remote_command)
                 .map(str::to_owned),
-            current,
-            live: if current {
-                LiveState::from_state(self.conn().state())
-            } else {
-                None
-            },
+            enabled: row.kind != RowKind::Saved || dialog.picker.enabled(&row.target),
+            held: conn.is_some(),
+            live: conn.and_then(|conn| LiveState::from_state(conn.state())),
+            duplicate_of: key
+                .as_ref()
+                .and_then(|key| self.duplicate_of(key))
+                .map(|owner| self.host_label(owner)),
             has_token: !dialog.not_paired.contains(&row.label),
             sessions_last_time,
-            live_sessions: current.then(|| self.sidebar.local_sessions().len()),
+            live_sessions,
         }
+    }
+
+    /// `host`'s name in another row's "Same daemon as" chip: This PC, else
+    /// the short name of the target the window holds it on.
+    fn host_label(&self, host: &HostKey) -> String {
+        match host {
+            HostKey::Local => "This PC".to_owned(),
+            HostKey::Remote(name) => self
+                .conn_of(host)
+                .and_then(|conn| conn.target().short_name())
+                .map_or_else(|| name.clone(), str::to_owned),
+        }
+    }
+
+    /// Each row's own controls, in row order.
+    fn picker_row_controls(&self, dialog: &ConnectionPickerDialog) -> Vec<RowControls> {
+        dialog
+            .picker
+            .rows()
+            .iter()
+            .map(|row| RowControls::of(row, &self.row_facts(dialog, row)))
+            .collect()
     }
 
     /// The saved tailnet hosts this PC holds no device token for. A host
@@ -412,8 +493,8 @@ impl RootView {
             .collect()
     }
 
-    /// Connections: opens the picker over the saved hosts, focused on the
-    /// current target's row, and starts one Tailscale scan.
+    /// Connections: opens the picker over the saved hosts, focused on This
+    /// PC's row, and starts one Tailscale scan.
     pub fn open_connection_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.connection_picker.is_some() {
             return;
@@ -421,18 +502,13 @@ impl RootView {
         let saved = self.sidebar.ui_state().saved_hosts.clone();
         let not_paired = self.hosts_not_paired(&saved);
         let picker = ConnectionPicker::new(saved);
-        let current = picker
-            .rows()
-            .iter()
-            .position(|row| row.target == *self.conn().target())
-            .unwrap_or(0);
         let scan = self.start_connection_scan(window, cx);
         self.close_flyout();
         self.connection_picker = Some(ConnectionPickerDialog {
             picker,
             not_paired,
             add: None,
-            focus: PickerControl::Row(current),
+            focus: PickerControl::Row(0),
             error: None,
             _scan: scan,
         });
@@ -540,11 +616,11 @@ impl RootView {
 
     /// Steps the focus to the next control, or the previous one, wrapping.
     fn move_connection_picker_focus(&mut self, forward: bool) {
-        let Some(dialog) = &mut self.connection_picker else {
+        let Some(dialog) = &self.connection_picker else {
             return;
         };
         let mode = dialog.add.as_ref().map(|form| form.mode);
-        let ring = control_ring(&dialog.picker.rows(), mode);
+        let ring = control_ring(&self.picker_row_controls(dialog), mode);
         let at = ring
             .iter()
             .position(|control| *control == dialog.focus)
@@ -554,7 +630,7 @@ impl RootView {
         } else {
             (at + ring.len() - 1) % ring.len()
         };
-        if let Some(control) = ring.get(next) {
+        if let (Some(control), Some(dialog)) = (ring.get(next), &mut self.connection_picker) {
             dialog.focus = *control;
         }
     }
@@ -572,6 +648,9 @@ impl RootView {
         match control {
             PickerControl::Row(index) => self.pick_connection_row(index, window, cx),
             PickerControl::Forget(index) => self.forget_connection_row(index, window, cx),
+            PickerControl::Switch(index) => self.toggle_connection_row(index, window, cx),
+            PickerControl::Pair(index) => self.pair_connection_row(index, window, cx),
+            PickerControl::Reconnect(index) => self.reconnect_connection_row(index),
             PickerControl::AddHost => self.open_add_form(window, cx),
             PickerControl::ModeTailnet => self.set_add_mode(AddMode::Tailnet, window, cx),
             PickerControl::ModeSsh => self.set_add_mode(AddMode::Ssh, window, cx),
@@ -768,8 +847,9 @@ impl RootView {
         cx.notify();
     }
 
-    /// Add and connect: saves the host the form's mode holds and switches
-    /// to it (an SSH host tested or not), or shows why it is refused.
+    /// Add and connect: saves the host the form's mode holds, switched on,
+    /// and connects it (an SSH host tested or not), or shows why it is
+    /// refused.
     fn add_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.connection_picker.as_ref().and_then(|d| d.add.as_ref()) else {
             return;
@@ -785,73 +865,134 @@ impl RootView {
             ),
         };
         match typed {
-            Ok(target) => self.switch_to_target(target, window, cx),
+            Ok(target) => self.add_host(target, window, cx),
             Err(refusal) => self.refuse_typed_host(refusal, cx),
         }
     }
 
-    /// Connects to the row at `index`.
-    fn pick_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self
-            .connection_picker
+    /// The row at `index`, while the picker is open.
+    fn picker_row(&self, index: usize) -> Option<Row> {
+        self.connection_picker
             .as_ref()
             .and_then(|dialog| dialog.picker.rows().into_iter().nth(index))
-            .map(|row| row.target);
-        if let Some(target) = target {
-            self.switch_to_target(target, window, cx);
+    }
+
+    /// A pick of the row at `index`: a saved host's switch flips, a peer is
+    /// saved and connected as an added host, and This PC's does nothing.
+    fn pick_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.picker_row(index) else {
+            return;
+        };
+        match row.kind {
+            RowKind::Saved => self.toggle_connection_row(index, window, cx),
+            RowKind::Peer => self.add_host(row.target, window, cx),
+            RowKind::Local => {}
         }
     }
 
-    /// Closes the picker and, unless `target` is the current one, sends the
-    /// switch and saves a remote host among the saved hosts; only a tailnet
-    /// host waits for a "not approved" to open
-    /// the pairing dialog. The current host, while it does not know this
-    /// PC, opens the pairing dialog instead.
-    fn switch_to_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        let current = target == *self.conn().target();
-        let pair_current = current && self.device_pairing_offered();
-        if !current {
-            let host = SavedHost::from_target(&target);
-            if let (Some(host), Some(dialog)) = (host, &mut self.connection_picker) {
-                dialog.picker.remember(host);
-                self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
-            }
-            if pairs_on_switch(&target) {
-                self.pair_on_not_approved();
-            }
-            self.save_ui();
-            self.command_to(&HostKey::Local, NetCommand::SwitchTarget(target));
+    /// The Connected switch of the saved host at row `index`: switched on,
+    /// the host is saved enabled and connected; switched off, it is saved
+    /// disabled and its connection dropped, its sidebar rows left as they
+    /// stood. Neither sends anything to a daemon.
+    fn toggle_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self
+            .picker_row(index)
+            .filter(|row| row.kind == RowKind::Saved)
+        else {
+            return;
+        };
+        let Some(dialog) = &mut self.connection_picker else {
+            return;
+        };
+        let enabled = !dialog.picker.enabled(&row.target);
+        dialog.picker.set_enabled(&row.target, enabled);
+        self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
+        self.save_ui();
+        tracing::info!(
+            host = row.label.as_str(),
+            enabled,
+            "Connections: the host's switch moved"
+        );
+        if enabled {
+            self.connect_host(row.target, window, cx);
+        } else {
+            self.disconnect_host(&HostKey::of(&row.target));
         }
+        self.apply_connection_picker_focus(window, cx);
+    }
+
+    /// Pair on the row at `index`: the picker closes and the pairing dialog
+    /// opens for the row's host, now or on its next "not approved".
+    fn pair_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.picker_row(index) else {
+            return;
+        };
         self.close_connection_picker(window, cx);
-        if pair_current {
-            self.open_device_pairing(window, cx);
+        self.pair_with_host(&HostKey::of(&row.target), window, cx);
+    }
+
+    /// Reconnect now on the row at `index`: that host's network thread
+    /// redials; no other host's is touched.
+    fn reconnect_connection_row(&self, index: usize) {
+        if let Some(row) = self.picker_row(index) {
+            tracing::info!(
+                host = row.label.as_str(),
+                "Connections: reconnecting the host now"
+            );
+            self.command_to(&HostKey::of(&row.target), NetCommand::Restart);
         }
     }
 
-    /// Forget on the saved host at row `index`, its session count and a
-    /// tailnet host's device token deleted with it; forgetting the current
-    /// host switches to this PC. The picker stays open.
+    /// Add and connect, or a pick of a peer: saves `target`'s host switched
+    /// on and connects it, closing the picker. A host the window holds on
+    /// another port or remote command is dialled again on the new one.
+    fn add_host(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(host), Some(dialog)) =
+            (SavedHost::from_target(&target), &mut self.connection_picker)
+        else {
+            return;
+        };
+        dialog.picker.remember(host);
+        dialog.picker.set_enabled(&target, true);
+        self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
+        self.save_ui();
+        let key = HostKey::of(&target);
+        if self
+            .conn_of(&key)
+            .is_some_and(|conn| *conn.target() != target)
+        {
+            self.disconnect_host(&key);
+        }
+        self.connect_host(target, window, cx);
+        self.close_connection_picker(window, cx);
+    }
+
+    /// Forget on the saved host at row `index`: it is no longer saved, its
+    /// connection is dropped and its sidebar rows cleared, and its session
+    /// count and a tailnet host's device token go with it. This PC is
+    /// untouched and the picker stays open.
     fn forget_connection_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.conn().target().clone();
         let Some(dialog) = &mut self.connection_picker else {
             return;
         };
         let Some(row) = dialog.picker.rows().into_iter().nth(index) else {
             return;
         };
-        let was_current = dialog.picker.forget(&row.target, &current);
-        if let Some(key) = row.target.host_key() {
-            self.sidebar.forget_host_session_count(&key);
-        }
+        dialog.picker.forget(&row.target, &Target::Local);
         let rows = dialog.picker.rows().len();
         dialog.focus = PickerControl::Row(index.min(rows.saturating_sub(1)));
         self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());
-        if was_current {
-            self.command_to(&HostKey::Local, NetCommand::SwitchTarget(Target::Local));
+        if let Some(key) = row.target.host_key() {
+            self.sidebar.forget_host_session_count(&key);
+        }
+        let host = HostKey::of(&row.target);
+        if host != HostKey::Local {
+            self.disconnect_host(&host);
+            self.clear_remote_slice(&host, window, cx);
         }
         self.save_ui();
-        if let Target::Tailnet(host) = &row.target {
-            self.forget_device_token(host.name(), cx);
+        if let Target::Tailnet(tailnet) = &row.target {
+            self.forget_device_token(tailnet.name(), cx);
         }
         self.apply_connection_picker_focus(window, cx);
     }
@@ -1109,9 +1250,10 @@ fn host_row(
     let selector = control.selector(draw.rows);
     let group = SharedString::from(format!("connections-row-group-{index}"));
     let detail = row_detail(facts);
+    let controls = RowControls::of(row, facts);
     let saved = row.kind == RowKind::Saved;
     let forget_shown = forget_focused(draw.focus, index);
-    let trail = div()
+    let chip = div()
         .flex()
         .items_center()
         .gap(px(8.0))
@@ -1123,9 +1265,21 @@ fn host_row(
                 .as_ref()
                 .map(|state| state_chip(crate::fonts::ui_text_size(cx), row, state, &t)),
         )
-        .when(saved && forget_shown, |trail| trail.opacity(0.0))
-        .when(saved && !forget_shown, |trail| {
-            trail.group_hover(group.clone(), |style| style.opacity(0.0))
+        .when(saved && forget_shown, |chip| chip.opacity(0.0))
+        .when(saved && !forget_shown, |chip| {
+            chip.group_hover(group.clone(), |style| style.opacity(0.0))
+        });
+    // Forget lies over the chip alone, never over the switch beside it.
+    let trail = div()
+        .relative()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_end()
+        .when(saved, |trail| trail.min_w(px(FORGET_ROOM)))
+        .child(chip)
+        .when(saved, |trail| {
+            trail.child(forget_button(index, forget_shown, group.clone(), draw, cx))
         });
     let text = div()
         .flex_1()
@@ -1140,7 +1294,8 @@ fn host_row(
             &detail.line,
             group.clone(),
             &t,
-        ));
+        ))
+        .children(row_actions(index, controls, draw, cx));
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
         .debug_selector(move || selector)
@@ -1154,20 +1309,83 @@ fn host_row(
         .py(px(7.0))
         .rounded(px(ROW_RADIUS))
         .cursor_pointer()
-        .when(facts.current, |row| row.bg(gpui::rgb(t.selection)))
         .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
         .child(kind_tile(facts.host, &t))
         .child(text)
+        .children(row_switch(index, controls, facts.enabled, draw, cx))
         .child(trail)
-        .when(saved, |line| {
-            line.child(forget_button(index, forget_shown, group, draw, cx))
-        })
         .when(draw.focus == control, |row| {
             row.child(focus_ring(ROW_RADIUS, &theme(cx)))
         })
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.press_connection_control(control, window, cx);
         }))
+}
+
+/// A saved host's third line under its detail line: Pair and Reconnect
+/// now, while either applies.
+fn row_actions(
+    index: usize,
+    controls: RowControls,
+    draw: &Draw<'_>,
+    cx: &mut Context<RootView>,
+) -> Option<Div> {
+    if !controls.pair && !controls.reconnect {
+        return None;
+    }
+    let pair = controls.pair.then(|| {
+        control_button(
+            PickerControl::Pair(index),
+            ButtonKind::Outlined,
+            ButtonSize::Compact,
+            draw,
+            cx,
+        )
+        .child("Pair")
+    });
+    let reconnect = controls.reconnect.then(|| {
+        control_button(
+            PickerControl::Reconnect(index),
+            ButtonKind::Outlined,
+            ButtonSize::Compact,
+            draw,
+            cx,
+        )
+        .child("Reconnect now")
+    });
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .mt(px(6.0))
+            .children(pair)
+            .children(reconnect),
+    )
+}
+
+/// A saved host's On switch, ticked while it is `enabled`.
+fn row_switch(
+    index: usize,
+    controls: RowControls,
+    enabled: bool,
+    draw: &Draw<'_>,
+    cx: &mut Context<RootView>,
+) -> Option<Stateful<Div>> {
+    controls.saved.then(|| {
+        let control = PickerControl::Switch(index);
+        checkbox_row(
+            &control.selector(draw.rows),
+            enabled,
+            draw.focus == control,
+            div().text_size(px(11.5)).child("On"),
+        )
+        .flex_none()
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            cx.stop_propagation();
+            this.press_connection_control(control, window, cx);
+        }))
+    })
 }
 
 /// Whether the keyboard focus shows the Forget button of the row at
@@ -1205,7 +1423,7 @@ fn forget_button(
         .absolute()
         .top_0()
         .bottom_0()
-        .right(px(10.0))
+        .right_0()
         .flex()
         .items_center()
         .child(button)
@@ -1360,8 +1578,9 @@ fn dot(size: f32, color: u32) -> Div {
         .bg(gpui::rgb(color))
 }
 
-/// The chip at a row's trail: a dot and the state for the current row, an
-/// amber tag for one that needs pairing.
+/// The chip at a row's trail: a dot and the state for a held host, an
+/// amber tag for one that needs pairing, faint text for one switched off
+/// or reaching another host's daemon.
 fn state_chip(offset: i8, row: &Row, state: &RowState, t: &UiTheme) -> Div {
     let label = state.label();
     let selector = format!("connections-state-{}", row.key());
@@ -1376,11 +1595,15 @@ fn state_chip(offset: i8, row: &Row, state: &RowState, t: &UiTheme) -> Div {
         RowState::Connected => dotted(selector, t.status_ok, label),
         RowState::Disconnected { .. } => dotted(selector, t.status_idle, label),
         RowState::Connecting => div().debug_selector(move || selector).child(label),
+        RowState::Off | RowState::SameDaemonAs { .. } => div()
+            .debug_selector(move || selector)
+            .text_color(gpui::rgb(FAINT))
+            .child(label),
     }
 }
 
 /// `label` after a 7 px dot of `color`.
-fn dotted(selector: String, color: u32, label: &'static str) -> Div {
+fn dotted(selector: String, color: u32, label: String) -> Div {
     div()
         .debug_selector(move || selector)
         .flex()
@@ -1391,7 +1614,7 @@ fn dotted(selector: String, color: u32, label: &'static str) -> Div {
 }
 
 /// An amber tag reading `label`.
-fn tag(offset: i8, selector: String, label: &'static str, t: &UiTheme) -> Div {
+fn tag(offset: i8, selector: String, label: String, t: &UiTheme) -> Div {
     div()
         .debug_selector(move || selector)
         .flex()

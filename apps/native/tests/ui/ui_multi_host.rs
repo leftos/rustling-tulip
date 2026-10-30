@@ -15,7 +15,7 @@ use protocol::{
 use rustling_tulip_native::ScKey;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, NetEvent, toast_action_selector};
+use rustling_tulip_native::{Connection, NetCommand, NetEvent, toast_action_selector};
 use support::{
     Fixture, Harness, PROTOCOL, TestDir, facts, facts_message, history_item, pane, repo, session,
     tab, welcome,
@@ -1484,4 +1484,104 @@ fn a_welcome_without_a_daemon_id_is_never_a_duplicate(cx: &mut TestAppContext) {
     assert_eq!(duplicate_of(&mut h, &remote()), None);
     assert_eq!(duplicate_of(&mut h, &ssh_box()), None);
     assert_eq!(shown_leaves(&mut h), ["a1", "b1", "c1"]);
+}
+
+#[gpui::test]
+fn a_paired_event_from_another_host_leaves_the_dialog_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": REMOTE, "port": 8787 },
+            { "name": OTHER, "port": 8787 },
+        ] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let other = Target::tailnet(OTHER, None);
+    h.host(&other).connect();
+    let mut refused = Connection::for_target(remote());
+    refused.on_connecting();
+    refused.on_socket_open(8787);
+    refused.on_not_approved(protocol::DEVICE_NOT_APPROVED.to_owned(), false);
+    h.host(&remote()).event(NetEvent::State(refused));
+    h.root_update(rustling_tulip_native::RootView::open_connection_picker);
+    h.click_on(&format!("connections-row-{REMOTE}-pair"));
+    assert!(h.root(|root, _| root.device_pairing_open()));
+
+    h.host(&other).event(NetEvent::Paired);
+
+    assert!(
+        h.root(|root, _| root.device_pairing_open()),
+        "another host's pairing never ends this one's dialog"
+    );
+}
+
+/// `s1` in repo `r1` (registered at `D:/src/r1`, the session on its main
+/// tree), shown in pane `p1` of tab `t1`.
+fn r1_fixture() -> Fixture {
+    let mut fixture = Fixture::single(
+        session("s1")
+            .members(&[("r1", "main", "D:/src/r1")])
+            .build(),
+    );
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    fixture
+}
+
+/// This PC's connection open on the fake daemon's port and welcomed.
+fn this_pc_open() -> Connection {
+    let mut conn = Connection::for_target(Target::Local);
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(PROTOCOL, support::daemon_features());
+    conn
+}
+
+#[gpui::test]
+fn same_target_reconnect_keeps_the_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &r1_fixture());
+
+    let mut dropped = this_pc_open();
+    let _ = dropped.on_closed("socket closed".to_owned());
+    h.set_connection(dropped);
+    h.set_connection(this_pc_open());
+    assert_eq!(
+        shown_leaves(&mut h),
+        ["s1"],
+        "the rows stay until the daemon's lists"
+    );
+    assert_eq!(h.root(|root, _| root.tab_ids()), ["t1"]);
+    assert_eq!(h.root(|root, _| root.active_pane_ids()), ["p1"]);
+}
+
+#[gpui::test]
+fn quit_sends_shutdown_only_to_this_pc(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &r1_fixture());
+    h.host(&remote()).connect();
+    h.sent();
+    let closed = h.cx.simulate_close();
+    h.cx.run_until_parked();
+    assert!(!closed, "an active session keeps the window open");
+    assert!(h.root(|root, _| root.exit_dialog_open()));
+    h.commands();
+    h.host(&remote()).commands();
+
+    h.click_on("exit-stop-keep-worktrees");
+
+    let local = h.commands();
+    assert!(
+        local
+            .iter()
+            .any(|command| matches!(command, NetCommand::Shutdown { .. } | NetCommand::Stop)),
+        "This PC's daemon is stopped: {local:?}"
+    );
+    let remote_commands = h.host(&remote()).commands();
+    assert!(
+        !remote_commands
+            .iter()
+            .any(|command| matches!(command, NetCommand::Shutdown { .. } | NetCommand::Stop)),
+        "the remote host's daemon is neither shut down nor stopped: {remote_commands:?}"
+    );
 }

@@ -1,8 +1,9 @@
 //! Device pairing specs: this PC pairing itself with a tailnet host that
-//! answers "not approved". The dialog opens on the owner's pick or from the
-//! footer pill, never by itself at boot; its buttons and keys send the
-//! pairing commands to the network thread; the host picker tags a saved host
-//! this PC holds no token for, and Forget deletes the host's token.
+//! answers "not approved". The dialog opens from the Pair button on the
+//! host's Connections row, never by itself at launch; its buttons and keys
+//! send the pairing commands to that host's network thread; the host picker
+//! tags a saved host this PC holds no token for, and Forget deletes the
+//! host's token.
 
 #![expect(
     clippy::expect_used,
@@ -17,7 +18,7 @@ use protocol::{DEVICE_NOT_APPROVED, DaemonMessage, DevicePairOutcome};
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
 use serde_json::json;
-use support::{Fixture, Harness, TestDir};
+use support::{Harness, TestDir};
 
 const HOST: &str = "box.tail1234.ts.net";
 const OTHER: &str = "den.tail1234.ts.net";
@@ -41,45 +42,48 @@ fn not_approved(had_token: bool) -> Connection {
     conn
 }
 
-/// Saves `hosts` as the picker's hosts, with this PC as the boot target.
-fn seed_saved_hosts(dir: &TestDir, hosts: &[&str]) {
-    let saved: Vec<serde_json::Value> = hosts
-        .iter()
-        .map(|name| json!({ "name": name, "port": 8787 }))
-        .collect();
+/// Saves `hosts` as the picker's hosts, each switched on.
+fn seed_saved_hosts(dir: &TestDir, hosts: &[serde_json::Value]) {
     std::fs::write(
         dir.path().join("native-ui.json"),
-        json!({ "saved_hosts": saved }).to_string(),
+        json!({ "saved_hosts": hosts }).to_string(),
     )
     .expect("seed native-ui.json");
+}
+
+fn tailnet_entry(name: &str) -> serde_json::Value {
+    json!({ "name": name, "port": 8787 })
+}
+
+/// Whether the last frame drew what `selector` tags.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).size.width > gpui::px(0.0)
 }
 
 fn open_picker(h: &mut Harness<'_>) {
     h.root_update(RootView::open_connection_picker);
 }
 
-/// Picks the saved [`HOST`] in the Connections picker, which asks the
-/// network thread to switch to it.
-fn pick_host(h: &mut Harness<'_>) {
-    open_picker(h);
-    h.commands();
-    h.click_on(&format!("connections-row-{HOST}"));
-    assert!(
-        h.commands()
-            .iter()
-            .any(|command| matches!(command, NetCommand::SwitchTarget(t) if *t == host())),
-        "the pick switches to the host"
-    );
+/// Reports `conn` on [`HOST`]'s connection.
+fn host_state(h: &mut Harness<'_>, conn: Connection) {
+    h.host(&host()).event(NetEvent::State(conn));
 }
 
-/// The window on this PC, the owner picking [`HOST`], which answers "not
-/// approved": the dialog is open in its Intro phase.
+/// The commands sent to [`HOST`]'s network thread since the last look.
+fn host_commands(h: &mut Harness<'_>) -> Vec<NetCommand> {
+    h.host(&host()).commands()
+}
+
+/// The window connected to the saved [`HOST`] at launch, which answers "not
+/// approved", the owner pressing its row's Pair: the dialog is open in its
+/// Intro phase.
 fn picked<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
-    seed_saved_hosts(dir, &[HOST]);
+    seed_saved_hosts(dir, &[tailnet_entry(HOST)]);
     let mut h = Harness::open(cx, dir);
-    pick_host(&mut h);
-    h.set_connection(connecting());
-    h.set_connection(not_approved(false));
+    host_state(&mut h, connecting());
+    host_state(&mut h, not_approved(false));
+    open_picker(&mut h);
+    h.click_on(&format!("connections-row-{HOST}-pair"));
     assert!(h.root(|root, _| root.device_pairing_open()));
     h
 }
@@ -96,7 +100,7 @@ fn buttons(h: &mut Harness<'_>) -> Vec<&'static str> {
 fn waiting<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     let mut h = picked(cx, dir);
     h.click_on("device-pairing-ask");
-    h.send(DaemonMessage::DevicePairPending {
+    h.host(&host()).send(DaemonMessage::DevicePairPending {
         request_id: "r1".to_owned(),
         expires_in_secs: 300,
     });
@@ -106,27 +110,39 @@ fn waiting<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
 /// The dialog after the owner approved on the host: the code field shows.
 fn code_entry<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     let mut h = waiting(cx, dir);
-    h.send(DaemonMessage::DevicePairDecided {
+    h.host(&host()).send(DaemonMessage::DevicePairDecided {
         request_id: "r1".to_owned(),
         outcome: DevicePairOutcome::Approved,
     });
-    h.commands();
+    host_commands(&mut h);
     h
 }
 
 #[gpui::test]
-fn picking_an_unpaired_host_opens_the_pairing_dialog(cx: &mut TestAppContext) {
+fn pair_on_an_unpaired_row_opens_the_dialog_for_that_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    seed_saved_hosts(&dir, &[HOST]);
+    seed_saved_hosts(&dir, &[tailnet_entry(HOST), tailnet_entry(OTHER)]);
     let mut h = Harness::open(cx, &dir);
-    pick_host(&mut h);
+    h.tokens()
+        .set(OTHER, "device-token")
+        .expect("store the token");
+    h.host(&Target::tailnet(OTHER, None)).connect();
+    host_state(&mut h, connecting());
+    open_picker(&mut h);
+    assert!(
+        !drawn(&mut h, &format!("connections-row-{OTHER}-pair")),
+        "a paired, connected host offers no Pair"
+    );
+    h.commands();
 
-    h.set_connection(connecting());
+    h.click_on(&format!("connections-row-{HOST}-pair"));
+    assert!(!h.root(|root, _| root.connection_picker_open()));
     assert!(
         !h.root(|root, _| root.device_pairing_open()),
         "nothing opens while the host is still being dialled"
     );
-    h.set_connection(not_approved(false));
+    host_state(&mut h, not_approved(false));
+
     assert!(h.root(|root, _| root.device_pairing_open()));
     assert_eq!(
         h.root(|root, _| root.device_pairing_title()).as_deref(),
@@ -137,41 +153,46 @@ fn picking_an_unpaired_host_opens_the_pairing_dialog(cx: &mut TestAppContext) {
         Some("box.tail1234.ts.net does not know this PC.")
     );
     assert_eq!(buttons(&mut h), ["Ask to pair", "Close"]);
-    assert!(h.commands().is_empty(), "opening sends nothing");
+    assert!(host_commands(&mut h).is_empty(), "opening sends nothing");
+    assert!(h.commands().is_empty(), "nor asks This PC for anything");
 }
 
 #[gpui::test]
-fn boot_onto_an_unpaired_host_opens_nothing(cx: &mut TestAppContext) {
+fn pair_on_a_not_approved_row_opens_the_dialog_at_once(cx: &mut TestAppContext) {
     let dir = TestDir::new();
+    seed_saved_hosts(&dir, &[tailnet_entry(HOST)]);
     let mut h = Harness::open(cx, &dir);
-    h.commands();
-
-    h.set_connection(connecting());
-    h.set_connection(not_approved(false));
-    assert!(
-        !h.root(|root, _| root.device_pairing_open()),
-        "no pick and no Reconnect: only the footer says it"
-    );
-    assert!(h.commands().is_empty());
-}
-
-#[gpui::test]
-fn the_pill_opens_the_dialog_while_not_paired(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::on_target(cx, &dir, host(), &Fixture::default());
-    let mut refused = Connection::for_target(host());
-    refused.on_connecting();
+    h.tokens()
+        .set(HOST, "device-token")
+        .expect("store the token");
+    let mut refused = connecting();
     refused.on_socket_open(8787);
-    refused.on_welcome(support::PROTOCOL, support::daemon_features());
     refused.on_not_approved(DEVICE_NOT_APPROVED.to_owned(), true);
-    h.set_connection(refused);
-    assert!(!h.root(|root, _| root.device_pairing_open()));
+    host_state(&mut h, refused);
+    open_picker(&mut h);
 
-    h.click_on("daemon-pill");
+    h.click_on(&format!("connections-row-{HOST}-pair"));
+
     assert!(h.root(|root, _| root.device_pairing_open()));
     assert_eq!(
         line(&mut h).as_deref(),
         Some("box.tail1234.ts.net no longer accepts this PC's pairing.")
+    );
+}
+
+#[gpui::test]
+fn an_ssh_row_has_no_pair_button(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_saved_hosts(&dir, &[json!({ "kind": "ssh", "name": "devbox" })]);
+    let mut h = Harness::open(cx, &dir);
+
+    open_picker(&mut h);
+
+    assert!(drawn(&mut h, "connections-row-ssh:devbox"));
+    assert!(!drawn(&mut h, "connections-row-ssh:devbox-pair"));
+    assert!(
+        !drawn(&mut h, "connections-row-This PC-pair"),
+        "nor does This PC's"
     );
 }
 
@@ -182,15 +203,16 @@ fn ask_to_pair_sends_pair_request(cx: &mut TestAppContext) {
 
     h.click_on("device-pairing-ask");
     assert!(
-        h.commands()
+        host_commands(&mut h)
             .iter()
             .any(|command| matches!(command, NetCommand::PairRequest)),
-        "Ask to pair asks the network thread"
+        "Ask to pair asks the host's network thread"
     );
+    assert!(h.commands().is_empty(), "This PC is asked for nothing");
     assert_eq!(line(&mut h).as_deref(), Some("Asking box.tail1234.ts.net…"));
     assert_eq!(buttons(&mut h), ["Cancel"]);
 
-    h.send(DaemonMessage::DevicePairPending {
+    h.host(&host()).send(DaemonMessage::DevicePairPending {
         request_id: "r1".to_owned(),
         expires_in_secs: 300,
     });
@@ -226,8 +248,7 @@ fn enter_submits_the_code(cx: &mut TestAppContext) {
         "only digits, at most six, stay in the field"
     );
     h.keys("enter");
-    let redeemed: Vec<String> = h
-        .commands()
+    let redeemed: Vec<String> = host_commands(&mut h)
         .into_iter()
         .filter_map(|command| match command {
             NetCommand::PairRedeem { code } => Some(code),
@@ -247,11 +268,10 @@ fn enter_submits_the_code(cx: &mut TestAppContext) {
 fn esc_while_waiting_sends_pair_cancel_and_closes(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = waiting(cx, &dir);
-    h.commands();
+    host_commands(&mut h);
 
     h.keys("escape");
-    let cancels = h
-        .commands()
+    let cancels = host_commands(&mut h)
         .iter()
         .filter(|command| matches!(command, NetCommand::PairCancel))
         .count();
@@ -264,10 +284,10 @@ fn paired_closes_the_dialog(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = code_entry(cx, &dir);
 
-    h.event(NetEvent::Paired);
+    h.host(&host()).event(NetEvent::Paired);
     assert!(!h.root(|root, _| root.device_pairing_open()));
     assert!(
-        !h.commands()
+        !host_commands(&mut h)
             .iter()
             .any(|command| matches!(command, NetCommand::PairCancel)),
         "a pairing that succeeded is not withdrawn"
@@ -280,7 +300,7 @@ fn token_save_failed_keeps_the_dialog_with_its_line(cx: &mut TestAppContext) {
     let mut h = code_entry(cx, &dir);
     h.keys("1 2 3 4 5 6 enter");
 
-    h.event(NetEvent::TokenSaveFailed);
+    h.host(&host()).event(NetEvent::TokenSaveFailed);
     assert!(h.root(|root, _| root.device_pairing_open()));
     assert_eq!(
         line(&mut h).as_deref(),
@@ -289,17 +309,17 @@ fn token_save_failed_keeps_the_dialog_with_its_line(cx: &mut TestAppContext) {
     assert_eq!(buttons(&mut h), ["Ask again", "Close"]);
 }
 
-/// The dialog ended by a lost socket, then Ask again pressed: the network
-/// thread redials to ask.
+/// The dialog ended by a lost socket, then Ask again pressed: the host's
+/// network thread redials to ask.
 fn asked_again(h: &mut Harness<'_>) {
-    h.event(NetEvent::PairingLost);
+    h.host(&host()).event(NetEvent::PairingLost);
     assert_eq!(buttons(h), ["Ask again", "Close"]);
     h.click_on("device-pairing-ask-again");
     assert!(
-        h.commands()
+        host_commands(h)
             .iter()
             .any(|command| matches!(command, NetCommand::PairRequest)),
-        "Ask again asks the network thread"
+        "Ask again asks the host's network thread"
     );
 }
 
@@ -309,17 +329,17 @@ fn a_failed_redial_after_ask_again_withdraws_the_request(cx: &mut TestAppContext
     let mut h = waiting(cx, &dir);
     asked_again(&mut h);
 
-    h.set_connection(connecting());
+    host_state(&mut h, connecting());
     assert!(
         h.root(|root, _| root.device_pairing_open()),
         "the redial is under way"
     );
     let mut dropped = connecting();
     let _ = dropped.on_closed("connection refused".to_owned());
-    h.set_connection(dropped);
+    host_state(&mut h, dropped);
     assert!(!h.root(|root, _| root.device_pairing_open()));
     assert!(
-        h.commands()
+        host_commands(&mut h)
             .iter()
             .any(|command| matches!(command, NetCommand::PairCancel)),
         "the request the next redial would send is withdrawn"
@@ -333,11 +353,12 @@ fn ask_again_shows_an_empty_code_field(cx: &mut TestAppContext) {
     h.keys("1 2 3 4 5 6");
     asked_again(&mut h);
 
-    h.send(DaemonMessage::DevicePairPending {
+    let mut host = h.host(&host());
+    host.send(DaemonMessage::DevicePairPending {
         request_id: "r2".to_owned(),
         expires_in_secs: 300,
     });
-    h.send(DaemonMessage::DevicePairDecided {
+    host.send(DaemonMessage::DevicePairDecided {
         request_id: "r2".to_owned(),
         outcome: DevicePairOutcome::Approved,
     });
@@ -354,12 +375,12 @@ fn a_refused_code_returns_focus_to_the_field(cx: &mut TestAppContext) {
     let mut h = code_entry(cx, &dir);
     h.keys("1 2 3 4 5 6 tab enter");
     assert!(
-        h.commands()
+        host_commands(&mut h)
             .iter()
             .any(|command| matches!(command, NetCommand::PairRedeem { .. })),
         "Enter on the focused Pair sends the code"
     );
-    h.send(DaemonMessage::DevicePairFailed {
+    h.host(&host()).send(DaemonMessage::DevicePairFailed {
         reason: "That code is not right.".to_owned(),
     });
 
@@ -375,7 +396,7 @@ fn a_refused_code_returns_focus_to_the_field(cx: &mut TestAppContext) {
 fn waiting_dialog_takes_a_cli_minted_code(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = waiting(cx, &dir);
-    h.commands();
+    host_commands(&mut h);
     assert_eq!(h.root(RootView::device_pairing_code), None);
 
     h.click_on("device-pairing-have-code");
@@ -386,8 +407,7 @@ fn waiting_dialog_takes_a_cli_minted_code(cx: &mut TestAppContext) {
     );
     assert_eq!(buttons(&mut h), ["Pair", "Cancel"]);
     h.keys("1 2 3 4 5 6 enter");
-    let redeemed: Vec<String> = h
-        .commands()
+    let redeemed: Vec<String> = host_commands(&mut h)
         .into_iter()
         .filter_map(|command| match command {
             NetCommand::PairRedeem { code } => Some(code),
@@ -396,7 +416,7 @@ fn waiting_dialog_takes_a_cli_minted_code(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(redeemed, ["123456"], "the code goes to the host");
 
-    h.send(DaemonMessage::DevicePairFailed {
+    h.host(&host()).send(DaemonMessage::DevicePairFailed {
         reason: "That code is not right.".to_owned(),
     });
     assert_eq!(
@@ -405,7 +425,7 @@ fn waiting_dialog_takes_a_cli_minted_code(cx: &mut TestAppContext) {
     );
 
     h.keys("4 2");
-    h.send(DaemonMessage::DevicePairDecided {
+    h.host(&host()).send(DaemonMessage::DevicePairDecided {
         request_id: "r1".to_owned(),
         outcome: DevicePairOutcome::Approved,
     });
@@ -421,30 +441,9 @@ fn waiting_dialog_takes_a_cli_minted_code(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn picking_the_current_unpaired_host_opens_the_dialog(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    seed_saved_hosts(&dir, &[HOST]);
-    let mut h = Harness::open(cx, &dir);
-    h.set_connection(connecting());
-    h.set_connection(not_approved(false));
-    assert!(!h.root(|root, _| root.device_pairing_open()));
-
-    open_picker(&mut h);
-    h.commands();
-    h.click_on(&format!("connections-row-{HOST}"));
-    assert!(h.root(|root, _| root.device_pairing_open()));
-    assert_eq!(buttons(&mut h), ["Ask to pair", "Close"]);
-    assert!(!h.root(|root, _| root.connection_picker_open()));
-    assert!(
-        h.commands().is_empty(),
-        "the current host is not switched to again"
-    );
-}
-
-#[gpui::test]
 fn the_picker_tags_an_unpaired_saved_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    seed_saved_hosts(&dir, &[HOST, OTHER]);
+    seed_saved_hosts(&dir, &[tailnet_entry(HOST), tailnet_entry(OTHER)]);
     let mut h = Harness::open(cx, &dir);
     h.tokens()
         .set(HOST, "device-token")
@@ -461,7 +460,7 @@ fn the_picker_tags_an_unpaired_saved_host(cx: &mut TestAppContext) {
 #[gpui::test]
 fn forget_deletes_the_hosts_token(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    seed_saved_hosts(&dir, &[HOST]);
+    seed_saved_hosts(&dir, &[tailnet_entry(HOST)]);
     let mut h = Harness::open(cx, &dir);
     h.tokens()
         .set(HOST, "device-token")
@@ -470,7 +469,7 @@ fn forget_deletes_the_hosts_token(cx: &mut TestAppContext) {
 
     h.click_on(&format!("connections-forget-{HOST}"));
     assert_eq!(
-        h.tokens().get(HOST).expect("read the store"),
+        h.tokens().get(HOST).expect("read the token"),
         None,
         "Forget deletes the host's device token"
     );

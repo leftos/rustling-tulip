@@ -4,6 +4,7 @@
 //! The model is [`crate::device_pairing`]; the network thread stores the
 //! token the host issues.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::{
@@ -79,8 +80,10 @@ enum DeviceControl {
     Button(DeviceButton),
 }
 
-/// The open dialog: its model, its code field and the control Tab moved to.
+/// The open dialog: the host it pairs with, its model, its code field and
+/// the control Tab moved to.
 struct DevicePairingDialog {
+    host: HostKey,
     model: DevicePairing,
     code_input: Entity<TextInput>,
     control: Option<DeviceControl>,
@@ -88,14 +91,14 @@ struct DevicePairingDialog {
 }
 
 /// The pairing dialog with what only the screen needs: its keyboard focus,
-/// the owner's pick or Reconnect waiting for the host's answer, and the
+/// the hosts whose answer the owner's Pair or Reconnect waits for, and the
 /// countdown's redraw tick.
 pub(crate) struct DevicePairingView {
     dialog: Option<DevicePairingDialog>,
     focus: FocusHandle,
-    /// Set by a pick of a tailnet host or a Reconnect: the connection's next
-    /// "not approved" opens the dialog.
-    pair_on_not_approved: bool,
+    /// The hosts the owner asked to pair with or reconnected: each one's
+    /// next "not approved" opens the dialog for it.
+    pair_on_not_approved: HashSet<HostKey>,
     /// The countdown as last drawn, so a tick redraws only on a change.
     drawn: Option<String>,
     tick: Option<Task<()>>,
@@ -106,7 +109,7 @@ impl DevicePairingView {
         Self {
             dialog: None,
             focus,
-            pair_on_not_approved: false,
+            pair_on_not_approved: HashSet::new(),
             drawn: None,
             tick: None,
         }
@@ -197,36 +200,63 @@ impl RootView {
             .map(|dialog| &dialog.model)
     }
 
-    /// The owner picked a tailnet host or pressed Reconnect: if the host
-    /// answers "not approved", the dialog opens by itself.
-    pub(crate) fn pair_on_not_approved(&mut self) {
-        self.device_pairing.pair_on_not_approved = true;
+    /// The owner asked to pair with `host` or reconnected it: if it answers
+    /// "not approved", the dialog opens for it by itself.
+    pub(crate) fn pair_on_not_approved(&mut self, host: HostKey) {
+        self.device_pairing.pair_on_not_approved.insert(host);
     }
 
-    /// Whether the connection is a pairing one, so the footer pill opens
-    /// the dialog instead of the flyout.
-    pub(crate) fn device_pairing_offered(&self) -> bool {
-        matches!(self.conn().state(), State::NotApproved { .. })
+    /// Whether the open dialog pairs with `host`.
+    fn device_pairing_is_for(&self, host: &HostKey) -> bool {
+        self.device_pairing
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.host == *host)
     }
 
-    /// Opens the dialog for the connection's host in its Intro phase,
-    /// replacing one already open; sends nothing.
-    pub(crate) fn open_device_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let State::NotApproved { had_token, .. } = self.conn().state() else {
+    /// Pair on `host`'s Connections row: the dialog opens for it now while
+    /// the host says "not approved", else on its next "not approved".
+    pub(crate) fn pair_with_host(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let not_approved = self
+            .conn_of(host)
+            .is_some_and(|conn| matches!(conn.state(), State::NotApproved { .. }));
+        if not_approved {
+            self.open_device_pairing(host, window, cx);
+        } else {
+            self.pair_on_not_approved(host.clone());
+        }
+    }
+
+    /// Opens the dialog for `host` in its Intro phase while its connection
+    /// is a pairing one, replacing one already open; sends nothing.
+    pub(crate) fn open_device_pairing(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conn) = self.conn_of(host) else {
+            tracing::warn!(
+                ?host,
+                "device pairing: no connection to the host; no dialog"
+            );
+            return;
+        };
+        let State::NotApproved { had_token, .. } = conn.state() else {
             return;
         };
         let had_token = *had_token;
-        let Some(host) = self
-            .conn()
-            .target()
-            .tailnet_host()
-            .map(|h| h.name().to_owned())
-        else {
+        let Some(name) = conn.target().tailnet_host().map(|h| h.name().to_owned()) else {
             tracing::warn!("a pairing connection that is not to a tailnet host; no dialog");
             return;
         };
         tracing::info!(
-            host = host.as_str(),
+            host = name.as_str(),
             had_token,
             "device pairing: the dialog opens"
         );
@@ -234,7 +264,8 @@ impl RootView {
         let code_input = cx.new(|cx| TextInput::new(String::new(), CODE_PLACEHOLDER, cx));
         let subscriptions = Self::watch_device_code_field(&code_input, window, cx);
         self.device_pairing.dialog = Some(DevicePairingDialog {
-            model: DevicePairing::new(&host, had_token),
+            host: host.clone(),
+            model: DevicePairing::new(&name, had_token),
             code_input,
             control: None,
             _subscriptions: subscriptions,
@@ -262,7 +293,7 @@ impl RootView {
         };
         if dialog.model.cancels_request() {
             tracing::info!("device pairing: withdrawing the request");
-            self.command_to(&HostKey::Local, NetCommand::PairCancel);
+            self.command_to(&dialog.host, NetCommand::PairCancel);
         }
         self.close_device_pairing(window, cx);
     }
@@ -276,7 +307,8 @@ impl RootView {
             dialog.control = None;
             clear_code_field(dialog, cx);
             tracing::info!("device pairing: asking the host");
-            self.command_to(&HostKey::Local, NetCommand::PairRequest);
+            let host = dialog.host.clone();
+            self.command_to(&host, NetCommand::PairRequest);
             self.apply_device_pairing_focus(window, cx);
         }
         self.sync_device_pairing(window, cx);
@@ -294,7 +326,8 @@ impl RootView {
         clear_code_field(dialog, cx);
         dialog.control = Some(DeviceControl::Field);
         tracing::info!("device pairing: sending the code");
-        self.command_to(&HostKey::Local, NetCommand::PairRedeem { code });
+        let host = dialog.host.clone();
+        self.command_to(&host, NetCommand::PairRedeem { code });
         self.apply_device_pairing_focus(window, cx);
     }
 
@@ -343,7 +376,28 @@ impl RootView {
     /// Follows a network event: the connection opens or closes the dialog,
     /// the host's messages move its phase, and the network thread's pairing
     /// outcomes end it.
+    /// An event from a host other than the dialog's leaves the dialog alone.
     pub(crate) fn on_device_pairing_input(
+        &mut self,
+        host: &HostKey,
+        input: PairingInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let PairingInput::State = input {
+            self.follow_connection_for_pairing(host, window, cx);
+        } else if self.device_pairing_is_for(host) {
+            self.on_dialog_host_input(input, window, cx);
+        } else if let PairingInput::TokenSaveFailed = input {
+            tracing::warn!(
+                ?host,
+                "device pairing: the token was lost with no dialog open for the host"
+            );
+        }
+    }
+
+    /// A pairing event from the dialog's own host.
+    fn on_dialog_host_input(
         &mut self,
         input: PairingInput,
         window: &mut Window,
@@ -352,7 +406,7 @@ impl RootView {
         let now = (self.now)();
         let before = self.device_pairing_model().map(DevicePairing::kind);
         match input {
-            PairingInput::State => self.follow_connection_for_pairing(window, cx),
+            PairingInput::State => {}
             PairingInput::Paired => {
                 tracing::info!("device pairing: paired; the dialog closes");
                 self.close_device_pairing(window, cx);
@@ -375,8 +429,6 @@ impl RootView {
             PairingInput::TokenSaveFailed => {
                 if let Some(dialog) = &mut self.device_pairing.dialog {
                     dialog.model.on_token_save_failed();
-                } else {
-                    tracing::warn!("device pairing: the token was lost with no dialog open");
                 }
             }
         }
@@ -394,24 +446,40 @@ impl RootView {
         self.sync_device_pairing(window, cx);
     }
 
-    /// A "not approved" the owner's pick or Reconnect waited for opens the
-    /// dialog; a connection that opened or was refused otherwise closes it,
-    /// and one that failed withdraws a request still out, so no later
-    /// redial asks with no dialog to finish it. While the host is still
-    /// being dialled the dialog stays as it is.
-    fn follow_connection_for_pairing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.conn().state() {
+    /// `host`'s connection moved: a "not approved" the owner's Pair or
+    /// Reconnect waited for opens the dialog for it; a connection that
+    /// opened or was refused otherwise closes its dialog, and one that
+    /// failed withdraws a request still out, so no later redial asks with
+    /// no dialog to finish it. While the host is still being dialled its
+    /// dialog stays as it is. Another host's dialog is left alone.
+    fn follow_connection_for_pairing(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.conn_of(host).map(|conn| conn.state().clone()) else {
+            return;
+        };
+        let ours = self.device_pairing_is_for(host);
+        match state {
             State::NotApproved { .. } => {
-                if std::mem::take(&mut self.device_pairing.pair_on_not_approved) {
-                    self.open_device_pairing(window, cx);
+                if self.device_pairing.pair_on_not_approved.remove(host) {
+                    self.open_device_pairing(host, window, cx);
                 }
             }
             State::Init | State::Connecting => {}
             State::Open { .. } | State::AuthFailed { .. } => {
-                self.device_pairing.pair_on_not_approved = false;
-                self.close_device_pairing(window, cx);
+                self.device_pairing.pair_on_not_approved.remove(host);
+                if ours {
+                    self.close_device_pairing(window, cx);
+                }
             }
-            State::Closed { .. } | State::Error { .. } => self.cancel_device_pairing(window, cx),
+            State::Closed { .. } | State::Error { .. } => {
+                if ours {
+                    self.cancel_device_pairing(window, cx);
+                }
+            }
         }
     }
 

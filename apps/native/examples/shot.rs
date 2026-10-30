@@ -396,12 +396,12 @@ const SHOT_SSH_TYPED: &str = "me@devbox";
 const SHOT_SSH_SHORT: &str = "devbox";
 
 /// The layout the `connections` shots start from: a saved tailnet host,
-/// which had 3 sessions last time, and a saved SSH host.
+/// which had 3 sessions last time, and a saved SSH host switched off.
 fn connections_ui_state() -> Value {
     json!({
         "saved_hosts": [
             { "name": SHOT_TAILNET_HOST, "port": 8787 },
-            { "kind": "ssh", "name": SHOT_SSH_SAVED },
+            { "kind": "ssh", "name": SHOT_SSH_SAVED, "enabled": false },
         ],
         "host_session_counts": { SHOT_TAILNET_HOST: 3 },
     })
@@ -539,12 +539,25 @@ fn deps(
         futures::future::ready(None).boxed_local()
     });
     // The fake daemon's channels serve the first connection; a later one
-    // gets a pair nothing answers.
+    // gets a pair nothing answers but its state: the `connections` shots'
+    // saved tailnet host does not know this PC.
     let first = RefCell::new(Some((tx, events)));
-    let open_host: Transport = Rc::new(move |_: &Target| {
+    let open_host: Transport = Rc::new(move |target: &Target| {
         first.borrow_mut().take().unwrap_or_else(|| {
             let (tx, _) = unbounded();
-            let (_, events) = unbounded();
+            let (states, events) = unbounded();
+            if target.tailnet_host().is_some() {
+                let mut conn = rustling_tulip_native::Connection::for_target(target.clone());
+                conn.on_connecting();
+                conn.on_socket_open(8787);
+                conn.on_not_approved("device not approved".to_owned(), false);
+                if states
+                    .unbounded_send(rustling_tulip_native::NetEvent::State(conn))
+                    .is_err()
+                {
+                    tracing::warn!("the shot's host state found no listener");
+                }
+            }
             (tx, events)
         })
     });

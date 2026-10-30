@@ -187,9 +187,6 @@ pub enum NetCommand {
         before: Vec<ClientMessage>,
         drain: bool,
     },
-    /// Connect to this daemon instead, now: drop the live socket and start
-    /// the connection over on it.
-    SwitchTarget(Target),
     /// Ask the tailnet host to pair this device: `DevicePairRequest` on the
     /// pairing socket, or, when the host closed it, a redial with an empty
     /// token that sends the request once the host answers "not approved".
@@ -216,7 +213,6 @@ impl fmt::Debug for NetCommand {
                 .field("before", before)
                 .field("drain", drain)
                 .finish(),
-            Self::SwitchTarget(target) => f.debug_tuple("SwitchTarget").field(target).finish(),
             Self::PairRequest => f.write_str("PairRequest"),
             Self::PairRedeem { .. } => f
                 .debug_struct("PairRedeem")
@@ -398,7 +394,7 @@ struct Net {
     held_welcome: Option<Box<DaemonMessage>>,
     /// A [`NetCommand::PairRequest`] that found no pairing socket: the
     /// redial sends `DevicePairRequest` once the host answers "not
-    /// approved". A target switch, a restart or a cancel clears it.
+    /// approved". A restart or a cancel clears it.
     pair_on_connect: bool,
     /// Whether a pairing request sent on the current socket is still
     /// waiting on it: its close then loses the request.
@@ -480,8 +476,7 @@ impl Net {
         matches!(self.conn.state(), State::NotApproved { .. })
     }
 
-    /// Forget every pairing step in flight, as a target switch or a restart
-    /// does.
+    /// Forget every pairing step in flight, as a restart does.
     fn forget_pairing(&mut self) {
         self.pair_on_connect = false;
         self.request_live = false;
@@ -925,10 +920,6 @@ impl Net {
                 Step::Continue
             }
             Some(NetCommand::Shutdown { before, drain }) => self.shutdown(ws, &before, drain).await,
-            Some(NetCommand::SwitchTarget(target)) => {
-                self.switch_target(target);
-                Step::Leave(Next::Connect)
-            }
             Some(
                 command @ (NetCommand::PairRequest
                 | NetCommand::PairRedeem { .. }
@@ -1047,13 +1038,6 @@ impl Net {
         self.conn.restart()
     }
 
-    fn switch_target(&mut self, target: Target) {
-        info!(daemon = ?target, "switching the daemon target; connecting from scratch");
-        self.forget_pairing();
-        self.conn.switch_target(target);
-        self.emit_state();
-    }
-
     /// Sends `before`, then the shutdown, and reports it sent. A failed send
     /// closes the socket; the view's wait then offers Force quit.
     async fn shutdown(&mut self, ws: &mut Socket, before: &[ClientMessage], drain: bool) -> Step {
@@ -1165,10 +1149,6 @@ impl Net {
                 Some(Next::Connect)
             }
             Some(NetCommand::Stop) => self.stop().await.then_some(Next::Wait(None)),
-            Some(NetCommand::SwitchTarget(target)) => {
-                self.switch_target(target);
-                Some(Next::Connect)
-            }
             Some(NetCommand::Shutdown { before, drain }) => {
                 warn!(
                     drain,
@@ -2146,9 +2126,9 @@ mod tests {
     #[test]
     #[expect(
         clippy::panic,
-        reason = "a tailnet boot target that starts the local daemon fails the spec"
+        reason = "a tailnet net that starts the local daemon fails the spec"
     )]
-    fn net_starts_on_the_boot_target() {
+    fn a_tailnet_net_never_ensures_a_local_daemon() {
         let ca = TestCa::new();
         let (port, seen) = tls_daemon(&ca);
         let target = Target::tailnet(TLS_HOST, Some(port));
@@ -2209,48 +2189,6 @@ mod tests {
                 origin: None,
             }),
             "the tailnet listener needs Host = name:port and no Origin"
-        );
-        stop_net(view_tx, net);
-    }
-
-    #[test]
-    fn switch_target_while_waiting_reconnects() {
-        let ca = TestCa::new();
-        let (pairing_port, pairing) = tls_daemon_answering(&ca, Answer::NotApprovedThenClose);
-        let (port, seen) = tls_daemon(&ca);
-        let (view_tx, mut view_rx, net) = run_net(
-            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
-            Target::tailnet(TLS_HOST, Some(pairing_port)),
-        );
-        assert!(
-            saw_state(&mut view_rx, |conn| matches!(
-                conn.state(),
-                State::NotApproved { .. }
-            )),
-            "the host that does not approve this device never said so"
-        );
-        assert!(
-            seen_until(&pairing, |event| *event == Seen::Closed).is_some(),
-            "the pairing host never closed its socket"
-        );
-        assert!(
-            next_state(&mut view_rx).is_some_and(|conn| is_not_approved(&conn, true)),
-            "the close was not handled, so the switch would not land while waiting"
-        );
-
-        let switched = Target::tailnet(TLS_HOST, Some(port));
-        view_tx
-            .unbounded_send(NetCommand::SwitchTarget(switched.clone()))
-            .expect("net thread is running");
-        assert_eq!(
-            next_hello(&seen).as_deref(),
-            Some(DEVICE_TOKEN),
-            "SwitchTarget while waiting did not dial the new host"
-        );
-        assert!(
-            saw_state(&mut view_rx, |conn| conn.is_open()
-                && conn.target() == &switched),
-            "the new host never opened"
         );
         stop_net(view_tx, net);
     }
@@ -2569,39 +2507,6 @@ mod tests {
             0,
             "Stop ran on a tailnet host"
         );
-    }
-
-    #[test]
-    fn switch_target_reconnects_at_once() {
-        let ca = TestCa::new();
-        let (first_port, first) = tls_daemon(&ca);
-        let (second_port, second) = tls_daemon(&ca);
-        let (view_tx, mut view_rx, net) = run_net(
-            tailnet_deps(&ca, Some(DEVICE_TOKEN)),
-            Target::tailnet(TLS_HOST, Some(first_port)),
-        );
-        assert!(next_hello(&first).is_some(), "the first host got no Hello");
-        assert!(saw_state(&mut view_rx, Connection::is_open), "never opened");
-
-        let switched = Target::tailnet(TLS_HOST, Some(second_port));
-        view_tx
-            .unbounded_send(NetCommand::SwitchTarget(switched.clone()))
-            .expect("net thread is running");
-        assert_eq!(
-            next_hello(&second).as_deref(),
-            Some(DEVICE_TOKEN),
-            "SwitchTarget did not dial the new host"
-        );
-        assert!(
-            seen_until(&first, |event| *event == Seen::Closed).is_some(),
-            "the old host's socket stayed open"
-        );
-        assert!(
-            saw_state(&mut view_rx, |conn| conn.is_open()
-                && conn.target() == &switched),
-            "the new host never opened"
-        );
-        stop_net(view_tx, net);
     }
 
     /// A device token store that reads nothing and fails every write.
