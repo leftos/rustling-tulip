@@ -229,7 +229,9 @@ impl RootView {
     }
 
     /// Folds a message into `host`'s source-control models, live or
-    /// parked; returns whether nothing else is owed it.
+    /// parked; returns whether nothing else is owed it. A parked host's
+    /// message moves only its models: the commit inputs, the drop confirm
+    /// and the keyboard belong to the shown host.
     pub(crate) fn on_sc_panel_message(
         &mut self,
         host: &HostKey,
@@ -238,9 +240,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> bool {
         let shown = self.sc_shown.clone();
+        let live = *host == shown;
         self.show_sc_host(host);
-        let done = self.on_sc_message(host, msg, window, cx)
-            || self.on_stash_message(host, msg, window, cx)
+        let done = self.on_sc_message(live, msg, window, cx)
+            || self.on_stash_message(live, msg, window, cx)
             || self.apply_history(host, msg, cx);
         self.show_sc_host(&shown);
         done

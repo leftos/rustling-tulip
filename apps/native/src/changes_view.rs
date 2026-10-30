@@ -430,23 +430,24 @@ impl RootView {
     /// Folds a daemon message into the source-control stores. An `Error`
     /// answering one of their status requests marks its section failed and
     /// raises no toast; it returns `true`, since nothing else is owed. A
-    /// `GitWriteError` also raises a toast. A commit box the message hides
-    /// while its input has the keyboard hands the keyboard to the active
-    /// pane.
+    /// `GitWriteError` also raises a toast. When the stores are the shown
+    /// host's (`live`), the commit inputs follow them, and a commit box the
+    /// message hides while its input has the keyboard hands the keyboard to
+    /// the active pane; a parked host's stores leave both alone.
     pub(crate) fn on_sc_message(
         &mut self,
-        _host: &crate::target::HostKey,
+        live: bool,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let status_moved = self.sc.apply(msg);
         let writes_moved = self.changes.writes.apply(msg);
-        if writes_moved {
+        if writes_moved && live {
             self.sync_commit_inputs(cx);
         }
         if writes_moved || status_moved {
-            if self.hidden_commit_input_focused(window, cx) {
+            if live && self.hidden_commit_input_focused(window, cx) {
                 self.focus_active_pane(window, cx);
             }
             cx.notify();

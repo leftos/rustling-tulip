@@ -13,6 +13,7 @@ use crate::notice_view::modal_panel;
 use crate::open::OpenJob;
 use crate::open_view::Then;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tooltip};
 
@@ -70,10 +71,12 @@ impl RootView {
             .unwrap_or_default()
     }
 
-    /// The daemon's `WorktreeCleanupFailed`: the failure is queued, and the
-    /// dialog takes the keyboard. Every other message is left alone.
+    /// `host`'s `WorktreeCleanupFailed`: the failure is queued under that
+    /// host, and the dialog takes the keyboard. Every other message is left
+    /// alone.
     pub(crate) fn on_cleanup_failed_message(
         &mut self,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -88,11 +91,16 @@ impl RootView {
         };
         tracing::warn!(
             session = %session_id,
+            ?host,
             failures = failures.len(),
             "worktree cleanup failed; asking what to do"
         );
-        self.cleanup_failed
-            .push(session_id.clone(), session_label.clone(), failures.clone());
+        self.cleanup_failed.push(
+            host.clone(),
+            session_id.clone(),
+            session_label.clone(),
+            failures.clone(),
+        );
         self.cleanup_focus.focus(window);
         cx.notify();
     }
@@ -142,22 +150,19 @@ impl RootView {
     }
 
     /// Presses `control`: Ignore and ✕ close the entry, the retry sends it
-    /// and closes it, a checkbox flips and Open folder reveals the folder.
+    /// to the host that reported it and closes it, a checkbox flips and
+    /// Open folder reveals the folder where that host's files are this
+    /// PC's.
     fn press_cleanup_control(
         &mut self,
         control: Control,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let host = self
-            .cleanup_failed
-            .head()
-            .map_or(crate::target::HostKey::Local, |dialog| {
-                self.host_of_session(dialog.session_id())
-            });
         let Some(dialog) = self.cleanup_failed.head_mut() else {
             return;
         };
+        let host = dialog.host().clone();
         match control {
             Control::Close | Control::Ignore => {
                 tracing::info!(session = %dialog.session_id(), "worktree cleanup failure ignored");
@@ -165,13 +170,13 @@ impl RootView {
             }
             Control::Retry => {
                 let msg = dialog.retry_message();
-                let session_id = dialog.session_id().to_owned();
                 tracing::info!(
                     session = %dialog.session_id(),
+                    ?host,
                     kill = ?dialog.ticked_pids(),
                     "worktree cleanup: retrying"
                 );
-                self.send_to(&self.host_of_session(&session_id), msg);
+                self.send_to(&host, msg);
                 self.close_cleanup_head(window, cx);
             }
             Control::Process(pid) => dialog.toggle(pid),
@@ -215,9 +220,9 @@ impl RootView {
         }
     }
 
-    /// What the host of `dialog`'s session lets this client do there.
+    /// What the host that reported `dialog` lets this client do there.
     fn cleanup_capabilities(&self, dialog: &CleanupFailed) -> crate::remote_mode::Capabilities {
-        self.capabilities_of(&self.host_of_session(dialog.session_id()))
+        self.capabilities_of(dialog.host())
     }
 
     /// The dialog over a backdrop that takes every click beneath it.

@@ -674,8 +674,6 @@ struct InFlight {
     sent_at: Instant,
     /// The history ids it asked for; the answer is judged against these.
     requested: HashSet<String>,
-    /// Cleared when the request timed out; a late answer still applies.
-    busy: bool,
 }
 
 /// The Recover dialog's state.
@@ -883,7 +881,7 @@ impl RecoverDialog {
     }
 
     pub fn is_busy(&self) -> bool {
-        self.in_flight.iter().any(|f| f.busy)
+        !self.in_flight.is_empty()
     }
 
     fn ticked_count(&self) -> usize {
@@ -1112,7 +1110,6 @@ impl RecoverDialog {
                 request_id: id.clone(),
                 sent_at: now,
                 requested: items.iter().map(|i| i.history_id.clone()).collect(),
-                busy: true,
             });
             let msg = ClientMessage::RecoverSessions {
                 request_id: Some(id),
@@ -1192,28 +1189,41 @@ impl RecoverDialog {
     }
 
     /// Ends the wait once a host's request has gone unanswered for
-    /// [`RECOVER_TIMEOUT`] at `now`: the controls work again and the error
-    /// line names the hosts that did not answer (no host when only This PC
-    /// was asked). A late answer still applies. Returns whether it timed
-    /// out now.
+    /// [`RECOVER_TIMEOUT`] at `now`: that request counts as answered with
+    /// every row it asked for failed, and a late answer to it is ignored.
+    /// The controls work again and the error line names the hosts that did
+    /// not answer (no host when only This PC was asked). Once no request is
+    /// out, only the failed rows stay, as after the last answer. Returns
+    /// whether it timed out now.
     pub fn check_timeout(&mut self, now: Instant) -> bool {
-        let late: Vec<String> = self
-            .in_flight
-            .iter()
-            .filter(|f| f.busy && now.saturating_duration_since(f.sent_at) >= RECOVER_TIMEOUT)
-            .map(|f| label_of(&self.labels, &f.host))
-            .collect();
+        let (late, waiting): (Vec<InFlight>, Vec<InFlight>) = std::mem::take(&mut self.in_flight)
+            .into_iter()
+            .partition(|f| now.saturating_duration_since(f.sent_at) >= RECOVER_TIMEOUT);
+        self.in_flight = waiting;
         if late.is_empty() {
             return false;
         }
-        for flight in &mut self.in_flight {
-            flight.busy = false;
+        let names: Vec<String> = late
+            .iter()
+            .map(|f| label_of(&self.labels, &f.host))
+            .collect();
+        for flight in late {
+            self.held_failed.extend(
+                flight
+                    .requested
+                    .into_iter()
+                    .map(|id| (id, "Recovery did not answer".to_owned())),
+            );
         }
         self.error = Some(if self.asked == [HostKey::Local] {
             "Recovery did not answer".to_owned()
         } else {
-            format!("Recovery did not answer on {}", late.join(", "))
+            format!("Recovery did not answer on {}", names.join(", "))
         });
+        if self.in_flight.is_empty() {
+            let failed = std::mem::take(&mut self.held_failed);
+            self.keep_only(failed);
+        }
         true
     }
 }
@@ -1533,8 +1543,47 @@ mod tests {
 
         assert!(!dialog.is_busy(), "the controls work again");
         assert_eq!(dialog.error(), Some("Recovery did not answer on box"));
+        assert_eq!(
+            dialog.visible_rows(),
+            ["b"],
+            "only the unanswered row stays"
+        );
         let late = dialog.on_result(Some("q-box"), &[ok("b")]);
-        assert!(late.close, "a late answer still applies");
+        assert_eq!(late, Outcome::default(), "a late answer is ignored");
+        assert_eq!(dialog.visible_rows(), ["b"]);
+    }
+
+    #[test]
+    fn a_timeout_on_one_host_shows_the_other_hosts_failures() {
+        let mut dialog = two_host_dialog(
+            &[
+                lost("a", "2026-09-28T09:00:00Z"),
+                lost("c", "2026-09-28T09:00:00Z"),
+            ],
+            &[lost("b", "2026-09-28T09:00:00Z")],
+        );
+        let at = Instant::now();
+        send_both(&mut dialog, at);
+        dialog.on_result(Some("q-local"), &[ok("a"), failed("c", "worktree gone")]);
+
+        assert!(dialog.check_timeout(at + RECOVER_TIMEOUT));
+
+        assert!(!dialog.is_busy(), "the controls work again");
+        assert_eq!(dialog.error(), Some("Recovery did not answer on box"));
+        assert!(dialog.row("a").is_none(), "the recovered row goes");
+        assert_eq!(
+            dialog.row("c").expect("row").error.as_deref(),
+            Some("worktree gone"),
+            "This PC's failure shows"
+        );
+        assert_eq!(
+            dialog.row("b").expect("row").error.as_deref(),
+            Some("Recovery did not answer"),
+            "the host that did not answer fails its rows"
+        );
+        let late = dialog.on_result(Some("q-box"), &[ok("b")]);
+        assert_eq!(late, Outcome::default(), "a late answer is ignored");
+        assert!(dialog.row("b").is_some());
     }
 
     /// The registry's Claude descriptor.
@@ -2236,11 +2285,16 @@ mod tests {
             "times out once"
         );
         let late = dialog.on_result(Some("q1"), &[ok("a")]);
-        assert!(late.close, "a late answer still applies");
+        assert_eq!(late, Outcome::default(), "a late answer is ignored");
+        assert_eq!(
+            dialog.row("a").expect("row").error.as_deref(),
+            Some("Recovery did not answer"),
+            "the unanswered row stays failed"
+        );
     }
 
     #[test]
-    fn rows_ticked_after_the_request_are_not_failed() {
+    fn rows_not_requested_are_not_failed_by_a_timeout() {
         let mut dialog = dialog(&[
             lost("a", "2026-09-28T09:00:00Z"),
             stopped("s", "2026-09-28T09:30:00Z"),
@@ -2248,11 +2302,11 @@ mod tests {
         let sent = Instant::now();
         dialog.recover_message("q1", sent).expect("a request");
         assert!(dialog.check_timeout(sent + RECOVER_TIMEOUT));
-        dialog.toggle_other();
-        dialog.toggle("s");
-        assert!(dialog.is_ticked("s"), "ticked after the request");
-        let outcome = dialog.on_result(Some("q1"), &[ok("a")]);
-        assert!(outcome.close, "s was never asked for, so nothing failed");
+        assert!(dialog.row("a").is_some(), "the requested row failed");
+        assert!(
+            dialog.row("s").is_none(),
+            "s was never asked for, so it is not among the failed rows"
+        );
     }
 
     #[test]

@@ -4072,7 +4072,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.on_cleanup_failed_message(msg, window, cx);
+        self.on_cleanup_failed_message(host, msg, window, cx);
         self.on_worktrees_message(host, msg, cx);
         self.on_recover_message(host, msg, window, cx);
         self.on_pairing_message(host, msg, window, cx);
@@ -4190,6 +4190,8 @@ impl RootView {
         self.forget_agents(host);
         self.forget_daemon_settings(host);
         self.set_remote_status(host, None, cx);
+        self.cwd_workspace_scans
+            .retain(|(owner, _), _| owner != host);
         if *host != HostKey::Local {
             if let Some(mirrors) = self.mirrors_of_mut(host) {
                 mirrors.worktrees_root = None;
@@ -4214,8 +4216,6 @@ impl RootView {
         self.reset_preset_launches(cx);
         self.launched_highlight.clear();
         self.vscode_suggestions.clear();
-        self.cwd_workspace_scans
-            .retain(|(host, _), _| *host != HostKey::Local);
         self.close_appearance_editor(window, cx);
         self.close_discard_confirm(window, cx);
         self.close_stash_drop_confirm(window, cx);
