@@ -1311,3 +1311,30 @@ fn live_sessions_a_reboot_killed_resume_on_the_next_start(cx: &mut TestAppContex
         "the lost shell stays in Recover and no shell is spawned for it: {respawned:?}"
     );
 }
+
+/// A session a client has been told of has its sidecar on disk, so a reboot
+/// or a daemon crash right after the spawn's snapshot still leaves it to
+/// orphan recovery.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_a_spawned_sessions_sidecar_is_on_disk_when_its_snapshot_arrives(cx: &mut TestAppContext) {
+    require_node();
+    let daemon = LiveDaemon::start("sidecar-first");
+    let repo = daemon.git_fixture();
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    client.send(spawn_shell(&repo));
+    let shell = wait_snapshot(&mut h, &client, "the shell's snapshot", |s| {
+        s.mode == SessionMode::PlainShell
+    });
+    let meta = daemon
+        .config_dir()
+        .join("sessions")
+        .join(&shell.id)
+        .join("meta.json");
+    assert!(
+        meta.is_file(),
+        "the shell's sidecar is written before its first snapshot is sent: {} is missing",
+        meta.display()
+    );
+}

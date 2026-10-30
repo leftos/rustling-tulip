@@ -1355,17 +1355,18 @@ async fn spawn_interactive_session(
         agent_in_shell,
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
-    pending.publish_from(cfg.origin.clone());
-    announce_replayed_prompt(hub, &session_id, awaiting);
-    if discovering {
-        discovery::start_poller(&hub.sessions, hub.dirs.clone(), session_id.clone());
-    }
-
+    // The sidecar is on disk before any client hears of the session, so a
+    // daemon that dies right after the publish still leaves it to recovery.
     if let Some(mut meta) = meta {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
         meta.status_seq = snap.status_seq;
         write_meta_then_sync(hub, &meta);
+    }
+    pending.publish_from(cfg.origin.clone());
+    announce_replayed_prompt(hub, &session_id, awaiting);
+    if discovering {
+        discovery::start_poller(&hub.sessions, hub.dirs.clone(), session_id.clone());
     }
 
     if !injectors.is_empty() {
@@ -1563,9 +1564,8 @@ async fn spawn_plain_shell_session(
         true,
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
-    pending.publish_from(cfg.origin.clone());
-    announce_replayed_prompt(hub, &session_id, awaiting);
-
+    // The sidecar is on disk before any client hears of the session (see
+    // spawn_interactive_session).
     if let Some(pid) = pid
         && let Ok(mut meta) = plain_shell_meta(
             session_id.clone(),
@@ -1593,6 +1593,8 @@ async fn spawn_plain_shell_session(
         meta.hook_trusted = cfg.extras.hook_trusted;
         write_meta_then_sync(hub, &meta);
     }
+    pending.publish_from(cfg.origin.clone());
+    announce_replayed_prompt(hub, &session_id, awaiting);
 
     // A recovered shell types the resume command its hook agent's plugin
     // built; any other plain shell runs the injector its request carried.
@@ -1791,8 +1793,9 @@ fn spawn_headless_session(
         rec.headless = Some(Arc::clone(&handle));
         rec.snapshot()
     };
-    pending.publish_from(cfg.origin.clone());
 
+    // The sidecar is on disk before any client hears of the session (see
+    // spawn_interactive_session).
     if let Some(pid) = handle.pid()
         && let Ok(mut meta) = orphan::meta_from_record(
             session_id.clone(),
@@ -1822,6 +1825,7 @@ fn spawn_headless_session(
         meta.status_seq = snap.status_seq;
         write_meta_then_sync(hub, &meta);
     }
+    pending.publish_from(cfg.origin.clone());
 
     Ok(snap)
 }
