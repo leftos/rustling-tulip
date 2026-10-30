@@ -878,6 +878,9 @@ pub enum KeyState {
     EnvMissing,
     /// The provider refused the key.
     Rejected,
+    /// A key may be stored, but the daemon cannot read Windows Credential
+    /// Manager: it was started from an SSH login.
+    Unreachable,
     /// Forward-compat fallback: a state the current build does not know.
     #[serde(other)]
     Unknown,

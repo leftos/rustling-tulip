@@ -2155,7 +2155,10 @@ pub(crate) fn resolve_env_refs(
                 Ok((key.clone(), secret.expose().to_owned()))
             }
             Some(protocol::env_rows::Reference::Secret(id)) => {
-                let Some(secret) = env_secrets::open(&id) else {
+                let Ok(opened) = env_secrets::open(&id) else {
+                    return Err(env_secrets::vault_unreachable_failure());
+                };
+                let Some(secret) = opened else {
                     return Err(spawn_plan::SpawnFailure {
                         title: "A saved secret is missing".to_owned(),
                         detail: format!(
@@ -4389,6 +4392,25 @@ mod tests {
             &serde_json::to_string(&config.expect("the record has a config")).expect("serialize"),
             "the GetSpawnConfig reply",
         );
+    }
+
+    #[test]
+    fn a_spawn_needing_a_secret_is_refused_when_the_vault_is_unreachable() {
+        use env_secrets::test_support::{
+            NO_LOGON_SESSION, inject_row_error, store_error_with_code,
+        };
+        let (_lock, _secrets_dir) = env_secrets::test_support::scratch("vault-unreachable");
+        let id = env_secrets::seal("EXAMPLE_API_KEY", SECRET_SENTINEL).expect("seal the row");
+        inject_row_error(
+            "EXAMPLE_API_KEY",
+            &id,
+            store_error_with_code(NO_LOGON_SESSION),
+        );
+
+        let failure = resolve_env_refs(&env(&[("EXAMPLE_API_KEY", &secret_ref(&id))]), |_| None)
+            .expect_err("the spawn is refused");
+
+        assert_eq!(failure.detail, env_secrets::VAULT_UNREACHABLE);
     }
 
     #[tokio::test]

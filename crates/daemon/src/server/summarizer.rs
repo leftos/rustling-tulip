@@ -544,6 +544,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_summarizer_test_says_the_vault_is_unreachable() {
+        use crate::env_secrets::test_support::{
+            NO_LOGON_SESSION, inject_error, store_error_with_code,
+        };
+        let (_lock, _config) = scratch_async("summ-test-unreachable").await;
+        let (hub, _scratch, fake) = billing_hub("summ-test-unreachable", 0.0);
+        let provider = keyed_provider();
+        crate::summarizer::keys::set(&provider, &Secret::new("a-saved-key".to_owned()))
+            .expect("the key saves");
+        hub.state
+            .set_summarizer_settings(SummarizerSettings {
+                enabled: true,
+                provider: provider.clone(),
+                key_source: protocol::SummarizerKeySource::Stored,
+                daily_cap_usd: 1.0,
+            })
+            .expect("store the settings");
+        inject_error(
+            &format!("summarizer/{provider}"),
+            store_error_with_code(NO_LOGON_SESSION),
+        );
+
+        let refusal = hub
+            .summarizer
+            .test()
+            .await
+            .expect_err("the test cannot read the key");
+
+        assert_eq!(refusal.to_string(), crate::env_secrets::VAULT_UNREACHABLE);
+        assert_eq!(fake.calls(), 0, "no call without the key");
+    }
+
+    #[tokio::test]
     async fn a_tailnet_connection_may_set_the_key() {
         let (_lock, _config) = scratch_async("summ-tailnet-key").await;
         let (hub, _scratch) = test_hub("summ-tailnet-key");

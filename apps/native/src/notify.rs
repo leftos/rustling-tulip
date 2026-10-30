@@ -308,7 +308,10 @@ impl Summaries {
             .is_none_or(|key| {
                 !matches!(
                     key.state,
-                    KeyState::Missing | KeyState::EnvMissing | KeyState::Rejected
+                    KeyState::Missing
+                        | KeyState::EnvMissing
+                        | KeyState::Rejected
+                        | KeyState::Unreachable
                 )
             });
         Self {

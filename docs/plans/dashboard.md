@@ -356,7 +356,7 @@ Only the DeepSeek provider takes a key; the Haiku provider uses the Claude login
 
 A typed DeepSeek key is stored in **Windows Credential Manager** through the store the env-secrets code already sets up (`keyring-core` and `windows-native-keyring-store`, `crates/daemon/Cargo.toml:81` and `:121`; `env_secrets::init`, `crates/daemon/src/env_secrets.rs:86`), under the same service name rules as env secrets ([env-secrets.md](../env-secrets.md)), user `summarizer/<provider id>`.
 
-- A key is set with a write-only `SetSummarizerKey` and never leaves the daemon again: status carries only `missing`, `stored`, `env_found`, `env_missing` or `rejected`. Its type redacts itself in `Debug` and is never logged.
+- A key is set with a write-only `SetSummarizerKey` and never leaves the daemon again: status carries only `missing`, `stored`, `env_found`, `env_missing`, `rejected` or `unreachable`. Its type redacts itself in `Debug` and is never logged.
 - A key may instead name an environment variable, read at call time through `user_env::resolve` (`crates/daemon/src/user_env.rs:25`: the process, then the user, then the system scope).
 - An approved tailnet client may set a key: a remote connection already grants spawning a shell, so this adds no power.
 - Never in `state.json` or `native-ui.json`. `state.json` gains a secret-free `summarizer` block: `enabled`, `provider`, the DeepSeek key source (`stored`, or `env` with a variable name), `daily_cap_usd`.

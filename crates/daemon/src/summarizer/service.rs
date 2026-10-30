@@ -20,6 +20,7 @@ use protocol::{
 use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
 
+use crate::env_secrets::VaultUnreachable;
 use crate::server::StateEvent;
 use crate::state::AppState;
 use crate::summarizer::cache::{Cache, CacheKey};
@@ -227,6 +228,8 @@ enum KeyLookup {
     NotNeeded,
     Found(Secret),
     Missing,
+    /// Windows Credential Manager is out of reach of this daemon.
+    Unreachable,
 }
 
 /// The summarizer service.
@@ -512,7 +515,7 @@ impl Summarizer {
         let key = match self.provider_key(&provider, &settings).await {
             KeyLookup::NotNeeded => None,
             KeyLookup::Found(key) => Some(key),
-            KeyLookup::Missing => return no_call_outcome(&request),
+            KeyLookup::Missing | KeyLookup::Unreachable => return no_call_outcome(&request),
         };
         let prompt = prompt::build(request.trigger, &request.input);
         match self.call(caller, &provider, key.as_ref(), &prompt).await.0 {
@@ -533,7 +536,8 @@ impl Summarizer {
     /// # Errors
     ///
     /// The summarizer failed to start, no provider is set up, the day's cap
-    /// is reached, or the call failed.
+    /// is reached, Windows Credential Manager is out of reach
+    /// ([`VaultUnreachable`]), or the call failed.
     pub(crate) async fn test(&self) -> anyhow::Result<TestReply> {
         let Some(caller) = self.caller.as_deref() else {
             bail!("The summarizer failed to start; see daemon.log.");
@@ -554,6 +558,7 @@ impl Summarizer {
             KeyLookup::Missing => {
                 bail!("No summarizer provider is set up: the provider's key is missing.")
             }
+            KeyLookup::Unreachable => bail!(VaultUnreachable),
         };
         let prompt = prompt::build(Trigger::Stop, &prompt::shape(&[TEST_SAMPLE]));
         let (result, took) = self.call(caller, &provider, key.as_ref(), &prompt).await;
@@ -588,8 +593,12 @@ impl Summarizer {
         };
         let id = row.id;
         match tokio::task::spawn_blocking(move || keys::get(id, &source)).await {
-            Ok(Some(key)) => KeyLookup::Found(key),
-            Ok(None) => KeyLookup::Missing,
+            Ok(Ok(Some(key))) => KeyLookup::Found(key),
+            Ok(Ok(None)) => KeyLookup::Missing,
+            Ok(Err(unreachable)) => {
+                warn!(provider = id, error = %unreachable, "summarizer: could not read the saved key");
+                KeyLookup::Unreachable
+            }
             Err(err) => {
                 error!(%err, "summarizer: the key lookup failed; treating the key as missing");
                 KeyLookup::Missing
