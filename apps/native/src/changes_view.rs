@@ -541,13 +541,14 @@ impl RootView {
             .sc
             .status(key)
             .map(|_| self.sc.badge_total(std::slice::from_ref(key)));
+        let stored = self.sc_stored_key(key);
         let collapsed = self
             .sidebar
             .source_control()
-            .is_collapsed(key, Part::Changes, loaded);
+            .is_collapsed(&stored, Part::Changes, loaded);
         if self
             .sidebar
-            .set_sc_collapsed(key, Part::Changes, !collapsed)
+            .set_sc_collapsed(&stored, Part::Changes, !collapsed)
         {
             self.save_ui();
         }

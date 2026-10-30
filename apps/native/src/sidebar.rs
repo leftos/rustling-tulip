@@ -1327,6 +1327,19 @@ impl SidebarModel {
         &self.local.repos
     }
 
+    /// `host`'s registered repos, in its daemon's order; none for a remote
+    /// host that never sent a list.
+    pub fn repos_of(&self, host: &HostKey) -> &[RepoEntry] {
+        self.slice(host).map_or(&[], |slice| &slice.repos)
+    }
+
+    /// Every host's registered repos with their host, This PC's first, then
+    /// the remote hosts' in order.
+    pub fn all_repos(&self) -> impl Iterator<Item = (&HostKey, &RepoEntry)> {
+        self.slices()
+            .flat_map(|(host, slice)| slice.repos.iter().map(move |repo| (host, repo)))
+    }
+
     /// Whether This PC's repo list has arrived.
     pub fn repos_loaded(&self) -> bool {
         self.local.repos_loaded
@@ -1607,10 +1620,10 @@ impl SidebarModel {
         self.ui.source_control.set_collapsed(key, part, collapsed)
     }
 
-    /// Drops the source-control pin and collapse entries of repos not in
-    /// `repos`; returns whether any went.
-    pub fn prune_source_control(&mut self, repos: &[RepoEntry]) -> bool {
-        self.ui.source_control.prune(repos)
+    /// Drops the source-control pin and collapse entries of `host`'s repos
+    /// not in `repos`, its list; returns whether any went.
+    pub fn prune_source_control(&mut self, host: &HostKey, repos: &[RepoEntry]) -> bool {
+        self.ui.source_control.prune(host, repos)
     }
 
     /// Sets the source-control changes area's height, already clamped.

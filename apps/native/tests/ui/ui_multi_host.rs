@@ -10,6 +10,7 @@ use protocol::{
     AgentId, AttentionReason, ClientMessage, ContainerRef, DaemonMessage, KeepAwakeMode,
     OptionValue, RemoteState, SessionSnapshot, TabEntry,
 };
+use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetEvent, toast_action_selector};
 use support::{
@@ -612,6 +613,184 @@ fn the_dashboard_watches_every_host_and_lists_both_hosts_rows(cx: &mut TestAppCo
             .iter()
             .any(|msg| matches!(msg, ClientMessage::WatchDashboard { on: false })),
         "leaving the Dashboard ends the remote host's watch too"
+    );
+}
+
+/// A daemon status for `(repo_id, worktree)` with `changes` unstaged.
+fn repo_status(repo_id: &str, worktree: &str, changes: &[&str]) -> DaemonMessage {
+    let files: Vec<serde_json::Value> = changes
+        .iter()
+        .map(|path| serde_json::json!({ "path": path, "status": "M", "from_path": null }))
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "type": "repo_status",
+        "repo_id": repo_id,
+        "index_changes": [],
+        "worktree_changes": files,
+        "worktree_path": worktree,
+    }))
+    .expect("status fixture")
+}
+
+/// The repos of the status requests among `sent`.
+fn status_repos(sent: Vec<ClientMessage>) -> Vec<String> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RepoStatus { repo_id, .. } => Some(repo_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The source-control panel's sections as `(id, count)`.
+fn sc_sections(h: &mut Harness<'_>) -> Vec<(String, Option<usize>)> {
+    h.root(|root, _| {
+        root.source_control_panel()
+            .sections
+            .into_iter()
+            .map(|section| (section.id, section.count))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn the_source_control_panel_follows_the_focused_sessions_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        sessions: vec![session("a1").worktree("r1").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("a1"))),
+            tab("t2", &pane("p2", Some("b1"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "D:/src/r2")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").worktree("r2").build()],
+    });
+    h.click_on("activity-source-control");
+    h.sent();
+    h.host(&remote()).sent();
+    assert_eq!(
+        sc_sections(&mut h),
+        [("r1::C:/wt/x".to_owned(), None)],
+        "This PC's session shows This PC's tree"
+    );
+
+    h.click_on("tab-t2");
+
+    assert_eq!(
+        sc_sections(&mut h),
+        [("r2::C:/wt/x".to_owned(), None)],
+        "the remote session shows its own host's tree"
+    );
+    assert!(
+        status_repos(h.host(&remote()).sent()).contains(&"r2".to_owned()),
+        "the remote tree's status is asked of the remote host"
+    );
+    assert!(
+        status_repos(h.sent()).is_empty(),
+        "This PC is asked for nothing"
+    );
+    h.host(&remote())
+        .send(repo_status("r2", "C:/wt/x", &["a.rs"]));
+    assert_eq!(sc_sections(&mut h), [("r2::C:/wt/x".to_owned(), Some(1))]);
+
+    h.click_on("tab-t1");
+    assert_eq!(sc_sections(&mut h), [("r1::C:/wt/x".to_owned(), None)]);
+    h.host(&remote())
+        .send(repo_status("r2", "C:/wt/x", &["a.rs", "b.rs"]));
+    h.click_on("tab-t2");
+
+    assert_eq!(
+        sc_sections(&mut h),
+        [("r2::C:/wt/x".to_owned(), Some(2))],
+        "a status that came while the host was not shown is kept for it"
+    );
+    assert!(
+        status_repos(h.host(&remote()).sent()).is_empty(),
+        "showing the host again asks for nothing it holds"
+    );
+}
+
+/// A fetch of `rel` from repo `repo_id`.
+fn fetch_request(repo_id: &str, rel: &str) -> FetchRequest {
+    FetchRequest {
+        repo_id: repo_id.to_owned(),
+        repo_name: "repo".to_owned(),
+        worktree_path: None,
+        rel_path: rel.to_owned(),
+        line: None,
+        column: None,
+        open_when_done: false,
+    }
+}
+
+/// The ids of the fetches among `sent`.
+fn fetch_ids(sent: Vec<ClientMessage>) -> Vec<String> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchFile { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_remote_hosts_disconnect_ends_only_its_fetches(cx: &mut TestAppContext) {
+    const HOME: &str = "home.tail1234.ts.net";
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/r1")],
+        ..Fixture::default()
+    };
+    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOME, None), &fixture);
+    let root = dir.path().join("remote-files");
+    h.root_update(move |view, _, _| view.set_remote_files_root(root));
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    h.sent();
+    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r1", "a.txt"), cx));
+    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r2", "b.txt"), cx));
+    let home_fetch = fetch_ids(h.sent());
+    let remote_fetch = fetch_ids(h.host(&remote()).sent());
+    assert_eq!(
+        (home_fetch.len(), remote_fetch.len()),
+        (1, 1),
+        "each fetch goes to the host that holds its repo"
+    );
+
+    h.host(&remote())
+        .event(NetEvent::State(Connection::for_target(remote())));
+
+    let failed: Vec<String> = h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| toast.title.clone())
+            .filter(|title| title.starts_with("Couldn't fetch"))
+            .collect()
+    });
+    assert_eq!(
+        failed,
+        ["Couldn't fetch b.txt"],
+        "only the remote host's fetch ends"
+    );
+    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r1", "a.txt"), cx));
+    assert!(
+        h.root(|root, _| root
+            .toasts()
+            .iter()
+            .any(|toast| toast.title == "Already fetching a.txt")),
+        "This PC's slot's fetch still runs"
     );
 }
 

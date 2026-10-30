@@ -8,7 +8,7 @@ use gpui::{
     SharedString, Stateful, StyledText, Window, anchored, deferred, div, point, prelude::*, px,
     svg,
 };
-use protocol::{ClientMessage, SessionMember};
+use protocol::{ClientMessage, DaemonMessage, RepoEntry, SessionMember};
 
 use crate::assets::REFRESH_ICON;
 use crate::changes_view::{
@@ -20,8 +20,12 @@ use crate::session_menu::MENU_MAX_SHARE;
 use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
 use crate::sidebar::{Activity, display_label};
-use crate::source_control::{Part, ScKey, Section, sections};
+use crate::source_control::{
+    Part, ScKey, ScModel, Section, pin_entry, pin_parts, sections, stored_key,
+};
 use crate::stash_view::{ScStashes, stashes_part};
+use crate::stashes::StashModel;
+use crate::target::HostKey;
 use crate::text_input::TextInput;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
@@ -95,6 +99,16 @@ pub struct ScPanel {
     pub empty_hint: Option<&'static str>,
 }
 
+/// One host's source-control models: statuses, writes, stashes and
+/// History.
+#[derive(Default)]
+pub(crate) struct ScModels {
+    sc: ScModel,
+    writes: ScWrites,
+    stash: StashModel,
+    history: HistoryModel,
+}
+
 /// One row of the open picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScPickerRow {
@@ -120,36 +134,121 @@ impl RootView {
         self.last_focused_session.clone()
     }
 
-    /// The members of the panel's session, when it has any.
-    pub(crate) fn sc_focused_members(&self) -> Option<&[SessionMember]> {
+    /// The panel's session and its host, when it names any repos.
+    fn sc_session_members(&self) -> Option<(HostKey, &[SessionMember])> {
         let id = self.sc_session()?;
         self.sidebar
-            .session(&id)
-            .map(|session| session.members.as_slice())
-            .filter(|members| !members.is_empty())
+            .find_session(&id)
+            .map(|(host, session)| (host, session.members.as_slice()))
+            .filter(|(_, members)| !members.is_empty())
     }
 
-    /// The pinned repo, when it is still registered.
+    /// The members of the panel's session, when it has any and its host is
+    /// the one the panel shows.
+    pub(crate) fn sc_focused_members(&self) -> Option<&[SessionMember]> {
+        self.sc_session_members()
+            .filter(|(host, _)| *host == self.sc_shown)
+            .map(|(_, members)| members)
+    }
+
+    /// The pinned repo's id, when its host is the one the panel shows.
+    pub(crate) fn sc_pin_on_shown(&self) -> Option<&str> {
+        let entry = self.sidebar.source_control().pinned_repo.as_deref()?;
+        let (host, id) = pin_parts(entry);
+        (host == self.sc_shown).then_some(id)
+    }
+
+    /// The pinned repo, when it is still registered on the shown host.
     fn sc_pinned(&self) -> Option<&str> {
-        self.sidebar
-            .source_control()
-            .pinned_repo
-            .as_deref()
-            .filter(|id| self.sidebar.repos().iter().any(|repo| repo.id == *id))
+        self.sc_pin_on_shown()
+            .filter(|id| self.sc_repos().iter().any(|repo| repo.id == *id))
+    }
+
+    /// The shown host's registered repos.
+    pub(crate) fn sc_repos(&self) -> &[RepoEntry] {
+        self.sidebar.repos_of(&self.sc_shown)
     }
 
     pub(crate) fn sc_sections(&self) -> Vec<Section> {
         sections(
-            self.sidebar.repos(),
+            self.sc_repos(),
             self.sc_focused_members(),
-            self.sidebar.source_control().pinned_repo.as_deref(),
+            self.sc_pin_on_shown(),
         )
     }
 
-    /// Every registered repo's main tree.
-    fn sc_main_keys(&self) -> Vec<ScKey> {
+    /// `key` as the persisted collapse and height entries name it on the
+    /// shown host.
+    pub(crate) fn sc_stored_key(&self, key: &ScKey) -> ScKey {
+        stored_key(&self.sc_shown, key)
+    }
+
+    /// The host the panel should show: the focused session's when it names
+    /// repos, else the pinned repo's while the window holds its host, else
+    /// This PC.
+    fn sc_wanted_host(&self) -> HostKey {
+        if let Some((host, _)) = self.sc_session_members() {
+            return host;
+        }
         self.sidebar
-            .repos()
+            .source_control()
+            .pinned_repo
+            .as_deref()
+            .map(|entry| pin_parts(entry).0)
+            .filter(|host| self.conn_of(host).is_some())
+            .unwrap_or(HostKey::Local)
+    }
+
+    /// Makes `host`'s source-control models the live ones, parking the
+    /// shown host's; sends nothing.
+    pub(crate) fn show_sc_host(&mut self, host: &HostKey) {
+        if *host == self.sc_shown {
+            return;
+        }
+        let incoming = self.sc_parked.remove(host).unwrap_or_default();
+        let outgoing = ScModels {
+            sc: std::mem::replace(&mut self.sc, incoming.sc),
+            writes: std::mem::replace(&mut self.changes.writes, incoming.writes),
+            stash: std::mem::replace(&mut self.stash.model, incoming.stash),
+            history: std::mem::replace(&mut self.history, incoming.history),
+        };
+        let shown = std::mem::replace(&mut self.sc_shown, host.clone());
+        self.sc_parked.insert(shown, outgoing);
+    }
+
+    /// Drops remote `host`'s source-control models, showing This PC's when
+    /// they were the live ones.
+    pub(crate) fn forget_sc_host(&mut self, host: &HostKey) {
+        if *host == HostKey::Local {
+            return;
+        }
+        if self.sc_shown == *host {
+            self.show_sc_host(&HostKey::Local);
+        }
+        self.sc_parked.remove(host);
+    }
+
+    /// Folds a message into `host`'s source-control models, live or
+    /// parked; returns whether nothing else is owed it.
+    pub(crate) fn on_sc_panel_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let shown = self.sc_shown.clone();
+        self.show_sc_host(host);
+        let done = self.on_sc_message(host, msg, window, cx)
+            || self.on_stash_message(host, msg, window, cx)
+            || self.apply_history(host, msg, cx);
+        self.show_sc_host(&shown);
+        done
+    }
+
+    /// Every registered repo's main tree on the shown host.
+    fn sc_main_keys(&self) -> Vec<ScKey> {
+        self.sc_repos()
             .iter()
             .map(|repo| ScKey {
                 repo_id: repo.id.clone(),
@@ -193,7 +292,7 @@ impl RootView {
         self.sidebar.activity() == Activity::SourceControl
             && !self.sidebar.is_collapsed()
             && self.sc_focused_members().is_none()
-            && self.sidebar.repos().len() >= 2
+            && self.sidebar.all_repos().nth(1).is_some()
     }
 
     /// Closes the picker once its button no longer shows, so its menu and
@@ -207,21 +306,26 @@ impl RootView {
         stale
     }
 
-    /// The picker's rows: Auto, then every repo, the current choice checked.
+    /// The picker's rows: Auto, then every host's repos, This PC's first,
+    /// the current choice checked. A row's repo id is the pin it saves: a
+    /// remote host's carries `<host key>::` before the id.
     #[must_use]
     pub fn sc_picker_rows(&self) -> Vec<ScPickerRow> {
-        let pinned = self.sc_pinned();
+        let pinned = self.sc_pinned().map(|id| pin_entry(&self.sc_shown, id));
         let auto = ScPickerRow {
             selector: "sc-picker-auto".to_owned(),
             label: AUTO_LABEL.to_owned(),
             repo_id: None,
             checked: pinned.is_none(),
         };
-        let repos = self.sidebar.repos().iter().map(|repo| ScPickerRow {
-            selector: format!("sc-picker-{}", repo.id),
-            label: repo.name.clone(),
-            repo_id: Some(repo.id.clone()),
-            checked: pinned == Some(repo.id.as_str()),
+        let repos = self.sidebar.all_repos().map(|(host, repo)| {
+            let entry = pin_entry(host, &repo.id);
+            ScPickerRow {
+                selector: format!("sc-picker-{entry}"),
+                label: repo.name.clone(),
+                checked: pinned.as_deref() == Some(entry.as_str()),
+                repo_id: Some(entry),
+            }
         });
         std::iter::once(auto).chain(repos).collect()
     }
@@ -229,7 +333,7 @@ impl RootView {
     /// What the panel shows now.
     #[must_use]
     pub fn source_control_panel(&self) -> ScPanel {
-        let repos = self.sidebar.repos();
+        let repos = self.sc_repos();
         if repos.is_empty() {
             return ScPanel {
                 refresh: false,
@@ -268,7 +372,7 @@ impl RootView {
             let label = self
                 .sidebar
                 .session(&session)
-                .map(|s| display_label(s, self.sidebar.agents(&crate::target::HostKey::Local)))?;
+                .map(|s| display_label(s, self.sidebar.agents(&self.sc_shown)))?;
             let plural = if count == 1 { "" } else { "s" };
             return Some(ScContext {
                 text: format!("{label} · {count} repo{plural}"),
@@ -293,7 +397,7 @@ impl RootView {
         let loaded = self.sc.is_loaded(&section.key);
         let count = self.sc.badge_total(std::slice::from_ref(&section.key));
         let collapsed = self.sidebar.source_control().is_collapsed(
-            &section.key,
+            &self.sc_stored_key(&section.key),
             Part::Changes,
             loaded.then_some(count),
         );
@@ -331,6 +435,8 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let host = self.sc_wanted_host();
+        self.show_sc_host(&host);
         let mut wanted: Vec<ScKey> = self
             .sc_sections()
             .into_iter()

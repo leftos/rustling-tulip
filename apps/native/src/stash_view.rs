@@ -202,10 +202,11 @@ impl RootView {
         let repo = key.repo_id.as_str();
         let model = &self.stash.model;
         let list = model.list(repo);
-        let collapsed = self
-            .sidebar
-            .source_control()
-            .is_collapsed(key, Part::Stashes, None);
+        let collapsed = self.sidebar.source_control().is_collapsed(
+            &self.sc_stored_key(key),
+            Part::Stashes,
+            None,
+        );
         let mut part = ScStashes {
             selector: format!("sc-stashes-{id}"),
             collapsed,
@@ -380,13 +381,14 @@ impl RootView {
     /// while its push input has the keyboard hands the keyboard to the
     /// active pane.
     fn toggle_sc_stashes(&mut self, key: &ScKey, window: &mut Window, cx: &mut Context<Self>) {
+        let stored = self.sc_stored_key(key);
         let collapsed = self
             .sidebar
             .source_control()
-            .is_collapsed(key, Part::Stashes, None);
+            .is_collapsed(&stored, Part::Stashes, None);
         if self
             .sidebar
-            .set_sc_collapsed(key, Part::Stashes, !collapsed)
+            .set_sc_collapsed(&stored, Part::Stashes, !collapsed)
         {
             self.save_ui();
         }

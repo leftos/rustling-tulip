@@ -1456,7 +1456,7 @@ mod tests {
         let r1: RepoEntry =
             serde_json::from_value(json!({ "id": "r1", "name": "r1", "path": "D:/r1" }))
                 .expect("repo fixture");
-        assert!(state.prune(&[r1]));
+        assert!(state.prune(&crate::target::HostKey::Local, &[r1]));
         assert_eq!(
             state.history_list_height.keys().collect::<Vec<_>>(),
             ["r1::"]
