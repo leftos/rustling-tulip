@@ -11,7 +11,6 @@
 
 use crate::support;
 
-use std::path::Path;
 use std::time::Duration;
 
 use gpui::{Modifiers, TestAppContext, px};
@@ -398,51 +397,6 @@ fn add_repo_on_remote_writes_no_last_repo_dir(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn target_switch_closes_the_workspace_creator(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = with_repos(cx, &dir, two_repos());
-    vscode_creator(&mut h);
-    assert!(h.root(|root, _| root.workspace_creator_open()));
-
-    h.set_connection(remote());
-    assert!(
-        !h.root(|root, _| root.workspace_creator_open()),
-        "the switch closes the creator opened on the local daemon"
-    );
-}
-
-#[gpui::test]
-fn folder_pick_landing_after_switch_to_remote_is_dropped(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.hold_picks();
-    h.click_on("sidebar-add-repo");
-    assert_eq!(h.folder_asks(), 1, "the picker opens on the local daemon");
-
-    h.set_connection(remote());
-    h.release_picked_folder(Some("D:/work/repo"));
-    let sent = h.sent();
-    assert!(
-        !sent
-            .iter()
-            .any(|msg| matches!(msg, ClientMessage::AddRepo { .. })),
-        "a folder of this PC is never registered on the host: sent {sent:?}"
-    );
-}
-
-/// `s` alone in pane `p1`, its scrollback answered, the pane focused, on the
-/// local daemon.
-fn attached<'a>(cx: &'a mut TestAppContext, dir: &TestDir, s: SessionSnapshot) -> Harness<'a> {
-    let id = s.id.clone();
-    let mut h = Harness::with(cx, dir, &Fixture::single(s));
-    h.answer_scrollback(&id, b"");
-    let at = h.cell_center("p1", 0, 0);
-    h.click(at, Modifiers::none());
-    h.sent();
-    h
-}
-
 /// `s` alone in pane `p1`, its scrollback answered, the pane focused, on a
 /// remote host.
 fn attached_remote<'a>(
@@ -457,15 +411,6 @@ fn attached_remote<'a>(
     h.click(at, Modifiers::none());
     h.sent();
     h
-}
-
-/// Writes `rel` under `root`, so a link to it would open on the local
-/// daemon.
-fn write_file(root: &Path, rel: &str) {
-    let path = root.join(rel);
-    let parent = path.parent().expect("a file has a parent folder");
-    std::fs::create_dir_all(parent).expect("create the file's folder");
-    std::fs::write(&path, "x\n").expect("write the file");
 }
 
 #[gpui::test]
@@ -505,36 +450,6 @@ fn path_link_fetches_instead_of_opening_on_remote(cx: &mut TestAppContext) {
             .any(|(title, _)| title == "Couldn't open"),
         "nothing is refused: {:?}",
         toasts(&mut h)
-    );
-}
-
-#[gpui::test]
-fn run_confirm_opened_on_local_opens_nothing_after_switch_to_remote(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    write_file(dir.path(), "tools/run.bat");
-    // The script opens externally, as this spec pins that route.
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        r#"{ "general": { "open_text_externally": true } }"#,
-    )
-    .expect("seed native-ui.json");
-    let cwd = dir.path().to_string_lossy().into_owned();
-    let mut h = attached(cx, &dir, session("s1").shell(&cwd).build());
-    h.pty("s1", b"run tools/run.bat");
-    let on = h.cell_center("p1", 8, 0);
-    h.click(on, Modifiers::secondary_key());
-    assert!(
-        h.run_confirm().is_some(),
-        "the local daemon asks before running the file"
-    );
-
-    h.set_connection(remote());
-    let run = h.bounds("run-confirm-run").center();
-    h.click(run, Modifiers::none());
-    assert_eq!(h.opened(), [], "the file is not this PC's to run any more");
-    assert_eq!(
-        toasts(&mut h),
-        [("Couldn't open".to_owned(), Some(LOCAL_FILES.to_owned()))]
     );
 }
 
@@ -725,38 +640,6 @@ fn reconnect_from_a_dropped_remote_connection_sends_restart(cx: &mut TestAppCont
     assert!(
         matches!(commands.as_slice(), [NetCommand::Restart]),
         "the button asks for one Reconnect: no stop, shutdown or target switch"
-    );
-}
-
-/// Whether the open flyout's detail rows read `labels`, `|`-joined.
-fn details_read(h: &mut Harness<'_>, labels: &str) -> bool {
-    shows(h, "flyout-details", labels)
-}
-
-#[gpui::test]
-fn handshake_cleared_when_target_switches(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::with(cx, &dir, &Fixture::default());
-    h.click_on("daemon-pill");
-    assert!(
-        details_read(&mut h, "State|Port|PID|Protocol|Sessions"),
-        "the local daemon's handshake shows"
-    );
-
-    // A drop after the first connect draws no overlay, so the flyout stays.
-    let mut dropped = local();
-    dropped.on_closed("socket closed".to_owned());
-    h.set_connection(dropped);
-    assert!(
-        details_read(&mut h, "State|Port|PID|Protocol|Reason"),
-        "a new state on the same target keeps it"
-    );
-
-    h.set_connection(remote());
-    h.set_connection(local());
-    assert!(
-        details_read(&mut h, "State|Sessions"),
-        "the handshake from before the switch is gone"
     );
 }
 

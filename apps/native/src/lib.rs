@@ -3618,7 +3618,7 @@ impl RootView {
     /// flyout never shows its port, pid or protocol; the next ensure brings
     /// the new one.
     fn restart(&mut self) {
-        self.pair_on_not_approved();
+        self.pair_on_not_approved(HostKey::Local);
         self.command_to(&HostKey::Local, NetCommand::Restart);
         self.clear_handshake(&HostKey::Local);
         self.close_flyout();
@@ -3746,7 +3746,7 @@ impl RootView {
             self.reset_devices(window, cx);
         }
         if let Some(input) = pairing_input {
-            self.on_device_pairing_input(input, window, cx);
+            self.on_device_pairing_input(host, input, window, cx);
         }
         if exit_relevant {
             self.after_exit_event(window, cx);
@@ -5148,12 +5148,8 @@ impl RootView {
             .child(status_dot(footer.dot, "footer-dot", &t))
             .child(tagged_text("daemon-pill", text))
             .tooltip(tooltip(footer.tooltip.clone()))
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                if this.device_pairing_offered() {
-                    this.open_device_pairing(window, cx);
-                } else {
-                    this.toggle_flyout();
-                }
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.toggle_flyout();
                 cx.notify();
             }));
         div()

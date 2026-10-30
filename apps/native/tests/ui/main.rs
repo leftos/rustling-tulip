@@ -71,7 +71,6 @@ mod ui_stashes;
 mod ui_summary;
 mod ui_tab_drag;
 mod ui_tabs;
-mod ui_target_switch;
 mod ui_terminal;
 mod ui_theme;
 mod ui_themes;

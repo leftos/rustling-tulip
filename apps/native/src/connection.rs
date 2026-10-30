@@ -42,7 +42,7 @@ pub enum State {
     /// `Hello` with `Welcome`, then `DevicePairFailed { reason }`, and keeps
     /// the socket open as a pairing connection. `had_token` says whether the
     /// `Hello` carried a stored device token (one the host no longer
-    /// accepts) or none. Terminal until a Restart or a target switch.
+    /// accepts) or none. Terminal until a Restart.
     NotApproved { reason: String, had_token: bool },
     /// `ensure_running` or the handshake file failed.
     Error { reason: String },
@@ -151,12 +151,6 @@ impl Connection {
         }
     }
 
-    /// Start over on `target`: back to boot, with the backoff, the stop
-    /// request and the first-connect overlay reset.
-    pub fn switch_target(&mut self, target: Target) {
-        *self = Self::for_target(target);
-    }
-
     #[must_use]
     pub fn state(&self) -> &State {
         &self.state
@@ -223,7 +217,7 @@ impl Connection {
     }
 
     /// Whether the daemon refused this client (auth failed, or not
-    /// approved): nothing reconnects until a Restart or a target switch.
+    /// approved): nothing reconnects until a Restart.
     fn refused(&self) -> bool {
         matches!(
             self.state,
@@ -586,30 +580,6 @@ mod tests {
         assert_eq!(conn.restart(), RestartAction::FreshConnect);
         assert_eq!(conn.state(), &State::Connecting);
         assert_eq!(conn.on_closed("dropped".to_owned()), Some(HALF_SECOND));
-    }
-
-    #[test]
-    fn switch_target_leaves_auth_failed() {
-        let mut conn = open_remote();
-        conn.on_closed("dropped".to_owned());
-        conn.on_connecting();
-        conn.on_socket_open(8787);
-        conn.on_auth_failed("device not approved".to_owned());
-
-        let other = Target::tailnet("other.tail1234.ts.net", None);
-        conn.switch_target(other.clone());
-        assert_eq!(conn.target(), &other);
-        assert_eq!(conn.state(), &State::Init);
-        assert_eq!(
-            conn.overlay_text().as_deref(),
-            Some("Connecting to other…"),
-            "a new host shows the first-connect overlay again"
-        );
-        assert_eq!(
-            conn.on_closed("refused".to_owned()),
-            Some(HALF_SECOND),
-            "the new host reconnects with a reset backoff"
-        );
     }
 
     #[test]
