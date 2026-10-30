@@ -289,14 +289,13 @@ impl crate::RootView {
     /// them; empty while disconnected.
     #[must_use]
     pub fn agent_settings(&self) -> &BTreeMap<AgentId, OptionValues> {
-        &self.agent_settings
+        &self.mirrors().agent_settings
     }
 
-    /// Keeps `host`'s agents, or This PC's agents' Settings values: each
-    /// message replaces what the last one of its kind from that host said,
-    /// and a Settings broadcast answers the agent page's pending change.
-    /// Any other message, or a remote host's Settings values, is one the
-    /// root view does not fold, and is dropped.
+    /// Keeps `host`'s agents or their Settings values: each message
+    /// replaces what the last one of its kind from that host said, and a
+    /// Settings broadcast answers the agent page's pending change. Any
+    /// other message is one the root view does not fold, and is dropped.
     pub(crate) fn on_agents(
         &mut self,
         host: &crate::target::HostKey,
@@ -304,35 +303,36 @@ impl crate::RootView {
     ) {
         match msg {
             protocol::DaemonMessage::Agents { agents } => self.sidebar.set_agents(host, agents),
-            protocol::DaemonMessage::AgentSettings { settings }
-                if *host == crate::target::HostKey::Local =>
-            {
+            protocol::DaemonMessage::AgentSettings { settings } => {
+                let Some(mirrors) = self.mirrors_of_mut(host) else {
+                    return;
+                };
                 for agent in settings.keys() {
-                    self.agent_settings_pending.remove(agent);
+                    mirrors.agent_settings_pending.remove(agent);
                 }
-                self.agent_settings = settings;
-                self.agent_settings_received = true;
+                mirrors.agent_settings = settings;
+                mirrors.agent_settings_received = true;
             }
             _ => {}
         }
     }
 
-    /// Forgets `host`'s agents and, for This PC, their Settings values and
-    /// every pending Settings change, as a disconnect does.
+    /// Forgets `host`'s agents, their Settings values and every pending
+    /// Settings change, as a disconnect does.
     pub(crate) fn forget_agents(&mut self, host: &crate::target::HostKey) {
         self.sidebar.set_agents(host, Vec::new());
-        if *host != crate::target::HostKey::Local {
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
             return;
-        }
-        self.agent_settings.clear();
-        self.agent_settings_received = false;
-        self.agent_settings_pending.clear();
-        self.agent_setting_applies.clear();
+        };
+        mirrors.agent_settings.clear();
+        mirrors.agent_settings_received = false;
+        mirrors.agent_settings_pending.clear();
+        mirrors.agent_setting_applies.clear();
     }
 
     /// Whether this connection has heard the agents' Settings values.
     pub(crate) fn agent_settings_received(&self) -> bool {
-        self.agent_settings_received
+        self.mirrors().agent_settings_received
     }
 
     /// `agent`'s Settings values with `key` set to `value`, built on its
@@ -344,9 +344,10 @@ impl crate::RootView {
         key: &str,
         value: OptionValue,
     ) -> OptionValues {
+        let mirrors = self.mirrors_mut();
         merge_setting(
-            &mut self.agent_settings_pending,
-            &self.agent_settings,
+            &mut mirrors.agent_settings_pending,
+            &mirrors.agent_settings,
             agent,
             key,
             value,

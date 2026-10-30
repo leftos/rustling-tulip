@@ -15,6 +15,7 @@ use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{self, JobOutcome, OpenAction, OpenFailure, OpenJob, Resolution};
 use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::target::HostKey;
 use crate::ui_theme::theme;
 use crate::viewer_text::{self, NotText, Verdict};
 use crate::{RootView, file_fetch};
@@ -109,10 +110,12 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let host = session.map_or(HostKey::Local, |id| self.host_of_session(id));
         match link.kind {
             LinkKind::Url => match open::validate_http_url(&link.target) {
                 Ok(url) => {
-                    self.dispatch_open(OpenJob::Url(url.to_owned()), Then::Nothing, window, cx);
+                    let job = OpenJob::Url(url.to_owned());
+                    self.dispatch_open(&host, job, Then::Nothing, window, cx);
                 }
                 Err(err) => {
                     tracing::warn!("refusing terminal link {}: {err}", link.target);
@@ -126,7 +129,7 @@ impl RootView {
             },
             // A host path is not on this PC; resolving it here could open
             // a local file of the same name, so it is fetched instead.
-            LinkKind::Path if !self.capabilities().opens_local_files() => {
+            LinkKind::Path if !self.capabilities_of(&host).opens_local_files() => {
                 self.fetch_path_link(link, session, cx);
             }
             LinkKind::Path => {
@@ -297,7 +300,7 @@ impl RootView {
                     line,
                     column: column.unwrap_or(1),
                 };
-                self.dispatch_open(job, Then::Nothing, window, cx);
+                self.dispatch_open(&HostKey::Local, job, Then::Nothing, window, cx);
             }
             (Origin::Link, OpenAction::DefaultApp(path)) => {
                 self.open_in_default_app(path, Route::LINK, window, cx);
@@ -340,7 +343,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match route.origin {
-            Origin::Link => self.dispatch_open(job, route.then, window, cx),
+            Origin::Link => self.dispatch_open(&HostKey::Local, job, route.then, window, cx),
             Origin::Fetched => self.open_fetched_job(job, route.then, window, cx),
         }
     }
@@ -397,18 +400,21 @@ impl RootView {
             || self.notices.has_modal()
     }
 
-    /// Hands `job` to the opener on a background thread and reports how it
-    /// went. On a remote host only a URL opens; any other job would open a
-    /// host path on this PC, so it is refused with a toast.
+    /// Hands `job`, from an item on `host`, to the opener on a background
+    /// thread and reports how it went. On a remote host only a URL opens;
+    /// any other job would open a host path on this PC, so it is refused
+    /// with a toast. A terminal link's file reaches here only from a host
+    /// whose files are this PC's, so it comes as This PC's.
     pub(crate) fn dispatch_open(
         &mut self,
+        host: &HostKey,
         job: OpenJob,
         then: Then,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !matches!(job, OpenJob::Url(_))
-            && let Some(reason) = self.capabilities().local_files_refusal()
+            && let Some(reason) = self.capabilities_of(host).local_files_refusal()
         {
             tracing::warn!(?job, "refusing a local open on a remote host");
             self.push_toast(

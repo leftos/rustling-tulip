@@ -3,8 +3,12 @@
 
 use crate::support;
 
+use std::collections::BTreeMap;
+
 use gpui::{Modifiers, TestAppContext};
-use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
+use protocol::{
+    AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValue, RemoteState, SessionSnapshot,
+};
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetEvent, toast_action_selector};
 use support::{Fixture, Harness, PROTOCOL, TestDir, repo, session, welcome};
@@ -234,6 +238,109 @@ fn each_host_keeps_its_own_agent_descriptors(cx: &mut TestAppContext) {
     assert!(
         !h.root(|root, _| root.agents().is_empty()),
         "a remote host's agent list does not replace This PC's"
+    );
+}
+
+#[gpui::test]
+fn a_remote_keep_awake_status_leaves_this_pcs_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, Vec::new());
+    h.send(DaemonMessage::KeepAwakeStatus {
+        enabled: true,
+        mode: KeepAwakeMode::Always,
+        active: true,
+    });
+
+    h.host(&remote()).send(DaemonMessage::KeepAwakeStatus {
+        enabled: false,
+        mode: KeepAwakeMode::Off,
+        active: false,
+    });
+
+    assert_eq!(
+        h.root(|root, _| root.keep_awake_mode()),
+        Some(KeepAwakeMode::Always),
+        "This PC's keep-awake mode stays its own"
+    );
+}
+
+#[gpui::test]
+fn a_remote_remote_status_leaves_this_pcs_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, Vec::new());
+    h.send(DaemonMessage::RemoteStatus {
+        enabled: true,
+        port: 8787,
+        state: RemoteState::Starting,
+    });
+    let before = h.root(|root, _| (root.remote_status_line(), root.remote_toggle()));
+
+    h.host(&remote()).send(DaemonMessage::RemoteStatus {
+        enabled: false,
+        port: 9999,
+        state: RemoteState::Off,
+    });
+
+    assert_eq!(
+        h.root(|root, _| (root.remote_status_line(), root.remote_toggle())),
+        before,
+        "This PC's remote access status stays its own"
+    );
+}
+
+#[gpui::test]
+fn a_remote_agent_settings_list_leaves_this_pcs_settings_page_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, Vec::new());
+    let agent = AgentId("test".to_owned());
+    let local_settings = BTreeMap::from([(
+        agent.clone(),
+        BTreeMap::from([("sandbox".to_owned(), OptionValue::Bool(true))]),
+    )]);
+    h.send(DaemonMessage::AgentSettings {
+        settings: local_settings.clone(),
+    });
+
+    h.host(&remote()).send(DaemonMessage::AgentSettings {
+        settings: BTreeMap::from([(agent, BTreeMap::new())]),
+    });
+
+    assert_eq!(
+        h.root(|root, _| root.agent_settings().clone()),
+        local_settings,
+        "This PC's Settings values stay its own"
+    );
+}
+
+#[gpui::test]
+fn a_remote_sessions_menu_offers_what_a_remote_host_allows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("a1").worktree("r1").build()),
+    );
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").worktree("r2").build()],
+    });
+    h.sent();
+    let reveal_tip = |h: &mut Harness<'_>, leaf: &str| {
+        h.right_click_on(leaf);
+        let tip = h.root(|root, _| root.menu_disabled_tip("session-menu-reveal"));
+        h.keys("escape");
+        tip
+    };
+
+    assert!(
+        reveal_tip(&mut h, "leaf-b1").is_some(),
+        "the remote session's Reveal is refused: its folder is not on this PC"
+    );
+    assert_eq!(
+        reveal_tip(&mut h, "leaf-a1"),
+        None,
+        "This PC's session keeps Reveal"
     );
 }
 

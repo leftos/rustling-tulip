@@ -604,7 +604,7 @@ impl RootView {
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
             agents: self.sidebar.agents(&crate::target::HostKey::Local),
-            agent_settings: &self.agent_settings,
+            agent_settings: &self.hosts.local().mirrors.agent_settings,
             lock,
         };
         let now = (self.now)();
