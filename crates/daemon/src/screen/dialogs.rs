@@ -11,7 +11,9 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use agent_api::{AnswerRecipe, AnswerRefusal, ViewGoal, ViewReading, ViewRefusal, ViewStep};
+use agent_api::{
+    AnswerRecipe, AnswerRefusal, ScreenWork, ViewGoal, ViewReading, ViewRefusal, ViewStep,
+};
 use protocol::{AgentId, ChatAnswerKind, ChatPrompt, ChatScreen};
 
 use super::Screen;
@@ -69,6 +71,21 @@ pub fn read_view(agent: &AgentId, screen: &Screen) -> Option<ViewReading> {
         return None;
     };
     plugin.read_view(&screen.rows())
+}
+
+/// The running work `screen` counts, as `agent`'s plugin reads it; `None`
+/// for an agent with no registered plugin, one whose screen is not counted,
+/// or a frame that shows no count.
+#[must_use]
+pub fn read_work(agent: &AgentId, screen: &Screen) -> Option<ScreenWork> {
+    let Some(plugin) = agent_registry::plugin(agent) else {
+        tracing::debug!(
+            "no agent plugin `{}` is registered; its screen has no work count",
+            agent.0
+        );
+        return None;
+    };
+    plugin.read_work(&screen.rows())
 }
 
 /// The one key that moves `agent`'s screen, read as `reading`, towards
@@ -718,6 +735,80 @@ mod tests {
         assert!(
             wrong.is_empty(),
             "captures read the wrong dialog:\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// A shell whose agent has ended: its last answer, then the shell's own
+    /// prompt and no prompt box. No capture ends this way.
+    const SHELL_PROMPT: &str = "● All tests pass.\n\nPS C:\\work> exit\n\nPS C:\\work> \n";
+
+    /// The work count of a capture by Claude's plugin.
+    fn work_of(text: &str) -> Option<ScreenWork> {
+        read_work(&agent_registry::default_agent(), &screen_from(text))
+    }
+
+    #[test]
+    fn every_fixture_reads_its_work() {
+        let work = |subagents, shells| Some(ScreenWork { subagents, shells });
+        let cases: Vec<(&str, &str, Option<ScreenWork>)> = vec![
+            (
+                "v71",
+                include_str!("fixtures/v71-agents-running.txt"),
+                work(2, 1),
+            ),
+            (
+                "v2302-working-agents-panel",
+                include_str!("fixtures/claude--v2302-working-agents-panel--w119.txt"),
+                work(2, 0),
+            ),
+            (
+                "v160",
+                include_str!("fixtures/v160-main-agents-panel.txt"),
+                work(1, 1),
+            ),
+            (
+                "idle-background-shell",
+                include_str!("fixtures/claude--idle-background-shell.txt"),
+                work(0, 1),
+            ),
+            (
+                "v2301-done-shell-running",
+                include_str!("fixtures/claude--v2301-done-shell-running--w100.txt"),
+                work(0, 1),
+            ),
+            (
+                "v173",
+                include_str!("fixtures/v173-agent-view-main-reading.txt"),
+                work(1, 0),
+            ),
+            (
+                "v191",
+                include_str!("fixtures/v191-agent-view-box-keys-shell-pill.txt"),
+                work(2, 1),
+            ),
+            (
+                "v161",
+                include_str!("fixtures/v161-agent-view-panel-focus.txt"),
+                None,
+            ),
+            (
+                "v192",
+                include_str!("fixtures/v192-agent-view-ask-with-chat-about-this.txt"),
+                None,
+            ),
+            ("shell-prompt", SHELL_PROMPT, work(0, 0)),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(name, text, expected)| {
+                let read = work_of(text);
+                (read != *expected).then(|| format!("{name}: read {read:?}, expected {expected:?}"))
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "captures read the wrong work:\n{}",
             wrong.join("\n")
         );
     }

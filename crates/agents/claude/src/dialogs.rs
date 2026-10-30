@@ -19,8 +19,8 @@
 use std::cmp::Ordering;
 
 use agent_api::{
-    AnswerRecipe, AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal, ViewReading,
-    ViewRefusal, ViewStep,
+    AnswerRecipe, AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ScreenWork, ViewGoal,
+    ViewReading, ViewRefusal, ViewStep,
 };
 use protocol::{
     ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
@@ -1183,6 +1183,84 @@ pub(crate) fn read_view(rows: &[String]) -> ViewReading {
         panel_in_view: panel.iter().position(|row| row.in_view),
         panel: panel.into_iter().map(|row| row.label).collect(),
     }
+}
+
+/// The running work the screen whose visible rows are `rows` counts: the
+/// agents panel's rows other than `main` that show a running subagent's
+/// figures, and the shells the mode line counts. `None` while a dialog is
+/// up, while the panel holds the keys (its hint replaces the mode line), or
+/// when no mode line shows under the box. A frame with no prompt box at all
+/// (the shell's prompt is back) counts none of either.
+pub(crate) fn read_work(rows: &[String]) -> Option<ScreenWork> {
+    let view = read_view(rows);
+    if view.dialog || view.key_holder == KeyHolder::Panel {
+        return None;
+    }
+    let rules = rule_indices(rows);
+    let Some(&last) = rules.last() else {
+        return Some(ScreenWork {
+            subagents: 0,
+            shells: 0,
+        });
+    };
+    let under = &rows[last + 1..];
+    let mode_line = mode_line(under)?;
+    let subagents = under
+        .iter()
+        .filter(|row| panel_row(row).is_some())
+        .skip(1)
+        .filter(|row| has_running_figures(row))
+        .count();
+    Some(ScreenWork {
+        subagents: u32::try_from(subagents).unwrap_or(u32::MAX),
+        shells: shell_count(mode_line),
+    })
+}
+
+/// Whether a panel row ends in a running subagent's figures: its age
+/// (`5s`, `3m 16s`), then `· ↑ <n> tokens` or `· ↓ <n> tokens`.
+fn has_running_figures(row: &str) -> bool {
+    let Some((age, tokens)) = row
+        .trim_end()
+        .strip_suffix(" tokens")
+        .and_then(|figures| figures.rsplit_once(" · "))
+    else {
+        return false;
+    };
+    let count = tokens
+        .strip_prefix("↑ ")
+        .or_else(|| tokens.strip_prefix("↓ "));
+    let age = age.rsplit(PANEL_GAP).next().unwrap_or_default().trim();
+    count.is_some_and(|count| !count.is_empty() && !count.contains(' ')) && is_age(age)
+}
+
+/// Whether `text` is an age as the panel writes one: one or more words of
+/// digits closed by `h`, `m` or `s`.
+fn is_age(text: &str) -> bool {
+    !text.is_empty()
+        && text.split(' ').all(|word| {
+            word.strip_suffix(['h', 'm', 's']).is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+}
+
+/// The shells the mode line's `· N shell ·` or `· N shells ·` item counts;
+/// in `1 shell, 1 monitor` only the shell part. Zero when no item counts
+/// shells.
+fn shell_count(mode_line: &str) -> u32 {
+    mode_line
+        .split(" · ")
+        .find_map(|item| {
+            let first = item.split(',').next()?.trim();
+            let (count, noun) = first.split_once(' ')?;
+            if matches!(noun, "shell" | "shells") {
+                count.parse::<u32>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
 }
 
 /// The description on the rule over the box (`─ Sleeper A ─`): the later

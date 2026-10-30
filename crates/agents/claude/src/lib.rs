@@ -28,9 +28,9 @@ use agent_api::{
     ActivityReader, ActivitySource, Agent, AgentError, AnswerRecipe, AnswerRefusal,
     ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent, HookPlan,
     HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal, RecoveredRun, Refusal,
-    ResolvedRows, ScreenRules, SpawnCheck, SpawnContext, SummarizerRequest, SummarizerSpec,
-    TracerRun, TranscriptLineFacts, ViewGoal, ViewReading, ViewStep, hook_vocabulary,
-    workspace_prelude,
+    ResolvedRows, ScreenRules, ScreenWork, SpawnCheck, SpawnContext, SummarizerRequest,
+    SummarizerSpec, TracerRun, TranscriptLineFacts, ViewGoal, ViewReading, ViewStep,
+    hook_vocabulary, workspace_prelude,
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
@@ -559,6 +559,11 @@ impl Agent for ClaudePlugin {
     /// Which of Claude's conversations is in view and where its keys go.
     fn read_view(&self, rows: &[String]) -> Option<ViewReading> {
         Some(dialogs::read_view(rows))
+    }
+
+    /// The subagents and background shells Claude's screen counts.
+    fn read_work(&self, rows: &[String]) -> Option<ScreenWork> {
+        dialogs::read_work(rows)
     }
 
     /// The key that brings up `goal`'s view in Claude's terminal.

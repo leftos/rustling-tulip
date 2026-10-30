@@ -3134,6 +3134,15 @@ mod hysteresis_tests {
         record.agent_in_shell = true;
         record.shell_label = Some("pwsh".to_owned());
         record.program_name = Some("claude".to_owned());
+        record.work = crate::background_work::BackgroundWork {
+            tasks: vec![crate::background_work::WorkTask {
+                id: "b1".to_owned(),
+                kind: agent_api::hook_vocabulary::StopTaskKind::Shell { command: None },
+                description: "sleep".to_owned(),
+                since: chrono::DateTime::from_timestamp_nanos(1),
+            }],
+            wakeups: Vec::new(),
+        };
         registry.insert(record);
         let mut events = registry.subscribe();
         let read = record_status(&registry, SESSION).expect("the session is registered");
@@ -3143,6 +3152,11 @@ mod hysteresis_tests {
             let record = registry.get(SESSION).expect("session registered");
             let guard = record.lock().expect("record lock");
             assert_eq!(guard.program_name.as_deref(), Some("pwsh"));
+            assert_eq!(
+                guard.work,
+                crate::background_work::BackgroundWork::default(),
+                "the agent's work ended with it"
+            );
         }
 
         // The agent runs again without a `SessionStart` (no hooks) and ends.

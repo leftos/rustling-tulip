@@ -845,6 +845,20 @@ mod tests {
     }
 
     #[test]
+    fn session_end_on_an_agent_in_shell_record_clears_its_work() {
+        let mut record = agent_in_shell_record();
+        let tasks = json!([{"id": "b1", "type": "shell", "status": "running"}]);
+        apply_body(&mut record, 2, &main_stop(&tasks, &json!([])));
+        assert_eq!(record.work.tasks.len(), 1, "the stop's running task");
+        apply_body(&mut record, 3, &session_end());
+        assert_eq!(
+            record.work,
+            crate::background_work::BackgroundWork::default(),
+            "the agent's work ended with it"
+        );
+    }
+
+    #[test]
     fn session_end_on_an_agent_in_shell_record_leaves_hook_driven_and_announces_once() {
         let mut record = agent_in_shell_record();
         record.status = SessionStatus::AwaitingInput;

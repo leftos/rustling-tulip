@@ -138,6 +138,16 @@ pub struct ViewReading {
     pub panel_in_view: Option<usize>,
 }
 
+/// The running work a session's screen counts, as the agent's plugin reads
+/// it: counts only, with no names or ages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScreenWork {
+    /// The subagents the screen shows running.
+    pub subagents: u32,
+    /// The background shells the screen counts.
+    pub shells: u32,
+}
+
 /// The view a run of keys is to bring up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewGoal {

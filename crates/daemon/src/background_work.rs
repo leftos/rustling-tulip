@@ -91,13 +91,6 @@ impl BackgroundWork {
     }
 
     /// When the earliest pending wakeup fires, when one of them has a time.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the chat's running-work strip reads it; no caller yet"
-        )
-    )]
     #[must_use]
     pub fn wakeup_at(&self) -> Option<DateTime<Utc>> {
         self.wakeups.iter().filter_map(|wakeup| wakeup.at).min()

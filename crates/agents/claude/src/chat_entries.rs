@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use protocol::{ChatEntry, ToolOutcome};
 use serde_json::{Map, Value};
 
+use crate::records;
 use crate::transcripts::{is_command_noise, is_meta};
 
 /// The most bytes of a tool call's input a card keeps.
@@ -68,7 +69,26 @@ pub(crate) fn line_facts(line: &str) -> TranscriptLineFacts {
         timestamp: str_at(&record, "timestamp")
             .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
             .map(|stamp| stamp.with_timezone(&Utc)),
+        ended_tasks: ended_tasks(&record),
     }
+}
+
+/// The tasks a task-notification record reports ended: each notification's
+/// task id. A monitor's event arrives as a notification too, carrying an
+/// `<event>`, and leaves its monitor running, so that notification is not
+/// listed; the others in the same record are.
+fn ended_tasks(record: &Value) -> Vec<String> {
+    if record.pointer("/origin/kind").and_then(Value::as_str) != Some("task-notification") {
+        return Vec::new();
+    }
+    let Some(text) = record.pointer("/message/content").and_then(content_text) else {
+        return Vec::new();
+    };
+    text.split_inclusive("</task-notification>")
+        .filter(|own| tag_text(&without_tag(own, "result"), "event").is_none())
+        .flat_map(records::task_notifications)
+        .map(|notification| notification.task_id.to_owned())
+        .collect()
 }
 
 fn is_user_prompt(record: &Value) -> bool {
@@ -622,7 +642,49 @@ mod tests {
                     .with_ymd_and_hms(2026, 9, 27, 10, 0, 1)
                     .single()
                     .map(|second| second + TimeDelta::milliseconds(500)),
+                ended_tasks: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn line_facts_list_the_task_a_notification_ends() {
+        assert_eq!(line_facts(line("notifications", "31")).ended_tasks, ["b1"]);
+        assert_eq!(line_facts(line("notifications", "30")).ended_tasks, ["a1"]);
+        assert_eq!(
+            line_facts(line("notifications", "32")).ended_tasks,
+            Vec::<String>::new(),
+            "a monitor's event leaves its monitor running"
+        );
+        assert_eq!(
+            line_facts(line("notifications", "3b")).ended_tasks,
+            ["a6"],
+            "a summary inside the result is not the notification's"
+        );
+    }
+
+    #[test]
+    fn a_monitor_event_beside_a_shells_end_lists_the_shell() {
+        let record = json!({
+            "type": "user",
+            "uuid": uid("40"),
+            "timestamp": "2026-09-27T10:00:51.000Z",
+            "message": {
+                "role": "user",
+                "content": "<task-notification><task-id>m1</task-id>\
+                    <summary>Monitor \"build log\" matched a line</summary>\
+                    <event>error: x</event></task-notification>\n\
+                    <task-notification><task-id>b1</task-id><tool-use-id>toolu_01</tool-use-id>\
+                    <output-file>o</output-file><status>completed</status>\
+                    <summary>Background command \"Run tests\" completed (exit code 0)</summary>\
+                    </task-notification>",
+            },
+            "origin": {"kind": "task-notification"},
+        });
+        assert_eq!(
+            line_facts(&record.to_string()).ended_tasks,
+            ["b1"],
+            "the monitor runs on; the shell ended"
         );
     }
 

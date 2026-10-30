@@ -28,8 +28,8 @@ pub use activity::{
     MINUTE_COLUMNS, OpenCall, SubagentNode,
 };
 pub use dialogs::{
-    AnswerRecipe, AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal, ViewReading,
-    ViewRefusal, ViewStep,
+    AnswerRecipe, AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ScreenWork, ViewGoal,
+    ViewReading, ViewRefusal, ViewStep,
 };
 pub use screen_rules::{
     LineMatcher, ReadySignal, RuleError, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict,
@@ -190,7 +190,7 @@ pub struct LiveLine {
 }
 
 /// What the chat needs of one transcript line beyond its entries: which
-/// prompt's turn it belongs to.
+/// prompt's turn it belongs to, and which background tasks it reports ended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptLineFacts {
     /// The id the agent stamps on the line's prompt, the same key a
@@ -200,6 +200,9 @@ pub struct TranscriptLineFacts {
     pub is_user_prompt: bool,
     /// The line's own time, from the transcript record.
     pub timestamp: Option<DateTime<Utc>>,
+    /// The ids of the background tasks the line reports ended, the same ids
+    /// a turn end's task list carries.
+    pub ended_tasks: Vec<String>,
 }
 
 /// One change a plugin read from a line of its CLI's headless output, for the
@@ -810,6 +813,13 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
+    /// The running work the screen whose visible rows, top to bottom, are
+    /// `rows` counts; `None` for an agent whose screen the daemon does not
+    /// count, or a frame that shows no count (a dialog is up).
+    fn read_work(&self, _rows: &[String]) -> Option<ScreenWork> {
+        None
+    }
+
     /// The one key that moves the screen read as `reading` towards `goal`,
     /// [`ViewStep::Done`] once it is there, or why no key leads there.
     fn next_view_key(&self, _goal: ViewGoal, _reading: &ViewReading) -> ViewStep {
@@ -997,6 +1007,9 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::read_view`].
     fn read_view(&self, rows: &[String]) -> Option<ViewReading>;
+
+    /// See [`Agent::read_work`].
+    fn read_work(&self, rows: &[String]) -> Option<ScreenWork>;
 
     /// See [`Agent::next_view_key`].
     fn next_view_key(&self, goal: ViewGoal, reading: &ViewReading) -> ViewStep;
@@ -1225,6 +1238,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn read_view(&self, rows: &[String]) -> Option<ViewReading> {
         Agent::read_view(self, rows)
+    }
+
+    fn read_work(&self, rows: &[String]) -> Option<ScreenWork> {
+        Agent::read_work(self, rows)
     }
 
     fn next_view_key(&self, goal: ViewGoal, reading: &ViewReading) -> ViewStep {

@@ -2651,6 +2651,51 @@ pub struct ChatScreen {
     pub prompt: Option<ChatPrompt>,
 }
 
+/// One subagent on a session's running-work strip: one its agent's last
+/// `Stop` listed as running, or one only the screen counts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkSubagent {
+    /// The subagent's agent id; empty for one only the screen counts.
+    pub id: String,
+    /// What the subagent was asked to do; empty when the agent named nothing
+    /// or only the screen counts it.
+    pub description: String,
+    /// The subagent's agent type (`general-purpose`, `Explore`, …), when the
+    /// agent named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// When the subagent was first reported running; `None` for one only the
+    /// screen counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    /// Whether only the screen's count shows the subagent, with nothing the
+    /// agent reported behind it.
+    #[serde(default)]
+    pub from_screen: bool,
+}
+
+/// One background shell on a session's running-work strip: one its agent's
+/// last `Stop` listed as running, or one only the screen counts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkShell {
+    /// The shell's background task id; empty for one only the screen counts.
+    pub id: String,
+    /// The shell's description; empty when the agent named none or only the
+    /// screen counts it.
+    pub description: String,
+    /// The command line the shell runs, when the agent reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// When the shell was first reported running; `None` for one only the
+    /// screen counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    /// Whether only the screen's count shows the shell, with nothing the
+    /// agent reported behind it.
+    #[serde(default)]
+    pub from_screen: bool,
+}
+
 /// The state of the agent's input box.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -4935,6 +4980,22 @@ pub enum DaemonMessage {
         session_id: String,
         #[serde(default)]
         lines: Vec<StretchLine>,
+    },
+    /// The work still running beside the session's chat, for the strip over
+    /// its composer: the subagents, the background shells and the earliest
+    /// pending wakeup. Sent to chat and summary loaders only, once per
+    /// loader: to a new loader right after its `Chat` or `Summary` reply, and
+    /// to every loader when it changes. Empty lists and no wakeup hide the
+    /// strip.
+    ChatWork {
+        session_id: String,
+        #[serde(default)]
+        subagents: Vec<WorkSubagent>,
+        #[serde(default)]
+        shells: Vec<WorkShell>,
+        /// When the earliest pending wakeup fires.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wakeup_at: Option<DateTime<Utc>>,
     },
 }
 
@@ -10469,6 +10530,58 @@ mod tests {
             DaemonMessage::SummaryAppend { session_id, lines } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(lines, sample_stretch_lines());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_work_message_round_trips() {
+        let since = "2026-10-30T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a valid time");
+        let subagents = vec![
+            WorkSubagent {
+                id: "a1".to_string(),
+                description: "Explore the map".to_string(),
+                agent_type: Some("Explore".to_string()),
+                since: Some(since),
+                from_screen: false,
+            },
+            WorkSubagent {
+                id: String::new(),
+                description: String::new(),
+                agent_type: None,
+                since: None,
+                from_screen: true,
+            },
+        ];
+        let shells = vec![WorkShell {
+            id: "b1".to_string(),
+            description: "Run tests".to_string(),
+            command: Some("cargo test".to_string()),
+            since: Some(since),
+            from_screen: false,
+        }];
+        let msg = DaemonMessage::ChatWork {
+            session_id: "s1".to_string(),
+            subagents: subagents.clone(),
+            shells: shells.clone(),
+            wakeup_at: Some(since),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"chat_work""#));
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::ChatWork {
+                session_id,
+                subagents: read_subagents,
+                shells: read_shells,
+                wakeup_at,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(read_subagents, subagents);
+                assert_eq!(read_shells, shells);
+                assert_eq!(wakeup_at, Some(since));
             }
             other => panic!("unexpected variant: {other:?}"),
         }

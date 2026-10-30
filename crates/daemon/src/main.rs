@@ -13,6 +13,7 @@ mod binary_cache;
 mod branch_fate;
 mod branch_names;
 mod chat_mirror;
+mod chat_work;
 mod child_env;
 mod cli_apply_update;
 mod cli_bridge;

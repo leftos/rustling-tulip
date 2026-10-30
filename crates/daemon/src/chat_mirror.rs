@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use agent_api::{AgentPlugin, LiveLine, TranscriptLineFacts};
+use agent_api::{AgentPlugin, LiveLine, ScreenWork, TranscriptLineFacts};
 use chrono::{DateTime, Utc};
 use protocol::{
     AgentId, ChatEntry, ChatPrompt, ChatScreen, ComposerState, DaemonMessage, StretchLine,
@@ -34,6 +34,8 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+use crate::background_work::BackgroundWork;
+use crate::chat_work::chat_work;
 use crate::hook_status::LiveLines;
 use crate::screen::{Screen, SharedScreen, dialogs};
 use crate::session::{SessionEvent, SessionRegistry};
@@ -247,23 +249,30 @@ impl ChatMirror {
             let mut sessions = lock(&self.inner.sessions);
             let mirror = match sessions.entry(session_id.to_owned()) {
                 Entry::Occupied(held) => held.into_mut(),
-                Entry::Vacant(slot) => {
-                    slot.insert(SessionMirror::new(plugin, self.start_live(session_id)))
-                }
+                Entry::Vacant(slot) => slot.insert(SessionMirror::new(
+                    session_id,
+                    plugin,
+                    self.start_live(session_id),
+                )),
             };
             if mirror.conversation != conversation {
                 self.switch(session_id, mirror, conversation);
             }
-            if let Some(reading) = grid
-                .as_deref()
-                .and_then(|screen| dialogs::read(&found.agent, screen))
-            {
-                mirror.observe(session_id, reading);
+            if let Some(screen) = grid.as_deref() {
+                if let Some(reading) = dialogs::read(&found.agent, screen) {
+                    mirror.observe(session_id, reading);
+                }
+                if let Some(counted) = dialogs::read_work(&found.agent, screen) {
+                    mirror.screen_work = Some(counted);
+                }
             }
+            mirror.work.clone_from(&found.work);
+            mirror.update_work(session_id);
             let reply = mirror.register(kind, session_id, request_id, connection, out_tx);
             // A closed outbox is a connection already ending; its guard
-            // unloads.
+            // unloads. The strip follows the reply, to this loader only.
             let _ = out_tx.send(reply);
+            let _ = out_tx.send(mirror.work_shown.clone());
         }
         drop(grid);
         // The record was read before the lock: a conversation change or a
@@ -394,13 +403,14 @@ impl ChatMirror {
         mirror.conversation = conversation;
         mirror.chat = ChatState::starting_with(head, path.is_some());
         mirror.summary_sent.clear();
-        match path {
-            Some(path) => {
-                mirror.tail = Some(self.start_tail(session_id, path, mirror.epoch, mirror.plugin));
-                // The loaders show the old chat until the first read ends.
-                mirror.chat.stale = !mirror.loaders.is_empty();
-            }
-            None => mirror.reset(session_id),
+        // Task ids are unique across conversations, so the ended ones stay.
+        if let Some(path) = path {
+            mirror.tail = Some(self.start_tail(session_id, path, mirror.epoch, mirror.plugin));
+            // The loaders show the old chat until the first read ends.
+            mirror.chat.stale = !mirror.loaders.is_empty();
+        } else {
+            mirror.reset(session_id);
+            mirror.update_work(session_id);
         }
     }
 
@@ -442,23 +452,13 @@ impl ChatMirror {
             return;
         };
         match event {
-            TailEvent::Line(line) => {
-                let change = mirror.chat.apply_line(plugin, &line, &facts);
-                if change.entries.is_empty() && change.removed.is_empty() {
-                    return;
-                }
-                if mirror.chat.catching_up {
-                    // Sent whole when the read ends.
-                    mirror.chat.stale = true;
-                } else {
-                    mirror.send_change(session_id, &change);
-                }
-            }
+            TailEvent::Line(line) => mirror.apply_line(session_id, plugin, &line, &facts),
             TailEvent::Restarted => mirror.chat.restart(),
             TailEvent::CaughtUp => {
                 if mirror.chat.catch_up() {
                     mirror.reset(session_id);
                 }
+                mirror.update_work(session_id);
             }
         }
     }
@@ -525,8 +525,25 @@ impl ChatMirror {
         }
     }
 
+    /// `session_id`'s record changed: a mirrored session takes the work the
+    /// record now holds, and its loaders hear of a changed strip.
+    fn follow_work(&self, session_id: &str) {
+        if !lock(&self.inner.sessions).contains_key(session_id) {
+            return;
+        }
+        let Some(record) = self.inner.registry.get(session_id) else {
+            return;
+        };
+        let work = lock(&record).work.clone();
+        let mut sessions = lock(&self.inner.sessions);
+        if let Some(mirror) = sessions.get_mut(session_id) {
+            mirror.take_work(session_id, work);
+        }
+    }
+
     /// Read `session_id`'s record again and switch its chat when the record
-    /// names another conversation; a record that is gone drops its mirror.
+    /// names another conversation, taking the work it holds; a record that
+    /// is gone drops its mirror.
     fn refresh(&self, session_id: &str) {
         let Some(found) = Found::read(&self.inner.registry, session_id) else {
             self.drop_session(session_id);
@@ -537,10 +554,11 @@ impl ChatMirror {
         };
         let conversation = found.conversation(plugin);
         let mut sessions = lock(&self.inner.sessions);
-        if let Some(mirror) = sessions.get_mut(session_id)
-            && mirror.conversation != conversation
-        {
-            self.switch(session_id, mirror, conversation);
+        if let Some(mirror) = sessions.get_mut(session_id) {
+            if mirror.conversation != conversation {
+                self.switch(session_id, mirror, conversation);
+            }
+            mirror.take_work(session_id, found.work);
         }
     }
 
@@ -569,6 +587,7 @@ async fn follow_registry(weak: Weak<Inner>, mut receiver: broadcast::Receiver<Se
         match received {
             Ok(SessionEvent::Updated(snapshot, _)) => {
                 mirror.follow_conversation(&snapshot.id, snapshot.conversation_id.as_deref());
+                mirror.follow_work(&snapshot.id);
             }
             Ok(SessionEvent::Removed(session_id)) => mirror.drop_session(&session_id),
             Ok(_) => {}
@@ -673,6 +692,7 @@ struct Found {
     folder: Option<String>,
     extra_env: Vec<(String, String)>,
     screen: Option<SharedScreen>,
+    work: BackgroundWork,
 }
 
 impl Found {
@@ -690,6 +710,7 @@ impl Found {
                 .map(|config| config.extra_env.clone())
                 .unwrap_or_default(),
             screen: record.screen.clone(),
+            work: record.work.clone(),
         })
     }
 
@@ -740,6 +761,18 @@ struct SessionMirror {
     chat: ChatState,
     screen: ScreenState,
     live_task: tokio::task::AbortHandle,
+    /// The work the session's record holds, as its agent's last `Stop`
+    /// listed it.
+    work: BackgroundWork,
+    /// The ids of the tasks whose task notification the session's
+    /// transcripts hold, kept across a conversation switch since task ids
+    /// are unique across conversations.
+    ended_tasks: HashSet<String>,
+    /// The running work the screen counted at its last reading that showed
+    /// a count.
+    screen_work: Option<ScreenWork>,
+    /// The `ChatWork` the loaders were last sent.
+    work_shown: DaemonMessage,
 }
 
 impl Drop for SessionMirror {
@@ -749,7 +782,11 @@ impl Drop for SessionMirror {
 }
 
 impl SessionMirror {
-    fn new(plugin: &'static dyn AgentPlugin, live_task: tokio::task::AbortHandle) -> Self {
+    fn new(
+        session_id: &str,
+        plugin: &'static dyn AgentPlugin,
+        live_task: tokio::task::AbortHandle,
+    ) -> Self {
         Self {
             plugin,
             loaders: HashMap::new(),
@@ -760,6 +797,76 @@ impl SessionMirror {
             chat: ChatState::default(),
             screen: ScreenState::default(),
             live_task,
+            work: BackgroundWork::default(),
+            ended_tasks: HashSet::new(),
+            screen_work: None,
+            work_shown: DaemonMessage::ChatWork {
+                session_id: session_id.to_owned(),
+                subagents: Vec::new(),
+                shells: Vec::new(),
+                wakeup_at: None,
+            },
+        }
+    }
+
+    /// Apply one transcript line: send each loader what it changed once the
+    /// first read is over, and the strip when the line ended a task.
+    fn apply_line(
+        &mut self,
+        session_id: &str,
+        plugin: &dyn AgentPlugin,
+        line: &str,
+        facts: &TranscriptLineFacts,
+    ) {
+        self.ended_tasks.extend(facts.ended_tasks.iter().cloned());
+        let change = self.chat.apply_line(plugin, line, facts);
+        let changed = !(change.entries.is_empty() && change.removed.is_empty());
+        if self.chat.catching_up {
+            // Sent whole when the read ends, the strip with it.
+            self.chat.stale |= changed;
+            return;
+        }
+        if changed {
+            self.send_change(session_id, &change);
+        }
+        if !facts.ended_tasks.is_empty() {
+            self.update_work(session_id);
+        }
+    }
+
+    /// Take `work` as what the record holds, telling the loaders of a
+    /// changed strip.
+    fn take_work(&mut self, session_id: &str, work: BackgroundWork) {
+        if self.work != work {
+            self.work = work;
+            self.update_work(session_id);
+        }
+    }
+
+    /// Take `counted` as the screen's count, telling the loaders of a changed
+    /// strip.
+    fn take_screen_work(&mut self, session_id: &str, counted: ScreenWork) {
+        if self.screen_work != Some(counted) {
+            self.screen_work = Some(counted);
+            self.update_work(session_id);
+        }
+    }
+
+    /// Work out the strip again and send it to every loader when it changed.
+    fn update_work(&mut self, session_id: &str) {
+        let work = chat_work(session_id, &self.work, &self.ended_tasks, self.screen_work);
+        if !same_work(&work, &self.work_shown) {
+            self.tell_all(&work);
+            self.work_shown = work;
+        }
+    }
+
+    /// Send `msg` once to every loader, whatever it loaded.
+    fn tell_all(&self, msg: &DaemonMessage) {
+        for loader in self.loaders.values().filter(|loader| loader.loads_any()) {
+            // A closed outbox is a connection already ending; its guard
+            // unloads it.
+            let _ = loader.out.send(msg.clone());
         }
     }
 
@@ -959,6 +1066,31 @@ impl ChatTap {
         if let Some(reading) = dialogs::read(&self.agent, screen) {
             mirror.observe(&self.session_id, reading);
         }
+        // A frame that shows no count (a dialog is up) keeps the last one.
+        if let Some(counted) = dialogs::read_work(&self.agent, screen) {
+            mirror.take_screen_work(&self.session_id, counted);
+        }
+    }
+}
+
+/// Whether two `ChatWork` messages show the same strip.
+fn same_work(a: &DaemonMessage, b: &DaemonMessage) -> bool {
+    match (a, b) {
+        (
+            DaemonMessage::ChatWork {
+                subagents,
+                shells,
+                wakeup_at,
+                ..
+            },
+            DaemonMessage::ChatWork {
+                subagents: other_subagents,
+                shells: other_shells,
+                wakeup_at: other_wakeup,
+                ..
+            },
+        ) => subagents == other_subagents && shells == other_shells && wakeup_at == other_wakeup,
+        _ => false,
     }
 }
 

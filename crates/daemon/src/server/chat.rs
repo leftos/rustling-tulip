@@ -67,8 +67,7 @@ mod tests {
     use super::super::Hub;
     use super::super::connection::AuthKind;
     use super::super::test_support::{
-        ScratchDir, dispatch_on, drain, hello, idle_record, mem_session, next_message,
-        next_message_within, test_hub,
+        self, ScratchDir, dispatch_on, hello, idle_record, mem_session, test_hub,
     };
     use crate::chat_mirror::CHAT_REPLY_CAP;
     use crate::chat_mirror::test_lines::{answer, live_body, prompt, stamp};
@@ -185,6 +184,132 @@ mod tests {
             let record = self.hub.sessions.get("s1").expect("s1 is registered");
             crate::hook_status::deliver(&self.hub, "s1", &record, None, body);
         }
+
+        /// Deliver `body` as a hook event stamped `time`, in nanoseconds
+        /// since the epoch.
+        fn deliver_at(&self, time: u128, body: &serde_json::Value) {
+            let record = self.hub.sessions.get("s1").expect("s1 is registered");
+            crate::hook_status::deliver(&self.hub, "s1", &record, Some(time), body);
+        }
+    }
+
+    /// The next message that is not a `ChatWork`: every load's reply is
+    /// followed by the strip, which the tests of other messages skip.
+    async fn next_message(inbox: &mut Inbox) -> DaemonMessage {
+        loop {
+            let msg = test_support::next_message(inbox).await;
+            if !matches!(msg, DaemonMessage::ChatWork { .. }) {
+                return msg;
+            }
+        }
+    }
+
+    /// [`next_message`] with its own hang guard.
+    async fn next_message_within(inbox: &mut Inbox, guard: Duration) -> DaemonMessage {
+        loop {
+            let msg = test_support::next_message_within(inbox, guard).await;
+            if !matches!(msg, DaemonMessage::ChatWork { .. }) {
+                return msg;
+            }
+        }
+    }
+
+    /// The messages waiting on `inbox` but the strips.
+    fn drain(inbox: &mut Inbox) -> Vec<DaemonMessage> {
+        test_support::drain(inbox)
+            .into_iter()
+            .filter(|msg| !matches!(msg, DaemonMessage::ChatWork { .. }))
+            .collect()
+    }
+
+    /// A subagent's and a shell's ids, as a strip lists them.
+    type WorkIds = (Vec<String>, Vec<String>);
+
+    fn work_ids(msg: DaemonMessage) -> Option<WorkIds> {
+        match msg {
+            DaemonMessage::ChatWork {
+                subagents, shells, ..
+            } => Some((
+                subagents.into_iter().map(|agent| agent.id).collect(),
+                shells.into_iter().map(|shell| shell.id).collect(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The next `ChatWork` on `inbox`, skipping every other message.
+    async fn next_work(inbox: &mut Inbox) -> WorkIds {
+        loop {
+            if let Some(ids) = work_ids(test_support::next_message(inbox).await) {
+                return ids;
+            }
+        }
+    }
+
+    /// The `ChatWork`s already waiting on `inbox`.
+    fn waiting_work(inbox: &mut Inbox) -> Vec<WorkIds> {
+        test_support::drain(inbox)
+            .into_iter()
+            .filter_map(work_ids)
+            .collect()
+    }
+
+    /// The strips on `inbox` before the first message `last` matches, which
+    /// it consumes.
+    async fn strips_until(
+        inbox: &mut Inbox,
+        last: impl Fn(&DaemonMessage) -> bool,
+    ) -> Vec<WorkIds> {
+        let mut strips = Vec::new();
+        loop {
+            let msg = test_support::next_message(inbox).await;
+            if last(&msg) {
+                return strips;
+            }
+            strips.extend(work_ids(msg));
+        }
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|&id| id.to_owned()).collect()
+    }
+
+    /// The first hook time the strip tests stamp: 2026-09-21, in nanoseconds.
+    const T0: u128 = 1_790_000_000_000_000_000;
+
+    /// One second, in nanoseconds.
+    const SECOND: u128 = 1_000_000_000;
+
+    /// A main-agent `Stop` listing each `(id, type)` of `tasks` as running.
+    fn stop_listing(tasks: &[(&str, &str)]) -> serde_json::Value {
+        let tasks: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|(id, kind)| {
+                serde_json::json!({
+                    "id": id, "type": kind, "status": "running",
+                    "description": format!("task {id}"), "command": "cargo test",
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "hook_event_name": "Stop", "background_tasks": tasks, "session_crons": [],
+        })
+    }
+
+    /// The task notification `uuid` at second `n` that ends shell `task_id`.
+    fn notification(uuid: &str, n: usize, task_id: &str) -> String {
+        let text = format!(
+            "<task-notification><task-id>{task_id}</task-id><tool-use-id>toolu_01</tool-use-id>\
+             <output-file>o</output-file><status>completed</status>\
+             <summary>Background command \"Run tests\" completed (exit code 0)</summary>\
+             </task-notification>"
+        );
+        serde_json::json!({
+            "type": "user", "uuid": uuid, "timestamp": stamp(n),
+            "origin": {"kind": "task-notification"},
+            "message": {"role": "user", "content": text},
+        })
+        .to_string()
     }
 
     fn append_to(path: &PathBuf, lines: &[String]) {
@@ -351,6 +476,150 @@ mod tests {
         })
         .await
         .expect("hung: a live-line follower outlived its mirror");
+    }
+
+    #[tokio::test]
+    async fn chat_work_reaches_loaders_once() {
+        let fx = Fixture::new("chat-work-loaders", Some("conv-a"));
+        let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
+        let (summary_tx, mut summary_rx) = mpsc::unbounded_channel();
+        let (both_tx, mut both_rx) = mpsc::unbounded_channel();
+        fx.load(1, &chat_tx, "ra").await;
+        fx.load_summary(2, &summary_tx, "rb").await;
+        fx.load(3, &both_tx, "rc").await;
+        fx.load_summary(3, &both_tx, "rc2").await;
+        let empty: WorkIds = (Vec::new(), Vec::new());
+        assert_eq!(
+            next_work(&mut chat_rx).await,
+            empty,
+            "the chat load's strip"
+        );
+        assert_eq!(
+            next_work(&mut summary_rx).await,
+            empty,
+            "the summary load's strip"
+        );
+        assert_eq!(
+            next_work(&mut both_rx).await,
+            empty,
+            "the chat load's strip"
+        );
+        assert_eq!(
+            next_work(&mut both_rx).await,
+            empty,
+            "the summary load's strip"
+        );
+        fx.deliver_at(T0, &stop_listing(&[("b1", "shell")]));
+        for (name, inbox) in [
+            ("chat", &mut chat_rx),
+            ("summary", &mut summary_rx),
+            ("both", &mut both_rx),
+        ] {
+            assert_eq!(next_work(inbox).await, (Vec::new(), ids(&["b1"])), "{name}");
+            assert_eq!(waiting_work(inbox), Vec::<WorkIds>::new(), "{name}: once");
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_work_is_sent_on_load() {
+        let fx = Fixture::new("chat-work-on-load", Some("conv-a"));
+        fx.deliver_at(T0, &stop_listing(&[("b1", "shell"), ("a1", "subagent")]));
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        let reply = test_support::next_message(&mut a_rx).await;
+        assert!(
+            matches!(reply, DaemonMessage::Chat { .. }),
+            "the reply comes first, got {reply:?}"
+        );
+        let strip = work_ids(test_support::next_message(&mut a_rx).await);
+        assert_eq!(strip, Some((ids(&["a1"]), ids(&["b1"]))), "then the strip");
+        fx.load_summary(2, &b_tx, "rb").await;
+        let reply = test_support::next_message(&mut b_rx).await;
+        assert!(
+            matches!(reply, DaemonMessage::Summary { .. }),
+            "the reply comes first, got {reply:?}"
+        );
+        let strip = work_ids(test_support::next_message(&mut b_rx).await);
+        assert_eq!(strip, Some((ids(&["a1"]), ids(&["b1"]))), "then the strip");
+        assert_eq!(
+            waiting_work(&mut a_rx),
+            Vec::<WorkIds>::new(),
+            "B's load sends A no strip"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_notification_drops_its_task() {
+        let fx = Fixture::new("chat-work-notification", Some("conv-a"));
+        fx.append("conv-a", &[user(1)]);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        ids_until(&mut a_rx, "u-1").await;
+        fx.deliver_at(T0, &stop_listing(&[("b1", "shell"), ("a1", "subagent")]));
+        assert_eq!(next_work(&mut a_rx).await, (ids(&["a1"]), ids(&["b1"])));
+        fx.append("conv-a", &[notification("n-2", 2, "b1")]);
+        assert_eq!(
+            next_work(&mut a_rx).await,
+            (ids(&["a1"]), Vec::new()),
+            "the shell's notification ended it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conversation_switch_keeps_the_ended_tasks() {
+        let fx = Fixture::new("chat-work-switch", Some("conv-a"));
+        fx.transcript("conv-b");
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(next_work(&mut a_rx).await, (Vec::new(), Vec::new()));
+        fx.deliver_at(T0, &stop_listing(&[("b1", "shell")]));
+        assert_eq!(next_work(&mut a_rx).await, (Vec::new(), ids(&["b1"])));
+        fx.append("conv-a", &[notification("n-1", 1, "b1")]);
+        assert_eq!(
+            next_work(&mut a_rx).await,
+            (Vec::new(), Vec::new()),
+            "the shell's notification ended it"
+        );
+        fx.hub.sessions.update("s1", |record| {
+            record.conversation_id = Some("conv-b".to_owned());
+        });
+        let mut strips =
+            strips_until(&mut a_rx, |msg| matches!(msg, DaemonMessage::Chat { .. })).await;
+        // conv-b's line arrives after the strip its first read sent.
+        fx.append("conv-b", &[user(2)]);
+        strips.extend(
+            strips_until(&mut a_rx, |msg| {
+                matches!(msg, DaemonMessage::ChatAppend { entries, .. }
+                    if entries.iter().any(|entry| id_of(entry) == "u-2"))
+            })
+            .await,
+        );
+        assert!(
+            strips.iter().all(|(_, shells)| shells.is_empty()),
+            "the switch brought b1 back: {strips:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_chat_work_when_nothing_changed() {
+        let fx = Fixture::new("chat-work-unchanged", Some("conv-a"));
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "ra").await;
+        assert_eq!(next_work(&mut a_rx).await, (Vec::new(), Vec::new()));
+        let shell_only = stop_listing(&[("b1", "shell")]);
+        fx.deliver_at(T0, &shell_only);
+        assert_eq!(next_work(&mut a_rx).await, (Vec::new(), ids(&["b1"])));
+        fx.deliver_at(T0 + SECOND, &shell_only);
+        fx.deliver_at(
+            T0 + 2 * SECOND,
+            &stop_listing(&[("b1", "shell"), ("a1", "subagent")]),
+        );
+        assert_eq!(
+            next_work(&mut a_rx).await,
+            (ids(&["a1"]), ids(&["b1"])),
+            "the same Stop again sent no strip before the changed one"
+        );
     }
 
     #[tokio::test]

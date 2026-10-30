@@ -380,11 +380,12 @@ impl SessionRecord {
         self.mode == SessionMode::PlainShell || self.agent_in_shell
     }
 
-    /// The agent inside this session's shell ended: the leaf names the shell
-    /// again. Answers whether the clients are to be told, which is once per
-    /// agent run and never for a session whose agent is not typed into its
-    /// shell.
+    /// The agent inside this session's shell ended: the work it reported
+    /// ended with it, and the leaf names the shell again. Answers whether the
+    /// clients are to be told, which is once per agent run and never for a
+    /// session whose agent is not typed into its shell.
     pub fn end_agent_in_shell(&mut self) -> bool {
+        self.work = BackgroundWork::default();
         if !self.agent_in_shell || self.agent_exit_announced {
             return false;
         }
