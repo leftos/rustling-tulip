@@ -12,6 +12,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{ChatEntry, StretchLine, SummarySource};
 
 use crate::chat_mirror::entry_id;
+use crate::summarizer::prompt::shape;
 use crate::summarizer::reply::cut_chars;
 
 /// The span from which a turn splits into windows.
@@ -53,21 +54,36 @@ struct Placed<'a> {
 
 /// The stretch lines of a chat whose entries are `entries`, in chat order.
 pub fn stretch_lines(entries: &[TimedEntry<'_>]) -> Vec<StretchLine> {
+    turns(entries).into_iter().flat_map(turn_lines).collect()
+}
+
+/// Each stretch of a chat whose entries are `entries`, in chat order, as its
+/// id and the text the summarizer is sent for it: the opening user entry (or
+/// the row that began the turn) for a turn's first window, then each tool's
+/// summary and each answer's text, one per line, shaped as every summary
+/// input is. A pending user entry is left out, and nothing in it depends on
+/// the stretch's times.
+pub fn stretch_inputs(entries: &[TimedEntry<'_>]) -> Vec<(String, String)> {
+    turns(entries).into_iter().flat_map(turn_inputs).collect()
+}
+
+/// The chat's turns: each runs from an entry that began a turn to the next
+/// one, the last to the chat's end.
+fn turns<'e, 'a>(entries: &'e [TimedEntry<'a>]) -> Vec<&'e [TimedEntry<'a>]> {
     let starts: Vec<usize> = entries
         .iter()
         .enumerate()
         .filter(|(_, timed)| timed.starts_turn)
         .map(|(at, _)| at)
         .collect();
-    let mut lines = Vec::new();
-    for (n, &start) in starts.iter().enumerate() {
-        // The last turn runs to the chat's end.
-        let end = starts.get(n + 1).copied().unwrap_or(entries.len());
-        if let Some(turn) = entries.get(start..end) {
-            lines.extend(turn_lines(turn));
-        }
-    }
-    lines
+    starts
+        .iter()
+        .enumerate()
+        .filter_map(|(n, &start)| {
+            let end = starts.get(n + 1).copied().unwrap_or(entries.len());
+            entries.get(start..end)
+        })
+        .collect()
 }
 
 /// One turn's lines: one per window that holds an entry.
@@ -76,18 +92,59 @@ fn turn_lines(turn: &[TimedEntry<'_>]) -> Vec<StretchLine> {
     let Some(turn_id) = placed.first().map(|first| first.id) else {
         return Vec::new();
     };
-    // A turn a row began (a `!` command, a notice) leads with that row.
-    let prompt = match placed.first().map(|first| first.entry) {
-        Some(ChatEntry::System { text, .. }) => Some(text.as_str()),
-        _ => placed.iter().find_map(|placed| match placed.entry {
-            ChatEntry::User { text, .. } => Some(text.as_str()),
-            _ => None,
-        }),
-    };
+    let prompt = opening(&placed, |_| true);
     placed
         .chunk_by(|a, b| a.window == b.window)
         .filter_map(|window| window_line(turn_id, prompt.unwrap_or_default(), window))
         .collect()
+}
+
+/// One turn's stretch inputs: one per window that holds an entry.
+fn turn_inputs(turn: &[TimedEntry<'_>]) -> Vec<(String, String)> {
+    let placed = place(turn);
+    let Some(turn_id) = placed.first().map(|first| first.id) else {
+        return Vec::new();
+    };
+    let lead = opening(&placed, |pending| !pending);
+    placed
+        .chunk_by(|a, b| a.window == b.window)
+        .filter_map(|window| {
+            let first = window.first()?;
+            let mut parts: Vec<&str> = Vec::new();
+            if first.window == 0 {
+                parts.extend(lead);
+            }
+            parts.extend(window.iter().filter_map(|placed| match placed.entry {
+                ChatEntry::Tool { summary, .. } => Some(summary.as_str()),
+                ChatEntry::Answer { text, .. } => Some(text.as_str()),
+                _ => None,
+            }));
+            let input = shape(&[&parts.join("\n")]);
+            Some((stretch_id(turn_id, first.window), input))
+        })
+        .collect()
+}
+
+/// What a turn opens with: the row that began it (a `!` command, a notice),
+/// else its first user entry whose pending flag `keep` accepts.
+fn opening<'a>(placed: &[Placed<'a>], keep: impl Fn(bool) -> bool) -> Option<&'a str> {
+    match placed.first().map(|first| first.entry) {
+        Some(ChatEntry::System { text, .. }) => Some(text.as_str()),
+        _ => placed.iter().find_map(|placed| match placed.entry {
+            ChatEntry::User { text, pending, .. } if keep(*pending) => Some(text.as_str()),
+            _ => None,
+        }),
+    }
+}
+
+/// The id of window `window` of turn `turn_id`: the turn's own id for the
+/// first window, `<turn id>#<n>` for a later one.
+fn stretch_id(turn_id: &str, window: usize) -> String {
+    if window == 0 {
+        turn_id.to_owned()
+    } else {
+        format!("{turn_id}#{window}")
+    }
 }
 
 /// The turn's entries that have an id, each with its window: all in the
@@ -133,10 +190,11 @@ fn window_of(offset: TimeDelta) -> usize {
 fn window_line(turn_id: &str, prompt: &str, window: &[Placed<'_>]) -> Option<StretchLine> {
     let first = window.first()?;
     let last = window.last()?;
-    let (id, lead) = if first.window == 0 {
-        (turn_id.to_owned(), prompt)
+    let id = stretch_id(turn_id, first.window);
+    let lead = if first.window == 0 {
+        prompt
     } else {
-        (format!("{turn_id}#{}", first.window), later_lead(window))
+        later_lead(window)
     };
     let started_at = window.iter().find_map(|placed| placed.at);
     let ended_at = window.iter().rev().find_map(|placed| placed.at);
@@ -266,6 +324,18 @@ mod tests {
             })
             .collect();
         stretch_lines(&timed)
+    }
+
+    fn inputs_of(rows: &[Row]) -> Vec<(String, String)> {
+        let timed: Vec<TimedEntry<'_>> = rows
+            .iter()
+            .map(|(entry, at, starts_turn)| TimedEntry {
+                entry,
+                at: at.map(minute),
+                starts_turn: *starts_turn,
+            })
+            .collect();
+        stretch_inputs(&timed)
     }
 
     fn ids(lines: &[StretchLine]) -> Vec<&str> {
@@ -408,6 +478,72 @@ mod tests {
 
         let untimed_prompt = [prompt("p", "Go", None)];
         assert_eq!(lines_of(&untimed_prompt)[0].text, "Go");
+    }
+
+    #[test]
+    fn stretch_inputs_follow_the_windows() {
+        let head = ChatEntry::System {
+            id: "bang".to_owned(),
+            text: "!cargo test".to_owned(),
+        };
+        let rows = [
+            answer("before", None),
+            prompt("p1", "One", Some(0)),
+            tool("t1", Some(1)),
+            answer("a1", None),
+            tool("t2", Some(6)),
+            answer("a2", Some(16)),
+            prompt("p2", "Two", Some(20)),
+            answer("a3", None),
+            (head, Some(21), true),
+            tool("t3", Some(22)),
+        ];
+        let inputs = inputs_of(&rows);
+        let input_ids: Vec<&str> = inputs.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(input_ids, ids(&lines_of(&rows)));
+        let texts: Vec<&str> = inputs.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "One\nran t1\nanswer a1\nsecond line",
+                "ran t2",
+                "answer a2\nsecond line",
+                "Two\nanswer a3\nsecond line",
+                "!cargo test\nran t3",
+            ]
+        );
+
+        let pending = ChatEntry::User {
+            id: "q".to_owned(),
+            text: "Typed, not sent".to_owned(),
+            pending: true,
+        };
+        let rows = [(pending, None, true), tool("t4", None)];
+        assert_eq!(
+            inputs_of(&rows),
+            [("q".to_owned(), "ran t4".to_owned())],
+            "a pending user entry is left out"
+        );
+    }
+
+    #[test]
+    fn the_input_ignores_duration() {
+        let rows = vec![
+            prompt("p", "Go", Some(0)),
+            tool("t1", Some(1)),
+            tool("t2", Some(7)),
+        ];
+        let before = inputs_of(&rows);
+        assert_eq!(before[0], ("p".to_owned(), "Go\nran t1".to_owned()));
+
+        let mut later_window = rows.clone();
+        later_window.push(tool("t3", Some(12)));
+        assert_eq!(inputs_of(&later_window)[0], before[0]);
+
+        let mut next_turn = later_window;
+        next_turn.push(prompt("n", "Next", Some(50)));
+        next_turn.push(answer("a", Some(51)));
+        assert_eq!(inputs_of(&next_turn)[0], before[0]);
     }
 
     #[test]

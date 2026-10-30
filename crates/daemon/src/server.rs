@@ -417,6 +417,7 @@ pub async fn run(
 
     let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
     let summarizer = start_summarizer(&state, &dirs, &client_count, &state_events);
+    outlets.chat.set_summarizer(Arc::clone(&summarizer));
     let turns =
         crate::summarizer::turns::Turns::new(Arc::clone(&sessions), Arc::clone(&summarizer));
     let hub = Hub {

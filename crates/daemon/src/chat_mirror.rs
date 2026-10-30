@@ -29,7 +29,9 @@ use agent_api::{AgentPlugin, LiveLine, ScreenWork, TranscriptLineFacts};
 use chrono::{DateTime, Utc};
 use protocol::{
     AgentId, ChatEntry, ChatPrompt, ChatScreen, ComposerState, DaemonMessage, StretchLine,
+    SummarySource,
 };
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
@@ -39,6 +41,8 @@ use crate::chat_work::chat_work;
 use crate::hook_status::LiveLines;
 use crate::screen::{Screen, SharedScreen, dialogs};
 use crate::session::{SessionEvent, SessionRegistry};
+use crate::summarizer::prompt::Trigger;
+use crate::summarizer::service::{Outcome, Request, Summarizer};
 use crate::summary_lines::{self, TimedEntry};
 use crate::sync::lock;
 use crate::transcript_tail::{self, TailEvent, TailHandle};
@@ -46,6 +50,15 @@ use crate::transcript_tail::{self, TailEvent, TailHandle};
 /// The most entries a `Chat` message carries: the newest ones, with its
 /// `hidden` counting the older ones left out.
 pub const CHAT_REPLY_CAP: usize = 500;
+
+/// How long the open stretch's text must stay the same before the
+/// summarizer is asked for its line.
+const OPEN_QUIET: Duration = Duration::from_secs(30);
+
+/// How many of the closed stretches, newest first, a whole summary sent at
+/// the end of a read asks the summarizer for; older ones keep their
+/// template.
+const FIRST_READ_LIMIT: usize = 20;
 
 /// The shortest gap between two sends of the live answers still growing.
 const LIVE_FLUSH_GAP: Duration = Duration::from_millis(100);
@@ -79,9 +92,15 @@ struct Inner {
     /// Whether the task following the registry's conversation ids and
     /// removals has started.
     following: AtomicBool,
+    /// What writes the summary loaders' lines once set; until then they get
+    /// the template lines only.
+    summarizer: Mutex<Option<Arc<Summarizer>>>,
     /// How many live-line followers are running.
     #[cfg(test)]
     live_tasks: Arc<std::sync::atomic::AtomicUsize>,
+    /// How many summary requests are queued or running.
+    #[cfg(test)]
+    summary_jobs: Arc<std::sync::atomic::AtomicUsize>,
     /// Run once by the next load, between its read of the record and its
     /// locks.
     #[cfg(test)]
@@ -144,8 +163,11 @@ impl ChatMirror {
                 live_lines,
                 client_count,
                 following: AtomicBool::new(false),
+                summarizer: Mutex::new(None),
                 #[cfg(test)]
                 live_tasks: Arc::default(),
+                #[cfg(test)]
+                summary_jobs: Arc::default(),
                 #[cfg(test)]
                 load_gap: Mutex::new(None),
             }),
@@ -154,6 +176,13 @@ impl ChatMirror {
 
     fn upgrade(weak: &Weak<Inner>) -> Option<Self> {
         weak.upgrade().map(|inner| Self { inner })
+    }
+
+    /// Have `summarizer` write the summary loaders' lines: each session
+    /// mirrored from the next summary load on asks it for its stretches'
+    /// lines.
+    pub fn set_summarizer(&self, summarizer: Arc<Summarizer>) {
+        *lock(&self.inner.summarizer) = Some(summarizer);
     }
 
     /// The hand-off for `session_id`'s status watcher, whose screen `agent`'s
@@ -268,6 +297,9 @@ impl ChatMirror {
             }
             mirror.work.clone_from(&found.work);
             mirror.update_work(session_id);
+            if kind == LoadKind::Summary {
+                self.start_writer(session_id, &mut mirror.writer);
+            }
             let reply = mirror.register(kind, session_id, request_id, connection, out_tx);
             // A closed outbox is a connection already ending; its guard
             // unloads. The strip follows the reply, to this loader only.
@@ -310,6 +342,8 @@ impl ChatMirror {
         }
         if held.get().loaders.is_empty() {
             held.remove();
+        } else {
+            held.get_mut().stop_writer_unless_loaded();
         }
     }
 
@@ -317,6 +351,7 @@ impl ChatMirror {
     fn connection_closed(&self, connection: u64) {
         lock(&self.inner.sessions).retain(|_, mirror| {
             mirror.loaders.remove(&connection);
+            mirror.stop_writer_unless_loaded();
             !mirror.loaders.is_empty()
         });
     }
@@ -340,6 +375,12 @@ impl ChatMirror {
     #[cfg(test)]
     pub fn live_task_count(&self) -> usize {
         self.inner.live_tasks.load(Ordering::SeqCst)
+    }
+
+    /// How many summary requests are queued or running.
+    #[cfg(test)]
+    pub fn summary_jobs_pending(&self) -> usize {
+        self.inner.summary_jobs.load(Ordering::SeqCst)
     }
 
     /// The epoch `session_id`'s tail events must carry, while it is mirrored.
@@ -403,6 +444,9 @@ impl ChatMirror {
         mirror.conversation = conversation;
         mirror.chat = ChatState::starting_with(head, path.is_some());
         mirror.summary_sent.clear();
+        if let Some(writer) = mirror.writer.as_mut() {
+            writer.clear();
+        }
         // Task ids are unique across conversations, so the ended ones stay.
         if let Some(path) = path {
             mirror.tail = Some(self.start_tail(session_id, path, mirror.epoch, mirror.plugin));
@@ -499,6 +543,81 @@ impl ChatMirror {
             }
             mirror.flush_live(session_id);
         }
+    }
+
+    /// Start the task that asks the summarizer for `session_id`'s stretch
+    /// lines into `writer`, when a summarizer is set and none runs; a
+    /// stopped writer keeps the lines it stored.
+    fn start_writer(&self, session_id: &str, writer: &mut Option<SummaryWriter>) {
+        if writer.as_ref().is_some_and(|writer| writer.jobs.is_some()) {
+            return;
+        }
+        let Some(summarizer) = lock(&self.inner.summarizer).clone() else {
+            return;
+        };
+        let (jobs, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(write_summaries(
+            Arc::downgrade(&self.inner),
+            session_id.to_owned(),
+            summarizer,
+            receiver,
+        ));
+        let writer = writer.get_or_insert_with(|| SummaryWriter {
+            jobs: None,
+            memo: HashMap::new(),
+            queued: HashMap::new(),
+            watched: None,
+            run: 0,
+            #[cfg(test)]
+            pending: Arc::clone(&self.inner.summary_jobs),
+        });
+        writer.jobs = Some(jobs);
+        writer.run += 1;
+    }
+
+    /// Whether `job` is still worth a request: `session_id`'s chat is on its
+    /// epoch, its stretch's text is still the one it carries, and no line
+    /// was stored for that text since it was queued.
+    fn summary_due(&self, session_id: &str, job: &SummaryJob) -> bool {
+        let mut sessions = lock(&self.inner.sessions);
+        let Some(mirror) = sessions
+            .get_mut(session_id)
+            .filter(|mirror| mirror.epoch == job.epoch)
+        else {
+            return false;
+        };
+        let current = mirror.chat.stretch_digest(&job.stretch);
+        let Some(writer) = mirror.writer.as_mut() else {
+            return false;
+        };
+        let due = job.run == writer.run
+            && writer.jobs.is_some()
+            && current.as_deref() == Some(job.digest.as_str())
+            && !writer.holds(&job.stretch, &job.digest);
+        if !due {
+            writer.dequeue(job);
+        }
+        due
+    }
+
+    /// Store `text` (`None` for a miss) as the line of `job`'s stretch and
+    /// send the summary loaders the line if it changed.
+    fn store_summary(&self, session_id: &str, job: &SummaryJob, text: Option<String>) {
+        let mut sessions = lock(&self.inner.sessions);
+        let Some(mirror) = sessions
+            .get_mut(session_id)
+            .filter(|mirror| mirror.epoch == job.epoch)
+        else {
+            return;
+        };
+        let Some(writer) = mirror.writer.as_mut() else {
+            return;
+        };
+        writer.dequeue(job);
+        writer
+            .memo
+            .insert(job.stretch.clone(), (job.digest.clone(), text));
+        mirror.send_summary_change(session_id);
     }
 
     /// Start the one task that follows the registry for the mirrored
@@ -684,6 +803,272 @@ impl LiveFollower {
     }
 }
 
+/// One request for a stretch's line: the chat epoch and the stretch text it
+/// was made for, and that text.
+struct SummaryJob {
+    epoch: u64,
+    /// The worker run it was sent to.
+    run: u64,
+    stretch: String,
+    digest: String,
+    input: String,
+}
+
+/// What a session's summary writer is sent.
+enum WriterMsg {
+    /// Request this line now.
+    Now(SummaryJob),
+    /// The open stretch's text changed to this at this time: request it
+    /// once it has stayed so for [`OPEN_QUIET`]. It replaces the open
+    /// stretch sent before it.
+    Quiet(SummaryJob, Instant),
+}
+
+/// A session's requests for its stretch lines and the lines that came back.
+struct SummaryWriter {
+    /// The worker's queue while a summary loader holds the mirror; the
+    /// worker ends when it is dropped.
+    jobs: Option<mpsc::UnboundedSender<WriterMsg>>,
+    /// By stretch id, the digest of the text last requested and the line the
+    /// summarizer wrote for it, `None` for a miss.
+    memo: HashMap<String, (String, Option<String>)>,
+    /// By stretch id, the digest of a request sent and not yet answered.
+    queued: HashMap<String, String>,
+    /// The open stretch and digest last sent to wait for quiet.
+    watched: Option<(String, String)>,
+    /// Which run of the worker `jobs` feeds: each start counts one, and a
+    /// job of an earlier run is never requested.
+    run: u64,
+    #[cfg(test)]
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SummaryWriter {
+    /// Forget every line and request, for a chat that starts over.
+    fn clear(&mut self) {
+        self.memo.clear();
+        self.queued.clear();
+        self.watched = None;
+    }
+
+    /// Stop the worker: its queue closes, and the requests waiting in it and
+    /// the open stretch's timer go with it. The lines stored stay.
+    fn stop(&mut self) {
+        self.jobs = None;
+        self.queued.clear();
+        self.watched = None;
+    }
+
+    /// Whether `stretch`'s text with `digest` was requested and answered.
+    fn holds(&self, stretch: &str, digest: &str) -> bool {
+        self.memo
+            .get(stretch)
+            .is_some_and(|(held, _)| held == digest)
+    }
+
+    /// `job` is no longer waiting for its answer; a job of an earlier run
+    /// was forgotten when that run stopped.
+    fn dequeue(&mut self, job: &SummaryJob) {
+        if job.run == self.run && self.queued.get(&job.stretch) == Some(&job.digest) {
+            self.queued.remove(&job.stretch);
+        }
+    }
+
+    /// Queue the requests `lines` call for, by `stretches` (id to digest and
+    /// input) on chat epoch `epoch`: each closed stretch whose text has no
+    /// answer yet at once, the open (last) one at once when `turn_ended` and
+    /// after [`OPEN_QUIET`] otherwise. A `snapshot` asks only for the newest
+    /// [`FIRST_READ_LIMIT`] closed stretches and marks older unanswered ones
+    /// a miss.
+    fn schedule(
+        &mut self,
+        epoch: u64,
+        lines: &[StretchLine],
+        stretches: &HashMap<String, (String, String)>,
+        turn_ended: bool,
+        snapshot: bool,
+    ) {
+        let Some((open, closed)) = lines.split_last() else {
+            return;
+        };
+        for (newer, line) in closed.iter().rev().enumerate() {
+            let Some((digest, input)) = stretches.get(&line.id) else {
+                continue;
+            };
+            if snapshot && newer >= FIRST_READ_LIMIT {
+                // A stretch already answered or queued keeps its entry.
+                if !self.memo.contains_key(&line.id) && !self.queued.contains_key(&line.id) {
+                    self.memo.insert(line.id.clone(), (digest.clone(), None));
+                }
+                continue;
+            }
+            self.request(epoch, &line.id, digest, input);
+        }
+        if let Some((digest, input)) = stretches.get(&open.id) {
+            if turn_ended {
+                self.request(epoch, &open.id, digest, input);
+            } else {
+                self.watch(epoch, &open.id, digest, input);
+            }
+        }
+    }
+
+    /// Send a request for `stretch`'s text unless it was answered, is
+    /// waiting, or is empty, or the worker is stopped.
+    fn request(&mut self, epoch: u64, stretch: &str, digest: &str, input: &str) {
+        let Some(jobs) = &self.jobs else {
+            return;
+        };
+        if input.is_empty()
+            || self.holds(stretch, digest)
+            || self.queued.get(stretch).is_some_and(|held| held == digest)
+        {
+            return;
+        }
+        let job = SummaryJob {
+            epoch,
+            run: self.run,
+            stretch: stretch.to_owned(),
+            digest: digest.to_owned(),
+            input: input.to_owned(),
+        };
+        // The worker ends only once this sender is dropped.
+        if jobs.send(WriterMsg::Now(job)).is_ok() {
+            self.queued.insert(stretch.to_owned(), digest.to_owned());
+            #[cfg(test)]
+            self.pending.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Have the worker request the open `stretch` once its text has stayed
+    /// the same for [`OPEN_QUIET`], unless that text was answered, is
+    /// already watched, or is empty, or the worker is stopped.
+    fn watch(&mut self, epoch: u64, stretch: &str, digest: &str, input: &str) {
+        let Some(jobs) = &self.jobs else {
+            return;
+        };
+        let watched = self
+            .watched
+            .as_ref()
+            .is_some_and(|(id, held)| id == stretch && held == digest);
+        if input.is_empty() || watched || self.holds(stretch, digest) {
+            return;
+        }
+        let job = SummaryJob {
+            epoch,
+            run: self.run,
+            stretch: stretch.to_owned(),
+            digest: digest.to_owned(),
+            input: input.to_owned(),
+        };
+        // The worker ends only once this sender is dropped.
+        let _ = jobs.send(WriterMsg::Quiet(job, Instant::now()));
+        self.watched = Some((stretch.to_owned(), digest.to_owned()));
+    }
+
+    /// Give `lines` the summarizer's text where it wrote one for the
+    /// stretch's text as it stands, by `stretches` (id to digest and input).
+    fn overlay(&self, lines: &mut [StretchLine], stretches: &HashMap<String, (String, String)>) {
+        for line in lines {
+            let Some((digest, _)) = stretches.get(&line.id) else {
+                continue;
+            };
+            if let Some((held, Some(text))) = self.memo.get(&line.id)
+                && held == digest
+            {
+                line.text.clone_from(text);
+                line.source = SummarySource::Model;
+            }
+        }
+    }
+}
+
+/// Ask `summarizer` for the lines `jobs` brings for `session_id`, one at a
+/// time, until the mirror drops the queue; the open stretch's request waits
+/// on this task's timer.
+async fn write_summaries(
+    weak: Weak<Inner>,
+    session_id: String,
+    summarizer: Arc<Summarizer>,
+    mut jobs: mpsc::UnboundedReceiver<WriterMsg>,
+) {
+    let mut quiet: Option<(SummaryJob, Instant)> = None;
+    loop {
+        let received = match quiet.as_ref().map(|(_, at)| *at) {
+            Some(at) => tokio::select! {
+                received = jobs.recv() => received,
+                () = tokio::time::sleep_until(at) => {
+                    if let Some((job, _)) = quiet.take() {
+                        #[cfg(test)]
+                        count_job(&weak);
+                        write_one(&weak, &session_id, &summarizer, job).await;
+                    }
+                    continue;
+                }
+            },
+            None => jobs.recv().await,
+        };
+        match received {
+            None => return,
+            Some(WriterMsg::Now(job)) => write_one(&weak, &session_id, &summarizer, job).await,
+            Some(WriterMsg::Quiet(job, changed_at)) => quiet = Some((job, changed_at + OPEN_QUIET)),
+        }
+    }
+}
+
+/// A fired quiet request is pending until written.
+#[cfg(test)]
+fn count_job(weak: &Weak<Inner>) {
+    if let Some(inner) = weak.upgrade() {
+        inner.summary_jobs.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Request `job`'s line if it is still due and store what came back: the
+/// model's notification, or a miss for any other outcome.
+async fn write_one(
+    weak: &Weak<Inner>,
+    session_id: &str,
+    summarizer: &Summarizer,
+    mut job: SummaryJob,
+) {
+    let due = ChatMirror::upgrade(weak).is_some_and(|mirror| mirror.summary_due(session_id, &job));
+    if due {
+        let request = Request {
+            session_id: format!("{session_id}#summary"),
+            trigger: Trigger::Stop,
+            input: std::mem::take(&mut job.input),
+        };
+        let text = match summarizer.submit(request).await {
+            Outcome::Line { line, .. } if line.source == SummarySource::Model => {
+                Some(line.notification)
+            }
+            outcome => {
+                debug!(session_id, stretch = %job.stretch, ?outcome, "chat mirror: no model line for the stretch; its template stays");
+                None
+            }
+        };
+        if let Some(mirror) = ChatMirror::upgrade(weak) {
+            mirror.store_summary(session_id, &job, text);
+        }
+    }
+    #[cfg(test)]
+    if let Some(inner) = weak.upgrade() {
+        inner.summary_jobs.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The SHA-256 of a stretch's input, in hex.
+fn input_digest(input: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(64);
+    for byte in Sha256::digest(input.as_bytes()) {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// What a session's record says about its chat, read under the record's lock
 /// and used after it is released.
 struct Found {
@@ -773,6 +1158,9 @@ struct SessionMirror {
     screen_work: Option<ScreenWork>,
     /// The `ChatWork` the loaders were last sent.
     work_shown: DaemonMessage,
+    /// The requests for the stretch lines and their answers, from the first
+    /// summary load with a summarizer set.
+    writer: Option<SummaryWriter>,
 }
 
 impl Drop for SessionMirror {
@@ -806,6 +1194,7 @@ impl SessionMirror {
                 shells: Vec::new(),
                 wakeup_at: None,
             },
+            writer: None,
         }
     }
 
@@ -923,6 +1312,16 @@ impl SessionMirror {
         self.loaders.values().any(|loader| loader.summary)
     }
 
+    /// With no summary loader left, stop asking the summarizer for lines;
+    /// the next summary load starts again.
+    fn stop_writer_unless_loaded(&mut self) {
+        if !self.has_summary_loader()
+            && let Some(writer) = self.writer.as_mut()
+        {
+            writer.stop();
+        }
+    }
+
     /// Send every chat loader the whole chat and every summary loader every
     /// stretch line as a fresh start, which moves each chat loader's floor
     /// to the reply's first entry.
@@ -977,8 +1376,7 @@ impl SessionMirror {
             return;
         }
         let changed: Vec<StretchLine> = self
-            .chat
-            .stretch_lines()
+            .shown_lines(false)
             .into_iter()
             .filter(|line| self.summary_sent.get(&line.id) != Some(line))
             .collect();
@@ -998,7 +1396,7 @@ impl SessionMirror {
     /// loaders then hold: a reply when `request_id` is set, a fresh start
     /// for the summary loaders when it is not.
     fn summary_message(&mut self, session_id: &str, request_id: Option<String>) -> DaemonMessage {
-        let lines = self.chat.stretch_lines();
+        let lines = self.shown_lines(true);
         self.summary_sent = lines
             .iter()
             .map(|line| (line.id.clone(), line.clone()))
@@ -1008,6 +1406,35 @@ impl SessionMirror {
             lines,
             request_id,
         }
+    }
+
+    /// The stretch lines as the summary loaders are shown them, each with
+    /// the summarizer's text where it wrote one for the stretch's text as it
+    /// stands, after queuing the requests the lines call for (none while a
+    /// read is being caught up with). `snapshot` marks a whole summary,
+    /// whose requests keep to the newest closed stretches.
+    fn shown_lines(&mut self, snapshot: bool) -> Vec<StretchLine> {
+        let mut lines = self.chat.stretch_lines();
+        let Some(writer) = self.writer.as_mut() else {
+            return lines;
+        };
+        let stretches: HashMap<String, (String, String)> = self
+            .chat
+            .stretch_inputs()
+            .into_iter()
+            .map(|(id, input)| (id, (input_digest(&input), input)))
+            .collect();
+        if !self.chat.catching_up {
+            let turn_ended = lines.last().is_some_and(|line| {
+                matches!(
+                    self.chat.get(&line.to_entry),
+                    Some(ChatEntry::TurnEnd { .. })
+                )
+            });
+            writer.schedule(self.epoch, &lines, &stretches, turn_ended, snapshot);
+        }
+        writer.overlay(&mut lines, &stretches);
+        lines
     }
 
     /// The whole chat as one `Chat` message: a reply when `request_id` is
@@ -1351,8 +1778,26 @@ impl ChatState {
 
     /// The chat's stretch lines: its turns and their windows of activity.
     fn stretch_lines(&self) -> Vec<StretchLine> {
-        let timed: Vec<TimedEntry<'_>> = self
-            .entries
+        summary_lines::stretch_lines(&self.timed())
+    }
+
+    /// Each stretch's id and the text the summarizer is sent for it.
+    fn stretch_inputs(&self) -> Vec<(String, String)> {
+        summary_lines::stretch_inputs(&self.timed())
+    }
+
+    /// The digest of `stretch`'s text as it stands; `None` when the chat has
+    /// no such stretch.
+    fn stretch_digest(&self, stretch: &str) -> Option<String> {
+        self.stretch_inputs()
+            .into_iter()
+            .find(|(id, _)| id == stretch)
+            .map(|(_, input)| input_digest(&input))
+    }
+
+    /// The entries with their times and turn starts.
+    fn timed(&self) -> Vec<TimedEntry<'_>> {
+        self.entries
             .iter()
             .map(|entry| {
                 let id = entry_id(entry);
@@ -1362,8 +1807,7 @@ impl ChatState {
                     starts_turn: id.is_some_and(|id| self.turn_starts.contains(id)),
                 }
             })
-            .collect();
-        summary_lines::stretch_lines(&timed)
+            .collect()
     }
 
     /// The transcript wrote the next answer of the current turn: the live

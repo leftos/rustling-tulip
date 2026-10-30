@@ -72,9 +72,10 @@ mod tests {
     use crate::chat_mirror::CHAT_REPLY_CAP;
     use crate::chat_mirror::test_lines::{answer, live_body, prompt, stamp};
     use crate::screen::fixture_screen::screen_from;
+    use crate::summarizer::service::test_support::{FAKE_NOTIFICATION, FakeCaller};
     use protocol::{
         ChatEntry, ChatPromptKind, ChatScreen, ClientMessage, DaemonMessage, SessionMode,
-        SpawnConfig, SpawnTarget, StretchLine,
+        SpawnConfig, SpawnTarget, StretchLine, SummarizerSettings, SummarySource,
     };
     use std::collections::HashSet;
     use std::io::Write as _;
@@ -178,6 +179,21 @@ mod tests {
                 session_id: "s1".to_owned(),
             };
             dispatch_on(&self.hub, msg, connection, out_tx).await;
+        }
+
+        /// [`Self::new`] with the chat mirror's lines written by a summarizer
+        /// whose provider `caller` answers.
+        fn with_summarizer(tag: &str, conversation: Option<&str>, caller: Arc<FakeCaller>) -> Self {
+            let fixture = Self::new(tag, conversation);
+            let summarizer = test_support::test_summarizer(
+                &fixture.hub.state,
+                &fixture.hub.dirs,
+                &fixture.hub.client_count,
+                &fixture.hub.state_events,
+                caller,
+            );
+            fixture.hub.chat_mirror.set_summarizer(summarizer);
+            fixture
         }
 
         fn deliver(&self, body: &serde_json::Value) {
@@ -1261,6 +1277,254 @@ mod tests {
         assert_eq!(fx.hub.chat_mirror.tail_count(), 0);
         assert_eq!(fx.hub.chat_mirror.mirror_count(), 0);
         no_live_task_remains(&fx.hub).await;
+    }
+
+    /// Wait until no summary request is queued or running.
+    async fn no_summary_job_remains(hub: &Hub) {
+        tokio::time::timeout(HANG, async {
+            while hub.chat_mirror.summary_jobs_pending() > 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("hung: a summary request never finished");
+    }
+
+    /// The lines a summary loader shows once line `id` comes from the model.
+    async fn model_line_until(inbox: &mut Inbox, id: &str) -> Vec<StretchLine> {
+        let mut shown = Vec::new();
+        while !shown
+            .iter()
+            .any(|line: &StretchLine| line.id == id && line.source == SummarySource::Model)
+        {
+            fold_summary(&mut shown, next_message(inbox).await);
+        }
+        shown
+    }
+
+    fn line<'a>(lines: &'a [StretchLine], id: &str) -> &'a StretchLine {
+        lines
+            .iter()
+            .find(|line| line.id == id)
+            .expect("the line is shown")
+    }
+
+    /// Two turns, the first closed by the second.
+    fn two_turns() -> Vec<String> {
+        vec![user(1), answer("a-1", 2, "Fixed the login bug"), user(3)]
+    }
+
+    #[tokio::test]
+    async fn a_closed_stretch_gets_its_model_line() {
+        let fake = Arc::new(FakeCaller::default());
+        let fx = Fixture::with_summarizer("summary-model", Some("conv-a"), Arc::clone(&fake));
+        fx.append("conv-a", &two_turns());
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load_summary(1, &a_tx, "ra").await;
+        let shown = model_line_until(&mut a_rx, "u-1").await;
+        assert_eq!(line(&shown, "u-1").text, FAKE_NOTIFICATION);
+        assert_eq!(
+            line(&shown, "u-3").source,
+            SummarySource::Template,
+            "the open stretch waits"
+        );
+        assert_eq!(fake.calls(), 1);
+        let prompts = fake.prompts();
+        assert!(
+            prompts[0].contains("line 1\nFixed the login bug"),
+            "the stretch's text is sent: {}",
+            prompts[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_stretch_makes_no_call() {
+        let fake = Arc::new(FakeCaller::default());
+        let fx = Fixture::with_summarizer("summary-unchanged", Some("conv-a"), Arc::clone(&fake));
+        fx.append("conv-a", &two_turns());
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load_summary(1, &a_tx, "ra").await;
+        model_line_until(&mut a_rx, "u-1").await;
+
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        fx.load_summary(2, &b_tx, "rb").await;
+        let (lines, _) = next_summary(&mut b_rx).await;
+        assert_eq!(
+            line(&lines, "u-1").text,
+            FAKE_NOTIFICATION,
+            "a new loader gets the model line"
+        );
+
+        fx.append("conv-a", &[answer("a-4", 4, "And the docs")]);
+        assert_eq!(line_ids(&next_summary_append(&mut a_rx).await), ["u-3"]);
+        no_summary_job_remains(&fx.hub).await;
+        assert_eq!(fake.calls(), 1, "the closed stretch is not asked for again");
+    }
+
+    #[tokio::test]
+    async fn a_failure_keeps_the_template() {
+        let fake = Arc::new(FakeCaller::failing());
+        let fx = Fixture::with_summarizer("summary-failure", Some("conv-a"), Arc::clone(&fake));
+        fx.append("conv-a", &two_turns());
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load_summary(1, &a_tx, "ra").await;
+        let mut shown = summary_until(&mut a_rx, "u-3").await;
+        no_summary_job_remains(&fx.hub).await;
+        assert_eq!(fake.calls(), 1);
+
+        fx.append("conv-a", &[answer("a-4", 4, "And the docs")]);
+        fold_summary(&mut shown, next_message(&mut a_rx).await);
+        no_summary_job_remains(&fx.hub).await;
+        for msg in drain(&mut a_rx) {
+            fold_summary(&mut shown, msg);
+        }
+        assert_eq!(line(&shown, "u-1").source, SummarySource::Template);
+        assert_eq!(line(&shown, "u-1").text, "line 1 (<1m)");
+        assert_eq!(
+            fake.calls(),
+            1,
+            "a miss is not retried while its text stands"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cap_keeps_the_template() {
+        let fake = Arc::new(FakeCaller::default());
+        let fx = Fixture::with_summarizer("summary-cap", Some("conv-a"), Arc::clone(&fake));
+        let settings = SummarizerSettings {
+            daily_cap_usd: 0.0,
+            ..fx.hub.state.summarizer_settings()
+        };
+        fx.hub
+            .state
+            .set_summarizer_settings(settings)
+            .expect("the settings save");
+        fx.append("conv-a", &two_turns());
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load_summary(1, &a_tx, "ra").await;
+        let mut shown = summary_until(&mut a_rx, "u-3").await;
+        no_summary_job_remains(&fx.hub).await;
+        for msg in drain(&mut a_rx) {
+            fold_summary(&mut shown, msg);
+        }
+        assert_eq!(line(&shown, "u-1").source, SummarySource::Template);
+        assert_eq!(fake.calls(), 0, "the cap makes no provider call");
+    }
+
+    /// Wait until the fake has been called `calls` times.
+    async fn calls_reach(fake: &FakeCaller, calls: usize) {
+        tokio::time::timeout(HANG, async {
+            while fake.calls() < calls {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("hung: the summarizer was never called");
+    }
+
+    /// Let each gated call through until no summary request is queued or
+    /// running.
+    async fn release_until_idle(hub: &Hub, gate: &tokio::sync::Notify) {
+        tokio::time::timeout(HANG, async {
+            while hub.chat_mirror.summary_jobs_pending() > 0 {
+                gate.notify_one();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("hung: a summary request never finished");
+    }
+
+    #[tokio::test]
+    async fn a_second_load_keeps_queued_requests() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fake = Arc::new(FakeCaller::gated(Arc::clone(&gate)));
+        let fx = Fixture::with_summarizer("summary-requeue", Some("conv-a"), Arc::clone(&fake));
+        fx.append("conv-a", &two_turns());
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load_summary(1, &a_tx, "ra").await;
+        let mut shown = summary_until(&mut a_rx, "u-3").await;
+        calls_reach(&fake, 1).await;
+
+        // u-1's call waits at the gate while 22 more turns queue u-3 and u-4
+        // behind it, past the newest 20 closed stretches.
+        let turns: Vec<String> = (4..=25).map(user).collect();
+        fx.append("conv-a", &turns);
+        while !line_ids(&shown).contains(&"u-25") {
+            fold_summary(&mut shown, next_message(&mut a_rx).await);
+        }
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        fx.load_summary(2, &b_tx, "rb").await;
+        next_summary(&mut b_rx).await;
+
+        release_until_idle(&fx.hub, &gate).await;
+        for msg in drain(&mut a_rx) {
+            fold_summary(&mut shown, msg);
+        }
+        for id in ["u-1", "u-3", "u-4"] {
+            assert_eq!(
+                line(&shown, id).source,
+                SummarySource::Model,
+                "{id}'s queued request is kept"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unloading_the_summary_stops_requests() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fake = Arc::new(FakeCaller::gated(Arc::clone(&gate)));
+        let fx = Fixture::with_summarizer("summary-unload", Some("conv-a"), Arc::clone(&fake));
+        let turns: Vec<String> = (1..=5).map(user).collect();
+        fx.append("conv-a", &turns);
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load(1, &a_tx, "rc").await;
+        ids_until(&mut a_rx, "u-5").await;
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        fx.load_summary(2, &b_tx, "rs").await;
+        summary_until(&mut b_rx, "u-5").await;
+        calls_reach(&fake, 1).await;
+
+        fx.unload_summary(2, &b_tx).await;
+        assert_eq!(
+            fx.hub.chat_mirror.mirror_count(),
+            1,
+            "the chat still holds the mirror"
+        );
+        release_until_idle(&fx.hub, &gate).await;
+        assert_eq!(fake.calls(), 1, "only the call in flight ran");
+    }
+
+    /// The lines reach the mirror through its tail hook, so no file is read
+    /// and the paused clock's schedule is the only one.
+    #[tokio::test(start_paused = true)]
+    async fn the_open_stretch_waits_for_quiet() {
+        let fake = Arc::new(FakeCaller::default());
+        let fx = Fixture::with_summarizer("summary-quiet", None, Arc::clone(&fake));
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        fx.load_summary(1, &a_tx, "ra").await;
+        let started = tokio::time::Instant::now();
+        let mirror = fx.hub.chat_mirror.clone();
+        let epoch = mirror.epoch("s1").expect("s1 is mirrored");
+        mirror.tail_line("s1", epoch, &user(1));
+        mirror.tail_line("s1", epoch, &answer("a-1", 2, "Working on it"));
+        drain(&mut a_rx);
+
+        tokio::time::advance(Duration::from_secs(29)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fake.calls(), 0, "no call before the stretch is quiet");
+        assert!(drain(&mut a_rx).is_empty());
+
+        let lines = next_summary_append(&mut a_rx).await;
+        assert_eq!(line_ids(&lines), ["u-1"]);
+        assert_eq!(lines[0].source, SummarySource::Model);
+        assert_eq!(fake.calls(), 1);
+        assert!(
+            started.elapsed() >= Duration::from_secs(30),
+            "the call waited for 30 s of quiet"
+        );
     }
 
     /// One thread delivers tail lines while another loads the chat again and
