@@ -243,6 +243,58 @@ impl RootView {
         self.hosts.get(host).map(|entry| &entry.conn)
     }
 
+    /// Whether `host`'s sidebar rows draw dimmed: a remote host's while
+    /// its connection is not open, or the window holds none.
+    #[must_use]
+    pub fn host_dimmed(&self, host: &HostKey) -> bool {
+        content_dimmed(host, self.conn_of(host))
+    }
+
+    /// Whether the sidebar container keyed `key` draws dimmed, by its host.
+    #[must_use]
+    pub fn container_dimmed(&self, key: &str) -> bool {
+        self.host_dimmed(&self.host_of_container(key))
+    }
+
+    /// Whether session `id`'s sidebar row draws dimmed, by its host.
+    #[must_use]
+    pub fn session_dimmed(&self, id: &str) -> bool {
+        self.host_dimmed(&self.host_of_session(id))
+    }
+
+    /// The saved hosts whose switch is on, by host key, in saved order.
+    fn enabled_saved_hosts(&self) -> Vec<HostKey> {
+        self.sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .filter(|host| host.enabled)
+            .filter_map(|host| host.target().ok())
+            .map(|target| HostKey::of(&target))
+            .collect()
+    }
+
+    /// Whether `host` is one of the saved hosts, switched on or off.
+    fn is_saved_host(&self, host: &HostKey) -> bool {
+        self.sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .filter_map(|saved| saved.target().ok())
+            .any(|target| HostKey::of(&target) == *host)
+    }
+
+    /// The footer's `{n}/{m} hosts online` text; `None` with no enabled
+    /// saved host.
+    pub(crate) fn hosts_online(&self) -> Option<String> {
+        let enabled: Vec<Option<&Connection>> = self
+            .enabled_saved_hosts()
+            .iter()
+            .map(|host| self.conn_of(host))
+            .collect();
+        crate::footer::hosts_online(self.conn(), &enabled)
+    }
+
     /// What the daemon on `host` can do for this client, by the target the
     /// window's connection to it holds; This PC's for a host the window
     /// has no connection to.
@@ -405,14 +457,15 @@ impl RootView {
     }
 
     /// The host that owns container `id`: a repo or workspace id, or a
-    /// sidebar container key. A key carrying a connected remote host's
-    /// prefix names that host, so its DIR and SH containers resolve too; a
+    /// sidebar container key. A key carrying the prefix of a remote host
+    /// the window holds or has saved (a switched-off host keeps its rows)
+    /// names that host, so its DIR and SH containers resolve too; a
     /// `repo:` or `ws:` key resolves by the id it holds. This PC for
     /// anything else.
     pub(crate) fn host_of_container(&self, id: &str) -> HostKey {
         if let Some((name, _)) = id.split_once("::") {
             let host = HostKey::Remote(name.to_owned());
-            if self.hosts.get(&host).is_some() {
+            if self.hosts.get(&host).is_some() || self.is_saved_host(&host) {
                 return host;
             }
         }
@@ -499,17 +552,47 @@ fn command_name(command: &NetCommand) -> String {
         .to_owned()
 }
 
+/// Whether `host`'s rows draw dimmed, `conn` being the window's connection
+/// to it: a remote host's do while that connection is not open, or when the
+/// window holds none (switched off, or dropped as a duplicate). This PC's
+/// never do.
+pub(crate) fn content_dimmed(host: &HostKey, conn: Option<&Connection>) -> bool {
+    *host != HostKey::Local && !conn.is_some_and(Connection::is_open)
+}
+
 #[cfg(test)]
 mod tests {
     use futures::channel::mpsc::unbounded;
 
-    use super::{HostConn, Hosts};
+    use super::{HostConn, Hosts, content_dimmed};
+    use crate::connection::Connection;
     use crate::target::{HostKey, Target};
 
     const BOX: &str = "box.tail1234.ts.net";
 
     fn conn(target: Target) -> HostConn {
         HostConn::new(unbounded().0, target)
+    }
+
+    #[test]
+    fn a_remote_hosts_content_dims_unless_its_connection_is_open() {
+        let remote = HostKey::Remote(BOX.to_owned());
+        let mut box_conn = Connection::for_target(Target::tailnet(BOX, None));
+        assert!(content_dimmed(&remote, None), "no connection: dimmed");
+        assert!(content_dimmed(&remote, Some(&box_conn)), "connecting");
+        box_conn.on_connecting();
+        box_conn.on_socket_open(8787);
+        box_conn.on_welcome(23, Vec::new());
+        assert!(!content_dimmed(&remote, Some(&box_conn)), "open");
+        let _ = box_conn.on_closed("dropped".to_owned());
+        assert!(content_dimmed(&remote, Some(&box_conn)), "dropped");
+
+        let local = Connection::new();
+        assert!(
+            !content_dimmed(&HostKey::Local, Some(&local)),
+            "This PC's rows never dim, even while it connects"
+        );
+        assert!(!content_dimmed(&HostKey::Local, None));
     }
 
     #[test]

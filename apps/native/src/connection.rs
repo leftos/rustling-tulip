@@ -73,6 +73,10 @@ pub enum DotKind {
     Err,
 }
 
+/// What This PC's Restart action is called, in the flyout and the overlay;
+/// a remote host's Reconnect now is on its Connections row.
+pub const RESTART_LABEL: &str = "Restart daemon";
+
 /// What the footer shows for the connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Footer {
@@ -328,37 +332,9 @@ impl Connection {
         }
     }
 
-    /// What the Restart action is called: Restart on the local daemon,
-    /// Reconnect on a remote host (see [`Connection::restart`]).
-    #[must_use]
-    pub fn restart_label(&self) -> &'static str {
-        if self.target.is_local() {
-            "Restart daemon"
-        } else {
-            "Reconnect now"
-        }
-    }
-
-    /// The full-window overlay text shown until the first connect, naming a
-    /// remote host by its short name, or `None` when [`Connection::overlay`]
-    /// shows none.
-    #[must_use]
-    pub fn overlay_text(&self) -> Option<String> {
-        let local = self.overlay()?;
-        let Some(host) = self.target.short_name() else {
-            return Some(local.to_owned());
-        };
-        Some(match self.state {
-            State::Closed { .. } => format!("{host} dropped — reconnecting…"),
-            State::NotApproved { .. } => format!("Pair with {host}"),
-            _ => format!("Connecting to {host}…"),
-        })
-    }
-
     /// The local daemon's full-window overlay text shown until the first
     /// connect, or `None` once connected or when the footer carries a
-    /// failure instead. [`Connection::overlay_text`] is the text for any
-    /// target.
+    /// failure instead. Only This PC's connection draws it.
     #[must_use]
     pub fn overlay(&self) -> Option<&'static str> {
         if self.has_ever_connected {
@@ -542,8 +518,6 @@ mod tests {
 
     #[test]
     fn remote_restart_reconnects_without_shutdown() {
-        assert_eq!(open_remote().restart_label(), "Reconnect now");
-        assert_eq!(open(20).restart_label(), "Restart daemon");
         assert_eq!(open_remote().restart(), RestartAction::FreshConnect);
 
         let mut conn = remote();
@@ -596,25 +570,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_overlay_says_connecting_to_short_name() {
-        let mut conn = remote();
-        assert_eq!(conn.overlay_text().as_deref(), Some("Connecting to box…"));
-        conn.on_connecting();
-        assert_eq!(conn.overlay_text().as_deref(), Some("Connecting to box…"));
-        conn.on_closed("refused".to_owned());
-        assert_eq!(
-            conn.overlay_text().as_deref(),
-            Some("box dropped — reconnecting…")
-        );
-        assert_eq!(open_remote().overlay_text(), None);
-
+    fn local_overlay_says_starting_then_connecting() {
         let mut local = Connection::new();
-        assert_eq!(local.overlay_text().as_deref(), Some("Starting daemon…"));
+        assert_eq!(local.overlay(), Some("Starting daemon…"));
         local.on_connecting();
-        assert_eq!(
-            local.overlay_text().as_deref(),
-            Some("Connecting to daemon…")
-        );
+        assert_eq!(local.overlay(), Some("Connecting to daemon…"));
     }
 
     /// A tailnet connection whose daemon said this device is not approved.
@@ -656,28 +616,20 @@ mod tests {
     }
 
     #[test]
-    fn not_approved_overlay_names_the_host() {
+    fn not_approved_close_keeps_the_state_until_restart() {
         let mut conn = not_approved(true);
-        assert_eq!(conn.overlay_text().as_deref(), Some("Pair with box"));
         assert_eq!(
             conn.on_closed("daemon closed the connection".to_owned()),
             None,
             "the pairing socket's close schedules no reconnect"
         );
         assert_eq!(conn.on_error("later".to_owned()), None);
-        assert_eq!(
-            conn.overlay_text().as_deref(),
-            Some("Pair with box"),
+        assert!(
+            matches!(conn.state(), State::NotApproved { .. }),
             "the close keeps the not-approved state"
         );
         assert_eq!(conn.restart(), RestartAction::FreshConnect);
         assert_eq!(conn.state(), &State::Connecting);
-
-        assert_eq!(
-            open_remote().overlay_text(),
-            None,
-            "a served host shows no overlay"
-        );
     }
 
     #[test]

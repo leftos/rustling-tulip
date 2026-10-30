@@ -189,7 +189,7 @@ use std::time::{Duration, Instant};
 use crate::appearance::AppearanceChange;
 use crate::appearance_view::AppearanceEditor;
 use crate::changes_view::ChangesUi;
-use crate::connection::{DotKind, Footer};
+use crate::connection::{DotKind, Footer, RESTART_LABEL};
 use crate::connection_picker::{PeerSource, SshTester, SystemPeers, SystemSsh};
 use crate::connection_picker_view::ConnectionPickerDialog;
 use crate::copied::Copied;
@@ -4988,11 +4988,10 @@ impl Render for RootView {
         let flyout = self
             .flyout_open
             .then(|| [flyout_backdrop(cx).into_any_element(), self.flyout(cx)]);
-        let restart_label = self.conn().restart_label();
         let overlay = self
             .conn()
-            .overlay_text()
-            .map(|text| connecting_overlay(text, restart_label, footer.dot, cx));
+            .overlay()
+            .map(|text| connecting_overlay(text, footer.dot, cx));
         // The quit's walk draws its confirm above the exit dialog.
         let delete_dialog = self.delete_dialog_layer(cx);
         let (delete_under, delete_over) = if self.exit_walk_confirm_open() {
@@ -5166,6 +5165,7 @@ impl RootView {
             .text_color(gpui::rgb(t.text_2))
             .child(connections)
             .child(pill)
+            .children(self.hosts_online().map(|text| hosts_online_item(text, cx)))
             .children(
                 counts
                     .spans()
@@ -5296,24 +5296,18 @@ impl RootView {
         }
     }
 
-    /// "Control": restart (Reconnect now on a remote host), and the
-    /// two-click stop only with `stop`.
+    /// "Control": restart, and the two-click stop only with `stop`.
     fn control_section(&self, stop: bool, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let armed = self.stop.armed;
         flyout_section("Control", &theme(cx))
             .child(
-                action_button(
-                    "restart-daemon",
-                    self.conn().restart_label(),
-                    t.text,
-                    true,
-                    &t,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.restart();
-                    cx.notify();
-                })),
+                action_button("restart-daemon", RESTART_LABEL, t.text, true, &t).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.restart();
+                        cx.notify();
+                    }),
+                ),
             )
             .when(stop, |section| {
                 section.child(
@@ -5345,11 +5339,27 @@ fn flyout_backdrop(cx: &mut Context<RootView>) -> Stateful<Div> {
         }))
 }
 
-/// The full-window card shown until the first connect, with a restart link
-/// and a Connections link, since the card covers the footer's button.
+/// The footer's muted `{n}/{m} hosts online` item beside This PC's pill;
+/// a click opens Connections.
+fn hosts_online_item(text: String, cx: &mut Context<RootView>) -> Stateful<Div> {
+    div()
+        .id("footer-hosts")
+        .debug_selector(|| "footer-hosts".to_owned())
+        .flex_none()
+        .text_color(gpui::rgb(MUTED))
+        .cursor_pointer()
+        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .child(tagged_text("footer-hosts", text))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.open_connection_picker(window, cx);
+        }))
+}
+
+/// The full-window card shown until This PC's daemon first connects, with
+/// a restart link and a Connections link, since the card covers the
+/// footer's button.
 fn connecting_overlay(
-    text: String,
-    restart_label: &'static str,
+    text: &'static str,
     dot: DotKind,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
@@ -5360,7 +5370,7 @@ fn connecting_overlay(
         .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
         .hover(move |style| style.text_color(gpui::rgb(t.text)))
-        .child(tagged_text("overlay-restart", restart_label))
+        .child(tagged_text("overlay-restart", RESTART_LABEL))
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             this.restart();
             cx.notify();

@@ -118,6 +118,24 @@ impl RootView {
         theme(cx).ground
     }
 
+    /// The rows of `containers` and of the listed sessions that draw
+    /// dimmed.
+    fn dimmed_rows(&self, containers: &[Container]) -> DimmedRows<'_> {
+        DimmedRows {
+            containers: containers
+                .iter()
+                .filter(|container| self.container_dimmed(&container.key))
+                .map(|container| container.key.clone())
+                .collect(),
+            sessions: self
+                .sidebar
+                .all_sessions()
+                .filter(|session| self.session_dimmed(&session.id))
+                .map(|session| session.id.as_str())
+                .collect(),
+        }
+    }
+
     fn sidebar_panel(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let attached = self.focused_session();
@@ -185,6 +203,7 @@ impl RootView {
                         .unwrap_or_else(|| window.is_window_hovered()),
                 ),
                 detached_stop_all: self.detached_stop_all.armed(),
+                dimmed: self.dimmed_rows(&containers),
                 highlighted: &self.launched_highlight,
                 dragged: self.dragged_sidebar_row(cx),
                 drop_mark: self.sidebar_drop_mark(cx),
@@ -830,18 +849,23 @@ fn container_rows(
         &container.name,
         cx,
     );
-    let mut rows = vec![row.into_any_element()];
+    let dim = ctx.dimmed.containers.contains(&container.key);
+    let mut rows = vec![dimmed(row, dim).into_any_element()];
     if !container.collapsed {
         if matches!(container.kind, ContainerKind::Dir | ContainerKind::Shell)
             && let Some(path) = container.path.as_deref()
         {
-            rows.push(path_banner(container, path, add_workspace, cx).into_any_element());
+            let banner = path_banner(container, path, add_workspace, cx);
+            rows.push(dimmed(banner, dim).into_any_element());
         }
         if container.kind == ContainerKind::Unbound {
-            rows.push(unbound_banner(crate::fonts::ui_text_size(cx), &t).into_any_element());
+            rows.push(
+                dimmed(unbound_banner(crate::fonts::ui_text_size(cx), &t), dim).into_any_element(),
+            );
         }
         if container.kind == ContainerKind::Detached {
-            rows.push(detached_banner(container, ctx.detached_stop_all, cx).into_any_element());
+            let banner = detached_banner(container, ctx.detached_stop_all, cx);
+            rows.push(dimmed(banner, dim).into_any_element());
         }
         for leaf in container
             .leaves
@@ -869,6 +893,17 @@ fn container_rows(
 
 /// How opaque a dragged container's group or leaf stays in its place.
 const DRAGGED_ROW_OPACITY: f32 = 0.4;
+/// How opaque the rows of a remote host that is not open draw.
+const DIMMED_ROW_OPACITY: f32 = 0.55;
+
+/// `row` at [`DIMMED_ROW_OPACITY`] when `dim`; it stays clickable.
+fn dimmed<E: Styled>(row: E, dim: bool) -> E {
+    if dim {
+        row.opacity(DIMMED_ROW_OPACITY)
+    } else {
+        row
+    }
+}
 /// The insertion line's thickness.
 const DROP_LINE_HEIGHT: f32 = 2.0;
 /// Where a row's drag ghost sits, right of and below the pointer.
@@ -899,7 +934,8 @@ fn leaf_drag_row(
         drop_line(selector, side, &t)
     });
     let row = leaf_row(leaf, ctx, window, cx);
-    draggable_row(row, payload, &target, &leaf.label, cx)
+    let dim = ctx.dimmed.sessions.contains(leaf.id.as_str());
+    dimmed(draggable_row(row, payload, &target, &leaf.label, cx), dim)
         .when(dragged, |row| row.opacity(DRAGGED_ROW_OPACITY))
         .children(line)
 }
@@ -1371,6 +1407,15 @@ fn unbound_pill_look<E: Styled>(offset: i8, pill: E, t: &UiTheme) -> E {
         .opacity(0.8)
 }
 
+/// The sidebar rows whose host is a remote host that is not open, which
+/// draw dimmed.
+struct DimmedRows<'a> {
+    /// The containers, by key: their header and banners dim.
+    containers: HashSet<String>,
+    /// The sessions, by id: their rows dim.
+    sessions: HashSet<&'a str>,
+}
+
 /// What every leaf row of one render shares.
 struct LeafRows<'a> {
     /// The session the active pane shows.
@@ -1392,6 +1437,8 @@ struct LeafRows<'a> {
     hovered_row: Option<&'a str>,
     /// The Detached banner's Stop all is armed.
     detached_stop_all: bool,
+    /// The rows whose host is a remote host that is not open.
+    dimmed: DimmedRows<'a>,
     /// The sessions Select launched marked.
     highlighted: &'a LaunchHighlight,
     /// What the sidebar row or pill drag under way carries.
