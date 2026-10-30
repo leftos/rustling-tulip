@@ -177,7 +177,7 @@ mod tests {
     fn line(outcome: Outcome) -> Line {
         match outcome {
             Outcome::Line { line, .. } => Some(line),
-            Outcome::Replaced | Outcome::Idle => None,
+            Outcome::Replaced | Outcome::Idle | Outcome::Skipped => None,
         }
         .expect("the request made a line")
     }
@@ -341,15 +341,14 @@ mod tests {
         );
         assert_eq!(first.source, SummarySource::Model);
 
-        let refresh = line(
-            hub.summarizer
-                .submit(request(Trigger::Working, "Still working."))
-                .await,
-        );
+        let refresh = hub
+            .summarizer
+            .submit(request(Trigger::Working, "Still working."))
+            .await;
         assert_eq!(
-            refresh.source,
-            SummarySource::Template,
-            "a refresh stops at half"
+            refresh,
+            Outcome::Skipped,
+            "a refresh stops at half, with no template line"
         );
         assert_eq!(fake.calls(), 1);
 

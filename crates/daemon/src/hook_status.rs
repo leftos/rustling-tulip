@@ -94,8 +94,15 @@ pub fn truncate_bytes(text: &str, max_bytes: usize) -> String {
 /// permission mismatch it carries is logged.
 pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, report: &HookReport) {
     let mut applied = Applied::default();
+    let mut start_turns = false;
     hub.sessions.update(session_id, |record| {
         applied = apply_to_record(record, event_time, report);
+        // The report joins the pipeline in the same update that ends the
+        // turn, so the registry sees a stop line on its way and keeps a
+        // provisional line for it to replace.
+        if let Some(message) = applied.turn_report.as_deref() {
+            start_turns = hub.turns.add_report(session_id, message);
+        }
     });
     log_mismatch(session_id, applied.mismatch.as_ref());
     if applied.entered_awaiting {
@@ -104,8 +111,8 @@ pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, repor
     if applied.agent_exited {
         hub.sessions.announce_agent_exited(session_id);
     }
-    if let Some(message) = applied.turn_report.as_deref() {
-        hub.turns.on_stop(session_id, message);
+    if start_turns {
+        hub.turns.start(session_id);
     }
 }
 

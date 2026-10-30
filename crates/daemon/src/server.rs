@@ -915,6 +915,13 @@ fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usiz
     tokio::spawn(async move { summarizer.startup_key_check().await });
     // The Dashboard's 2 s facts tick; it parks while no connection watches.
     hub.dashboard.spawn_ticker();
+    // The 3-minute working refresh; it parks while no connection watches.
+    crate::summarizer::refresh::spawn(
+        Arc::clone(&hub.sessions),
+        hub.dashboard.clone(),
+        Arc::clone(&hub.summarizer),
+        Arc::clone(&hub.turns),
+    );
     // Idle self-exit: once the last client disconnects and no session has a
     // live child for a full grace period, flip the shutdown watch so a
     // resident daemon doesn't pin a stale executable across app updates.

@@ -65,6 +65,24 @@ fn restored_summary(
     (!summary.lines.is_empty()).then_some(summary)
 }
 
+/// `summary` as `summary.json` keeps it: without its provisional lines,
+/// `None` when no other line is left.
+fn persisted_summary(summary: &protocol::SessionSummary) -> Option<protocol::SessionSummary> {
+    let lines: Vec<protocol::SummaryLine> = summary
+        .lines
+        .iter()
+        .filter(|line| !line.provisional)
+        .cloned()
+        .collect();
+    (!lines.is_empty()).then(|| protocol::SessionSummary {
+        kind: summary.kind,
+        headline: summary.headline.clone(),
+        lines,
+        updated_at: summary.updated_at,
+        source: summary.source,
+    })
+}
+
 /// The connection whose request made a session update, and the request's
 /// id. Its own connection's forwarder echoes the id; no other client sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,6 +502,62 @@ impl SessionRecord {
         });
     }
 
+    /// Put the provisional `line` at the front of the summary ring, replacing
+    /// a provisional line there, and prune the ring at `now`. The latest
+    /// summary's `kind`, `headline`, `source` and `updated_at` stay as they
+    /// were; a session with no summary yet gets one with no kind and no
+    /// headline, stamped `now`.
+    pub(crate) fn push_provisional_line(
+        &mut self,
+        line: protocol::SummaryLine,
+        now: DateTime<Utc>,
+    ) {
+        let line = protocol::SummaryLine {
+            provisional: true,
+            ..line
+        };
+        let summary = self
+            .summary
+            .get_or_insert_with(|| protocol::SessionSummary {
+                kind: None,
+                headline: String::new(),
+                lines: Vec::new(),
+                updated_at: now,
+                source: line.source,
+            });
+        if summary.lines.first().is_some_and(|first| first.provisional) {
+            summary.lines.remove(0);
+        }
+        summary.lines.insert(0, line);
+        prune_summary_ring(&mut summary.lines, now);
+    }
+
+    /// Drop a provisional line at the front of the summary ring; a summary
+    /// left with no line goes. Returns whether a line was dropped.
+    pub(crate) fn drop_provisional_line(&mut self) -> bool {
+        let Some(summary) = self.summary.as_mut() else {
+            return false;
+        };
+        if !summary.lines.first().is_some_and(|first| first.provisional) {
+            return false;
+        }
+        summary.lines.remove(0);
+        if summary.lines.is_empty() {
+            self.summary = None;
+        }
+        true
+    }
+
+    /// When the latest stop line was made: the summary's `updated_at` while
+    /// it holds a line that is not provisional, else `None`. A stop line
+    /// moves it; a provisional line never does.
+    pub(crate) fn stop_line_stamp(&self) -> Option<DateTime<Utc>> {
+        self.summary
+            .as_ref()
+            .filter(|summary| summary.lines.iter().any(|line| !line.provisional))
+            .map(|summary| summary.updated_at)
+    }
+
     /// The chips the agent's descriptor shows for the options this session
     /// was spawned with (none recorded reads as no options).
     fn agent_chips(&self) -> Vec<protocol::SessionChip> {
@@ -527,7 +601,15 @@ pub struct SessionRegistry {
     scrollback_gates: Mutex<HashMap<String, ScrollbackGate>>,
     /// The sessions waiting for their conversation ids to be discovered.
     discovery: Discovery,
+    /// Whether a session's stop line is on its way: the turn pipeline
+    /// answers it once built. Asked under the record lock when a session
+    /// leaves `Working` or `AwaitingInput` for `Idle`, so it takes no
+    /// registry lock.
+    stop_line_due: RwLock<Option<StopLineDue>>,
 }
+
+/// Answers whether a session's stop line is on its way.
+pub(crate) type StopLineDue = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// A session's scrollback gate: the lifecycle task appends scrollback and
 /// saves the terminal state under it, and deleting the session's dir closes
@@ -573,7 +655,21 @@ impl SessionRegistry {
             sidecar_gates: Mutex::new(HashMap::new()),
             scrollback_gates: Mutex::new(HashMap::new()),
             discovery: Discovery::default(),
+            stop_line_due: RwLock::new(None),
         })
+    }
+
+    /// Ask `due` from now on whether a session's stop line is on its way.
+    pub(crate) fn set_stop_line_due(&self, due: StopLineDue) {
+        *write(&self.stop_line_due) = Some(due);
+    }
+
+    /// Whether `id`'s stop line is on its way; false while no turn pipeline
+    /// answers.
+    fn stop_line_is_due(&self, id: &str) -> bool {
+        read(&self.stop_line_due)
+            .as_ref()
+            .is_some_and(|due| due(id))
     }
 
     /// `id`'s scrollback gate, made with its record; one is made here for a
@@ -677,6 +773,13 @@ impl SessionRegistry {
     pub fn get(&self, id: &str) -> Option<Arc<Mutex<SessionRecord>>> {
         let guard = read(&self.by_id);
         guard.get(id).cloned()
+    }
+
+    /// Hold the registry map's write lock until the returned guard drops, so
+    /// a test can prove a path takes no registry lock.
+    #[cfg(test)]
+    pub(crate) fn hold_map(&self) -> impl Sized + '_ {
+        write(&self.by_id)
     }
 
     pub fn insert(&self, record: SessionRecord) {
@@ -799,7 +902,7 @@ impl SessionRegistry {
             return;
         };
         self.with_sidecar_gate(id, |arc| {
-            let summary = lock(arc).summary.clone();
+            let summary = lock(arc).summary.as_ref().and_then(persisted_summary);
             if let Some(summary) = summary {
                 orphan::try_write_summary(dirs, id, &summary);
             }
@@ -895,6 +998,26 @@ impl SessionRegistry {
         self.update_inner(id, origin, |record| f(record).then_some(None))
     }
 
+    /// Whether `id` going from `was` to `now` ends its turn with no stop line
+    /// to replace a provisional line: from `Working` or `AwaitingInput`, a
+    /// stop or an error always does, an `Idle` only while the turn pipeline
+    /// runs no driver for it. `AwaitingInput` is still the same turn.
+    fn turn_ended_without_stop_line(
+        &self,
+        id: &str,
+        was: SessionStatus,
+        now: SessionStatus,
+    ) -> bool {
+        if !matches!(was, SessionStatus::Working | SessionStatus::AwaitingInput) {
+            return false;
+        }
+        match now {
+            SessionStatus::Stopped | SessionStatus::Error => true,
+            SessionStatus::Idle => !self.stop_line_is_due(id),
+            _ => false,
+        }
+    }
+
     /// The body of every update: `f` answers `None` when it changed nothing,
     /// else the event, if any, to send after the `SessionUpdated`.
     fn update_inner<F>(&self, id: &str, origin: Option<UpdateOrigin>, f: F) -> bool
@@ -916,6 +1039,9 @@ impl SessionRegistry {
                 let at = Utc::now();
                 guard.status_since = Some(at);
                 status_change = Some((at, guard.status));
+                if self.turn_ended_without_stop_line(id, was_status, guard.status) {
+                    guard.drop_provisional_line();
+                }
             }
             let entered_error = !was_error && guard.status == SessionStatus::Error;
             (guard.snapshot(), entered_error, status_change, follow_up)
@@ -2513,6 +2639,189 @@ mod tests {
             .collect();
         assert_eq!(texts, ["c", "b"]);
         assert_eq!(rec.summary.expect("the ring").lines.len(), 3);
+    }
+
+    #[test]
+    fn a_provisional_push_leaves_the_summary_kind_and_headline() {
+        let mut rec = record("s1");
+        let saved = saved_summary();
+        rec.summary = Some(saved.clone());
+        let later = saved.updated_at + chrono::TimeDelta::minutes(3);
+        let mut first = ring_line("working on it", later);
+        first.source = protocol::SummarySource::Template;
+        rec.push_provisional_line(first, later);
+        rec.push_provisional_line(ring_line("still on it", later), later);
+
+        let summary = rec.summary.as_ref().expect("a summary");
+        assert_eq!(summary.kind, saved.kind);
+        assert_eq!(summary.headline, saved.headline);
+        assert_eq!(summary.source, saved.source);
+        assert_eq!(summary.updated_at, saved.updated_at);
+        let texts: Vec<&str> = summary
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["still on it", "newer", "older"],
+            "the second provisional line replaced the first"
+        );
+        assert!(summary.lines[0].provisional);
+        assert_eq!(rec.stop_line_stamp(), Some(saved.updated_at));
+    }
+
+    #[test]
+    fn a_provisional_line_is_not_written_to_summary_json() {
+        let saved = saved_summary();
+        let dirs = dirs_with_summary("ring-provisional", &saved);
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert_orphan(&standalone_meta());
+        registry.update("s1", |rec| {
+            rec.push_provisional_line(ring_line("working on it", Utc::now()), Utc::now());
+        });
+        registry.sync_summary("s1");
+        let written = crate::orphan::load_summary(&dirs, "s1").expect("the saved ring");
+        assert_eq!(written, saved, "the provisional line is left out");
+
+        let alone = crate::history::test_support::scratch_dirs("ring-provisional-alone");
+        crate::orphan::write_meta(&alone, &standalone_meta()).expect("write meta");
+        let registry = SessionRegistry::new(alone.clone());
+        registry.insert_orphan(&standalone_meta());
+        registry.update("s1", |rec| {
+            rec.push_provisional_line(ring_line("working on it", Utc::now()), Utc::now());
+        });
+        registry.sync_summary("s1");
+        assert!(
+            !crate::paths::session_summary_file(&alone, "s1").exists(),
+            "a ring of only a provisional line writes no file"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        let _ = std::fs::remove_dir_all(&alone.config);
+    }
+
+    #[test]
+    fn a_provisional_line_is_dropped_when_the_session_leaves_working_without_a_stop() {
+        let front = |registry: &SessionRegistry| {
+            summary_of(registry).map(|summary| (summary.lines[0].text.clone(), summary.lines.len()))
+        };
+        let working_with_provisional = |registry: &SessionRegistry| {
+            registry.update("s1", |rec| {
+                rec.status = SessionStatus::Working;
+                rec.push_summary_line(
+                    None,
+                    "h".to_owned(),
+                    ring_line("stop", Utc::now()),
+                    Utc::now(),
+                );
+                rec.push_provisional_line(ring_line("working", Utc::now()), Utc::now());
+            });
+        };
+        let registry = SessionRegistry::new(crate::history::test_support::scratch_dirs(
+            "ring-drop-provisional",
+        ));
+        let mut rec = record("s1");
+        rec.mode = SessionMode::Interactive;
+        registry.insert(rec);
+
+        working_with_provisional(&registry);
+        registry.update("s1", |rec| rec.status = SessionStatus::AwaitingInput);
+        assert_eq!(
+            front(&registry),
+            Some(("working".to_owned(), 2)),
+            "a prompt is still the same turn"
+        );
+        registry.update("s1", |rec| rec.status = SessionStatus::Working);
+        registry.update("s1", |rec| rec.status = SessionStatus::Idle);
+        assert_eq!(
+            front(&registry),
+            Some(("stop".to_owned(), 1)),
+            "idle with no stop line on its way"
+        );
+
+        working_with_provisional(&registry);
+        registry.set_stop_line_due(Box::new(|_| true));
+        registry.update("s1", |rec| rec.status = SessionStatus::Idle);
+        assert_eq!(
+            front(&registry).map(|(text, _)| text),
+            Some("working".to_owned()),
+            "the coming stop line replaces it instead"
+        );
+
+        working_with_provisional(&registry);
+        registry.update("s1", |rec| rec.status = SessionStatus::Stopped);
+        assert_eq!(
+            front(&registry).map(|(text, _)| text),
+            Some("stop".to_owned()),
+            "a stop always drops it"
+        );
+        working_with_provisional(&registry);
+        registry.update("s1", |rec| rec.status = SessionStatus::Error);
+        assert_eq!(
+            front(&registry).map(|(text, _)| text),
+            Some("stop".to_owned()),
+            "an error always drops it"
+        );
+    }
+
+    #[test]
+    fn a_provisional_line_is_dropped_when_a_turn_ends_from_awaiting_input() {
+        let front = |registry: &SessionRegistry| {
+            summary_of(registry).map(|summary| summary.lines[0].text.clone())
+        };
+        let asking_with_provisional = |registry: &SessionRegistry| {
+            registry.update("s1", |rec| {
+                rec.status = SessionStatus::Working;
+                rec.push_summary_line(
+                    None,
+                    "h".to_owned(),
+                    ring_line("stop", Utc::now()),
+                    Utc::now(),
+                );
+                rec.push_provisional_line(ring_line("working", Utc::now()), Utc::now());
+            });
+            registry.update("s1", |rec| rec.status = SessionStatus::AwaitingInput);
+        };
+        let registry = SessionRegistry::new(crate::history::test_support::scratch_dirs(
+            "ring-drop-provisional-asking",
+        ));
+        let mut rec = record("s1");
+        rec.mode = SessionMode::Interactive;
+        registry.insert(rec);
+
+        asking_with_provisional(&registry);
+        assert_eq!(
+            front(&registry).as_deref(),
+            Some("working"),
+            "a prompt keeps it"
+        );
+        registry.update("s1", |rec| rec.status = SessionStatus::Stopped);
+        assert_eq!(front(&registry).as_deref(), Some("stop"), "a stop drops it");
+
+        asking_with_provisional(&registry);
+        registry.update("s1", |rec| rec.status = SessionStatus::Error);
+        assert_eq!(
+            front(&registry).as_deref(),
+            Some("stop"),
+            "an error drops it"
+        );
+
+        asking_with_provisional(&registry);
+        registry.update("s1", |rec| rec.status = SessionStatus::Idle);
+        assert_eq!(
+            front(&registry).as_deref(),
+            Some("stop"),
+            "idle with no stop line on its way drops it"
+        );
+
+        asking_with_provisional(&registry);
+        registry.set_stop_line_due(Box::new(|_| true));
+        registry.update("s1", |rec| rec.status = SessionStatus::Idle);
+        assert_eq!(
+            front(&registry).as_deref(),
+            Some("working"),
+            "the coming stop line replaces it instead"
+        );
     }
 
     #[tokio::test]

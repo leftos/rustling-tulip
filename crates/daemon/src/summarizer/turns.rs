@@ -58,36 +58,92 @@ pub(crate) struct Turns {
 }
 
 impl Turns {
+    /// The pipeline over `sessions`, which from now on asks it whether a
+    /// session's stop line is on its way (see
+    /// [`SessionRegistry::set_stop_line_due`]).
     pub(crate) fn new(sessions: Arc<SessionRegistry>, summarizer: Arc<Summarizer>) -> Arc<Self> {
-        Arc::new(Self {
+        let turns = Arc::new(Self {
             sessions,
             summarizer,
             drivers: Mutex::default(),
-        })
+        });
+        let weak = Arc::downgrade(&turns);
+        turns.sessions.set_stop_line_due(Box::new(move |id| {
+            weak.upgrade().is_some_and(|turns| turns.has_work(id))
+        }));
+        turns
     }
 
     /// Add a main-agent `Stop`'s last message to `session_id`'s reports, and
-    /// start its driver when none runs.
+    /// start its driver when none runs, as the hook route does in two steps.
+    #[cfg(test)]
     pub(crate) fn on_stop(self: &Arc<Self>, session_id: &str, message: &str) {
+        if self.add_report(session_id, message) {
+            self.start(session_id);
+        }
+    }
+
+    /// Add a main-agent `Stop`'s last message to `session_id`'s reports.
+    /// Returns whether no driver runs for it, so the caller is to
+    /// [`Self::start`] one; it is marked running already. Runs under the
+    /// session's record lock, so it takes no registry lock.
+    pub(crate) fn add_report(&self, session_id: &str, message: &str) -> bool {
         let report = Report {
             text: truncate_bytes(message, REPORT_MAX_BYTES),
             at: Utc::now(),
         };
-        let start = {
-            let mut drivers = lock(&self.drivers);
-            drivers.retain(|id, _| self.sessions.get(id).is_some());
-            let driver = drivers.entry(session_id.to_owned()).or_default();
-            driver.pending.push(report);
-            if driver.pending.len() > PENDING_MAX_REPORTS {
-                driver.pending.remove(0);
-            }
-            !std::mem::replace(&mut driver.running, true)
-        };
-        if start {
-            let turns = Arc::clone(self);
-            let id = session_id.to_owned();
-            tokio::spawn(async move { turns.drive(&id).await });
+        let mut drivers = lock(&self.drivers);
+        let driver = drivers.entry(session_id.to_owned()).or_default();
+        driver.pending.push(report);
+        if driver.pending.len() > PENDING_MAX_REPORTS {
+            driver.pending.remove(0);
         }
+        !std::mem::replace(&mut driver.running, true)
+    }
+
+    /// Start the driver [`Self::add_report`] asked for, first forgetting the
+    /// sessions the registry no longer holds. Called with no record lock held.
+    pub(crate) fn start(self: &Arc<Self>, session_id: &str) {
+        self.forget_gone_sessions();
+        let turns = Arc::clone(self);
+        let id = session_id.to_owned();
+        tokio::spawn(async move { turns.drive(&id).await });
+    }
+
+    /// Drop the entries of sessions the registry no longer holds. The
+    /// registry is asked with the pipeline's lock released, so the pipeline's
+    /// lock is never held while a registry lock is taken.
+    fn forget_gone_sessions(&self) {
+        let tracked: Vec<String> = lock(&self.drivers).keys().cloned().collect();
+        let gone: Vec<String> = tracked
+            .into_iter()
+            .filter(|id| self.sessions.get(id).is_none())
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        let mut drivers = lock(&self.drivers);
+        for id in &gone {
+            drivers.remove(id);
+        }
+    }
+
+    /// Whether `id`'s driver runs, so a stop line is on its way: a call is
+    /// in flight or about to start. Reports put back with the driver stopped
+    /// wait for the next `Stop` and do not count. Asked under the session's
+    /// record lock, so it takes no registry lock.
+    pub(crate) fn has_work(&self, id: &str) -> bool {
+        lock(&self.drivers)
+            .get(id)
+            .is_some_and(|driver| driver.running)
+    }
+
+    /// Whether `id` has a driver running or reports pending, so its next
+    /// summary is a stop line: a refresh does not run ahead of it.
+    pub(crate) fn has_reports(&self, id: &str) -> bool {
+        lock(&self.drivers)
+            .get(id)
+            .is_some_and(|driver| driver.running || !driver.pending.is_empty())
     }
 
     /// Summarize `id`'s reports until none is pending, one call at a time.
@@ -124,7 +180,8 @@ impl Turns {
                         driver.finished_at = Some(Instant::now());
                     }
                 }
-                Outcome::Idle | Outcome::Replaced => {
+                // A stop request is never skipped; were it, its reports wait.
+                Outcome::Idle | Outcome::Replaced | Outcome::Skipped => {
                     self.put_back(id, reports);
                     return;
                 }
@@ -153,8 +210,9 @@ impl Turns {
     /// Return `reports`, which no line covered, ahead of the ones that came
     /// since, and stop the driver; a session already gone is forgotten.
     fn put_back(&self, id: &str, mut reports: Vec<Report>) {
+        let gone = self.sessions.get(id).is_none();
         let mut drivers = lock(&self.drivers);
-        if self.sessions.get(id).is_none() {
+        if gone {
             drivers.remove(id);
             return;
         }
@@ -223,6 +281,10 @@ mod tests {
 
     /// Hang guard for one awaited event; a passing run never waits it out.
     const HANG_GUARD: Duration = Duration::from_secs(600);
+
+    /// Hang guard for a thread blocked on a lock; a passing run never waits
+    /// it out, and a failing one would wait forever without it.
+    const LOCK_HANG_GUARD: Duration = Duration::from_secs(60);
 
     /// Apply the hook `body` to `s1` at `event_time`, as the hook route does.
     fn apply_hook(hub: &Hub, body: &str, event_time: u128) {
@@ -316,6 +378,39 @@ mod tests {
         hub.state
             .set_summarizer_settings(settings)
             .expect("store the settings");
+    }
+
+    /// The hook route runs `add_report`, and the registry asks `has_work`,
+    /// under a session's record lock, while `snapshots()` holds the registry
+    /// map's lock as it locks each record: neither may take the map lock.
+    /// With the map write-locked here, both finish only if they never ask.
+    #[tokio::test]
+    async fn add_report_takes_no_registry_lock() {
+        let (hub, _scratch, _fake, _events) = hub_with_session("turns-lock-order");
+        hub.sessions.insert(crate::history::test_support::record(
+            "gone",
+            protocol::SessionMode::Interactive,
+        ));
+        hub.client_count.send_replace(0);
+        hub.turns
+            .on_stop("gone", "a report for a session about to go");
+        assert!(settles(|| hub.turns.state_of("gone") == Some((1, false))).await);
+        hub.sessions.remove("gone");
+
+        let map = hub.sessions.hold_map();
+        let turns = std::sync::Arc::clone(&hub.turns);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let start = turns.add_report("s1", "a report");
+            let due = turns.has_work("s1");
+            let _ = done_tx.send((start, due));
+        });
+        let finished = done_rx.recv_timeout(LOCK_HANG_GUARD);
+        drop(map);
+        assert_eq!(
+            finished.expect("hung: add_report or has_work waited on the registry map lock"),
+            (true, true)
+        );
     }
 
     #[tokio::test]
@@ -623,6 +718,36 @@ mod tests {
             "{alert:?}"
         );
         assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn put_back_reports_do_not_keep_the_provisional_line() {
+        let (hub, _scratch, _fake, _events) = hub_with_session("turns-put-back-provisional");
+        hub.client_count.send_replace(0);
+        apply_hook(&hub, &stop("report A"), 100);
+        assert!(
+            settles(|| hub.turns.state_of("s1") == Some((1, false))).await,
+            "the report is put back with the driver stopped"
+        );
+        assert!(hub.turns.has_reports("s1"), "it is still the next summary");
+        assert!(!hub.turns.has_work("s1"), "but no stop line is on its way");
+
+        apply_hook(&hub, r#"{"hook_event_name":"UserPromptSubmit"}"#, 200);
+        hub.sessions.update("s1", |record| {
+            let line = protocol::SummaryLine {
+                text: "working".to_owned(),
+                at: chrono::Utc::now(),
+                source: SummarySource::Model,
+                provisional: true,
+            };
+            record.push_provisional_line(line, chrono::Utc::now());
+        });
+        hub.sessions
+            .update("s1", |record| record.status = SessionStatus::Idle);
+        let summary = crate::sync::lock(&hub.sessions.get("s1").expect("the session"))
+            .summary
+            .clone();
+        assert_eq!(summary, None, "the turn ended with no stop line due");
     }
 
     #[tokio::test]

@@ -182,6 +182,10 @@ pub(crate) enum Outcome {
     Replaced,
     /// No client is connected, so nothing was made.
     Idle,
+    /// A working refresh that made no line where a stop request gets the
+    /// template: summaries off, past half the cap, no provider, a rejected
+    /// or missing key, or a failed call.
+    Skipped,
 }
 
 /// A test summary's answer.
@@ -449,27 +453,54 @@ impl Summarizer {
         Ok(())
     }
 
-    /// Summarize `request` once its session's turn comes. A request that
-    /// makes no call (summaries off, no offered provider, the cap, a missing
-    /// key, or a failed start) gets the template line; a failed call gets it
-    /// too, its billed cost still counted.
+    /// Summarize `request` once its session's turn comes. A stop request
+    /// that makes no call (summaries off, no offered provider, the cap, a
+    /// missing key, or a failed start) gets the template line; a failed call
+    /// gets it too, its billed cost still counted. A working refresh gets
+    /// [`Outcome::Skipped`] in each of those places instead.
     pub(crate) async fn submit(&self, request: Request) -> Outcome {
-        let Some(_turn) = self.queue.admit(&request.session_id).await else {
+        self.submit_if(request, || true).await
+    }
+
+    /// Summarize `session_id`'s working refresh of `input` once its turn
+    /// comes, as [`Self::submit`] does, unless `still_due` answers `false`
+    /// when the turn comes: then it gets [`Outcome::Skipped`] with no call.
+    pub(crate) async fn submit_refresh(
+        &self,
+        session_id: &str,
+        input: String,
+        still_due: impl FnOnce() -> bool,
+    ) -> Outcome {
+        let request = Request {
+            session_id: session_id.to_owned(),
+            trigger: Trigger::Working,
+            input,
+        };
+        self.submit_if(request, still_due).await
+    }
+
+    /// The body of [`Self::submit`] and [`Self::submit_refresh`]: `proceed`
+    /// is asked once the request is admitted, before anything else.
+    async fn submit_if(&self, request: Request, proceed: impl FnOnce() -> bool) -> Outcome {
+        let Some(_turn) = self.queue.admit(&request.session_id, request.trigger).await else {
             return Outcome::Replaced;
         };
+        if !proceed() {
+            return Outcome::Skipped;
+        }
         let settings = self.state.summarizer_settings();
         let clients = *self.client_count.borrow();
         let spent = self.spent_today();
         let provider = match policy::plan(clients, &settings, request.trigger, spent) {
             Plan::Idle => return Outcome::Idle,
-            Plan::Template => return template_outcome(&request.input),
+            Plan::Template => return no_call_outcome(&request),
             Plan::Call(provider) => provider,
         };
         let Some(caller) = self.caller.as_deref() else {
-            return template_outcome(&request.input);
+            return no_call_outcome(&request);
         };
         if self.key_rejected(&provider) {
-            return template_outcome(&request.input);
+            return no_call_outcome(&request);
         }
         let cache_key = CacheKey::new(&provider.id(), request.trigger, &request.input);
         if let Some(summary) = crate::sync::lock(&self.cache).get(&cache_key).cloned() {
@@ -481,7 +512,7 @@ impl Summarizer {
         let key = match self.provider_key(&provider, &settings).await {
             KeyLookup::NotNeeded => None,
             KeyLookup::Found(key) => Some(key),
-            KeyLookup::Missing => return template_outcome(&request.input),
+            KeyLookup::Missing => return no_call_outcome(&request),
         };
         let prompt = prompt::build(request.trigger, &request.input);
         match self.call(caller, &provider, key.as_ref(), &prompt).await.0 {
@@ -492,7 +523,7 @@ impl Summarizer {
                     cost_usd: called.cost_usd,
                 }
             }
-            Err(_) => template_outcome(&request.input),
+            Err(_) => no_call_outcome(&request),
         }
     }
 
@@ -634,10 +665,15 @@ impl Summarizer {
     }
 }
 
-fn template_outcome(input: &str) -> Outcome {
-    Outcome::Line {
-        line: policy::template(input),
-        cost_usd: 0.0,
+/// What `request` gets when no model line was made for it: the template for
+/// a stop request, nothing for a working refresh.
+fn no_call_outcome(request: &Request) -> Outcome {
+    match request.trigger {
+        Trigger::Stop => Outcome::Line {
+            line: policy::template(&request.input),
+            cost_usd: 0.0,
+        },
+        Trigger::Working => Outcome::Skipped,
     }
 }
 
@@ -662,11 +698,88 @@ fn validate(settings: &SummarizerSettings) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
 mod tests {
-    use protocol::{KeyState, SummarizerKey};
+    use std::sync::Arc;
 
-    use crate::server::test_support::test_hub;
+    use protocol::{KeyState, SummarizerKey, SummarizerSettings, SummarySource};
+
+    use super::{Outcome, Request, Summarizer};
+    use crate::server::Hub;
+    use crate::server::test_support::{billing_hub, test_hub, test_summarizer};
+    use crate::summarizer::prompt::{self, Trigger};
     use crate::summarizer::providers;
+    use crate::summarizer::service::test_support::FakeCaller;
+
+    /// What a stop request and a working refresh for `session_id` each get.
+    async fn both_outcomes(summarizer: &Summarizer, session_id: &str) -> (Outcome, Outcome) {
+        let request = |trigger| Request {
+            session_id: session_id.to_owned(),
+            trigger,
+            input: prompt::shape(&["The tests pass."]),
+        };
+        let stop = summarizer.submit(request(Trigger::Stop)).await;
+        let working = summarizer.submit(request(Trigger::Working)).await;
+        (stop, working)
+    }
+
+    fn is_template(outcome: &Outcome) -> bool {
+        matches!(outcome, Outcome::Line { line, .. } if line.source == SummarySource::Template)
+    }
+
+    fn change_settings(hub: &Hub, change: impl FnOnce(&mut SummarizerSettings)) {
+        let mut settings = hub.state.summarizer_settings();
+        change(&mut settings);
+        hub.state
+            .set_summarizer_settings(settings)
+            .expect("store the settings");
+    }
+
+    #[tokio::test]
+    async fn a_working_request_is_skipped_where_a_stop_gets_a_template() {
+        let (hub, _scratch, fake) = billing_hub("summ-skip", 0.0);
+        let defaults = hub.state.summarizer_settings();
+
+        change_settings(&hub, |settings| settings.enabled = false);
+        let (stop, working) = both_outcomes(&hub.summarizer, "off").await;
+        assert!(is_template(&stop), "off: {stop:?}");
+        assert_eq!(working, Outcome::Skipped, "off");
+
+        change_settings(&hub, |settings| {
+            settings.enabled = true;
+            settings.provider = "no-such-provider".to_owned();
+        });
+        let (stop, working) = both_outcomes(&hub.summarizer, "no-provider").await;
+        assert!(is_template(&stop), "no provider: {stop:?}");
+        assert_eq!(working, Outcome::Skipped, "no provider");
+        assert_eq!(fake.calls(), 0, "no call is made without a provider");
+
+        change_settings(&hub, |settings| {
+            *settings = SummarizerSettings {
+                daily_cap_usd: 1.0,
+                ..defaults
+            };
+        });
+        crate::sync::lock(&hub.summarizer.ledger).add(super::today(), 0.6);
+        let (stop, working) = both_outcomes(&hub.summarizer, "half-cap").await;
+        assert!(
+            matches!(&stop, Outcome::Line { line, .. } if line.source == SummarySource::Model),
+            "past half the cap a stop still calls: {stop:?}"
+        );
+        assert_eq!(working, Outcome::Skipped, "past half the cap");
+        assert_eq!(fake.calls(), 1, "only the stop called");
+
+        let failing = test_summarizer(
+            &hub.state,
+            &hub.dirs,
+            &hub.client_count,
+            &hub.state_events,
+            Arc::new(FakeCaller::failing()),
+        );
+        let (stop, working) = both_outcomes(&failing, "failed").await;
+        assert!(is_template(&stop), "a failed call: {stop:?}");
+        assert_eq!(working, Outcome::Skipped, "a failed call");
+    }
 
     fn states(state: KeyState) -> Vec<SummarizerKey> {
         providers::TABLE
@@ -708,7 +821,7 @@ pub(crate) mod test_support {
 
     use protocol::AlertKind;
 
-    use super::{CallFuture, Called, Caller};
+    use super::{CallFailure, CallFuture, Called, Caller};
     use crate::summarizer::policy::Provider;
     use crate::summarizer::reply::Summary;
     use crate::user_env::Secret;
@@ -723,9 +836,19 @@ pub(crate) mod test_support {
         cost_usd: f64,
         /// When set, each call waits for a notification before answering.
         gate: Option<Arc<Notify>>,
+        /// When set, each call fails.
+        fails: bool,
     }
 
     impl FakeCaller {
+        /// A fake whose every call fails, billing nothing.
+        pub(crate) fn failing() -> Self {
+            Self {
+                fails: true,
+                ..Self::default()
+            }
+        }
+
         /// A fake whose every call waits until `gate` is notified, billing
         /// nothing.
         pub(crate) fn gated(gate: Arc<Notify>) -> Self {
@@ -765,9 +888,17 @@ pub(crate) mod test_support {
             crate::sync::lock(&self.prompts).push(prompt.to_owned());
             let cost_usd = self.cost_usd;
             let gate = self.gate.clone();
+            let fails = self.fails;
             Box::pin(async move {
                 if let Some(gate) = gate {
                     gate.notified().await;
+                }
+                if fails {
+                    return Err(CallFailure {
+                        message: "the fake provider failed".to_owned(),
+                        cost_usd,
+                        rejected: false,
+                    });
                 }
                 Ok(Called {
                     summary: Summary {

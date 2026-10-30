@@ -225,6 +225,21 @@ impl Dashboard {
             .and_then(|snapshot| snapshot.first_prompt.clone())
     }
 
+    /// The last text the assistant wrote in `session_id`'s transcript, as
+    /// last read; `None` while no connection watches, so nothing outlives
+    /// the watch.
+    pub(crate) fn last_assistant_text(&self, session_id: &str) -> Option<String> {
+        let state = lock(&self.inner.state);
+        if state.watchers.is_empty() {
+            return None;
+        }
+        state
+            .entries
+            .get(session_id)
+            .and_then(|entry| entry.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.last_assistant_text.clone())
+    }
+
     /// The recent work of a session's `members`, each worktree's read reused
     /// for [`work::TTL`] and each branch's pull request for [`pr::TTL`].
     pub(crate) async fn recent_work(
@@ -276,8 +291,8 @@ impl Dashboard {
         })
     }
 
-    /// The number of watchers, as the tick task sees it.
-    #[cfg(test)]
+    /// The number of watchers, as the tick task and the working refresh see
+    /// it.
     pub(crate) fn watcher_count(&self) -> watch::Receiver<usize> {
         self.inner.watcher_count.subscribe()
     }

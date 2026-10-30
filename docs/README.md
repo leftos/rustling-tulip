@@ -194,6 +194,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Progress update**: an attention-feed item for a stop while work continues, or a summary of work in progress; shown in the feed, never pushed to the phone.
 - **Prompt source**: where a preset launch takes its prompts from: a prompts file, a folder of `.md` files, inline text or GitHub issue ranges, limited to the sources the preset allows.
 - **Provider table**: a built-in, not user-editable list of providers. The Claude plugin's lists the environment variables each non-Anthropic provider sets, removes and locks (`crates/agents/claude/src/providers.rs`); the summarizer's lists each provider's endpoint, model and prices (`crates/daemon/src/summarizer/providers.rs`).
+- **Provisional line**: a working refresh's summary line (DB.17): pushed to the front of a session's summary ring every 3 minutes while a Dashboard is watched, replaced by the next line, never written to `summary.json`, and dropped when the turn ends with no stop line on its way.
 - **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
 - **Queue strip**: the Dashboard's By status band under the header while any session waits: one chip per wait, longest first, a click scrolling that session's row into view; see `docs/plans/dashboard.md`.
 - **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.

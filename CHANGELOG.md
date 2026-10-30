@@ -9,6 +9,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key, then pick a row with the arrows and Enter.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting now get clicks, drags and the wheel in the format they asked for.
 - A Dashboard button on the activity rail opens the Dashboard as a tab, one per window, with a count of sessions waiting on you.
+- While the Dashboard is open, a working session's summary line refreshes every 3 minutes until its turn ends.
 - Each finished turn of a Claude session is summarized in one line, kept across daemon restarts; a turn that ends asking you something lists the session under Needs you.
 - A Finished notification is titled and worded from the turn's summary when one arrives within a few seconds, and a Needs you notification names the question or permission it waits on.
 - The Dashboard tab lists every agent session by status: what each is doing now, its context, recent activity, cost and running subagents, with a queue of the sessions waiting on you.

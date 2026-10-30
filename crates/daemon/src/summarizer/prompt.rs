@@ -57,10 +57,6 @@ pub(crate) enum Trigger {
     /// The agent ended its turn; the text is its reports since the last call.
     Stop,
     /// The agent is still in its turn; the text is the last it wrote.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Dashboard's working refresh submits it")
-    )]
     Working,
 }
 

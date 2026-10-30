@@ -1,11 +1,15 @@
 //! The summarizer's per-session queue: one request runs per session at a time
 //! and at most one more waits; a new request for the session replaces the
-//! waiting one, which ends unrun. A running request is never cancelled.
+//! waiting one, which ends unrun, except that a working refresh never
+//! replaces a waiting stop request: it ends unrun itself. A running request
+//! is never cancelled.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tokio::sync::oneshot;
+
+use crate::summarizer::prompt::Trigger;
 
 /// The sessions with a request running, each with the request waiting after
 /// it, if any.
@@ -16,9 +20,20 @@ pub(crate) struct Queue {
 
 #[derive(Debug, Default)]
 struct Slot {
-    /// Told when the running request ends and this one may run; dropped when
-    /// a newer request replaces it.
-    waiting: Option<oneshot::Sender<()>>,
+    /// The waiting request's trigger, and the sender told when the running
+    /// request ends and it may run; dropped when a newer request replaces it.
+    waiting: Option<(Trigger, oneshot::Sender<()>)>,
+}
+
+impl Slot {
+    /// Whether a request for `trigger` may take the waiting place: always,
+    /// unless it is a working refresh and a stop request still waits there.
+    fn admits(&self, trigger: Trigger) -> bool {
+        match &self.waiting {
+            Some((Trigger::Stop, tx)) if !tx.is_closed() => trigger == Trigger::Stop,
+            _ => true,
+        }
+    }
 }
 
 /// A session's turn to run; the next waiting request runs once it drops.
@@ -53,10 +68,11 @@ impl Drop for Waiting<'_> {
 }
 
 impl Queue {
-    /// Wait for `session_id`'s turn: at once when nothing runs for it, else
-    /// once the running request ends. `None` when a newer request for the
-    /// session replaced this one first.
-    pub(crate) async fn admit(&self, session_id: &str) -> Option<Turn<'_>> {
+    /// Wait for `session_id`'s turn for a `trigger` request: at once when
+    /// nothing runs for it, else once the running request ends. `None` when
+    /// a newer request for the session replaced this one first, or at once
+    /// for a working refresh while a stop request waits.
+    pub(crate) async fn admit(&self, session_id: &str, trigger: Trigger) -> Option<Turn<'_>> {
         let rx = {
             let mut sessions = crate::sync::lock(&self.sessions);
             match sessions.get_mut(session_id) {
@@ -64,9 +80,10 @@ impl Queue {
                     sessions.insert(session_id.to_owned(), Slot::default());
                     return Some(self.turn(session_id));
                 }
+                Some(slot) if !slot.admits(trigger) => return None,
                 Some(slot) => {
                     let (tx, rx) = oneshot::channel();
-                    slot.waiting = Some(tx);
+                    slot.waiting = Some((trigger, tx));
                     rx
                 }
             }
@@ -101,7 +118,7 @@ impl Queue {
         let handed = slot
             .waiting
             .take()
-            .is_some_and(|waiting| waiting.send(()).is_ok());
+            .is_some_and(|(_, waiting)| waiting.send(()).is_ok());
         if !handed {
             sessions.remove(session_id);
         }
@@ -113,21 +130,24 @@ impl Queue {
 mod tests {
     use super::*;
 
+    const STOP: Trigger = Trigger::Stop;
+    const WORKING: Trigger = Trigger::Working;
+
     #[tokio::test]
     async fn a_second_trigger_for_a_session_replaces_its_queued_request() {
         let queue = Queue::default();
         let running = queue
-            .admit("s1")
+            .admit("s1", STOP)
             .await
             .expect("nothing runs, so s1 runs at once");
         let other = queue
-            .admit("s2")
+            .admit("s2", STOP)
             .await
             .expect("another session runs beside it");
 
-        let mut second = Box::pin(queue.admit("s1"));
+        let mut second = Box::pin(queue.admit("s1", STOP));
         assert!(futures::poll!(&mut second).is_pending(), "the second waits");
-        let mut third = Box::pin(queue.admit("s1"));
+        let mut third = Box::pin(queue.admit("s1", STOP));
         assert!(futures::poll!(&mut third).is_pending(), "the third waits");
         assert!(second.await.is_none(), "the third replaced the second");
 
@@ -136,8 +156,44 @@ mod tests {
         drop(turn);
         drop(other);
         assert!(
-            queue.admit("s1").await.is_some(),
+            queue.admit("s1", STOP).await.is_some(),
             "a freed session runs at once"
         );
+    }
+
+    #[tokio::test]
+    async fn a_working_request_never_replaces_a_queued_stop() {
+        let queue = Queue::default();
+        let running = queue.admit("s1", STOP).await.expect("s1 runs at once");
+        let mut stop = Box::pin(queue.admit("s1", STOP));
+        assert!(futures::poll!(&mut stop).is_pending(), "the stop waits");
+
+        let mut working = Box::pin(queue.admit("s1", WORKING));
+        assert!(
+            matches!(futures::poll!(&mut working), std::task::Poll::Ready(None)),
+            "the working request ends unrun at once"
+        );
+        drop(running);
+        assert!(
+            stop.await.is_some(),
+            "the queued stop still runs once the first ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_request_replaces_a_queued_working_one() {
+        let queue = Queue::default();
+        let running = queue.admit("s1", WORKING).await.expect("s1 runs at once");
+        let mut working = Box::pin(queue.admit("s1", WORKING));
+        assert!(
+            futures::poll!(&mut working).is_pending(),
+            "the refresh waits"
+        );
+        let mut stop = Box::pin(queue.admit("s1", STOP));
+        assert!(futures::poll!(&mut stop).is_pending(), "the stop waits");
+
+        assert!(working.await.is_none(), "the stop replaced the refresh");
+        drop(running);
+        assert!(stop.await.is_some(), "the stop runs once the first ends");
     }
 }
