@@ -25,7 +25,7 @@ pub const PROOF_TIMEOUT: Duration = Duration::from_millis(800);
 // per-session tracer reattach can take up to PIPE_CONNECT_TIMEOUT (15s)
 // when the pipe is busy from a stale daemon connection — two sessions
 // in that state already exceeds 8s.
-const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 

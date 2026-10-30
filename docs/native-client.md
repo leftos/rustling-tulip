@@ -116,6 +116,12 @@ This doc records the decisions a change to the client needs to know; what each f
 
   A tailnet target never runs `ensure_running` and never sends `Shutdown` or Stop; its `Hello` carries the device token read from the `DeviceTokenStore` (`NetDeps.tokens`), and a host with no stored token, or an unreadable store, is dialled with an empty one. `NetCommand::SwitchTarget` drops the socket and connects at once with fresh connection state.
 
+  `Target::Ssh(SshHost)` names an `~/.ssh/config` alias or `user@host[:port]`, kept exactly as typed; one that is empty, starts with `-` (ssh would read it as an option), holds whitespace or a control character, or has an empty side of its `@` is refused (`Target::parse_ssh`). The client runs `ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o Compression=no -- <host> <remote command>` with no console window (`ssh.rs`), the remote command defaulting to `rustling-tulipd bridge` and a saved host's `remote_command` replacing it, and speaks the protocol as one JSON message per line over its stdio.
+
+  The SSH login is the owner: there is no device token and no pairing, because the bridge on the host fills the `Hello` token. `BatchMode` means ssh never prompts, so an unknown host key or a key needing a passphrase fails with ssh's own text; when ssh's stdout ends the connection closes with `daemon closed the connection: ` and the last 2 KB of ssh's stderr, trimmed. The ssh binary is `RUSTLING_TULIP_SSH` (empty counts as unset), else `ssh` on PATH, else `%SystemRoot%\System32\OpenSSH\ssh.exe`; none found closes with `ssh was not found: install the OpenSSH client or set RUSTLING_TULIP_SSH to its path`.
+
+  An SSH target is a remote host like a tailnet one: no `ensure_running`, no Shutdown or Stop, local-file actions off, Restart reads "Reconnect now", and the footer pill and overlay use the host part of the string. The pairing views never act on it: a `PendingDevices` the daemon pushes on a loopback connection is ignored there (no Waiting devices rows, no toast).
+
   On a remote host Restart becomes "Reconnect now" (reconnect without touching the host's daemon, and the way out of `AuthFailed` and of `NotApproved`) and Stop is unavailable. The connection model gives the footer pill `{short name} · {state}`, the overlay "Connecting to {short name}…" and a flyout "Host" row `{name}:{port}`; the footer, flyout and overlay render them, and a target change clears the flyout's Port, PID and Protocol rows.
 
   **Remote mode** (`remote_mode.rs`): views ask a capability table (`Capabilities::for_target`), never the target.
@@ -172,7 +178,9 @@ This doc records the decisions a change to the client needs to know; what each f
 
   A typed host is checked as the name first, then a port of 1 to 65535, and each refusal's `Display` is the message shown. A failed scan keeps the saved rows and shows `TailnetError`'s `Display` text. The scan runs on a one-shot thread with its own current-thread runtime behind the `PeerSource` seam, so neither the UI nor the net thread waits on it. Forgetting the host the client is on reports that, so the caller switches to This PC.
 
-  **Boot target**: `native-ui.json` keeps `saved_hosts` (`{name, port}` entries) and `last_target` (`{name, port}`, absent or null for this PC). The client reads them before it starts the net thread and boots on `last_target` when its name is in `saved_hosts`, on the saved port, and never runs `ensure_running` for it; a saved host that cannot be reached is still the boot target.
+  **Boot target**: `native-ui.json` keeps `saved_hosts` and `last_target` (absent or null for this PC), each entry with a `kind` (`"tailnet"` when missing, or `"ssh"`): `{name, port}` for a tailnet host, `{kind, name, remote_command}` with no port for an SSH host. The client reads them before it starts the net thread and boots on `last_target` when a saved host has its kind and name, dialled as it was saved, and never runs `ensure_running` for it; a saved host that cannot be reached is still the boot target.
+
+  The per-host session count for an SSH host is keyed `ssh:<host string>`. The picker cannot add an SSH host yet, so one is reachable only by editing `native-ui.json`; Forget and the other rows already treat it like a tailnet host.
 
   A `last_target` that is not a saved host boots on this PC and logs at info `the last target is not a saved host; starting on this PC`. A hand-edited `saved_hosts` entry that fails the DNS-name check or has a port outside 1 to 65535 is dropped on load with a warn, its name normalised otherwise, and a `last_target` that is not a host record loads as this PC.
 
@@ -302,7 +310,7 @@ A `Devices` section (`devices.rs` model, `devices_view.rs` view) follows Waiting
 
 Rows sort connected first, then by last seen (newest first, never-seen last), then blocked, ties by name; an empty list reads "No device has paired yet." An unblocked row has Block and a blocked one Forget (`ForgetDevice`). Block opens a confirm, "Block {name}?" with "Its live connections end now, and it cannot pair again until you forget it.", Cancel (focused first) and Block (danger); Tab and Shift+Tab move, Enter presses, Esc cancels, and Block sends `RevokeDevice`.
 
-A request is asked for only on a connect to this PC's daemon whose `Welcome` lists `device_pairing`, never on a tailnet host. Each new unapproved request raises a toast, "A device asks for remote access" with the body `{name} · signed in to Tailscale as {login}`, with Approve… and Deny, only while connected to this PC's daemon. Pairing toasts do not consult the Notifications tab's toggles.
+A request is asked for only on a connect to this PC's daemon whose `Welcome` lists `device_pairing`, never on a tailnet or SSH host. Each new unapproved request raises a toast, "A device asks for remote access" with the body `{name} · signed in to Tailscale as {login}`, with Approve… and Deny, only while connected to this PC's daemon. Pairing toasts do not consult the Notifications tab's toggles.
 
 Approve… on a toast brings the window forward and opens the dialog without opening Settings, and only when no pairing dialog is open and the request is still listed and unapproved: an open dialog is never replaced from a toast.
 
@@ -598,7 +606,7 @@ A text file a terminal path link or the Fetch file… dialog opens goes to a vie
 
 ## Fetched files
 
-- Files fetched from a remote host are saved under the `remote-files` root (`daemon_client::remote_files_dir()`), as `<host MagicDNS name, lower-cased>/<repo-name>/<rel-path>`; names Windows cannot hold are sanitised, and `..`, drive prefixes and leading separators are refused. Nothing under the root is pruned.
+- Files fetched from a remote host are saved under the `remote-files` root (`daemon_client::remote_files_dir()`), as `<host MagicDNS name, lower-cased>/<repo-name>/<rel-path>` (`ssh-<host string, lower-cased>` instead of the name for an SSH host, so the two kinds never share a folder); names Windows cannot hold are sanitised, and `..`, drive prefixes and leading separators are refused. Nothing under the root is pruned.
 - A fetch streams into a hidden `.fetch-<launch stamp>-<n>.part` beside the target, created with create-new and deleted only by the fetch that created it, and is renamed over the target on done. Fewer bytes than announced is an error; more is saved. An error, a cancel, a failed write or a lost or switched connection deletes the part and toasts `Couldn't fetch <file>`.
 - One fetch per target: a second fetch to the same path (case-insensitive on Windows) toasts `Already fetching <file>`.
 - A Ctrl+click on a terminal path link on a remote host sends `FetchFile` for the link's readings (`fetch_link.rs`, `RootView::fetch_path_link`). A **reading** is one way to take the link's path as a file under a repo or worktree of the pane's session: each candidate, longest first; an absolute host path is matched against the session's member worktrees, a relative one is read against the pane's cwd first, then against each member worktree.

@@ -1103,6 +1103,9 @@ fn live_deps(
                 daemon_client::connect_proven(port, &token, daemon_client::PROOF_TIMEOUT).await
             })
         }),
+        open_ssh: Box::new(|_| {
+            Box::pin(async { Err(anyhow::anyhow!("a live run never starts ssh")) })
+        }),
         identity: Some(identity),
         stop: Box::new(move || {
             let dir = stop_dir.clone();

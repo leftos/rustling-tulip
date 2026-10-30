@@ -471,15 +471,19 @@ pub struct UiState {
     /// The Settings modal's Spawn defaults tab.
     #[serde(default)]
     pub spawn: SpawnDefaults,
-    /// The tailnet host the client last connected to; `None` is this PC.
+    /// The tailnet or SSH host the client last connected to; `None` is this
+    /// PC.
     #[serde(default, deserialize_with = "last_target_or_local")]
     pub last_target: Option<SavedHost>,
-    /// The tailnet hosts the user added, in the order they were added. An
-    /// entry that is not a valid host is dropped on load.
+    /// The tailnet and SSH hosts the user added, in the order they were
+    /// added. An entry that is not a valid host, or of an unknown kind, is
+    /// dropped on load.
     #[serde(default, deserialize_with = "valid_saved_hosts")]
     pub saved_hosts: Vec<SavedHost>,
-    /// The session count each tailnet host last had, by its lower-cased
-    /// `MagicDNS` name: a connect whose first list differs offers the import.
+    /// The session count each remote host last had, by
+    /// [`crate::target::Target::session_count_key`]: a tailnet host's
+    /// lower-cased `MagicDNS` name, or `ssh:` and an SSH host's string. A
+    /// connect whose first list differs offers the import.
     #[serde(default)]
     pub host_session_counts: BTreeMap<String, u32>,
 }
@@ -498,7 +502,8 @@ fn last_target_or_local<'de, D: Deserializer<'de>>(
         host.normalised()
             .inspect_err(|err| {
                 tracing::warn!(
-                    "last_target {}:{} is not valid ({err}); starting on this PC",
+                    "last_target {:?} {}:{} is not valid ({err}); starting on this PC",
+                    host.kind,
                     host.name,
                     host.port
                 );
@@ -507,9 +512,10 @@ fn last_target_or_local<'de, D: Deserializer<'de>>(
     }))
 }
 
-/// Reads `saved_hosts`, keeping each entry whose name passes the DNS-name
-/// check and whose port is 1 to 65535, its name normalised; every other
-/// entry is dropped with a warning naming it.
+/// Reads `saved_hosts`, keeping each tailnet entry whose name passes the
+/// DNS-name check and whose port is 1 to 65535, and each SSH entry whose
+/// host string passes its check, normalised; every other entry, an unknown
+/// kind included, is dropped with a warning naming it.
 fn valid_saved_hosts<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<SavedHost>, D::Error> {
@@ -527,7 +533,8 @@ fn valid_saved_hosts<'de, D: Deserializer<'de>>(
                 Ok(normal) => Some(normal),
                 Err(err) => {
                     tracing::warn!(
-                        "saved host {}:{} is not valid ({err}); dropped",
+                        "saved host {:?} {}:{} is not valid ({err}); dropped",
+                        host.kind,
                         host.name,
                         host.port
                     );
@@ -4057,21 +4064,104 @@ pub(crate) mod tests {
         );
     }
 
+    fn tailnet_host(name: &str, port: u16) -> SavedHost {
+        SavedHost {
+            kind: crate::connection_picker::HostKind::Tailnet,
+            name: name.to_owned(),
+            port,
+            remote_command: None,
+        }
+    }
+
+    fn ssh_host(name: &str, remote_command: Option<&str>) -> SavedHost {
+        SavedHost {
+            kind: crate::connection_picker::HostKind::Ssh,
+            name: name.to_owned(),
+            port: 0,
+            remote_command: remote_command.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn ssh_saved_host_round_trips_with_kind_and_remote_command() {
+        let dir = TestDir::new("ssh-saved-hosts");
+        let devbox = ssh_host("Me@DevBox:2222", Some("C:\\rt\\rustling-tulipd.exe bridge"));
+        let state = UiState {
+            last_target: Some(devbox.clone()),
+            saved_hosts: vec![devbox, ssh_host("devbox", None)],
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0), state, "kept exactly as typed");
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                .expect("JSON");
+        assert_eq!(
+            file["last_target"],
+            json!({
+                "kind": "ssh",
+                "name": "Me@DevBox:2222",
+                "remote_command": "C:\\rt\\rustling-tulipd.exe bridge",
+            })
+        );
+        assert_eq!(
+            file["saved_hosts"][1],
+            json!({ "kind": "ssh", "name": "devbox" }),
+            "no port and no remote command"
+        );
+    }
+
+    #[test]
+    fn an_unknown_kind_is_dropped_on_load() {
+        let dir = TestDir::new("unknown-host-kind");
+        let file = json!({
+            "saved_hosts": [
+                { "kind": "mosh", "name": "devbox" },
+                { "kind": "ssh", "name": "devbox" },
+                { "kind": "ssh", "name": "-oProxyCommand=calc" },
+                { "kind": "ssh", "name": "devbox", "port": 22, "remote_command": " " },
+            ],
+            "last_target": { "kind": "mosh", "name": "devbox" },
+        });
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(
+            loaded.saved_hosts,
+            [ssh_host("devbox", None), ssh_host("devbox", None)],
+            "an unknown kind and a refused host string are dropped; a stray port and a blank command are not kept"
+        );
+        assert_eq!(loaded.last_target, None, "an unknown kind is this PC");
+    }
+
+    #[test]
+    fn a_record_without_kind_is_tailnet() {
+        let dir = TestDir::new("host-kind-default");
+        let host = json!({ "name": "box.tail1234.ts.net", "port": 9443 });
+        let file = json!({ "saved_hosts": [host.clone()], "last_target": host });
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        let tailnet = tailnet_host("box.tail1234.ts.net", 9443);
+        assert_eq!(loaded.saved_hosts, std::slice::from_ref(&tailnet));
+        assert_eq!(loaded.last_target, Some(tailnet));
+        save_ui_state(&dir.0, &loaded).expect("save");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                .expect("JSON");
+        assert_eq!(
+            saved["saved_hosts"][0], host,
+            "a tailnet record is written without a kind"
+        );
+    }
+
     #[test]
     fn last_target_and_saved_hosts_round_trip() {
         let dir = TestDir::new("saved-hosts");
-        let box_host = SavedHost {
-            name: "box.tail1234.ts.net".to_owned(),
-            port: 9443,
-        };
+        let box_host = tailnet_host("box.tail1234.ts.net", 9443);
         let state = UiState {
             last_target: Some(box_host.clone()),
             saved_hosts: vec![
                 box_host.clone(),
-                SavedHost {
-                    name: "laptop.tail1234.ts.net".to_owned(),
-                    port: 8787,
-                },
+                tailnet_host("laptop.tail1234.ts.net", 8787),
             ],
             ..UiState::default()
         };
@@ -4147,10 +4237,7 @@ pub(crate) mod tests {
         let loaded = load_ui_state(&dir.0);
         assert_eq!(
             loaded.last_target,
-            Some(SavedHost {
-                name: "box.tail1234.ts.net".to_owned(),
-                port: 9443,
-            }),
+            Some(tailnet_host("box.tail1234.ts.net", 9443)),
             "the last target's name loads normalised, as a saved host's does"
         );
         assert_eq!(
@@ -4189,14 +4276,8 @@ pub(crate) mod tests {
         assert_eq!(
             loaded.saved_hosts,
             [
-                SavedHost {
-                    name: "box.tail1234.ts.net".to_owned(),
-                    port: 9443,
-                },
-                SavedHost {
-                    name: "up.tail1234.ts.net".to_owned(),
-                    port: 8787,
-                },
+                tailnet_host("box.tail1234.ts.net", 9443),
+                tailnet_host("up.tail1234.ts.net", 8787),
             ],
             "only the hosts whose name passes the DNS check and whose port is 1 to 65535 stay"
         );

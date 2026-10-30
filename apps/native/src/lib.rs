@@ -112,6 +112,7 @@ mod spawn_form;
 mod spawn_preview;
 mod spawn_view;
 mod spawns;
+pub mod ssh;
 mod stash_view;
 mod stashes;
 mod status_glyph;
@@ -244,7 +245,7 @@ pub use crate::history::{
 pub use crate::needs_you_view::NeedsYouEntry;
 pub use crate::net::{
     EnsureFuture, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetDeps, NetEvent,
-    OpenLocalFuture, StopFuture, spawn_with as spawn_net,
+    OpenLocalFuture, OpenSshFuture, StopFuture, spawn_with as spawn_net,
 };
 pub use crate::notices::{
     ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastAction,

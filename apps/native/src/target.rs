@@ -1,5 +1,5 @@
-//! Which daemon the client connects to: the local one, or a host on the
-//! tailnet by its `MagicDNS` name.
+//! Which daemon the client connects to: the local one, a host on the
+//! tailnet by its `MagicDNS` name, or a host reached through `ssh`.
 
 /// The port a host's tailnet listener serves when none is given.
 pub const DEFAULT_TAILNET_PORT: u16 = 8787;
@@ -14,6 +14,62 @@ pub enum Target {
     /// A host's tailnet listener, dialled over TLS with this device's token
     /// for that host. Built only by [`Target::tailnet`].
     Tailnet(TailnetHost),
+    /// A host reached by running `ssh` with its host string and the remote
+    /// command, which bridges to that host's daemon. Built only by
+    /// [`Target::parse_ssh`].
+    Ssh(SshHost),
+}
+
+/// An SSH host: the string handed to `ssh` exactly as typed, and the
+/// remote command when it is not the default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshHost {
+    /// An `~/.ssh/config` alias or `user@host[:port]`, never lower-cased.
+    name: String,
+    remote_command: Option<String>,
+}
+
+impl SshHost {
+    /// The host string handed to `ssh`.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The command run on the host instead of the default bridge command.
+    #[must_use]
+    pub fn remote_command(&self) -> Option<&str> {
+        self.remote_command.as_deref()
+    }
+
+    /// The host part: without a `user@` and without a `:port`.
+    #[must_use]
+    pub fn short_name(&self) -> &str {
+        let host = self.name.rsplit('@').next().unwrap_or(&self.name);
+        host.split(':').next().unwrap_or(host)
+    }
+}
+
+/// Why an SSH host string was refused: its `Display` is the message the
+/// picker shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshHostError {
+    /// Nothing was typed, or a `user@` or `@host` with an empty side.
+    Empty,
+    /// It starts with `-`, which `ssh` would read as an option.
+    LeadingDash,
+    /// It holds whitespace or a control character.
+    Whitespace,
+}
+
+impl std::fmt::Display for SshHostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "Type an SSH host: an alias from your SSH config, or user@host.",
+            Self::LeadingDash => "An SSH host cannot start with a dash.",
+            Self::Whitespace => "An SSH host cannot contain spaces or control characters.",
+        })
+    }
 }
 
 /// A tailnet host's normalised name and its listener's port.
@@ -146,33 +202,102 @@ impl Target {
         })
     }
 
+    /// The SSH host a user typed, with an optional remote command (a blank
+    /// one is none). The string is kept exactly as typed; it is refused when
+    /// empty, when it starts with `-` (an `ssh` option such as
+    /// `-oProxyCommand=…` would run code), when it holds whitespace or a
+    /// control character, or when the user or host side of an `@` is empty.
+    pub fn parse_ssh(name: &str, remote_command: Option<&str>) -> Result<Self, SshHostError> {
+        if name.is_empty() {
+            return Err(SshHostError::Empty);
+        }
+        if name.starts_with('-') {
+            return Err(SshHostError::LeadingDash);
+        }
+        if name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(SshHostError::Whitespace);
+        }
+        if let Some((user, host)) = name.split_once('@')
+            && (user.is_empty() || host.is_empty())
+        {
+            return Err(SshHostError::Empty);
+        }
+        let remote_command = remote_command
+            .filter(|command| !command.trim().is_empty())
+            .map(str::to_owned);
+        Ok(Self::Ssh(SshHost {
+            name: name.to_owned(),
+            remote_command,
+        }))
+    }
+
     /// Whether this is the local daemon.
     #[must_use]
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local)
     }
 
-    /// The tailnet host; `None` for the local daemon.
+    /// The tailnet host; `None` for the local daemon and an SSH host.
     #[must_use]
     pub fn tailnet_host(&self) -> Option<&TailnetHost> {
         match self {
-            Self::Local => None,
             Self::Tailnet(host) => Some(host),
+            Self::Local | Self::Ssh(_) => None,
         }
     }
 
-    /// The host's short name, its first DNS label; `None` for the local
-    /// daemon.
+    /// The SSH host; `None` for the local daemon and a tailnet host.
     #[must_use]
-    pub fn short_name(&self) -> Option<&str> {
-        self.tailnet_host().map(TailnetHost::short_name)
+    pub fn ssh_host(&self) -> Option<&SshHost> {
+        match self {
+            Self::Ssh(host) => Some(host),
+            Self::Local | Self::Tailnet(_) => None,
+        }
     }
 
-    /// The host's full name and port, `name:port`; `None` for the local
-    /// daemon.
+    /// The remote host's name: the `MagicDNS` name of a tailnet host, the
+    /// host string of an SSH host; `None` for the local daemon.
+    #[must_use]
+    pub fn remote_name(&self) -> Option<&str> {
+        match self {
+            Self::Local => None,
+            Self::Tailnet(host) => Some(host.name()),
+            Self::Ssh(host) => Some(host.name()),
+        }
+    }
+
+    /// The key a remote host's last session count is recorded under: a
+    /// tailnet host's `MagicDNS` name, an SSH host's string after `ssh:` so
+    /// the two never share a key; `None` for the local daemon.
+    #[must_use]
+    pub fn session_count_key(&self) -> Option<String> {
+        match self {
+            Self::Local => None,
+            Self::Tailnet(host) => Some(host.name().to_owned()),
+            Self::Ssh(host) => Some(format!("ssh:{}", host.name())),
+        }
+    }
+
+    /// The host's short name: a tailnet host's first DNS label, an SSH
+    /// host's host part; `None` for the local daemon.
+    #[must_use]
+    pub fn short_name(&self) -> Option<&str> {
+        match self {
+            Self::Local => None,
+            Self::Tailnet(host) => Some(host.short_name()),
+            Self::Ssh(host) => Some(host.short_name()),
+        }
+    }
+
+    /// The host's address: a tailnet host's `name:port`, an SSH host's
+    /// string; `None` for the local daemon.
     #[must_use]
     pub fn address(&self) -> Option<String> {
-        self.tailnet_host().map(TailnetHost::address)
+        match self {
+            Self::Local => None,
+            Self::Tailnet(host) => Some(host.address()),
+            Self::Ssh(host) => Some(host.name().to_owned()),
+        }
     }
 }
 
@@ -183,7 +308,7 @@ mod tests {
         reason = "a name accepted or refused against the spec fails it with what happened"
     )]
 
-    use super::{DEFAULT_TAILNET_PORT, TailnetHost, Target};
+    use super::{DEFAULT_TAILNET_PORT, SshHost, SshHostError, TailnetHost, Target};
 
     const EMPTY: &str = "Type a host name.";
     const BARE: &str = "Use the full name, for example box.tail1234.ts.net.";
@@ -382,5 +507,92 @@ mod tests {
         assert_eq!(refusal("localhost"), BARE);
         assert_eq!(refusal("box."), BARE);
         assert_eq!(refusal("Box"), BARE);
+    }
+
+    /// The error `name` was refused with as an SSH host.
+    fn ssh_refusal(name: &str) -> SshHostError {
+        let Err(err) = Target::parse_ssh(name, None) else {
+            panic!("{name:?} was accepted as an SSH host");
+        };
+        err
+    }
+
+    #[test]
+    fn parse_ssh_refuses_a_leading_dash() {
+        for name in ["-oProxyCommand=x", "-V", "-"] {
+            assert_eq!(ssh_refusal(name), SshHostError::LeadingDash, "{name:?}");
+        }
+        assert_eq!(
+            SshHostError::LeadingDash.to_string(),
+            "An SSH host cannot start with a dash."
+        );
+    }
+
+    #[test]
+    fn parse_ssh_refuses_whitespace() {
+        for name in ["a b", "a\tb", " devbox", "devbox ", "a\u{a0}b"] {
+            assert_eq!(ssh_refusal(name), SshHostError::Whitespace, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn parse_ssh_refuses_control_characters() {
+        for name in ["a\u{1}b", "a\nb", "a\0b", "a\u{7f}b"] {
+            assert_eq!(ssh_refusal(name), SshHostError::Whitespace, "{name:?}");
+        }
+        assert_eq!(
+            SshHostError::Whitespace.to_string(),
+            "An SSH host cannot contain spaces or control characters."
+        );
+    }
+
+    #[test]
+    fn parse_ssh_refuses_empty() {
+        for name in ["", "user@", "@host", "@"] {
+            assert_eq!(ssh_refusal(name), SshHostError::Empty, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn parse_ssh_accepts_alias_and_user_at_host_port() {
+        for name in ["devbox", "me@box", "me@box:2222", "DevBox", "bôx.example"] {
+            let Ok(target) = Target::parse_ssh(name, None) else {
+                panic!("{name:?} was refused");
+            };
+            let host = target.ssh_host().map(SshHost::name);
+            assert_eq!(host, Some(name), "kept exactly as typed");
+            assert_eq!(target.tailnet_host(), None);
+            assert_eq!(target.remote_name(), Some(name));
+            assert_eq!(target.address().as_deref(), Some(name));
+            assert!(!target.is_local());
+        }
+        let Ok(target) =
+            Target::parse_ssh("me@box:2222", Some("C:\\rt\\rustling-tulipd.exe bridge"))
+        else {
+            panic!("a remote command was refused");
+        };
+        assert_eq!(target.short_name(), Some("box"));
+        assert_eq!(
+            target.session_count_key().as_deref(),
+            Some("ssh:me@box:2222")
+        );
+        assert_eq!(
+            target.ssh_host().and_then(SshHost::remote_command),
+            Some("C:\\rt\\rustling-tulipd.exe bridge")
+        );
+        assert_eq!(
+            Target::parse_ssh("devbox", Some("  "))
+                .ok()
+                .as_ref()
+                .and_then(Target::ssh_host)
+                .and_then(SshHost::remote_command),
+            None,
+            "a blank remote command is the default"
+        );
+        assert_ne!(
+            Target::parse_ssh("devbox", None).ok(),
+            Target::parse_ssh("devbox", Some("other")).ok(),
+            "another remote command is another target"
+        );
     }
 }

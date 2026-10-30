@@ -7,48 +7,113 @@ use serde::{Deserialize, Serialize};
 use tailnet::{PeerStatus, Status, TailnetError};
 
 use crate::sidebar::UiState;
-use crate::target::{DEFAULT_TAILNET_PORT, HostNameError, Target};
+use crate::target::{DEFAULT_TAILNET_PORT, HostNameError, SshHostError, Target};
 
 /// The label of the row that connects to this PC's own daemon.
 const THIS_PC: &str = "This PC";
 
-/// A tailnet host the user added, as `native-ui.json` stores it: its full
-/// `MagicDNS` name and the port it was added with.
+/// How a saved host is reached: `"tailnet"` (the default when a record has
+/// no `kind`) or `"ssh"` in `native-ui.json`. An unknown kind fails the
+/// record's decode, so it is dropped on load.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostKind {
+    #[default]
+    Tailnet,
+    Ssh,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes the field by reference"
+)]
+fn is_tailnet(kind: &HostKind) -> bool {
+    *kind == HostKind::Tailnet
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes the field by reference"
+)]
+fn is_zero(port: &u16) -> bool {
+    *port == 0
+}
+
+/// A host the user added, as `native-ui.json` stores it: a tailnet host's
+/// full `MagicDNS` name and the port it was added with, or an SSH host's
+/// string, exactly as typed, and its optional remote command, with no port.
+/// A tailnet record is written without its `kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedHost {
+    #[serde(default, skip_serializing_if = "is_tailnet")]
+    pub kind: HostKind,
     pub name: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_command: Option<String>,
 }
 
 impl SavedHost {
+    /// The record of `target`, as a switch to it saves it; `None` for the
+    /// local daemon.
+    #[must_use]
+    pub fn from_target(target: &Target) -> Option<Self> {
+        match target {
+            Target::Local => None,
+            Target::Tailnet(host) => Some(Self {
+                kind: HostKind::Tailnet,
+                name: host.name().to_owned(),
+                port: host.port(),
+                remote_command: None,
+            }),
+            Target::Ssh(host) => Some(Self {
+                kind: HostKind::Ssh,
+                name: host.name().to_owned(),
+                port: 0,
+                remote_command: host.remote_command().map(str::to_owned),
+            }),
+        }
+    }
+
     /// The target this host dials, or why its name or port is not one.
     ///
     /// # Errors
     ///
-    /// [`TypedHostError::Name`] when the name fails the DNS-name check,
-    /// [`TypedHostError::Port`] when the port is 0.
+    /// For a tailnet host, [`TypedHostError::Name`] when the name fails the
+    /// DNS-name check, [`TypedHostError::Port`] when the port is 0; for an
+    /// SSH host, [`TypedHostError::SshName`] when its string is refused.
     pub fn target(&self) -> Result<Target, TypedHostError> {
-        if self.port == 0 {
-            return Err(TypedHostError::Port);
+        match self.kind {
+            HostKind::Tailnet => {
+                if self.port == 0 {
+                    return Err(TypedHostError::Port);
+                }
+                Target::parse_tailnet(&self.name, Some(self.port)).map_err(TypedHostError::Name)
+            }
+            HostKind::Ssh => Target::parse_ssh(&self.name, self.remote_command.as_deref())
+                .map_err(TypedHostError::SshName),
         }
-        Target::parse_tailnet(&self.name, Some(self.port)).map_err(TypedHostError::Name)
     }
 
-    /// This host with its name in [`Target::parse_tailnet`]'s normal form:
-    /// lower-cased, without a trailing dot.
+    /// Whether this record is `target`'s: the same kind and name.
+    #[must_use]
+    pub fn is_for(&self, target: &Target) -> bool {
+        Self::from_target(target)
+            .is_some_and(|host| host.kind == self.kind && host.name == self.name)
+    }
+
+    /// This host in its normal form: a tailnet name as
+    /// [`Target::parse_tailnet`] keeps it (lower-cased, without a trailing
+    /// dot); an SSH host as typed, without a port and without a blank
+    /// remote command.
     ///
     /// # Errors
     ///
     /// As [`SavedHost::target`].
     pub fn normalised(&self) -> Result<Self, TypedHostError> {
         let target = self.target()?;
-        Ok(target.tailnet_host().map_or_else(
-            || self.clone(),
-            |host| Self {
-                name: host.name().to_owned(),
-                port: host.port(),
-            },
-        ))
+        Ok(Self::from_target(&target).unwrap_or_else(|| self.clone()))
     }
 }
 
@@ -126,6 +191,8 @@ pub struct Row {
 pub enum TypedHostError {
     /// The name failed the DNS-name check.
     Name(HostNameError),
+    /// The SSH host string failed its check.
+    SshName(SshHostError),
     /// The port is not a number from 1 to 65535.
     Port,
 }
@@ -134,6 +201,7 @@ impl std::fmt::Display for TypedHostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Name(err) => err.fmt(f),
+            Self::SshName(err) => err.fmt(f),
             Self::Port => f.write_str("The port is a number from 1 to 65535."),
         }
     }
@@ -158,15 +226,19 @@ pub fn typed_target(name: &str, port: &str) -> Result<Target, TypedHostError> {
 }
 
 /// The target the client connects to at start: the last target when it is
-/// still a saved host, dialled on the port it was saved with; else this PC.
-/// Tailscale is never asked, and a saved host that cannot be reached is
-/// still the boot target.
+/// still a saved host of its kind and name, dialled as it was saved; else
+/// this PC. Tailscale and `ssh` are never asked, and a saved host that
+/// cannot be reached is still the boot target.
 #[must_use]
 pub fn resolve_boot_target(ui: &UiState) -> Target {
     let Some(last) = &ui.last_target else {
         return Target::Local;
     };
-    let Some(host) = ui.saved_hosts.iter().find(|host| host.name == last.name) else {
+    let Some(host) = ui
+        .saved_hosts
+        .iter()
+        .find(|host| host.kind == last.kind && host.name == last.name)
+    else {
         tracing::info!(
             host = %last.name,
             "the last target is not a saved host; starting on this PC"
@@ -328,7 +400,8 @@ fn is_owner_device(peer: &PeerStatus, me: &PeerStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectionPicker, PeerSource, Row, RowKind, SavedHost, resolve_boot_target, typed_target,
+        ConnectionPicker, HostKind, PeerSource, Row, RowKind, SavedHost, resolve_boot_target,
+        typed_target,
     };
     use crate::sidebar::UiState;
     use crate::target::Target;
@@ -374,8 +447,10 @@ mod tests {
 
     fn saved(name: &str, port: u16) -> SavedHost {
         SavedHost {
+            kind: HostKind::Tailnet,
             name: name.to_owned(),
             port,
+            remote_command: None,
         }
     }
 
@@ -653,6 +728,39 @@ mod tests {
             }),
             Target::Local,
             "no last target is this PC"
+        );
+    }
+
+    #[test]
+    fn boot_target_is_a_saved_ssh_host() {
+        let devbox = SavedHost {
+            kind: HostKind::Ssh,
+            name: "devbox".to_owned(),
+            port: 0,
+            remote_command: None,
+        };
+        let ui = UiState {
+            saved_hosts: vec![saved("devbox.tail1234.ts.net", 8787), devbox.clone()],
+            last_target: Some(devbox.clone()),
+            ..UiState::default()
+        };
+        assert_eq!(
+            Some(resolve_boot_target(&ui)),
+            Target::parse_ssh("devbox", None).ok()
+        );
+        let tailnet_only = UiState {
+            saved_hosts: vec![SavedHost {
+                kind: HostKind::Tailnet,
+                port: 8787,
+                ..devbox.clone()
+            }],
+            last_target: Some(devbox),
+            ..UiState::default()
+        };
+        assert_eq!(
+            resolve_boot_target(&tailnet_only),
+            Target::Local,
+            "a saved host of another kind is not the last target"
         );
     }
 

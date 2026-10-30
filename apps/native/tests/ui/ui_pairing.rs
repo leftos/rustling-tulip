@@ -485,6 +485,38 @@ fn list_pending_devices_is_sent_on_connect(cx: &mut TestAppContext) {
     assert_eq!(lists_pending(&sent), 0, "a tailnet host: {sent:?}");
 }
 
+/// The SSH host `devbox`.
+fn devbox() -> Target {
+    Target::parse_ssh("devbox", None).expect("an SSH host")
+}
+
+#[gpui::test]
+fn an_ssh_target_never_asks_for_pending_devices(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let pairing = vec![FEATURE_DEVICE_PAIRING.to_owned()];
+    let sent = reconnect(&mut h, devbox(), pairing.clone());
+    assert_eq!(lists_pending(&sent), 0, "an SSH host: {sent:?}");
+
+    let sent = reconnect(&mut h, Target::Local, pairing);
+    assert_eq!(lists_pending(&sent), 1, "this PC: {sent:?}");
+}
+
+#[gpui::test]
+fn an_ssh_target_ignores_pending_devices_pushed_by_the_daemon(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    reconnect(&mut h, devbox(), vec![FEATURE_DEVICE_PAIRING.to_owned()]);
+
+    fold(&mut h, &[request("r1")]);
+    assert_eq!(
+        h.root(|root, _| root.pairing_rows()),
+        Vec::<(String, String)>::new(),
+        "the host's waiting list is not this client's to approve"
+    );
+    assert!(h.pairing_toasts().is_empty(), "no toast either");
+}
+
 #[gpui::test]
 fn a_cli_code_opens_no_dialog(cx: &mut TestAppContext) {
     let dir = TestDir::new();

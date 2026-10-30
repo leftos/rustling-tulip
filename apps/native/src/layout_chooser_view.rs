@@ -241,7 +241,7 @@ impl RootView {
         match msg {
             DaemonMessage::Sessions { sessions } => {
                 let initial = std::mem::take(&mut self.awaiting_initial_sessions);
-                let host = self.tailnet_host_name();
+                let host = self.host_count_key();
                 let recorded = host
                     .as_deref()
                     .and_then(|host| self.sidebar.host_session_count(host));
@@ -265,7 +265,7 @@ impl RootView {
             }
             DaemonMessage::SessionUpdated { .. } | DaemonMessage::SessionRemoved { .. } => {
                 if !self.awaiting_initial_sessions
-                    && let Some(host) = self.tailnet_host_name()
+                    && let Some(host) = self.host_count_key()
                     && self.record_host_session_count(&host, self.seen_sessions.len())
                 {
                     self.schedule_ui_save(cx);
@@ -275,24 +275,23 @@ impl RootView {
         }
     }
 
-    /// The connected tailnet host's name; `None` on this PC.
-    fn tailnet_host_name(&self) -> Option<String> {
-        self.conn
-            .target()
-            .tailnet_host()
-            .map(|host| host.name().to_owned())
+    /// The connected remote host's session-count key; `None` on this PC.
+    fn host_count_key(&self) -> Option<String> {
+        self.conn.target().session_count_key()
     }
 
-    /// Records `count` as `host`'s session count while `host` is a saved
-    /// host, so a forgotten one records nothing; returns whether the
-    /// recorded count changed, so the caller saves.
+    /// Records `count` under `host`, the connected host's session-count
+    /// key, while that host is a saved host, so a forgotten one records
+    /// nothing; returns whether the recorded count changed, so the caller
+    /// saves.
     fn record_host_session_count(&mut self, host: &str, count: usize) -> bool {
+        let target = self.conn.target();
         let saved = self
             .sidebar
             .ui_state()
             .saved_hosts
             .iter()
-            .any(|saved| saved.name == host);
+            .any(|saved| saved.is_for(target));
         let count = u32::try_from(count).unwrap_or(u32::MAX);
         saved && self.sidebar.set_host_session_count(host, count)
     }

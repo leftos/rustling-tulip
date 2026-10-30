@@ -234,7 +234,9 @@ impl RootView {
     }
 
     /// Folds in the daemon's waiting list or a code it minted; any other
-    /// message is not the pairing model's.
+    /// message is not the pairing model's. A waiting list is folded only
+    /// from this PC's daemon: one an SSH host's daemon pushes is that host's
+    /// to approve.
     pub(crate) fn on_pairing_message(
         &mut self,
         msg: &DaemonMessage,
@@ -242,6 +244,12 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match msg {
+            DaemonMessage::PendingDevices { requests } if !self.conn.target().is_local() => {
+                tracing::debug!(
+                    requests = requests.len(),
+                    "pairing: a remote host's waiting list ignored"
+                );
+            }
             DaemonMessage::PendingDevices { requests } => {
                 let fresh = self.fold_pending_devices(requests, window, cx);
                 self.raise_pairing_toasts(requests, &fresh, cx);

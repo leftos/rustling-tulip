@@ -109,6 +109,8 @@ agent-registry = { workspace = true, features = ["test-support"] }
 gpui = { version = "0.2.2", features = ["test-support"] }
 png = "0.18"
 sha2 = "0.10"
+# `test-util` enables the paused clock net.rs's tests run its deadlines on.
+tokio = { workspace = true, features = ["test-util"] }
 # The fake TLS daemon in net.rs's tests: a test CA and a leaf signed by it.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 

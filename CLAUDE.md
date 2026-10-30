@@ -139,6 +139,7 @@ The `tools/e2e/fake-tailscale/` shim (`fake-tailscale.cmd`, `.sh` and `index.mjs
 | `RUSTLING_TULIP_BINARIES_DIR` | Cached-binary root override: the content-addressed copies of the daemon, tracer and CLI shims a spawn runs (`crates/daemon/src/paths.rs`) | `%LOCALAPPDATA%\leftos\rustling-tulip\data\binaries\` |
 | `RUSTLING_TULIP_TAILNET_DIR` | Tailnet listener's certificate dir override (useful for e2e test isolation) | `%LOCALAPPDATA%\leftos\rustling-tulip\data\tailnet\` |
 | `RUSTLING_TULIP_REMOTE_FILES_DIR` | Native client: download root for files fetched from a remote host (`daemon_client::remote_files_dir()`; useful for e2e test isolation) | `%LOCALAPPDATA%\leftos\rustling-tulip\data\remote-files\` |
+| `RUSTLING_TULIP_SSH` | Native client: path to the `ssh` binary it runs for an SSH host; an empty value counts as unset | `ssh` (PATH lookup), else `%SystemRoot%\System32\OpenSSH\ssh.exe` |
 | `RUSTLING_TULIP_OFFSCREEN_WINDOW` | Native client: open the window cloaked and never activate it (the smoke tier sets it) | unset |
 
 ## Where things live on disk
@@ -183,7 +184,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   It also holds the app-level terminal font and colours, the interface font (`ui_font_family`, absent for the bundled Geist), the shared list of recent custom colours, per-tab font sizes, the activity rail's view (`activity`), and the source-control panel's pinned repo, collapsed sections and split heights.
 
-  It holds the diff tabs' include-whitespace and highlight toggles, whether a Markdown viewer tab opens rendered (`viewer_markdown_rendered`, default true; a missing key loads as true), and the per-host remote session counts (`host_session_counts`, `{"<lower-cased MagicDNS name>": <count>}`, only for hosts in `saved_hosts`; the import-remote-sessions modal compares against it).
+  It holds the diff tabs' include-whitespace and highlight toggles, whether a Markdown viewer tab opens rendered (`viewer_markdown_rendered`, default true; a missing key loads as true), and the per-host remote session counts (`host_session_counts`, `{"<lower-cased MagicDNS name>": <count>}`, or `"ssh:<host string>"` for an SSH host, only for hosts in `saved_hosts`; the import-remote-sessions modal compares against it).
 
   It holds the open pop-out windows in open order (`popouts`, each `{"key": {"kind": "pane"|"tab"|"session", …ids}, "window": <the window shape, or null until first moved>}`; restored once per launch once the tabs and sessions arrive; a missing key or a non-list value loads as empty, and an entry whose key does not decode is dropped).
 
@@ -193,7 +194,9 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   Notifications holds the `Needs you` and `Finished` toggles (`notifications.awaiting_input` and `notifications.finished`) and the skip choice.
 
-  Its `saved_hosts` list (the tailnet hosts the host picker offers, `{name, port}` each; an entry that fails the DNS-name check is dropped on load) and `last_target` (`{name, port}`, absent or null for this PC) set the host the client boots onto; the host picker writes both (a switch sets `last_target` and adds the host, or updates its saved port, and Forget rewrites `saved_hosts`).
+  Its `saved_hosts` list (the hosts the host picker offers) and `last_target` (absent or null for this PC) set the host the client boots onto; the host picker writes both (a switch sets `last_target` and adds the host, or updates its saved port, and Forget rewrites `saved_hosts`).
+
+  Each entry has a `kind`, `"tailnet"` when missing: a tailnet entry is `{name, port}` (written without `kind`; one that fails the DNS-name check is dropped on load), an SSH entry is `{"kind": "ssh", "name": "<host string>", "remote_command": "<optional>"}` with no port. An unknown kind, or an SSH host string that fails its check, is dropped on load. The picker has no way to add an SSH host yet, so one is reachable only by editing the file.
 
   Its `unc_hosts` list (network hosts terminal links may open) is edited by hand; the client re-reads it on each click and never writes it. The native client's bundled OFL fonts live in `apps/native/assets/fonts/` (sources and versions in its README), and the large-file hook exempts them.
 
@@ -215,7 +218,7 @@ The tailnet listener's certificate lives in a third machine-local root beside th
 
 It is not under the config dir, so the private key never roams (`crates/daemon/src/paths.rs` `resolve_tailnet_dir`, `crates/daemon/src/tailnet_listener.rs`).
 
-Files the native client fetches from a remote host live in a fourth machine-local root beside those, `daemon_client::remote_files_dir()` (overridable with `RUSTLING_TULIP_REMOTE_FILES_DIR`), `%LOCALAPPDATA%\leftos\rustling-tulip\data\remote-files\` on Windows: `<host MagicDNS name, lower-cased>/<repo-name>/<rel-path>`, with Windows-unsafe names sanitised.
+Files the native client fetches from a remote host live in a fourth machine-local root beside those, `daemon_client::remote_files_dir()` (overridable with `RUSTLING_TULIP_REMOTE_FILES_DIR`), `%LOCALAPPDATA%\leftos\rustling-tulip\data\remote-files\` on Windows: `<host MagicDNS name, lower-cased>/<repo-name>/<rel-path>`, with Windows-unsafe names sanitised; an SSH host's folder is `ssh-<host string, lower-cased and sanitised>` (`ssh-me@devbox_2222`).
 
 The Dashboard summarizer runs the agent's CLI in a fifth machine-local root beside those, `ProjectDirs::data_local_dir().join("summarizer")` (no override variable), `%LOCALAPPDATA%\leftos\rustling-tulip\data\summarizer\` on Windows: nothing lives there but the CLI's working folder, which is kept empty and never emptied by the daemon. It is created on first use (`crates/daemon/src/paths.rs` `resolve_summarizer_dir`, `crates/daemon/src/summarizer/cli.rs`).
 
@@ -384,4 +387,4 @@ Don't go looking for these — they're explicitly out of scope until their plan 
 
 - **Auto-update** for the native client — deferred until its installer (Phase 6) and a signed release pipeline exist.
 - **Code signing / notarization** of the native client's installer (Phase 6) and the binaries inside it — there is no signing cert, so an unsigned bundle trips SmartScreen.
-- **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay (clients over OpenSSH are planned: RT-530, `docs/plans/ssh-remote.md`), **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine (`docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (Wave 10, "Subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.
+- **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (Wave 10, "Subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.

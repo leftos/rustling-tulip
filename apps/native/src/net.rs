@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result};
 use daemon_client::device_tokens::{CredentialManagerTokens, DeviceTokenStore, MemoryTokens};
 use daemon_client::{ClientIdentity, Proof, ProvenConnectError};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
-use futures::{SinkExt as _, StreamExt as _};
+use futures::{Sink, SinkExt as _, Stream, StreamExt as _};
 use protocol::{
     ClientMessage, DaemonHandshake, DaemonMessage, DevicePairOutcome, InboundDaemonMessage,
 };
@@ -23,13 +23,29 @@ use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::{self, Message};
-use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{Connector, MaybeTlsStream};
 use tracing::{debug, error, info, warn};
 
 use crate::connection::{Connection, PROBE_TIMEOUT, RestartAction, State, TICK, Watchdog};
-use crate::target::{TailnetHost, Target};
+use crate::ssh::{LineSocket, StderrTail};
+use crate::target::{SshHost, TailnetHost, Target};
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// A duplex of daemon messages: a WebSocket, or lines over `ssh`'s stdio.
+trait Wire:
+    Stream<Item = Result<Message, tungstenite::Error>>
+    + Sink<Message, Error = tungstenite::Error>
+    + Unpin
+{
+}
+
+impl<T> Wire for T where
+    T: Stream<Item = Result<Message, tungstenite::Error>>
+        + Sink<Message, Error = tungstenite::Error>
+        + Unpin
+{
+}
+
+type Socket = Box<dyn Wire>;
 type Frame = Option<Result<Message, tungstenite::Error>>;
 /// A pending `ensure_running`, boxed so tests can substitute one.
 pub type EnsureFuture = Pin<Box<dyn Future<Output = Result<DaemonHandshake>>>>;
@@ -45,6 +61,9 @@ pub type StopFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 pub type OpenLocalFuture =
     Pin<Box<dyn Future<Output = Result<TcpStream, daemon_client::ProvenConnectError>>>>;
 
+/// A pending start of `ssh` to an SSH host, as a line socket.
+pub type OpenSshFuture = Pin<Box<dyn Future<Output = Result<LineSocket>>>>;
+
 /// How the network thread reaches its daemon.
 pub struct NetDeps {
     /// Starts an `ensure_running`: the daemon step of each connection
@@ -53,6 +72,9 @@ pub struct NetDeps {
     /// Opens the loopback stream the token will travel on: production proves
     /// the listener holds the token first; tests open plain connections.
     pub open_local: Box<dyn Fn(u16, String) -> OpenLocalFuture + Send>,
+    /// Starts `ssh` to an SSH host: production runs the binary; tests
+    /// script the child over in-memory pipes.
+    pub open_ssh: Box<dyn Fn(&SshHost) -> OpenSshFuture + Send>,
     /// The identity sent in `Hello`; `None` connects without one.
     pub identity: Option<ClientIdentity>,
     /// Force-stops the daemon, for [`NetCommand::Stop`].
@@ -111,6 +133,10 @@ impl NetDeps {
                     daemon_client::connect_proven(port, &token, daemon_client::PROOF_TIMEOUT).await
                 })
             }),
+            open_ssh: Box::new(|host| {
+                let host = host.clone();
+                Box::pin(async move { crate::ssh::open(&host) })
+            }),
             identity,
             stop: Box::new(|| Box::pin(daemon_client::stop())),
             tokens,
@@ -136,6 +162,13 @@ const CLIENT_ID_FILE: &str = "client-id-native";
 /// How long after `Hello` the daemon has to answer with `Welcome` or
 /// `AuthFailed` before the socket is dropped and the reconnect runs.
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long after `Hello` an SSH host has to answer: `ssh`'s 10 s connect
+/// timeout, then the bridge on the host starting an idle-exited daemon,
+/// which may take the daemon's whole spawn wait, plus 10 s for key exchange,
+/// login and the answer itself.
+const SSH_WELCOME_TIMEOUT: Duration = Duration::from_secs(10)
+    .saturating_add(daemon_client::SPAWN_WAIT_TIMEOUT)
+    .saturating_add(Duration::from_secs(10));
 
 /// A request from the view to the network thread.
 pub enum NetCommand {
@@ -370,6 +403,9 @@ struct Net {
     /// The id of the pairing request the current socket's host reported
     /// pending, which a redeem names.
     request_id: Option<String>,
+    /// The end of `ssh`'s stderr while the socket is an SSH one: a close
+    /// reason ends with it when `ssh`'s stdout ends.
+    ssh_stderr: Option<StderrTail>,
 }
 
 impl Net {
@@ -397,6 +433,7 @@ impl Net {
             pair_on_connect: false,
             request_live: false,
             request_id: None,
+            ssh_stderr: None,
         }
     }
 
@@ -452,10 +489,33 @@ impl Net {
     /// while the daemon or the socket is still coming up is handled at once
     /// and may cancel the attempt.
     async fn attempt(&mut self) -> Next {
+        self.ssh_stderr = None;
         match self.conn.target().clone() {
             Target::Local => self.attempt_local().await,
             Target::Tailnet(host) => self.attempt_tailnet(&host).await,
+            Target::Ssh(host) => self.attempt_ssh(&host).await,
         }
+    }
+
+    /// An SSH host: never a local daemon step and never a device token.
+    /// Start `ssh` with the host's remote command and pump its stdio lines
+    /// with an empty token, which the bridge on the host fills in.
+    async fn attempt_ssh(&mut self, host: &SshHost) -> Next {
+        self.conn.on_connecting();
+        self.emit_state();
+        let socket = match self.or_command((self.deps.open_ssh)(host)).await {
+            Ok(Ok(socket)) => socket,
+            Ok(Err(err)) => {
+                let reason = format!("{err:#}");
+                warn!(host = host.name(), %reason, "starting ssh failed");
+                return self.failed(reason);
+            }
+            Err(next) => return next,
+        };
+        self.ssh_stderr = Some(socket.stderr_tail());
+        self.conn.on_socket_open(0);
+        self.pump(Box::new(socket), String::new(), SSH_WELCOME_TIMEOUT)
+            .await
     }
 
     /// The local daemon: ensure it runs, open the loopback socket, pump it
@@ -506,7 +566,8 @@ impl Net {
             Err(next) => return next,
         };
         self.conn.on_socket_open(port);
-        self.pump(ws, handshake.auth_token).await
+        self.pump(Box::new(ws), handshake.auth_token, self.welcome_timeout)
+            .await
     }
 
     /// A tailnet host: never a local daemon step. Dial its listener over TLS
@@ -541,7 +602,12 @@ impl Net {
         };
         self.conn.on_socket_open(host.port());
         // An empty token is how an unpaired device asks the host to pair.
-        self.pump(ws, token.unwrap_or_default()).await
+        self.pump(
+            Box::new(ws),
+            token.unwrap_or_default(),
+            self.welcome_timeout,
+        )
+        .await
     }
 
     /// The device token held for `host`; `None` when none is held or the
@@ -612,15 +678,22 @@ impl Net {
     }
 
     /// Pump the open socket both ways until it closes or a command leaves it.
-    async fn pump(&mut self, mut ws: Socket, auth_token: String) -> Next {
+    /// The daemon has `welcome_timeout` after `Hello` to answer. On an SSH
+    /// socket every close reason ends with `ssh`'s stderr.
+    async fn pump(
+        &mut self,
+        mut ws: Socket,
+        auth_token: String,
+        welcome_timeout: Duration,
+    ) -> Next {
         self.held_welcome = None;
         self.request_live = false;
         self.request_id = None;
         if let Err(err) = send(&mut ws, &self.hello(auth_token)).await {
-            return self.closed(format!("sending Hello: {err:#}"));
+            return self.closed(self.with_ssh_stderr(&format!("sending Hello: {err:#}")));
         }
         let mut probe_deadline: Option<Instant> = None;
-        let mut welcome_deadline = Some(Instant::now() + self.welcome_timeout);
+        let mut welcome_deadline = Some(Instant::now() + welcome_timeout);
         loop {
             let step = tokio::select! {
                 frame = ws.next() => self.on_frame(frame, &mut probe_deadline),
@@ -631,7 +704,7 @@ impl Net {
                     Step::Close(format!("no reply to the resume probe within {PROBE_TIMEOUT:?}"))
                 }
                 () = sleep_until(welcome_deadline) => {
-                    warn!(timeout = ?self.welcome_timeout, "no welcome from daemon; dropping the socket");
+                    warn!(timeout = ?welcome_timeout, "no welcome from daemon; dropping the socket");
                     Step::Close("no welcome from daemon".to_owned())
                 }
             };
@@ -643,7 +716,7 @@ impl Net {
             let step = self.request_on_connect(&mut ws, step).await;
             match step {
                 Step::Continue => {}
-                Step::Close(reason) => return self.closed(reason),
+                Step::Close(reason) => return self.closed(self.with_ssh_stderr(&reason)),
                 Step::Leave(next) => return next,
             }
         }
@@ -769,10 +842,19 @@ impl Net {
         }
     }
 
+    /// `reason`, ending with what `ssh` last wrote to stderr when the socket
+    /// is an SSH one and it wrote anything.
+    fn with_ssh_stderr(&self, reason: &str) -> String {
+        match self.ssh_stderr.as_ref().map(StderrTail::text) {
+            Some(tail) if !tail.is_empty() => format!("{reason}: {tail}"),
+            _ => reason.to_owned(),
+        }
+    }
+
     /// Whether `msg` is a `Welcome` to hold back: a tailnet host's first.
     fn holds_welcome(&self, msg: &DaemonMessage) -> bool {
         matches!(msg, DaemonMessage::Welcome { .. })
-            && !self.conn.target().is_local()
+            && matches!(self.conn.target(), Target::Tailnet(_))
             && matches!(self.conn.state(), State::Connecting)
     }
 
@@ -1160,11 +1242,12 @@ async fn sleep_until(deadline: Option<Instant>) {
 )]
 mod tests {
     use super::{
-        EnsureFuture, Net, NetCommand, NetDeps, NetEvent, OpenLocalFuture, Proof, WELCOME_TIMEOUT,
-        not_proven_reason, run_thread, tls_config_trusting,
+        EnsureFuture, Net, NetCommand, NetDeps, NetEvent, OpenLocalFuture, OpenSshFuture, Proof,
+        WELCOME_TIMEOUT, not_proven_reason, run_thread, tls_config_trusting,
     };
     use crate::connection::{Connection, State};
-    use crate::target::Target;
+    use crate::ssh::LineSocket;
+    use crate::target::{SshHost, Target};
     use daemon_client::device_tokens::{DeviceTokenStore, MemoryTokens};
     use futures::StreamExt as _;
     use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -1204,12 +1287,18 @@ mod tests {
         })
     }
 
+    /// The `open_ssh` of every test that is not about SSH: it fails.
+    fn no_ssh() -> Box<dyn Fn(&SshHost) -> OpenSshFuture + Send> {
+        Box::new(|_| Box::pin(async { Err(anyhow::anyhow!("ssh must not run")) }))
+    }
+
     /// Deps that ensure with `ensure`, open plain connections, send no
     /// identity and never stop.
     fn deps(ensure: fn() -> EnsureFuture) -> NetDeps {
         NetDeps {
             ensure: Box::new(ensure),
             open_local: plain_open(),
+            open_ssh: no_ssh(),
             identity: None,
             stop: Box::new(|| Box::pin(async { Ok(()) })),
             tokens: Arc::new(MemoryTokens::default()),
@@ -2029,6 +2118,7 @@ mod tests {
         NetDeps {
             ensure: Box::new(ensure_must_not_run),
             open_local: plain_open(),
+            open_ssh: no_ssh(),
             identity: None,
             stop: Box::new(|| {
                 TAILNET_STOPS.fetch_add(1, Ordering::SeqCst);
@@ -3131,5 +3221,427 @@ mod tests {
             "a redeem named the replaced request: {log:?}"
         );
         stop_net(view_tx, net);
+    }
+
+    /// A device token store that counts every use and holds nothing.
+    #[derive(Default)]
+    struct CountingTokens(AtomicUsize);
+
+    impl DeviceTokenStore for CountingTokens {
+        fn get(&self, _host: &str) -> anyhow::Result<Option<String>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn set(&self, _host: &str, _token: &str) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn delete(&self, _host: &str) -> anyhow::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The host side of one scripted `ssh` child: what the client writes to
+    /// its stdin, and its stdout and stderr.
+    struct ScriptedChild {
+        stdin: tokio::io::BufReader<tokio::io::DuplexStream>,
+        stdout: tokio::io::DuplexStream,
+        stderr: tokio::io::DuplexStream,
+    }
+
+    /// Run `work` on a fresh runtime, failing as hung after [`BACKSTOP`].
+    fn on_test_runtime<F: std::future::Future>(work: F) -> F::Output {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build a test runtime");
+        runtime.block_on(async {
+            tokio::time::timeout(BACKSTOP, work)
+                .await
+                .expect("the scripted child hung")
+        })
+    }
+
+    impl ScriptedChild {
+        /// The next line the client wrote, as JSON.
+        async fn next_line(&mut self) -> serde_json::Value {
+            use tokio::io::AsyncBufReadExt as _;
+            let mut line = String::new();
+            self.stdin
+                .read_line(&mut line)
+                .await
+                .expect("read a client line");
+            serde_json::from_str(&line).expect("a client line is JSON")
+        }
+
+        /// Writes `msg` to the client as one line.
+        async fn send(&mut self, msg: &DaemonMessage) {
+            use tokio::io::AsyncWriteExt as _;
+            let mut line = serde_json::to_string(msg).expect("encode a daemon message");
+            line.push('\n');
+            self.stdout
+                .write_all(line.as_bytes())
+                .await
+                .expect("write a daemon line");
+        }
+
+        /// [`ScriptedChild::next_line`] from outside a runtime.
+        fn read(&mut self) -> serde_json::Value {
+            on_test_runtime(self.next_line())
+        }
+
+        /// [`ScriptedChild::send`] from outside a runtime.
+        fn write(&mut self, msg: &DaemonMessage) {
+            on_test_runtime(self.send(msg));
+        }
+
+        /// Exits as `ssh` does: `stderr` written, then every stream closed.
+        fn exit_with(mut self, stderr: &str) {
+            use tokio::io::AsyncWriteExt as _;
+            on_test_runtime(self.stderr.write_all(stderr.as_bytes())).expect("write stderr");
+        }
+    }
+
+    /// The SSH host every SSH test connects to.
+    fn devbox() -> Target {
+        Target::parse_ssh("devbox", None).expect("an SSH host")
+    }
+
+    fn welcome() -> DaemonMessage {
+        DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23],
+            features: Vec::new(),
+        }
+    }
+
+    /// Deps whose `open_ssh` hands each attempt's scripted child to the
+    /// receiver; an ensure fails and is counted, a stop is counted, and
+    /// every device token use is counted.
+    fn ssh_deps() -> (NetDeps, mpsc::Receiver<ScriptedChild>, Arc<CountingTokens>) {
+        let (children_tx, children) = mpsc::channel();
+        let tokens = Arc::new(CountingTokens::default());
+        let deps = NetDeps {
+            open_ssh: Box::new(move |_| {
+                let (client_out, host_in) = tokio::io::duplex(1 << 16);
+                let (host_out, client_in) = tokio::io::duplex(1 << 16);
+                let (host_err, client_err) = tokio::io::duplex(1 << 12);
+                let sent = children_tx.send(ScriptedChild {
+                    stdin: tokio::io::BufReader::new(host_in),
+                    stdout: host_out,
+                    stderr: host_err,
+                });
+                Box::pin(async move {
+                    sent.map_err(|_| anyhow::anyhow!("the test is gone"))?;
+                    Ok(LineSocket::new(client_in, client_out, client_err))
+                })
+            }),
+            stop: Box::new(|| {
+                TAILNET_STOPS.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            }),
+            tokens: tokens.clone(),
+            ..deps(ensure_must_not_run)
+        };
+        (deps, children, tokens)
+    }
+
+    fn next_child(children: &mpsc::Receiver<ScriptedChild>) -> ScriptedChild {
+        children
+            .recv_timeout(BACKSTOP)
+            .expect("ssh was never started")
+    }
+
+    #[test]
+    fn an_ssh_target_pumps_lines_from_a_scripted_child() {
+        let (deps, children, tokens) = ssh_deps();
+        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
+        let mut child = next_child(&children);
+
+        let hello = child.read();
+        assert_eq!(hello["type"], "hello", "the first line is Hello: {hello}");
+        assert_eq!(hello["auth_token"], "", "the bridge fills the token in");
+        child.write(&welcome());
+        assert!(
+            saw_state(&mut view_rx, |conn| conn.is_open()
+                && conn.target() == &devbox()),
+            "the SSH host never opened"
+        );
+        view_tx
+            .unbounded_send(NetCommand::Send(Box::new(ClientMessage::ListRepos)))
+            .expect("net thread is running");
+        assert_eq!(
+            child.read()["type"],
+            "list_repos",
+            "a message is the next line"
+        );
+        child.write(&DaemonMessage::Repos { repos: Vec::new() });
+        assert!(
+            saw(&mut view_rx, |event| matches!(
+                event,
+                NetEvent::Message(msg) if matches!(**msg, DaemonMessage::Repos { .. })
+            )),
+            "a daemon line never reached the view"
+        );
+        stop_net(view_tx, net);
+        assert_eq!(
+            TAILNET_ENSURES.load(Ordering::SeqCst),
+            0,
+            "ensure_running ran for an SSH host"
+        );
+        assert_eq!(
+            tokens.0.load(Ordering::SeqCst),
+            0,
+            "an SSH host used the device tokens"
+        );
+    }
+
+    #[test]
+    fn an_ssh_child_that_exits_closes_with_its_stderr_and_reconnects() {
+        let (deps, children, _tokens) = ssh_deps();
+        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
+        let mut child = next_child(&children);
+        assert_eq!(child.read()["type"], "hello");
+
+        child.exit_with(
+            "** WARNING: connection is not using a post-quantum key exchange algorithm.\r\n\
+             me@devbox: Permission denied (publickey).\r\n",
+        );
+        let reason = "daemon closed the connection: \
+                      ** WARNING: connection is not using a post-quantum key exchange algorithm.\r\n\
+                      me@devbox: Permission denied (publickey).";
+        assert!(
+            saw_state(&mut view_rx, |conn| {
+                matches!(conn.state(), State::Closed { reason: shown } if shown == reason)
+            }),
+            "the close reason does not end with ssh's stderr"
+        );
+        let mut again = next_child(&children);
+        assert_eq!(
+            again.read()["type"],
+            "hello",
+            "the backoff never started ssh again"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn an_ssh_spawn_failure_is_an_error_state() {
+        let (opened_tx, opened) = mpsc::channel();
+        let deps = NetDeps {
+            open_ssh: Box::new(move |_| {
+                let _ = opened_tx.send(());
+                Box::pin(async { Err(anyhow::anyhow!("ssh was not found")) })
+            }),
+            ..deps(ensure_must_not_run)
+        };
+        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
+
+        assert!(
+            saw_state(&mut view_rx, |conn| {
+                matches!(conn.state(), State::Error { reason } if reason == "ssh was not found")
+            }),
+            "a failed ssh start is not an error state"
+        );
+        opened
+            .recv_timeout(BACKSTOP)
+            .expect("ssh was never started");
+        opened
+            .recv_timeout(BACKSTOP)
+            .expect("the backoff never started ssh again");
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn an_ssh_welcome_is_not_held_back() {
+        let (deps, children, _tokens) = ssh_deps();
+        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
+        let mut child = next_child(&children);
+        assert_eq!(child.read()["type"], "hello");
+
+        child.write(&welcome());
+        let settled = loop {
+            match next_state(&mut view_rx) {
+                Some(conn) if matches!(conn.state(), State::Init | State::Connecting) => {}
+                other => break other,
+            }
+        };
+        assert!(
+            settled.as_ref().is_some_and(Connection::is_open),
+            "a Welcome alone must open an SSH connection, got {settled:?}"
+        );
+        stop_net(view_tx, net);
+    }
+
+    /// Runs `script` against the network loop on `devbox`, both on this
+    /// thread on a paused clock: time moves only when `script` advances it
+    /// or every task waits on a timer.
+    fn on_paused_clock<F, Fut>(script: F)
+    where
+        F: FnOnce(UnboundedReceiver<NetEvent>, mpsc::Receiver<ScriptedChild>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("build a paused test runtime");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (deps, children, _tokens) = ssh_deps();
+            let (view_tx, commands) = unbounded();
+            let (events, view_rx) = unbounded();
+            let net = tokio::task::spawn_local(
+                Net::new(commands, events, deps, devbox(), WELCOME_TIMEOUT).run(),
+            );
+            script(view_rx, children).await;
+            drop(view_tx);
+            net.await.expect("the network loop ends");
+        });
+    }
+
+    /// The child the network loop starts next, waited for by yielding, so
+    /// the paused clock never moves meanwhile.
+    async fn started(children: &mpsc::Receiver<ScriptedChild>) -> ScriptedChild {
+        for _ in 0..100_000 {
+            if let Ok(child) = children.try_recv() {
+                return child;
+            }
+            tokio::task::yield_now().await;
+        }
+        children
+            .recv_timeout(Duration::ZERO)
+            .expect("ssh was never started")
+    }
+
+    /// Lets every ready task run without moving the paused clock.
+    async fn settle() {
+        for _ in 0..1_000 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Every state reported so far, without waiting.
+    fn states_so_far(view_rx: &mut UnboundedReceiver<NetEvent>) -> Vec<Connection> {
+        let mut states = Vec::new();
+        while let Ok(event) = view_rx.try_recv() {
+            if let NetEvent::State(conn) = event {
+                states.push(conn);
+            }
+        }
+        states
+    }
+
+    #[test]
+    fn an_ssh_welcome_waits_past_the_local_deadline() {
+        on_paused_clock(|mut view_rx, children| async move {
+            let mut child = started(&children).await;
+            assert_eq!(child.next_line().await["type"], "hello");
+
+            tokio::time::advance(WELCOME_TIMEOUT + Duration::from_secs(1)).await;
+            settle().await;
+            let states = states_so_far(&mut view_rx);
+            assert!(
+                states
+                    .iter()
+                    .all(|conn| matches!(conn.state(), State::Init | State::Connecting)),
+                "an SSH connection gave up at the local welcome deadline: {states:?}"
+            );
+
+            child.send(&welcome()).await;
+            let mut opened = false;
+            while let Some(event) = view_rx.next().await {
+                if let NetEvent::State(conn) = event {
+                    opened = conn.is_open();
+                    break;
+                }
+            }
+            assert!(opened, "the late Welcome did not open the connection");
+        });
+    }
+
+    #[test]
+    fn an_ssh_welcome_timeout_carries_ssh_stderr() {
+        use tokio::io::AsyncWriteExt as _;
+        on_paused_clock(|mut view_rx, children| async move {
+            let mut child = started(&children).await;
+            assert_eq!(child.next_line().await["type"], "hello");
+            child
+                .stderr
+                .write_all(b"bridge: the daemon did not start\r\n")
+                .await
+                .expect("write stderr");
+            settle().await;
+
+            tokio::time::advance(super::SSH_WELCOME_TIMEOUT + Duration::from_secs(1)).await;
+            settle().await;
+            let states = states_so_far(&mut view_rx);
+            assert!(
+                states.iter().any(|conn| matches!(
+                    conn.state(),
+                    State::Closed { reason }
+                        if reason == "no welcome from daemon: bridge: the daemon did not start"
+                )),
+                "the welcome timeout's reason does not end with ssh's stderr: {states:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn an_ssh_target_never_ensures_or_stops_the_local_daemon() {
+        let (deps, children, _tokens) = ssh_deps();
+        let (view_tx, mut view_rx, net) = run_net(deps, devbox());
+        let mut child = next_child(&children);
+        assert_eq!(child.read()["type"], "hello");
+        child.write(&welcome());
+        assert!(saw_state(&mut view_rx, Connection::is_open), "never opened");
+
+        for command in [
+            NetCommand::Stop,
+            NetCommand::Shutdown {
+                before: vec![ClientMessage::ListPendingDevices],
+                drain: true,
+            },
+            NetCommand::Send(Box::new(ClientMessage::ListRepos)),
+        ] {
+            view_tx
+                .unbounded_send(command)
+                .expect("net thread is running");
+        }
+        assert_eq!(
+            child.read()["type"],
+            "list_repos",
+            "Stop or quit sent something to an SSH host"
+        );
+        assert!(
+            saw(&mut view_rx, |event| matches!(
+                event,
+                NetEvent::ShutdownFailed
+            )),
+            "quit on an SSH host must report that nothing was sent"
+        );
+        view_tx
+            .unbounded_send(NetCommand::Restart)
+            .expect("net thread is running");
+        let mut again = next_child(&children);
+        assert_eq!(
+            again.read()["type"],
+            "hello",
+            "Restart never started ssh again"
+        );
+        stop_net(view_tx, net);
+        assert_eq!(
+            TAILNET_ENSURES.load(Ordering::SeqCst),
+            0,
+            "ensure_running ran for an SSH host"
+        );
+        assert_eq!(
+            TAILNET_STOPS.load(Ordering::SeqCst),
+            0,
+            "Stop ran on an SSH host"
+        );
     }
 }

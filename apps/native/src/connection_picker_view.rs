@@ -385,10 +385,7 @@ impl RootView {
         let current = target == *self.conn.target();
         let pair_current = current && self.device_pairing_offered();
         if !current {
-            let host = target.tailnet_host().map(|host| SavedHost {
-                name: host.name().to_owned(),
-                port: host.port(),
-            });
+            let host = SavedHost::from_target(&target);
             if let (Some(host), Some(dialog)) = (&host, &mut self.connection_picker) {
                 dialog.picker.remember(host.clone());
                 self.sidebar.set_saved_hosts(dialog.picker.saved().to_vec());

@@ -21,7 +21,7 @@ mod supervisor;
 mod test_fakes;
 
 pub use proof::{Proof, ProvenConnectError, connect_proven};
-pub use supervisor::{PROOF_TIMEOUT, ensure_running};
+pub use supervisor::{PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running};
 
 use anyhow::{Context as _, anyhow, bail};
 use protocol::DaemonHandshake;

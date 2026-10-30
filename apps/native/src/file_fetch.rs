@@ -122,13 +122,17 @@ pub fn sanitize_segment(segment: &str) -> String {
 }
 
 /// The folder a target's fetched files land in: the tailnet host's `MagicDNS`
-/// name, lower-cased; `None` for the local daemon, whose files are already
-/// on this PC.
+/// name, or `ssh-` and the SSH host's string, lower-cased and made safe, so
+/// the two kinds never share a folder; `None` for the local daemon, whose
+/// files are already on this PC.
 #[must_use]
 pub fn host_folder(target: &Target) -> Option<String> {
-    target
-        .tailnet_host()
-        .map(|host| sanitize_segment(&host.name().to_lowercase()))
+    let folder = match target {
+        Target::Local => return None,
+        Target::Tailnet(host) => host.name().to_lowercase(),
+        Target::Ssh(host) => format!("ssh-{}", host.name().to_lowercase()),
+    };
+    Some(sanitize_segment(&folder))
 }
 
 /// The last segment of the relative path `rel`.
@@ -1793,6 +1797,22 @@ mod tests {
         assert_eq!(
             host_folder(&Target::tailnet("Box.Tail1234.TS.net.", None)).as_deref(),
             Some("box.tail1234.ts.net")
+        );
+    }
+
+    #[test]
+    fn an_ssh_host_folder_is_its_sanitised_name() {
+        let ssh = |name: &str| Target::parse_ssh(name, None).expect("an SSH host");
+        assert_eq!(host_folder(&ssh("devbox")).as_deref(), Some("ssh-devbox"));
+        assert_eq!(
+            host_folder(&ssh("Me@Box:2222")).as_deref(),
+            Some("ssh-me@box_2222")
+        );
+        let name = "box.tail1234.ts.net";
+        assert_ne!(
+            host_folder(&ssh(name)),
+            host_folder(&Target::tailnet(name, None)),
+            "an SSH host never shares a tailnet host's folder"
         );
     }
 

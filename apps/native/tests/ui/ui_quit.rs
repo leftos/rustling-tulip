@@ -748,6 +748,9 @@ fn shutdown_does_not_reconnect_after_close(cx: &mut TestAppContext) {
             })
         }),
         open_local: support::plain_open(),
+        open_ssh: Box::new(|_| {
+            Box::pin(async { Err(anyhow::anyhow!("this spec never starts ssh")) })
+        }),
         identity: None,
         stop: Box::new(|| Box::pin(async { Ok(()) })),
         tokens: std::sync::Arc::new(daemon_client::device_tokens::MemoryTokens::default()),

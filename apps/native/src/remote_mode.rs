@@ -104,6 +104,21 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::expect_used, reason = "the spec's host must parse")]
+    fn ssh_has_neither_local_files_nor_daemon_management() {
+        let ssh = Target::parse_ssh("me@devbox", None).expect("an SSH host");
+        let caps = Capabilities::for_target(&ssh);
+        assert!(!caps.opens_local_files());
+        assert_eq!(caps.local_files_refusal(), Some(LOCAL_FILES_REASON));
+        assert!(!caps.manages_daemon());
+        assert_eq!(spawn_no_repos_note(&ssh), "No repos on devbox yet.");
+        assert_eq!(
+            sidebar_no_repos_note(&ssh),
+            "No repos or workspaces on devbox yet."
+        );
+    }
+
+    #[test]
     fn daemon_is_managed_only_on_the_local_daemon() {
         assert!(local().manages_daemon());
         assert!(!remote().manages_daemon());

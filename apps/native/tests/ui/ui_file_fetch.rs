@@ -188,6 +188,32 @@ fn a_fetched_file_with_a_line_opens_in_vscode(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_file_fetched_from_an_ssh_host_lands_under_its_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ssh = Target::parse_ssh("Me@DevBox:2222", None).expect("an SSH host");
+    let s = session("s1").worktree("r1").build();
+    let mut h = Harness::on_target(cx, &dir, ssh, &Fixture::single(s));
+    let root = dir.path().join("remote-files");
+    let set = root.clone();
+    h.root_update(move |view, _, _| view.set_remote_files_root(set));
+    h.sent();
+
+    let id = start(&mut h, request("src/main.rs", Some(1), None));
+    stream(&mut h, &id, b"fn main() {\n", b"}\n");
+
+    let saved = root
+        .join("ssh-me@devbox_2222")
+        .join("repo")
+        .join("src")
+        .join("main.rs");
+    assert_eq!(
+        fs::read(&saved).expect("the file is saved under the SSH host's folder"),
+        b"fn main() {\n}\n"
+    );
+    assert_eq!(names_in(&root), ["ssh-me@devbox_2222"]);
+}
+
+#[gpui::test]
 fn a_fetched_file_without_a_line_opens_in_its_default_app(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, root) = on_remote(cx, &dir);

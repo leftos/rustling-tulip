@@ -1810,6 +1810,34 @@ fn an_unrecorded_host_records_its_count_silently(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_ssh_host_records_its_session_count_under_a_prefixed_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = json!({
+        "saved_hosts": [
+            { "name": HOST, "port": 8787 },
+            { "kind": "ssh", "name": "devbox" },
+        ],
+        "host_session_counts": {},
+    });
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::to_vec_pretty(&ui).expect("serialize native-ui.json"),
+    )
+    .expect("write native-ui.json");
+    let ssh = Target::parse_ssh("devbox", None).expect("an SSH host");
+    let mut h = Harness::on_target(cx, &dir, ssh, &with_sessions(3));
+    assert!(!import_open(&mut h), "a first record offers nothing");
+
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("native-ui.json");
+    let saved: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    assert_eq!(
+        saved["host_session_counts"],
+        json!({ "ssh:devbox": 3 }),
+        "recorded under the SSH key alone"
+    );
+}
+
+#[gpui::test]
 fn a_host_not_saved_records_nothing(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::on_target(cx, &dir, remote_target(), &with_sessions(3));
