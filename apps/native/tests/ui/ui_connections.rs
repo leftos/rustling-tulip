@@ -20,7 +20,9 @@ use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use gpui::{TestAppContext, px};
 use protocol::{DaemonMessage, WorktreeCleanupFailure};
-use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
+use rustling_tulip_native::connection_picker::{
+    AddMode, PeerSource, RowDetail, RowState, SshTestCancel, SshTester,
+};
 use rustling_tulip_native::target::{SshHost, Target};
 use rustling_tulip_native::{Connection, NetCommand, RootView};
 use serde_json::{Value, json};
@@ -120,6 +122,26 @@ fn row(label: &str) -> String {
     format!("connections-row-{label}")
 }
 
+/// The second line and chip of the row keyed `key`.
+fn detail(h: &mut Harness<'_>, key: &str) -> Option<RowDetail> {
+    let key = key.to_owned();
+    h.root(move |root, _| root.connection_picker_row_detail(&key))
+}
+
+fn add_mode(h: &mut Harness<'_>) -> Option<AddMode> {
+    h.root(|root, _| root.connection_picker_add_mode())
+}
+
+/// The focus after each of `presses` Tab presses.
+fn tab_walk(h: &mut Harness<'_>, presses: usize) -> Vec<String> {
+    (0..presses)
+        .map(|_| {
+            h.keys("tab");
+            focus(h).expect("the picker is open")
+        })
+        .collect()
+}
+
 fn owned_rows(rows: &[(&str, bool)]) -> Vec<(String, bool)> {
     rows.iter()
         .map(|(label, current)| ((*label).to_owned(), *current))
@@ -185,7 +207,7 @@ fn typed_name_with_a_slash_shows_the_message_and_sends_nothing(cx: &mut TestAppC
     open_picker(&mut h, tailnet_with(&[]));
     h.commands();
 
-    h.keys("tab");
+    h.click_on("connections-add-host");
     assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
     type_text(&mut h, "box.tail1234.ts.net/ws");
     h.keys("enter");
@@ -348,7 +370,7 @@ fn typed_host_with_a_custom_port_dials_that_port(cx: &mut TestAppContext) {
     open_picker(&mut h, tailnet_with(&[]));
     h.commands();
 
-    h.keys("tab");
+    h.click_on("connections-add-host");
     type_text(&mut h, HOST);
     h.keys("tab");
     assert_eq!(focus(&mut h).as_deref(), Some("connections-port"));
@@ -440,8 +462,7 @@ fn typed_known_host_on_a_new_port_updates_the_saved_port(cx: &mut TestAppContext
     open_picker(&mut h, tailnet_with(&[]));
     h.commands();
 
-    // This PC, the saved host, its Forget, then Name.
-    h.keys("tab tab tab");
+    h.click_on("connections-add-host");
     assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
     type_text(&mut h, HOST);
     h.keys("tab");
@@ -459,7 +480,7 @@ fn typing_in_the_picker_does_not_reach_the_layers_below(cx: &mut TestAppContext)
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::default());
     open_picker(&mut h, tailnet_with(&[]));
-    h.keys("tab");
+    h.click_on("connections-add-host");
     assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
 
     h.keys("ctrl-,");
@@ -490,7 +511,7 @@ fn a_notice_under_the_picker_does_not_take_its_keys(cx: &mut TestAppContext) {
         root.set_peer_source(Arc::new(tailnet_with(&[])));
         root.open_connection_picker(window, cx);
     });
-    h.keys("tab");
+    h.click_on("connections-add-host");
     assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
 
     h.keys("space");
@@ -562,12 +583,13 @@ fn ssh(name: &str) -> Target {
 }
 
 /// Opens the picker with `tester` as its Test connection and no tailnet
-/// peers, then the Add SSH host form.
+/// peers, then the add form, switched to SSH.
 fn open_ssh_form(h: &mut Harness<'_>, tester: Arc<FakeSsh>) {
     h.root_update(move |root, _, _| root.set_ssh_tester(tester));
     open_picker(h, tailnet_with(&[]));
     h.commands();
-    h.click_on("connections-add-ssh");
+    h.click_on("connections-add-host");
+    h.click_on("connections-add-mode-ssh");
     assert!(h.root(|root, _| root.connection_picker_adding_ssh()));
     assert_eq!(
         focus(h).as_deref(),
@@ -585,7 +607,7 @@ fn picker_error(h: &mut Harness<'_>) -> Option<String> {
 }
 
 #[gpui::test]
-fn picker_lists_a_saved_ssh_host_with_an_ssh_tag(cx: &mut TestAppContext) {
+fn picker_lists_a_saved_ssh_host_with_its_ssh_line(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(
         &dir,
@@ -611,7 +633,11 @@ fn picker_lists_a_saved_ssh_host_with_an_ssh_tag(cx: &mut TestAppContext) {
         [HOST],
         "an SSH host has no device token and is never tagged Not paired"
     );
-    assert!(h.bounds("connections-ssh-tag-me@devbox").size.width > px(0.0));
+    assert_eq!(
+        detail(&mut h, "ssh:me@devbox").map(|detail| detail.line),
+        Some("SSH · rustling-tulipd bridge".to_owned())
+    );
+    assert!(h.bounds("connections-detail-ssh:me@devbox").size.width > px(0.0));
     assert!(h.bounds("connections-row-ssh:me@devbox").size.width > px(0.0));
 }
 
@@ -631,7 +657,7 @@ fn add_ssh_host_refuses_a_bad_host_with_its_text_and_sends_nothing(cx: &mut Test
     h.click_on("connections-ssh-form-host");
     type_text(&mut h, "-x");
     assert_eq!(picker_error(&mut h), None, "an edit clears the refusal");
-    h.click_on("connections-ssh-form-add");
+    h.click_on("connections-add-submit");
     assert_eq!(
         picker_error(&mut h).as_deref(),
         Some("An SSH host cannot start with a dash.")
@@ -718,7 +744,7 @@ fn adding_an_ssh_host_without_a_test_saves_it_and_switches(cx: &mut TestAppConte
         Some("connections-ssh-form-command")
     );
     type_text(&mut h, "rtd.cmd");
-    h.click_on("connections-ssh-form-add");
+    h.click_on("connections-add-submit");
 
     assert_eq!(
         switches(&mut h),
@@ -883,4 +909,387 @@ fn escape_leaves_the_ssh_form_then_closes_the_picker(cx: &mut TestAppContext) {
 
     h.keys("escape");
     assert!(!is_open(&mut h), "the next closes the picker");
+}
+
+#[gpui::test]
+fn connections_draws_three_sections_in_order(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 9443 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    open_picker(&mut h, tailnet_with(&[PEER]));
+
+    let tops: Vec<_> = [
+        "connections-section-this-pc".to_owned(),
+        row("This PC"),
+        "connections-section-saved".to_owned(),
+        row(HOST),
+        "connections-section-tailnet".to_owned(),
+        row(PEER),
+    ]
+    .iter()
+    .map(|selector| {
+        let bounds = h.bounds(selector);
+        assert!(bounds.size.width > px(0.0), "{selector} is drawn");
+        bounds.origin.y
+    })
+    .collect();
+    assert!(
+        tops.windows(2).all(|pair| pair[0] < pair[1]),
+        "This PC, Saved hosts and On your tailnet, each over its rows: {tops:?}"
+    );
+}
+
+#[gpui::test]
+fn a_saved_tailnet_host_without_a_token_shows_not_paired(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [
+            { "name": HOST, "port": 8787 },
+            { "name": PEER, "port": 8787 },
+        ] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.tokens().set(PEER, "t1").expect("seed a token");
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    assert_eq!(
+        detail(&mut h, HOST).and_then(|detail| detail.state),
+        Some(RowState::NotPaired)
+    );
+    assert!(
+        h.bounds(&format!("connections-not-paired-{HOST}"))
+            .size
+            .width
+            > px(0.0)
+    );
+    assert_eq!(
+        detail(&mut h, PEER).and_then(|detail| detail.state),
+        None,
+        "a host this PC holds a token for shows no chip"
+    );
+}
+
+#[gpui::test]
+fn the_current_row_shows_connected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::on_target(cx, &dir, Target::Local, &Fixture::default());
+
+    open_picker(&mut h, tailnet_with(&[]));
+
+    assert_eq!(
+        detail(&mut h, "This PC").and_then(|detail| detail.state),
+        Some(RowState::Connected)
+    );
+    assert!(h.bounds("connections-state-This PC").size.width > px(0.0));
+}
+
+#[gpui::test]
+fn a_row_shows_its_detail_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{ "name": HOST, "port": 9443 }],
+            "host_session_counts": { HOST: 3 },
+        }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    open_picker(&mut h, tailnet_with(&[PEER]));
+
+    assert_eq!(
+        detail(&mut h, HOST).map(|detail| detail.line),
+        Some("Tailnet · port 9443 · 3 sessions last time".to_owned())
+    );
+    assert_eq!(
+        detail(&mut h, PEER).map(|detail| detail.line),
+        Some("Online · port 8787 · connecting saves it".to_owned())
+    );
+    assert!(h.bounds(&format!("connections-detail-{HOST}")).size.width > px(0.0));
+}
+
+#[gpui::test]
+fn forget_is_clickable_without_hovering_first(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 9443 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+    h.commands();
+    assert_eq!(
+        focus(&mut h),
+        Some(row("This PC")),
+        "neither the host's row nor its Forget has the focus"
+    );
+
+    h.click_on(&format!("connections-forget-{HOST}"));
+
+    assert_eq!(rows(&mut h), owned_rows(&[("This PC", true)]));
+    assert_eq!(
+        switches(&mut h),
+        [] as [Target; 0],
+        "the row was not picked"
+    );
+}
+
+fn forget_shown(h: &mut Harness<'_>, key: &str) -> bool {
+    let key = key.to_owned();
+    h.root(move |root, _| root.connection_picker_forget_shown(&key))
+}
+
+#[gpui::test]
+fn opening_the_picker_on_a_saved_host_shows_its_state_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [{ "name": HOST, "port": 8787 }],
+            "last_target": { "name": HOST, "port": 8787 },
+        }),
+    );
+    let tailnet = Target::tailnet(HOST, Some(8787));
+    let mut h = Harness::on_target(cx, &dir, tailnet.clone(), &Fixture::default());
+    let mut refused = Connection::for_target(tailnet);
+    refused.on_connecting();
+    refused.on_socket_open(8787);
+    refused.on_not_approved("device not approved".to_owned(), true);
+    h.set_connection(refused);
+
+    h.root_update(|root, window, cx| {
+        root.set_peer_source(Arc::new(tailnet_with(&[])));
+        root.open_connection_picker(window, cx);
+    });
+
+    assert_eq!(
+        focus(&mut h),
+        Some(row(HOST)),
+        "the current row has the focus"
+    );
+    assert_eq!(
+        detail(&mut h, HOST).and_then(|detail| detail.state),
+        Some(RowState::NeedsPairing)
+    );
+    assert!(h.bounds(&format!("connections-state-{HOST}")).size.width > px(0.0));
+    assert!(
+        !forget_shown(&mut h, HOST),
+        "the focused row keeps its chip; Forget stays hidden"
+    );
+}
+
+#[gpui::test]
+fn tabbing_to_forget_reveals_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 9443 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+
+    h.keys("tab");
+    assert_eq!(focus(&mut h), Some(row(HOST)));
+    assert!(
+        !forget_shown(&mut h, HOST),
+        "the row's focus alone keeps it hidden"
+    );
+
+    h.keys("tab");
+    assert_eq!(focus(&mut h), Some(format!("connections-forget-{HOST}")));
+    assert!(forget_shown(&mut h, HOST), "Forget's own focus shows it");
+}
+
+#[gpui::test]
+fn add_host_opens_an_inline_form_on_tailnet(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+    assert_eq!(add_mode(&mut h), None);
+
+    h.click_on("connections-add-host");
+
+    assert_eq!(add_mode(&mut h), Some(AddMode::Tailnet));
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
+    let panel = h.bounds("connections-panel");
+    for selector in [
+        "connections-add-mode-tailnet",
+        "connections-add-mode-ssh",
+        "connections-name",
+        "connections-port",
+        "connections-add-cancel",
+        "connections-add-submit",
+    ] {
+        let bounds = h.bounds(selector);
+        assert!(
+            bounds.size.width > px(0.0) && panel.contains(&bounds.center()),
+            "{selector} shows in the panel"
+        );
+    }
+}
+
+#[gpui::test]
+fn switching_to_ssh_keeps_the_tailnet_fields_and_cancels_a_running_test(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let tester = Arc::new(FakeSsh::default());
+    h.root_update({
+        let tester = Arc::clone(&tester);
+        move |root, _, _| root.set_ssh_tester(tester)
+    });
+    open_picker(&mut h, tailnet_with(&[]));
+    h.commands();
+    h.click_on("connections-add-host");
+    type_text(&mut h, HOST);
+
+    h.click_on("connections-add-mode-ssh");
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-ssh-form-host"));
+    type_text(&mut h, SSH_HOST);
+    h.click_on("connections-ssh-form-test");
+    assert_eq!(
+        ssh_result(&mut h).as_deref(),
+        Some("Testing the connection…")
+    );
+
+    h.click_on("connections-add-mode-tailnet");
+    assert!(tester.cancelled(), "leaving SSH cancels the running test");
+    assert_eq!(ssh_result(&mut h), None);
+
+    h.click_on("connections-add-mode-ssh");
+    h.click_on("connections-ssh-form-test");
+    assert_eq!(
+        tester.tested(),
+        [SSH_HOST, SSH_HOST],
+        "the SSH mode kept its host"
+    );
+
+    h.click_on("connections-add-mode-tailnet");
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
+    h.keys("enter");
+    assert_eq!(
+        switches(&mut h),
+        [Target::tailnet(HOST, Some(8787))],
+        "the Tailnet mode kept its name"
+    );
+}
+
+#[gpui::test]
+fn cancel_closes_the_form_and_esc_then_closes_the_picker(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+    h.click_on("connections-add-host");
+
+    h.click_on("connections-add-cancel");
+    assert_eq!(add_mode(&mut h), None, "Cancel closes the form");
+    assert!(is_open(&mut h));
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-add-host"));
+
+    h.keys("escape");
+    assert!(!is_open(&mut h), "Esc then closes the picker");
+}
+
+#[gpui::test]
+fn with_fifteen_hosts_and_the_form_open_the_panel_stays_inside_the_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let hosts: Vec<Value> = (0..15)
+        .map(|n| json!({ "name": format!("host{n}.tail1234.ts.net"), "port": 8787 }))
+        .collect();
+    seed_ui(&dir, &json!({ "saved_hosts": hosts }));
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(601.0)));
+    open_picker(&mut h, tailnet_with(&[]));
+
+    h.click_on("connections-add-host");
+
+    let height = h.window_height();
+    let panel = h.bounds("connections-panel");
+    assert!(
+        panel.top() >= px(24.0) && panel.bottom() <= px(height - 24.0),
+        "the panel {panel:?} keeps 24 px clear of the {height} px window's edges"
+    );
+    for selector in ["connections-add-submit", "connections-close"] {
+        let bounds = h.bounds(selector);
+        assert!(
+            bounds.size.width > px(0.0)
+                && bounds.top() >= panel.top()
+                && bounds.bottom() <= panel.bottom(),
+            "{selector} {bounds:?} lies inside the panel {panel:?}"
+        );
+    }
+    assert!(
+        h.bounds("connections-list").size.height < px(15.0 * 46.0),
+        "the list scrolls instead of growing"
+    );
+}
+
+#[gpui::test]
+fn tab_ring_order_with_the_form_closed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 9443 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[PEER]));
+    assert_eq!(focus(&mut h), Some(row("This PC")));
+
+    assert_eq!(
+        tab_walk(&mut h, 6),
+        [
+            row(HOST),
+            format!("connections-forget-{HOST}"),
+            row(PEER),
+            "connections-add-host".to_owned(),
+            "connections-close".to_owned(),
+            row("This PC"),
+        ]
+    );
+}
+
+#[gpui::test]
+fn tab_ring_order_with_the_form_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &json!({ "saved_hosts": [{ "name": HOST, "port": 9443 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_picker(&mut h, tailnet_with(&[]));
+    h.click_on("connections-add-host");
+    assert_eq!(focus(&mut h).as_deref(), Some("connections-name"));
+
+    assert_eq!(
+        tab_walk(&mut h, 10),
+        [
+            "connections-port".to_owned(),
+            "connections-add-cancel".to_owned(),
+            "connections-add-submit".to_owned(),
+            "connections-close".to_owned(),
+            row("This PC"),
+            row(HOST),
+            format!("connections-forget-{HOST}"),
+            "connections-add-mode-tailnet".to_owned(),
+            "connections-add-mode-ssh".to_owned(),
+            "connections-name".to_owned(),
+        ]
+    );
+
+    h.click_on("connections-add-mode-ssh");
+    assert_eq!(
+        tab_walk(&mut h, 5),
+        [
+            "connections-ssh-form-command",
+            "connections-add-cancel",
+            "connections-ssh-form-test",
+            "connections-add-submit",
+            "connections-close",
+        ]
+    );
 }

@@ -1,9 +1,10 @@
 //! The host picker's model: the rows it offers (this PC, the saved tailnet
-//! and SSH hosts and the owner's online tailnet peers), the typed-host
-//! checks, the Add SSH host form's Test connection states, forgetting a
-//! saved host, and the target the client boots onto. Plain Rust: the view
-//! draws these rows, the Tailscale scan reaches it through [`PeerSource`]
-//! and Test connection through [`SshTester`].
+//! and SSH hosts and the owner's online tailnet peers), the sections they
+//! are grouped under and the second line and state chip each one shows, the
+//! typed-host checks, the add form's two modes and its Test connection
+//! states, forgetting a saved host, and the target the client boots onto.
+//! Plain Rust: the view draws these rows, the Tailscale scan reaches it
+//! through [`PeerSource`] and Test connection through [`SshTester`].
 
 use futures::FutureExt as _;
 use futures::channel::oneshot;
@@ -11,7 +12,9 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tailnet::{PeerStatus, Status, TailnetError};
 
+use crate::connection;
 use crate::sidebar::UiState;
+use crate::ssh::DEFAULT_REMOTE_COMMAND;
 use crate::target::{DEFAULT_TAILNET_PORT, HostNameError, SshHost, SshHostError, Target};
 
 /// The label of the row that connects to this PC's own daemon.
@@ -228,6 +231,9 @@ pub enum SshTest {
 /// The line Test connection shows while it runs.
 pub const SSH_TESTING: &str = "Testing the connection…";
 
+/// The "On your tailnet" header's note while the scan has not answered.
+pub const SCAN_PENDING: &str = "Looking for your devices…";
+
 impl SshTest {
     /// The state a finished test of `host` leaves.
     #[must_use]
@@ -257,6 +263,112 @@ impl SshTest {
             Self::Passed(short) => Some(format!("Connected: {short}")),
             Self::Failed(text) => Some(text.clone()),
         }
+    }
+}
+
+/// The two kinds of host the add form can add, one at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddMode {
+    /// A tailnet host: its Name and Port.
+    Tailnet,
+    /// An SSH host: its Host and Remote command.
+    Ssh,
+}
+
+/// One field of the add form, in the mode that shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddField {
+    /// The field's label.
+    pub label: &'static str,
+    /// Whether the field is drawn in the mono face.
+    pub mono: bool,
+}
+
+/// A button under the add form's fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddButton {
+    /// Closes the form, cancelling a running test.
+    Cancel,
+    /// Runs Test connection; reads "Cancel" while one runs.
+    Test,
+    /// Adds the host and connects to it.
+    Submit,
+}
+
+impl AddButton {
+    /// The button's text; Test reads "Cancel" while a test runs.
+    #[must_use]
+    pub fn label(&self, test: &SshTest) -> &'static str {
+        match self {
+            Self::Cancel => "Cancel",
+            Self::Test => test.button_label(),
+            Self::Submit => "Add and connect",
+        }
+    }
+}
+
+impl AddMode {
+    /// The mode's segment label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tailnet => "Tailnet",
+            Self::Ssh => "SSH",
+        }
+    }
+
+    /// The other mode.
+    #[must_use]
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Tailnet => Self::Ssh,
+            Self::Ssh => Self::Tailnet,
+        }
+    }
+
+    /// The mode's fields, top to bottom. Each mode keeps its own text, so a
+    /// switch shows that mode's fields as they were left.
+    #[must_use]
+    pub const fn fields(self) -> [AddField; 2] {
+        match self {
+            Self::Tailnet => [
+                AddField {
+                    label: "Name",
+                    mono: false,
+                },
+                AddField {
+                    label: "Port",
+                    mono: false,
+                },
+            ],
+            Self::Ssh => [
+                AddField {
+                    label: "Host",
+                    mono: false,
+                },
+                AddField {
+                    label: "Remote command",
+                    mono: true,
+                },
+            ],
+        }
+    }
+
+    /// The form's buttons, left to right; only SSH has a test.
+    #[must_use]
+    pub fn buttons(self) -> Vec<AddButton> {
+        match self {
+            Self::Tailnet => vec![AddButton::Cancel, AddButton::Submit],
+            Self::Ssh => vec![AddButton::Cancel, AddButton::Test, AddButton::Submit],
+        }
+    }
+
+    /// Whether switching the form from `self` to `next` cancels a running
+    /// Test connection: only leaving SSH with one running does. The view
+    /// then drops it and clears the result line.
+    #[must_use]
+    pub fn switch_cancels_test(self, next: Self, test: &SshTest) -> bool {
+        matches!(self, Self::Ssh) && matches!(next, Self::Tailnet) && *test == SshTest::Testing
     }
 }
 
@@ -316,6 +428,272 @@ impl Row {
         } else {
             self.label.clone()
         }
+    }
+
+    /// The section the row is listed under.
+    #[must_use]
+    pub const fn section(&self) -> Section {
+        match self.kind {
+            RowKind::Local => Section::ThisPc,
+            RowKind::Saved => Section::Saved,
+            RowKind::Peer => Section::Tailnet,
+        }
+    }
+
+    /// The row's name as the picker draws it: a tailnet host's machine name
+    /// and the greyed suffix from its first dot (`.tail1234.ts.net`); an SSH
+    /// host's string and "This PC" whole.
+    #[must_use]
+    pub fn name_parts(&self) -> (String, Option<String>) {
+        match &self.target {
+            Target::Tailnet(_) => match self.label.split_once('.') {
+                Some((name, suffix)) => (name.to_owned(), Some(format!(".{suffix}"))),
+                None => (self.label.clone(), None),
+            },
+            Target::Local | Target::Ssh(_) => (self.label.clone(), None),
+        }
+    }
+}
+
+/// A section of the picker's list, under its own header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    /// This PC's own daemon.
+    ThisPc,
+    /// The hosts the user saved.
+    Saved,
+    /// The owner's online tailnet peers that are not saved.
+    Tailnet,
+}
+
+impl Section {
+    /// The section's header title.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::ThisPc => THIS_PC,
+            Self::Saved => "Saved hosts",
+            Self::Tailnet => "On your tailnet",
+        }
+    }
+}
+
+/// One section of the picker's list, with the rows it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerSection {
+    /// Which section this is.
+    pub section: Section,
+    /// The header's right-side note: the Saved section's count, the Tailnet
+    /// section's online count or the scan's wait or error; none for This PC.
+    pub note: Option<String>,
+    /// The rows it holds, as indices into [`ConnectionPicker::rows`].
+    pub rows: Vec<usize>,
+}
+
+/// What kind of host a row offers, for its second line and state chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowHost {
+    /// This PC's own daemon.
+    ThisPc,
+    /// A saved tailnet host.
+    Tailnet,
+    /// A saved SSH host.
+    Ssh,
+    /// An online tailnet peer the user has not saved.
+    Peer,
+}
+
+/// The connection's live state, mirrored from [`connection::State`] so the
+/// rows' lines and chips are plain values with no GPUI in them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveState {
+    /// A connect is under way.
+    Connecting,
+    /// The daemon answered `Hello`.
+    Open,
+    /// The host has not approved this device.
+    NotApproved,
+    /// Closed, refused or failed, with the reason to show.
+    Down { reason: String },
+}
+
+impl LiveState {
+    /// What `state` puts on the current row; `None` before the first connect
+    /// attempt, when there is nothing to report yet.
+    #[must_use]
+    pub fn from_state(state: &connection::State) -> Option<Self> {
+        match state {
+            connection::State::Init => None,
+            connection::State::Connecting => Some(Self::Connecting),
+            connection::State::Open { .. } => Some(Self::Open),
+            connection::State::NotApproved { .. } => Some(Self::NotApproved),
+            connection::State::Closed { reason }
+            | connection::State::AuthFailed { reason }
+            | connection::State::Error { reason } => Some(Self::Down {
+                reason: reason.clone(),
+            }),
+        }
+    }
+
+    /// The chip this state puts on the current row.
+    fn row_state(&self) -> RowState {
+        match self {
+            Self::Connecting => RowState::Connecting,
+            Self::Open => RowState::Connected,
+            Self::NotApproved => RowState::NeedsPairing,
+            Self::Down { reason } => RowState::Disconnected {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
+/// The chip at a row's trail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowState {
+    /// The current row's daemon answered.
+    Connected,
+    /// The current row is connecting.
+    Connecting,
+    /// The current row's host has not approved this device.
+    NeedsPairing,
+    /// A saved tailnet host this PC holds no device token for.
+    NotPaired,
+    /// The current row is disconnected, with the reason.
+    Disconnected { reason: String },
+}
+
+impl RowState {
+    /// The chip's text.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Connected => "Connected",
+            Self::Connecting => "Connecting…",
+            Self::NeedsPairing => "Needs pairing",
+            Self::NotPaired => "Not paired",
+            Self::Disconnected { .. } => "Disconnected",
+        }
+    }
+}
+
+/// What the picker knows about one row when it draws its second line and
+/// state chip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowFacts {
+    /// What kind of host the row offers.
+    pub host: RowHost,
+    /// A tailnet row's port: the one it was saved with, or the default for a
+    /// peer.
+    pub port: Option<u16>,
+    /// An SSH row's remote command, as saved.
+    pub remote_command: Option<String>,
+    /// Whether this row is the target the client is on.
+    pub current: bool,
+    /// The live connection state; read only on the current row.
+    pub live: Option<LiveState>,
+    /// Whether this PC holds a device token for a saved tailnet host.
+    pub has_token: bool,
+    /// The sessions the row's host last had, from `host_session_counts`.
+    pub sessions_last_time: Option<usize>,
+    /// The live session count of the row's host; read only while it is
+    /// current.
+    pub live_sessions: Option<usize>,
+}
+
+/// A row's second line and the chip at its trail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowDetail {
+    /// The line under the row's name, its parts joined by ` · `.
+    pub line: String,
+    /// The chip at the row's trail, when it has one.
+    pub state: Option<RowState>,
+}
+
+/// The second line and state chip of a row, from what the picker knows.
+#[must_use]
+pub fn row_detail(facts: &RowFacts) -> RowDetail {
+    RowDetail {
+        line: detail_line(facts),
+        state: detail_state(facts),
+    }
+}
+
+/// The row's second line: its kind, then what the picker knows about it.
+fn detail_line(facts: &RowFacts) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match facts.host {
+        RowHost::ThisPc => {
+            parts.push("This PC's daemon".to_owned());
+            if facts.current {
+                parts.extend(session_count(facts.live_sessions, false));
+            }
+        }
+        RowHost::Tailnet => {
+            parts.push("Tailnet".to_owned());
+            parts.extend(port_clause(facts.port));
+            parts.extend(saved_host_sessions(facts));
+        }
+        RowHost::Ssh => {
+            parts.push("SSH".to_owned());
+            parts.push(
+                facts
+                    .remote_command
+                    .as_deref()
+                    .unwrap_or(DEFAULT_REMOTE_COMMAND)
+                    .to_owned(),
+            );
+            parts.extend(saved_host_sessions(facts));
+        }
+        RowHost::Peer => {
+            parts.push("Online".to_owned());
+            parts.extend(port_clause(Some(
+                facts.port.unwrap_or(DEFAULT_TAILNET_PORT),
+            )));
+            parts.push("connecting saves it".to_owned());
+        }
+    }
+    parts.join(" · ")
+}
+
+/// The "port <n>" part of a tailnet row.
+fn port_clause(port: Option<u16>) -> Option<String> {
+    port.map(|port| format!("port {port}"))
+}
+
+/// The sessions part of a saved host's row: its live count while it is the
+/// current target, else the count it had last time.
+fn saved_host_sessions(facts: &RowFacts) -> Option<String> {
+    if facts.current {
+        session_count(facts.live_sessions, false)
+    } else {
+        session_count(facts.sessions_last_time, true)
+    }
+}
+
+/// The sessions part of a row: "3 sessions", or "3 sessions last time" for a
+/// host that is not current. None is left out, as is zero.
+fn session_count(count: Option<usize>, last_time: bool) -> Option<String> {
+    let count = count.filter(|count| *count > 0)?;
+    let noun = if count == 1 { "session" } else { "sessions" };
+    Some(if last_time {
+        format!("{count} {noun} last time")
+    } else {
+        format!("{count} {noun}")
+    })
+}
+
+/// The chip a row shows: the current row's live state when there is one,
+/// else "Not paired" for a saved tailnet host this PC holds no token for.
+fn detail_state(facts: &RowFacts) -> Option<RowState> {
+    if facts.current
+        && let Some(live) = &facts.live
+    {
+        return Some(live.row_state());
+    }
+    match facts.host {
+        RowHost::Tailnet if !facts.has_token => Some(RowState::NotPaired),
+        RowHost::ThisPc | RowHost::Tailnet | RowHost::Ssh | RowHost::Peer => None,
     }
 }
 
@@ -475,6 +853,56 @@ impl ConnectionPicker {
         rows
     }
 
+    /// The rows grouped under their sections, in draw order: This PC, the
+    /// saved hosts, then the peers. A section with no rows is left out,
+    /// apart from "On your tailnet", which stays while the scan has not
+    /// answered or has failed.
+    #[must_use]
+    pub fn sections(&self) -> Vec<PickerSection> {
+        let rows = self.rows();
+        let mut this_pc = Vec::new();
+        let mut saved = Vec::new();
+        let mut tailnet = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            match row.section() {
+                Section::ThisPc => this_pc.push(index),
+                Section::Saved => saved.push(index),
+                Section::Tailnet => tailnet.push(index),
+            }
+        }
+        let mut sections = vec![PickerSection {
+            section: Section::ThisPc,
+            note: None,
+            rows: this_pc,
+        }];
+        if !saved.is_empty() {
+            sections.push(PickerSection {
+                section: Section::Saved,
+                note: Some(saved.len().to_string()),
+                rows: saved,
+            });
+        }
+        if let Some(note) = self.tailnet_note(tailnet.len()) {
+            sections.push(PickerSection {
+                section: Section::Tailnet,
+                note: Some(note),
+                rows: tailnet,
+            });
+        }
+        sections
+    }
+
+    /// The "On your tailnet" header's note, or `None` when the section is
+    /// left out because the scan answered with no peer to offer.
+    fn tailnet_note(&self, online: usize) -> Option<String> {
+        match &self.scan {
+            Scan::Pending => Some(SCAN_PENDING.to_owned()),
+            Scan::Failed(text) => Some(text.clone()),
+            Scan::Peers(_) if online == 0 => None,
+            Scan::Peers(_) => Some(format!("{online} online")),
+        }
+    }
+
     /// Whether the scan has not answered yet.
     #[must_use]
     pub fn scan_pending(&self) -> bool {
@@ -546,11 +974,12 @@ fn is_owner_device(peer: &PeerStatus, me: &PeerStatus) -> bool {
 )]
 mod tests {
     use super::{
-        ConnectionPicker, HostKind, PeerSource, Row, RowKind, SSH_TESTING, SavedHost, SshTest,
-        pairs_on_switch, resolve_boot_target, typed_ssh_target, typed_target,
+        AddButton, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, Row, RowFacts,
+        RowHost, RowKind, RowState, SCAN_PENDING, SSH_TESTING, SavedHost, Section, SshTest,
+        pairs_on_switch, resolve_boot_target, row_detail, typed_ssh_target, typed_target,
     };
     use crate::sidebar::UiState;
-    use crate::target::Target;
+    use crate::target::{DEFAULT_TAILNET_PORT, Target};
     use tailnet::{PeerStatus, Status, TailnetError};
 
     const OWNER: i64 = 42;
@@ -1109,6 +1538,437 @@ mod tests {
         assert_eq!(
             refusal("-oProxyCommand=x"),
             Err("An SSH host cannot start with a dash.".to_owned())
+        );
+    }
+
+    /// Row facts with nothing known about the row beyond its kind.
+    fn facts(host: RowHost) -> RowFacts {
+        RowFacts {
+            host,
+            port: None,
+            remote_command: None,
+            current: false,
+            live: None,
+            has_token: true,
+            sessions_last_time: None,
+            live_sessions: None,
+        }
+    }
+
+    /// The sections the picker draws, in draw order.
+    fn section_ids(picker: &ConnectionPicker) -> Vec<Section> {
+        picker
+            .sections()
+            .iter()
+            .map(|group| group.section)
+            .collect()
+    }
+
+    /// A section's header note.
+    fn section_note(picker: &ConnectionPicker, section: Section) -> Option<String> {
+        picker
+            .sections()
+            .into_iter()
+            .find(|group| group.section == section)
+            .and_then(|group| group.note)
+    }
+
+    /// A section's rows, as indices into `rows()`.
+    fn section_rows(picker: &ConnectionPicker, section: Section) -> Vec<usize> {
+        picker
+            .sections()
+            .into_iter()
+            .find(|group| group.section == section)
+            .map_or_else(Vec::new, |group| group.rows)
+    }
+
+    #[test]
+    fn sections_title_and_order() {
+        let picker = ConnectionPicker::new(vec![saved(BOX, 8787), ssh_saved("me@devbox", None)]);
+        let sections = picker.sections();
+        assert_eq!(
+            sections
+                .iter()
+                .map(|group| group.section)
+                .collect::<Vec<_>>(),
+            [Section::ThisPc, Section::Saved, Section::Tailnet],
+            "the scan has not answered, so its section stays to say it is looking"
+        );
+        assert_eq!(
+            sections
+                .iter()
+                .map(|group| group.section.title())
+                .collect::<Vec<_>>(),
+            ["This PC", "Saved hosts", "On your tailnet"]
+        );
+        assert_eq!(
+            sections
+                .iter()
+                .map(|group| group.rows.clone())
+                .collect::<Vec<_>>(),
+            [vec![0], vec![1, 2], Vec::new()]
+        );
+    }
+
+    #[test]
+    fn saved_section_is_hidden_when_empty() {
+        let mut picker = ConnectionPicker::new(Vec::new());
+        assert_eq!(
+            section_ids(&picker),
+            [Section::ThisPc, Section::Tailnet],
+            "the scan is pending, so its section stays"
+        );
+        picker.apply_scan(Ok(status(Vec::new())));
+        assert_eq!(
+            section_ids(&picker),
+            [Section::ThisPc],
+            "no saved host and no peer to offer"
+        );
+    }
+
+    #[test]
+    fn tailnet_section_note_counts_online_peers() {
+        let mut picker = ConnectionPicker::new(vec![
+            saved("a.tail1234.ts.net", 8787),
+            saved("b.tail1234.ts.net", 9443),
+        ]);
+        picker.apply_scan(Ok(status(vec![peer("laptop.tail1234.ts.net")])));
+        assert_eq!(section_note(&picker, Section::Saved).as_deref(), Some("2"));
+        assert_eq!(
+            section_note(&picker, Section::Tailnet).as_deref(),
+            Some("1 online")
+        );
+        assert_eq!(section_rows(&picker, Section::Tailnet), [3]);
+
+        picker.apply_scan(Ok(status(vec![
+            peer("laptop.tail1234.ts.net"),
+            peer("phone.tail1234.ts.net"),
+        ])));
+        assert_eq!(
+            section_note(&picker, Section::Tailnet).as_deref(),
+            Some("2 online")
+        );
+        assert_eq!(section_rows(&picker, Section::Tailnet), [3, 4]);
+    }
+
+    #[test]
+    fn tailnet_section_shows_pending_and_error_notes() {
+        let mut picker = ConnectionPicker::new(Vec::new());
+        assert_eq!(
+            section_note(&picker, Section::Tailnet).as_deref(),
+            Some(SCAN_PENDING)
+        );
+        picker.apply_scan(FailingSource(TailnetError::NotRunning).status());
+        assert_eq!(
+            section_note(&picker, Section::Tailnet).as_deref(),
+            Some("the tailscale CLI could not reach tailscaled (not running?)")
+        );
+    }
+
+    #[test]
+    fn tailnet_section_is_hidden_when_the_scan_found_no_unsaved_peer() {
+        let mut picker = ConnectionPicker::new(vec![saved(BOX, 8787)]);
+        picker.apply_scan(Ok(status(Vec::new())));
+        assert_eq!(section_ids(&picker), [Section::ThisPc, Section::Saved]);
+        picker.apply_scan(Ok(status(vec![peer(BOX)])));
+        assert_eq!(
+            section_ids(&picker),
+            [Section::ThisPc, Section::Saved],
+            "its only online peer is the saved host"
+        );
+    }
+
+    #[test]
+    fn name_parts_greys_the_tailnet_suffix() {
+        assert_eq!(
+            row(RowKind::Peer, BOX, 8787).name_parts(),
+            ("box".to_owned(), Some(".tail1234.ts.net".to_owned()))
+        );
+        assert_eq!(
+            row(RowKind::Saved, BOX, 9443).name_parts(),
+            ("box".to_owned(), Some(".tail1234.ts.net".to_owned()))
+        );
+        assert_eq!(this_pc().name_parts(), ("This PC".to_owned(), None));
+    }
+
+    #[test]
+    fn name_parts_keeps_an_ssh_host_whole() {
+        assert_eq!(
+            ssh_row("me@devbox").name_parts(),
+            ("me@devbox".to_owned(), None)
+        );
+        assert_eq!(
+            ssh_row("me@box.example.com").name_parts(),
+            ("me@box.example.com".to_owned(), None),
+            "a dotted SSH host is not split"
+        );
+    }
+
+    #[test]
+    fn this_pc_detail_line() {
+        let current = RowFacts {
+            current: true,
+            live: Some(LiveState::Open),
+            live_sessions: Some(7),
+            ..facts(RowHost::ThisPc)
+        };
+        let detail = row_detail(&current);
+        assert_eq!(detail.line, "This PC's daemon · 7 sessions");
+        assert_eq!(detail.state, Some(RowState::Connected));
+
+        let other = RowFacts {
+            live_sessions: Some(7),
+            ..facts(RowHost::ThisPc)
+        };
+        let detail = row_detail(&other);
+        assert_eq!(
+            detail.line, "This PC's daemon",
+            "its live count is known only while it is current"
+        );
+        assert_eq!(detail.state, None);
+    }
+
+    #[test]
+    fn saved_tailnet_detail_line() {
+        let unpaired = RowFacts {
+            port: Some(8787),
+            sessions_last_time: Some(3),
+            has_token: false,
+            ..facts(RowHost::Tailnet)
+        };
+        let detail = row_detail(&unpaired);
+        assert_eq!(detail.line, "Tailnet · port 8787 · 3 sessions last time");
+        assert_eq!(detail.state, Some(RowState::NotPaired));
+
+        let paired = RowFacts {
+            port: Some(9443),
+            ..facts(RowHost::Tailnet)
+        };
+        let detail = row_detail(&paired);
+        assert_eq!(detail.line, "Tailnet · port 9443", "none last time");
+        assert_eq!(
+            detail.state, None,
+            "a saved host this PC holds a token for has no chip"
+        );
+    }
+
+    #[test]
+    fn ssh_detail_line_falls_back_to_the_bridge_command() {
+        let plain = RowFacts {
+            sessions_last_time: Some(2),
+            ..facts(RowHost::Ssh)
+        };
+        assert_eq!(
+            row_detail(&plain).line,
+            "SSH · rustling-tulipd bridge · 2 sessions last time"
+        );
+
+        let custom = RowFacts {
+            remote_command: Some("rtd.cmd".to_owned()),
+            has_token: false,
+            ..facts(RowHost::Ssh)
+        };
+        let detail = row_detail(&custom);
+        assert_eq!(detail.line, "SSH · rtd.cmd");
+        assert_eq!(detail.state, None, "an SSH host is never not paired");
+    }
+
+    #[test]
+    fn peer_detail_line() {
+        let online = RowFacts {
+            port: Some(DEFAULT_TAILNET_PORT),
+            ..facts(RowHost::Peer)
+        };
+        let detail = row_detail(&online);
+        assert_eq!(detail.line, "Online · port 8787 · connecting saves it");
+        assert_eq!(detail.state, None);
+    }
+
+    #[test]
+    fn the_current_saved_host_shows_its_live_session_count() {
+        let tailnet = RowFacts {
+            port: Some(8787),
+            current: true,
+            sessions_last_time: Some(3),
+            live_sessions: Some(4),
+            ..facts(RowHost::Tailnet)
+        };
+        assert_eq!(
+            row_detail(&tailnet).line,
+            "Tailnet · port 8787 · 4 sessions"
+        );
+        let ssh = RowFacts {
+            current: true,
+            sessions_last_time: Some(2),
+            live_sessions: Some(1),
+            ..facts(RowHost::Ssh)
+        };
+        assert_eq!(
+            row_detail(&ssh).line,
+            "SSH · rustling-tulipd bridge · 1 session"
+        );
+    }
+
+    #[test]
+    fn session_counts_are_singular_at_one_and_hidden_at_zero() {
+        let tailnet = |sessions_last_time: Option<usize>| RowFacts {
+            port: Some(8787),
+            sessions_last_time,
+            ..facts(RowHost::Tailnet)
+        };
+        assert_eq!(
+            row_detail(&tailnet(Some(1))).line,
+            "Tailnet · port 8787 · 1 session last time"
+        );
+        assert_eq!(
+            row_detail(&tailnet(Some(0))).line,
+            "Tailnet · port 8787",
+            "none last time"
+        );
+        assert_eq!(
+            row_detail(&tailnet(None)).line,
+            "Tailnet · port 8787",
+            "unknown last time"
+        );
+
+        let this_pc_row = |live_sessions: Option<usize>| RowFacts {
+            current: true,
+            live: Some(LiveState::Open),
+            live_sessions,
+            ..facts(RowHost::ThisPc)
+        };
+        assert_eq!(
+            row_detail(&this_pc_row(Some(1))).line,
+            "This PC's daemon · 1 session"
+        );
+        assert_eq!(row_detail(&this_pc_row(Some(0))).line, "This PC's daemon");
+        assert_eq!(row_detail(&this_pc_row(None)).line, "This PC's daemon");
+    }
+
+    #[test]
+    fn a_live_state_on_the_current_row_wins_over_not_paired() {
+        let current = |live: LiveState| RowFacts {
+            port: Some(8787),
+            current: true,
+            live: Some(live),
+            has_token: false,
+            ..facts(RowHost::Tailnet)
+        };
+        assert_eq!(
+            row_detail(&current(LiveState::Open)).state,
+            Some(RowState::Connected)
+        );
+        assert_eq!(
+            row_detail(&current(LiveState::Connecting)).state,
+            Some(RowState::Connecting)
+        );
+        assert_eq!(
+            row_detail(&current(LiveState::NotApproved)).state,
+            Some(RowState::NeedsPairing)
+        );
+        let down = row_detail(&current(LiveState::Down {
+            reason: "connection reset".to_owned(),
+        }));
+        assert_eq!(
+            down.state,
+            Some(RowState::Disconnected {
+                reason: "connection reset".to_owned()
+            })
+        );
+
+        let other = RowFacts {
+            port: Some(8787),
+            has_token: false,
+            live: Some(LiveState::Open),
+            ..facts(RowHost::Tailnet)
+        };
+        assert_eq!(
+            row_detail(&other).state,
+            Some(RowState::NotPaired),
+            "another row's live state is not read"
+        );
+
+        assert_eq!(RowState::Connected.label(), "Connected");
+        assert_eq!(RowState::Connecting.label(), "Connecting…");
+        assert_eq!(RowState::NeedsPairing.label(), "Needs pairing");
+        assert_eq!(RowState::NotPaired.label(), "Not paired");
+        assert_eq!(down.state.map(|state| state.label()), Some("Disconnected"));
+    }
+
+    #[test]
+    fn add_mode_buttons_per_mode() {
+        assert_eq!(
+            AddMode::Tailnet.buttons(),
+            [AddButton::Cancel, AddButton::Submit]
+        );
+        assert_eq!(
+            AddMode::Ssh.buttons(),
+            [AddButton::Cancel, AddButton::Test, AddButton::Submit]
+        );
+        let labels = |mode: AddMode, test: &SshTest| {
+            mode.buttons()
+                .iter()
+                .map(|button| button.label(test))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(AddMode::Tailnet, &SshTest::Idle),
+            ["Cancel", "Add and connect"]
+        );
+        assert_eq!(
+            labels(AddMode::Ssh, &SshTest::Idle),
+            ["Cancel", "Test connection", "Add and connect"]
+        );
+        assert_eq!(
+            labels(AddMode::Ssh, &SshTest::Testing),
+            ["Cancel", "Cancel", "Add and connect"],
+            "the test button cancels its own run"
+        );
+        assert_eq!(AddMode::Tailnet.label(), "Tailnet");
+        assert_eq!(AddMode::Ssh.label(), "SSH");
+        assert_eq!(AddMode::Tailnet.other(), AddMode::Ssh);
+    }
+
+    #[test]
+    fn switching_mode_keeps_each_modes_fields_and_cancels_a_running_test() {
+        assert!(AddMode::Ssh.switch_cancels_test(AddMode::Tailnet, &SshTest::Testing));
+        for test in [
+            SshTest::Idle,
+            SshTest::Passed("devbox".to_owned()),
+            SshTest::Failed("Permission denied (publickey).".to_owned()),
+        ] {
+            assert!(
+                !AddMode::Ssh.switch_cancels_test(AddMode::Tailnet, &test),
+                "{test:?}"
+            );
+        }
+        assert!(
+            !AddMode::Ssh.switch_cancels_test(AddMode::Ssh, &SshTest::Testing),
+            "pressing the mode it is already on"
+        );
+        assert!(
+            !AddMode::Tailnet.switch_cancels_test(AddMode::Ssh, &SshTest::Testing),
+            "SSH holds the only test"
+        );
+
+        let tailnet = AddMode::Tailnet.fields();
+        let ssh = AddMode::Ssh.fields();
+        assert_eq!(
+            tailnet.iter().map(|field| field.label).collect::<Vec<_>>(),
+            ["Name", "Port"]
+        );
+        assert_eq!(
+            ssh.iter().map(|field| field.label).collect::<Vec<_>>(),
+            ["Host", "Remote command"]
+        );
+        assert!(
+            ssh.iter().any(|field| field.mono),
+            "the remote command is drawn in the mono face"
+        );
+        assert_ne!(
+            tailnet.to_vec(),
+            ssh.to_vec(),
+            "a switch swaps the field set, it does not share it"
         );
     }
 }

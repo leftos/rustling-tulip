@@ -75,8 +75,17 @@ pub(crate) const DIFF_NEXT_ICON: &str = "icons/diff-next.svg";
 /// A diff tab's Last change button: a double chevron and a bar, right.
 pub(crate) const DIFF_LAST_ICON: &str = "icons/diff-last.svg";
 
+/// The Connections picker's This PC row: a monitor.
+pub(crate) const HOST_PC_ICON: &str = "icons/host-pc.svg";
+/// The Connections picker's tailnet rows: three linked nodes.
+pub(crate) const HOST_TAILNET_ICON: &str = "icons/host-tailnet.svg";
+/// The Connections picker's SSH rows: a terminal prompt in a box.
+pub(crate) const HOST_SSH_ICON: &str = "icons/host-ssh.svg";
+/// A check mark: the Connections picker's passed Test connection.
+pub(crate) const CHECK_ICON: &str = "icons/check.svg";
+
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 33] = [
+const ASSETS: [(&str, &[u8]); 37] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -200,6 +209,16 @@ const ASSETS: [(&str, &[u8]); 33] = [
         DIFF_LAST_ICON,
         include_bytes!("../assets/icons/diff-last.svg"),
     ),
+    (HOST_PC_ICON, include_bytes!("../assets/icons/host-pc.svg")),
+    (
+        HOST_TAILNET_ICON,
+        include_bytes!("../assets/icons/host-tailnet.svg"),
+    ),
+    (
+        HOST_SSH_ICON,
+        include_bytes!("../assets/icons/host-ssh.svg"),
+    ),
+    (CHECK_ICON, include_bytes!("../assets/icons/check.svg")),
 ];
 
 /// The bundled assets; the app registers it with `Application::with_assets`.

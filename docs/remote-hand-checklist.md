@@ -36,8 +36,8 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 
 ## 3. Pairing the device
 
-- [ ] On the device, press `Connections` in the footer. **Expect:** the `Connections` dialog shows `Looking for your devices…`, then `This PC` (tagged `Current`) and `<host>` among the online peers.
-- [ ] Type `box` (a bare label) under `Add a host` and press `Connect`. **Expect:** `Use the full name, for example box.tail1234.ts.net.` and nothing dialled.
+- [ ] On the device, press `Connections` in the footer. **Expect:** the `Connections` dialog shows `Looking for your devices…` under `On your tailnet`, then `This PC` (chip `Connected`) and `<host>` among the online peers.
+- [ ] Press `+ Add host`, type `box` (a bare label) as the Name in Tailnet mode and press `Add and connect`. **Expect:** `Use the full name, for example box.tail1234.ts.net.` and nothing dialled.
 - [ ] Pick the `<host>` row. **Expect:** the dialog closes, and the "Pair with `<host>`" dialog opens by itself with `<host> does not know this PC.` and the buttons `Ask to pair` and `Close`; the footer pill reads `<short> · not paired`.
 - [ ] Press `Ask to pair`. **Expect:** the device shows `Approve this PC on <host>.` with an `expires in m:ss` countdown and `Cancel`; the host raises the Windows toast `A device asks for remote access` with `Approve…` and `Deny`, and Settings → Remote access on the host shows `Waiting devices · 1` with the device's name, its Tailscale login and an `m:ss left` countdown.
 - [ ] On the device, press `Have a code?` (it is also reachable with Tab). **Expect:** a `6 digits` field with `Pair` and `Cancel` appears under the line and the countdown keeps running. Type `000000` and press `Pair`. **Expect:** `That code is not right.` in the same place as after approval, and the request keeps waiting (the host's Waiting devices row stays).
@@ -74,7 +74,7 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 
 - [ ] With the device connected, turn the host's switch off. **Expect:** the device's connection drops at once and its pill reads `<short> · disconnected` and then `<short> · connecting…` as it retries; nothing listens on 8787.
 - [ ] Turn the host's switch back on. **Expect:** the device reconnects by itself, with no Pair dialog.
-- [ ] Change the host's port to `8788` and `Apply` while the device is connected. **Expect:** the device drops and keeps retrying 8787. On the device, add `<host>` with Port `8788` under `Add a host`. **Expect:** it connects. Set the host's port back to 8787 afterwards.
+- [ ] Change the host's port to `8788` and `Apply` while the device is connected. **Expect:** the device drops and keeps retrying 8787. On the device, add `<host>` with Port `8788` under `+ Add host` (Tailnet). **Expect:** it connects. Set the host's port back to 8787 afterwards.
 
 ## 7. A device removed from the tailnet
 
@@ -83,11 +83,11 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 ## 8. Peers that are refused
 
 - [ ] Open Tailscale's IP address doc (kb/1033) and compare the ranges it gives with `in_tailscale_range` in `crates/tailnet/src/rule.rs`. **Expect:** the doc states `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, as the code does.
-- [ ] From a node of another Tailscale user in the same tailnet, dial the host (the client's `Add a host` with `<host>`, or `curl -v https://<host>:8787/`). **Expect:** the connection is dropped before TLS: the client never reaches the Pair dialog, `curl` fails in the handshake rather than receiving an HTTP status, and `daemon.log` shows `tailnet listener: peer refused by the owner rule` with `reason=peer node belongs to another Tailscale user`.
+- [ ] From a node of another Tailscale user in the same tailnet, dial the host (the client's `+ Add host` with `<host>`, or `curl -v https://<host>:8787/`). **Expect:** the connection is dropped before TLS: the client never reaches the Pair dialog, `curl` fails in the handshake rather than receiving an HTTP status, and `daemon.log` shows `tailnet listener: peer refused by the owner rule` with `reason=peer node belongs to another Tailscale user`.
 - [ ] From a tagged node (`tailscale up --advertise-tags=tag:<tag>`), dial the host the same way. **Expect:** dropped the same way, with `reason=peer node is tagged`.
 - [ ] Share the host to another Tailscale account (admin console → Share) and dial it from that account's node. **Expect:** dropped the same way; record which reason the log gives (`peer node belongs to another Tailscale user`, `peer node is shared in by another user` or `peer node is a sharee node`).
 - [ ] With a node shared into the tailnet from another account, open `Connections` on the device. **Expect:** that node is not listed, and no tagged or offline node is either.
-- [ ] Sign in to the host as a second Windows account, open the client there and add `<host>` under `Add a host`. **Expect:** dropped, with `reason=peer is the host node itself` in the first account's `daemon.log`.
+- [ ] Sign in to the host as a second Windows account, open the client there and add `<host>` under `+ Add host`. **Expect:** dropped, with `reason=peer is the host node itself` in the first account's `daemon.log`.
 - [ ] In that second account, open Settings → Remote access and turn the switch on. **Expect:** `Tailscale belongs to another Windows user or runs in server mode.` Turn it off and sign out of the account.
 - [ ] After each refused dial, check the host's Settings. **Expect:** no toast and no Waiting devices row: a refused peer never reaches pairing.
 
@@ -116,8 +116,8 @@ These need Windows OpenSSH Server running on the host and key login from the dev
 - [ ] Within 30 s of that, on the host: `Get-Process rustling-tulipd-*`. **Expect:** the daemon the bridge started is still running once the SSH session has ended, and so are any `rt-tracer-*` of the sessions it hosts; with no session and no client it exits by itself 30 s after the client left (`idle for the full grace period` in `daemon.log`).
 - [ ] Run setup again and pick another folder. **Expect:** the old folder is gone from the user PATH and the new one is on it.
 - [ ] Uninstall. **Expect:** the install folder is gone from the user PATH and every other entry is as it was.
-- [ ] From the native client on the device, open Connections, press Add SSH host…, type the host and press Test connection. **Expect:** `Connected: <short name>`; then press Add. **Expect:** the client switches to the host with no pairing prompt, and the row carries an `SSH` tag and never `Not paired`.
-- [ ] In the same form, test a host whose key the device's ssh does not offer or the host does not authorize. **Expect:** ssh's own `Permission denied (publickey).` text under the form, and no row added until you press Add.
+- [ ] From the native client on the device, open Connections, press `+ Add host`, switch to SSH, type the host and press Test connection. **Expect:** `Connected: <short name>`; then press `Add and connect`. **Expect:** the client switches to the host with no pairing prompt, and its row reads `SSH · …` and never `Not paired`.
+- [ ] In the same form, test a host whose key the device's ssh does not offer or the host does not authorize. **Expect:** ssh's own `Permission denied (publickey).` text under the form, and no row added until you press `Add and connect`.
 
 ## iPhone and PWA
 

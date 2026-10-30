@@ -15,13 +15,14 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Deleting a locked worktree from Manage worktrees or a session discard now removes it completely, so its branch can be used again.
 - After a restart, the app no longer mistakes another program that reused a session's process number for that session, so it can no longer stop or reattach the wrong one.
 - A phone or laptop that drops off the tailnet without closing its connection is now disconnected within a minute, and a slow one no longer makes the host buffer every session's output without limit.
-
-### Fixed
-
 - Repos that store refs in git's reftable format now refresh their status and stash list after a commit, branch switch or stash.
 - A long-running session's history now starts at a line when reopened, instead of mid colour code with stray characters at the top of the pane.
 - A power cut or a sleep the PC never wakes from no longer leaves sessions, settings or saved hosts as empty or half-written files.
 - Sessions no longer end when the terminal, IDE task or tool that started the app closes and takes its child processes with it.
+
+### Changed
+
+- The Connections picker groups this PC, your saved hosts and the devices on your tailnet, shows each host's state, and adds a tailnet or SSH host from one form.
 
 ## v0.5.1-alpha
 

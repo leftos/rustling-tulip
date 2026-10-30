@@ -12,8 +12,8 @@
 //! over a small Rust file, scrolled to a line) and `viewer-md` (a viewer tab
 //! over a Markdown file, rendered), `dashboard`, `connections` (the host
 //! picker with a saved tailnet host and a saved SSH host) and
-//! `connections-ssh` (its Add SSH host form, filled in, after a passing Test
-//! connection). The PNG goes to
+//! `connections-ssh` (its add form switched to SSH, filled in, after a
+//! passing Test connection). The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -28,7 +28,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, Utc};
-use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
+use daemon_client::device_tokens::MemoryTokens;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
@@ -172,10 +172,11 @@ impl View {
     }
 
     /// How many rounds of input reach the view, each given [`DRIVE_WAIT`]
-    /// to draw before the next: the SSH form opens from the picker, and its
-    /// Host field takes typing only once drawn.
+    /// to draw before the next: the add form opens from the picker, its SSH
+    /// segment is pressed once drawn, and its Host field takes typing only
+    /// once drawn.
     fn steps(self) -> usize {
-        if self == Self::ConnectionsSsh { 3 } else { 1 }
+        if self == Self::ConnectionsSsh { 4 } else { 1 }
     }
 
     /// The window's size for this view.
@@ -320,7 +321,7 @@ fn compact_ui_state() -> Value {
     json!({ "general": { "leaf_density": "compact" } })
 }
 
-/// The tailnet host the `connections` shots have saved and paired.
+/// The tailnet host the `connections` shots have saved, not yet paired.
 const SHOT_TAILNET_HOST: &str = "box.tail1234.ts.net";
 /// The SSH host the `connections` shots have saved.
 const SHOT_SSH_SAVED: &str = "me@buildbox";
@@ -328,13 +329,16 @@ const SHOT_SSH_SAVED: &str = "me@buildbox";
 const SHOT_SSH_TYPED: &str = "me@devbox";
 const SHOT_SSH_SHORT: &str = "devbox";
 
-/// The layout the `connections` shots start from: a saved tailnet host
-/// and a saved SSH host.
+/// The layout the `connections` shots start from: a saved tailnet host,
+/// which had 3 sessions last time, and a saved SSH host.
 fn connections_ui_state() -> Value {
-    json!({ "saved_hosts": [
-        { "name": SHOT_TAILNET_HOST, "port": 8787 },
-        { "kind": "ssh", "name": SHOT_SSH_SAVED },
-    ] })
+    json!({
+        "saved_hosts": [
+            { "name": SHOT_TAILNET_HOST, "port": 8787 },
+            { "kind": "ssh", "name": SHOT_SSH_SAVED },
+        ],
+        "host_session_counts": { SHOT_TAILNET_HOST: 3 },
+    })
 }
 
 /// The owner's tailnet as the `connections` shots see it: this PC and one
@@ -386,12 +390,17 @@ fn open_picker(window: &mut Window, cx: &mut App) -> Result<()> {
 }
 
 /// Step `step` of the `connections-ssh` shot: open the picker; Shift+Tab
-/// twice from This PC's row (past Close) to Add SSH host… and press it; type
-/// the host and press Enter, which runs Test connection.
+/// twice from This PC's row (past Close) to `+ Add host` and press Enter,
+/// which opens the form on its Name field; Shift+Tab once to the SSH
+/// segment and press Enter, which focuses the Host field; type the host and
+/// press Enter, which runs Test connection.
 fn drive_connections_ssh(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
     match step {
         0 => open_picker(window, cx),
         1 => ["shift-tab", "shift-tab", "enter"]
+            .into_iter()
+            .try_for_each(|key| press(key, window, cx)),
+        2 => ["shift-tab", "enter"]
             .into_iter()
             .try_for_each(|key| press(key, window, cx)),
         _ => {
@@ -475,18 +484,10 @@ fn deps(
         pick_folder,
         pick_file,
         autostart: Arc::new(NoAutostart),
-        tokens: paired_tokens(),
+        // No device token, so the `connections` shots' saved tailnet host
+        // reads as not paired.
+        tokens: Arc::new(MemoryTokens::default()),
     }
-}
-
-/// Device tokens holding one for the `connections` shots' saved tailnet
-/// host, so its row reads as paired.
-fn paired_tokens() -> Arc<MemoryTokens> {
-    let tokens = MemoryTokens::default();
-    if let Err(err) = tokens.set(SHOT_TAILNET_HOST, "shot-token") {
-        tracing::warn!("seeding the shot's device token: {err:#}");
-    }
-    Arc::new(tokens)
 }
 
 /// Opens the root view in a cloaked window that is never activated.

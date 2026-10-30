@@ -146,6 +146,9 @@ pub(crate) const DANGER_BG: u32 = 0x003a_1c1f;
 
 /// The footer's dot for a healthy daemon, as `0xRRGGBB`.
 pub(crate) const STATUS_OK: u32 = 0x003f_b96a;
+/// The disc behind a passed check mark: [`STATUS_OK`] at 16% alpha, as
+/// `0xRRGGBBAA`.
+pub(crate) const OK_WASH: u32 = (STATUS_OK << 8) | 0x29;
 /// The footer's dot for an idle or stopped daemon, as `0xRRGGBB`.
 pub(crate) const STATUS_IDLE: u32 = 0x0083_8a96;
 /// The footer's dot for a daemon in error, as `0xRRGGBB`.
@@ -280,6 +283,7 @@ mod tests {
             ("ASK_WASH", ASK_WASH, ASKING, 0.07),
             ("ASK_BORDER", ASK_BORDER, ASKING, 0.35),
             ("DANGER_WASH", DANGER_WASH, DANGER, 0.10),
+            ("OK_WASH", OK_WASH, STATUS_OK, 0.16),
         ] {
             assert_eq!(token >> 8, hue, "{name}'s channels");
             let alpha = f64::from(token & 0xff) / 255.0;
@@ -291,6 +295,7 @@ mod tests {
         assert_eq!(ASK_WASH, 0xf6bc_4e12);
         assert_eq!(ASK_BORDER, 0xf6bc_4e59);
         assert_eq!(DANGER_WASH, 0xf26d_6d1a);
+        assert_eq!(OK_WASH, 0x3fb9_6a29);
         assert_eq!(CONTEXT_HOT, DANGER);
     }
 

@@ -38,7 +38,7 @@ It is alpha software, Windows only for now.
 
 ### Remote access over SSH
 
-- Without Tailscale, connect to another Windows PC over SSH: Add SSH host… in the Connections picker takes an alias or user@host, and Test connection checks it first. SSH hosts are Windows PCs for now.
+- Without Tailscale, connect to another Windows PC over SSH: + Add host in the Connections picker, switched to SSH, takes an alias or user@host, and Test connection checks it first. SSH hosts are Windows PCs for now.
 - The installer puts its folder on your user PATH (and uninstall takes it off), so `rustling-tulipd` runs by name from a terminal or an SSH login.
 
 ![The Connections picker with a saved SSH host and the Add an SSH host form after a passing Test connection](docs/images/connections-ssh.png)
