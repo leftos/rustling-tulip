@@ -27,15 +27,16 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             path,
             against,
             worktree_path,
+            host,
         } => {
-            let outcome = open_diff_tab(
-                hub,
-                client_id,
-                &repo_id,
-                &path,
-                against.as_deref(),
-                worktree_path.as_deref(),
-            );
+            let key = DiffTabKey {
+                repo_id: &repo_id,
+                path: &path,
+                against: against.as_deref(),
+                worktree_path: worktree_path.as_deref(),
+                host: host.as_deref(),
+            };
+            let outcome = open_diff_tab(hub, client_id, &key);
             match outcome {
                 Ok(outcome) => {
                     if let Some(new_tab) = outcome.created {
@@ -101,12 +102,13 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
         ClientMessage::CreateTab {
             name,
             initial_session_id,
+            host,
             request_id,
         } => {
             // Resolve the default name against the current tab list so
             // sequential opens produce `Tab`, `Tab 2`, `Tab 3`, ...
             let created = hub.state.mutate_client_layout(client_id, |tabs| {
-                let tab = crate::tabs::make_tab(name, initial_session_id, tabs);
+                let tab = crate::tabs::make_tab(name, initial_session_id, host, tabs);
                 tabs.push(tab.clone());
                 tab
             });
@@ -229,11 +231,13 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             direction,
             place,
             new_session_id,
+            host,
             request_id,
         } => {
             let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = crate::tabs::find_tab_mut(tabs, &tab_id)?;
-                crate::tabs::split_tab_pane(tab, &pane_id, direction, place, new_session_id)?;
+                let new_pane = crate::tabs::new_pane(new_session_id, host);
+                crate::tabs::split_tab_pane(tab, &pane_id, direction, place, new_pane)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             });
             match updated {
@@ -275,11 +279,12 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             tab_id,
             pane_id,
             session_id,
+            host,
         } => {
             let updated = hub.state.mutate_client_layout(client_id, |tabs| {
                 let tab = crate::tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = crate::tabs::grid_or_err_mut(tab)?;
-                crate::tabs::replace_pane_session(grid, &pane_id, session_id)?;
+                crate::tabs::replace_pane_session(grid, &pane_id, session_id, host)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
             hub.emit_tab(client_id, TabEvent::Updated(updated));
@@ -399,6 +404,16 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
             }
         }
+        ClientMessage::ForgetHostSessions {
+            host,
+            session_ids,
+            all,
+            request_id,
+        } => {
+            if let Err(err) = forget_host_panes(hub, &host, &session_ids, all) {
+                send_tab_failure(out_tx, &err, request_id);
+            }
+        }
         _ => warn!("tabs::handle: dispatch routed a message this module does not handle"),
     }
     Ok(())
@@ -461,55 +476,80 @@ struct OpenTabOutcome {
     created: Option<TabEntry>,
 }
 
-/// Find or create a diff tab keyed on (`repo_id`, `path`, `against`).
-/// Returns the tab id either way so the client can activate it.
+/// What identifies a diff tab: the same key opens the same tab.
+struct DiffTabKey<'a> {
+    repo_id: &'a str,
+    path: &'a str,
+    against: Option<&'a str>,
+    worktree_path: Option<&'a str>,
+    /// The host of the repo's daemon; `None` is this daemon.
+    host: Option<&'a str>,
+}
+
+/// Find or create a diff tab keyed on [`DiffTabKey`]. Returns the tab id
+/// either way so the client can activate it. A local diff tab needs its repo
+/// registered here; a foreign one (`host` set) names a repo of another
+/// daemon, which this one cannot check.
 fn open_diff_tab(
     hub: &Hub,
     client_id: &str,
-    repo_id: &str,
-    path: &str,
-    against: Option<&str>,
-    worktree_path: Option<&str>,
+    key: &DiffTabKey<'_>,
 ) -> anyhow::Result<OpenTabOutcome> {
-    repo_path_or_err(hub, repo_id)?;
+    let &DiffTabKey {
+        repo_id,
+        path,
+        against,
+        worktree_path,
+        host,
+    } = key;
+    if host.is_none() {
+        repo_path_or_err(hub, repo_id)?;
+    }
     let against_owned = against.map(str::to_string);
     let worktree_path_owned = worktree_path.map(str::to_string);
-    let outcome: anyhow::Result<OpenTabOutcome> = hub.state.mutate_client_layout(client_id, |tabs| {
-        if let Some(existing) = tabs.iter().find(|t| {
-            matches!(
-                &t.content,
-                TabContent::Diff {
-                    repo_id: r,
-                    path: p,
-                    against: a,
-                    worktree_path: w,
-                } if r == repo_id && p == path && a.as_deref() == against && w.as_deref() == worktree_path
-            )
-        }) {
-            return Ok(OpenTabOutcome {
-                tab_id: existing.id.clone(),
-                created: None,
-            });
-        }
-        let new_tab = TabEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: diff_tab_name(path, against_owned.as_deref()),
-            content: TabContent::Diff {
-                repo_id: repo_id.to_string(),
-                path: path.to_string(),
-                against: against_owned.clone(),
-                worktree_path: worktree_path_owned.clone(),
-            },
-            created_at: chrono::Utc::now(),
-            picked_layout: None,
-        };
-        let id = new_tab.id.clone();
-        tabs.push(new_tab.clone());
-        Ok(OpenTabOutcome {
-            tab_id: id,
-            created: Some(new_tab),
-        })
-    })?;
+    let outcome: anyhow::Result<OpenTabOutcome> =
+        hub.state.mutate_client_layout(client_id, |tabs| {
+            if let Some(existing) = tabs.iter().find(|t| {
+                matches!(
+                    &t.content,
+                    TabContent::Diff {
+                        repo_id: tab_repo,
+                        path: tab_path,
+                        against: tab_against,
+                        worktree_path: tab_worktree,
+                        host: tab_host,
+                    } if tab_repo == repo_id
+                        && tab_path == path
+                        && tab_against.as_deref() == against
+                        && tab_worktree.as_deref() == worktree_path
+                        && tab_host.as_deref() == host
+                )
+            }) {
+                return Ok(OpenTabOutcome {
+                    tab_id: existing.id.clone(),
+                    created: None,
+                });
+            }
+            let new_tab = TabEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: diff_tab_name(path, against_owned.as_deref()),
+                content: TabContent::Diff {
+                    repo_id: repo_id.to_string(),
+                    path: path.to_string(),
+                    against: against_owned.clone(),
+                    worktree_path: worktree_path_owned.clone(),
+                    host: host.map(str::to_string),
+                },
+                created_at: chrono::Utc::now(),
+                picked_layout: None,
+            };
+            let id = new_tab.id.clone();
+            tabs.push(new_tab.clone());
+            Ok(OpenTabOutcome {
+                tab_id: id,
+                created: Some(new_tab),
+            })
+        })?;
     outcome
 }
 
@@ -616,7 +656,8 @@ fn short_rev(rev: &str) -> &str {
 }
 
 /// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `ClosePane`,
-/// `MergeTabs`, `MovePane`, `SwapPanes`, `ReorderTabs`, `ExtractToNewTab`) with
+/// `MergeTabs`, `MovePane`, `SwapPanes`, `ReorderTabs`, `ExtractToNewTab`,
+/// `ForgetHostSessions`) with
 /// an `Error` to this requester only, carrying the `request_id` it asked with
 /// so the client can drop what it armed for it.
 fn send_tab_failure(
@@ -636,11 +677,15 @@ fn send_tab_failure(
 /// "open all active sessions" first-connect choice. Empty when no sessions
 /// exist (the client starts with no tabs).
 fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
-    let panes: Vec<(String, Option<String>)> = hub
+    let panes: Vec<crate::tabs::PaneRef> = hub
         .sessions
         .snapshots()
         .into_iter()
-        .map(|s| (uuid::Uuid::new_v4().to_string(), Some(s.id)))
+        .map(|s| crate::tabs::PaneRef {
+            pane_id: uuid::Uuid::new_v4().to_string(),
+            session_id: Some(s.id),
+            host: None,
+        })
         .collect();
     let Some(grid) = crate::tabs::build_grid(&panes, 0, None) else {
         return Vec::new();
@@ -654,23 +699,50 @@ fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
     }]
 }
 
-/// Auto-close every pane bound to `session_id` across all client layouts when
-/// the session is removed: a pane's sibling fills its space, and a tab whose
-/// last pane closed is removed entirely. A surviving tab untouched since its
-/// layout was picked is rebuilt in that layout, by each client's own flag.
+/// Auto-close every local pane bound to `session_id` across all client layouts
+/// when the session is removed: a pane's sibling fills its space, and a tab
+/// whose last pane closed is removed entirely. A surviving tab untouched since
+/// its layout was picked is rebuilt in that layout, by each client's own flag.
 /// Emits scoped `TabUpdated` (survivors) / `TabRemoved` (emptied tabs) per
 /// affected client.
 pub(super) fn close_session_panes(hub: &Hub, session_id: &str) {
+    if let Err(err) = close_panes_in_all_layouts(hub, |tabs| {
+        crate::tabs::close_session_panes(tabs, session_id)
+    }) {
+        warn!(?err, "close_session_panes: state.mutate failed");
+    }
+}
+
+/// [`close_session_panes`] for another daemon's sessions: close, across all
+/// client layouts, every pane of `host` whose session is in `session_ids`, or
+/// every pane of `host` when `all` is set. No matching pane emits nothing.
+fn forget_host_panes(
+    hub: &Hub,
+    host: &str,
+    session_ids: &[String],
+    all: bool,
+) -> anyhow::Result<()> {
+    close_panes_in_all_layouts(hub, |tabs| {
+        crate::tabs::forget_host_panes(tabs, host, session_ids, all)
+    })
+}
+
+/// Run `close` on every client's layout, then emit each client's scoped
+/// `TabUpdated` / `TabRemoved` events for what it closed.
+fn close_panes_in_all_layouts(
+    hub: &Hub,
+    close: impl Fn(&mut Vec<TabEntry>) -> crate::tabs::SessionCloseResult,
+) -> anyhow::Result<()> {
     // Per-client outcomes: a surviving tab to re-broadcast, or a tab id whose
     // last pane closed (already removed from that client's layout).
     enum Outcome {
         Updated(String, TabEntry),
         Removed(String, String),
     }
-    let outcomes = match hub.state.mutate_all_layouts(|layouts| {
+    let outcomes = hub.state.mutate_all_layouts(|layouts| {
         let mut out: Vec<Outcome> = Vec::new();
         for (cid, layout) in layouts.iter_mut() {
-            let result = crate::tabs::close_session_panes(&mut layout.tabs, session_id);
+            let result = close(&mut layout.tabs);
             for tab in result.updated {
                 out.push(Outcome::Updated(cid.clone(), tab));
             }
@@ -679,19 +751,14 @@ pub(super) fn close_session_panes(hub: &Hub, session_id: &str) {
             }
         }
         out
-    }) {
-        Ok(list) => list,
-        Err(err) => {
-            warn!(?err, "close_session_panes: state.mutate failed");
-            return;
-        }
-    };
+    })?;
     for outcome in outcomes {
         match outcome {
             Outcome::Updated(cid, tab) => hub.emit_tab(&cid, TabEvent::Updated(tab)),
             Outcome::Removed(cid, tab_id) => hub.emit_tab(&cid, TabEvent::Removed(tab_id)),
         }
     }
+    Ok(())
 }
 
 /// Rebind every pane bound to `old_id` to `new_id` across every client's
@@ -819,6 +886,7 @@ mod tests {
                 direction: protocol::SplitDirection::Horizontal,
                 place: protocol::SplitPlace::Second,
                 new_session_id: None,
+                host: None,
                 request_id: Some("s1".to_string()),
             },
         )
@@ -892,6 +960,7 @@ mod tests {
                 path: "src/a.rs".to_string(),
                 against: None,
                 worktree_path: None,
+                host: None,
             },
         )
         .await;
@@ -903,6 +972,43 @@ mod tests {
             ),
             "{msg:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_diff_tab_skips_the_repo_check() {
+        let (hub, _scratch) = test_hub("open-diff-foreign");
+        let open = || ClientMessage::OpenDiffTab {
+            id: "diff-open-2".to_string(),
+            repo_id: "a-repo-of-devbox".to_string(),
+            path: "src/a.rs".to_string(),
+            against: None,
+            worktree_path: None,
+            host: Some("ssh:devbox".to_string()),
+        };
+        let msg = dispatch_one(&hub, open()).await;
+        let DaemonMessage::DiffTabOpened { id, tab_id } = &msg else {
+            unreachable!("a foreign diff tab opens without a local repo: {msg:?}");
+        };
+        assert_eq!(id, "diff-open-2");
+        let tabs = hub.state.client_layout("c1");
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        assert_eq!(&tabs[0].id, tab_id);
+        assert!(
+            matches!(
+                &tabs[0].content,
+                TabContent::Diff { repo_id, host: Some(host), .. }
+                    if repo_id == "a-repo-of-devbox" && host == "ssh:devbox"
+            ),
+            "{:?}",
+            tabs[0].content
+        );
+
+        let again = dispatch_one(&hub, open()).await;
+        assert!(
+            matches!(&again, DaemonMessage::DiffTabOpened { tab_id: same, .. } if same == tab_id),
+            "the same foreign diff focuses the open tab: {again:?}"
+        );
+        assert_eq!(hub.state.client_layout("c1").len(), 1);
     }
 
     fn open_viewer(id: &str, path: &str) -> ClientMessage {
@@ -1156,9 +1262,9 @@ mod tests {
 
     /// A tab whose panes, in order, are `panes`, each bound to `s-<pane id>`.
     fn seeded_tab(id: &str, panes: &[&str]) -> TabEntry {
-        let bound: Vec<(String, Option<String>)> = panes
+        let bound: Vec<crate::tabs::PaneRef> = panes
             .iter()
-            .map(|pane| ((*pane).to_string(), Some(format!("s-{pane}"))))
+            .map(|pane| crate::server::test_support::local_pane(pane, Some(&format!("s-{pane}"))))
             .collect();
         let grid = crate::tabs::build_balanced(&bound, protocol::SplitDirection::Horizontal)
             .expect("panes build a grid");
@@ -1233,16 +1339,16 @@ mod tests {
         assert_eq!(
             sessions(src),
             vec![
-                ("p1".to_string(), Some("s-p3".to_string())),
-                ("p2".to_string(), Some("s-p2".to_string())),
+                crate::server::test_support::local_pane("p1", Some("s-p3")),
+                crate::server::test_support::local_pane("p2", Some("s-p2")),
             ]
         );
         assert_eq!(dst.id, "t2");
         assert_eq!(
             sessions(dst),
             vec![
-                ("p3".to_string(), Some("s-p1".to_string())),
-                ("p4".to_string(), Some("s-p4".to_string())),
+                crate::server::test_support::local_pane("p3", Some("s-p1")),
+                crate::server::test_support::local_pane("p4", Some("s-p4")),
             ]
         );
     }
@@ -1251,7 +1357,7 @@ mod tests {
     fn pane_ids(tab: &TabEntry) -> Vec<String> {
         crate::tabs::collect_panes(tab.grid().expect("a grid tab"))
             .into_iter()
-            .map(|(id, _)| id)
+            .map(|pane| pane.pane_id)
             .collect()
     }
 
@@ -1452,12 +1558,12 @@ mod tests {
 
         /// Panes `p1`..`p4`, `p1` bound to `doomed` and the rest to their own
         /// sessions.
-        fn four_panes() -> Vec<(String, Option<String>)> {
+        fn four_panes() -> Vec<crate::tabs::PaneRef> {
             vec![
-                ("p1".to_string(), Some("doomed".to_string())),
-                ("p2".to_string(), Some("s2".to_string())),
-                ("p3".to_string(), Some("s3".to_string())),
-                ("p4".to_string(), Some("s4".to_string())),
+                crate::server::test_support::local_pane("p1", Some("doomed")),
+                crate::server::test_support::local_pane("p2", Some("s2")),
+                crate::server::test_support::local_pane("p3", Some("s3")),
+                crate::server::test_support::local_pane("p4", Some("s4")),
             ]
         }
 
@@ -1530,6 +1636,7 @@ mod tests {
                 first: Box::new(GridNode::Pane {
                     pane_id: "p2".to_string(),
                     session_id: Some("s2".to_string()),
+                    host: None,
                 }),
                 second: Box::new(GridNode::Split {
                     direction: SplitDirection::Horizontal,
@@ -1537,10 +1644,12 @@ mod tests {
                     first: Box::new(GridNode::Pane {
                         pane_id: "p3".to_string(),
                         session_id: Some("s3".to_string()),
+                        host: None,
                     }),
                     second: Box::new(GridNode::Pane {
                         pane_id: "p4".to_string(),
                         session_id: Some("s4".to_string()),
+                        host: None,
                     }),
                 }),
             };
@@ -1553,6 +1662,91 @@ mod tests {
             assert_eq!(
                 crate::tabs::collect_panes(touched.grid().expect("grid")),
                 survivors.to_vec()
+            );
+        }
+
+        /// [`four_panes`] with `p1` showing session `doomed` of `ssh:devbox`.
+        fn four_panes_one_foreign() -> Vec<crate::tabs::PaneRef> {
+            let mut panes = four_panes();
+            panes[0].host = Some("ssh:devbox".to_string());
+            panes
+        }
+
+        fn seed_foreign_four_panes(hub: &Hub, client_id: &str, picked: Option<RearrangeLayout>) {
+            let grid = crate::tabs::build_balanced(
+                &four_panes_one_foreign(),
+                protocol::SplitDirection::Horizontal,
+            )
+            .expect("four panes build a grid");
+            hub.state
+                .mutate_client_layout(client_id, |tabs| {
+                    tabs.push(TabEntry {
+                        id: "t1".to_string(),
+                        name: "Tab".to_string(),
+                        content: TabContent::Grid { grid },
+                        created_at: Utc::now(),
+                        picked_layout: picked,
+                    });
+                })
+                .expect("seed the client layout");
+        }
+
+        fn forget_doomed() -> ClientMessage {
+            ClientMessage::ForgetHostSessions {
+                host: "ssh:devbox".to_string(),
+                session_ids: vec!["doomed".to_string()],
+                all: false,
+                request_id: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn forget_host_sessions_updates_every_client_layout() {
+            let (hub, _scratch) = test_hub("pick-forget-host");
+            seed_foreign_four_panes(&hub, "c1", Some(RearrangeLayout::Horizontal));
+            seed_foreign_four_panes(&hub, "c2", None);
+
+            close_session_panes(&hub, "doomed");
+            for cid in ["c1", "c2"] {
+                assert_eq!(
+                    crate::tabs::collect_panes(only_tab(&hub, cid).grid().expect("grid")),
+                    four_panes_one_foreign(),
+                    "{cid}: a local removal leaves the foreign pane with the same id"
+                );
+            }
+
+            let mut events = hub.tab_events.subscribe();
+            dispatch_ok(&hub, forget_doomed()).await;
+
+            let survivors = &four_panes()[1..];
+            let picked = only_tab(&hub, "c1");
+            assert_eq!(
+                picked.grid(),
+                crate::tabs::build_balanced(survivors, protocol::SplitDirection::Horizontal)
+                    .as_ref(),
+                "the untouched tab is rebuilt evenly"
+            );
+            assert_eq!(picked.picked_layout, Some(RearrangeLayout::Horizontal));
+            let touched = only_tab(&hub, "c2");
+            assert_eq!(touched.picked_layout, None);
+            assert_eq!(
+                crate::tabs::collect_panes(touched.grid().expect("grid")),
+                survivors.to_vec()
+            );
+            let updated = super::take_tab_events(&mut events);
+            assert_eq!(updated.len(), 2, "one update per client: {updated:?}");
+            assert!(
+                updated
+                    .iter()
+                    .all(|event| matches!(event, TabEvent::Updated(tab) if tab.id == "t1")),
+                "{updated:?}"
+            );
+
+            dispatch_ok(&hub, forget_doomed()).await;
+            let again = super::take_tab_events(&mut events);
+            assert!(
+                again.is_empty(),
+                "forgetting again changes nothing: {again:?}"
             );
         }
 

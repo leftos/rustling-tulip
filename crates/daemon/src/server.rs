@@ -73,6 +73,9 @@ pub struct Hub {
     pub state: Arc<AppState>,
     pub sessions: Arc<SessionRegistry>,
     pub auth_token: String,
+    /// This daemon's stable id (`<config>/daemon-id`), sent in every
+    /// `Welcome`; kept across restarts.
+    pub daemon_id: String,
     /// `tracer_protocol::daemon_proof_key(auth_token)`, derived once per run:
     /// the key `/proof` answers the hook shim's challenges with.
     pub proof_key: [u8; 32],
@@ -369,6 +372,7 @@ pub async fn run(
     remove_retired_lan_files(&dirs.config);
     let remote = crate::remote_config::load(&dirs);
     let auth_token = crate::secret::generate_auth_token();
+    let daemon_id = crate::daemon_id::load_or_create(&dirs).context("loading the daemon id")?;
 
     let (attention_tx, attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
@@ -425,6 +429,7 @@ pub async fn run(
         sessions,
         proof_key: tracer_protocol::daemon_proof_key(&auth_token),
         auth_token: auth_token.clone(),
+        daemon_id,
         tailnet_handshake_timeout: TAILNET_HANDSHAKE_TIMEOUT,
         attention_tx,
         dirs: dirs.clone(),
@@ -727,7 +732,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SwapPanes { .. }
         | ClientMessage::RearrangeTab { .. }
         | ClientMessage::MergeTabs { .. }
-        | ClientMessage::ExtractToNewTab { .. }) => tabs::handle(hub, m, ctx)?,
+        | ClientMessage::ExtractToNewTab { .. }
+        | ClientMessage::ForgetHostSessions { .. }) => tabs::handle(hub, m, ctx)?,
         m @ (ClientMessage::ResumeAbandoned { .. }
         | ClientMessage::DiscardAbandoned { .. }
         | ClientMessage::ResumeAllAbandoned

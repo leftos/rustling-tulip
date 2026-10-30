@@ -242,12 +242,14 @@ fn emptied(grid: &GridNode, known_sessions: &HashSet<String>) -> GridNode {
         GridNode::Pane {
             pane_id,
             session_id,
+            host,
         } => GridNode::Pane {
             pane_id: pane_id.clone(),
             session_id: session_id
                 .as_ref()
                 .filter(|id| known_sessions.contains(*id))
                 .cloned(),
+            host: host.clone(),
         },
         GridNode::Split {
             direction,
@@ -324,6 +326,7 @@ mod tests {
                 GridNode::Pane {
                     pane_id,
                     session_id,
+                    ..
                 } => {
                     out.push((pane_id.clone(), session_id.clone()));
                 }

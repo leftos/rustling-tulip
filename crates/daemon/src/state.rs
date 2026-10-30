@@ -644,6 +644,7 @@ mod tests {
                 grid: GridNode::Pane {
                     pane_id: format!("pane-{id}"),
                     session_id: None,
+                    host: None,
                 },
             },
             created_at: chrono::Utc::now(),

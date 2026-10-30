@@ -1799,7 +1799,7 @@ mod tests {
         let tab = hub
             .state
             .mutate_client_layout(&client_id, |tabs| {
-                let tab = crate::tabs::make_tab(None, None, tabs);
+                let tab = crate::tabs::make_tab(None, None, None, tabs);
                 tabs.push(tab.clone());
                 tab
             })

@@ -67,7 +67,7 @@ fn placements(sent: Vec<ClientMessage>) -> Vec<ClientMessage> {
 }
 
 fn is_replace(msg: &ClientMessage, tab: &str, pane: &str, session: &str) -> bool {
-    matches!(msg, ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id) }
+    matches!(msg, ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id), host: None }
         if tab_id == tab && pane_id == pane && id == session)
 }
 

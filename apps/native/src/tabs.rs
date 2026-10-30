@@ -205,6 +205,7 @@ fn walk_panes<'a>(node: &'a GridNode, out: &mut Vec<Pane<'a>>) {
         GridNode::Pane {
             pane_id,
             session_id,
+            ..
         } => out.push(Pane {
             id: pane_id,
             session: session_id.as_deref(),
@@ -870,6 +871,7 @@ impl Placement {
             Self::NewTab => ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: session_id,
+                host: None,
                 request_id,
             },
             Self::Pane {
@@ -879,6 +881,7 @@ impl Placement {
                 tab_id: tab_id.clone(),
                 pane_id: pane_id.clone(),
                 session_id,
+                host: None,
             },
             Self::Pane {
                 tab_id,
@@ -889,6 +892,7 @@ impl Placement {
                 direction: split.direction,
                 place: split.place,
                 new_session_id: session_id,
+                host: None,
                 request_id: Some(crate::new_request_id()),
             },
         }
@@ -1577,6 +1581,7 @@ pub(crate) mod tests {
         GridNode::Pane {
             pane_id: id.to_owned(),
             session_id: session.map(str::to_owned),
+            host: None,
         }
     }
 
@@ -2259,6 +2264,7 @@ pub(crate) mod tests {
             wire(&ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some("new".to_owned()),
+                host: None,
                 request_id: Some("r1".to_owned()),
             })
         );
@@ -2278,6 +2284,7 @@ pub(crate) mod tests {
                 tab_id: "t1".to_owned(),
                 pane_id: "e".to_owned(),
                 session_id: Some("new".to_owned()),
+                host: None,
             })
         );
         let split = Placement::Pane {
@@ -2299,6 +2306,7 @@ pub(crate) mod tests {
                 direction: V,
                 place: SplitPlace::Second,
                 new_session_id: Some("new".to_owned()),
+                host: None,
                 request_id: None,
             })
         );
@@ -2482,6 +2490,7 @@ pub(crate) mod tests {
             direction: V,
             place: SplitPlace::Second,
             new_session_id: None,
+            host: None,
             request_id: request_id.map(str::to_owned),
         }
     }

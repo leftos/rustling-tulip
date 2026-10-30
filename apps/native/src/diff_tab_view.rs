@@ -694,6 +694,7 @@ impl RootView {
             path: path.to_owned(),
             against,
             worktree_path: key.worktree.clone(),
+            host: None,
         });
     }
 
@@ -710,6 +711,7 @@ impl RootView {
                     path,
                     against,
                     worktree_path,
+                    ..
                 } => Some((
                     tab.id.clone(),
                     DiffTarget {
