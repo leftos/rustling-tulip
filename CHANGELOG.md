@@ -4,6 +4,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.5.1-alpha
+
 ### Fixed
 
 - A host's daemon started by an SSH connection no longer stops, taking its sessions with it, when that connection ends.
