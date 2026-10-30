@@ -335,16 +335,6 @@ mod tests {
         }
     }
 
-    /// [`next_message`] with its own hang guard.
-    async fn next_message_within(inbox: &mut Inbox, guard: Duration) -> DaemonMessage {
-        loop {
-            let msg = test_support::next_message_within(inbox, guard).await;
-            if !matches!(msg, DaemonMessage::ChatWork { .. }) {
-                return msg;
-            }
-        }
-    }
-
     /// The messages waiting on `inbox` but the strips.
     fn drain(inbox: &mut Inbox) -> Vec<DaemonMessage> {
         test_support::drain(inbox)
@@ -1263,7 +1253,7 @@ mod tests {
         fx.deliver(&live_body("P1", "m2", 0, "marker"));
         let mut marker = false;
         while !marker {
-            match next_message_within(&mut a_rx, HANG).await {
+            match next_message(&mut a_rx).await {
                 DaemonMessage::ChatAppend { entries, .. } => {
                     for entry in entries {
                         match entry {
@@ -1921,7 +1911,7 @@ mod tests {
         }
 
         async fn next_refusal(inbox: &mut Inbox) -> (String, String) {
-            refusal_of(next_message_within(inbox, HANG).await)
+            refusal_of(next_message(inbox).await)
         }
 
         fn refused(code: &str, message: &str) -> (String, String) {
@@ -2065,7 +2055,7 @@ mod tests {
                         keys.push(key.expect("the PTY is open"));
                         term.show(V174).await;
                     }
-                    msg = next_message_within(&mut s_rx, HANG) => break refusal_of(msg),
+                    msg = next_message(&mut s_rx) => break refusal_of(msg),
                 }
             };
             assert_eq!(
@@ -2496,7 +2486,7 @@ mod tests {
                 }
 
                 async fn refusal(&mut self) -> (String, String) {
-                    answer_refusal(next_message_within(&mut self.s_rx, HANG).await)
+                    answer_refusal(next_message(&mut self.s_rx).await)
                 }
             }
 
@@ -2910,14 +2900,14 @@ mod tests {
                 let (s_tx, mut s_rx) = mpsc::unbounded_channel();
                 answer(&fx, &s_tx, &format!("{prompt_id}-old"), option(1)).await;
                 assert_eq!(
-                    answer_refusal(next_message_within(&mut s_rx, HANG).await),
+                    answer_refusal(next_message(&mut s_rx).await),
                     gone,
                     "another prompt's id"
                 );
                 term.draw(V51);
                 answer(&fx, &s_tx, &prompt_id, option(1)).await;
                 assert_eq!(
-                    answer_refusal(next_message_within(&mut s_rx, HANG).await),
+                    answer_refusal(next_message(&mut s_rx).await),
                     gone,
                     "the grid shows another dialog than the mirror's"
                 );
@@ -2926,7 +2916,7 @@ mod tests {
                 let (fx, mut term) = Fixture::with_terminal("answer-unloaded", None, PERMISSION);
                 answer(&fx, &s_tx, &prompt_id, option(1)).await;
                 assert_eq!(
-                    answer_refusal(next_message_within(&mut s_rx, HANG).await),
+                    answer_refusal(next_message(&mut s_rx).await),
                     gone,
                     "a chat nobody loads has no prompt ids"
                 );
@@ -3032,7 +3022,7 @@ mod tests {
                 let (s_tx, mut s_rx) = mpsc::unbounded_channel();
                 answer(&fx, &s_tx, &prompt_id, option(1)).await;
                 assert_eq!(
-                    answer_refusal(next_message_within(&mut s_rx, HANG).await),
+                    answer_refusal(next_message(&mut s_rx).await),
                     refused(BUSY, "another message is being typed")
                 );
                 assert!(term.typed_now().is_empty(), "nothing is typed");
@@ -3153,7 +3143,7 @@ mod tests {
                     };
                     answer(&fx, &a_tx, &prompt_id, kind).await;
                     assert_eq!(
-                        answer_refusal(next_message_within(&mut a_rx, HANG).await),
+                        answer_refusal(next_message(&mut a_rx).await),
                         refused(INVALID_REQUEST, why),
                         "{text:?}"
                     );

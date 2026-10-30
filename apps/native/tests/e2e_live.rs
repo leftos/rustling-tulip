@@ -482,7 +482,7 @@ fn wait_chat(
     what: &str,
     done: impl Fn(&[ChatEntry]) -> bool,
 ) {
-    let deadline = Instant::now() + SPAWN;
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         h.cx.run_until_parked();
         let rows = h.root(|root, _| root.chat_rows(session_id));
@@ -505,7 +505,7 @@ fn wait_chat(
             });
             assert!(
                 Instant::now() < deadline,
-                "timed out after {SPAWN:?} waiting for {what}; composer (text, note, error) {composer:?}; rows {rows:#?}; newest chat message {newest:?}"
+                "hung: {what} still not seen after {HANG_GUARD:?}; composer (text, note, error) {composer:?}; rows {rows:#?}; newest chat message {newest:?}"
             );
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -531,7 +531,7 @@ fn spawn_fake_claude(
         name: None,
     });
     let mut repo_id = None;
-    h.wait_until("the fixture repo in state.json", SPAWN, |_| {
+    h.wait_until("the fixture repo in state.json", |_| {
         repo_id = daemon.repo_id(&repo);
         repo_id.is_some()
     });
@@ -559,7 +559,7 @@ fn split_beside(h: &mut Harness<'_>, client: &LiveClient, pane: &str, session_id
         new_session_id: Some(session_id.to_owned()),
         request_id: None,
     });
-    h.wait_until("a second pane beside the first", SPAWN, |h| {
+    h.wait_until("a second pane beside the first", |h| {
         h.root(|root, _| root.active_pane_ids().len() == 2)
     });
     let second = h
@@ -597,18 +597,18 @@ fn live_chat_mirror_sends_a_message_allows_the_prompt_and_sees_the_turn_end(
     // no focus events until it is activated, as the desktop does.
     h.cx.update(|window, _| window.activate_window());
     h.type_into(&pane, "");
-    h.wait_until("the first pane to take the focus", SPAWN, |h| {
+    h.wait_until("the first pane to take the focus", |h| {
         h.root(|root, _| root.focused_pane()).as_deref() == Some(pane.as_str())
     });
     h.keys("ctrl-shift-m");
-    h.wait_until("the first pane to show its chat", SPAWN, |h| {
+    h.wait_until("the first pane to show its chat", |h| {
         h.root(|root, _| root.pane_shows_chat(&pane))
     });
     assert!(
         !h.root(|root, _| root.pane_shows_chat(&terminal)),
         "the second pane keeps its terminal"
     );
-    h.wait_until("the chat's composer", SPAWN, |h| {
+    h.wait_until("the chat's composer", |h| {
         h.bounds("chat-composer").origin.x >= gpui::px(0.0)
     });
     h.click_on("chat-composer");
@@ -636,10 +636,10 @@ fn live_chat_mirror_sends_a_message_allows_the_prompt_and_sees_the_turn_end(
         })
         },
     );
-    h.wait_for_row(&terminal, "the permission dialog", SPAWN, |row| {
+    h.wait_for_row(&terminal, "the permission dialog", |row| {
         row.contains("Do you want to proceed?")
     });
-    h.wait_until("the permission card", SPAWN, |h| {
+    h.wait_until("the permission card", |h| {
         h.root(|root, _| root.chat_card(&id).is_some())
             && h.bounds("chat-card-1").origin.x >= gpui::px(0.0)
     });
@@ -669,7 +669,7 @@ fn live_chat_mirror_sends_a_message_allows_the_prompt_and_sees_the_turn_end(
         )),
         "the allowed tool call carries its result: {rows:#?}"
     );
-    h.wait_until("the answered card to leave the chat", SPAWN, |h| {
+    h.wait_until("the answered card to leave the chat", |h| {
         h.root(|root, _| root.chat_card(&id).is_none())
     });
     let idle = wait_status(&mut h, &client, from, &id, SessionStatus::Idle);
@@ -677,10 +677,7 @@ fn live_chat_mirror_sends_a_message_allows_the_prompt_and_sees_the_turn_end(
         idle.pending_input, None,
         "the turn's end leaves nothing pending"
     );
-    h.wait_for_row(
-        &terminal,
-        "the turn's answer in the terminal pane",
-        ECHO,
-        |row| row.contains(TOOL_ANSWER),
-    );
+    h.wait_for_row(&terminal, "the turn's answer in the terminal pane", |row| {
+        row.contains(TOOL_ANSWER)
+    });
 }
