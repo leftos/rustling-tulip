@@ -6,15 +6,24 @@
 //! watcher (`pty_state`) guesses the status from the byte stream; these
 //! reports are the agent's own. This module orders them, holds the ones that
 //! arrive before their session is inserted, and writes them to the record.
+//!
+//! A hook event can instead carry a live line: a piece of the answer the
+//! agent is still writing. That goes to the session's live-line channel and
+//! never touches the record.
 
 use crate::server::Hub;
 use crate::session::{PendingInsert, SessionRecord, push_recent_action};
-use agent_api::{AgentPlugin, HookReport, PendingUpdate};
+use agent_api::{AgentPlugin, HookReport, LiveLine, PendingUpdate};
 use protocol::{AgentId, SessionStatus};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::broadcast;
 use tracing::{debug, warn};
+
+/// Live lines one session's channel keeps for a subscriber that has not read
+/// them yet; past it the slowest subscriber lags and loses the oldest.
+const LIVE_LINE_CAPACITY: usize = 256;
 
 /// Bytes of a turn's last assistant message kept on the record.
 const LAST_MESSAGE_MAX_BYTES: usize = 8 * 1024;
@@ -113,6 +122,77 @@ pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, repor
     }
     if start_turns {
         hub.turns.start(session_id);
+    }
+}
+
+/// Hand one hook event for the inserted session `session_id`, whose record is
+/// `record`, to where it goes.
+///
+/// A live line the record's hook plugin reads from `body` goes to the
+/// session's live-line channel and nowhere else: it never stamps or orders
+/// the record, and never changes its status, `hook_driven`, `background` or
+/// pending input. Any other event the plugin maps is applied with
+/// [`apply_signal`]; one it does not know changes nothing.
+pub fn deliver(
+    hub: &Hub,
+    session_id: &str,
+    record: &Mutex<SessionRecord>,
+    event_time: Option<u128>,
+    body: &serde_json::Value,
+) {
+    let (line, report) = {
+        let record = crate::sync::lock(record);
+        let Some(plugin) = hub.pending_hooks.plugin_for(&record) else {
+            return;
+        };
+        if let Some(line) = plugin.map_live_line(body) {
+            (Some(line), None)
+        } else {
+            let (options, trusted) = hook_options_and_trust(&record);
+            (None, plugin.map_hook_event(body, options, trusted))
+        }
+    };
+    if let Some(line) = line {
+        hub.live_lines.publish(session_id, line);
+    } else if let Some(report) = report {
+        apply_signal(hub, session_id, event_time, &report);
+    }
+}
+
+/// Each session's live-line channel: the pieces of an answer its agent is
+/// still writing, in the order their hook events arrived (each piece carries
+/// its own place). A session's channel lives while it has a subscriber; a
+/// line for a session nobody subscribes to is dropped.
+#[derive(Clone, Default)]
+pub struct LiveLines {
+    channels: Arc<Mutex<HashMap<String, broadcast::Sender<LiveLine>>>>,
+}
+
+impl LiveLines {
+    /// Receive `session_id`'s live lines from now on. Channels left with no
+    /// subscriber are dropped here and on the next line sent to them.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no chat server subscribes to live lines yet")
+    )]
+    pub fn subscribe(&self, session_id: &str) -> broadcast::Receiver<LiveLine> {
+        let mut channels = crate::sync::lock(&self.channels);
+        channels.retain(|_, sender| sender.receiver_count() > 0);
+        channels
+            .entry(session_id.to_owned())
+            .or_insert_with(|| broadcast::channel(LIVE_LINE_CAPACITY).0)
+            .subscribe()
+    }
+
+    /// Send `line` to `session_id`'s subscribers, if it has any.
+    fn publish(&self, session_id: &str, line: LiveLine) {
+        let mut channels = crate::sync::lock(&self.channels);
+        let Some(sender) = channels.get(session_id) else {
+            return;
+        };
+        if sender.send(line).is_err() {
+            channels.remove(session_id);
+        }
     }
 }
 
@@ -314,17 +394,25 @@ impl PendingHooks {
         record: &SessionRecord,
         body: &serde_json::Value,
     ) -> Option<HookReport> {
+        let plugin = self.plugin_for(record)?;
+        let (options, trusted) = hook_options_and_trust(record);
+        plugin.map_hook_event(body, options, trusted)
+    }
+
+    /// The plugin that reads `record`'s hook events: its hook agent's. A
+    /// plain shell without a hook agent has none, and an unregistered agent
+    /// has none and is logged.
+    fn plugin_for(&self, record: &SessionRecord) -> Option<&'static dyn AgentPlugin> {
         let agent = record.hook_plugin_agent()?;
-        let Some(plugin) = (self.plugins)(&agent) else {
+        let plugin = (self.plugins)(&agent);
+        if plugin.is_none() {
             warn!(
                 session_id = %record.id,
                 "no agent plugin `{}` is registered; its hook event is not mapped",
                 agent.0
             );
-            return None;
-        };
-        let (options, trusted) = hook_options_and_trust(record);
-        plugin.map_hook_event(body, options, trusted)
+        }
+        plugin
     }
 
     /// Hold the raw event `body`, `len` bytes long, for `session_id` until
@@ -347,10 +435,7 @@ impl PendingHooks {
         prune_expired(&mut held.sessions, now);
         if let Some(record) = hub.sessions.get(session_id) {
             drop(held);
-            let report = self.map_for_record(&crate::sync::lock(&record), &body);
-            if let Some(report) = report {
-                apply_signal(hub, session_id, event_time, &report);
-            }
+            deliver(hub, session_id, &record, event_time, &body);
             return;
         }
         if len > PENDING_HOOK_MAX_BYTES_PER_SESSION {
@@ -1180,5 +1265,122 @@ mod tests {
         // A cap this small still lands on a character boundary.
         assert_eq!(truncate_bytes("éabcd", 1), "");
         assert_eq!(truncate_bytes("éabcd", 2), "é");
+    }
+
+    /// A `MessageDisplay` body carrying `delta` at `index`.
+    fn message_display(delta: &str, index: u64) -> Value {
+        json!({
+            "hook_event_name": "MessageDisplay",
+            "prompt_id": "p1",
+            "message_id": "m1",
+            "index": index,
+            "final": false,
+            "delta": delta,
+        })
+    }
+
+    /// The record fields a hook event can write.
+    fn hook_state(
+        record: &SessionRecord,
+    ) -> (
+        SessionStatus,
+        Option<u128>,
+        bool,
+        bool,
+        Option<PendingInput>,
+    ) {
+        (
+            record.status,
+            record.last_hook_time,
+            record.hook_driven,
+            record.background,
+            record.pending_input.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_live_line_leaves_status_stamp_and_flags_untouched() {
+        let (hub, _scratch) = crate::server::test_support::test_hub("live-line-state");
+        let mut waiting = record_with_open_prompt();
+        waiting.id = "waiting".to_owned();
+        let mut working = turn_record();
+        working.id = "working".to_owned();
+        working.status = SessionStatus::Working;
+        working.last_hook_time = Some(1);
+        let mut idle = turn_record();
+        idle.id = "idle".to_owned();
+        idle.status = SessionStatus::Idle;
+        idle.background = true;
+        idle.last_hook_time = Some(1);
+        for record in [waiting, working, idle] {
+            let id = record.id.clone();
+            let before = hook_state(&record);
+            hub.sessions.insert(record);
+            let mut lines = hub.live_lines.subscribe(&id);
+            let arc = hub.sessions.get(&id).expect("inserted");
+            deliver(&hub, &id, &arc, Some(50), &message_display("Red\n", 0));
+            assert_eq!(hook_state(&crate::sync::lock(&arc)), before, "{id}");
+            let line = lines.try_recv().expect("the live line reached the channel");
+            assert_eq!((line.index, line.text.as_str()), (0, "Red\n"), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_line_never_orders_a_later_status_event() {
+        let (hub, _scratch) = crate::server::test_support::test_hub("live-line-order");
+        let mut record = turn_record();
+        record.status = SessionStatus::Idle;
+        record.last_hook_time = Some(1);
+        hub.sessions.insert(record);
+        let arc = hub.sessions.get("s1").expect("inserted");
+        deliver(&hub, "s1", &arc, Some(50), &message_display("Red\n", 0));
+        deliver(
+            &hub,
+            "s1",
+            &arc,
+            Some(2),
+            &json!({"hook_event_name": "UserPromptSubmit"}),
+        );
+        let record = crate::sync::lock(&arc);
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(record.last_hook_time, Some(2));
+    }
+
+    #[tokio::test]
+    async fn live_lines_reach_only_their_sessions_subscribers_in_arrival_order() {
+        let (hub, _scratch) = crate::server::test_support::test_hub("live-line-route");
+        for id in ["s1", "s2"] {
+            let mut record = turn_record();
+            record.id = id.to_owned();
+            hub.sessions.insert(record);
+        }
+        let mut s1_lines = hub.live_lines.subscribe("s1");
+        let mut s2_lines = hub.live_lines.subscribe("s2");
+        let arc = hub.sessions.get("s1").expect("inserted");
+        for (delta, index) in [("Blue\n", 2), ("Red\n", 0), ("Yellow\n", 1)] {
+            deliver(&hub, "s1", &arc, Some(9), &message_display(delta, index));
+        }
+        let received: Vec<(u64, String)> = std::iter::from_fn(|| s1_lines.try_recv().ok())
+            .map(|line| (line.index, line.text))
+            .collect();
+        assert_eq!(
+            received,
+            [
+                (2, "Blue\n".to_owned()),
+                (0, "Red\n".to_owned()),
+                (1, "Yellow\n".to_owned()),
+            ]
+        );
+        assert!(s2_lines.try_recv().is_err(), "another session's line");
+    }
+
+    #[tokio::test]
+    async fn a_live_line_with_no_subscriber_is_dropped() {
+        let (hub, _scratch) = crate::server::test_support::test_hub("live-line-none");
+        hub.sessions.insert(turn_record());
+        let arc = hub.sessions.get("s1").expect("inserted");
+        deliver(&hub, "s1", &arc, Some(9), &message_display("Red\n", 0));
+        let mut lines = hub.live_lines.subscribe("s1");
+        assert!(lines.try_recv().is_err(), "a line before the subscription");
     }
 }

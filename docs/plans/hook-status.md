@@ -91,6 +91,7 @@ At spawn the daemon creates `sessions/<id>/` and writes `hook-settings.json` the
 | `Elicitation` | An MCP server asks for input |
 | `Stop`, `StopFailure` | Turn over, with the last assistant message |
 | `SessionEnd` | Conversation switched or ended |
+| `MessageDisplay` (no matcher) | Feeds the chat mirror's live answer text (`LiveLine`); no status effect, and a line for a session with no chat subscriber is dropped |
 
 The file is removed with the rest of `sessions/<id>/` on a graceful stop. It contains no secret: the token is read from `daemon.json` at call time.
 

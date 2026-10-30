@@ -27,9 +27,9 @@ pub use transcripts::encode_project_dir;
 use agent_api::{
     ActivityReader, ActivitySource, Agent, AgentError, AnswerRecipe, AnswerRefusal,
     ConversationPlan, ConversationQuery, EnvPlan, FoundConversation, HeadlessEvent, HookPlan,
-    HookReport, HookShim, ImportedRun, KeyLookup, ReadySignal, RecoveredRun, Refusal,
+    HookReport, HookShim, ImportedRun, KeyLookup, LiveLine, ReadySignal, RecoveredRun, Refusal,
     ResolvedRows, ScreenRules, SpawnCheck, SpawnContext, SummarizerRequest, SummarizerSpec,
-    TracerRun, workspace_prelude,
+    TracerRun, hook_vocabulary, workspace_prelude,
 };
 use options::{ClaudeProvider, PermissionMode};
 use protocol::{
@@ -463,6 +463,10 @@ impl Agent for ClaudePlugin {
         trusted: bool,
     ) -> Option<HookReport> {
         hooks::map_hook_event(body, spawn, trusted)
+    }
+
+    fn map_live_line(&self, body: &serde_json::Value) -> Option<LiveLine> {
+        hook_vocabulary::live_line(body)
     }
 
     /// `claude --settings "<path>" --resume <id>`, naming the hook settings

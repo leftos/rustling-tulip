@@ -2943,6 +2943,7 @@ mod tests {
             start_resume: Arc::default(),
             resume_reported: Arc::default(),
             pending_hooks: crate::hook_status::PendingHooks::default(),
+            live_lines: crate::hook_status::LiveLines::default(),
             devices: Arc::new(std::sync::Mutex::new(devices)),
             pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
             pairing_waiters: Arc::default(),

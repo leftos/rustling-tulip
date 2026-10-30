@@ -160,6 +160,25 @@ pub struct HookReport {
     pub weak_idle: bool,
 }
 
+/// A piece of the answer the agent is writing, as one of its hook events
+/// reports it while the answer is still on screen, before its transcript
+/// holds it. It says nothing about the session's status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveLine {
+    /// The text, as the agent displayed it.
+    pub text: String,
+    /// Where the text sits in its message: pieces can arrive out of order,
+    /// and this places them.
+    pub index: u64,
+    /// The key that groups the pieces of one message, when the event names
+    /// one.
+    pub message_key: Option<String>,
+    /// The key of the prompt whose turn wrote the message, when the event
+    /// names one; the agent's transcript stamps the prompt's own record with
+    /// it.
+    pub prompt_key: Option<String>,
+}
+
 /// One change a plugin read from a line of its CLI's headless output, for the
 /// daemon to apply to the session's record in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -673,6 +692,13 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
+    /// The live line one hook payload carries, or `None` for a payload that
+    /// carries none. A payload that answers `Some` here says nothing about
+    /// its session's status.
+    fn map_live_line(&self, _body: &serde_json::Value) -> Option<LiveLine> {
+        None
+    }
+
     /// The command a recovered shell types to resume conversation
     /// `conversation_id` in the agent, after the shell's spawn wrote the hook
     /// files `hook_files` from [`Self::hook_plan`] (empty when it wrote
@@ -878,6 +904,9 @@ pub trait AgentPlugin: Send + Sync {
         spawn: Option<&OptionValues>,
         trusted: bool,
     ) -> Option<HookReport>;
+
+    /// [`Agent::map_live_line`].
+    fn map_live_line(&self, body: &serde_json::Value) -> Option<LiveLine>;
 
     /// [`Agent::shell_resume`] over `opts` decoded.
     ///
@@ -1091,6 +1120,10 @@ impl<A: Agent> AgentPlugin for A {
             }
         });
         Agent::map_hook_event(self, body, opts.as_ref(), trusted)
+    }
+
+    fn map_live_line(&self, body: &serde_json::Value) -> Option<LiveLine> {
+        Agent::map_live_line(self, body)
     }
 
     fn shell_resume(

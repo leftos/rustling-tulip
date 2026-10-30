@@ -17,8 +17,10 @@ const HOOK_BODY_LIMIT: usize = 1 << 20;
 /// the body holds and whether or not the session exists, since the shim
 /// ignores it and a rejected event must never hold up the agent.
 ///
-/// The session's hook plugin maps the body (see
-/// [`crate::hook_status::PendingHooks::map_for_record`]). An event for a
+/// The session's hook plugin reads the body (see
+/// [`crate::hook_status::deliver`]): a live line goes to the session's
+/// live-line channel, untouched by the ordering below, and any other event is
+/// mapped and applied. An event for a
 /// session id the registry does not hold yet is held raw in
 /// [`crate::hook_status::PendingHooks`], then mapped and applied when the
 /// spawn inserts the record: the tracer starts the child, whose hooks fire at
@@ -61,12 +63,7 @@ pub(super) async fn hook_handler(
             .defer(&hub, &session_id, event_time, value, body.len());
         return StatusCode::NO_CONTENT.into_response();
     };
-    let report = hub
-        .pending_hooks
-        .map_for_record(&crate::sync::lock(&record), &value);
-    if let Some(report) = report {
-        crate::hook_status::apply_signal(&hub, &session_id, event_time, &report);
-    }
+    crate::hook_status::deliver(&hub, &session_id, &record, event_time, &value);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -211,6 +208,35 @@ mod tests {
                 }],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn hook_route_sends_a_live_line_to_the_sessions_channel() {
+        let (hub, _scratch) = test_hub("hook-live-line");
+        hub.sessions.insert(idle_record("s1"));
+        let mut lines = hub.live_lines.subscribe("s1");
+        let body = concat!(
+            r#"{"hook_event_name":"MessageDisplay","prompt_id":"p1","message_id":"m1","#,
+            r#""index":1,"final":true,"delta":"Yellow"}"#,
+        );
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request("s1", Some("test-token"), Some("100"), body))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let line = lines.try_recv().expect("the route sent the live line");
+        assert_eq!(
+            line,
+            agent_api::LiveLine {
+                text: "Yellow".to_owned(),
+                index: 1,
+                message_key: Some("m1".to_owned()),
+                prompt_key: Some("p1".to_owned()),
+            }
+        );
+        let snapshot = snapshot_of(&hub, "s1");
+        assert_eq!(snapshot.status, SessionStatus::Idle);
+        assert_eq!(snapshot.pending_input, None);
     }
 
     #[tokio::test]

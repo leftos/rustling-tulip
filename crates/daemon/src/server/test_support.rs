@@ -163,6 +163,7 @@ pub(super) fn build_test_hub(
         start_resume: Arc::default(),
         resume_reported: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
+        live_lines: crate::hook_status::LiveLines::default(),
         devices: Arc::new(std::sync::Mutex::new(devices)),
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: super::pairing::PairingWaiters::default(),

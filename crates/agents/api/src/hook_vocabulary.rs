@@ -5,7 +5,7 @@
 //! copying it. Reading is tolerant: an unknown event, an unknown field and a
 //! body that is not a JSON object are all ignored rather than refused.
 
-use crate::{HookReport, PendingUpdate};
+use crate::{HookReport, LiveLine, PendingUpdate};
 use protocol::{PendingInput, PendingQuestion, SessionStatus};
 use serde_json::Value;
 
@@ -101,6 +101,34 @@ fn reports_background_work(body: &Value) -> bool {
 pub fn map(body: &Value) -> Option<HookReport> {
     let signal = map_signal(body)?;
     Some(report(signal, &details(body)))
+}
+
+/// The live line a `MessageDisplay` payload carries: its `delta` as the
+/// text, its `index`, its `message_id` as the message key and its
+/// `prompt_id` as the prompt key.
+///
+/// Any other event answers `None`, as does a `MessageDisplay` without a
+/// string `delta` or a whole-number `index`, since such a line has no text or
+/// no place. An empty or missing id is no key. [`map`] answers `None` for
+/// this event, so it never changes or orders the session's status. Never
+/// panics.
+#[must_use]
+pub fn live_line(body: &Value) -> Option<LiveLine> {
+    if body.get("hook_event_name")?.as_str()? != "MessageDisplay" {
+        return None;
+    }
+    let key = |name: &str| {
+        body.get(name)
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    };
+    Some(LiveLine {
+        text: body.get("delta")?.as_str()?.to_owned(),
+        index: body.get("index")?.as_u64()?,
+        message_key: key("message_id"),
+        prompt_key: key("prompt_id"),
+    })
 }
 
 /// The report of an event whose status and pending input are `signal`, with
@@ -410,6 +438,91 @@ mod tests {
     /// `body` as [`map`] reports it.
     fn map_event(body: &Value) -> Option<HookReport> {
         map(body)
+    }
+
+    /// A `MessageDisplay` payload carrying `delta` at `index`.
+    fn message_display(delta: &str, index: u64) -> Value {
+        json!({
+            "hook_event_name": "MessageDisplay",
+            "prompt_id": "p1",
+            "message_id": "m1",
+            "index": index,
+            "final": false,
+            "delta": delta,
+        })
+    }
+
+    #[test]
+    fn message_display_maps_to_a_live_line() {
+        assert_eq!(
+            live_line(&message_display("Red\n", 0)),
+            Some(LiveLine {
+                text: "Red\n".to_owned(),
+                index: 0,
+                message_key: Some("m1".to_owned()),
+                prompt_key: Some("p1".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn message_display_lines_out_of_order_keep_their_index() {
+        let lines: Vec<(u64, String)> = [("Blue\n", 2), ("Red\n", 0), ("Yellow\n", 1)]
+            .into_iter()
+            .map(|(delta, index)| {
+                let line = live_line(&message_display(delta, index)).expect("a live line");
+                (line.index, line.text)
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (2, "Blue\n".to_owned()),
+                (0, "Red\n".to_owned()),
+                (1, "Yellow\n".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn message_display_without_ids_has_no_keys() {
+        let body = json!({
+            "hook_event_name": "MessageDisplay",
+            "message_id": "",
+            "index": 3,
+            "delta": "text",
+        });
+        let line = live_line(&body).expect("a live line");
+        assert_eq!((line.message_key, line.prompt_key), (None, None));
+    }
+
+    #[test]
+    fn message_display_without_text_or_index_is_no_line() {
+        for body in [
+            json!({"hook_event_name": "MessageDisplay", "index": 0}),
+            json!({"hook_event_name": "MessageDisplay", "index": 0, "delta": 5}),
+            json!({"hook_event_name": "MessageDisplay", "delta": "text"}),
+            json!({"hook_event_name": "MessageDisplay", "index": -1, "delta": "text"}),
+            json!({"hook_event_name": "MessageDisplay", "index": "0", "delta": "text"}),
+        ] {
+            assert_eq!(live_line(&body), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn only_message_display_carries_a_live_line() {
+        for body in [
+            json!({"hook_event_name": "Stop", "index": 0, "delta": "text"}),
+            json!({"index": 0, "delta": "text"}),
+            json!("not an object"),
+        ] {
+            assert_eq!(live_line(&body), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn message_display_reports_no_status() {
+        assert_eq!(map(&message_display("Red\n", 0)), None);
     }
 
     /// The report `body` maps to.

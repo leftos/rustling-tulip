@@ -97,6 +97,7 @@ fn build_hook_settings(tracer_exe: &Path, session_id: &str, config_dir: &Path) -
         "Stop",
         "StopFailure",
         "SessionEnd",
+        "MessageDisplay",
     ]
     .into_iter()
     .map(|event| {
@@ -281,6 +282,7 @@ mod tests {
             events,
             [
                 "Elicitation",
+                "MessageDisplay",
                 "Notification",
                 "PermissionRequest",
                 "PostToolUse",
@@ -311,6 +313,7 @@ mod tests {
             "Stop",
             "StopFailure",
             "SessionEnd",
+            "MessageDisplay",
         ] {
             assert!(
                 groups(&document, event)[0].get("matcher").is_none(),
@@ -362,6 +365,37 @@ mod tests {
                 "{event} must run in the background, not block the turn"
             );
         }
+    }
+
+    /// The `MessageDisplay` body Claude Code 2.1.314 sent for a three-line
+    /// answer, its transcript path's user folder redacted.
+    const MESSAGE_DISPLAY: &str = include_str!("../tests/fixtures/hooks/message_display.json");
+
+    fn message_display_body() -> Value {
+        serde_json::from_str(MESSAGE_DISPLAY).expect("the fixture is JSON")
+    }
+
+    #[test]
+    fn captured_message_display_maps_to_a_live_line() {
+        let line = agent_api::Agent::map_live_line(&crate::ClaudePlugin, &message_display_body())
+            .expect("the captured body carries a live line");
+        assert_eq!(
+            line,
+            agent_api::LiveLine {
+                text: "Red — the colour of fire and ripe strawberries\n\
+                       Yellow — bright like a summer sun\n\
+                       Blue — calm as a clear sky"
+                    .to_owned(),
+                index: 0,
+                message_key: Some("ea5975fb-ea6c-4b0c-a588-87e760f6e3cc".to_owned()),
+                prompt_key: Some("7e18acba-1e68-409c-9232-4b0d7764938a".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn captured_message_display_reports_no_status() {
+        assert_eq!(map_hook_event(&message_display_body(), None, false), None);
     }
 
     #[test]

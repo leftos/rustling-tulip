@@ -153,6 +153,8 @@ pub struct Hub {
     /// Hook events that arrived for a session id before its spawn inserted
     /// it; applied to the record at insertion (bounded by age and count).
     pub pending_hooks: crate::hook_status::PendingHooks,
+    /// Each session's live-line channel, fed by the hook route.
+    pub live_lines: crate::hook_status::LiveLines,
     /// The approved tailnet devices, one record each holding only the hex
     /// SHA-256 of its token (`config/devices.json`).
     pub devices: Arc<std::sync::Mutex<crate::devices::DeviceStore>>,
@@ -439,6 +441,7 @@ pub async fn run(
         start_resume: Arc::default(),
         resume_reported: Arc::default(),
         pending_hooks: crate::hook_status::PendingHooks::default(),
+        live_lines: crate::hook_status::LiveLines::default(),
         devices: Arc::new(std::sync::Mutex::new(crate::devices::DeviceStore::load(
             &crate::paths::devices_file(&dirs),
         ))),
