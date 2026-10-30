@@ -40,11 +40,11 @@ Orchestrator decisions:
 - `RootView` holds `hosts: HashMap<HostKey, HostConn>`: `tx`, `Connection`, handshake, and that host's mirrors (agents, agent settings and commands, keep-awake, remote status, worktrees root, history, devices).
 - `RootDeps` takes a transport factory, `open(target) -> (tx, events)`, in place of one `tx`/`events` pair: the real one spawns a `Net`, the test one registers fake channels.
 - `send(msg)` becomes `send_to(host, msg)` with no default: tab and layout messages go to `Local`, everything else to the owning host, found by the sidebar lookups that return the host.
-- `reset_for_target` / `reset_for_new_daemon` become `reset_host(host)`, dropping only that host's slice.
+- `reset_for_target` / `reset_for_new_daemon` become `reset_host(host)`, which drops a host's mirrors (agents, daemon settings, remote status, scans) and what showed its sessions; `clear_host_slice` is the deeper reset when the Local slot's target changes, and a remote host's disconnect clears nothing.
 
 ### Per-host state
 
-- `SidebarModel` holds a `HostSlice { repos, workspaces, sessions, agents }` per host; the `Sessions`, `Repos` and `Workspaces` folds replace only the sending host's slice; id lookups return `(HostKey, &item)`.
+- `SidebarModel` holds a `HostSlice` per host (repos, workspaces, sessions, agents, and the container and session orders, attention and unseen sets kept from them); a remote host's container keys are `{host key}::{key}`; the `Sessions`, `Repos` and `Workspaces` folds replace only the sending host's slice; id lookups return `(HostKey, &item)`.
 - Keyed by `(host, id)`: `seen_sessions` and notifications, dashboard facts (`WatchDashboard` per host), the source-control model and pins, the file-fetch registry (ended per host on its disconnect), `Capabilities` (`remote_mode.rs`), `PopoutKey::Session`.
 - Foreign-pane pruning: when a remote host's `Sessions` omits an id a pane references, the client sends `ForgetHostSessions` to Local; nothing is pruned while a host is offline.
 
@@ -57,11 +57,11 @@ Orchestrator decisions:
 
 ## Items
 
-- [ ] MH.1 (RT-563) Protocol and daemon: pane, tab and diff `host`, foreign references in the tab code, `ForgetHostSessions`, `Welcome.daemon_id`.
-- [ ] MH.2 (RT-564) Transport: `HostKey`, a `Net` per host, tagged events, the `RootDeps` factory, `send_to`; the UI-spec harness gains `harness.host(name)` sub-daemons while `Harness::connect()` stays Local. Behaviour unchanged.
-- [ ] MH.3 (RT-565) Per-host state: sidebar slices, per-host mirrors, notifications, dashboard, source control, file fetch, capabilities, `reset_host`; spec `ui_multi_host.rs`.
+- [x] MH.1 (RT-563) Protocol and daemon: pane, tab and diff `host`, foreign references in the tab code, `ForgetHostSessions`, `Welcome.daemon_id`.
+- [x] MH.2 (RT-564) Transport: `HostKey`, a `Net` per host, tagged events, the `RootDeps` factory, `send_to`; `Harness::connect()` stays Local. Behaviour unchanged.
+- [x] MH.3 (RT-565) Per-host state: sidebar slices, per-host mirrors, notifications, dashboard, source control, file fetch, capabilities, Recover, session pop-out keys, `reset_host`; the UI-spec harness gains `Harness::host(target)` sub-daemons; spec `ui_multi_host.rs`.
 - [ ] MH.4 (RT-566) Connect every enabled host: remove `SwitchTarget`, `last_target` and the boot target; Connections as host manager with switches, per-host pairing and daemon-id dedupe; offline hosts dimmed, the overlay for Local only.
 - [ ] MH.5 (RT-567) Sidebar host groups with `+ Shell`, host chips on pills and pane headers; shot view `multi-host`.
-- [ ] MH.6 (RT-568) Mixed tabs: place remote spawns and duplicates into Local's layout, move and drag remote sessions into any tab, prune foreign panes, host in pop-out keys, remote sessions in no tab.
+- [ ] MH.6 (RT-568) Mixed tabs: place remote spawns and duplicates into Local's layout, move and drag remote sessions into any tab, prune foreign panes, host in pane and tab pop-out keys, remote sessions in no tab.
 - [ ] MH.7 (RT-569) Cross-host spawn and settings: grouped spawn picker, quick-shell host, the Shell dialog's host field, the Settings host selector, Recover grouped by host.
 - [ ] MH.8 (RT-570) Live proof and docs: `e2e_multi_host.rs` (a local daemon plus a second isolated one through fake-ssh and the bridge), the hand checklist, `docs/native-client.md`, `docs/architecture.md`, glossary, CLAUDE.md, the changelog; this file promoted and deleted.
