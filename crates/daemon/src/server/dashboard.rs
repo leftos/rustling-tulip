@@ -84,7 +84,7 @@ mod tests {
     use crate::dashboard::test_support::Script;
     use crate::dashboard::{Dashboard, TICK};
     use crate::server::Hub;
-    use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyForwarders};
+    use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyLane};
     use crate::server::dispatch;
     use crate::server::test_support::{
         ScratchDir, drain, git_init, git_ok, hello, idle_record, loopback_ws_client,
@@ -105,13 +105,13 @@ mod tests {
 
     async fn send(hub: &Hub, conn: &Conn, msg: ClientMessage) {
         let (file_tx, _file_rx) = mpsc::channel(1);
-        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let pty_lane: Arc<PtyLane> = Arc::default();
         let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
         let local = AuthKind::Local;
         let ctx = ConnCtx {
             out_tx: &conn.out_tx,
             file_tx: &file_tx,
-            pty_forwarders: &pty_forwarders,
+            pty_lane: &pty_lane,
             fetches: &fetches,
             client_id: "c1",
             client_name: None,

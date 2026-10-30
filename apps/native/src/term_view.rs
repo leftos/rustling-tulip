@@ -135,7 +135,9 @@ struct CachedLinks {
 /// The session the pane shows, and the load of its scrollback. Only the
 /// first scrollback reply after an attach is written: a later one answers an
 /// earlier attach of the same session and would replay its history over the
-/// live screen.
+/// live screen. The one exception is the daemon's resync, a reply without a
+/// request id after the load finished: it starts the pane over as an attach,
+/// and is written to the fresh terminal.
 #[derive(Debug, Default)]
 struct Attachment {
     session_id: Option<String>,
@@ -655,6 +657,18 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// Starts over as an attach does, for the daemon's resync: a fresh
+    /// terminal waiting for the scrollback reply in hand, so the pane shows
+    /// what a fresh attach would.
+    fn reattach_for_resync(&mut self) {
+        if let Some(context) = &self.session {
+            let cursor = context.default_cursor_shape();
+            let plain_shell = context.mode == SessionMode::PlainShell;
+            self.fresh_terminal(cursor, plain_shell);
+        }
+        self.attachment.load = Some(ScrollbackLoad::start((self.now)()));
+    }
+
     /// Replaces the terminal, dropping any selection or mouse gesture on the
     /// old one. A plain shell's terminal keeps the commands the shell marks.
     fn fresh_terminal(&mut self, cursor: CursorShape, plain_shell: bool) {
@@ -838,11 +852,43 @@ impl TerminalPane {
     /// loaded unless the daemon restarted the forwarder for it. Ignored,
     /// and not decoded, unless it is the first reply since the attach and
     /// answers the latest request.
+    ///
+    /// A reply without a request id is the daemon's resync of a session whose
+    /// output outran this connection: dropped while the pane's own load is
+    /// pending (that request's reply supersedes it), and otherwise written to
+    /// a fresh terminal exactly as an attach's reply is.
     pub fn on_scrollback(
         &mut self,
         reply: &ScrollbackReply,
         cx: &mut Context<Self>,
     ) -> Result<(), base64::DecodeError> {
+        let Some(state) = self.attachment.load.as_ref().map(ScrollbackLoad::state) else {
+            return Ok(());
+        };
+        let mut resync_history = None;
+        if reply.request_id.is_none() {
+            if matches!(state, LoadState::Loading(_)) {
+                tracing::debug!(
+                    "dropping a resync of session {:?} while its own load is pending",
+                    reply.session_id
+                );
+                return Ok(());
+            }
+            // Decoded before the pane starts over, so a resync that does not
+            // decode leaves the pane as it was.
+            match B64.decode(&reply.data_b64) {
+                Ok(history) => resync_history = Some(history),
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        "keeping the pane of session {:?}: its resync did not decode",
+                        reply.session_id
+                    );
+                    return Ok(());
+                }
+            }
+            self.reattach_for_resync();
+        }
         let Some(load) = self.attachment.load.as_mut() else {
             return Ok(());
         };
@@ -850,7 +896,10 @@ impl TerminalPane {
             reply.request_id.as_deref(),
             reply.forwarder_restarted,
             reply.truncated,
-            || B64.decode(&reply.data_b64),
+            || match resync_history {
+                Some(history) => Ok(history),
+                None => B64.decode(&reply.data_b64),
+            },
         )?;
         match verdict {
             ReplyVerdict::Accepted(steps) => {

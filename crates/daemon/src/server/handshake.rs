@@ -1,10 +1,10 @@
 //! The WebSocket handshake: reading and authorising `Hello`, negotiating the protocol version, `Welcome`, and the initial state push.
 use super::Hub;
-use super::connection::AuthKind;
+use super::connection::{AuthKind, Inbound};
 use super::live_devices::LiveConnection;
 use crate::devices::DeviceId;
 use anyhow::{Context as _, anyhow};
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::Message;
 use futures::StreamExt as _;
 use protocol::{
     ClientMessage, ClonableLayout, DaemonMessage, InboundClientMessage, SUPPORTED_PROTOCOL_VERSIONS,
@@ -55,11 +55,11 @@ pub const TAILNET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`Hub::tailnet_handshake_timeout`] to send it; the loopback listener keeps
 /// an un-timed handshake. `Ok(None)` when the connection's `life` is
 /// cancelled first: the listener server that accepted it ended.
-pub(super) async fn handshake(
+pub(super) async fn handshake<R: Inbound>(
     hub: &Hub,
     auth: &AuthKind,
     life: &CancellationToken,
-    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    receiver: &mut R,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> anyhow::Result<Option<Handshake>> {
     let hello = async {
@@ -80,11 +80,11 @@ pub(super) async fn handshake(
     }
 }
 
-async fn read_hello(
+async fn read_hello<R: Inbound>(
     hub: &Hub,
     auth: &AuthKind,
     life: &CancellationToken,
-    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    receiver: &mut R,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> anyhow::Result<Handshake> {
     let Some(Ok(msg)) = receiver.next().await else {

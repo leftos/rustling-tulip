@@ -132,10 +132,11 @@ impl ScrollbackLoad {
     }
 
     /// A scrollback reply, written if it is the first one while loading and
-    /// answers the latest request. A reply without an id comes from a daemon
-    /// that echoes none, and is never stale. `history` is only called, to
-    /// decode the reply, once it is accepted; its error leaves the load as
-    /// it was.
+    /// answers the latest request. A reply without an id is never stale: an
+    /// id-less `Scrollback` is the daemon's resync, which the pane handles
+    /// before it reaches the load, starting a fresh load for it. `history` is
+    /// only called, to decode the reply, once it is accepted; its error
+    /// leaves the load as it was.
     ///
     /// When the daemon says `forwarder_restarted`, the output held back so
     /// far came from the stream it stopped and is already in the history: it

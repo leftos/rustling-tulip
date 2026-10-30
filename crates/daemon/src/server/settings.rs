@@ -583,7 +583,7 @@ mod tests {
     /// fails the first assertion.
     #[tokio::test]
     async fn a_scan_does_not_hold_the_caller() {
-        use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyForwarders};
+        use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyLane};
         use std::collections::HashMap;
         use tokio::sync::Mutex as AsyncMutex;
 
@@ -597,13 +597,13 @@ mod tests {
         .expect("write the workspace file");
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let (file_tx, _file_rx) = mpsc::channel(1);
-        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let pty_lane: Arc<PtyLane> = Arc::default();
         let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
         let local = AuthKind::Local;
         let ctx = ConnCtx {
             out_tx: &out_tx,
             file_tx: &file_tx,
-            pty_forwarders: &pty_forwarders,
+            pty_lane: &pty_lane,
             fetches: &fetches,
             client_id: "c1",
             client_name: None,

@@ -721,7 +721,7 @@ pub(super) fn rebind_session_panes(hub: &Hub, old_id: &str, new_id: &str) {
 )]
 mod tests {
     use super::*;
-    use crate::server::connection::{AuthKind, FetchRegistry, PtyForwarders};
+    use crate::server::connection::{AuthKind, FetchRegistry, PtyLane};
     use crate::server::dispatch;
     use crate::server::test_support::{dispatch_one, drain, seed_two_pane_layout, test_hub};
     use crate::state::AppState;
@@ -1120,13 +1120,13 @@ mod tests {
     async fn dispatch_all(hub: &Hub, msg: ClientMessage) -> Vec<DaemonMessage> {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let (file_tx, _file_rx) = mpsc::channel(1);
-        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let pty_lane: Arc<PtyLane> = Arc::default();
         let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
         let local = AuthKind::Local;
         let ctx = ConnCtx {
             out_tx: &out_tx,
             file_tx: &file_tx,
-            pty_forwarders: &pty_forwarders,
+            pty_lane: &pty_lane,
             fetches: &fetches,
             client_id: "c1",
             client_name: None,
@@ -1415,13 +1415,13 @@ mod tests {
         async fn dispatch_ok(hub: &Hub, msg: ClientMessage) {
             let (out_tx, _out_rx) = mpsc::unbounded_channel();
             let (file_tx, _file_rx) = mpsc::channel(1);
-            let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+            let pty_lane: Arc<PtyLane> = Arc::default();
             let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
             let local = AuthKind::Local;
             let ctx = ConnCtx {
                 out_tx: &out_tx,
                 file_tx: &file_tx,
-                pty_forwarders: &pty_forwarders,
+                pty_lane: &pty_lane,
                 fetches: &fetches,
                 client_id: "c1",
                 client_name: None,

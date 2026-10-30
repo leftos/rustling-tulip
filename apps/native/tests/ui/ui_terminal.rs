@@ -1344,3 +1344,43 @@ fn bold_setting_is_applied(cx: &mut TestAppContext) {
         "the app default is saved"
     );
 }
+
+#[gpui::test]
+fn an_idless_scrollback_is_dropped_while_the_pane_loads(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+
+    h.answer_scrollback_to("s1", None, true, b"RESYNC\r\n");
+    assert!(
+        !h.grid_text("p1").join("\n").contains("RESYNC"),
+        "a resync is dropped while the pane's own load is pending"
+    );
+    h.answer_scrollback("s1", b"OWN\r\n");
+    let screen = h.grid_text("p1").join("\n");
+    assert!(
+        screen.contains("OWN") && !screen.contains("RESYNC"),
+        "the pane's own reply is written, got {screen:?}"
+    );
+}
+
+#[gpui::test]
+fn an_idless_scrollback_replaces_a_loaded_panes_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    h.answer_scrollback("s1", b"OLD-HISTORY\r\n");
+    h.pty_raw("s1", b"OLD-LIVE\r\n");
+
+    h.answer_scrollback_to("s1", None, true, b"RESYNCED\r\n");
+    h.pty_raw("s1", b"AFTER");
+    let screen = h.grid_text("p1").join("\n");
+    assert!(
+        screen.contains("RESYNCED") && screen.contains("AFTER"),
+        "the resync and the output after it show, got {screen:?}"
+    );
+    assert!(
+        !screen.contains("OLD-HISTORY") && !screen.contains("OLD-LIVE"),
+        "only the resync's content shows, as after a fresh attach, got {screen:?}"
+    );
+}

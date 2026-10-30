@@ -106,7 +106,7 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 
     use crate::env_secrets::test_support::scratch_async;
-    use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyForwarders};
+    use crate::server::connection::{AuthKind, ConnCtx, FetchRegistry, PtyLane};
     use crate::server::handshake::push_initial_state;
     use crate::server::test_support::{
         billing_hub, drain, hello, loopback_ws_client, next_message, test_hub, test_peer, ws_next,
@@ -147,12 +147,12 @@ mod tests {
 
     async fn send_as(hub: &Hub, conn: &Conn, auth: &AuthKind, msg: ClientMessage) {
         let (file_tx, _file_rx) = mpsc::channel(1);
-        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let pty_lane: Arc<PtyLane> = Arc::default();
         let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
         let ctx = ConnCtx {
             out_tx: &conn.out_tx,
             file_tx: &file_tx,
-            pty_forwarders: &pty_forwarders,
+            pty_lane: &pty_lane,
             fetches: &fetches,
             client_id: "c1",
             client_name: None,

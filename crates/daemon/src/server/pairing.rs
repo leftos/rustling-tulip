@@ -15,12 +15,12 @@
 //! for a block while it holds [`Hub::pairing`], so `pairing` comes before
 //! `devices` too; nothing takes `pairing` or `live_devices` while holding
 //! `devices`.
-use super::connection::{AuthKind, ConnCtx};
+use super::connection::{AuthKind, ConnCtx, ConnLife, Inbound};
 use super::{Hub, StateEvent};
 use crate::devices::{
     CODE_LIFETIME, PairError, PairingBook, PendingView, REQUEST_LIFETIME, RequestId,
 };
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::Message;
 use chrono::Utc;
 use futures::StreamExt as _;
 use protocol::{
@@ -29,9 +29,9 @@ use protocol::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Each waiting request's connection, by request id.
@@ -99,6 +99,8 @@ enum Event {
     Shutdown(bool),
     /// The listener server that accepted the connection ended.
     ServerEnded,
+    /// The send pump gave up on the device.
+    Dead,
 }
 
 /// The state of one pairing connection.
@@ -106,6 +108,8 @@ struct PairingConn<'a> {
     hub: &'a Hub,
     peer: &'a tailnet::PeerIdentity,
     out_tx: &'a mpsc::UnboundedSender<DaemonMessage>,
+    /// The connection's `Pong` count, raised on each `Pong` frame.
+    pongs: &'a AtomicU64,
     /// Registered in [`Hub::pairing_waiters`] under this connection's request.
     waiter_tx: mpsc::UnboundedSender<DaemonMessage>,
     /// This connection's request, once it asked.
@@ -126,14 +130,16 @@ struct PairingConn<'a> {
 /// Without a request the connection closes [`Hub::tailnet_handshake_timeout`]
 /// after its `Welcome`; with one it lives while the request waits. It closes
 /// at once when its `life` is cancelled (the listener server that accepted it
-/// ended). Whatever ends it, its own request goes from the book.
-pub(super) async fn pairing_session(
+/// ended) or the send pump gives up on the device (`dead`). Whatever ends it,
+/// its own request goes from the book.
+pub(super) async fn pairing_session<R: Inbound>(
     hub: &Hub,
-    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    receiver: &mut R,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     peer: &tailnet::PeerIdentity,
-    life: &CancellationToken,
+    conn_life: &ConnLife,
 ) {
+    let life = &conn_life.life;
     info!(device = %peer.name, login = %peer.login, "tailnet device without a valid token; pairing only");
     let _ = out_tx.send(DaemonMessage::DevicePairFailed {
         reason: DEVICE_NOT_APPROVED.to_owned(),
@@ -143,6 +149,7 @@ pub(super) async fn pairing_session(
         hub,
         peer,
         out_tx,
+        pongs: &conn_life.pongs,
         waiter_tx,
         own: None,
         saw_approved: false,
@@ -159,6 +166,7 @@ pub(super) async fn pairing_session(
         let event = tokio::select! {
             biased;
             () = life.cancelled() => Event::ServerEnded,
+            () = conn_life.dead.cancelled() => Event::Dead,
             () = &mut idle, if conn.own.is_none() => Event::Idle,
             frame = receiver.next() => Event::Frame(frame),
             Some(msg) = waiter_rx.recv() => Event::Waiter(Box::new(msg)),
@@ -177,6 +185,10 @@ pub(super) async fn pairing_session(
                 while let Ok(msg) = waiter_rx.try_recv() {
                     let _ = out_tx.send(msg);
                 }
+                Flow::Close
+            }
+            Event::Dead => {
+                info!(device = %peer.name, "pairing connection closed: the send pump gave up on the device");
                 Flow::Close
             }
             Event::Frame(frame) => conn.on_frame(frame),
@@ -211,7 +223,11 @@ impl PairingConn<'_> {
         let text = match message {
             Message::Text(text) => text,
             Message::Close(_) => return Flow::Close,
-            Message::Ping(_) | Message::Pong(_) => return Flow::Stay,
+            Message::Pong(_) => {
+                self.pongs.fetch_add(1, Ordering::SeqCst);
+                return Flow::Stay;
+            }
+            Message::Ping(_) => return Flow::Stay,
             Message::Binary(_) => return self.stray(),
         };
         match InboundClientMessage::from_json_str(text.as_str()) {

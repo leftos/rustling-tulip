@@ -1,11 +1,12 @@
 //! Live sessions: listing, duplicating, renaming and restyling them, their input and scrollback, the per-connection session event stream, and stopping, parking and discarding them.
-use super::connection::{ConnCtx, PtyForwarders};
+use super::connection::{ConnCtx, PtyLane};
 use super::git::{blocked_discard_message, probe_locking_processes, retry_worktree_cleanup};
 use super::recovery::{mark_history_recovered, record_end, recovery_conversation_exists};
 use super::spawn::{remove_hook_settings, send_spawn_failure, spawn_session, target_uses_worktree};
 use super::tabs::close_session_panes;
 use super::{Hub, StateEvent};
 use crate::branch_fate::{FateInput, SessionBase};
+use crate::paths::Dirs;
 use crate::registry::{set_repo_appearance, set_workspace_appearance};
 use crate::session::{
     ScrollbackSnapshot, SessionEvent, SessionRegistry, UpdateOrigin, build_replay_snapshot,
@@ -32,7 +33,7 @@ use tracing::{debug, info, warn};
 pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::Result<()> {
     let ConnCtx {
         out_tx,
-        pty_forwarders,
+        pty_lane,
         connection,
         ..
     } = *ctx;
@@ -127,9 +128,16 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             set_session_appearance(&hub.sessions, change, out_tx);
         }
         ClientMessage::Detach { session_id } => {
-            let mut forwarders = pty_forwarders.lock().await;
+            let mut forwarders = pty_lane.forwarders.lock().await;
             if let Some(handle) = forwarders.remove(&session_id) {
                 handle.abort();
+                // As in `reply_then_forward`: a forwarder mid-resync must not
+                // queue its `Scrollback` after the detach, where a remount's
+                // `LoadScrollback` reply could come before it. Only the
+                // multi-threaded runtime can show the difference: on the
+                // current-thread runtime the tests run on, `abort` already
+                // stops an idle forwarder before it runs again.
+                let _ = handle.await;
             }
         }
         ClientMessage::SendInput {
@@ -252,14 +260,8 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             session_id,
             request_id,
         } => {
-            load_scrollback_and_attach_forwarder(
-                hub,
-                &session_id,
-                request_id,
-                out_tx,
-                pty_forwarders,
-            )
-            .await;
+            load_scrollback_and_attach_forwarder(hub, &session_id, request_id, out_tx, pty_lane)
+                .await;
         }
         _ => warn!("sessions::handle: dispatch routed a message this module does not handle"),
     }
@@ -310,109 +312,204 @@ async fn load_scrollback_and_attach_forwarder(
     session_id: &str,
     request_id: Option<String>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    pty_forwarders: &PtyForwarders,
+    pty_lane: &Arc<PtyLane>,
 ) {
-    let snap_tx = hub
-        .sessions
+    match take_snapshot(&hub.sessions, session_id).await {
+        Snapshot::Taken(snap) => {
+            let fwd = Forwarding {
+                out_tx: out_tx.clone(),
+                lane: Arc::clone(pty_lane),
+                sessions: Arc::clone(&hub.sessions),
+                dirs: hub.dirs.clone(),
+            };
+            reply_then_forward(snap, session_id, request_id, &fwd).await;
+        }
+        // No live PTY (orphan/abandoned/headless), or the session exited.
+        Snapshot::Exited => {
+            let _ = out_tx.send(file_scrollback_reply(&hub.dirs, session_id, request_id));
+        }
+        Snapshot::TimedOut => {
+            warn!(
+                %session_id,
+                "load_scrollback: timed out waiting for snapshot from lifecycle task"
+            );
+            let _ = out_tx.send(file_scrollback_reply(&hub.dirs, session_id, request_id));
+        }
+    }
+}
+
+/// What a session's lifecycle task answered a snapshot request with.
+enum Snapshot {
+    /// The session's atomic snapshot.
+    Taken(ScrollbackSnapshot),
+    /// No snapshot will come: the session has no live PTY (no request
+    /// channel), or its lifecycle task dropped the request because the
+    /// session exited. Its scrollback file is final.
+    Exited,
+    /// The lifecycle task did not answer within
+    /// [`SCROLLBACK_SNAPSHOT_TIMEOUT`]; the session may still be live.
+    TimedOut,
+}
+
+/// Ask the session's lifecycle task for its atomic snapshot.
+async fn take_snapshot(sessions: &SessionRegistry, session_id: &str) -> Snapshot {
+    let snap_tx = sessions
         .get(session_id)
         .and_then(|arc| crate::sync::lock(&arc).scrollback_snapshot_req.clone());
-
-    let snapshot = if let Some(snap_tx) = snap_tx {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if snap_tx.send(reply_tx).is_ok() {
-            match tokio::time::timeout(SCROLLBACK_SNAPSHOT_TIMEOUT, reply_rx).await {
-                Ok(Ok(snap)) => Some(snap),
-                Ok(Err(_recv_err)) => {
-                    // The normal path for a request queued behind the exit:
-                    // the file it falls back to is final by then.
-                    debug!(
-                        %session_id,
-                        "load_scrollback: lifecycle task dropped snapshot reply"
-                    );
-                    None
-                }
-                Err(_elapsed) => {
-                    warn!(
-                        %session_id,
-                        "load_scrollback: timed out waiting for snapshot from lifecycle task"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
+    let Some(snap_tx) = snap_tx else {
+        return Snapshot::Exited;
     };
-
-    if let Some(snap) = snapshot {
-        reply_then_forward(snap, session_id, request_id, out_tx, pty_forwarders).await;
-    } else {
-        // No live PTY (orphan/abandoned/headless), or the lifecycle task failed
-        // to answer in time. Read the file directly, but still re-assert the
-        // child's bracketed-paste mode from the persisted sidecar: on the
-        // snapshot-timeout path the session *is* live, and handing it an
-        // unprefixed replay re-opens the stale-paste-flag bug.
-        let bp_enabled = crate::termstate::load(&hub.dirs, session_id);
-        let (data, truncated) = build_replay_snapshot(Some(&hub.dirs), session_id, bp_enabled);
-        let _ = out_tx.send(scrollback_reply(
-            session_id, &data, truncated, request_id, false,
-        ));
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if snap_tx.send(reply_tx).is_err() {
+        return Snapshot::Exited;
     }
+    match tokio::time::timeout(SCROLLBACK_SNAPSHOT_TIMEOUT, reply_rx).await {
+        Ok(Ok(snap)) => Snapshot::Taken(snap),
+        Ok(Err(_recv_err)) => {
+            // The normal path for a request queued behind the exit: the file
+            // it falls back to is final by then.
+            debug!(%session_id, "take_snapshot: lifecycle task dropped snapshot reply");
+            Snapshot::Exited
+        }
+        Err(_elapsed) => Snapshot::TimedOut,
+    }
+}
+
+/// A `Scrollback` read straight from the session's scrollback file, for a
+/// session without a live snapshot. It still re-asserts the child's
+/// bracketed-paste mode from the persisted sidecar: on the snapshot-timeout
+/// path the session *is* live, and handing it an unprefixed replay re-opens
+/// the stale-paste-flag bug.
+fn file_scrollback_reply(
+    dirs: &Dirs,
+    session_id: &str,
+    request_id: Option<String>,
+) -> DaemonMessage {
+    let bp_enabled = crate::termstate::load(dirs, session_id);
+    let (data, truncated) = build_replay_snapshot(Some(dirs), session_id, bp_enabled);
+    scrollback_reply(session_id, &data, truncated, request_id, false)
+}
+
+/// What a session's PTY forwarder needs beyond its live receiver: the
+/// connection's queue and PTY lane, and the registry and dirs a resync reads.
+#[derive(Clone)]
+pub(super) struct Forwarding {
+    pub(super) out_tx: mpsc::UnboundedSender<DaemonMessage>,
+    pub(super) lane: Arc<PtyLane>,
+    pub(super) sessions: Arc<SessionRegistry>,
+    pub(super) dirs: Dirs,
 }
 
 /// Queues the snapshot's `Scrollback` reply, then starts the per-client
 /// forwarder for its live receiver. The lifecycle task has been sending every
 /// chunk after the snapshot into it, so output produced meanwhile waits in it;
-/// and since
-/// `out_tx` is a FIFO, the reply reaches the client before any `PtyOutput`
-/// from the new forwarder.
+/// and since `out_tx` is a FIFO, the reply reaches the client before any
+/// `PtyOutput` from the new forwarder.
 async fn reply_then_forward(
     snap: ScrollbackSnapshot,
     session_id: &str,
     request_id: Option<String>,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    pty_forwarders: &PtyForwarders,
+    fwd: &Forwarding,
 ) {
     // Replace any existing forwarder for this session (e.g. a previous
     // Terminal mount in the same WS session that didn't get a clean
     // Detach). Stop it before the reply, spawn the fresh one after.
-    let mut forwarders = pty_forwarders.lock().await;
+    let mut forwarders = fwd.lane.forwarders.lock().await;
     if let Some(old) = forwarders.remove(session_id) {
         old.abort();
         // `abort` does not wait, and on the multi-threaded runtime the old
-        // forwarder may be mid-send on another worker; awaiting it (it
-        // yields `Err(Cancelled)` once stopped) keeps its `PtyOutput` from
-        // landing after the reply. It holds only its live receiver and an
-        // `out_tx` clone, never this map's lock, so waiting here is safe.
+        // forwarder may be mid-send on another worker, or mid-resync;
+        // awaiting it (it yields `Err(Cancelled)` once stopped) keeps its
+        // `PtyOutput` or its resync's `Scrollback` from landing after the
+        // reply. It never takes this map's lock, so waiting here is safe.
         let _ = old.await;
     }
-    let _ = out_tx.send(scrollback_reply(
+    let _ = fwd.out_tx.send(scrollback_reply(
         session_id,
         &snap.data,
         snap.truncated,
         request_id,
         true,
     ));
-    let mut live = snap.live;
-    let out = out_tx.clone();
-    let sid = session_id.to_string();
-    let handle = tokio::spawn(async move {
-        while let Some(bytes) = live.recv().await {
-            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            if out
-                .send(DaemonMessage::PtyOutput {
-                    session_id: sid.clone(),
-                    data_b64,
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
+    let handle = tokio::spawn(forward(snap.live, session_id.to_string(), fwd.clone()));
     forwarders.insert(session_id.to_string(), handle);
+}
+
+/// A session's PTY forwarder on one connection: queues each chunk from `live`
+/// as base64 `PtyOutput`, charged to the session in the connection's PTY lane.
+/// A chunk that would take the session past
+/// [`PTY_SESSION_BUDGET`](super::connection::PTY_SESSION_BUDGET) is dropped
+/// with `live`, which stops the lifecycle task feeding this client (the
+/// scrollback file still gets every chunk), and the forwarder resyncs the
+/// client in this same task ([`resync`]), going on from the fresh snapshot's
+/// receiver. Ends when `live` closes, the connection's queue closes, or a
+/// resync leaves nothing to forward.
+async fn forward(mut live: mpsc::UnboundedReceiver<Vec<u8>>, session_id: String, fwd: Forwarding) {
+    loop {
+        let Some(bytes) = live.recv().await else {
+            return;
+        };
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        if fwd.lane.try_charge(&session_id, data_b64.len()) {
+            let output = DaemonMessage::PtyOutput {
+                session_id: session_id.clone(),
+                data_b64,
+            };
+            if fwd.out_tx.send(output).is_err() {
+                return;
+            }
+            continue;
+        }
+        drop(live);
+        info!(
+            %session_id,
+            "PTY output is over the session's queue budget; resyncing the client"
+        );
+        let Some(fresh) = resync(&session_id, &fwd).await else {
+            return;
+        };
+        live = fresh;
+    }
+}
+
+/// Resync a client whose session went over its PTY budget, once the send
+/// pump has taken everything the session queued: queue a fresh snapshot's
+/// `Scrollback` (no request id, `forwarder_restarted`) and hand back its live
+/// receiver. A session that exited gets its file's scrollback, not
+/// restarted, and a session gone from the registry gets nothing; both hand
+/// back `None`. A snapshot that timed out while the session still exists is
+/// asked for again once the session's queue has drained again, for as long
+/// as it takes.
+async fn resync(session_id: &str, fwd: &Forwarding) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
+    loop {
+        fwd.lane.drained(session_id).await;
+        if fwd.sessions.get(session_id).is_none() {
+            debug!(%session_id, "resync: the session is gone; nothing to send");
+            return None;
+        }
+        match take_snapshot(&fwd.sessions, session_id).await {
+            Snapshot::Taken(snap) => {
+                let _ = fwd.out_tx.send(scrollback_reply(
+                    session_id,
+                    &snap.data,
+                    snap.truncated,
+                    None,
+                    true,
+                ));
+                return Some(snap.live);
+            }
+            Snapshot::Exited => {
+                let _ = fwd
+                    .out_tx
+                    .send(file_scrollback_reply(&fwd.dirs, session_id, None));
+                return None;
+            }
+            Snapshot::TimedOut => debug!(
+                %session_id,
+                "resync: the snapshot timed out; asking again once the session's queue drains"
+            ),
+        }
+    }
 }
 
 /// One `Scrollback` reply, echoing the request's id.
@@ -1277,13 +1374,15 @@ pub(super) async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<
 mod tests {
     use super::*;
     use crate::history;
-    use crate::server::connection::{AuthKind, FetchRegistry};
+    use crate::history::test_support::{FakeExit, fake_pty, insert_live};
+    use crate::pty::PtyExit;
+    use crate::server::connection::{AuthKind, FetchRegistry, PTY_SESSION_BUDGET, stop_transfers};
     use crate::server::dispatch;
     use crate::server::recovery::discard_abandoned;
     use crate::server::test_support::{
-        appearance_registry, deepseek_options, deepseek_spawn, dispatch_all, env_spawn,
-        idle_record, next_message, only_update, repo_entry, snapshot_of, spawnless_test_hub,
-        test_hub, wait_until,
+        MemClient, appearance_registry, deepseek_options, deepseek_spawn, dispatch_all, env_spawn,
+        hello, idle_record, mem_session, next_message, only_update, repo_entry, snapshot_of,
+        spawnless_test_hub, test_hub, test_peer, wait_until,
     };
     use chrono::Utc;
     use protocol::{SessionKind, SessionMode};
@@ -1302,11 +1401,21 @@ mod tests {
             live,
         };
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let (hub, _scratch) = test_hub("reply-precedes-output");
+        let fwd = Forwarding {
+            out_tx,
+            lane: Arc::default(),
+            sessions: Arc::clone(&hub.sessions),
+            dirs: hub.dirs.clone(),
+        };
         let old = tokio::spawn(std::future::pending::<()>());
-        forwarders.lock().await.insert("s1".to_string(), old);
+        fwd.lane
+            .forwarders
+            .lock()
+            .await
+            .insert("s1".to_string(), old);
 
-        reply_then_forward(snap, "s1", Some("req-1".to_string()), &out_tx, &forwarders).await;
+        reply_then_forward(snap, "s1", Some("req-1".to_string()), &fwd).await;
 
         let first = out_rx.recv().await.unwrap();
         assert!(
@@ -1331,20 +1440,407 @@ mod tests {
             matches!(&second, DaemonMessage::PtyOutput { data_b64, .. } if *data_b64 == expected),
             "{second:?}"
         );
-        assert!(forwarders.lock().await.contains_key("s1"));
+        assert!(fwd.lane.forwarders.lock().await.contains_key("s1"));
+    }
+
+    /// 48 KiB of PTY output, 64 KiB as base64, ending in `tag` and a newline.
+    fn tagged_chunk(tag: &str) -> Vec<u8> {
+        let mut bytes = vec![b'.'; 48 * 1024 - tag.len() - 1];
+        bytes.extend_from_slice(tag.as_bytes());
+        bytes.push(b'\n');
+        bytes
+    }
+
+    /// Chunks enough to take one session past its budget: 64 of them fill it.
+    const TRIP_CHUNKS: usize = 80;
+
+    /// Send chunks `range` of session `id` through its tracer side.
+    async fn send_chunks(exit: &FakeExit, id: &str, range: std::ops::Range<usize>) {
+        for i in range {
+            exit.chunk(tagged_chunk(&format!("<{id}:{i}>"))).await;
+        }
+    }
+
+    /// Let every task run until all of them wait, well inside the send
+    /// timeout of a stalled pump.
+    async fn settle() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    /// Live sessions `ids` in `hub`, and a connection served as `auth` (a
+    /// tailnet one as an approved device) that attached each of them and then
+    /// stopped reading. Returns the client, the task serving it, and each
+    /// session's tracer side, in `ids` order.
+    async fn stalled_client_attached_to(
+        hub: &Hub,
+        ids: &[&str],
+        auth: AuthKind,
+    ) -> (MemClient, tokio::task::JoinHandle<()>, Vec<FakeExit>) {
+        let mut exits = Vec::new();
+        for id in ids {
+            let (pty, exit) = fake_pty();
+            insert_live(&hub.sessions, &hub.dirs, idle_record(id), &pty);
+            exits.push(exit);
+        }
+        let token = if let AuthKind::Tailnet(peer) = &auth {
+            let (_, token) = crate::sync::lock(&hub.devices)
+                .issue(peer, Utc::now())
+                .expect("issue a device token");
+            token
+        } else {
+            hub.auth_token.clone()
+        };
+        let (mut client, session) = mem_session(hub, auth);
+        client.send(&hello(&token, None));
+        let welcome = tokio::time::timeout(Duration::from_secs(60), client.next(true))
+            .await
+            .expect("the daemon answers the Hello");
+        assert!(matches!(welcome, Some(DaemonMessage::Welcome { .. })));
+        client.stall();
+        for id in ids {
+            client.send(&ClientMessage::LoadScrollback {
+                session_id: (*id).to_owned(),
+                request_id: Some(format!("attach-{id}")),
+            });
+        }
+        settle().await;
+        (client, session, exits)
+    }
+
+    /// Every message the daemon sends until it has been quiet for a second
+    /// of virtual time, or until it closes the connection.
+    async fn drain_until_quiet(client: &mut MemClient) -> Vec<DaemonMessage> {
+        let mut messages = Vec::new();
+        while let Ok(Some(message)) =
+            tokio::time::timeout(Duration::from_secs(1), client.next(true)).await
+        {
+            messages.push(message);
+        }
+        messages
+    }
+
+    /// The `Scrollback`s for `id` without a request id: `(restarted, data)`.
+    fn resyncs(messages: &[DaemonMessage], id: &str) -> Vec<(bool, Vec<u8>)> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                DaemonMessage::Scrollback {
+                    session_id,
+                    data_b64,
+                    request_id: None,
+                    forwarder_restarted,
+                    ..
+                } if session_id == id => Some((*forwarder_restarted, decode(data_b64))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn decode(data_b64: &str) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .expect("valid base64")
+    }
+
+    /// What a client shows for `id` after `messages`: the last `Scrollback`
+    /// it accepted, then every `PtyOutput` after it.
+    fn client_view(messages: &[DaemonMessage], id: &str) -> Vec<u8> {
+        let mut view = Vec::new();
+        for message in messages {
+            match message {
+                DaemonMessage::Scrollback {
+                    session_id,
+                    data_b64,
+                    ..
+                } if session_id == id => view = decode(data_b64),
+                DaemonMessage::PtyOutput {
+                    session_id,
+                    data_b64,
+                } if session_id == id => view.extend(decode(data_b64)),
+                _ => {}
+            }
+        }
+        view
+    }
+
+    fn outputs_contain(messages: &[DaemonMessage], id: &str, tag: &str) -> bool {
+        messages.iter().any(|message| {
+            matches!(message, DaemonMessage::PtyOutput { session_id, data_b64 }
+                if session_id == id && decode(data_b64).ends_with(format!("{tag}\n").as_bytes()))
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_never_reading_client_keeps_each_sessions_queue_bounded_and_the_connection_closes() {
+        let (hub, _scratch) = test_hub("never-reading-client");
+        // The bound, on a queue nothing drains.
+        let (pty, exit) = fake_pty();
+        insert_live(&hub.sessions, &hub.dirs, idle_record("s1"), &pty);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let lane: Arc<PtyLane> = Arc::default();
+        load_scrollback_and_attach_forwarder(&hub, "s1", None, &out_tx, &lane).await;
+        send_chunks(&exit, "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+        let mut queued = 0;
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::PtyOutput { data_b64, .. } = message {
+                queued += data_b64.len();
+            }
+        }
+        assert!(
+            queued <= PTY_SESSION_BUDGET,
+            "{queued} bytes queued past the budget"
+        );
+        assert_eq!(lane.queued("s1"), queued, "the lane counts what is queued");
+
+        // The connection, an approved tailnet device's: its stalled send
+        // closes it.
+        let tailnet = AuthKind::Tailnet(test_peer());
+        let (_client, session, exits) = stalled_client_attached_to(&hub, &["s2"], tailnet).await;
+        send_chunks(&exits[0], "s2", 0..TRIP_CHUNKS).await;
+        tokio::time::timeout(Duration::from_secs(600), session)
+            .await
+            .expect("the stalled connection closes")
+            .expect("the session did not panic");
+        assert_eq!(
+            *hub.client_count.borrow(),
+            0,
+            "the client count is released"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pty_output_over_the_budget_resyncs_with_one_scrollback() {
+        let (hub, _scratch) = test_hub("budget-resync");
+        let (mut client, _session, exits) =
+            stalled_client_attached_to(&hub, &["s1"], AuthKind::Local).await;
+        send_chunks(&exits[0], "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+        client.resume();
+        send_chunks(&exits[0], "s1", TRIP_CHUNKS..TRIP_CHUNKS + 3).await;
+        let messages = drain_until_quiet(&mut client).await;
+
+        let resynced = resyncs(&messages, "s1");
+        assert_eq!(resynced.len(), 1, "one resync");
+        assert!(resynced[0].0, "the resync restarts the forwarder");
+        let last_tag = format!("<s1:{}>\n", TRIP_CHUNKS + 2);
+        let view = client_view(&messages, "s1");
+        assert!(
+            view.ends_with(last_tag.as_bytes()),
+            "output goes on after the resync"
+        );
+
+        client.send(&ClientMessage::LoadScrollback {
+            session_id: "s1".to_owned(),
+            request_id: Some("check".to_owned()),
+        });
+        let fresh = drain_until_quiet(&mut client).await;
+        let fresh = client_view(&fresh, "s1");
+        assert!(
+            fresh.ends_with(last_tag.as_bytes()),
+            "a fresh attach holds the last output"
+        );
+        assert!(
+            view.ends_with(&fresh),
+            "the client's view after the resync matches the scrollback file: {} vs {} bytes",
+            view.len(),
+            fresh.len()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_noisy_session_does_not_resync_a_quiet_one() {
+        let (hub, _scratch) = test_hub("noisy-and-quiet");
+        let (mut client, _session, exits) =
+            stalled_client_attached_to(&hub, &["s1", "s2"], AuthKind::Local).await;
+        send_chunks(&exits[1], "s2", 0..1).await;
+        send_chunks(&exits[0], "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+        client.resume();
+        send_chunks(&exits[1], "s2", 1..2).await;
+        let messages = drain_until_quiet(&mut client).await;
+
+        assert_eq!(
+            resyncs(&messages, "s1").len(),
+            1,
+            "the noisy session resyncs"
+        );
+        assert!(
+            resyncs(&messages, "s2").is_empty(),
+            "the quiet one does not"
+        );
+        assert!(outputs_contain(&messages, "s2", "<s2:0>"));
+        assert!(outputs_contain(&messages, "s2", "<s2:1>"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_load_scrollback_during_a_resync_supersedes_it() {
+        let (hub, _scratch) = test_hub("load-during-resync");
+        let (mut client, _session, exits) =
+            stalled_client_attached_to(&hub, &["s1"], AuthKind::Local).await;
+        send_chunks(&exits[0], "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+        client.send(&ClientMessage::LoadScrollback {
+            session_id: "s1".to_owned(),
+            request_id: Some("again".to_owned()),
+        });
+        settle().await;
+        client.resume();
+        send_chunks(&exits[0], "s1", TRIP_CHUNKS..TRIP_CHUNKS + 2).await;
+        let messages = drain_until_quiet(&mut client).await;
+
+        assert!(
+            messages.iter().any(|message| matches!(message,
+                DaemonMessage::Scrollback { request_id: Some(id), .. } if id == "again")),
+            "the requester's reply arrives"
+        );
+        assert!(resyncs(&messages, "s1").is_empty(), "no id-less Scrollback");
+        assert!(outputs_contain(
+            &messages,
+            "s1",
+            &format!("<s1:{}>", TRIP_CHUNKS + 1)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_detach_during_a_resync_sends_nothing_after_it() {
+        let (hub, _scratch) = test_hub("detach-during-resync");
+        let (mut client, _session, exits) =
+            stalled_client_attached_to(&hub, &["s1"], AuthKind::Local).await;
+        send_chunks(&exits[0], "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+        client.send(&ClientMessage::Detach {
+            session_id: "s1".to_owned(),
+        });
+        settle().await;
+        client.resume();
+        send_chunks(&exits[0], "s1", TRIP_CHUNKS..TRIP_CHUNKS + 2).await;
+        let messages = drain_until_quiet(&mut client).await;
+
+        assert!(
+            resyncs(&messages, "s1").is_empty(),
+            "no resync after the detach"
+        );
+        assert!(
+            !outputs_contain(&messages, "s1", &format!("<s1:{TRIP_CHUNKS}>")),
+            "no output after the detach"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_closing_mid_resync_leaves_no_task() {
+        let (hub, _scratch) = test_hub("close-mid-resync");
+        let (pty, exit) = fake_pty();
+        insert_live(&hub.sessions, &hub.dirs, idle_record("s1"), &pty);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let lane: Arc<PtyLane> = Arc::default();
+        let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        load_scrollback_and_attach_forwarder(&hub, "s1", None, &out_tx, &lane).await;
+        send_chunks(&exit, "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+
+        // The connection's teardown, while the forwarder waits to resync.
+        stop_transfers(&lane, &fetches).await;
+        drop(out_tx);
+        let closed = tokio::time::timeout(Duration::from_secs(600), async {
+            while out_rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "a forwarder still holds the connection's queue"
+        );
+        assert_eq!(Arc::strong_count(&lane), 1, "nothing else holds the lane");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_exiting_mid_resync_gets_its_final_scrollback() {
+        let (hub, _scratch) = test_hub("exit-mid-resync");
+        let (mut client, _session, mut exits) =
+            stalled_client_attached_to(&hub, &["s1"], AuthKind::Local).await;
+        send_chunks(&exits[0], "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+        exits.remove(0).finish(PtyExit::Code(0)).await;
+        settle().await;
+        client.resume();
+        let messages = drain_until_quiet(&mut client).await;
+
+        let resynced = resyncs(&messages, "s1");
+        assert_eq!(resynced.len(), 1, "one final Scrollback");
+        assert!(!resynced[0].0, "no forwarder follows it");
+        let last_tag = format!("<s1:{}>\n", TRIP_CHUNKS - 1);
+        assert!(
+            resynced[0].1.ends_with(last_tag.as_bytes()),
+            "it holds the session's last output"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resync_whose_snapshot_times_out_retries_and_keeps_forwarding() {
+        let (hub, _scratch) = test_hub("resync-snapshot-timeout");
+        let (mut client, _session, exits) =
+            stalled_client_attached_to(&hub, &["s1"], AuthKind::Local).await;
+        // The lifecycle task's snapshot channel, swapped for one the test
+        // holds, so the resync's first request goes unanswered.
+        let record = hub.sessions.get("s1").expect("s1 is live");
+        let (held_tx, mut held_rx) = mpsc::unbounded_channel();
+        let lifecycle_tx = crate::sync::lock(&record)
+            .scrollback_snapshot_req
+            .replace(held_tx)
+            .expect("s1 has a lifecycle task");
+        send_chunks(&exits[0], "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+        client.resume();
+
+        let unanswered = tokio::time::timeout(Duration::from_secs(60), held_rx.recv())
+            .await
+            .expect("the resync asks for a snapshot")
+            .expect("the request channel is open");
+        crate::sync::lock(&record).scrollback_snapshot_req = Some(lifecycle_tx);
+        tokio::time::sleep(SCROLLBACK_SNAPSHOT_TIMEOUT * 2).await;
+        drop(unanswered);
+        send_chunks(&exits[0], "s1", TRIP_CHUNKS..TRIP_CHUNKS + 3).await;
+        let messages = drain_until_quiet(&mut client).await;
+
+        let resynced = resyncs(&messages, "s1");
+        assert_eq!(resynced.len(), 1, "one resync, from the retried snapshot");
+        assert!(resynced[0].0, "the retried resync restarts the forwarder");
+        let last_tag = format!("<s1:{}>\n", TRIP_CHUNKS + 2);
+        assert!(
+            client_view(&messages, "s1").ends_with(last_tag.as_bytes()),
+            "output goes on after the resync"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_removed_session_mid_resync_gets_no_scrollback() {
+        let (hub, _scratch) = test_hub("removed-mid-resync");
+        let (mut client, _session, exits) =
+            stalled_client_attached_to(&hub, &["s1"], AuthKind::Local).await;
+        send_chunks(&exits[0], "s1", 0..TRIP_CHUNKS).await;
+        settle().await;
+        hub.sessions.remove("s1");
+        settle().await;
+        client.resume();
+        let messages = drain_until_quiet(&mut client).await;
+
+        assert!(
+            resyncs(&messages, "s1").is_empty(),
+            "a removed session gets no resync"
+        );
     }
 
     /// Dispatch `msg` against `hub` without expecting a reply.
     async fn dispatch_silently(hub: &Hub, msg: ClientMessage) {
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
         let (file_tx, _file_rx) = mpsc::channel(1);
-        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let pty_lane: Arc<PtyLane> = Arc::default();
         let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
         let local = AuthKind::Local;
         let ctx = ConnCtx {
             out_tx: &out_tx,
             file_tx: &file_tx,
-            pty_forwarders: &pty_forwarders,
+            pty_lane: &pty_lane,
             fetches: &fetches,
             client_id: "c1",
             client_name: None,

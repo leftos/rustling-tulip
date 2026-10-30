@@ -897,17 +897,16 @@ mod tests {
         msg: ClientMessage,
         auth: &AuthKind,
     ) -> Vec<DaemonMessage> {
-        use crate::server::connection::{ConnCtx, FetchRegistry, PtyForwarders};
+        use crate::server::connection::{ConnCtx, FetchRegistry, PtyLane};
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let (file_tx, _file_rx) = mpsc::channel(1);
-        let pty_forwarders: PtyForwarders =
-            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let pty_lane: Arc<PtyLane> = Arc::default();
         let fetches: FetchRegistry =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let ctx = ConnCtx {
             out_tx: &out_tx,
             file_tx: &file_tx,
-            pty_forwarders: &pty_forwarders,
+            pty_lane: &pty_lane,
             fetches: &fetches,
             client_id: "c1",
             client_name: None,

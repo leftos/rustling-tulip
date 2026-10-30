@@ -3,7 +3,9 @@
     clippy::expect_used,
     reason = "fixtures assert preconditions with expect; failure messages aid debugging"
 )]
-use super::connection::{AuthKind, ConnCtx, FetchRegistry, NEXT_CONNECTION, PtyForwarders};
+use super::connection::{
+    AuthKind, ConnCtx, FetchRegistry, NEXT_CONNECTION, PtyLane, client_session_until,
+};
 use super::handshake::TAILNET_HANDSHAKE_TIMEOUT;
 use super::recovery::RecoveryClaims;
 use super::remote::RemoteSlot;
@@ -23,10 +25,13 @@ use protocol::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 /// A scratch directory for a hub's config, state and worktrees, removed
 /// when the test ends.
@@ -234,12 +239,12 @@ pub(super) async fn dispatch_one_as(
 ) -> DaemonMessage {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let (file_tx, _file_rx) = mpsc::channel(1);
-    let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+    let pty_lane: Arc<PtyLane> = Arc::default();
     let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
     let ctx = ConnCtx {
         out_tx: &out_tx,
         file_tx: &file_tx,
-        pty_forwarders: &pty_forwarders,
+        pty_lane: &pty_lane,
         fetches: &fetches,
         client_id: "c1",
         client_name: None,
@@ -374,13 +379,13 @@ pub(super) async fn wait_until(cond: impl Fn() -> bool) -> bool {
 pub(super) async fn dispatch_all(hub: &Hub, msg: ClientMessage) -> Vec<DaemonMessage> {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let (file_tx, _file_rx) = mpsc::channel(1);
-    let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+    let pty_lane: Arc<PtyLane> = Arc::default();
     let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
     let local = AuthKind::Local;
     let ctx = ConnCtx {
         out_tx: &out_tx,
         file_tx: &file_tx,
-        pty_forwarders: &pty_forwarders,
+        pty_lane: &pty_lane,
         fetches: &fetches,
         client_id: "c1",
         client_name: None,
@@ -712,6 +717,144 @@ pub(super) async fn ws_next(client: &mut WsClient) -> Option<DaemonMessage> {
         .expect("the daemon answers or closes the connection")
 }
 
+/// The daemon's end of an in-memory connection ([`mem_session`]): the frames
+/// the test client sent, and a sink into the client that takes no frame while
+/// its stall switch is on, as a socket whose peer stopped reading, until the
+/// client resumes reading.
+pub(super) struct MemSocket {
+    from_client: mpsc::UnboundedReceiver<WsFrame>,
+    to_client: Option<mpsc::UnboundedSender<WsFrame>>,
+    stalled: Arc<AtomicBool>,
+    resumed: Arc<futures::task::AtomicWaker>,
+}
+
+/// A frame as the daemon's side of a socket sees it.
+type WsFrame = axum::extract::ws::Message;
+
+impl futures::Stream for MemSocket {
+    type Item = Result<WsFrame, axum::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.from_client.poll_recv(cx).map(|frame| frame.map(Ok))
+    }
+}
+
+impl futures::Sink<WsFrame> for MemSocket {
+    type Error = axum::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.resumed.register(cx.waker());
+        if self.stalled.load(Ordering::SeqCst) {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, frame: WsFrame) -> Result<(), Self::Error> {
+        let sent = self
+            .to_client
+            .as_ref()
+            .is_some_and(|tx| tx.send(frame).is_ok());
+        if sent {
+            Ok(())
+        } else {
+            Err(axum::Error::new("the test client is gone"))
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.to_client = None;
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// The test's end of an in-memory connection ([`mem_session`]).
+pub(super) struct MemClient {
+    to_daemon: mpsc::UnboundedSender<WsFrame>,
+    from_daemon: mpsc::UnboundedReceiver<WsFrame>,
+    stalled: Arc<AtomicBool>,
+    resumed: Arc<futures::task::AtomicWaker>,
+    /// The `Ping` frames [`MemClient::next`] has read.
+    pub(super) pings: usize,
+}
+
+impl MemClient {
+    /// Stop taking the daemon's frames, as a peer that stopped reading.
+    pub(super) fn stall(&self) {
+        self.stalled.store(true, Ordering::SeqCst);
+    }
+
+    /// Take the daemon's frames again after [`MemClient::stall`].
+    pub(super) fn resume(&self) {
+        self.stalled.store(false, Ordering::SeqCst);
+        self.resumed.wake();
+    }
+
+    /// Send `msg` as one text frame.
+    pub(super) fn send(&self, msg: &ClientMessage) {
+        let json = serde_json::to_string(msg).expect("serialize a client message");
+        self.to_daemon
+            .send(WsFrame::Text(json.into()))
+            .expect("the daemon reads the connection");
+    }
+
+    /// The next daemon message, answering each `Ping` before it with a `Pong`
+    /// when `answer_pings`; `None` once the daemon closed the connection. No
+    /// hang guard: the caller sets one.
+    pub(super) async fn next(&mut self, answer_pings: bool) -> Option<DaemonMessage> {
+        loop {
+            match self.from_daemon.recv().await? {
+                WsFrame::Text(text) => {
+                    return Some(serde_json::from_str(text.as_str()).expect("a daemon message"));
+                }
+                WsFrame::Ping(_) => {
+                    self.pings += 1;
+                    if answer_pings {
+                        let _ = self.to_daemon.send(WsFrame::Pong(axum::body::Bytes::new()));
+                    }
+                }
+                WsFrame::Close(_) => return None,
+                WsFrame::Binary(_) | WsFrame::Pong(_) => {}
+            }
+        }
+    }
+}
+
+/// An in-memory connection served by `client_session_until` as `auth` (a
+/// tailnet one under a server life nothing cancels), and the task serving it,
+/// which ends when the connection does. No socket and no I/O, so a test on a
+/// paused clock sees time move only when every task waits on a timer.
+pub(super) fn mem_session(hub: &Hub, auth: AuthKind) -> (MemClient, tokio::task::JoinHandle<()>) {
+    let (to_daemon, from_client) = mpsc::unbounded_channel();
+    let (to_client, from_daemon) = mpsc::unbounded_channel();
+    let stalled = Arc::new(AtomicBool::new(false));
+    let resumed = Arc::new(futures::task::AtomicWaker::new());
+    let socket = MemSocket {
+        resumed: Arc::clone(&resumed),
+        from_client,
+        to_client: Some(to_client),
+        stalled: Arc::clone(&stalled),
+    };
+    let server_life = matches!(auth, AuthKind::Tailnet(_)).then(CancellationToken::new);
+    let session = tokio::spawn(client_session_until(hub.clone(), socket, auth, server_life));
+    let client = MemClient {
+        to_daemon,
+        from_daemon,
+        stalled,
+        resumed,
+        pings: 0,
+    };
+    (client, session)
+}
+
 /// A current-version `Hello` carrying `auth_token` and `client_name`.
 pub(super) fn hello(auth_token: &str, client_name: Option<&str>) -> ClientMessage {
     ClientMessage::Hello {
@@ -763,13 +906,13 @@ pub(super) fn workspace_entry(id: &str, name: &str, members: &[&str]) -> protoco
 pub(super) async fn dispatch_err(hub: &Hub, msg: ClientMessage) -> Option<String> {
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     let (file_tx, _file_rx) = mpsc::channel(1);
-    let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+    let pty_lane: Arc<PtyLane> = Arc::default();
     let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
     let local = AuthKind::Local;
     let ctx = ConnCtx {
         out_tx: &out_tx,
         file_tx: &file_tx,
-        pty_forwarders: &pty_forwarders,
+        pty_lane: &pty_lane,
         fetches: &fetches,
         client_id: "c1",
         client_name: None,
