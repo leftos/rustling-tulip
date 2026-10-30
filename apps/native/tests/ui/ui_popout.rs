@@ -1572,6 +1572,7 @@ fn s2_without_a_pane() -> Fixture {
 fn pop_out_session(h: &mut Harness<'_>, id: &str) -> OpenOutcome {
     let key = PopoutKey::Session {
         session_id: id.to_owned(),
+        host: None,
     };
     h.root_update(move |root, window, cx| root.open_popout(key, window, cx))
 }

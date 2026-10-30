@@ -7,14 +7,16 @@ use std::collections::BTreeMap;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point};
 use protocol::{
-    AgentId, AttentionReason, ClientMessage, ContainerRef, DaemonMessage, KeepAwakeMode,
-    OptionValue, RemoteState, SessionSnapshot, TabEntry,
+    AgentId, AttentionReason, ClientMessage, ContainerRef, DaemonMessage, DeviceInfo,
+    KeepAwakeMode, OptionValue, RecoverItemResult, RemoteState, SessionSnapshot, TabEntry,
+    VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
 };
 use rustling_tulip_native::file_fetch::FetchRequest;
-use rustling_tulip_native::target::Target;
+use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent, toast_action_selector};
 use support::{
-    Fixture, Harness, PROTOCOL, TestDir, facts, facts_message, pane, repo, session, tab, welcome,
+    Fixture, Harness, PROTOCOL, TestDir, facts, facts_message, history_item, pane, repo, session,
+    tab, welcome,
 };
 
 #[gpui::test]
@@ -438,6 +440,71 @@ fn a_remote_shell_folder_is_scanned_on_its_own_host(cx: &mut TestAppContext) {
     assert!(scans(h.sent()).is_empty(), "This PC is not asked");
 }
 
+/// The `.code-workspace` file named `name` in `D:/same/dir`.
+fn dir_suggestion(name: &str) -> VscodeWorkspaceSuggestion {
+    VscodeWorkspaceSuggestion {
+        source_path: format!("D:/same/dir/{name}.code-workspace"),
+        suggested_name: name.to_owned(),
+        folders: vec![VscodeWorkspaceFolder {
+            path: "D:/same/dir".to_owned(),
+            name: None,
+            matched_repo_id: None,
+        }],
+    }
+}
+
+#[gpui::test]
+fn two_hosts_with_the_same_folder_each_get_their_own_vscode_scan(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(session("a1").dir_shell("D:/same/dir").build()),
+    );
+    h.sent();
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").dir_shell("D:/same/dir").build()],
+    });
+    let scans = |sent: Vec<ClientMessage>| -> Vec<String> {
+        sent.into_iter()
+            .filter_map(|msg| match msg {
+                ClientMessage::ScanVscodeWorkspaces { path } => Some(path),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        scans(h.host(&remote()).sent()),
+        ["D:\\same\\dir"],
+        "the remote host scans its own folder at the same path"
+    );
+
+    h.send(DaemonMessage::VscodeWorkspacesScanned {
+        path: "D:\\same\\dir".to_owned(),
+        suggestions: vec![dir_suggestion("ours")],
+    });
+    h.host(&remote())
+        .send(DaemonMessage::VscodeWorkspacesScanned {
+            path: "D:\\same\\dir".to_owned(),
+            suggestions: vec![dir_suggestion("theirs")],
+        });
+
+    let found = |h: &mut Harness<'_>, host: HostKey| {
+        h.root(move |root, _| {
+            root.cwd_workspace_suggestion_on(&host, "D:/same/dir")
+                .map(|suggestion| suggestion.suggested_name.clone())
+        })
+    };
+    assert_eq!(found(&mut h, HostKey::Local).as_deref(), Some("ours"));
+    assert_eq!(
+        found(&mut h, HostKey::Remote(REMOTE.to_owned())).as_deref(),
+        Some("theirs"),
+        "each host keeps its own suggestion"
+    );
+}
+
 #[gpui::test]
 fn removing_a_remote_repo_lists_its_own_hosts_sessions(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -814,5 +881,190 @@ fn container_keys_of_two_hosts_do_not_collide(cx: &mut TestAppContext) {
         shown_folds(&mut h),
         [("detached".to_owned(), true), (remote_detached, false)],
         "folding This PC's row leaves the remote host's open"
+    );
+}
+
+/// Whether `sent` asks for the session history.
+fn asks_history(sent: &[ClientMessage]) -> bool {
+    sent.iter()
+        .any(|msg| matches!(msg, ClientMessage::ListSessionHistory { .. }))
+}
+
+/// The `RecoverSessions` requests among `sent`: each one's id and the
+/// history ids it names.
+fn recover_requests(sent: Vec<ClientMessage>) -> Vec<(String, Vec<String>)> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RecoverSessions { request_id, items } => Some((
+                request_id.unwrap_or_default(),
+                items.into_iter().map(|item| item.history_id).collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The answer to recovery `request_id`: `history_id` came back as
+/// `session_id`.
+fn recovered(request_id: &str, history_id: &str, session_id: &str) -> DaemonMessage {
+    DaemonMessage::RecoverResult {
+        request_id: Some(request_id.to_owned()),
+        results: vec![RecoverItemResult {
+            history_id: history_id.to_owned(),
+            session_id: Some(session_id.to_owned()),
+            error: None,
+        }],
+    }
+}
+
+/// An approved device named `name`.
+fn device(id: &str, name: &str) -> DeviceInfo {
+    DeviceInfo {
+        device_id: id.to_owned(),
+        name: name.to_owned(),
+        login: "alice@example.com".to_owned(),
+        created_at: chrono::Utc::now(),
+        last_seen: None,
+        revoked: false,
+        connected: 0,
+    }
+}
+
+#[gpui::test]
+fn the_devices_view_acts_on_this_pc_with_a_remote_host_connected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let mut host = h.host(&remote());
+    host.connect();
+    h.send(DaemonMessage::Devices {
+        devices: vec![device("d1", "laptop")],
+    });
+    let ours = h.root(|root, _| root.device_rows());
+    assert_eq!(ours.len(), 1, "This PC's device is listed");
+
+    h.host(&remote()).send(DaemonMessage::Devices {
+        devices: vec![device("d2", "phone"), device("d3", "tablet")],
+    });
+
+    assert_eq!(
+        h.root(|root, _| root.device_rows()),
+        ours,
+        "a remote host's device list is not This PC's"
+    );
+}
+
+#[gpui::test]
+fn a_remote_sessions_popout_is_restored_on_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let saved = serde_json::json!({
+        "key": { "kind": "session", "session_id": "b1", "host": REMOTE },
+        "window": null,
+    });
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::json!({ "popouts": [saved] }).to_string(),
+    )
+    .expect("write native-ui.json");
+    let mut h = Harness::open(cx, &dir);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+
+    h.load(&Fixture::single(session("a1").build()));
+
+    assert_eq!(h.window_count(), 2, "the remote session's pop-out reopened");
+    h.sent();
+    h.host(&remote()).sent();
+    let mut popout = h.popout_window();
+    popout.simulate_keystrokes("a");
+    let typed: Vec<String> = h
+        .host(&remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SendInput { session_id, .. } => Some(session_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed, ["b1"], "its terminal types on the remote host");
+    h.advance(std::time::Duration::from_millis(500));
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    let ui: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    assert_eq!(
+        ui["popouts"],
+        serde_json::json!([saved]),
+        "the saved entry keeps its host"
+    );
+}
+
+#[gpui::test]
+fn recover_lists_each_hosts_history_and_recovers_on_that_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![history_item("a1").build()],
+    });
+    let mut host = h.host(&remote());
+    host.connect_keeping_sent();
+    assert!(
+        asks_history(&host.sent()),
+        "a host that says Welcome is asked for its history"
+    );
+    host.send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![history_item("b1").build()],
+    });
+    h.sent();
+    assert_eq!(
+        h.root(|root, _| root.recover_badge()).as_deref(),
+        Some("2"),
+        "the badge counts every host's losses"
+    );
+
+    h.click_on("activity-recover");
+
+    assert!(asks_history(&h.sent()), "opening asks This PC");
+    assert!(
+        asks_history(&h.host(&remote()).sent()),
+        "and the remote host"
+    );
+    let rows: Vec<String> =
+        h.root(|root, _| root.recover_rows().into_iter().map(|row| row.id).collect());
+    assert_eq!(rows, ["a1", "b1"], "This PC's rows, then the remote host's");
+    assert_eq!(
+        h.root(|root, _| root.recover_host_headers()),
+        ["This PC", "box"],
+        "each host's rows sit under its name"
+    );
+
+    h.click_on("recover-submit");
+
+    let ours = recover_requests(h.sent());
+    let theirs = recover_requests(h.host(&remote()).sent());
+    assert_eq!(
+        ours.iter().map(|(_, ids)| ids.clone()).collect::<Vec<_>>(),
+        [["a1"]],
+        "This PC recovers only its own row"
+    );
+    assert_eq!(
+        theirs
+            .iter()
+            .map(|(_, ids)| ids.clone())
+            .collect::<Vec<_>>(),
+        [["b1"]],
+        "the remote host recovers only its own row"
+    );
+    h.send(recovered(&ours[0].0, "a1", "n1"));
+    assert!(
+        h.root(|root, _| root.recover_open()),
+        "the dialog waits for the other host's answer"
+    );
+    h.host(&remote()).send(recovered(&theirs[0].0, "b1", "n2"));
+    assert!(
+        !h.root(|root, _| root.recover_open()),
+        "both hosts answered with nothing failed"
     );
 }

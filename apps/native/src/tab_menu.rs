@@ -396,6 +396,7 @@ mod tests {
         sessions.open(
             PopoutKey::Session {
                 session_id: "s1".to_owned(),
+                host: None,
             },
             &tabs,
         );

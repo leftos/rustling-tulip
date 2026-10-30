@@ -57,10 +57,12 @@ impl RootView {
         self.ask_devices();
     }
 
-    /// Folds in the daemon's device list; any other message is not the
-    /// devices model's.
+    /// Folds in `host`'s device list when `host` is This PC; any other
+    /// message is not the devices model's, and a remote host's list is not
+    /// this client's to manage.
     pub(crate) fn on_devices_message(
         &mut self,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -68,6 +70,13 @@ impl RootView {
         let DaemonMessage::Devices { devices } = msg else {
             return;
         };
+        if *host != HostKey::Local {
+            tracing::debug!(
+                devices = devices.len(),
+                "devices: a remote host's list ignored"
+            );
+            return;
+        }
         tracing::info!(devices = devices.len(), "devices: the approved list");
         if self.devices.model.on_devices(devices.clone()) {
             self.after_block_confirm_closed(window, cx);

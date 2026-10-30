@@ -422,9 +422,7 @@ impl RootView {
     /// session's, its pane's, or its tab's.
     pub(crate) fn slot_window(&self, slot_id: &str) -> Option<WindowId> {
         let key = match popouts::slot_session(slot_id) {
-            Some(session_id) => PopoutKey::Session {
-                session_id: session_id.to_owned(),
-            },
+            Some(session_id) => self.popouts.session_key(session_id)?.clone(),
             None => match self.popouts.popped_key(slot_id) {
                 Some(key) => key.clone(),
                 None => self.tab_popout_of_pane(slot_id)?,

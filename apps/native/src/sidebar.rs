@@ -4765,6 +4765,7 @@ pub(crate) mod tests {
                 SavedPopout {
                     key: PopoutKey::Session {
                         session_id: "s1".to_owned(),
+                        host: None,
                     },
                     window: Some(WindowState {
                         x: 40.0,

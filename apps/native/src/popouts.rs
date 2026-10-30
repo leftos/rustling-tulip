@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::sidebar::display_label;
 use crate::tabs::{Pane, TabsModel, collect_panes};
+use crate::target::HostKey;
 use crate::window_state::WindowState;
 
 /// What one pop-out window holds.
@@ -18,8 +19,41 @@ pub enum PopoutKey {
     Pane { tab_id: String, pane_id: String },
     /// A whole tab.
     Tab { tab_id: String },
-    /// A session that has no pane of its own.
-    Session { session_id: String },
+    /// A session that has no pane of its own, on the host named by its
+    /// host key; `None` is This PC.
+    Session {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
+}
+
+impl PopoutKey {
+    /// The pop-out of session `session_id` on `host`.
+    #[must_use]
+    pub fn session(host: &HostKey, session_id: &str) -> Self {
+        Self::Session {
+            session_id: session_id.to_owned(),
+            host: match host {
+                HostKey::Local => None,
+                HostKey::Remote(name) => Some(name.clone()),
+            },
+        }
+    }
+
+    /// The host whose session the pop-out shows: a session key's own,
+    /// This PC for a pane or a tab, which belong to the layout home.
+    #[must_use]
+    pub fn host(&self) -> HostKey {
+        match self {
+            Self::Session {
+                host: Some(name), ..
+            } => HostKey::Remote(name.clone()),
+            Self::Session { host: None, .. } | Self::Pane { .. } | Self::Tab { .. } => {
+                HostKey::Local
+            }
+        }
+    }
 }
 
 /// An open pop-out as `native-ui.json` keeps it across restarts: what it
@@ -124,6 +158,14 @@ impl Popouts {
         self.keys.iter().position(|open| open == key)
     }
 
+    /// The open pop-out of session `session_id`, whichever host its key
+    /// names.
+    pub(crate) fn session_key(&self, session_id: &str) -> Option<&PopoutKey> {
+        self.keys.iter().find(
+            |key| matches!(key, PopoutKey::Session { session_id: id, .. } if id == session_id),
+        )
+    }
+
     /// The pane pop-out showing pane `pane_id`, whichever tab its key names.
     pub(crate) fn popped_key(&self, pane_id: &str) -> Option<&PopoutKey> {
         self.keys
@@ -148,7 +190,7 @@ impl Popouts {
         self.keys
             .iter()
             .filter_map(|key| match key {
-                PopoutKey::Session { session_id } => Some(session_id.as_str()),
+                PopoutKey::Session { session_id, .. } => Some(session_id.as_str()),
                 PopoutKey::Pane { .. } | PopoutKey::Tab { .. } => None,
             })
             .collect()
@@ -240,7 +282,7 @@ pub(crate) fn title(
     agents: &[AgentDescriptor],
 ) -> String {
     match key {
-        PopoutKey::Session { session_id } => sessions
+        PopoutKey::Session { session_id, .. } => sessions
             .iter()
             .find(|s| s.id == session_id.as_str())
             .map_or_else(
@@ -293,7 +335,7 @@ pub(crate) fn slot_session(slot_id: &str) -> Option<&str> {
 pub(crate) fn terminal_slot(key: &PopoutKey) -> Option<String> {
     match key {
         PopoutKey::Pane { pane_id, .. } => Some(pane_id.clone()),
-        PopoutKey::Session { session_id } => Some(session_slot_id(session_id)),
+        PopoutKey::Session { session_id, .. } => Some(session_slot_id(session_id)),
         PopoutKey::Tab { .. } => None,
     }
 }
@@ -392,7 +434,7 @@ fn sessions_of<'a>(key: &'a PopoutKey, tabs: &'a [TabEntry]) -> Vec<&'a str> {
                     .collect()
             })
             .unwrap_or_default(),
-        PopoutKey::Session { session_id } => vec![session_id.as_str()],
+        PopoutKey::Session { session_id, .. } => vec![session_id.as_str()],
     }
 }
 
@@ -436,6 +478,7 @@ mod tests {
     fn session_key(id: &str) -> PopoutKey {
         PopoutKey::Session {
             session_id: id.to_owned(),
+            host: None,
         }
     }
 

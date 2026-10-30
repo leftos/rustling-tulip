@@ -17,8 +17,8 @@ use crate::activity_bar::badge_text;
 use crate::buttons::RING_ROOM;
 use crate::notice_view::modal_panel;
 use crate::recover::{
-    Activation, Control, FocusMove, Group, GroupKind, Names, RECOVER_TIMEOUT, RecoverDialog, Row,
-    other_toggle_label,
+    Activation, Control, FocusMove, Group, GroupKind, HostHistory, Names, RECOVER_TIMEOUT,
+    RecoverDialog, Row, other_toggle_label,
 };
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::target::HostKey;
@@ -85,6 +85,20 @@ impl RootView {
                 };
                 (group.title(), rows)
             })
+            .collect()
+    }
+
+    /// The host names drawn over each host's rows, in order; none while
+    /// only one host lists rows.
+    #[must_use]
+    pub fn recover_host_headers(&self) -> Vec<String> {
+        let Some(dialog) = &self.recover else {
+            return Vec::new();
+        };
+        dialog
+            .groups()
+            .iter()
+            .filter_map(|group| group.header.clone())
             .collect()
     }
 
@@ -164,8 +178,9 @@ impl RootView {
         self.recover.as_ref().and_then(RecoverDialog::empty_text)
     }
 
-    /// The names the dialog shows for the registry's repos and workspaces.
-    fn recover_names(&self) -> Names {
+    /// The names the dialog shows for the registry's repos and workspaces,
+    /// with `host`'s agents.
+    fn recover_names(&self, host: &HostKey) -> Names {
         Names {
             workspaces: self
                 .sidebar
@@ -179,29 +194,98 @@ impl RootView {
                 .iter()
                 .map(|r| (r.id.clone(), r.name.clone()))
                 .collect(),
-            agents: self.sidebar.agents(&crate::target::HostKey::Local).to_vec(),
+            agents: self.sidebar.agents(host).to_vec(),
         }
     }
 
+    /// The name the dialog gives `host`: "This PC", else the remote host's
+    /// short name.
+    fn recover_host_label(&self, host: &HostKey) -> String {
+        match host {
+            HostKey::Local => "This PC".to_owned(),
+            HostKey::Remote(key) => self
+                .conn_of(host)
+                .and_then(|conn| conn.target().short_name())
+                .unwrap_or(key)
+                .to_owned(),
+        }
+    }
+
+    /// Every host the window holds, in host order, with its name and the
+    /// names its rows use.
+    fn recover_sources(&self) -> Vec<(HostKey, String, Names)> {
+        self.hosts
+            .keys()
+            .into_iter()
+            .map(|host| {
+                let label = self.recover_host_label(&host);
+                let names = self.recover_names(&host);
+                (host, label, names)
+            })
+            .collect()
+    }
+
+    /// Each of `sources`' histories as the dialog lists it.
+    fn host_histories<'a>(
+        &'a self,
+        sources: &'a [(HostKey, String, Names)],
+    ) -> Vec<HostHistory<'a>> {
+        sources
+            .iter()
+            .map(|(host, label, names)| HostHistory {
+                host: host.clone(),
+                label: label.clone(),
+                items: self.session_history.items(host),
+                names,
+            })
+            .collect()
+    }
+
+    /// Hands the open dialog every host's history as it now stands.
+    pub(crate) fn refresh_recover(&mut self) {
+        let Some(mut dialog) = self.recover.take() else {
+            return;
+        };
+        let sources = self.recover_sources();
+        dialog.refresh_over(&self.host_histories(&sources), &Local::now());
+        self.recover = Some(dialog);
+    }
+
     /// The rail button: opens the dialog, or closes it unless a recovery is
-    /// on its way.
+    /// on its way. With more than one host, each connected host is asked
+    /// for its history afresh.
     pub(crate) fn toggle_recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.recover.is_some() {
             self.close_recover(window, cx);
             return;
         }
-        let dialog = RecoverDialog::new(
-            self.session_history.items(),
-            &self.recover_names(),
-            &Local::now(),
-        );
+        let sources = self.recover_sources();
+        let dialog = RecoverDialog::over(&self.host_histories(&sources), &Local::now());
         tracing::info!(
-            entries = self.session_history.items().len(),
+            hosts = sources.len(),
+            entries = dialog.groups().iter().map(|g| g.rows.len()).sum::<usize>(),
             "recover dialog: opened"
         );
         self.recover = Some(dialog);
+        if sources.len() > 1 {
+            for (host, _, _) in &sources {
+                if self.conn_of(host).is_some_and(crate::Connection::is_open) {
+                    self.ask_history(host);
+                }
+            }
+        }
         self.recover_focus.focus(window);
         cx.notify();
+    }
+
+    /// Asks `host`'s daemon for its session history.
+    pub(crate) fn ask_history(&self, host: &HostKey) {
+        self.send_to(
+            host,
+            ClientMessage::ListSessionHistory {
+                request_id: Some(new_request_id()),
+            },
+        );
     }
 
     /// Closes the dialog, unless a recovery is on its way.
@@ -227,12 +311,7 @@ impl RootView {
         self.recover_requests.clear();
         self.recover_batches.clear();
         self.drop_recover(window, cx);
-        self.send_to(
-            &HostKey::Local,
-            protocol::ClientMessage::ListSessionHistory {
-                request_id: Some(new_request_id()),
-            },
-        );
+        self.ask_history(&HostKey::Local);
     }
 
     /// A lost connection: the dialog closes.
@@ -240,22 +319,20 @@ impl RootView {
         self.drop_recover(window, cx);
     }
 
-    /// The history (a reply or a broadcast), a recovery's answer, and the
-    /// snapshot of a recovered session still to be placed. Every other
+    /// `host`'s history (a reply or a broadcast), a recovery's answer, and
+    /// the snapshot of a recovered session still to be placed. Every other
     /// message is left alone.
     pub(crate) fn on_recover_message(
         &mut self,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match msg {
             DaemonMessage::SessionHistory { .. } => {
-                self.session_history.apply(msg);
-                let names = self.recover_names();
-                if let Some(dialog) = &mut self.recover {
-                    dialog.refresh(self.session_history.items(), &names, &Local::now());
-                }
+                self.session_history.apply(host, msg);
+                self.refresh_recover();
                 cx.notify();
             }
             DaemonMessage::RecoverResult {
@@ -341,28 +418,34 @@ impl RootView {
         }
     }
 
-    /// Sends the ticked rows' recovery and starts its timeout.
+    /// Sends the ticked rows' recovery, one request to each row's host, and
+    /// starts its timeout.
     fn submit_recover(&mut self, cx: &mut Context<Self>) {
-        let request_id = new_request_id();
         let now = (self.now)();
-        let Some(msg) = self
+        let messages = self
             .recover
             .as_mut()
-            .and_then(|dialog| dialog.recover_message(&request_id, now))
-        else {
+            .map(|dialog| dialog.recover_messages(new_request_id, now))
+            .unwrap_or_default();
+        if messages.is_empty() {
             return;
-        };
-        tracing::info!(request = %request_id, "recover dialog: recovering");
-        let abandoned: HashSet<String> = match &msg {
-            ClientMessage::RecoverSessions { items, .. } => items
-                .iter()
-                .map(|item| item.history_id.clone())
-                .filter(|id| self.sidebar.session(id).is_some_and(|s| s.is_abandoned))
-                .collect(),
-            _ => HashSet::new(),
-        };
-        self.recover_requests.insert(request_id, abandoned);
-        self.send_to(&HostKey::Local, msg);
+        }
+        for (host, msg) in messages {
+            if let ClientMessage::RecoverSessions {
+                request_id: Some(request_id),
+                items,
+            } = &msg
+            {
+                tracing::info!(request = %request_id, ?host, "recover dialog: recovering");
+                let abandoned: HashSet<String> = items
+                    .iter()
+                    .map(|item| item.history_id.clone())
+                    .filter(|id| self.sidebar.session(id).is_some_and(|s| s.is_abandoned))
+                    .collect();
+                self.recover_requests.insert(request_id.clone(), abandoned);
+            }
+            self.send_to(&host, msg);
+        }
         self.arm_recover_timeout(RECOVER_TIMEOUT, cx);
         cx.notify();
     }
@@ -463,10 +546,15 @@ impl RootView {
     ) -> Option<AnyElement> {
         let t = theme(cx);
         let dialog = self.recover.as_ref()?;
+        let mut toggle_drawn = false;
         let groups: Vec<Div> = dialog
             .groups()
             .iter()
-            .map(|group| group_block(dialog, group, cx))
+            .map(|group| {
+                let with_toggle = group.kind == GroupKind::Other && !toggle_drawn;
+                toggle_drawn |= with_toggle;
+                group_block(dialog, group, with_toggle, cx)
+            })
             .collect();
         let list = div()
             .id("recover-list")
@@ -623,18 +711,34 @@ fn control_button(
     }))
 }
 
-/// A group: its title (the other sessions' behind their toggle) over its
-/// shown rows.
-fn group_block(dialog: &RecoverDialog, group: &Group, cx: &mut Context<RootView>) -> Div {
-    let block = div().flex().flex_col().gap(px(6.0));
+/// A group: its host's name when it heads the host's rows, then its title
+/// (the other sessions' behind the one toggle, drawn `with_toggle`) over
+/// its shown rows.
+fn group_block(
+    dialog: &RecoverDialog,
+    group: &Group,
+    with_toggle: bool,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let block = div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .children(group.header.clone().map(muted));
     if group.kind == GroupKind::Other {
-        let toggle = control_button(dialog, Control::OtherToggle, cx);
+        let block = if with_toggle {
+            block.child(
+                div()
+                    .flex()
+                    .child(control_button(dialog, Control::OtherToggle, cx)),
+            )
+        } else {
+            block
+        };
         if !dialog.other_expanded() {
-            return block.child(div().flex().child(toggle));
+            return block;
         }
-        return block
-            .child(div().flex().child(toggle))
-            .children(group.rows.iter().map(|id| row_block(dialog, id, cx)));
+        return block.children(group.rows.iter().map(|id| row_block(dialog, id, cx)));
     }
     block
         .child(div().font_weight(FontWeight::SEMIBOLD).child(group.title()))

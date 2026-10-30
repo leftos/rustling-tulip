@@ -23,7 +23,7 @@ impl RootView {
     /// file fills the creator's pending parse. Returns whether it was one.
     pub(crate) fn on_vscode_message(
         &mut self,
-        _host: &crate::target::HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -41,23 +41,24 @@ impl RootView {
                 true
             }
             DaemonMessage::VscodeWorkspacesScanned { path, suggestions } => {
-                self.on_vscode_workspaces_scanned(path, suggestions, cx);
+                self.on_vscode_workspaces_scanned(host, path, suggestions, cx);
                 true
             }
             _ => false,
         }
     }
 
-    /// The answer to a DIR or SH folder scan: keep its first suggestion, or
-    /// none, under the folder's normalized path.
+    /// `host`'s answer to a DIR or SH folder scan: keep its first
+    /// suggestion, or none, under the host and the folder's normalized path.
     pub(crate) fn on_vscode_workspaces_scanned(
         &mut self,
+        host: &HostKey,
         path: &str,
         suggestions: &[VscodeWorkspaceSuggestion],
         cx: &mut Context<Self>,
     ) {
         self.cwd_workspace_scans
-            .insert(scan_key(path), suggestions.first().cloned());
+            .insert((host.clone(), scan_key(path)), suggestions.first().cloned());
         cx.notify();
     }
 
