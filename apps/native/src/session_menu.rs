@@ -3100,19 +3100,18 @@ impl RootView {
     }
 
     /// The banner atop an orphan's pane: its live stream is gone though its
-    /// process still runs.
+    /// process still runs. `host` is the host the banner's window shows,
+    /// passed in by the caller that knows it: a session pop-out's slot is
+    /// no tab's pane, so nothing here can find its host.
     pub(crate) fn orphan_banner(
         &self,
         offset: i8,
         pane_id: &str,
+        host: &HostKey,
         session_id: Option<&str>,
         t: &UiTheme,
     ) -> Option<Div> {
-        let host = crate::popouts::pane_in_tabs(pane_id, self.tabs.tabs())
-            .map_or(HostKey::Local, |pane| pane.host);
-        let session = session_id
-            .and_then(|id| self.sidebar.session(id))
-            .filter(|session| session.is_orphan)?;
+        let line = self.orphan_banner_line(host, session_id?)?;
         let name = format!("orphan-banner-{pane_id}");
         Some(
             div()
@@ -3123,8 +3122,21 @@ impl RootView {
                 .bg(gpui::rgba((t.warning << 8) | 0x24))
                 .text_size(ui_px_at(offset, UI_TEXT_SIZE))
                 .text_color(gpui::rgb(t.text))
-                .child(orphan_banner_text(session, self.sidebar.agents(&host))),
+                .child(line),
         )
+    }
+
+    /// The text of the orphan banner a window draws for `host`'s session
+    /// `id`; `None` when that host does not list it or it is no orphan.
+    #[must_use]
+    pub fn orphan_banner_line(&self, host: &HostKey, id: &str) -> Option<String> {
+        let session = self
+            .sidebar
+            .sessions_of(host)
+            .iter()
+            .find(|session| session.id == id)
+            .filter(|session| session.is_orphan)?;
+        Some(orphan_banner_text(session, self.sidebar.agents(host)))
     }
 
     /// The selectors of the abandoned overlays and orphan banners of the
@@ -3160,14 +3172,14 @@ impl RootView {
     /// the tab on screen; empty when it shows neither.
     #[must_use]
     pub fn pane_notice(&self, pane_id: &str) -> Vec<String> {
-        let Some(session) = self.active_pane_session(pane_id) else {
+        let Some((host, session)) = self.active_pane_hosted(pane_id) else {
             return Vec::new();
         };
-        let host = crate::popouts::pane_in_tabs(pane_id, self.tabs.tabs())
-            .map_or(HostKey::Local, |pane| pane.host);
         let mut text = Vec::new();
-        if session.is_orphan {
-            text.push(orphan_banner_text(session, self.sidebar.agents(&host)));
+        if session.is_orphan
+            && let Some(line) = self.orphan_banner_line(&host, &session.id)
+        {
+            text.push(line);
         }
         if action_state(session) == ActionState::Abandoned {
             text.extend(abandoned_lines(session));

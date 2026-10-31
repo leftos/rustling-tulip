@@ -1566,6 +1566,7 @@ impl RootView {
             }
             (None, None) => self.empty_pane(tab_id, pane_id, None, cx),
         };
+        let host = self.tabs.pane_host(tab_id, pane_id);
         let body = div()
             .relative()
             .flex()
@@ -1575,6 +1576,7 @@ impl RootView {
             .children(self.orphan_banner(
                 crate::fonts::ui_text_size(cx),
                 pane_id,
+                &host,
                 session_id,
                 &theme(cx),
             ))
@@ -1831,6 +1833,7 @@ impl RootView {
             .children(self.orphan_banner(
                 crate::fonts::ui_text_size(cx),
                 &slot_id,
+                host,
                 Some(session_id),
                 &theme(cx),
             ))
@@ -1875,6 +1878,7 @@ impl RootView {
                 .child(terminal)
                 .into_any_element(),
         };
+        let host = self.tabs.pane_host(tab_id, pane_id);
         let body = div()
             .relative()
             .flex()
@@ -1884,6 +1888,7 @@ impl RootView {
             .children(self.orphan_banner(
                 crate::fonts::ui_text_size(cx),
                 pane_id,
+                &host,
                 session_id,
                 &theme(cx),
             ))
@@ -2227,14 +2232,9 @@ impl RootView {
         buttons
     }
 
-    /// The session shown by pane `pane_id` of the tab on screen, as the
-    /// pane's host lists it.
-    pub(crate) fn active_pane_session(&self, pane_id: &str) -> Option<&SessionSnapshot> {
-        self.active_pane_hosted(pane_id).map(|(_, session)| session)
-    }
-
-    /// [`Self::active_pane_session`], with the pane's host.
-    fn active_pane_hosted(&self, pane_id: &str) -> Option<(HostKey, &SessionSnapshot)> {
+    /// The session shown by pane `pane_id` of the tab on screen, with the
+    /// pane's host, as that host lists it.
+    pub(crate) fn active_pane_hosted(&self, pane_id: &str) -> Option<(HostKey, &SessionSnapshot)> {
         let tab_id = &self.tabs.active_tab()?.id;
         self.pane_session_in(tab_id, pane_id)
     }
