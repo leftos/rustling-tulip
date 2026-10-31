@@ -736,13 +736,18 @@ fn edge_of_split(direction: SplitDirection, place: SplitPlace) -> PaneDropEdge {
 /// Where the unbound `session` dropped at `target` goes: an empty pane or
 /// the centre takes it in place of what the pane shows, a half (or the
 /// outer edge on that side) splits the pane with it. Either request names
-/// the session's host and goes to This PC, the layout home.
+/// the session's host and goes to This PC, the layout home. None while the
+/// source's host is not connected.
 fn unbound_drop(
     tabs: &[TabEntry],
     session: &SessionRef,
     target: &LeafTarget<'_>,
     request_id: Option<String>,
+    source_online: bool,
 ) -> Option<(PaneDropEdge, LeafDrop)> {
+    if !source_online {
+        return None;
+    }
     let grid = tabs.iter().find(|tab| tab.id == target.tab_id)?.grid()?;
     if !contains_pane(grid, target.pane_id) {
         return None;
@@ -778,7 +783,8 @@ fn unbound_drop(
 /// lands on, which the overlay shows: a bound leaf moves its pane (see
 /// [`leaf_source_pane`]) as [`pane_drop`] would move it; an unbound one is
 /// placed there (see `unbound_drop`). None for a session its host's list in
-/// `sessions` lacks or a pane cannot show (headless), and for a drop
+/// `sessions` lacks or a pane cannot show (headless), for a source whose
+/// host is not connected (`source_online` false), and for a drop
 /// [`pane_drop`] refuses.
 #[must_use]
 pub fn leaf_drop(
@@ -787,10 +793,14 @@ pub fn leaf_drop(
     session: &SessionRef,
     target: &LeafTarget<'_>,
     request_id: Option<String>,
+    source_online: bool,
 ) -> Option<(PaneDropEdge, LeafDrop)> {
+    if !source_online {
+        return None;
+    }
     attachable(sessions, session)?;
     let Some((tab_id, pane_id)) = leaf_source_pane(tabs, session) else {
-        return unbound_drop(tabs.tabs(), session, target, request_id);
+        return unbound_drop(tabs.tabs(), session, target, request_id, source_online);
     };
     let payload = DragPayload::Pane { tab_id, pane_id };
     let drop = pane_drop(
@@ -829,7 +839,11 @@ pub fn leaf_pill_drop(
     session: &SessionRef,
     pill: &str,
     request_id: Option<String>,
+    source_online: bool,
 ) -> Option<LeafDrop> {
+    if !source_online {
+        return None;
+    }
     let snapshot = attachable(sessions, session)?;
     if !pill_takes_leaf(tabs, pill) {
         return None;
@@ -1836,6 +1850,7 @@ mod tests {
             &here("s1"),
             &onto("t1", "b", PaneDropEdge::Right),
             Some("r".to_owned()),
+            true,
         )
         .expect("the leaf drops");
         assert_eq!(edge, PaneDropEdge::Right);
@@ -1855,6 +1870,7 @@ mod tests {
             &here("s1"),
             &onto("t4", "f", PaneDropEdge::Replace),
             None,
+            true,
         )
         .expect("the leaf drops");
         let drop = moved(Some(drop));
@@ -1871,7 +1887,8 @@ mod tests {
                 &on_local(&sessions),
                 &here("s1"),
                 &onto("t1", "a", PaneDropEdge::Left),
-                None
+                None,
+                true
             )
             .is_none(),
             "a leaf dropped on its own pane does nothing"
@@ -1889,6 +1906,7 @@ mod tests {
             &here("s2"),
             &onto("t4", "f", PaneDropEdge::Replace),
             None,
+            true,
         );
         assert_eq!(
             landed(drop),
@@ -1905,7 +1923,7 @@ mod tests {
         );
 
         let (_, message) = landed(
-            leaf_pill_drop(&model, &on_local(&sessions), &here("s2"), "t2", None)
+            leaf_pill_drop(&model, &on_local(&sessions), &here("s2"), "t2", None, true)
                 .map(|drop| (PaneDropEdge::Replace, drop)),
         );
         assert_eq!(
@@ -1936,6 +1954,7 @@ mod tests {
                 &here("u"),
                 &onto("t1", "b", edge),
                 Some("r".to_owned()),
+                true,
             );
             assert_eq!(
                 landed(drop),
@@ -1965,6 +1984,7 @@ mod tests {
             &here("u"),
             &onto("t1", "b", PaneDropEdge::Replace),
             Some("r".to_owned()),
+            true,
         );
         assert_eq!(
             landed(drop),
@@ -2020,6 +2040,7 @@ mod tests {
                 &here("u"),
                 &onto("t1", pane_id, outer),
                 Some("r".to_owned()),
+                true,
             );
             assert_eq!(
                 landed(drop),
@@ -2056,6 +2077,7 @@ mod tests {
                 &here("u"),
                 &onto("t2", "e", edge),
                 None,
+                true,
             );
             assert_eq!(
                 landed(drop),
@@ -2084,13 +2106,22 @@ mod tests {
                     &on_local(&sessions),
                     &here(session),
                     &onto("t1", "b", PaneDropEdge::Left),
-                    None
+                    None,
+                    true
                 )
                 .is_none(),
                 "{session} drops on no pane"
             );
             assert!(
-                leaf_pill_drop(&model, &on_local(&sessions), &here(session), "t4", None).is_none(),
+                leaf_pill_drop(
+                    &model,
+                    &on_local(&sessions),
+                    &here(session),
+                    "t4",
+                    None,
+                    true
+                )
+                .is_none(),
                 "{session} drops on no pill"
             );
         }
@@ -2100,7 +2131,8 @@ mod tests {
                 &on_local(&sessions),
                 &here("u"),
                 &onto("t1", "nowhere", PaneDropEdge::Left),
-                None
+                None,
+                true
             )
             .is_none(),
             "a pane the tab lacks takes no leaf"
@@ -2114,8 +2146,15 @@ mod tests {
         for session in ["u", "s2"] {
             for pill in ["t3", "t9"] {
                 assert!(
-                    leaf_pill_drop(&model, &on_local(&sessions), &here(session), pill, None)
-                        .is_none(),
+                    leaf_pill_drop(
+                        &model,
+                        &on_local(&sessions),
+                        &here(session),
+                        pill,
+                        None,
+                        true
+                    )
+                    .is_none(),
                     "{session} on {pill}"
                 );
             }
@@ -2124,7 +2163,7 @@ mod tests {
         assert!(pill_takes_leaf(&model, "t4"));
 
         let (_, message) = landed(
-            leaf_pill_drop(&model, &on_local(&sessions), &here("u"), "t4", None)
+            leaf_pill_drop(&model, &on_local(&sessions), &here("u"), "t4", None, true)
                 .map(|drop| (PaneDropEdge::Replace, drop)),
         );
         assert_eq!(
@@ -2141,7 +2180,15 @@ mod tests {
         assert!(!pill_takes_leaf(&model, "t4"));
         for session in ["u", "s2"] {
             assert!(
-                leaf_pill_drop(&model, &on_local(&sessions), &here(session), "t4", None).is_none(),
+                leaf_pill_drop(
+                    &model,
+                    &on_local(&sessions),
+                    &here(session),
+                    "t4",
+                    None,
+                    true
+                )
+                .is_none(),
                 "a closing tab takes no {session}"
             );
         }
@@ -2153,7 +2200,8 @@ mod tests {
         let model = leaf_tabs();
         for pill in ["t1", "t2"] {
             assert!(
-                leaf_pill_drop(&model, &on_local(&sessions), &here("s1"), pill, None).is_none(),
+                leaf_pill_drop(&model, &on_local(&sessions), &here("s1"), pill, None, true)
+                    .is_none(),
                 "{pill} already shows s1"
             );
         }
@@ -2164,6 +2212,7 @@ mod tests {
             &here("s2"),
             "t2",
             Some("r".to_owned()),
+            true,
         ));
         assert_eq!(
             wire(&drop.message()),
@@ -2218,6 +2267,7 @@ mod tests {
             &on_box("rb"),
             &onto("t1", "b", PaneDropEdge::Left),
             Some("r".to_owned()),
+            true,
         );
         assert_eq!(
             landed(drop),
@@ -2243,6 +2293,7 @@ mod tests {
             &on_box("rb"),
             &onto("t2", "e", PaneDropEdge::Replace),
             None,
+            true,
         );
         assert_eq!(
             landed(drop),
@@ -2260,7 +2311,7 @@ mod tests {
         );
 
         let (_, message) = landed(
-            leaf_pill_drop(&model, &sessions, &on_box("rb"), "t4", None)
+            leaf_pill_drop(&model, &sessions, &on_box("rb"), "t4", None, true)
                 .map(|drop| (PaneDropEdge::Replace, drop)),
         );
         assert_eq!(
@@ -2281,14 +2332,68 @@ mod tests {
             (on_box("u"), "the remote host lists no u"),
         ] {
             assert!(
-                leaf_drop(&model, &sessions, &session, &elsewhere, None).is_none(),
+                leaf_drop(&model, &sessions, &session, &elsewhere, None, true).is_none(),
                 "{why}"
             );
             assert!(
-                leaf_pill_drop(&model, &sessions, &session, "t4", None).is_none(),
+                leaf_pill_drop(&model, &sessions, &session, "t4", None, true).is_none(),
                 "{why}, on a pill"
             );
         }
+    }
+
+    #[test]
+    fn an_offline_source_host_drops_nowhere() {
+        let local = leaf_sessions();
+        let remote = vec![crate::sidebar::tests::session("rb")];
+        let sessions = [
+            (HostKey::Local, local.as_slice()),
+            (HostKey::Remote(BOX.to_owned()), remote.as_slice()),
+        ];
+        let model = leaf_tabs();
+        let target = onto("t1", "b", PaneDropEdge::Left);
+        let leaf = on_box("rb");
+
+        assert!(
+            leaf_drop(
+                &model,
+                &sessions,
+                &leaf,
+                &target,
+                Some("r".to_owned()),
+                true
+            )
+            .is_some(),
+            "an online source host's leaf drops on a pane"
+        );
+        assert!(
+            leaf_drop(
+                &model,
+                &sessions,
+                &leaf,
+                &target,
+                Some("r".to_owned()),
+                false
+            )
+            .is_none(),
+            "an offline source host's leaf drops on no pane"
+        );
+        assert!(
+            leaf_pill_drop(&model, &sessions, &leaf, "t4", Some("r".to_owned()), true).is_some(),
+            "an online source host's leaf drops on a pill"
+        );
+        assert!(
+            leaf_pill_drop(&model, &sessions, &leaf, "t4", Some("r".to_owned()), false).is_none(),
+            "an offline source host's leaf drops on no pill"
+        );
+        assert!(
+            unbound_drop(model.tabs(), &leaf, &target, Some("r".to_owned()), true).is_some(),
+            "an online unbound source is placed"
+        );
+        assert!(
+            unbound_drop(model.tabs(), &leaf, &target, Some("r".to_owned()), false).is_none(),
+            "an offline unbound source is placed nowhere"
+        );
     }
 
     #[test]
@@ -2307,7 +2412,7 @@ mod tests {
             (here("s1"), "a", "This PC's s1 moves a"),
         ] {
             let (_, drop) =
-                leaf_drop(&model, &sessions, &session, &to_f, None).expect("the leaf drops");
+                leaf_drop(&model, &sessions, &session, &to_f, None, true).expect("the leaf drops");
             let drop = moved(Some(drop));
             assert_eq!(
                 (drop.src_tab_id.as_str(), drop.src_pane_id.as_str()),
@@ -2322,6 +2427,7 @@ mod tests {
             &on_box("s1"),
             "t4",
             Some("r".to_owned()),
+            true,
         ));
         assert_eq!(
             wire(&drop.message()),
@@ -2337,7 +2443,7 @@ mod tests {
             "on a pill, the remote session's own pane moves"
         );
         assert!(
-            leaf_pill_drop(&model, &sessions, &on_box("s1"), "t1", None).is_none(),
+            leaf_pill_drop(&model, &sessions, &on_box("s1"), "t1", None, true).is_none(),
             "t1 already shows the remote s1"
         );
     }

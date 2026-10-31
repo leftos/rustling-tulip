@@ -1631,13 +1631,17 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        // The card names the session its pane shows, on the pane's host:
+        // a session id two hosts share must not borrow the other's rows.
+        let host = match &key {
+            PopoutKey::Pane { tab_id, .. } => self.tabs.pane_host(tab_id, pane_id),
+            other => other.host(),
+        };
         let label = session_id
-            .and_then(|id| self.sidebar.session(id))
+            .and_then(|id| self.hosted_session(&host, id))
             .map_or_else(
                 || drag::EMPTY_PANE_LABEL.to_owned(),
-                |session| {
-                    display_label(session, self.sidebar.agents(&crate::target::HostKey::Local))
-                },
+                |session| display_label(session, self.sidebar.agents(&host)),
             );
         let focus_key = key.clone();
         let focus = BorderedButton {
@@ -2123,12 +2127,14 @@ impl RootView {
                 edge,
             };
             let session = SessionRef::new(host.clone(), session_id.clone());
+            let source_online = !self.is_remote_offline(host);
             let (edge, drop) = drag::leaf_drop(
                 &self.tabs,
                 &self.sidebar.sessions_by_host(),
                 &session,
                 &target,
                 request_id,
+                source_online,
             )?;
             return Some((pane_id, edge, drop));
         }
@@ -2284,11 +2290,12 @@ impl RootView {
     /// What a pane header shows of `host`'s `session`, with the host's chip
     /// when it is a remote one.
     fn session_header_parts(&self, host: &HostKey, session: &SessionSnapshot) -> PaneHeaderParts {
+        let agents = self.sidebar.agents(host);
         let host = self.host_chip_label(host);
         header_parts(
             session,
             self.sidebar.is_unseen(&session.id),
-            self.sidebar.session_agents(&session.id),
+            agents,
             host.as_ref(),
         )
     }

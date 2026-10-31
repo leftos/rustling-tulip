@@ -3107,6 +3107,8 @@ impl RootView {
         session_id: Option<&str>,
         t: &UiTheme,
     ) -> Option<Div> {
+        let host = crate::popouts::pane_in_tabs(pane_id, self.tabs.tabs())
+            .map_or(HostKey::Local, |pane| pane.host);
         let session = session_id
             .and_then(|id| self.sidebar.session(id))
             .filter(|session| session.is_orphan)?;
@@ -3120,10 +3122,7 @@ impl RootView {
                 .bg(gpui::rgba((t.warning << 8) | 0x24))
                 .text_size(ui_px_at(offset, UI_TEXT_SIZE))
                 .text_color(gpui::rgb(t.text))
-                .child(orphan_banner_text(
-                    session,
-                    self.sidebar.agents(&crate::target::HostKey::Local),
-                )),
+                .child(orphan_banner_text(session, self.sidebar.agents(&host))),
         )
     }
 
@@ -3163,12 +3162,11 @@ impl RootView {
         let Some(session) = self.active_pane_session(pane_id) else {
             return Vec::new();
         };
+        let host = crate::popouts::pane_in_tabs(pane_id, self.tabs.tabs())
+            .map_or(HostKey::Local, |pane| pane.host);
         let mut text = Vec::new();
         if session.is_orphan {
-            text.push(orphan_banner_text(
-                session,
-                self.sidebar.agents(&crate::target::HostKey::Local),
-            ));
+            text.push(orphan_banner_text(session, self.sidebar.agents(&host)));
         }
         if action_state(session) == ActionState::Abandoned {
             text.extend(abandoned_lines(session));

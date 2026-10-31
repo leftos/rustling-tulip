@@ -1246,7 +1246,14 @@ fn leaf_drag_row(
         session_id: leaf.id.clone(),
     };
     let session = SessionRef::new(ctx.host_of(&container.key), leaf.id.clone());
-    let payload = drag::leaf_payload(container, &session);
+    // An offline host's leaf is as inert as its other dimmed rows: like an
+    // SH or DIR header it neither drags nor takes a drop, so no drag starts
+    // and no drop mark shows while the host is away.
+    let payload = if ctx.dimmed.containers.contains(&container.key) {
+        None
+    } else {
+        drag::leaf_payload(container, &session)
+    };
     let dragged = payload.is_some() && ctx.dragged == payload;
     let line = ctx.mark_at(&target).map(|side| {
         let selector = format!("sidebar-drop-mark-{}-{}", container.key, leaf.id);
