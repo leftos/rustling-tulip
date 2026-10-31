@@ -101,6 +101,67 @@ fn rows_grow_with_the_ui_text_size_and_clicks_still_hit_them(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn a_repo_row_with_a_summary_grows_by_two_offsets(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    let mut launched = repo("r1", "D:/src/r1");
+    launched.last_spawn_config = Some(SpawnConfig {
+        target: SpawnTarget::Single {
+            repo_id: "r1".to_owned(),
+            branch_name: "feat/x".to_owned(),
+            base_branch: Some("main".to_owned()),
+            use_worktree: false,
+            checkout_strategy: None,
+            worktree_reuse: WorktreeReusePolicy::default(),
+            existing_worktree: None,
+        },
+        mode: SessionMode::Interactive,
+        dangerously_skip_permissions: false,
+        agent: None,
+        extra_env: Vec::new(),
+    });
+    fixture.repos = vec![launched, repo("r2", "D:/src/r2")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(
+        h.bounds("container-repo:r1").size.height,
+        px(46.0),
+        "precondition: a two-line row at no offset"
+    );
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+    let row = h.bounds("container-repo:r1");
+    assert_eq!(row.size.height, px(54.0), "two lines: two offsets");
+    assert!(
+        h.bounds("leaf-s1").top() >= row.bottom(),
+        "the next row starts at or below this row's bottom"
+    );
+    let other = h.bounds("container-repo:r2");
+    assert!(
+        other.bottom() <= row.top() || other.top() >= row.bottom(),
+        "the one-line row does not overlap it: {other:?} and {row:?}"
+    );
+    assert_eq!(other.size.height, px(34.0), "one line: one offset");
+}
+
+#[gpui::test]
+fn sidebar_chips_grow_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture::single(
+        session("s1")
+            .agent_chips(serde_json::json!([{ "text": "DeepSeek", "tip": "Runs on DeepSeek" }]))
+            .build(),
+    );
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(
+        h.bounds("leaf-provider-s1").size.height,
+        px(17.0),
+        "precondition: a subline chip at no offset"
+    );
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    assert_eq!(h.bounds("leaf-provider-s1").size.height, px(20.0));
+}
+
+#[gpui::test]
 fn containers_render_workspace_repo_shell_dir_detached_in_order(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {

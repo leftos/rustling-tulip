@@ -717,7 +717,7 @@ fn segmented<C: Copy + PartialEq + 'static>(
             .debug_selector(move || selector.to_owned())
             .flex()
             .items_center()
-            .h(px(22.0))
+            .h(ui_px(cx, 22.0))
             .px(px(pad))
             .rounded(px(4.0))
             .text_size(ui_px(cx, 11.5))
@@ -765,7 +765,7 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
         .flex_none()
         .items_center()
         .gap(px(if filtering { 6.0 } else { 8.0 }))
-        .h(px(44.0))
+        .h(ui_px(cx, 44.0))
         .pl(px(14.0))
         .pr(px(10.0))
         .border_b_1()
@@ -969,7 +969,7 @@ impl Render for RowGhost {
                 .top(self.offset.y + ROW_GHOST_NUDGE.y)
                 .flex()
                 .items_center()
-                .h(px(26.0))
+                .h(ui_px(cx, 26.0))
                 .px(px(10.0))
                 .whitespace_nowrap()
                 .rounded(px(6.0))
@@ -1435,7 +1435,7 @@ fn chip<E: Styled>(offset: i8, element: E, size: ChipSize, t: &UiTheme) -> E {
         .flex()
         .flex_none()
         .items_center()
-        .h(px(size.height()))
+        .h(ui_px_at(offset, size.height()))
         .px(px(size.padding()))
         .rounded(px(5.0))
         .border_1()
@@ -1750,6 +1750,14 @@ fn container_badge(offset: i8, selector: String, t: &UiTheme) -> Div {
         .child("!")
 }
 
+/// A container row's fixed height at UI text size `offset`: 30 px for one
+/// line, 46 px for two (a launch summary under the name), each line adding
+/// the offset once so rows stay even.
+fn row_height(offset: i8, two_line: bool) -> Pixels {
+    let (base, lines) = if two_line { (46.0, 2.0) } else { (30.0, 1.0) };
+    px(base + lines * f32::from(offset))
+}
+
 /// A container row: a click focuses and folds it; a right-click on a repo
 /// or workspace opens its menu; a double-click there replays its last
 /// launch, and its ▶ replays into the current tab. A row with a launch
@@ -1781,7 +1789,7 @@ fn container_row(
         .flex()
         .flex_none()
         .gap(px(7.0))
-        .h(px(if summary.is_some() { 46.0 } else { 30.0 }))
+        .h(row_height(crate::fonts::ui_text_size(cx), two_line))
         .pl(px(4.0))
         .pr(px(8.0))
         .cursor_pointer()
@@ -2248,7 +2256,7 @@ fn action_chip(offset: i8, element: Stateful<Div>, t: &UiTheme) -> Stateful<Div>
         .flex()
         .flex_none()
         .items_center()
-        .h(px(20.0))
+        .h(ui_px_at(offset, 20.0))
         .px(px(7.0))
         .rounded(px(5.0))
         .border_1()
