@@ -15,9 +15,10 @@
 //! `connections-ssh` (its add form switched to SSH, filled in, after a
 //! passing Test connection), `menu` (the sessions panel's ⋯ menu open
 //! over the repo rows, with a toast over the panes), `chat` (the Petal
-//! pane switched to its chat, a row of each kind and a live answer) and
-//! `summary` (the Petal pane switched to its summary: three lines, the
-//! second one open, under a pinned Permission card). The PNG goes to
+//! pane switched to its chat, a row of each kind, an answer with one stretch
+//! open and two closed, and a live answer) and `summary` (the Petal pane
+//! switched to its summary: three lines, the second one open, under a
+//! pinned Permission card). The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -70,6 +71,9 @@ const DASHBOARD_WINDOW_SIZE: (u16, u16) = (1800, 900);
 /// hold the pinned card, all three lines with one open, the strip and the
 /// composer.
 const SUMMARY_WINDOW_SIZE: (u16, u16) = (1000, 1000);
+/// The `chat` shot's window: tall enough for the split's top pane to hold
+/// the finished answer with its stretches above the newest rows.
+const CHAT_WINDOW_SIZE: (u16, u16) = (1000, 1100);
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -112,6 +116,9 @@ const VIEWER_LINE: u32 = 30;
 const VIEWER_MD_FILE: &str = "README.md";
 /// The `summary` shot's line drawn open: the second of its three.
 const SUMMARY_OPEN_LINE: &str = "t1";
+/// The stretch the `chat` shot's finished answer draws open, with a closed
+/// stretch nested in it and another closed beside it.
+const CHAT_OPEN_STRETCH: &str = "pills";
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -206,7 +213,7 @@ impl View {
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
-            Self::Update | Self::Summary => 2,
+            Self::Update | Self::Summary | Self::Chat => 2,
             _ => 1,
         }
     }
@@ -216,6 +223,7 @@ impl View {
         match self {
             Self::Dashboard => DASHBOARD_WINDOW_SIZE,
             Self::Summary => SUMMARY_WINDOW_SIZE,
+            Self::Chat => CHAT_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -255,7 +263,16 @@ impl View {
                         .flat_map(|(_, rows)| rows)
                         .any(|row| row.context != "—")
             }
-            Self::Chat => root.pane_shows_chat("p1") && !root.chat_rows("s-petal").is_empty(),
+            Self::Chat => {
+                root.pane_shows_chat("p1")
+                    && root
+                        .chat_answer_stretchtext("s-petal", "a1")
+                        .iter()
+                        .any(|(_, key)| key == CHAT_OPEN_STRETCH)
+                    && root
+                        .chat_answer_text("s-petal", "a1")
+                        .is_some_and(|text| text.contains("bottom edge"))
+            }
             Self::Summary => {
                 root.pane_view("p1") == PaneView::Summary
                     && root.summary_line_open("s-petal", SUMMARY_OPEN_LINE)
@@ -682,7 +699,13 @@ fn drive(
                 .root::<RootView>()
                 .flatten()
                 .context("the window has no root view")?;
-            root.update(cx, |root, cx| root.toggle_pane_view("p1", window, cx));
+            root.update(cx, |root, cx| {
+                if step == 0 {
+                    root.toggle_pane_view("p1", window, cx);
+                } else {
+                    root.toggle_stretchtext("s-petal", "a1", CHAT_OPEN_STRETCH, cx);
+                }
+            });
             Ok(())
         }
         View::Summary => {
@@ -1327,7 +1350,9 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
         }),
         parent_id: None,
     };
-    let answer = "The footer now keeps **8 px** between its pills:\n\n\
+    let answer = "The footer now keeps **8 px** between its \
+                  {{pills|pills, the {{status chips|status, branch and model chips}} along \
+                  its bottom edge}}, so it {{reads calmer|reads calmer at a glance}}:\n\n\
                   - `pill()` takes the gap from its caller\n\
                   - the colours come from `palette.rs`\n\n\
                   ```rust\nlet gap = px(8.0);\n```";

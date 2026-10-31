@@ -537,7 +537,7 @@ A pane showing an interactive agent session that offers a chat has three views: 
   A session that offers no chat shows its terminal under the muted line "This session offers no chat, so it shows its terminal", and a load that fails for another reason shows "Could not load the chat: {the daemon's message}" the same way, with no toast.
 - **Chat body**: a scrolling chat that follows the bottom until scrolled up, on the shared scrollbar.
 
-  User bubbles sit on the right (a pending one dimmed until its transcript record arrives); answers are Markdown through `md_blocks.rs` (a live answer has a blue border, a cursor and "writing · N lines", and only `http`/`https` links are clickable).
+  User bubbles sit on the right (a pending one dimmed until its transcript record arrives); answers are Markdown, composed by `stretchtext.rs` (stretchtext drawn as its short form, a faded-underline link that opens its long form in place, one level at a time, with a muted `‹` that closes it and its nested ones; open state per session and answer, in memory, carried from a live answer to its transcript answer), then parsed by `md_blocks.rs` and drawn by `viewer_md_view.rs`'s painter (a live answer has a blue border, a cursor and "writing · N lines", and only `http`/`https` links are clickable).
 
   "Thought for Ns" is one muted line; a tool card shows its name, one-liner and running, done or failed state, and a click shows Input and Result or Error; system rows are muted pills, a receipt reads "question — answer", a turn's duration reads "Worked for …" and older entries read "N earlier messages".
 

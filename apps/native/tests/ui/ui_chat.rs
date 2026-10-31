@@ -1421,3 +1421,169 @@ fn a_send_with_no_pending_entry_settles_when_the_turn_starts(cx: &mut TestAppCon
     h.keys("ctrl-enter");
     assert_eq!(sends(&mut h).len(), 1, "the next send goes");
 }
+
+/// An answer with a stretch whose long form holds a nested stretch.
+const STRETCHED: &str = "The build {{failed|failed on a cold cache.\n\nThe {{cache key|key is the lockfile hash}} changed.}} today.";
+const OUTER: &str = "failed";
+const INNER: &str = "failed \u{203A} cache key";
+
+fn drawn_text(h: &mut Harness<'_>, answer_id: &str) -> Option<String> {
+    let answer_id = answer_id.to_owned();
+    h.root(move |root, _| root.chat_answer_text("s1", &answer_id))
+}
+
+fn stretch_links(h: &mut Harness<'_>, answer_id: &str) -> Vec<(String, String)> {
+    let answer_id = answer_id.to_owned();
+    h.root(move |root, _| root.chat_answer_stretchtext("s1", &answer_id))
+}
+
+fn link(text: &str, key: &str) -> (String, String) {
+    (text.to_owned(), key.to_owned())
+}
+
+/// Clicks the short form or the closer of stretch `key` in answer
+/// `answer_id`.
+fn toggle(h: &mut Harness<'_>, answer_id: &str, key: &str) {
+    let (answer_id, key) = (answer_id.to_owned(), key.to_owned());
+    h.root_update(move |root, _, cx| root.toggle_stretchtext("s1", &answer_id, &key, cx));
+}
+
+/// `p1` on its chat with `entries` loaded.
+fn chat_with<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    entries: Vec<ChatEntry>,
+) -> Harness<'a> {
+    let (mut h, id) = opened(cx, dir);
+    h.send(reply(Some(&id), entries));
+    h
+}
+
+#[gpui::test]
+fn a_stretch_draws_its_short_form_until_clicked(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_with(cx, &dir, vec![user("u1"), answer("a1", STRETCHED, false)]);
+    assert_eq!(
+        drawn_text(&mut h, "a1").as_deref(),
+        Some("The build failed today.")
+    );
+    assert_eq!(stretch_links(&mut h, "a1"), [link("failed", OUTER)]);
+    let closed = h.bounds("chat-row-p1-a1").size.height;
+    assert!(closed > px(0.0), "the answer is drawn");
+    toggle(&mut h, "a1", OUTER);
+    let open = h.bounds("chat-row-p1-a1").size.height;
+    assert!(
+        open > closed,
+        "the long form takes its place: {closed:?} then {open:?}"
+    );
+}
+
+#[gpui::test]
+fn clicking_a_stretch_opens_one_level(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_with(cx, &dir, vec![answer("a1", STRETCHED, false)]);
+    toggle(&mut h, "a1", OUTER);
+    assert_eq!(
+        drawn_text(&mut h, "a1").as_deref(),
+        Some("The build failed on a cold cache.\nThe cache key changed. \u{2039} today.")
+    );
+    assert_eq!(
+        stretch_links(&mut h, "a1"),
+        [link("cache key", INNER), link("\u{2039}", OUTER)],
+        "the nested stretch is a link of its own, still closed"
+    );
+}
+
+#[gpui::test]
+fn the_closer_closes_a_stretch_and_its_nested_ones(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_with(cx, &dir, vec![answer("a1", STRETCHED, false)]);
+    toggle(&mut h, "a1", OUTER);
+    toggle(&mut h, "a1", INNER);
+    assert_eq!(
+        drawn_text(&mut h, "a1").as_deref(),
+        Some(
+            "The build failed on a cold cache.\nThe key is the lockfile hash \u{2039} changed. \u{2039} today."
+        )
+    );
+    assert_eq!(
+        stretch_links(&mut h, "a1"),
+        [link("\u{2039}", INNER), link("\u{2039}", OUTER)]
+    );
+    toggle(&mut h, "a1", OUTER);
+    assert_eq!(
+        drawn_text(&mut h, "a1").as_deref(),
+        Some("The build failed today.")
+    );
+    toggle(&mut h, "a1", OUTER);
+    assert_eq!(
+        stretch_links(&mut h, "a1"),
+        [link("cache key", INNER), link("\u{2039}", OUTER)],
+        "opened again, the nested stretch starts closed"
+    );
+}
+
+#[gpui::test]
+fn an_open_stretch_survives_the_live_answer_becoming_final(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_with(cx, &dir, vec![user("u1")]);
+    h.send(append(vec![answer("live:m1", STRETCHED, true)], &[]));
+    assert_eq!(stretch_links(&mut h, "live:m1"), [link("failed", OUTER)]);
+    toggle(&mut h, "live:m1", OUTER);
+    h.send(append(vec![answer("a1", STRETCHED, false)], &["live:m1"]));
+    assert_eq!(row_ids(&mut h), ["u1", "a1"]);
+    assert_eq!(
+        stretch_links(&mut h, "a1"),
+        [link("cache key", INNER), link("\u{2039}", OUTER)],
+        "the transcript answer opens where the live one was open"
+    );
+}
+
+#[gpui::test]
+fn a_popped_out_chat_pane_shows_the_same_open_stretches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_in_a_repo(cx, &dir);
+    h.click_on(TO_CHAT);
+    let id = load_request(&h.sent()).expect("the toggle asks for the chat");
+    h.send(reply(Some(&id), vec![answer("a1", STRETCHED, false)]));
+    toggle(&mut h, "a1", OUTER);
+    pop_out_p1(&mut h);
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    let open = popout
+        .debug_bounds("chat-row-p1-a1")
+        .expect("the pop-out draws the answer")
+        .size
+        .height;
+    toggle(&mut h, "a1", OUTER);
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    let closed = popout
+        .debug_bounds("chat-row-p1-a1")
+        .expect("the pop-out still draws the answer")
+        .size
+        .height;
+    assert!(
+        open > closed,
+        "the pop-out drew the stretch the main window opened: {open:?} then {closed:?}"
+    );
+}
+
+#[gpui::test]
+fn a_stretch_in_a_code_block_stays_literal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_with(
+        cx,
+        &dir,
+        vec![answer(
+            "a1",
+            "Write `{{a|b}}` like so:\n\n```\n{{name|value}}\n```",
+            false,
+        )],
+    );
+    assert_eq!(
+        drawn_text(&mut h, "a1").as_deref(),
+        Some("Write {{a|b}} like so:\n{{name|value}}")
+    );
+    assert_eq!(stretch_links(&mut h, "a1"), []);
+}

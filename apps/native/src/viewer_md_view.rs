@@ -25,6 +25,7 @@ use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
 use crate::open::OpenJob;
 use crate::open_view::{COULD_NOT_OPEN, Origin, Then};
+use crate::stretchtext::Composed;
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_tab::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
@@ -62,6 +63,8 @@ const CELL_PAD_Y: f32 = 4.0;
 const LINE_HEIGHT_RATIO: f32 = 1.4;
 /// A link's underline and a strikethrough's line, in px.
 const DECORATION: f32 = 1.0;
+/// The alpha of a stretch's underline, in the link colour.
+const STRETCH_UNDERLINE_ALPHA: f32 = 0.45;
 
 /// A parsed Markdown document as the rows the view draws, and where each
 /// top-level block's rows start.
@@ -85,6 +88,30 @@ impl MdDoc {
     pub(crate) fn anchor_row(&self, slug: &str) -> Option<usize> {
         self.anchor_rows.get(slug).copied()
     }
+
+    /// The text the document draws, a line per row; a table row's cells are
+    /// joined by ` | `.
+    pub(crate) fn drawn_text(&self) -> String {
+        self.rows
+            .iter()
+            .map(Row::drawn_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Each stretchtext link the document draws, in order: its drawn text
+    /// and the key of the stretch it opens or closes.
+    pub(crate) fn stretchtext_links(&self) -> Vec<(String, String)> {
+        self.rows
+            .iter()
+            .flat_map(Row::span_lists)
+            .flatten()
+            .filter_map(|span| match &span.link {
+                Some(LinkTarget::Stretchtext { key }) => Some((span.text.clone(), key.clone())),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Which links a rendered document follows on a click.
@@ -92,8 +119,8 @@ impl MdDoc {
 pub(crate) enum LinkRoute {
     /// A viewer tab's: every link, followed as the tab's file writes it.
     ViewerTab,
-    /// A chat answer's: only a web link, opened in the browser; any other
-    /// link is plain text.
+    /// A chat answer's: a web link, opened in the browser, and a stretch,
+    /// opened or closed in place; any other link is plain text.
     WebOnly,
 }
 
@@ -102,7 +129,7 @@ impl LinkRoute {
     pub(crate) fn follows(self, target: &LinkTarget) -> bool {
         match self {
             Self::ViewerTab => true,
-            Self::WebOnly => matches!(target, LinkTarget::Url(_)),
+            Self::WebOnly => matches!(target, LinkTarget::Url(_) | LinkTarget::Stretchtext { .. }),
         }
     }
 }
@@ -138,6 +165,31 @@ struct Row {
     indent: usize,
     gap: f32,
     kind: RowKind,
+}
+
+impl Row {
+    /// The runs of spans the row draws: a table row's per cell.
+    fn span_lists(&self) -> Vec<&[Span]> {
+        match &self.kind {
+            RowKind::Heading { spans, .. } | RowKind::Text(spans) | RowKind::Item { spans, .. } => {
+                vec![spans.as_slice()]
+            }
+            RowKind::TableRow { cells, .. } => cells.iter().map(Vec::as_slice).collect(),
+            RowKind::CodeLine { .. } | RowKind::Rule | RowKind::Html(_) => Vec::new(),
+        }
+    }
+
+    fn drawn_text(&self) -> String {
+        match &self.kind {
+            RowKind::CodeLine { text, .. } | RowKind::Html(text) => text.clone(),
+            _ => self
+                .span_lists()
+                .into_iter()
+                .map(|spans| inline_text(spans).0)
+                .collect::<Vec<_>>()
+                .join(" | "),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -188,7 +240,21 @@ struct Place {
 /// code blocks whose language has a grammar within the highlighter's time
 /// limit for the whole document; `cancel` stops the colouring.
 pub(crate) fn prepare(text: &str, file_dir: &Path, cancel: &AtomicBool) -> MdDoc {
-    let md_blocks::Document { blocks } = md_blocks::parse(text, file_dir);
+    flatten(md_blocks::parse(text, file_dir), cancel)
+}
+
+/// A chat answer as [`crate::stretchtext::compose`] wrote it, parsed into rows
+/// with its stretches lifted into stretchtext links, its code coloured as
+/// [`prepare`] colours it.
+pub(crate) fn prepare_answer(composed: &Composed, cancel: &AtomicBool) -> MdDoc {
+    let mut document = md_blocks::parse(&composed.source, Path::new(""));
+    md_blocks::lift_stretchtext(&mut document, &composed.keys);
+    flatten(document, cancel)
+}
+
+/// `document`'s blocks as rows.
+fn flatten(document: md_blocks::Document, cancel: &AtomicBool) -> MdDoc {
+    let md_blocks::Document { blocks } = document;
     let mut flat = Flattener {
         rows: Vec::new(),
         anchor_rows: HashMap::new(),
@@ -397,11 +463,17 @@ fn steps(count: usize, step: f32) -> f32 {
 
 /// A span's look: bold, italic, struck through, a code chip, muted, or the
 /// colour and underline of a link `route` follows.
+///
+/// A stretch's short form takes the link colour over a faded underline, so
+/// it reads apart from a web link; its closer draws muted, with none.
 fn span_style(span: &Span, route: LinkRoute, t: &UiTheme) -> HighlightStyle {
-    let linked = span
-        .link
-        .as_ref()
-        .is_some_and(|target| route.follows(target));
+    let followed = span.link.as_ref().filter(|target| route.follows(target));
+    let stretch = matches!(followed, Some(LinkTarget::Stretchtext { .. }));
+    let linked = followed.is_some() && !(stretch && span.muted);
+    let underline_color = stretch.then(|| Hsla {
+        a: STRETCH_UNDERLINE_ALPHA,
+        ..hsla(t.periwinkle)
+    });
     let color = if linked {
         Some(hsla(t.periwinkle))
     } else if span.muted {
@@ -416,7 +488,7 @@ fn span_style(span: &Span, route: LinkRoute, t: &UiTheme) -> HighlightStyle {
         background_color: span.code.then(|| hsla(t.chip)),
         underline: linked.then_some(UnderlineStyle {
             thickness: px(DECORATION),
-            color: None,
+            color: underline_color,
             wavy: false,
         }),
         strikethrough: span.strikethrough.then_some(StrikethroughStyle {
@@ -473,6 +545,8 @@ pub(crate) struct Painter {
     mono_size: f32,
     colors: [Hsla; 6],
     theme: UiTheme,
+    /// The session and answer a chat answer's stretchtext links toggle.
+    stretchtext: Option<(String, String)>,
 }
 
 impl Painter {
@@ -493,7 +567,15 @@ impl Painter {
             mono_size: size,
             colors: TokenClass::ALL.map(|class| hsla(class.color(t))),
             theme: *t,
+            stretchtext: None,
         }
+    }
+
+    /// This painter drawing answer `answer_id` of session `session_id`'s
+    /// chat, whose stretchtext links open and close its stretches.
+    pub(crate) fn for_answer(mut self, session_id: &str, answer_id: &str) -> Self {
+        self.stretchtext = Some((session_id.to_owned(), answer_id.to_owned()));
+        self
     }
 
     /// Row `ix`'s content, before its indent and quote borders.
@@ -549,6 +631,7 @@ impl Painter {
         }
         let (bounds, targets): (Vec<Range<usize>>, Vec<LinkTarget>) = links.into_iter().unzip();
         let (tab_id, route) = (self.tab_id.clone(), self.route);
+        let stretchtext = self.stretchtext.clone();
         text.on_click(bounds, move |index, window, cx| {
             let Some(target) = targets.get(index).cloned() else {
                 tracing::debug!(index, "a Markdown link click outside every link");
@@ -559,6 +642,13 @@ impl Painter {
                 return;
             };
             root.update(cx, |root, cx| match (route, target) {
+                (_, LinkTarget::Stretchtext { key }) => {
+                    if let Some((session_id, answer_id)) = &stretchtext {
+                        root.toggle_stretchtext(session_id, answer_id, &key, cx);
+                    } else {
+                        tracing::debug!("a stretchtext link outside a chat answer");
+                    }
+                }
                 (LinkRoute::ViewerTab, target) => root.follow_md_link(&tab_id, target, window, cx),
                 (LinkRoute::WebOnly, LinkTarget::Url(url)) => {
                     root.dispatch_open(OpenJob::Url(url), Then::Nothing, window, cx);
@@ -826,6 +916,9 @@ impl RootView {
                 self.resolve_path(vec![candidate], base_dirs, origin, window, cx);
             }
             LinkTarget::Anchor(slug) => self.scroll_to_md_anchor(tab_id, &slug, cx),
+            LinkTarget::Stretchtext { .. } => {
+                tracing::debug!(tab_id, "a viewer tab has no stretchtext to open");
+            }
             LinkTarget::Refused => {
                 tracing::warn!(tab_id, "refusing a Markdown link that is not http or https");
                 self.push_toast(

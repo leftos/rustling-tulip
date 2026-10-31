@@ -10,6 +10,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use crate::stretchtext;
+
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
@@ -89,55 +91,79 @@ impl GoneIds {
 }
 
 /// One session's chat rows in arrival order, the tool cards the user opened,
-/// the count of older rows the display cap or a load left out, and the ids
-/// that left since the last load.
+/// each answer's open stretches, the count of older rows the display cap or
+/// a load left out, and the ids that left since the last load.
 #[derive(Debug, Default)]
 pub struct ChatLog {
     entries: Vec<ChatEntry>,
     expanded: HashSet<String>,
+    stretchtext: HashMap<String, BTreeSet<String>>,
     hidden: u32,
     gone: GoneIds,
 }
 
 impl ChatLog {
     /// Replaces every row with a load reply's rows, taking that reply's count
-    /// of the older rows it left out; every card closes, and an id that left
-    /// before is accepted again.
+    /// of the older rows it left out; every card and stretch closes, and an
+    /// id that left before is accepted again.
     pub fn load(&mut self, entries: Vec<ChatEntry>, hidden: u32) {
         self.entries = entries
             .into_iter()
             .filter(|entry| !matches!(entry, ChatEntry::Unknown))
             .collect();
         self.expanded.clear();
+        self.stretchtext.clear();
         self.gone.clear();
         self.hidden = hidden;
     }
 
     /// A load the daemon sent unasked: it replaces every row as a load does,
-    /// but the cards the user opened stay open when their rows survive it.
+    /// but the cards and stretches the user opened stay open when their rows
+    /// survive it.
     pub fn reset(&mut self, entries: Vec<ChatEntry>, hidden: u32) {
         let expanded = std::mem::take(&mut self.expanded);
+        let stretchtext = std::mem::take(&mut self.stretchtext);
         self.load(entries, hidden);
         self.expanded = expanded
             .into_iter()
             .filter(|id| self.get(id).is_some())
             .collect();
+        self.stretchtext = stretchtext
+            .into_iter()
+            .filter(|(id, _)| self.get(id).is_some())
+            .collect();
     }
 
-    /// Drops the rows `ids` names and forgets their expansion; a later
-    /// update for one of them is ignored until the next load.
+    /// Drops the rows `ids` names and forgets their expansion and open
+    /// stretches; a later update for one of them is ignored until the next
+    /// load.
     pub fn remove(&mut self, ids: &[String]) {
         for id in ids {
             self.entries
                 .retain(|entry| entry_id(entry) != Some(id.as_str()));
             self.expanded.remove(id);
+            self.stretchtext.remove(id);
             self.gone.insert(id);
         }
     }
 
     /// Applies one append: the `removed` ids leave first, then `entries` are
     /// upserted, so an id both removed and carried comes back at the bottom.
+    /// A removed live answer's open stretches move to the new finished
+    /// answer that replaces it, the first removed to the first new.
     pub fn append(&mut self, entries: Vec<ChatEntry>, removed: &[String]) {
+        let moved: Vec<BTreeSet<String>> = removed
+            .iter()
+            .filter(|id| matches!(self.get(id), Some(ChatEntry::Answer { live: true, .. })))
+            .filter_map(|id| self.stretchtext.get(id).cloned())
+            .collect();
+        let finals: Vec<String> = entries
+            .iter()
+            .filter(|entry| matches!(entry, ChatEntry::Answer { live: false, .. }))
+            .filter_map(entry_id)
+            .filter(|id| self.get(id).is_none())
+            .map(ToOwned::to_owned)
+            .collect();
         self.remove(removed);
         for entry in &entries {
             if let Some(id) = entry_id(entry)
@@ -147,6 +173,11 @@ impl ChatLog {
             }
         }
         self.upsert(entries);
+        for (id, open) in finals.into_iter().zip(moved) {
+            if self.get(&id).is_some() {
+                self.stretchtext.insert(id, open);
+            }
+        }
     }
 
     /// Applies appended rows: a known id is replaced in its place, a new id
@@ -225,6 +256,29 @@ impl ChatLog {
         self.expanded.contains(id)
     }
 
+    /// Opens the stretch `key` of answer `id`, or closes it and every
+    /// stretch nested in it when it is open, returning whether it is open
+    /// now. A row that is not an answer, or an id the log does not hold,
+    /// changes nothing.
+    pub fn toggle_stretchtext(&mut self, id: &str, key: &str) -> bool {
+        if !matches!(self.get(id), Some(ChatEntry::Answer { .. })) {
+            return false;
+        }
+        let open = self.stretchtext.entry(id.to_owned()).or_default();
+        if open.contains(key) {
+            stretchtext::close(open, key);
+            return false;
+        }
+        open.insert(key.to_owned());
+        true
+    }
+
+    /// The keys of answer `id`'s open stretches, when any were opened.
+    #[must_use]
+    pub fn open_stretchtext(&self, id: &str) -> Option<&BTreeSet<String>> {
+        self.stretchtext.get(id)
+    }
+
     /// Drops the rows past [`DISPLAY_CAP`], counting them hidden and
     /// forgetting their expansion.
     fn trim(&mut self) {
@@ -235,6 +289,7 @@ impl ChatLog {
         for entry in self.entries.drain(..excess) {
             if let Some(id) = entry_id(&entry) {
                 self.expanded.remove(id);
+                self.stretchtext.remove(id);
                 self.gone.insert(id);
             }
         }

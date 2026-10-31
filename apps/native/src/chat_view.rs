@@ -6,7 +6,6 @@
 //! and which chats are loaded live in [`crate::chat`].
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -39,9 +38,10 @@ use crate::fonts::DEFAULT_FAMILY;
 use crate::palette::{CHIP, DANGER, FAINT, LINE_STRONG, SUBTLE, TEXT_2, WAITING, WORKING};
 use crate::scrollbar::Scrollbar;
 use crate::sidebar::LOCAL_HOST_KEY;
+use crate::stretchtext;
 use crate::summary::{SummaryLog, wanted_loads};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare, render_row};
+use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare_answer, render_row};
 use crate::work_strip::strip_row;
 use crate::{MUTED, RootView, TEXT, UI_TEXT_SIZE, new_request_id};
 
@@ -108,8 +108,8 @@ pub(crate) struct SessionChat {
     log: ChatLog,
     stack: PromptStack,
     request: Option<String>,
-    /// By answer id, the text length it was parsed at and the document.
-    docs: HashMap<String, (usize, Arc<MdDoc>)>,
+    /// By answer id, its parsed document and what it was parsed at.
+    docs: HashMap<String, AnswerDoc>,
     /// The work running beside the chat, for its strip; a `Chat` reply
     /// leaves it as it is.
     work: RunningWork,
@@ -123,6 +123,15 @@ pub(crate) struct SessionChat {
     composer: Option<Composer>,
     /// The daemon's reason for refusing the last send.
     send_error: Option<String>,
+}
+
+/// An answer's parsed document, with the text length, live flag and open
+/// stretches it was parsed at: a change to any of them parses it again.
+struct AnswerDoc {
+    len: usize,
+    live: bool,
+    open: BTreeSet<String>,
+    doc: Arc<MdDoc>,
 }
 
 /// A loaded chat's composer and its subscriptions.
@@ -240,19 +249,30 @@ impl SessionChat {
         true
     }
 
-    /// Parses each answer whose text is new or changed length since its
-    /// last parse, and forgets the answers that left.
+    /// Parses each answer whose text is new or changed length, whose live
+    /// flag changed or whose stretches opened or closed since its last
+    /// parse, and forgets the answers that left.
     fn refresh_docs(&mut self) {
         let mut parsed = std::mem::take(&mut self.docs);
         let cancel = AtomicBool::new(false);
+        let none = BTreeSet::new();
         for entry in self.log.entries() {
-            let ChatEntry::Answer { id, text, .. } = entry else {
+            let ChatEntry::Answer { id, text, live } = entry else {
                 continue;
             };
+            let open = self.log.open_stretchtext(id).unwrap_or(&none);
             let doc = parsed
                 .remove(id)
-                .filter(|(len, _)| *len == text.len())
-                .unwrap_or_else(|| (text.len(), Arc::new(prepare(text, Path::new(""), &cancel))));
+                .filter(|doc| doc.len == text.len() && doc.live == *live && doc.open == *open)
+                .unwrap_or_else(|| {
+                    let composed = stretchtext::compose(text, open, *live);
+                    AnswerDoc {
+                        len: text.len(),
+                        live: *live,
+                        open: open.clone(),
+                        doc: Arc::new(prepare_answer(&composed, &cancel)),
+                    }
+                });
             self.docs.insert(id.clone(), doc);
         }
     }
@@ -1235,6 +1255,50 @@ impl RootView {
         }
     }
 
+    /// A click on a stretch's short form or closer in answer `answer_id` of
+    /// session `session_id`'s chat opens it, or closes it and the stretches
+    /// nested in it; every pane on the session draws it so.
+    pub fn toggle_stretchtext(
+        &mut self,
+        session_id: &str,
+        answer_id: &str,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(chat) = self.chat.sessions.get_mut(session_id) {
+            chat.log.toggle_stretchtext(answer_id, key);
+            chat.refresh_docs();
+            cx.notify();
+        }
+    }
+
+    /// The text answer `answer_id` of session `session_id`'s chat draws, a
+    /// line per drawn row; none while its chat is not loaded.
+    #[must_use]
+    pub fn chat_answer_text(&self, session_id: &str, answer_id: &str) -> Option<String> {
+        self.answer_doc(session_id, answer_id)
+            .map(MdDoc::drawn_text)
+    }
+
+    /// The stretchtext links answer `answer_id` of session `session_id`'s
+    /// chat draws, in order: each one's drawn text (a short form, or `‹` for
+    /// a closer) and its stretch's key.
+    #[must_use]
+    pub fn chat_answer_stretchtext(
+        &self,
+        session_id: &str,
+        answer_id: &str,
+    ) -> Vec<(String, String)> {
+        self.answer_doc(session_id, answer_id)
+            .map(MdDoc::stretchtext_links)
+            .unwrap_or_default()
+    }
+
+    fn answer_doc(&self, session_id: &str, answer_id: &str) -> Option<&MdDoc> {
+        let chat = self.chat.sessions.get(session_id)?;
+        chat.docs.get(answer_id).map(|answer| answer.doc.as_ref())
+    }
+
     /// What pane `pane_id`, showing `session_id` with its terminal
     /// attached, draws: its chat when switched to it, else `terminal`, under
     /// the note a refused chat left.
@@ -1692,16 +1756,17 @@ fn answer_row(
     id: &str,
     text: &str,
     live: bool,
-    doc: Option<&(usize, Arc<MdDoc>)>,
+    doc: Option<&AnswerDoc>,
 ) -> Div {
     let body = match doc {
-        Some((_, doc)) => {
+        Some(AnswerDoc { doc, .. }) => {
             let painter = Painter::new(
                 format!("chat-{id}"),
                 LinkRoute::WebOnly,
                 look.mono_family,
                 look.mono_size,
-            );
+            )
+            .for_answer(look.session_id, id);
             div()
                 .flex()
                 .flex_col()

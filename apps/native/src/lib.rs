@@ -121,6 +121,7 @@ pub mod ssh;
 mod stash_view;
 mod stashes;
 mod status_glyph;
+mod stretchtext;
 mod summary;
 mod summary_view;
 pub mod syntax;

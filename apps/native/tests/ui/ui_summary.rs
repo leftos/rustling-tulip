@@ -688,3 +688,38 @@ fn a_line_opened_before_the_chat_arrives_says_loading_then_shows_its_entries(
         "the loading note goes once the chat is in"
     );
 }
+
+#[gpui::test]
+fn an_opened_summary_line_draws_stretches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, chat, summary) = opened(cx, &dir);
+    let stretched = ChatEntry::Answer {
+        id: "a1".to_owned(),
+        text: "The build {{failed|failed on a cold cache.\n\nIt took a minute.}} today.".to_owned(),
+        live: false,
+    };
+    h.send(chat_reply(&chat, vec![user("u1"), stretched]));
+    h.send(summary_reply(
+        Some(&summary),
+        vec![line(
+            "u1",
+            "u1",
+            "a1",
+            "Fixed the build",
+            SummarySource::Model,
+        )],
+    ));
+    h.click_on("summary-line-p1-u1");
+    let closed = h.bounds("summary-row-p1-a1").size.height;
+    assert!(closed > px(0.0), "the opened line draws the answer");
+    assert_eq!(
+        h.root(|root, _| root.chat_answer_stretchtext("s1", "a1")),
+        [("failed".to_owned(), "failed".to_owned())]
+    );
+    h.root_update(|root, _, cx| root.toggle_stretchtext("s1", "a1", "failed", cx));
+    let open = h.bounds("summary-row-p1-a1").size.height;
+    assert!(
+        open > closed,
+        "the stretch opens in the summary pane: {closed:?} then {open:?}"
+    );
+}

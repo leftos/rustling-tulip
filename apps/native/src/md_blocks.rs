@@ -3,6 +3,7 @@
 //! Plain Rust: no GPUI and no I/O.
 
 use crate::open::validate_http_url;
+use crate::stretchtext::{self, Marker};
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -120,6 +121,144 @@ pub(crate) enum LinkTarget {
     Anchor(String),
     /// A target the viewer never opens.
     Refused,
+    /// A stretch of a chat answer, by its key: a click on its short form
+    /// opens it, a click on its closer closes it.
+    Stretchtext { key: String },
+}
+
+/// Lifts the marker runs [`stretchtext::compose`] wrote out of `document`:
+/// each closed stretch's short form becomes spans linked to
+/// [`LinkTarget::Stretchtext`] with its key from `keys`, and each closer a
+/// muted `‹` span with the same link. A start with no end among one run of
+/// spans, or an index `keys` does not hold, leaves its text plain; a code
+/// block or raw HTML only loses its markers.
+pub(crate) fn lift_stretchtext(document: &mut Document, keys: &[String]) {
+    for block in &mut document.blocks {
+        lift_block(block, keys);
+    }
+}
+
+fn lift_block(block: &mut Block, keys: &[String]) {
+    match block {
+        Block::Heading { spans, .. } | Block::Paragraph(spans) => lift_spans(spans, keys),
+        Block::List { items, .. } => {
+            for inner in items.iter_mut().flat_map(|item| item.blocks.iter_mut()) {
+                lift_block(inner, keys);
+            }
+        }
+        Block::Quote(blocks) => {
+            for inner in blocks {
+                lift_block(inner, keys);
+            }
+        }
+        Block::Code { text, .. } | Block::Html(text) => {
+            *text = stretchtext::strip_marker_runs(text);
+        }
+        Block::Table { head, rows, .. } => {
+            for cell in head.iter_mut().chain(rows.iter_mut().flatten()) {
+                lift_spans(cell, keys);
+            }
+        }
+        Block::Rule => {}
+    }
+}
+
+fn lift_spans(spans: &mut Vec<Span>, keys: &[String]) {
+    if !spans
+        .iter()
+        .any(|span| span.text.contains(stretchtext::is_marker))
+    {
+        return;
+    }
+    let mut lifter = Lifter::default();
+    for span in std::mem::take(spans) {
+        lifter.span(&span, keys);
+    }
+    *spans = lifter.finish();
+}
+
+/// The spans lifted so far, and the short form being lifted: its key and
+/// the index of its first span.
+#[derive(Default)]
+struct Lifter {
+    out: Vec<Span>,
+    link: Option<(String, usize)>,
+}
+
+impl Lifter {
+    fn span(&mut self, span: &Span, keys: &[String]) {
+        let mut rest = span.text.as_str();
+        while let Some((start, marker, end)) = stretchtext::next_marker(rest) {
+            self.piece(span, &rest[..start]);
+            self.marker(span, marker, keys);
+            rest = &rest[end..];
+        }
+        self.piece(span, rest);
+    }
+
+    /// `text` with `span`'s styles, linked to the short form being lifted
+    /// unless it is already in a link.
+    fn piece(&mut self, span: &Span, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let link = match (&self.link, &span.link) {
+            (Some((key, _)), None) => Some(LinkTarget::Stretchtext { key: key.clone() }),
+            _ => span.link.clone(),
+        };
+        self.out.push(Span {
+            text: text.to_owned(),
+            strong: span.strong,
+            emphasis: span.emphasis,
+            strikethrough: span.strikethrough,
+            code: span.code,
+            muted: span.muted,
+            link,
+            range: span.range.clone(),
+        });
+    }
+
+    fn marker(&mut self, span: &Span, marker: Marker, keys: &[String]) {
+        match marker {
+            Marker::LinkStart(index) => {
+                self.unlink();
+                self.link = keys.get(index).map(|key| (key.clone(), self.out.len()));
+            }
+            Marker::LinkEnd => self.link = None,
+            Marker::Closer(index) => {
+                if let Some(key) = keys.get(index) {
+                    self.out.push(Span {
+                        text: stretchtext::CLOSER.to_owned(),
+                        strong: false,
+                        emphasis: false,
+                        strikethrough: false,
+                        code: false,
+                        muted: true,
+                        link: Some(LinkTarget::Stretchtext { key: key.clone() }),
+                        range: span.range.clone(),
+                    });
+                }
+            }
+            Marker::Stray => {}
+        }
+    }
+
+    /// Ends a short form whose end never came: its spans lose the link.
+    fn unlink(&mut self) {
+        let Some((key, from)) = self.link.take() else {
+            return;
+        };
+        for span in self.out.iter_mut().skip(from) {
+            if matches!(&span.link, Some(LinkTarget::Stretchtext { key: own }) if *own == key) {
+                span.link = None;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<Span> {
+        self.unlink();
+        self.out
+    }
 }
 
 /// Parses `text`, a Markdown file's contents, into its blocks.

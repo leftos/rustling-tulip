@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A chat pane shows what is still running under the chat: its subagents, background shells and the next wakeup, with their ages.
 - A chat pane answers Claude's prompts from cards, by click or key, and sends your messages from a box under the chat, keeping your text when a send fails.
 - A pane can show a session as a summary, one line per stretch of work that opens into its messages, through the header's Summary switch or Ctrl+Shift+U.
+- Chat and summary panes draw stretchtext replies as expandable text: a click opens a short phrase into its longer form, one level at a time, and `‹` closes it.
 - When Claude asks for you while a subagent's view is open in the terminal, the session switches back to the main conversation, setting any draft aside and restoring it afterwards.
 
 ### Fixed
