@@ -119,13 +119,13 @@ impl RootView {
         if self.conn().overlay().is_some() {
             return;
         }
+        let host_key = self.host_of_preset_target(&target);
         let repo_path = self
             .sidebar
-            .repos()
+            .repos_of(&host_key)
             .iter()
             .find(|repo| repo.id == entry.source_repo_id)
             .map(|repo| repo.path.clone());
-        let host_key = self.host_of_preset_target(&target);
         let mut wizard = PresetWizard::new(entry, target, repo_path.as_deref());
         let host = (!self.capabilities_of(&host_key).opens_local_files())
             .then(|| {
@@ -329,6 +329,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let host = self.host_of_request(&msg);
         let (Some(dialog), ClientMessage::LaunchPreset { job_id, .. }) =
             (&self.preset_wizard, &msg)
         else {
@@ -337,11 +338,12 @@ impl RootView {
         let wizard = &dialog.wizard;
         let spec = self.preset_launches.start(
             job_id.clone(),
+            host.clone(),
             wizard.entry().name.clone(),
             wizard.shows_max_per_tab(),
             wizard.launch_cap(),
         );
-        self.send_to(&self.host_of_request(&msg), msg);
+        self.send_to(&host, msg);
         self.push_toast_spec(spec, cx);
         self.close_preset_wizard(window, cx);
     }
@@ -449,22 +451,16 @@ impl RootView {
         let sidebar = &self.sidebar;
         let listed = |id: &str| sidebar.session(id).map(is_live);
         match self.preset_launches.press(key, action, &listed) {
-            Some(JobAction::Cancel(job_id)) => {
-                self.send_to(
-                    &HostKey::Local,
-                    ClientMessage::CancelPresetLaunch { job_id },
-                );
+            Some(JobAction::Cancel { job_id, host }) => {
+                self.send_to(&host, ClientMessage::CancelPresetLaunch { job_id });
             }
             Some(JobAction::Select) => {
                 self.launched_highlight.select(key, &self.preset_launches);
                 self.show_sessions_panel(window, cx);
             }
             Some(JobAction::StopAll { cancel, sessions }) => {
-                if let Some(job_id) = cancel {
-                    self.send_to(
-                        &HostKey::Local,
-                        ClientMessage::CancelPresetLaunch { job_id },
-                    );
+                if let Some((job_id, host)) = cancel {
+                    self.send_to(&host, ClientMessage::CancelPresetLaunch { job_id });
                 }
                 for session_id in sessions {
                     self.send_to(

@@ -14,18 +14,26 @@
 //! ones), a closed or timed-out ended toast drops its job, a new `Welcome`
 //! keeps ended jobs' toasts, and a tab-grouping job's first tab is shown
 //! once; Cancel, Esc (also from a text field), a new `Welcome` and a lost
-//! connection close the wizard.
+//! connection close the wizard. On a remote host the path rows take typed
+//! host paths where this PC's pickers never open, the folder row starts at
+//! the source repo's path there, and a launch's Cancel goes to that host.
+
+#![expect(
+    clippy::panic,
+    reason = "a spec fails with the message of the precondition it lost"
+)]
 
 use crate::support;
 
 use std::path::PathBuf;
 
-use gpui::TestAppContext;
+use gpui::{Modifiers, TestAppContext, px};
 use protocol::{
-    ClientMessage, DaemonMessage, PresetEntry, PresetLaunchJobSnapshot, PresetLaunchJobStatus,
-    PresetTarget,
+    AgentId, ClientMessage, DaemonMessage, LaunchPresetSource, PresetEntry,
+    PresetLaunchJobSnapshot, PresetLaunchJobStatus, PresetTarget,
 };
 use rustling_tulip_native::palette::{LAUNCHED_TINT, SELECTION};
+use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{
     Activity, FileFilter, LaunchButton, NextButton, Toast, ToastKind, toast_action_selector,
 };
@@ -264,6 +272,352 @@ fn preset_wizard_path_rows_stay_read_only_on_a_local_host(cx: &mut TestAppContex
     h.set_picked_file(Some("E:/prompts/bugs.md"));
     h.click_on("preset-source-file-pick");
     assert_eq!(h.file_asks(), 1, "Pick… opens this PC's picker");
+}
+
+/// The tailnet host the remote specs connect beside This PC.
+const REMOTE: &str = "box.tail1234.ts.net";
+
+/// The one agent the remote host lists, which This PC does not.
+const BOX_AGENT: &str = "box-agent";
+
+/// What a pick row's Pick… says on a host that opens no picker on this PC.
+const LOCAL_FILES: &str = "Not available on a remote host: this opens files on this PC";
+
+/// [`REMOTE`] as the specs connect it.
+fn remote() -> Target {
+    Target::tailnet(REMOTE, None)
+}
+
+/// A window on This PC holding `local_repos`, with the tailnet host
+/// connected beside it, listing only [`BOX_AGENT`] and holding
+/// `remote_repos`; nothing sent is left unread on either host.
+fn two_hosts<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    local_repos: &[&str],
+    remote_repos: &[&str],
+) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = local_repos
+        .iter()
+        .map(|id| repo(id, &format!("C:/{id}")))
+        .collect();
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut agent = agent_registry::descriptors()
+        .into_iter()
+        .next()
+        .expect("the registry lists an agent");
+    agent.id = AgentId(BOX_AGENT.to_owned());
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Agents {
+        agents: vec![agent],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: Vec::new(),
+    });
+    host.send(DaemonMessage::Repos {
+        repos: remote_repos
+            .iter()
+            .map(|id| repo(id, &format!("D:/{id}")))
+            .collect(),
+    });
+    host.sent();
+    h.sent();
+    h
+}
+
+/// Whether the model shows what `selector` tags and it was painted; gpui
+/// keeps an element's bounds after it leaves, so a spec asks before the
+/// element was ever drawn.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.in_model(selector) && h.bounds(selector).origin.x >= px(0.0)
+}
+
+/// Whether resting the mouse on `selector` draws a tooltip reading `text`
+/// against the mouse there. gpui puts a tooltip's corner a pixel from the
+/// mouse, so one drawn for an earlier control elsewhere does not count.
+fn tooltip_on(h: &mut Harness<'_>, selector: &str, text: &str) -> bool {
+    let at = h.center(selector);
+    h.hover(at, Modifiers::none());
+    h.advance(Duration::from_millis(600));
+    let tip = h.bounds(&format!("tooltip={text}"));
+    let slack = px(2.0);
+    tip.origin.x >= px(0.0)
+        && at.x >= tip.left() - slack
+        && at.x <= tip.right() + slack
+        && at.y >= tip.top() - slack
+        && at.y <= tip.bottom() + slack
+}
+
+/// A preset of the remote host's `r2` with `sources` and `variables`, as
+/// the wizard's specs build one.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "each spec builds its JSON inline at the call"
+)]
+fn remote_preset(sources: serde_json::Value, variables: serde_json::Value) -> PresetEntry {
+    serde_json::from_value(json!({
+        "id": "triage", "name": "Triage", "source_repo_id": "r2",
+        "description": "Free-form bug prompts",
+        "prompt_sources": sources, "variables": variables,
+        "prompt_template": "{prompt}", "branch_template": "tmp/{index}",
+        "tab_grouping": {"kind": "none"},
+        "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+    }))
+    .expect("preset fixture")
+}
+
+/// The target of the remote host's `r2`.
+fn remote_repo() -> PresetTarget {
+    PresetTarget::Repo {
+        repo_id: "r2".to_owned(),
+    }
+}
+
+/// Opens [`REMOTE`]'s `r2` menu, answers it with `entry` as that host does
+/// and presses its row.
+fn open_remote_wizard(h: &mut Harness<'_>, entry: PresetEntry) {
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    let target = remote_repo();
+    let request_id = h
+        .host(&remote())
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::ListPresets {
+                target: asked,
+                request_id,
+            } if asked == target => request_id,
+            _ => None,
+        });
+    h.host(&remote()).send(DaemonMessage::Presets {
+        target,
+        entries: vec![entry],
+        request_id,
+    });
+    h.click_on("container-menu-launch-preset-0");
+    assert!(
+        h.root(|root, _| root.preset_wizard_open()),
+        "the wizard opened"
+    );
+}
+
+/// The text of the wizard's typed host path field tagged `selector`.
+fn path_text(h: &mut Harness<'_>, selector: &str) -> Option<String> {
+    h.root(|root, cx| root.preset_wizard_path_text(selector, cx))
+}
+
+/// Answers the preview the remote host was asked for, if it was asked, with
+/// one prompt, presses Launch and returns the launch the client sent.
+fn launch_remote_from_preview(h: &mut Harness<'_>) -> ClientMessage {
+    let asked = h
+        .host(&remote())
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::PreviewPreset { id, .. } => Some(id),
+            _ => None,
+        });
+    if let Some(id) = asked {
+        h.host(&remote()).send(DaemonMessage::PresetPreview {
+            id,
+            prompts: vec!["fix".to_owned()],
+        });
+    }
+    h.click_on("preset-launch");
+    h.host(&remote())
+        .sent()
+        .into_iter()
+        .find(|msg| matches!(msg, ClientMessage::LaunchPreset { .. }))
+        .expect("a launch went out")
+}
+
+/// The preset messages This PC received: none, from a remote wizard.
+fn local_preset_messages(h: &mut Harness<'_>) -> Vec<&'static str> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::PreviewPreset { .. } => Some("preview"),
+            ClientMessage::ResolvePresetScripts { .. } => Some("scripts"),
+            ClientMessage::LaunchPreset { .. } => Some("launch"),
+            ClientMessage::CancelPresetLaunch { .. } => Some("cancel"),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn preset_wizard_browse_opens_no_picker_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    h.set_picked_file(Some("E:/prompts/bugs.md"));
+    h.set_picked_folder(Some("E:/prompts"));
+
+    let sources = json!([{"kind": "file"}, {"kind": "folder", "relative_path": "docs/prompts"}]);
+    open_remote_wizard(&mut h, remote_preset(sources, json!([])));
+    assert!(tooltip_on(&mut h, "preset-source-file-pick", LOCAL_FILES));
+    h.click_on("preset-source-file-pick");
+    h.click_on("preset-source-kind-folder");
+    assert!(tooltip_on(&mut h, "preset-source-folder-pick", LOCAL_FILES));
+    h.click_on("preset-source-folder-pick");
+    h.click_on("preset-cancel");
+
+    let variables = json!([
+        {"name": "log", "label": "Log file", "kind": {"kind": "file_path", "extensions": ["log"]},
+         "prompt_at_launch": true}
+    ]);
+    open_remote_wizard(
+        &mut h,
+        remote_preset(json!([{"kind": "inline"}]), variables),
+    );
+    h.click_on("preset-source-inline-text");
+    type_text(&mut h, "fix");
+    h.click_on("preset-next");
+    assert!(tooltip_on(&mut h, "preset-variable-log-pick", LOCAL_FILES));
+    h.click_on("preset-variable-log-pick");
+
+    assert_eq!(h.file_asks(), 0, "no file picker opens on this PC");
+    assert_eq!(h.folder_asks(), 0, "no folder picker opens on this PC");
+    assert!(
+        local_preset_messages(&mut h).is_empty(),
+        "This PC is asked for, and sent, no preset of the remote repo"
+    );
+}
+
+#[gpui::test]
+fn preset_wizard_path_rows_take_a_typed_host_path_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    open_remote_wizard(&mut h, remote_preset(json!([{"kind": "file"}]), json!([])));
+
+    h.click_on("preset-source-file");
+    type_text(&mut h, "E:/prompts/bugs.md");
+    assert_eq!(
+        path_text(&mut h, "preset-source-file").as_deref(),
+        Some("E:/prompts/bugs.md")
+    );
+    assert!(
+        tooltip_on(&mut h, "preset-source-file-pick", LOCAL_FILES),
+        "Pick… stays disabled beside the field"
+    );
+    h.click_on("preset-next");
+    let ClientMessage::LaunchPreset { source, .. } = launch_remote_from_preview(&mut h) else {
+        panic!("a launch went out");
+    };
+    assert_eq!(
+        source,
+        LaunchPresetSource::File {
+            path: "E:/prompts/bugs.md".to_owned()
+        }
+    );
+    assert_eq!(h.file_asks(), 0, "no file picker opens on this PC");
+    assert!(
+        local_preset_messages(&mut h).is_empty(),
+        "the launch went to the remote host alone"
+    );
+}
+
+#[gpui::test]
+fn preset_wizard_folder_row_is_prefilled_and_typed_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    let sources = json!([{"kind": "folder", "relative_path": "docs/prompts"}]);
+    open_remote_wizard(&mut h, remote_preset(sources, json!([])));
+
+    assert_eq!(
+        path_text(&mut h, "preset-source-folder").as_deref(),
+        Some("D:/r2\\docs\\prompts"),
+        "the field starts at the default under the source repo"
+    );
+    h.click_on("preset-source-folder");
+    h.keys("ctrl-a backspace");
+    type_text(&mut h, "E:/prompts");
+    h.click_on("preset-next");
+    let ClientMessage::LaunchPreset { source, .. } = launch_remote_from_preview(&mut h) else {
+        panic!("a launch went out");
+    };
+    assert_eq!(
+        source,
+        LaunchPresetSource::Folder {
+            path: "E:/prompts".to_owned()
+        }
+    );
+    assert!(
+        local_preset_messages(&mut h).is_empty(),
+        "the launch went to the remote host alone"
+    );
+}
+
+#[gpui::test]
+fn preset_wizard_path_variables_take_typed_host_paths_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    let variables = json!([
+        {"name": "log", "label": "Log file", "kind": {"kind": "file_path", "extensions": ["log"]},
+         "prompt_at_launch": true}
+    ]);
+    open_remote_wizard(
+        &mut h,
+        remote_preset(json!([{"kind": "inline"}]), variables),
+    );
+    h.click_on("preset-source-inline-text");
+    type_text(&mut h, "fix");
+    h.click_on("preset-next");
+
+    h.click_on("preset-variable-log");
+    type_text(&mut h, "E:/logs/run.log");
+    assert!(
+        !drawn(&mut h, "preset-variable-log-clear"),
+        "a typed row is cleared by editing, not by a button"
+    );
+    h.click_on("preset-next");
+    let ClientMessage::LaunchPreset {
+        variable_values, ..
+    } = launch_remote_from_preview(&mut h)
+    else {
+        panic!("a launch went out");
+    };
+    assert_eq!(
+        variable_values,
+        vec![("log".to_owned(), "E:/logs/run.log".to_owned())]
+    );
+    assert!(
+        local_preset_messages(&mut h).is_empty(),
+        "the launch went to the remote host alone"
+    );
+}
+
+#[gpui::test]
+fn preset_wizard_refuses_a_relative_typed_path_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    open_remote_wizard(&mut h, remote_preset(json!([{"kind": "file"}]), json!([])));
+    assert!(
+        !drawn(&mut h, "preset-source-file-error"),
+        "an empty row says nothing yet"
+    );
+
+    h.click_on("preset-source-file");
+    type_text(&mut h, "prompts/bugs.md");
+    assert!(drawn(&mut h, "preset-source-file-error"));
+    assert_eq!(
+        h.root(|root, _| root.preset_wizard_path_refusal("preset-source-file"))
+            .as_deref(),
+        Some("Use a full path on box, starting with a drive letter, \\\\server or /.")
+    );
+    assert_eq!(
+        h.root(|root, _| root.preset_wizard_next())
+            .map(|next| next.enabled),
+        Some(false),
+        "Next waits for a full path"
+    );
+    h.click_on("preset-next");
+    assert_eq!(h.root(|root, _| root.preset_wizard_stage()), Some("source"));
+    assert!(
+        local_preset_messages(&mut h).is_empty(),
+        "a refused path sends nothing to This PC"
+    );
 }
 
 #[gpui::test]
@@ -1181,6 +1535,39 @@ fn cancel_sends_cancel_preset_launch(cx: &mut TestAppContext) {
         })
         .collect();
     assert_eq!(cancels, [job_id]);
+}
+
+#[gpui::test]
+fn cancelling_a_remote_launch_goes_to_that_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    open_remote_wizard(&mut h, remote_preset(json!([{"kind": "file"}]), json!([])));
+    h.click_on("preset-source-file");
+    type_text(&mut h, "E:/prompts/bugs.md");
+    h.click_on("preset-next");
+    let ClientMessage::LaunchPreset { job_id, .. } = launch_remote_from_preview(&mut h) else {
+        panic!("a launch went out");
+    };
+    h.sent();
+    press(&mut h, &job_id, "cancel");
+    let cancels: Vec<String> = h
+        .host(&remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::CancelPresetLaunch { job_id } => Some(job_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cancels,
+        [job_id],
+        "the cancel goes to the host the job runs on"
+    );
+    assert!(
+        local_preset_messages(&mut h).is_empty(),
+        "This PC is sent no cancel for the remote job"
+    );
 }
 
 #[gpui::test]

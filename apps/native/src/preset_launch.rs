@@ -12,6 +12,7 @@ use protocol::{
 };
 
 use crate::notices::{ToastAction, ToastKind, ToastSpec};
+use crate::target::HostKey;
 
 /// The most characters of a prompt's first line a preview row shows.
 pub const FIRST_LINE_PREVIEW_LIMIT: usize = 80;
@@ -451,6 +452,8 @@ enum FirstTab {
 #[derive(Debug, Clone)]
 struct LaunchJob {
     preset: String,
+    /// The host the launch went to, where its cancel goes too.
+    host: HostKey,
     grouped: bool,
     cap: Option<u32>,
     total: u32,
@@ -498,14 +501,14 @@ pub const STOP_ALL: ToastAction = ToastAction {
 /// What a press on a launch toast's button does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobAction {
-    /// Cancel the running job of this id.
-    Cancel(String),
+    /// Cancel the running job of this id, on the host it runs on.
+    Cancel { job_id: String, host: HostKey },
     /// Mark the job's sessions, following it as it makes more.
     Select,
-    /// Cancel the running job `cancel` names first, then stop these
-    /// sessions.
+    /// Cancel the running job `cancel` names first, on its host, then stop
+    /// these sessions.
     StopAll {
-        cancel: Option<String>,
+        cancel: Option<(String, HostKey)>,
         sessions: Vec<String>,
     },
 }
@@ -588,7 +591,9 @@ impl LaunchJob {
             .filter(|id| self.counts(id, listed))
             .cloned()
             .collect();
-        let cancel = self.request_cancel().then(|| job_id.to_owned());
+        let cancel = self
+            .request_cancel()
+            .then(|| (job_id.to_owned(), self.host.clone()));
         (cancel.is_some() || !sessions.is_empty())
             .then_some(JobAction::StopAll { cancel, sessions })
     }
@@ -738,17 +743,20 @@ pub struct PresetLaunches {
 }
 
 impl PresetLaunches {
-    /// Records job `job_id` of preset `preset`, sent just now, packing its
-    /// sessions `cap` to a tab when `grouped`; returns its first toast.
+    /// Records job `job_id` of preset `preset`, sent just now to `host`,
+    /// packing its sessions `cap` to a tab when `grouped`; returns its first
+    /// toast.
     pub fn start(
         &mut self,
         job_id: String,
+        host: HostKey,
         preset: String,
         grouped: bool,
         cap: Option<u32>,
     ) -> ToastSpec {
         let job = LaunchJob {
             preset,
+            host,
             grouped,
             cap: cap.filter(|_| grouped),
             total: 0,
@@ -827,9 +835,10 @@ impl PresetLaunches {
         let job_id = job_id_of(key)?;
         let job = self.jobs.get_mut(job_id)?;
         match action {
-            id if id == CANCEL.id => job
-                .request_cancel()
-                .then(|| JobAction::Cancel(job_id.to_owned())),
+            id if id == CANCEL.id => job.request_cancel().then(|| JobAction::Cancel {
+                job_id: job_id.to_owned(),
+                host: job.host.clone(),
+            }),
             id if id == SELECT.id => Some(JobAction::Select),
             id if id == STOP_ALL.id => job.stop_all(job_id, listed),
             _ => None,
@@ -1135,7 +1144,13 @@ mod tests {
     #[test]
     fn the_registry_ignores_jobs_this_window_did_not_launch() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         let foreign = snapshot("other", PresetLaunchJobStatus::Spawning);
         assert_eq!(launches.on_message(&all_live, &updated(foreign)), None);
         assert_eq!(
@@ -1151,7 +1166,13 @@ mod tests {
     #[test]
     fn the_registry_folds_progress_into_one_sticky_toast() {
         let mut launches = PresetLaunches::default();
-        let first = launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        let first = launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         assert_eq!(
             texts(&first),
             (ToastKind::Info, "Launching Sweep", None, true),
@@ -1188,7 +1209,13 @@ mod tests {
     #[test]
     fn a_completed_job_is_replaced_by_a_timed_toast() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         let mut done = snapshot("j1", PresetLaunchJobStatus::Completed);
         done.launched = 6;
         done.created_tab_ids = strings(&["t1", "t2"]);
@@ -1210,7 +1237,13 @@ mod tests {
         );
 
         let mut flat = PresetLaunches::default();
-        flat.start("j2".to_owned(), "Flat".to_owned(), false, None);
+        flat.start(
+            "j2".to_owned(),
+            HostKey::Local,
+            "Flat".to_owned(),
+            false,
+            None,
+        );
         let mut one = snapshot("j2", PresetLaunchJobStatus::Spawning);
         one.total = 1;
         assert_eq!(
@@ -1231,7 +1264,13 @@ mod tests {
     #[test]
     fn a_cancelled_job_says_how_far_it_got() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         let mut cancelled = snapshot("j1", PresetLaunchJobStatus::Cancelled);
         cancelled.launched = 2;
         assert_eq!(
@@ -1251,7 +1290,13 @@ mod tests {
     #[test]
     fn a_failed_job_and_its_failure_message_give_one_warning() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         let mut job = snapshot("j1", PresetLaunchJobStatus::Failed);
         job.error = Some("no such folder".to_owned());
         assert_eq!(
@@ -1272,7 +1317,13 @@ mod tests {
             None
         );
 
-        launches.start("j2".to_owned(), "Other".to_owned(), false, None);
+        launches.start(
+            "j2".to_owned(),
+            HostKey::Local,
+            "Other".to_owned(),
+            false,
+            None,
+        );
         assert_eq!(
             launches
                 .on_message(
@@ -1299,8 +1350,20 @@ mod tests {
     #[test]
     fn a_new_connection_forgets_running_jobs_and_keeps_finished_ones() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
-        launches.start("j2".to_owned(), "Done".to_owned(), false, None);
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
+        launches.start(
+            "j2".to_owned(),
+            HostKey::Local,
+            "Done".to_owned(),
+            false,
+            None,
+        );
         launches.on_message(
             &all_live,
             &updated(snapshot("j2", PresetLaunchJobStatus::Completed)),
@@ -1337,7 +1400,13 @@ mod tests {
     #[test]
     fn the_buttons_follow_the_job_and_its_live_sessions() {
         let mut launches = PresetLaunches::default();
-        let first = launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        let first = launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         assert_eq!(
             ids(&first.actions),
             ["cancel", "select", "stop-all"],
@@ -1390,7 +1459,13 @@ mod tests {
     #[test]
     fn session_ids_fold_after_the_job_ends() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         let mut msg = failed("j1", "boom");
         if let DaemonMessage::PresetLaunchFailed {
             partial_session_ids,
@@ -1414,12 +1489,59 @@ mod tests {
     }
 
     #[test]
-    fn a_pressed_cancel_goes_until_the_job_ends() {
+    fn a_cancel_names_the_jobs_host() {
+        let remote = HostKey::Remote("box.tail1234.ts.net".to_owned());
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            remote.clone(),
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         assert_eq!(
             launches.press("preset:j1", CANCEL.id, &all_live),
-            Some(JobAction::Cancel("j1".to_owned()))
+            Some(JobAction::Cancel {
+                job_id: "j1".to_owned(),
+                host: remote.clone()
+            }),
+            "Cancel goes to the host the launch went to"
+        );
+
+        let mut again = PresetLaunches::default();
+        again.start(
+            "j2".to_owned(),
+            remote.clone(),
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
+        assert_eq!(
+            again.press("preset:j2", STOP_ALL.id, &all_live),
+            Some(JobAction::StopAll {
+                cancel: Some(("j2".to_owned(), remote)),
+                sessions: Vec::new()
+            }),
+            "Stop all's cancel goes to the same host"
+        );
+    }
+
+    #[test]
+    fn a_pressed_cancel_goes_until_the_job_ends() {
+        let mut launches = PresetLaunches::default();
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
+        assert_eq!(
+            launches.press("preset:j1", CANCEL.id, &all_live),
+            Some(JobAction::Cancel {
+                job_id: "j1".to_owned(),
+                host: HostKey::Local
+            })
         );
         assert_eq!(
             ids(&launches.shown_actions(&all_live)[0].1),
@@ -1443,7 +1565,13 @@ mod tests {
     #[test]
     fn stop_all_on_a_running_job_cancels_it_first_and_stops_the_live_sessions() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         let job = with_sessions(
             snapshot("j1", PresetLaunchJobStatus::Spawning),
             &["s1", "s2", "s3"],
@@ -1457,7 +1585,7 @@ mod tests {
         assert_eq!(
             launches.press("preset:j1", STOP_ALL.id, &s1_stopped_s3_unlisted),
             Some(JobAction::StopAll {
-                cancel: Some("j1".to_owned()),
+                cancel: Some(("j1".to_owned(), HostKey::Local)),
                 sessions: strings(&["s2", "s3"])
             }),
             "a session whose snapshot has not arrived is stopped too"
@@ -1480,11 +1608,17 @@ mod tests {
     #[test]
     fn stop_all_on_a_running_job_with_nothing_listed_still_cancels() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         assert_eq!(
             launches.press("preset:j1", STOP_ALL.id, &|_| None),
             Some(JobAction::StopAll {
-                cancel: Some("j1".to_owned()),
+                cancel: Some(("j1".to_owned(), HostKey::Local)),
                 sessions: Vec::new()
             }),
             "the cancel goes with no session to stop"
@@ -1499,7 +1633,13 @@ mod tests {
     #[test]
     fn a_removed_id_is_not_stopped() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         let job = with_sessions(
             snapshot("j1", PresetLaunchJobStatus::Spawning),
             &["s1", "s2"],
@@ -1512,7 +1652,7 @@ mod tests {
         assert_eq!(
             launches.press("preset:j1", STOP_ALL.id, &|_| None),
             Some(JobAction::StopAll {
-                cancel: Some("j1".to_owned()),
+                cancel: Some(("j1".to_owned(), HostKey::Local)),
                 sessions: strings(&["s2"])
             }),
             "the removed s1 is gone, the unlisted s2 is not"
@@ -1522,7 +1662,13 @@ mod tests {
     #[test]
     fn a_sessions_list_marks_a_reported_id_it_lacks_as_removed() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         let done = with_sessions(snapshot("j1", PresetLaunchJobStatus::Completed), &["s1"]);
         launches.on_message(&all_live, &updated(done));
         assert_eq!(
@@ -1549,14 +1695,20 @@ mod tests {
             "nothing to stop"
         );
 
-        launches.start("j2".to_owned(), "Later".to_owned(), false, None);
+        launches.start(
+            "j2".to_owned(),
+            HostKey::Local,
+            "Later".to_owned(),
+            false,
+            None,
+        );
         launches.on_message(&|_| None, &list);
         let running = with_sessions(snapshot("j2", PresetLaunchJobStatus::Spawning), &["s2"]);
         launches.on_message(&|_| None, &updated(running));
         assert_eq!(
             launches.press("preset:j2", STOP_ALL.id, &|_| None),
             Some(JobAction::StopAll {
-                cancel: Some("j2".to_owned()),
+                cancel: Some(("j2".to_owned(), HostKey::Local)),
                 sessions: strings(&["s2"])
             }),
             "an id reported after the list counts until listed or removed"
@@ -1566,7 +1718,13 @@ mod tests {
     #[test]
     fn stop_all_on_an_ended_job_only_stops_and_cancel_needs_a_running_job() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         assert_eq!(launches.press("preset:j1", "nope", &all_live), None);
         assert_eq!(launches.press("preset:other", SELECT.id, &all_live), None);
         let done = with_sessions(snapshot("j1", PresetLaunchJobStatus::Cancelled), &["s1"]);
@@ -1601,8 +1759,20 @@ mod tests {
     #[test]
     fn the_highlight_follows_the_selected_job_until_cleared() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
-        launches.start("j2".to_owned(), "Other".to_owned(), false, None);
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
+        launches.start(
+            "j2".to_owned(),
+            HostKey::Local,
+            "Other".to_owned(),
+            false,
+            None,
+        );
         let fold = |launches: &mut PresetLaunches, job_id: &str, ids: &[&str]| {
             let job = with_sessions(snapshot(job_id, PresetLaunchJobStatus::Spawning), ids);
             launches.on_message(&all_live, &updated(job));
@@ -1647,8 +1817,20 @@ mod tests {
     #[test]
     fn the_first_tab_is_handed_out_once_and_only_with_tab_grouping() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
-        launches.start("j2".to_owned(), "Flat".to_owned(), false, None);
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
+        launches.start(
+            "j2".to_owned(),
+            HostKey::Local,
+            "Flat".to_owned(),
+            false,
+            None,
+        );
         assert!(launches.take_first_tabs().is_empty(), "no tab known yet");
         launches.on_message(&all_live, &progress("j1", 1, &["t1"]));
         launches.on_message(&all_live, &progress("j2", 1, &["t9"]));
@@ -1660,8 +1842,20 @@ mod tests {
     #[test]
     fn a_finished_job_leaves_when_its_toast_is_gone() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
-        launches.start("j2".to_owned(), "Done".to_owned(), false, None);
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
+        launches.start(
+            "j2".to_owned(),
+            HostKey::Local,
+            "Done".to_owned(),
+            false,
+            None,
+        );
         launches.on_message(
             &all_live,
             &updated(snapshot("j2", PresetLaunchJobStatus::Completed)),
@@ -1712,7 +1906,13 @@ mod tests {
     #[test]
     fn zero_preset_cap_job_tabs_do_not_panic() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(0));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(0),
+        );
         let mut job = snapshot("j1", PresetLaunchJobStatus::Spawning);
         job.total = 3;
         assert_eq!(
@@ -1726,7 +1926,13 @@ mod tests {
     #[test]
     fn a_failure_message_before_the_failed_snapshot_gives_one_warning() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         assert_eq!(
             launches
                 .on_message(&all_live, &failed("j1", "boom"))
@@ -1747,7 +1953,13 @@ mod tests {
     #[test]
     fn a_dismissed_progress_toast_stays_dismissed_until_the_job_ends() {
         let mut launches = PresetLaunches::default();
-        launches.start("j1".to_owned(), "Sweep".to_owned(), true, Some(3));
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Sweep".to_owned(),
+            true,
+            Some(3),
+        );
         launches.dismiss("preset:j1");
         launches.dismiss("preset:unknown");
         assert_eq!(

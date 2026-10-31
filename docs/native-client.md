@@ -93,9 +93,13 @@ This doc records the decisions a change to the client needs to know; what each f
 
   Launch runs the scripts on the daemon first, then sends `LaunchPreset` with a client-made job id and closes the dialog; a script failure stays on Preview with the error inline and the failing script's row marked in the danger colour, and the button reads `Retry script(s) & launch …`. Esc, Cancel and Back wait while the scripts run; a new `Welcome` and the connection overlay still close the wizard.
 
+  Opened from a remote host's repo, the wizard's folder and path rows take typed paths on that host, and a folder source's default is under that repo's path on the host.
+
   Progress outlives the dialog. A job registry in `RootView` tracks only the jobs this window started, so another window's launch raises no toast here.
 
   Each job has one sticky toast, `Launching {preset}` with `{created} of {total} sessions · {tabs created} of {tabs} tabs`, a thin progress bar (`notice_view.rs`) and a red `Cancel` button (`CancelPresetLaunch`), replaced in place by a `Launched {preset}` or `Cancelled {preset}` toast; a failed job raises one sticky warning, `Preset launch failed: {preset}`, with the daemon's reason. Closing a running job's toast keeps it closed until the job ends.
+
+  A job's `Cancel` and `Stop all` send `CancelPresetLaunch` to the host the job runs on.
 
   Success and canceled toasts stay timed and keep `Select` and a red `Stop all` until they fade; a failed launch's toast is sticky until ×. A job leaves the registry when its terminal toast closes, times out or is pushed out. On `Welcome` running jobs and their toasts drop, and ended ones keep theirs. Toast buttons are generic (`ToastSpec::actions`, selectors `toast-action-<toast id>-cancel|select|stop-all`).
 

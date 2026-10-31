@@ -63,5 +63,5 @@ Orchestrator decisions:
 - [x] MH.4 (RT-566) Connect every enabled host: remove `SwitchTarget`, `last_target` and the boot target; Connections as host manager with switches, per-host pairing and daemon-id dedupe; offline hosts dimmed, the overlay for Local only.
 - [x] MH.5 (RT-567) Sidebar host groups with `+ Shell`, host chips on pills and pane headers; shot view `multi-host`.
 - [x] MH.6 (RT-568) Mixed tabs: place remote spawns and duplicates into Local's layout, move and drag remote sessions into any tab, prune foreign panes, host in pane and tab pop-out keys, remote sessions in no tab.
-- [ ] MH.7 (RT-569) Cross-host spawn and settings: grouped spawn picker, quick-shell host, the Shell dialog's host field, the Settings host selector, Recover grouped by host.
+- [x] MH.7 (RT-569) Cross-host spawn and settings: grouped spawn picker, quick-shell host, the Shell dialog's host field, the Settings host selector, Recover grouped by host.
 - [ ] MH.8 (RT-570) Live proof and docs: `e2e_multi_host.rs` (a local daemon plus a second isolated one through fake-ssh and the bridge), the hand checklist, `docs/native-client.md`, `docs/architecture.md`, glossary, CLAUDE.md, the changelog; this file promoted and deleted.
