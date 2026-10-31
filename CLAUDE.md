@@ -27,6 +27,7 @@ CHANGELOG.md            what changed in each release, for users; each landed ite
 docs/README.md          the docs start page: one line per doc under docs/, the developer layout, build and run notes, and the glossary
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
 docs/native-client.md   the native client's settled design decisions
+docs/auto-update.md     how the native client finds, verifies and installs a published release
 docs/env-secrets.md     how secret env rows are sealed into Credential Manager, and what is and isn't protected
 docs/plans/MAIN.md      the plan snapshot, generated from Linear team RT: every open item by wave, in working order
 docs/plans/*.md         design files: designs and rulings for open items, linked from their Linear issues
@@ -54,8 +55,8 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 native           # build daemon + tracer, then run the native client (extra args: a session id to focus)
 .\rt.ps1 native-e2e       # native client specs (e2e_live, e2e_recover, e2e_remote, e2e_ssh) against a real daemon, built with the e2e-loopback-peers feature, isolated under .tmp/ (fake-claude, fake-tailscale and fake-ssh need node)
 .\rt.ps1 native-smoke     # launch the native client exe in a cloaked, never-focused window; check it connects and takes keys
-.\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, connections, connections-ssh) in .tmp\shots\
-.\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe (needs NSIS 3; tools/installer/README.md)
+.\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, connections, connections-ssh, update) in .tmp\shots\
+.\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against (needs NSIS 3; tools/installer/README.md)
 .\rt.ps1 help             # usage summary
 ```
 
@@ -97,13 +98,19 @@ Nothing calls `gate.exe` directly. The wrapper hands the call to the installed g
 
 `rustling-tulipd shutdown` stops the running daemon the way the client retires one: it sends `/shutdown` only to a listener that has proven it holds the token, leaves every tracer alive, creates no folders and starts no log (`crates/daemon/src/cli_shutdown.rs`, `daemon_client::shutdown_in`); the installer runs it on install and uninstall. The `/proof` key context and the `/proof` and `/shutdown` routes are therefore a contract with every released daemon.
 
+`rustling-tulipd apply-update --from <staging> --to <dir> [--old-version <v>] [--update] [--relaunch]` is what the installer runs from the staged daemon to swap the installed files (`crates/daemon/src/cli_apply_update.rs`, `docs/auto-update.md`): it stops the daemon, renames each file to `.old` and the staged one into place, rolls every file back on a failure, writes `last-result.json`, and with `--relaunch` starts the client.
+
+Its exit codes: 0 applied, 1 bad arguments, 2 the daemon would not stop, 3 an exe still runs from the install folder, 4 another update holds the lock, 5 a file failed and was rolled back. `rustling-tulipd --version` prints the daemon's version.
+
 `rustling-tulipd bridge` is what an SSH client runs on the host: it relays one compact JSON protocol message per line between its stdin and stdout and the loopback daemon's WebSocket, starting the daemon first when none runs (`daemon_client::ensure_running`) and filling the `Hello` token from the host's handshake so the token never leaves the host (`crates/daemon/src/cli_bridge.rs`).
 
 It exits 0 when the daemon closes the WebSocket, and after stdin EOF once the daemon has closed or 5 s have passed (it relays replies still in flight and sends its Close only then, since the daemon drops queued replies once it reads one); a daemon it starts on Windows inherits none of its standard handles. On failure it prints one stderr line `rustling-tulipd bridge: <error>`, leaves stdout empty and exits 1. It starts no tracing, takes no instance lock, rotates no log, creates no folders and attaches no console.
 
-The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect.
+The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` + `build_version` to `daemon.json` in the config dir below; clients read that to connect.
 
 A daemon sharing none of the client's versions is retired and replaced. The native client speaks only the current version, and the daemon's `supported` (`protocol-version.json`) lists only the current version too.
+
+A daemon whose `build_version` is older than the client's own (a missing one counts as older) is retired and replaced too, with the reason `older build`; one whose `build_version` is newer is never retired, and `ensure_running` fails with `DaemonIsNewer` ("daemon is newer … update the client") instead.
 
 ## E2E tests
 
@@ -121,7 +128,7 @@ The native client has three test tiers:
   Every live daemon gets `RUSTLING_TULIP_TAILSCALE` (the fake-tailscale shim) and `RUSTLING_TULIP_TAILNET_DIR` (`<root>/tailnet`), so no spec reaches the real Tailscale or the real certificate dir.
 - **OS smoke** — `.\rt.ps1 native-smoke`: builds daemon + tracer in test-release and launches the native client exe in a cloaked window that never takes focus, under `nextest --run-ignored only` (`tests/smoke_window.rs`) and checks it connects and that posted keys reach the shell. `native-smoke` takes no test filter, and a failed spec keeps its dir under `.tmp/native-e2e/<test>-<pid>/`, whose `sessions/<id>/scrollback.bin` is the exact PTY output.
 
-To look at a UI change, run `.\rt.ps1 native-shot <view>` (`main`, `main-compact` for the sidebar's Compact leaves, `source-control`, `diff`, `settings`, `settings-claude`, `spawn`, `viewer`, `viewer-md`, `dashboard`, `connections` for the host picker with a saved tailnet and SSH host, `connections-ssh` for its Add SSH host form after a passing Test connection): it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path; Read the PNG, and show the user before and after shots for any visual choice.
+To look at a UI change, run `.\rt.ps1 native-shot <view>` (`main`, `main-compact` for the sidebar's Compact leaves, `source-control`, `diff`, `settings`, `settings-claude`, `spawn`, `viewer`, `viewer-md`, `dashboard`, `connections` for the host picker with a saved tailnet and SSH host, `connections-ssh` for its Add SSH host form after a passing Test connection, `update` for the footer's `Update {version} ready` notice): it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path; Read the PNG, and show the user before and after shots for any visual choice.
 
 The `crates/agents/claude/fake/` shim (`fake-claude.cmd` or `fake-claude.sh`, plus `index.mjs`) replaces the real CLI in the e2e tier. The plugin returns it from `Agent::fake_cli` (`agent_api::FakeCli`, feature `test-support`), and the live harness (`apps/native/tests/support/live.rs`) sets each registered agent's override variable (`program_env_var()`, `RUSTLING_TULIP_CLAUDE` for Claude) to its fake through `agent-registry`, so the daemon path-resolves the CLI from that variable at spawn time.
 
@@ -147,6 +154,8 @@ Its JSON state file, named by `RUSTLING_TULIP_FAKE_SSH_STATE`, holds `bridge`, `
 | `RUSTLING_TULIP_TAILNET_DIR` | Tailnet listener's certificate dir override (useful for e2e test isolation) | `%LOCALAPPDATA%\leftos\rustling-tulip\data\tailnet\` |
 | `RUSTLING_TULIP_REMOTE_FILES_DIR` | Native client: download root for files fetched from a remote host (`daemon_client::remote_files_dir()`; useful for e2e test isolation) | `%LOCALAPPDATA%\leftos\rustling-tulip\data\remote-files\` |
 | `RUSTLING_TULIP_SSH` | Native client: path to the `ssh` binary it runs for an SSH host; an empty value counts as unset | `ssh` (PATH lookup), else `%SystemRoot%\System32\OpenSSH\ssh.exe` |
+| `RUSTLING_TULIP_UPDATE_FEED` | Native client: base URL of the releases feed the updater reads, the `/repos/leftos/rustling-tulip/releases` path being appended (tests point it at a local server); a dev build checks for updates only when it is set (`apps/native/src/update.rs`, `docs/auto-update.md`) | `https://api.github.com` |
+| `RUSTLING_TULIP_UPDATES_DIR` | Native client: download root for update installers and `last-result.json`; a non-empty value is used as given, an empty one counts as unset | `%LOCALAPPDATA%\leftos\rustling-tulip\data\updates\` |
 | `RUSTLING_TULIP_OFFSCREEN_WINDOW` | Native client: open the window cloaked and never activate it (the smoke tier sets it) | unset |
 
 ## Where things live on disk
@@ -157,7 +166,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   They are `worktrees_root_override`, `keep_awake_mode`: `"off"`, `"when_busy"` (the default) or `"always"`, `agent_commands`: `{"<agent serde name>": {"program", "args"}}` for the Settings launch command, only agents that set one, a blank pair removing the entry, `agent_settings`: `{"<agent id>": {<option>: <value>}}`, each agent's validated Settings page values.
 - `state.json.corrupt-<UTC stamp>` — a `state.json` that failed to parse, moved aside (or its bytes written beside it) before the daemon starts on defaults; the 3 newest are kept, and the secret sweep counts the `${secret:<id>}` references a text scan finds in each, so no sealed value they name is deleted (`crates/daemon/src/state.rs` `keep_corrupt_state`, `crates/daemon/src/main.rs`).
-- `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
+- `daemon.json` — handshake (port + auth_token + pid + supported_versions + build_version, the daemon's package version); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring. `hook-settings.json` sits beside them for an interactive Claude spawn (passed as `--settings`) and for a recovered shell with a hook agent and a conversation id; a graceful stop deletes it with the sidecar.
 
   `summary.json` sits beside `meta.json` too: the session's summary ring as a protocol `SessionSummary` whose `lines` is the whole ring (at most 12 lines, none older than 2 hours, newest first). It is written atomically right after each ring update and only while `meta.json` exists (it never creates the folder), restored by the orphan, reattached and abandoned inserts (a missing, corrupt or emptied ring restores no summary), and deleted with the sidecar (`crates/daemon/src/summarizer/turns.rs`, `crates/daemon/src/session.rs`).
@@ -197,7 +206,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   It holds the Settings modal's Spawn default (`spawn` holds only the trusted-launch default; Claude's approval mode and provider are the daemon's `agent_settings`, not stored here), General, Notifications and App title choices (`general`, `notifications`, `title`).
 
-  General includes the sidebar's leaf density (`general.leaf_density`), the sessions it draws under repos (`general.sessions_under_repos`: `"every"` default, `"busy"`, `"none"`), how it sorts repos (`general.repo_sort`: `"needs_you"` default, `"active"`, `"manual"`; a missing key or unknown value loads as `"needs_you"`), and `general.open_text_externally`, default off.
+  General includes `general.check_updates` (default on; off stops the updater's automatic checks and downloads), the sidebar's leaf density (`general.leaf_density`), the sessions it draws under repos (`general.sessions_under_repos`: `"every"` default, `"busy"`, `"none"`), how it sorts repos (`general.repo_sort`: `"needs_you"` default, `"active"`, `"manual"`; a missing key or unknown value loads as `"needs_you"`), and `general.open_text_externally`, default off.
 
   Notifications holds the `Needs you` and `Finished` toggles (`notifications.awaiting_input` and `notifications.finished`) and the skip choice.
 
@@ -227,6 +236,10 @@ It is not under the config dir, so the private key never roams (`crates/daemon/s
 
 Files the native client fetches from a remote host live in a fourth machine-local root beside those, `daemon_client::remote_files_dir()` (overridable with `RUSTLING_TULIP_REMOTE_FILES_DIR`), `%LOCALAPPDATA%\leftos\rustling-tulip\data\remote-files\` on Windows: `<host MagicDNS name, lower-cased>/<repo-name>/<rel-path>`, with Windows-unsafe names sanitised; an SSH host's folder is `ssh-<host string, lower-cased and sanitised>` (`ssh-me@devbox_2222`).
 
+Auto-update downloads live in a machine-local root beside the others, `%LOCALAPPDATA%\leftos\rustling-tulip\data\updates\` on Windows (overridable with `RUSTLING_TULIP_UPDATES_DIR`): one `<version>-<random>\` folder per download, holding the verified installer, and `last-result.json` (`{from, message, ok, to}`), which `rustling-tulipd apply-update` writes and the client reads once after the restart.
+
+Older folders and the `.old` files an update left in the install folder are deleted at the next launch (`apps/native/src/update.rs`, `docs/auto-update.md`).
+
 The Dashboard summarizer runs the agent's CLI in a fifth machine-local root beside those, `ProjectDirs::data_local_dir().join("summarizer")` (no override variable), `%LOCALAPPDATA%\leftos\rustling-tulip\data\summarizer\` on Windows: nothing lives there but the CLI's working folder, which is kept empty and never emptied by the daemon. It is created on first use (`crates/daemon/src/paths.rs` `resolve_summarizer_dir`, `crates/daemon/src/summarizer/cli.rs`).
 
 A fetch writes a hidden `.fetch-<launch stamp>-<n>.part` beside the target and renames it over the target when the file is done; a failed or cancelled fetch deletes its part. Nothing under it is ever pruned (`apps/native/src/file_fetch.rs`).
@@ -253,7 +266,7 @@ Before every breaking bump, verify that `daemon_client::ensure_running` retires 
 
 **On-disk layout under `%APPDATA%\rustling-tulip\`** (see `crates/daemon/src/paths.rs`):
 - `state.json` — repo + workspace registry plus host settings (never sessions)
-- `daemon.json` — handshake (port, token, pid, supported protocol versions)
+- `daemon.json` — handshake (port, token, pid, supported protocol versions, build version)
 - `sessions/<id>/meta.json` — orphan-recovery sidecar; written at spawn, deleted on graceful stop
 - `sessions/<id>/hook-settings.json` — the hooks document an interactive Claude spawn passes as `--settings` (a recovered shell's `shell_resume` command names its path); written at spawn, deleted on a graceful stop
 - `sessions/<id>/summary.json` — the session's summary ring (a protocol `SessionSummary`); written atomically after each ring update while `meta.json` exists, deleted with the sidecar
@@ -392,6 +405,5 @@ Once nothing open links a design file, its durable decisions are promoted into `
 
 Don't go looking for these — they're explicitly out of scope until their plan item comes up:
 
-- **Auto-update** for the native client — deferred until its installer (Phase 6) and a signed release pipeline exist.
 - **Code signing / notarization** of the native client's installer (Phase 6) and the binaries inside it — there is no signing cert, so an unsigned bundle trips SmartScreen.
 - **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (Wave 10, "Subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.

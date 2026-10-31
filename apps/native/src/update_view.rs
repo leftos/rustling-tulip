@@ -1,6 +1,6 @@
 //! The updater on screen: the checks it runs, the footer's notice of a ready
 //! update and its Restart to update button, the Settings → General update
-//! rows, and the toast after an update (`docs/plans/auto-update.md`,
+//! rows, and the toast after an update (`docs/auto-update.md`,
 //! decisions 3, 5, 6 and 8). The checking and the installing are
 //! [`crate::update`]'s.
 
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use gpui::{AnyElement, ClickEvent, Context, Task, div, prelude::*, px};
 
-use crate::buttons::{ButtonSize, outlined_button};
+use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::notices::ToastKind;
 use crate::update::{AlreadyRunning, LastResult, Ready, Updater};
 use crate::{FOOTER_PILL_HEIGHT, FOOTER_PILL_TEXT_SIZE, RootView, tagged_text};
@@ -100,8 +100,12 @@ impl RootView {
         }
     }
 
+    /// The check 30 s after launch and every 24 h: skipped while automatic
+    /// checks are off or an update is already ready to install.
     fn scheduled_update_check(&mut self, cx: &mut Context<Self>) {
-        if self.sidebar.ui_state().general.check_updates {
+        if self.update.ready.is_some() {
+            tracing::info!("update: an update is ready; skipping the scheduled check");
+        } else if self.sidebar.ui_state().general.check_updates {
             self.run_update_check(cx);
         } else {
             tracing::info!("update: automatic checks are off; skipping");
@@ -209,7 +213,7 @@ impl RootView {
     /// edge, once an update is ready.
     pub(crate) fn update_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let text = self.update_footer_text()?;
-        let button = outlined_button("footer-update", ButtonSize::Compact, true)
+        let button = outlined_button("footer-update", ButtonSize::Compact, true, Layer::Base)
             .min_h(px(FOOTER_PILL_HEIGHT))
             .py(px(0.0))
             .text_size(px(FOOTER_PILL_TEXT_SIZE))

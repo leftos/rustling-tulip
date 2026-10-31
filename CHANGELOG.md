@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- The app checks for new releases, downloads and verifies them, and offers Restart to update; your sessions keep running through the update.
+
 ### Changed
 
 - A higher-contrast look: menus, popovers and dialogs stand clearly above a near-black window, session rows are cards, and menu groups are ruled.

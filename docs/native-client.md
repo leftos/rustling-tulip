@@ -524,6 +524,22 @@ Window focused skips whenever the window is focused, and Never never skips, for 
 
 The settings are `notifications.awaiting_input`, `notifications.finished` (on unless turned off) and `notifications.skip_when` (`on_screen`, `focused` or `never`) in `native-ui.json`. An unknown or non-string `skip_when` loads as `on_screen` with a warn line in `native.log`, and the rest of the file still loads. The tab also shows Windows' read-only toast state with a link to Windows' settings.
 
+## Updates
+
+The client updates itself from published releases; the mechanism (trust model, feed, verify, file swap, daemon takeover) is in [auto-update.md](./auto-update.md). Updates are for this PC only: no daemon message, tailnet peer or SSH host triggers or feeds it.
+
+It checks 30 s after launch and every 24 h, skipped while an update is ready, and downloads a newer release in the background (`update_view.rs`). A dev build checks only when `RUSTLING_TULIP_UPDATE_FEED` is set.
+
+When a verified installer is ready, the footer shows the notice `Update {version} ready` (`footer-update-text`) with a `Restart to update` button (`footer-update`). Nothing installs until that press.
+
+The press starts the installer detached and quits through the Keep-sessions-running path, so sessions keep running in their tracers and the new client comes back on the new version. A second update while one runs is refused with the toast `An update is already running`; an installer that cannot be started gives the toast `Couldn't start the update`.
+
+Settings → General has an Updates section: a `Check for updates` toggle (`settings-general-check-updates`, saved as `general.check_updates`, default on; off stops the automatic checks and downloads).
+
+The section also has a `Version {version}` line (`settings-update-version`), a last-check line (`settings-update-last-check`: `Not checked yet`, `Up to date`, `Update {version} ready` or `Last check failed: {error}`) and a `Check now` button, which checks whether the toggle is on or off and is disabled while a check runs.
+
+The first launch after an update reads the result once: the toast `Updated to {version}`, or `Update to {version} didn't install` with the recorded message as its detail, after which the ready update is offered again. The `--updated-from <version>` launch argument that marks it is stripped before the client reads its other arguments.
+
 ## Session recovery
 
 A "Recover sessions" button sits on the activity rail above the Settings gear, with a badge counting unexpected ends (`TracerLost`) not yet recovered (a session a reboot, a crash or a killed process tree ended gets its entry at the next daemon start, so it counts too); an entry counts until it is recovered, from the dialog or the sidebar's Resume, or pruned after 7 days, and Dismiss does not clear it.

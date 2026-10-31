@@ -20,7 +20,7 @@ How a versioned release of rustling-tulip is cut, starting with `v0.1.0-alpha`. 
    - `.\rt.ps1 native-e2e` and `.\rt.ps1 native-smoke`
 
    A red gate stops the release; its fix lands first.
-4. **Installer.** `.\rt.ps1 installer`, then install it on this PC and run the hand-test list in `tools/installer/README.md`. It also writes `target/installer/rustling-tulip-<version>-setup.exe.sha256` (`<hex>  <file name>`), which the app's updater checks every download against (`docs/plans/auto-update.md`).
+4. **Installer.** `.\rt.ps1 installer`, then install it on this PC and run the hand-test list in `tools/installer/README.md`. It also writes `target/installer/rustling-tulip-<version>-setup.exe.sha256` (`<hex>  <file name>`), which the app's updater checks every download against ([auto-update.md](./auto-update.md)).
 5. **README.** Refresh `README.md`'s Features and What's new sections from the release's notes (new features in, removed ones out), and re-shoot any screenshot whose view changed with `.\rt.ps1 native-shot <view>` into `docs/images/`; commit it as `docs: refresh the README for v<version>`.
 6. **Tag and push.** `git tag -a v<version> -m "rustling-tulip v<version>"` on the commit the gates ran on, then `git push origin main v<version>`.
 7. **Publish.** `gh release create v<version> target/installer/rustling-tulip-<version>-setup.exe target/installer/rustling-tulip-<version>-setup.exe.sha256 --repo leftos/rustling-tulip --title "rustling-tulip v<version>" --notes-file <notes> --prerelease` (drop `--prerelease` for a version with no suffix). The notes are the version's `CHANGELOG.md` section, checked against the issues `linear release status` lists in `vNext`.
