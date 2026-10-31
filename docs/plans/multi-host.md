@@ -61,7 +61,7 @@ Orchestrator decisions:
 - [x] MH.2 (RT-564) Transport: `HostKey`, a `Net` per host, tagged events, the `RootDeps` factory, `send_to`; `Harness::connect()` stays Local. Behaviour unchanged.
 - [x] MH.3 (RT-565) Per-host state: sidebar slices, per-host mirrors, notifications, dashboard, source control, file fetch, capabilities, Recover, session pop-out keys, `reset_host`; the UI-spec harness gains `Harness::host(target)` sub-daemons; spec `ui_multi_host.rs`.
 - [x] MH.4 (RT-566) Connect every enabled host: remove `SwitchTarget`, `last_target` and the boot target; Connections as host manager with switches, per-host pairing and daemon-id dedupe; offline hosts dimmed, the overlay for Local only.
-- [ ] MH.5 (RT-567) Sidebar host groups with `+ Shell`, host chips on pills and pane headers; shot view `multi-host`.
+- [x] MH.5 (RT-567) Sidebar host groups with `+ Shell`, host chips on pills and pane headers; shot view `multi-host`.
 - [ ] MH.6 (RT-568) Mixed tabs: place remote spawns and duplicates into Local's layout, move and drag remote sessions into any tab, prune foreign panes, host in pane and tab pop-out keys, remote sessions in no tab.
 - [ ] MH.7 (RT-569) Cross-host spawn and settings: grouped spawn picker, quick-shell host, the Shell dialog's host field, the Settings host selector, Recover grouped by host.
 - [ ] MH.8 (RT-570) Live proof and docs: `e2e_multi_host.rs` (a local daemon plus a second isolated one through fake-ssh and the bridge), the hand checklist, `docs/native-client.md`, `docs/architecture.md`, glossary, CLAUDE.md, the changelog; this file promoted and deleted.
