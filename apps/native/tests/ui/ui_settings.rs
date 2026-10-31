@@ -2704,6 +2704,8 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
         "appearance-background-hex",
         "appearance-ui-family-filter",
         "appearance-ui-family-list",
+        "appearance-ui-text-size-down",
+        "appearance-ui-text-size-up",
         "appearance-family-filter",
         "appearance-family-list",
         "appearance-size-down",
@@ -2855,6 +2857,97 @@ fn a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_defa
         "Use built-in restores the default"
     );
     assert_eq!(saved_ui(&dir)["ui_font_family"], serde_json::Value::Null);
+}
+
+/// The offset every UI text size is drawn at.
+fn ui_text_size(h: &mut Harness<'_>) -> i8 {
+    h.cx.update(|_, cx| fonts::ui_text_size(cx))
+}
+
+/// What the UI text size row shows between its buttons.
+fn ui_text_size_label(h: &mut Harness<'_>) -> String {
+    h.root(|root, _| root.appearance_ui_text_size_label())
+        .expect("Settings › Appearance is open")
+}
+
+/// Clicks the UI text size row's `up` or `down` button, scrolled into view.
+fn press_ui_text_size(h: &mut Harness<'_>, which: &str) {
+    let selector = format!("appearance-ui-text-size-{which}");
+    h.scroll_into_view("settings-content", &selector);
+    h.click_on(&selector);
+}
+
+/// The Appearance stops Tab walks, from the tab list round to it.
+fn appearance_ring(h: &mut Harness<'_>) -> Vec<&'static str> {
+    h.click_on("settings-tab-appearance");
+    let mut ring = Vec::new();
+    for _ in 0..40 {
+        h.keys("tab");
+        match settings_focus(h) {
+            Some("list") | None => return ring,
+            Some(stop) => ring.push(stop),
+        }
+    }
+    assert_eq!(
+        settings_focus(h),
+        Some("list"),
+        "Tab never came back to the tab list: {ring:?}"
+    );
+    ring
+}
+
+#[gpui::test]
+fn ui_text_size_plus_raises_every_ui_text_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    assert_eq!(ui_text_size(&mut h), 0, "nothing picked: no offset");
+    assert_eq!(ui_text_size_label(&mut h), "Default");
+
+    press_ui_text_size(&mut h, "up");
+    assert_eq!(ui_text_size(&mut h), 1, "the press applies at once");
+    assert_eq!(
+        h.cx.update(|_, cx| fonts::ui_px(cx, 12.0)),
+        px(13.0),
+        "every UI text size reads one pixel larger"
+    );
+    assert_eq!(ui_text_size_label(&mut h), "+1 px");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], 1, "saved on this machine");
+
+    press_ui_text_size(&mut h, "down");
+    press_ui_text_size(&mut h, "down");
+    assert_eq!(ui_text_size(&mut h), -1);
+    assert_eq!(ui_text_size_label(&mut h), "−1 px");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], -1);
+}
+
+#[gpui::test]
+fn ui_text_size_buttons_stop_at_the_ends_of_the_range(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    for _ in 0..6 {
+        press_ui_text_size(&mut h, "up");
+    }
+    assert_eq!(ui_text_size(&mut h), 4, "+ stops at +4");
+    assert_eq!(ui_text_size_label(&mut h), "+4 px");
+    let ring = appearance_ring(&mut h);
+    assert!(
+        ring.contains(&"appearance-ui-text-size-down")
+            && !ring.contains(&"appearance-ui-text-size-up"),
+        "+ is disabled at the top of the range: {ring:?}"
+    );
+
+    for _ in 0..8 {
+        press_ui_text_size(&mut h, "down");
+    }
+    assert_eq!(ui_text_size(&mut h), -2, "− stops at −2");
+    assert_eq!(ui_text_size_label(&mut h), "−2 px");
+    assert_eq!(saved_ui(&dir)["ui_text_size"], -2);
+    let ring = appearance_ring(&mut h);
+    assert!(
+        ring.contains(&"appearance-ui-text-size-up")
+            && !ring.contains(&"appearance-ui-text-size-down"),
+        "− is disabled at the bottom of the range: {ring:?}"
+    );
 }
 
 #[gpui::test]

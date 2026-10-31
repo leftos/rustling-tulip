@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::fonts::ui_px_at;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, ClipboardItem, Context, ElementId, SharedString, div,
     prelude::*, px,
@@ -132,10 +133,11 @@ impl RootView {
     }
 
     /// The chip, centred just above the footer bar while a copy is recent.
-    pub(crate) fn chip_layer(&self, t: &UiTheme) -> Option<AnyElement> {
+    pub(crate) fn chip_layer(&self, offset: i8, t: &UiTheme) -> Option<AnyElement> {
         let chars = self.copy_chip.chars()?;
         let generation = self.copy_chip.generation();
         let chip = toast_frame(
+            offset,
             ElementId::Name(SharedString::from(format!("copied-chip-{generation}"))),
             t,
         )
@@ -150,7 +152,7 @@ impl RootView {
                 .absolute()
                 .left_0()
                 .right_0()
-                .bottom(px(FOOTER_HEIGHT + 8.0))
+                .bottom(ui_px_at(offset, FOOTER_HEIGHT) + px(8.0))
                 .flex()
                 .justify_center()
                 .child(chip.with_animation(

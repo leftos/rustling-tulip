@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::fonts::ui_px_at;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
     Focusable as _, FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point,
@@ -2354,11 +2355,17 @@ impl RootView {
     fn busy_exclusion_row(session_id: &str, row: SessionRow, cx: &mut Context<Self>) -> AnyElement {
         let checked = matches!(row, SessionRow::BusyExcluded { excluded: true });
         let session_id = session_id.to_owned();
-        check_row(row.selector(), row.label(), checked, &theme(cx))
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.choose_row(&session_id, row, window, cx);
-            }))
-            .into_any_element()
+        check_row(
+            crate::fonts::ui_text_size(cx),
+            row.selector(),
+            row.label(),
+            checked,
+            &theme(cx),
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.choose_row(&session_id, row, window, cx);
+        }))
+        .into_any_element()
     }
 
     /// A line of a submenu of tabs for `session_id`; a choice runs `pick`,
@@ -2933,13 +2940,17 @@ impl RootView {
             );
         }
         Some(
-            overlay_layer(format!("exited-{pane_id}"), &theme(cx))
-                .child(
-                    overlay_card(format!("exited-card-{pane_id}"), &theme(cx))
-                        .child(exited_message(session))
-                        .child(overlay_buttons(buttons)),
-                )
-                .into_any_element(),
+            overlay_layer(
+                crate::fonts::ui_text_size(cx),
+                format!("exited-{pane_id}"),
+                &theme(cx),
+            )
+            .child(
+                overlay_card(format!("exited-card-{pane_id}"), &theme(cx))
+                    .child(exited_message(session))
+                    .child(overlay_buttons(buttons)),
+            )
+            .into_any_element(),
         )
     }
 
@@ -2966,19 +2977,23 @@ impl RootView {
             .collect();
         let mut lines = abandoned_lines(session).into_iter();
         Some(
-            overlay_layer(format!("abandoned-{pane_id}"), &theme(cx))
-                .child(
-                    overlay_card(format!("abandoned-card-{pane_id}"), &theme(cx))
-                        .children(lines.next())
-                        .children(lines.map(|line| {
-                            div()
-                                .max_w(px(DIALOG_WIDTH))
-                                .text_color(gpui::rgb(theme(cx).muted))
-                                .child(line)
-                        }))
-                        .child(overlay_buttons(buttons)),
-                )
-                .into_any_element(),
+            overlay_layer(
+                crate::fonts::ui_text_size(cx),
+                format!("abandoned-{pane_id}"),
+                &theme(cx),
+            )
+            .child(
+                overlay_card(format!("abandoned-card-{pane_id}"), &theme(cx))
+                    .children(lines.next())
+                    .children(lines.map(|line| {
+                        div()
+                            .max_w(px(DIALOG_WIDTH))
+                            .text_color(gpui::rgb(theme(cx).muted))
+                            .child(line)
+                    }))
+                    .child(overlay_buttons(buttons)),
+            )
+            .into_any_element(),
         )
     }
 
@@ -2986,6 +3001,7 @@ impl RootView {
     /// process still runs.
     pub(crate) fn orphan_banner(
         &self,
+        offset: i8,
         pane_id: &str,
         session_id: Option<&str>,
         t: &UiTheme,
@@ -3001,7 +3017,7 @@ impl RootView {
                 .px(px(8.0))
                 .py(px(4.0))
                 .bg(gpui::rgba((t.warning << 8) | 0x24))
-                .text_size(px(UI_TEXT_SIZE))
+                .text_size(ui_px_at(offset, UI_TEXT_SIZE))
                 .text_color(gpui::rgb(t.text))
                 .child(orphan_banner_text(session, &self.agents)),
         )
@@ -3056,7 +3072,7 @@ impl RootView {
 
 /// A tinted layer over a whole pane, its content centred, that takes the
 /// pointer from the terminal under it.
-fn overlay_layer(name: String, t: &UiTheme) -> Stateful<Div> {
+fn overlay_layer(offset: i8, name: String, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -3071,7 +3087,7 @@ fn overlay_layer(name: String, t: &UiTheme) -> Stateful<Div> {
         .gap(px(10.0))
         .bg(gpui::rgba(t.scrim))
         .occlude()
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.text))
 }
 
@@ -3597,7 +3613,13 @@ fn swatch_row(
 
 /// A clickable menu row with a ✓ in the swatch's slot while `checked`,
 /// tagged `<selector>-check`; unchecked leaves the slot empty.
-fn check_row(selector: &str, label: &'static str, checked: bool, t: &UiTheme) -> Stateful<Div> {
+fn check_row(
+    offset: i8,
+    selector: &str,
+    label: &'static str,
+    checked: bool,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let check = format!("{selector}-check");
     let slot = div()
         .flex()
@@ -3605,8 +3627,8 @@ fn check_row(selector: &str, label: &'static str, checked: bool, t: &UiTheme) ->
         .items_center()
         .justify_center()
         .size(px(12.0))
-        .text_size(px(12.0))
-        .line_height(px(12.0));
+        .text_size(ui_px_at(offset, 12.0))
+        .line_height(ui_px_at(offset, 12.0));
     let slot = if checked {
         slot.debug_selector(|| check).child("✓")
     } else {

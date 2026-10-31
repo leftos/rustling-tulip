@@ -2,6 +2,7 @@
 //! middle-click or × to close, twice when the tab holds something), then "+"
 //! for a new tab.
 
+use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, App, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId, Entity,
     Focusable as _, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful,
@@ -578,14 +579,15 @@ impl RootView {
             .map(|tab| self.tab_pill(tab, accent, cx))
             .collect();
         div()
+            .debug_selector(|| "tab-bar".to_owned())
             .flex()
             .flex_none()
             .items_center()
-            .h(px(TAB_BAR_HEIGHT))
+            .h(ui_px(cx, TAB_BAR_HEIGHT))
             .bg(gpui::rgb(t.surface))
             .border_b_1()
             .border_color(gpui::rgb(t.border))
-            .text_size(px(UI_TEXT_SIZE))
+            .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.muted))
             .children(pills)
             .child(new_tab_button(cx))
@@ -599,11 +601,18 @@ impl RootView {
         let armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
         let badge = self
             .tab_badge(&tab.id)
-            .map(|badge| count_badge(&tab.id, badge, &theme(cx)));
+            .map(|badge| count_badge(crate::fonts::ui_text_size(cx), &tab.id, badge, &theme(cx)));
         let dashboard = matches!(tab.content, TabContent::Dashboard);
         let icon = dashboard.then(|| dashboard_icon(&tab.id, &t));
         let need_badge = dashboard
-            .then(|| need_you_badge(&tab.id, self.needs_you_count(), &t))
+            .then(|| {
+                need_you_badge(
+                    crate::fonts::ui_text_size(cx),
+                    &tab.id,
+                    self.needs_you_count(),
+                    &t,
+                )
+            })
             .flatten();
         let rename = self.renaming.as_ref().filter(|r| r.tab_id == tab.id);
         let label = match rename {
@@ -1209,7 +1218,7 @@ impl CountPill {
 
 /// The count pill after a grid tab's name, tagged `tab-badge-<id>`; its
 /// working glyph is tagged `tab-badge-glyph-<id>-working`.
-fn count_badge(tab_id: &str, badge: TabBadge, t: &UiTheme) -> Stateful<Div> {
+fn count_badge(offset: i8, tab_id: &str, badge: TabBadge, t: &UiTheme) -> Stateful<Div> {
     let pill = CountPill::of(badge, t);
     let name = format!("tab-badge-{tab_id}");
     let glyph_id = format!("tab-badge-glyph-{tab_id}");
@@ -1220,12 +1229,12 @@ fn count_badge(tab_id: &str, badge: TabBadge, t: &UiTheme) -> Stateful<Div> {
         .flex_none()
         .items_center()
         .gap(px(4.0))
-        .h(px(BUSY_PILL_HEIGHT))
+        .h(ui_px_at(offset, BUSY_PILL_HEIGHT))
         .px(px(6.0))
-        .rounded(px(BUSY_PILL_HEIGHT / 2.0))
+        .rounded(ui_px_at(offset, BUSY_PILL_HEIGHT) / 2.0)
         .bg(gpui::rgb(pill.background))
         .font_family(fonts::DEFAULT_FAMILY)
-        .text_size(px(BUSY_PILL_TEXT_SIZE))
+        .text_size(ui_px_at(offset, BUSY_PILL_TEXT_SIZE))
         .text_color(gpui::rgb(pill.color))
         .tooltip(tooltip(pill.tooltip))
         .when(pill.glyph, |row| {
@@ -1259,7 +1268,7 @@ fn dashboard_icon(tab_id: &str, t: &UiTheme) -> Div {
 
 /// The pill after a Dashboard tab's name counting the sessions waiting on
 /// the user, tagged `tab-need-badge-<id>`; none at 0.
-fn need_you_badge(tab_id: &str, waiting: usize, t: &UiTheme) -> Option<Stateful<Div>> {
+fn need_you_badge(offset: i8, tab_id: &str, waiting: usize, t: &UiTheme) -> Option<Stateful<Div>> {
     let text = badge_text(waiting)?;
     let name = format!("tab-need-badge-{tab_id}");
     Some(
@@ -1269,12 +1278,12 @@ fn need_you_badge(tab_id: &str, waiting: usize, t: &UiTheme) -> Option<Stateful<
             .flex()
             .flex_none()
             .items_center()
-            .h(px(BUSY_PILL_HEIGHT))
+            .h(ui_px_at(offset, BUSY_PILL_HEIGHT))
             .px(px(6.0))
-            .rounded(px(BUSY_PILL_HEIGHT / 2.0))
+            .rounded(ui_px_at(offset, BUSY_PILL_HEIGHT) / 2.0)
             .bg(gpui::rgb(t.chip))
             .font_family(fonts::DEFAULT_FAMILY)
-            .text_size(px(BUSY_PILL_TEXT_SIZE))
+            .text_size(ui_px_at(offset, BUSY_PILL_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
             .tooltip(tooltip(format!("{waiting} waiting on you")))
             .child(text),
@@ -1342,12 +1351,12 @@ impl Render for PillGhost {
                 .flex_none()
                 .items_center()
                 .gap(px(4.0))
-                .h(px(GHOST_BADGE_HEIGHT))
+                .h(ui_px(cx, GHOST_BADGE_HEIGHT))
                 .px(px(5.0))
-                .rounded(px(GHOST_BADGE_HEIGHT / 2.0))
+                .rounded(ui_px(cx, GHOST_BADGE_HEIGHT) / 2.0)
                 .bg(gpui::rgb(pill.background))
                 .font_family(fonts::DEFAULT_FAMILY)
-                .text_size(px(GHOST_BADGE_TEXT_SIZE))
+                .text_size(ui_px(cx, GHOST_BADGE_TEXT_SIZE))
                 .text_color(gpui::rgb(pill.color))
                 .when(pill.glyph, |row| {
                     row.child(glyph_view(
@@ -1374,7 +1383,7 @@ impl Render for PillGhost {
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .h(px(GHOST_HEIGHT))
+                .h(ui_px(cx, GHOST_HEIGHT))
                 .px(px(10.0))
                 .whitespace_nowrap()
                 .bg(gpui::rgb(t.raised))
@@ -1384,7 +1393,7 @@ impl Render for PillGhost {
                 .shadow_lg()
                 .opacity(GHOST_OPACITY)
                 .font_family(fonts::ui_family(cx))
-                .text_size(px(GHOST_TEXT_SIZE))
+                .text_size(ui_px(cx, GHOST_TEXT_SIZE))
                 .text_color(gpui::rgb(t.text))
                 .children(badge)
                 .child(self.label.clone()),
@@ -1442,7 +1451,7 @@ fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
     div()
         .id("new-tab")
         .debug_selector(|| "new-tab".to_owned())
-        .w(px(TAB_BAR_HEIGHT))
+        .w(ui_px(cx, TAB_BAR_HEIGHT))
         .h_full()
         .flex()
         .items_center()

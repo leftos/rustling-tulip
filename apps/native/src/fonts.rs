@@ -4,8 +4,9 @@
 //! knows.
 
 use std::borrow::Cow;
+use std::ops::RangeInclusive;
 
-use gpui::{App, Global, SharedString, TextSystem};
+use gpui::{App, Global, Pixels, SharedString, TextSystem, px};
 use serde::{Deserialize, Serialize};
 
 /// The family a pane renders in when the settings name none.
@@ -208,6 +209,56 @@ pub fn set_ui_family(requested: Option<&str>, cx: &mut App) {
 pub fn set_ui_family_among(requested: Option<&str>, installed: &[SharedString], cx: &mut App) {
     let family = resolve_ui_family(requested, || installed.to_vec());
     cx.set_global(UiFont(family));
+}
+
+/// The whole pixels the user may add to every UI text size, smallest to
+/// largest; 0 draws each at its base.
+pub const UI_TEXT_SIZE_OFFSETS: RangeInclusive<i8> = -2..=4;
+/// The smallest a UI text size gets, whatever the offset.
+const MIN_UI_PX: f32 = 8.0;
+
+/// How the interface's text is drawn beyond its family: the whole pixels
+/// added to every UI text size and to the fixed heights that hold one line.
+struct UiText {
+    size_offset: i8,
+}
+
+impl Global for UiText {}
+
+/// The offset every UI text size is drawn at; 0 until
+/// [`set_ui_text_size`] has run.
+#[must_use]
+pub fn ui_text_size(cx: &App) -> i8 {
+    cx.try_global::<UiText>().map_or(0, |text| text.size_offset)
+}
+
+/// Makes `offset`, clamped to [`UI_TEXT_SIZE_OFFSETS`], the offset every UI
+/// text size is drawn at.
+pub fn set_ui_text_size(offset: i8, cx: &mut App) {
+    cx.set_global(UiText {
+        size_offset: clamped_ui_text_size(i64::from(offset)),
+    });
+}
+
+/// `offset` clamped to [`UI_TEXT_SIZE_OFFSETS`].
+#[must_use]
+pub fn clamped_ui_text_size(offset: i64) -> i8 {
+    let low = *UI_TEXT_SIZE_OFFSETS.start();
+    let high = *UI_TEXT_SIZE_OFFSETS.end();
+    i8::try_from(offset.clamp(i64::from(low), i64::from(high))).unwrap_or(0)
+}
+
+/// UI size `base` (a text size, or a fixed height that holds one line of
+/// text) at the app's offset.
+#[must_use]
+pub fn ui_px(cx: &App, base: f32) -> Pixels {
+    ui_px_at(ui_text_size(cx), base)
+}
+
+/// UI size `base` at `offset`, never below 8 px.
+#[must_use]
+pub fn ui_px_at(offset: i8, base: f32) -> Pixels {
+    px((base + f32::from(offset)).max(MIN_UI_PX))
 }
 
 /// The family to draw the interface in for `requested` (or
@@ -415,6 +466,35 @@ mod tests {
             calls.set(calls.get() + 1);
             names(families)
         }
+    }
+
+    #[test]
+    fn ui_px_adds_the_offset_and_never_goes_below_8() {
+        assert_eq!(ui_px_at(0, 12.0), gpui::px(12.0), "no offset: the base");
+        assert_eq!(ui_px_at(3, 12.0), gpui::px(15.0));
+        assert_eq!(ui_px_at(-2, 11.5), gpui::px(9.5));
+        assert_eq!(ui_px_at(-2, 9.5), gpui::px(8.0), "floored at 8 px");
+        assert_eq!(ui_px_at(4, 6.0), gpui::px(10.0), "the floor is on the sum");
+        assert_eq!(clamped_ui_text_size(9), 4, "above the range: its top");
+        assert_eq!(
+            clamped_ui_text_size(-100),
+            -2,
+            "below the range: its bottom"
+        );
+        assert_eq!(clamped_ui_text_size(1), 1);
+    }
+
+    #[gpui::test]
+    fn ui_px_reads_the_offset_the_app_set(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert_eq!(ui_text_size(cx), 0, "nothing set: no offset");
+            assert_eq!(ui_px(cx, 12.0), gpui::px(12.0));
+            set_ui_text_size(2, cx);
+            assert_eq!(ui_text_size(cx), 2);
+            assert_eq!(ui_px(cx, 12.0), gpui::px(14.0));
+            set_ui_text_size(7, cx);
+            assert_eq!(ui_text_size(cx), 4, "clamped to the range");
+        });
     }
 
     #[test]

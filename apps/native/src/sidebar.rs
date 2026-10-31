@@ -429,6 +429,11 @@ pub struct UiState {
     /// [`crate::fonts::DEFAULT_UI_FAMILY`].
     #[serde(default)]
     pub ui_font_family: Option<String>,
+    /// The whole pixels added to every UI text size, within
+    /// [`crate::fonts::UI_TEXT_SIZE_OFFSETS`]; a stored value outside it
+    /// clamps on load.
+    #[serde(default, deserialize_with = "clamped_ui_text_size")]
+    pub ui_text_size: i8,
     /// The theme the interface draws in: a built-in's id or a user theme's
     /// file slug; `None` is the built-in theme.
     #[serde(default)]
@@ -490,6 +495,21 @@ pub struct UiState {
     /// connect whose first list differs offers the import.
     #[serde(default)]
     pub host_session_counts: BTreeMap<String, u32>,
+}
+
+/// Reads `ui_text_size`, never failing the file: a whole number clamps to
+/// [`crate::fonts::UI_TEXT_SIZE_OFFSETS`], and anything else loads as no
+/// offset with a warning naming it.
+fn clamped_ui_text_size<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i8, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let whole = value.as_i64().or_else(|| value.as_u64().map(|_| i64::MAX));
+    Ok(whole.map_or_else(
+        || {
+            tracing::warn!("ui_text_size {value} is not a whole number; drawing at no offset");
+            0
+        },
+        crate::fonts::clamped_ui_text_size,
+    ))
 }
 
 /// Reads `last_target` so that a value that is not a host record loads as
@@ -772,6 +792,7 @@ impl Default for UiState {
             last_vscode_dir: None,
             terminal_font: FontSettings::default(),
             ui_font_family: None,
+            ui_text_size: 0,
             theme: None,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
@@ -1252,6 +1273,12 @@ impl SidebarModel {
     /// Sets the family the interface draws in; `None` is the default.
     pub fn set_ui_font_family(&mut self, family: Option<String>) {
         self.ui.ui_font_family = family;
+    }
+
+    /// Sets the whole pixels added to every UI text size, clamped to
+    /// [`crate::fonts::UI_TEXT_SIZE_OFFSETS`].
+    pub fn set_ui_text_size(&mut self, offset: i8) {
+        self.ui.ui_text_size = crate::fonts::clamped_ui_text_size(i64::from(offset));
     }
 
     /// Whether the diff tabs show whitespace-only changes.
@@ -3944,6 +3971,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ui_state_without_ui_text_size_loads_0() {
+        assert_eq!(UiState::default().ui_text_size, 0);
+        let older: UiState = serde_json::from_value(json!({ "sidebar_width": 300.0 }))
+            .expect("a file from before the UI text size was saved");
+        assert_eq!(older.ui_text_size, 0, "absent: no offset");
+    }
+
+    #[test]
+    fn ui_state_round_trips_ui_text_size() {
+        let dir = TestDir::new("ui-text-size");
+        let state = UiState {
+            ui_text_size: -2,
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0).ui_text_size, -2);
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("the saved layout");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["ui_text_size"], -2, "saved as an integer");
+    }
+
+    #[test]
+    fn an_out_of_range_ui_text_size_clamps_on_load() {
+        let load = |value: serde_json::Value| -> UiState {
+            serde_json::from_value(json!({ "sidebar_width": 300.0, "ui_text_size": value }))
+                .expect("a UI text size never fails the file")
+        };
+        assert_eq!(load(json!(9)).ui_text_size, 4, "above: the largest");
+        assert_eq!(load(json!(-50)).ui_text_size, -2, "below: the smallest");
+        assert_eq!(load(json!(100_000)).ui_text_size, 4, "past an i8");
+        assert_eq!(load(json!(u64::MAX)).ui_text_size, 4, "past an i64");
+        assert_eq!(load(json!(3)).ui_text_size, 3, "in range: kept");
+        let bad = load(json!("big"));
+        assert_eq!(bad.ui_text_size, 0, "not a whole number: no offset");
+        assert!(
+            (bad.sidebar_width - 300.0).abs() < f32::EPSILON,
+            "the rest of the file loads"
+        );
+    }
+
+    #[test]
     fn ui_state_without_a_theme_key_loads_none() {
         assert_eq!(UiState::default().theme, None);
         let older: UiState = serde_json::from_value(json!({ "sidebar_width": 300.0 }))
@@ -3985,6 +4053,7 @@ pub(crate) mod tests {
                 bold: true,
             },
             ui_font_family: Some("Inter".to_owned()),
+            ui_text_size: 3,
             theme: Some("my-theme".to_owned()),
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {

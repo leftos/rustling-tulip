@@ -149,6 +149,7 @@ mod workspace_creator_view;
 mod worktrees_manager;
 mod worktrees_manager_view;
 
+use crate::fonts::ui_px;
 use alacritty_terminal::vte::ansi::CursorShape;
 use daemon_client::device_tokens::DeviceTokenStore;
 use futures::StreamExt as _;
@@ -1268,6 +1269,7 @@ impl RootView {
             .map_or_else(UiState::default, load_ui_state);
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
         fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
+        fonts::set_ui_text_size(ui.ui_text_size, cx);
         let themes_dir = ui_dir
             .as_deref()
             .map(|dir| dir.join(theme_store::THEMES_DIR));
@@ -2356,6 +2358,16 @@ impl RootView {
             Some(editor) => fonts::set_ui_family_among(stored, editor.system_families(), cx),
             None => fonts::set_ui_family(stored, cx),
         }
+        self.save_ui();
+        cx.refresh_windows();
+    }
+
+    /// Makes `offset` (clamped to [`fonts::UI_TEXT_SIZE_OFFSETS`]) the whole
+    /// pixels added to every UI text size: saved on this machine and applied
+    /// to every window at once.
+    pub fn set_ui_text_size(&mut self, offset: i8, cx: &mut Context<Self>) {
+        self.sidebar.set_ui_text_size(offset);
+        fonts::set_ui_text_size(self.sidebar.ui_state().ui_text_size, cx);
         self.save_ui();
         cx.refresh_windows();
     }
@@ -4608,7 +4620,7 @@ impl Render for RootView {
             // Above the flyout's backdrop, so the chip's tooltip is reachable
             // while the flyout is open: its own copy button has no other
             // confirmation to show.
-            .children(self.chip_layer(&theme(cx)))
+            .children(self.chip_layer(crate::fonts::ui_text_size(cx), &theme(cx)))
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
             .children(self.fetch_dialog_layer(cx))
@@ -4687,12 +4699,12 @@ impl RootView {
             .flex()
             .flex_none()
             .items_center()
-            .h(px(FOOTER_PILL_HEIGHT))
+            .h(ui_px(cx, FOOTER_PILL_HEIGHT))
             .px(px(9.0))
-            .rounded(px(FOOTER_PILL_HEIGHT / 2.0))
+            .rounded(ui_px(cx, FOOTER_PILL_HEIGHT) / 2.0)
             .border_1()
             .border_color(gpui::rgb(t.line_strong))
-            .text_size(px(FOOTER_PILL_TEXT_SIZE))
+            .text_size(ui_px(cx, FOOTER_PILL_TEXT_SIZE))
             .cursor_pointer()
             .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
             .child("Connections")
@@ -4708,12 +4720,12 @@ impl RootView {
             .flex_none()
             .items_center()
             .gap(px(7.0))
-            .h(px(FOOTER_PILL_HEIGHT))
+            .h(ui_px(cx, FOOTER_PILL_HEIGHT))
             .px(px(9.0))
-            .rounded(px(FOOTER_PILL_HEIGHT / 2.0))
+            .rounded(ui_px(cx, FOOTER_PILL_HEIGHT) / 2.0)
             .border_1()
             .border_color(gpui::rgb(t.line_strong))
-            .text_size(px(FOOTER_PILL_TEXT_SIZE))
+            .text_size(ui_px(cx, FOOTER_PILL_TEXT_SIZE))
             .cursor_pointer()
             .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
             .when(self.flyout_open, move |pill| pill.bg(gpui::rgb(t.hover_bg)))
@@ -4734,11 +4746,11 @@ impl RootView {
             .items_center()
             .gap(px(FOOTER_GAP))
             .px(px(12.0))
-            .h(px(FOOTER_HEIGHT))
+            .h(ui_px(cx, FOOTER_HEIGHT))
             .bg(gpui::rgb(t.sunken))
             .border_t_1()
             .border_color(gpui::rgb(t.border))
-            .text_size(px(FOOTER_TEXT_SIZE))
+            .text_size(ui_px(cx, FOOTER_TEXT_SIZE))
             .text_color(gpui::rgb(t.text_2))
             .child(connections)
             .child(pill)
@@ -4782,7 +4794,7 @@ impl RootView {
         popover_frame("daemon-flyout", &theme(cx))
             .absolute()
             .left(px(PADDING))
-            .bottom(px(FOOTER_HEIGHT + 4.0))
+            .bottom(ui_px(cx, FOOTER_HEIGHT) + px(4.0))
             .w(px(320.0))
             .flex()
             .flex_col()
@@ -4928,7 +4940,7 @@ fn connecting_overlay(
     let t = theme(cx);
     let restart = div()
         .id("overlay-restart")
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px(cx, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
         .hover(move |style| style.text_color(gpui::rgb(t.text)))
@@ -4940,7 +4952,7 @@ fn connecting_overlay(
     let connections = div()
         .id("overlay-connections")
         .debug_selector(|| "overlay-connections".to_owned())
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px(cx, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
         .hover(move |style| style.text_color(gpui::rgb(t.text)))
@@ -5099,7 +5111,7 @@ impl Render for Tip {
             .border_1()
             .border_color(gpui::rgb(t.popover_edge))
             .rounded(px(10.0))
-            .text_size(px(UI_TEXT_SIZE))
+            .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
             .debug_selector(|| format!("tooltip={}", self.0))
             .child(self.0.clone())

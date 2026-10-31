@@ -56,6 +56,10 @@ pub(crate) enum AppearanceStop {
     UiFamilyFilter,
     /// The app level's UI font list, one stop like the family list.
     UiFamilyList,
+    /// The app level's UI text size − and +, each disabled at its end of
+    /// the range.
+    UiTextSizeDown,
+    UiTextSizeUp,
     SizeDown,
     SizeUp,
     Bold,
@@ -87,6 +91,8 @@ impl AppearanceStop {
             Self::FamilyList => "appearance-family-list",
             Self::UiFamilyFilter => "appearance-ui-family-filter",
             Self::UiFamilyList => "appearance-ui-family-list",
+            Self::UiTextSizeDown => "appearance-ui-text-size-down",
+            Self::UiTextSizeUp => "appearance-ui-text-size-up",
             Self::SizeDown => "appearance-size-down",
             Self::SizeUp => "appearance-size-up",
             Self::Bold => "appearance-bold",
@@ -113,7 +119,10 @@ impl AppearanceStop {
 
     /// Whether the stop can be disabled, and so left out of the ring.
     const fn can_disable(self) -> bool {
-        matches!(self, Self::Apply(_) | Self::Reset(_))
+        matches!(
+            self,
+            Self::Apply(_) | Self::Reset(_) | Self::UiTextSizeDown | Self::UiTextSizeUp
+        )
     }
 }
 
@@ -153,10 +162,11 @@ impl FontList {
 
 /// The stops Tab walks, in reading order: per colour row its preset line,
 /// its recent line (`has_recent`), its hex field, Apply and its reset link;
-/// the UI font filter and list (`ui_font`); then the font filter and list,
-/// size − and + and the size reset, the bold checkbox and its reset, and
-/// Close (`close`). Apply and the reset links are left out while `enabled`
-/// says they do nothing.
+/// the UI font filter and list and the UI text size − and + (`ui_font`);
+/// then the font filter and list, size − and + and the size reset, the bold
+/// checkbox and its reset, and Close (`close`). Apply, the reset links and
+/// the UI text size buttons are left out while `enabled` says they do
+/// nothing.
 pub(crate) fn stops(
     has_recent: bool,
     ui_font: bool,
@@ -176,7 +186,12 @@ pub(crate) fn stops(
         ]);
     }
     if ui_font {
-        ring.extend([AppearanceStop::UiFamilyFilter, AppearanceStop::UiFamilyList]);
+        ring.extend([
+            AppearanceStop::UiFamilyFilter,
+            AppearanceStop::UiFamilyList,
+            AppearanceStop::UiTextSizeDown,
+            AppearanceStop::UiTextSizeUp,
+        ]);
     }
     ring.extend([
         AppearanceStop::FamilyFilter,
@@ -391,6 +406,7 @@ mod tests {
 
     use AppearanceStop::{
         Apply, Bold, Close, FamilyFilter, FamilyList, Hex, Reset, SizeDown, SizeUp, Swatches,
+        UiFamilyList, UiTextSizeDown, UiTextSizeUp,
     };
     use ColorRow::{Accent, Background};
     use SwatchLine::{Presets, Recent};
@@ -539,6 +555,31 @@ mod tests {
         );
         assert_eq!(with.last(), Some(&Close), "Close comes last when asked for");
         assert_eq!(with.len(), without.len() + 3);
+    }
+
+    #[test]
+    fn the_ui_text_size_buttons_follow_the_ui_font_list() {
+        let ring = stops(false, true, false, |_| true);
+        let after: Vec<AppearanceStop> = ring
+            .iter()
+            .skip_while(|stop| **stop != UiFamilyList)
+            .take(4)
+            .copied()
+            .collect();
+        assert_eq!(
+            after,
+            [UiFamilyList, UiTextSizeDown, UiTextSizeUp, FamilyFilter],
+            "after the UI font list, before the terminal font"
+        );
+        assert!(
+            !stops(false, false, false, |_| true).contains(&UiTextSizeUp),
+            "only the app level has them"
+        );
+        let at_the_top = stops(false, true, false, |stop| stop != UiTextSizeUp);
+        assert!(
+            at_the_top.contains(&UiTextSizeDown) && !at_the_top.contains(&UiTextSizeUp),
+            "a button at its end of the range leaves the ring"
+        );
     }
 
     #[test]

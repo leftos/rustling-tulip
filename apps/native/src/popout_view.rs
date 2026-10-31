@@ -3,10 +3,11 @@
 //! window's [`RootView`] over its one daemon connection. It registers no app
 //! shortcuts, so every key goes to the terminal.
 
+use crate::fonts::ui_px;
 use gpui::{
     AnyElement, AnyWindowHandle, App, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Subscription, WeakEntity, Window,
-    WindowId, div, prelude::*, px,
+    WindowId, div, prelude::*,
 };
 
 use crate::overlay_owner::Overlay;
@@ -189,7 +190,7 @@ impl Render for PopoutView {
                 .size_full()
                 .items_center()
                 .justify_center()
-                .text_size(px(UI_TEXT_SIZE))
+                .text_size(ui_px(cx, UI_TEXT_SIZE))
                 .text_color(gpui::rgb(t.muted))
                 .debug_selector(|| "popout-pane-gone".to_owned())
                 .child(PANE_GONE_NOTE)

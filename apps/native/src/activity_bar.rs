@@ -5,6 +5,7 @@
 //! bottom the Recover sessions button with its badge and the Settings
 //! button.
 
+use crate::fonts::ui_px_at;
 use gpui::{
     ClickEvent, Context, DispatchPhase, Div, FontWeight, MouseButton, MouseDownEvent,
     MouseExitEvent, MouseUpEvent, SharedString, Stateful, Window, canvas, div, prelude::*, px, svg,
@@ -212,7 +213,12 @@ impl RootView {
         let activity = item.activity;
         let button = rail_button(item.selector, item.icon, active, &t)
             .when_some(badge_text(item.badge), |row, text| {
-                row.child(badge(item.badge_selector, text, &t))
+                row.child(badge(
+                    crate::fonts::ui_text_size(cx),
+                    item.badge_selector,
+                    text,
+                    &t,
+                ))
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.click_activity(activity, window, cx);
@@ -230,7 +236,12 @@ impl RootView {
         let count = self.needs_you_count();
         let button = rail_button(selector, DASHBOARD_ICON, self.dashboard_active(), &t)
             .when_some(badge_text(count), |row, text| {
-                row.child(badge("dashboard-badge", text, &t))
+                row.child(badge(
+                    crate::fonts::ui_text_size(cx),
+                    "dashboard-badge",
+                    text,
+                    &t,
+                ))
             })
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_or_focus_dashboard(window, cx);
@@ -246,7 +257,14 @@ impl RootView {
         let button = rail_button(selector, RECOVER_ICON, false, &t)
             .when_some(
                 badge_text(self.session_history.badge_count()),
-                |row, text| row.child(badge("recover-badge", text, &t)),
+                |row, text| {
+                    row.child(badge(
+                        crate::fonts::ui_text_size(cx),
+                        "recover-badge",
+                        text,
+                        &t,
+                    ))
+                },
             )
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.toggle_recover(window, cx);
@@ -436,7 +454,7 @@ fn rail_button(
         .child(tile)
 }
 
-fn badge(selector: &'static str, text: String, t: &UiTheme) -> Div {
+fn badge(offset: i8, selector: &'static str, text: String, t: &UiTheme) -> Div {
     div()
         .absolute()
         .right(px(BADGE_INSET))
@@ -444,15 +462,15 @@ fn badge(selector: &'static str, text: String, t: &UiTheme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .min_w(px(BADGE_HEIGHT))
-        .h(px(BADGE_HEIGHT))
+        .min_w(ui_px_at(offset, BADGE_HEIGHT))
+        .h(ui_px_at(offset, BADGE_HEIGHT))
         .px(px(4.0))
         .rounded_full()
         .bg(gpui::rgb(t.hover))
         .border(px(BADGE_RING))
         .border_color(gpui::rgb(t.sunken))
         .text_color(gpui::rgb(t.text))
-        .text_size(px(BADGE_TEXT_SIZE))
+        .text_size(ui_px_at(offset, BADGE_TEXT_SIZE))
         .font_weight(FontWeight::BOLD)
         .debug_selector(move || selector.to_owned())
         .child(text)

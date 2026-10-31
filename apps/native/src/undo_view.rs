@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use crate::fonts::ui_px;
 use gpui::{
     AnyElement, ClickEvent, Context, ElementId, SharedString, StyledText, Window, div, prelude::*,
     px,
@@ -183,7 +184,7 @@ impl RootView {
                 .absolute()
                 .left(px(0.0))
                 .right(px(0.0))
-                .bottom(px(FOOTER_HEIGHT + 8.0))
+                .bottom(ui_px(cx, FOOTER_HEIGHT) + px(8.0))
                 .flex()
                 .justify_center()
                 .child(
@@ -238,6 +239,7 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
     .flex_1();
     let name = format!("undo-entry-{id}");
     toast_frame(
+        crate::fonts::ui_text_size(cx),
         ElementId::Name(SharedString::from(name.clone())),
         &theme(cx),
     )

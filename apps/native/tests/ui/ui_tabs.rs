@@ -50,6 +50,30 @@ fn new_tab_button_creates_a_tab_that_becomes_active(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_tab_bar_grows_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    let base = h.bounds("tab-bar").size.height;
+    assert_eq!(base, px(38.0), "no offset: the base height");
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    assert_eq!(
+        h.bounds("tab-bar").size.height,
+        base + px(3.0),
+        "three pixels taller at +3"
+    );
+    let bar = h.bounds("tab-bar");
+    let pill = h.bounds("new-tab");
+    assert!(
+        pill.top() >= bar.top() && pill.bottom() <= bar.bottom(),
+        "the new-tab button stays inside the bar: {pill:?} in {bar:?}"
+    );
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(-2, cx));
+    assert_eq!(h.bounds("tab-bar").size.height, base - px(2.0));
+}
+
+#[gpui::test]
 fn split_right_sends_a_horizontal_split_and_shift_places_first(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));

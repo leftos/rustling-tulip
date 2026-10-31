@@ -15,6 +15,7 @@ use crate::buttons::{ButtonSize, Layer, focus_ring, outlined_button, primary_but
 use crate::drag::{self, DragPayload, Side, SidebarRow};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
+use crate::fonts::{ui_px, ui_px_at};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
 use crate::palette::ROW_GAP;
@@ -224,7 +225,7 @@ impl RootView {
             .debug_selector(|| "sidebar-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(t.panel_bg))
-            .text_size(px(UI_TEXT_SIZE))
+            .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
             .child(header(
                 self.sidebar.sidebar_view(),
@@ -349,7 +350,7 @@ impl RootView {
                 .child(
                     div()
                         .debug_selector(|| "sidebar-more-add-workspace-hint".to_owned())
-                        .text_size(px(11.0))
+                        .text_size(ui_px(cx, 11.0))
                         .child(NEEDS_TWO_REPOS),
                 )
         } else {
@@ -603,7 +604,7 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .flex_none()
         .ml(px(2.0))
         .font_family(DEFAULT_FAMILY)
-        .text_size(px(10.0))
+        .text_size(ui_px(cx, 10.0))
         .opacity(0.7)
         .child("Ctrl N");
     primary_button(
@@ -719,7 +720,7 @@ fn segmented<C: Copy + PartialEq + 'static>(
             .h(px(22.0))
             .px(px(pad))
             .rounded(px(4.0))
-            .text_size(px(11.5))
+            .text_size(ui_px(cx, 11.5))
             .cursor_pointer()
             .tooltip(tooltip(tip))
             .when(active, |segment| {
@@ -772,7 +773,7 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
         .child(
             div()
                 .flex_1()
-                .text_size(px(13.0))
+                .text_size(ui_px(cx, 13.0))
                 .font_weight(FontWeight::BOLD)
                 .text_color(gpui::rgb(t.text))
                 .child("Sessions"),
@@ -821,7 +822,7 @@ fn container_rows(
             rows.push(path_banner(container, path, add_workspace, cx).into_any_element());
         }
         if container.kind == ContainerKind::Unbound {
-            rows.push(unbound_banner(&t).into_any_element());
+            rows.push(unbound_banner(crate::fonts::ui_text_size(cx), &t).into_any_element());
         }
         if container.kind == ContainerKind::Detached {
             rows.push(detached_banner(container, ctx.detached_stop_all, cx).into_any_element());
@@ -978,7 +979,7 @@ impl Render for RowGhost {
                 .shadow_lg()
                 .opacity(0.85)
                 .font_family(fonts::ui_family(cx))
-                .text_size(px(11.0))
+                .text_size(ui_px(cx, 11.0))
                 .text_color(gpui::rgb(t.text))
                 .child(self.label.clone()),
         )
@@ -1140,7 +1141,7 @@ fn path_banner(
         .pl(px(LEAF_INDENT))
         .pr(px(ROW_PADDING))
         .py(px(4.0))
-        .text_size(px(TAG_TEXT_SIZE + 1.0))
+        .text_size(ui_px(cx, TAG_TEXT_SIZE + 1.0))
         .text_color(gpui::rgb(t.muted))
         .child(div().flex_1().min_w(px(0.0)).child(truncating(
             &format!("container-{key}-path"),
@@ -1183,7 +1184,7 @@ fn banner_link(selector: String, label: &'static str, tip: String, t: &UiTheme) 
 }
 
 /// The text under an expanded Unbound container, with the pill it names.
-fn unbound_banner(t: &UiTheme) -> Div {
+fn unbound_banner(offset: i8, t: &UiTheme) -> Div {
     div()
         .debug_selector(|| "unbound-banner".to_owned())
         .flex()
@@ -1193,10 +1194,10 @@ fn unbound_banner(t: &UiTheme) -> Div {
         .pl(px(LEAF_INDENT))
         .pr(px(ROW_PADDING))
         .py(px(4.0))
-        .text_size(px(TAG_TEXT_SIZE + 1.0))
+        .text_size(ui_px_at(offset, TAG_TEXT_SIZE + 1.0))
         .text_color(gpui::rgb(t.muted))
         .child("These sessions are alive but no tab currently references them. Click the")
-        .child(unbound_pill_look(div(), t).child("unbound"))
+        .child(unbound_pill_look(offset, div(), t).child("unbound"))
         .child("pill on a session to open it in a new tab.")
 }
 
@@ -1270,7 +1271,7 @@ fn detached_banner(container: &Container, armed: bool, cx: &mut Context<RootView
         .pl(px(LEAF_INDENT))
         .pr(px(ROW_PADDING))
         .py(px(4.0))
-        .text_size(px(TAG_TEXT_SIZE + 1.0))
+        .text_size(ui_px(cx, TAG_TEXT_SIZE + 1.0))
         .text_color(gpui::rgb(t.muted));
     if live.is_empty() {
         return banner.child(DETACHED_BANNER);
@@ -1294,6 +1295,7 @@ fn detached_stop_all_chip(
         DETACHED_STOP_ALL_TIP
     };
     chip(
+        crate::fonts::ui_text_size(cx),
         div()
             .id(SharedString::from(DETACHED_STOP_ALL_SELECTOR))
             .debug_selector(|| DETACHED_STOP_ALL_SELECTOR.to_owned()),
@@ -1316,13 +1318,13 @@ fn detached_stop_all_chip(
 }
 
 /// The unbound pill's look: dim italic text in a dim border.
-fn unbound_pill_look<E: Styled>(pill: E, t: &UiTheme) -> E {
+fn unbound_pill_look<E: Styled>(offset: i8, pill: E, t: &UiTheme) -> E {
     pill.flex_none()
         .px(px(4.0))
         .rounded(px(3.0))
         .border_1()
         .border_color(gpui::rgb(t.muted))
-        .text_size(px(TAG_TEXT_SIZE))
+        .text_size(ui_px_at(offset, TAG_TEXT_SIZE))
         .text_color(gpui::rgb(t.muted))
         .italic()
         .opacity(0.8)
@@ -1428,7 +1430,7 @@ impl ChipSize {
 }
 
 /// An outlined Geist Mono chip of `size`, lettered in `t.subtle`.
-fn chip<E: Styled>(element: E, size: ChipSize, t: &UiTheme) -> E {
+fn chip<E: Styled>(offset: i8, element: E, size: ChipSize, t: &UiTheme) -> E {
     element
         .flex()
         .flex_none()
@@ -1439,7 +1441,7 @@ fn chip<E: Styled>(element: E, size: ChipSize, t: &UiTheme) -> E {
         .border_1()
         .border_color(gpui::rgb(t.line_strong))
         .font_family(DEFAULT_FAMILY)
-        .text_size(px(size.text_size()))
+        .text_size(ui_px_at(offset, size.text_size()))
         .text_color(gpui::rgb(t.subtle))
 }
 
@@ -1486,6 +1488,7 @@ fn leaf_pill(
     let selector = format!("leaf-pill-{session_id}");
     let text = chip_text(&selector, pill_text(pill));
     let base = chip(
+        crate::fonts::ui_text_size(cx),
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector),
@@ -1545,6 +1548,7 @@ fn leaf_chips(
         let selector = name.clone();
         chips.push(
             chip(
+                crate::fonts::ui_text_size(cx),
                 div()
                     .id(SharedString::from(name.clone()))
                     .debug_selector(move || selector),
@@ -1562,10 +1566,15 @@ fn leaf_chips(
     if let Some((text, tip)) = leaf.state.tag() {
         let name = format!("leaf-state-{}", leaf.id);
         chips.push(
-            chip(div().id(SharedString::from(name.clone())), size, &t)
-                .tooltip(tooltip(tip))
-                .child(chip_text(&name, text))
-                .into_any_element(),
+            chip(
+                crate::fonts::ui_text_size(cx),
+                div().id(SharedString::from(name.clone())),
+                size,
+                &t,
+            )
+            .tooltip(tooltip(tip))
+            .child(chip_text(&name, text))
+            .into_any_element(),
         );
     }
     chips
@@ -1583,8 +1592,8 @@ fn chip_texts(leaf: &Leaf, pill: Option<&TabPill>) -> Vec<String> {
         .collect()
 }
 
-/// The width `text` takes in `family` at `size` px, in px.
-fn text_width(window: &Window, text: &str, family: impl Into<SharedString>, size: f32) -> f32 {
+/// The width `text` takes in `family` at `size`, in px.
+fn text_width(window: &Window, text: &str, family: impl Into<SharedString>, size: Pixels) -> f32 {
     let run = TextRun {
         len: text.len(),
         font: font(family),
@@ -1593,24 +1602,17 @@ fn text_width(window: &Window, text: &str, family: impl Into<SharedString>, size
         underline: None,
         strikethrough: None,
     };
-    let line = window.text_system().shape_line(
-        SharedString::from(text.to_owned()),
-        px(size),
-        &[run],
-        None,
-    );
+    let line =
+        window
+            .text_system()
+            .shape_line(SharedString::from(text.to_owned()), size, &[run], None);
     line.width / px(1.0)
 }
 
 /// Whether the subline's `text` and the subline-sized `chips` (their
-/// lettering) fit side by side in `room` px.
-fn chips_fit(
-    window: &Window,
-    text: Option<&str>,
-    chips: &[String],
-    room: f32,
-    ui_family: SharedString,
-) -> bool {
+/// lettering) fit side by side in `room` px, measured in the interface's
+/// family at the sizes they draw at.
+fn chips_fit(window: &Window, text: Option<&str>, chips: &[String], room: f32, cx: &App) -> bool {
     if chips.is_empty() {
         return true;
     }
@@ -1619,13 +1621,15 @@ fn chips_fit(
     let chips_width: f32 = chips
         .iter()
         .map(|chip| {
-            let width = text_width(window, chip, DEFAULT_FAMILY, size.text_size()) + chip_frame;
+            let width =
+                text_width(window, chip, DEFAULT_FAMILY, ui_px(cx, size.text_size())) + chip_frame;
             width.min(PILL_MAX_WIDTH) + SUBLINE_GAP
         })
         .sum::<f32>()
         - SUBLINE_GAP;
     let text_width = text.map_or(0.0, |text| {
-        text_width(window, text, ui_family, SUBLINE_TEXT_SIZE) + SUBLINE_GAP
+        let size = ui_px(cx, SUBLINE_TEXT_SIZE);
+        text_width(window, text, fonts::ui_family(cx), size) + SUBLINE_GAP
     });
     text_width + chips_width <= room
 }
@@ -1664,12 +1668,12 @@ fn kind_icon(kind: ContainerKind, t: &UiTheme) -> Option<(&'static str, &'static
 /// A container row's parts after the chevron: the kind icon, the name, the
 /// attention badge, the kind tag and the session count, each tagged
 /// `container-<key>-<part>`.
-fn container_parts(container: &Container, t: &UiTheme) -> Vec<AnyElement> {
+fn container_parts(offset: i8, container: &Container, t: &UiTheme) -> Vec<AnyElement> {
     let mut parts = Vec::new();
     if let Some(icon) = container_icon(container, t) {
         parts.push(icon);
     }
-    parts.extend(container_info_parts(container, t));
+    parts.extend(container_info_parts(offset, container, t));
     parts
 }
 
@@ -1689,19 +1693,19 @@ fn container_icon(container: &Container, t: &UiTheme) -> Option<AnyElement> {
 }
 
 /// The row's name, badge, tag and count.
-fn container_info_parts(container: &Container, t: &UiTheme) -> Vec<AnyElement> {
+fn container_info_parts(offset: i8, container: &Container, t: &UiTheme) -> Vec<AnyElement> {
     let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
     let mut parts = Vec::new();
     parts.push(
         truncating(&part("name"), StyledText::new(container.name.clone()))
             .flex_1()
-            .text_size(px(12.5))
+            .text_size(ui_px_at(offset, 12.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(gpui::rgb(t.text))
             .into_any_element(),
     );
     if container.attention {
-        parts.push(container_badge(part("badge"), t).into_any_element());
+        parts.push(container_badge(offset, part("badge"), t).into_any_element());
     }
     let tag = part("tag");
     parts.push(
@@ -1709,7 +1713,7 @@ fn container_info_parts(container: &Container, t: &UiTheme) -> Vec<AnyElement> {
             .debug_selector(|| tag)
             .flex_none()
             .font_family(DEFAULT_FAMILY)
-            .text_size(px(TAG_TEXT_SIZE))
+            .text_size(ui_px_at(offset, TAG_TEXT_SIZE))
             .text_color(gpui::rgb(t.subtle))
             .child(container.kind.tag())
             .into_any_element(),
@@ -1721,7 +1725,7 @@ fn container_info_parts(container: &Container, t: &UiTheme) -> Vec<AnyElement> {
             .flex_none()
             .min_w(px(14.0))
             .text_right()
-            .text_size(px(11.0))
+            .text_size(ui_px_at(offset, 11.0))
             .text_color(gpui::rgb(t.subtle))
             .child(container.leaves.len().to_string())
             .into_any_element(),
@@ -1730,7 +1734,7 @@ fn container_info_parts(container: &Container, t: &UiTheme) -> Vec<AnyElement> {
 }
 
 /// The `!` badge of a container holding a session that needs attention.
-fn container_badge(selector: String, t: &UiTheme) -> Div {
+fn container_badge(offset: i8, selector: String, t: &UiTheme) -> Div {
     div()
         .debug_selector(|| selector)
         .flex()
@@ -1741,7 +1745,7 @@ fn container_badge(selector: String, t: &UiTheme) -> Div {
         .rounded(px(4.0))
         .bg(gpui::rgb(t.asking))
         .text_color(gpui::rgb(t.on_asking))
-        .text_size(px(11.0))
+        .text_size(ui_px_at(offset, 11.0))
         .font_weight(FontWeight::BOLD)
         .child("!")
 }
@@ -1798,10 +1802,18 @@ fn container_row(
         } else {
             row
         };
-        row.child(container_lines(container, summary, &t))
+        row.child(container_lines(
+            crate::fonts::ui_text_size(cx),
+            container,
+            summary,
+            &t,
+        ))
     } else {
-        row.child(chevron(container, &t))
-            .children(container_parts(container, &t))
+        row.child(chevron(container, &t)).children(container_parts(
+            crate::fonts::ui_text_size(cx),
+            container,
+            &t,
+        ))
     };
     let row = row.when(launchable && (hovered || focused), |row| {
         row.child(container_launch(container, two_line, cx))
@@ -1899,13 +1911,13 @@ fn container_focus_ring(container: &Container, t: &UiTheme) -> Div {
 }
 
 /// A two-line row's text: the name line over the launch summary.
-fn container_lines(container: &Container, summary: &str, t: &UiTheme) -> Div {
+fn container_lines(offset: i8, container: &Container, summary: &str, t: &UiTheme) -> Div {
     let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
     let line = div()
         .flex()
         .items_center()
         .gap(px(6.0))
-        .children(container_info_parts(container, t));
+        .children(container_info_parts(offset, container, t));
     let selector = part("summary");
     div()
         .flex()
@@ -1917,7 +1929,7 @@ fn container_lines(container: &Container, summary: &str, t: &UiTheme) -> Div {
             truncating(&selector, StyledText::new(summary.to_owned()))
                 .debug_selector(|| selector)
                 .mt(px(1.0))
-                .text_size(px(10.5))
+                .text_size(ui_px_at(offset, 10.5))
                 .text_color(gpui::rgb(t.muted)),
         )
 }
@@ -1943,8 +1955,8 @@ fn leaf_row(
             row.flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .h(px(COMPACT_LEAF_HEIGHT))
-                .children(label_head(leaf, &theme(cx)))
+                .h(ui_px(cx, COMPACT_LEAF_HEIGHT))
+                .children(label_head(crate::fonts::ui_text_size(cx), leaf, &theme(cx)))
                 .children(inline_buttons(leaf, cx))
                 .children(chips)
         }
@@ -1953,7 +1965,7 @@ fn leaf_row(
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .children(label_head(leaf, &theme(cx)))
+                .children(label_head(crate::fonts::ui_text_size(cx), leaf, &theme(cx)))
                 .children(inline_buttons(leaf, cx));
             let lower = comfortable_lower(leaf, ctx, window, cx);
             row.flex_col().py(px(6.0)).child(label_line).children(lower)
@@ -2043,7 +2055,7 @@ fn seen_idle(leaf: &Leaf) -> bool {
 /// The label line's start: the status glyph, the label (dimmed once an
 /// idle session's turn has been seen), the `!` badge or, on a session that
 /// does not count as busy, its marker, and the runtime tag.
-fn label_head(leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement> {
+fn label_head(offset: i8, leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement> {
     let seen_idle = seen_idle(leaf);
     let mut parts = vec![
         glyph_view(
@@ -2057,13 +2069,14 @@ fn label_head(leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement> {
             StyledText::new(leaf.label.clone()),
         )
         .flex_1()
-        .text_size(px(13.0))
+        .text_size(ui_px_at(offset, 13.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(gpui::rgb(if seen_idle { t.text_2 } else { t.text }))
         .into_any_element(),
     ];
     if leaf.shows_attention() {
-        parts.push(container_badge(format!("leaf-badge-{}", leaf.id), t).into_any_element());
+        parts
+            .push(container_badge(offset, format!("leaf-badge-{}", leaf.id), t).into_any_element());
     }
     if leaf.busy_excluded {
         parts.push(busy_excluded_marker(&leaf.id, t));
@@ -2074,7 +2087,7 @@ fn label_head(leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement> {
                 .id(SharedString::from(format!("leaf-runtime-{}", leaf.id)))
                 .flex_none()
                 .font_family(DEFAULT_FAMILY)
-                .text_size(px(10.5))
+                .text_size(ui_px_at(offset, 10.5))
                 .text_color(gpui::rgb(runtime_color(leaf, t)))
                 .child(text)
                 .tooltip(tooltip(tip))
@@ -2172,7 +2185,7 @@ fn comfortable_lower(
         leaf.subline.as_deref(),
         &texts,
         ctx.subline_room,
-        fonts::ui_family(cx),
+        cx,
     );
     let (inline, below) = if fits {
         (
@@ -2198,7 +2211,7 @@ fn comfortable_lower(
                 .gap(px(SUBLINE_GAP))
                 .mt(px(1.0))
                 .pl(px(SUBLINE_INDENT))
-                .text_size(px(SUBLINE_TEXT_SIZE))
+                .text_size(ui_px(cx, SUBLINE_TEXT_SIZE))
                 .text_color(gpui::rgb(t.subtle))
                 .children(leaf.subline.clone().map(|text| {
                     ellipsized_box().children(ellipsized(
@@ -2230,7 +2243,7 @@ fn comfortable_lower(
 }
 
 /// An inline action's 20 px chip, outlined in `t.line_strong`.
-fn action_chip(element: Stateful<Div>, t: &UiTheme) -> Stateful<Div> {
+fn action_chip(offset: i8, element: Stateful<Div>, t: &UiTheme) -> Stateful<Div> {
     element
         .flex()
         .flex_none()
@@ -2240,7 +2253,7 @@ fn action_chip(element: Stateful<Div>, t: &UiTheme) -> Stateful<Div> {
         .rounded(px(5.0))
         .border_1()
         .border_color(gpui::rgb(t.line_strong))
-        .text_size(px(11.0))
+        .text_size(ui_px_at(offset, 11.0))
         .text_color(gpui::rgb(t.text))
         .cursor_pointer()
         .hover(move |style| style.bg(gpui::rgb(t.hover)))
@@ -2256,6 +2269,7 @@ fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
             let selector = format!("leaf-{}-{}", inline.key, leaf.id);
             let id = leaf.id.clone();
             action_chip(
+                crate::fonts::ui_text_size(cx),
                 div()
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(|| selector),

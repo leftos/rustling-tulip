@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
     Entity, FocusHandle, FontWeight, HighlightStyle, MouseButton, MouseDownEvent, Pixels, Point,
@@ -1080,7 +1081,8 @@ impl RootView {
     fn no_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         if !self.no_tab_choices_shown() {
-            return muted_note("No tab open", &t).into_any_element();
+            return muted_note(crate::fonts::ui_text_size(cx), "No tab open", &t)
+                .into_any_element();
         }
         let has_repos = self.has_repos();
         let spawn = BorderedButton {
@@ -1112,7 +1114,7 @@ impl RootView {
                 this.add_repo(window, cx);
             }));
         }
-        spawn_choices("No tab open", buttons, &t)
+        spawn_choices(crate::fonts::ui_text_size(cx), "No tab open", buttons, &t)
             .when(!has_repos, |note| {
                 note.child(
                     div()
@@ -1171,7 +1173,13 @@ impl RootView {
             this.shell_in_pane(&ids.0, &ids.1, window, cx);
         });
         let ids = (tab_id.to_owned(), pane_id.to_owned());
-        let body = spawn_choices("No session", [spawn, shell], &t).on_mouse_down(
+        let body = spawn_choices(
+            crate::fonts::ui_text_size(cx),
+            "No session",
+            [spawn, shell],
+            &t,
+        )
+        .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.open_empty_pane_menu(&ids.0, &ids.1, event.position, window, cx);
@@ -1201,17 +1209,21 @@ impl RootView {
                 {
                     Self::popped_tab_card(tab, cx)
                 }
-                TabContent::Diff { .. } => self
-                    .diff_tab_element(&tab.id)
-                    .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT, &t).into_any_element()),
+                TabContent::Diff { .. } => self.diff_tab_element(&tab.id).unwrap_or_else(|| {
+                    muted_note(crate::fonts::ui_text_size(cx), DIFF_LOADING_TEXT, &t)
+                        .into_any_element()
+                }),
                 TabContent::Viewer { .. } => self
                     .viewer_tab_element(&tab.id, cx)
                     .unwrap_or_else(|| div().into_any_element()),
                 TabContent::Grid { grid } => self.tab_grid(&tab.id, grid, self.layouts.main(), cx),
                 TabContent::Dashboard => self.dashboard_tab_element(cx),
-                TabContent::Unknown => {
-                    muted_note("This tab needs a newer app.", &t).into_any_element()
-                }
+                TabContent::Unknown => muted_note(
+                    crate::fonts::ui_text_size(cx),
+                    "This tab needs a newer app.",
+                    &t,
+                )
+                .into_any_element(),
             },
         };
         grid_frame(content, cx)
@@ -1345,7 +1357,12 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .children(self.orphan_banner(pane_id, session_id, &theme(cx)))
+            .children(self.orphan_banner(
+                crate::fonts::ui_text_size(cx),
+                pane_id,
+                session_id,
+                &theme(cx),
+            ))
             .child(body)
             .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
@@ -1353,15 +1370,7 @@ impl RootView {
         let overlay = self
             .pane_drop_overlay(cx)
             .filter(|(target, _)| target == pane_id)
-            .map(|(_, edge)| {
-                drop_overlay(
-                    pane_id,
-                    edge,
-                    colors.accent_line,
-                    crate::fonts::ui_family(cx),
-                    &t,
-                )
-            });
+            .map(|(_, edge)| drop_overlay(pane_id, edge, colors.accent_line, cx, &t));
         let frame = format!("pane-frame-{pane_id}");
         let header = self
             .pane_header(tab_id, pane_id, session_id, colors.accent_line, cx)
@@ -1429,7 +1438,13 @@ impl RootView {
             card: format!("pane-popped-{pane_id}"),
             label: format!("popped-label-{pane_id}"),
         };
-        popped_out_card(names, label, [focus, dock], &t)
+        popped_out_card(
+            crate::fonts::ui_text_size(cx),
+            names,
+            label,
+            [focus, dock],
+            &t,
+        )
     }
 
     /// The card a popped-out tab leaves in the main window in place of its
@@ -1461,7 +1476,13 @@ impl RootView {
             card: format!("popped-tab-{}", tab.id),
             label: format!("popped-tab-label-{}", tab.id),
         };
-        popped_out_card(names, tab.name.clone(), [focus, dock], &t)
+        popped_out_card(
+            crate::fonts::ui_text_size(cx),
+            names,
+            tab.name.clone(),
+            [focus, dock],
+            &t,
+        )
     }
 
     /// Why an empty pane of `tab_id` offers no spawn: a popped-out tab
@@ -1501,9 +1522,9 @@ impl RootView {
         let tab = self.tabs.tab(tab_id)?;
         let content = match &tab.content {
             TabContent::Grid { grid } => self.tab_grid(tab_id, grid, here, cx),
-            TabContent::Diff { .. } => self
-                .diff_tab_element(tab_id)
-                .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT, &t).into_any_element()),
+            TabContent::Diff { .. } => self.diff_tab_element(tab_id).unwrap_or_else(|| {
+                muted_note(crate::fonts::ui_text_size(cx), DIFF_LOADING_TEXT, &t).into_any_element()
+            }),
             TabContent::Viewer { .. } | TabContent::Dashboard | TabContent::Unknown => return None,
         };
         let name = format!("popout-tab-title-{tab_id}");
@@ -1536,7 +1557,12 @@ impl RootView {
                 cx,
             );
             let name = format!("popout-not-found-{slot_id}");
-            let note = muted_note(popouts::SESSION_NOT_FOUND, &t).debug_selector(|| name);
+            let note = muted_note(
+                crate::fonts::ui_text_size(cx),
+                popouts::SESSION_NOT_FOUND,
+                &t,
+            )
+            .debug_selector(|| name);
             return popout_column(toolbar, note.into_any_element());
         };
         let parts = header_parts(session, self.sidebar.is_unseen(session_id), &self.agents);
@@ -1560,7 +1586,12 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .children(self.orphan_banner(&slot_id, Some(session_id), &theme(cx)))
+            .children(self.orphan_banner(
+                crate::fonts::ui_text_size(cx),
+                &slot_id,
+                Some(session_id),
+                &theme(cx),
+            ))
             .child(body)
             .children(self.exited_overlay(None, &slot_id, Some(session_id), cx))
             .children(self.abandoned_overlay(&slot_id, Some(session_id), cx));
@@ -1605,7 +1636,12 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .children(self.orphan_banner(pane_id, session_id, &theme(cx)))
+            .children(self.orphan_banner(
+                crate::fonts::ui_text_size(cx),
+                pane_id,
+                session_id,
+                &theme(cx),
+            ))
             .child(body)
             .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
@@ -1723,13 +1759,13 @@ impl RootView {
             .flex_none()
             .items_center()
             .gap(px(8.0))
-            .h(px(PANE_HEADER_HEIGHT))
+            .h(ui_px(cx, PANE_HEADER_HEIGHT))
             .pl(px(12.0))
             .pr(px(8.0))
             .rounded_t(px(PANE_RADIUS))
             .border_b_1()
             .border_color(gpui::rgb(t.line))
-            .text_size(px(UI_TEXT_SIZE))
+            .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text_2))
             .children(header_title(pane_id, parts.as_ref(), cx))
             .child(div().flex_1())
@@ -2002,8 +2038,8 @@ impl RootView {
     ) -> AnyElement {
         let t = theme(cx);
         let session = self.sidebar.session(session_id);
-        let note =
-            muted_note(body_note(session), &t).debug_selector(|| format!("pane-note-{pane_id}"));
+        let note = muted_note(crate::fonts::ui_text_size(cx), body_note(session), &t)
+            .debug_selector(|| format!("pane-note-{pane_id}"));
         let headless = session.is_some_and(|session| session.mode == SessionMode::Headless);
         match slot.filter(|_| headless) {
             Some(slot) => {
@@ -2226,7 +2262,7 @@ fn header_title(
         return vec![title.child(drag::EMPTY_PANE_LABEL).into_any_element()];
     };
     let title = title
-        .text_size(px(TITLE_TEXT_SIZE))
+        .text_size(ui_px(cx, TITLE_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(gpui::rgb(t.text));
     let mut out = vec![
@@ -2281,7 +2317,7 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
         .flex()
         .flex_none()
         .items_center()
-        .h(px(CHIP_HEIGHT))
+        .h(ui_px(cx, CHIP_HEIGHT))
         .px(px(7.0))
         .rounded(px(CHIP_RADIUS))
         .border_1()
@@ -2289,7 +2325,7 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
         .bg(gpui::rgb(t.chip))
         .font_family(DEFAULT_FAMILY)
         .font_weight(FontWeight::NORMAL)
-        .text_size(px(CHIP_TEXT_SIZE))
+        .text_size(ui_px(cx, CHIP_TEXT_SIZE))
         .text_color(gpui::rgb(t.text_2))
         .tooltip(tooltip(chip.tip.clone()));
     let base = if chip.kind == HeaderChipKind::Branch {
@@ -2390,14 +2426,14 @@ fn status_label(status: SessionStatus, background: bool) -> &'static str {
 }
 
 /// Muted text centred in the space it is given.
-fn muted_note(text: &'static str, t: &UiTheme) -> Div {
+fn muted_note(offset: i8, text: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_1()
         .size_full()
         .items_center()
         .justify_center()
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.muted))
         .child(text)
 }
@@ -2405,18 +2441,22 @@ fn muted_note(text: &'static str, t: &UiTheme) -> Div {
 /// A muted `heading` over a row of `buttons`, centred in the space it is
 /// given.
 fn spawn_choices(
+    offset: i8,
     heading: &'static str,
     buttons: impl IntoIterator<Item = Stateful<Div>>,
     t: &UiTheme,
 ) -> Div {
-    muted_note(heading, t).flex_col().gap(px(8.0)).child(
-        div()
-            .flex()
-            .flex_wrap()
-            .justify_center()
-            .gap(px(6.0))
-            .children(buttons),
-    )
+    muted_note(offset, heading, t)
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .justify_center()
+                .gap(px(6.0))
+                .children(buttons),
+        )
 }
 
 /// A 26 px square glyph button in a pane header.
@@ -2523,6 +2563,7 @@ impl Render for PaneGhost {
         let t = theme(cx);
         div().child(
             ghost_pill(
+                crate::fonts::ui_text_size(cx),
                 self.label.clone(),
                 self.accent,
                 crate::fonts::ui_family(cx),
@@ -2539,6 +2580,7 @@ impl Render for PaneGhost {
 /// A translucent pill with `text`, edged in `accent`: the drag ghost and the
 /// swap badge, drawn in the interface's `family`.
 fn ghost_pill(
+    offset: i8,
     text: impl Into<SharedString>,
     accent: u32,
     family: SharedString,
@@ -2554,7 +2596,7 @@ fn ghost_pill(
         .border_color(gpui::rgb(accent))
         .whitespace_nowrap()
         .font_family(family)
-        .text_size(px(GHOST_TEXT_SIZE))
+        .text_size(ui_px_at(offset, GHOST_TEXT_SIZE))
         .text_color(gpui::rgb(t.text))
         .child(text.into())
 }
@@ -2575,13 +2617,13 @@ fn popout_toolbar_row(
         .flex_none()
         .items_center()
         .gap(px(8.0))
-        .h(px(PANE_HEADER_HEIGHT))
+        .h(ui_px(cx, PANE_HEADER_HEIGHT))
         .pl(px(12.0))
         .pr(px(8.0))
         .border_b_1()
         .border_color(gpui::rgb(t.line))
         .bg(gpui::rgb(t.raised))
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px(cx, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.text_2))
         .children(title)
         .child(div().flex_1())
@@ -2599,6 +2641,7 @@ struct CardNames {
 /// A card standing in for content a pop-out window draws: `label` over the
 /// popped-out note and `buttons`.
 fn popped_out_card(
+    offset: i8,
     names: CardNames,
     label: String,
     buttons: [Stateful<Div>; 2],
@@ -2613,7 +2656,7 @@ fn popped_out_card(
         .max_w_full()
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_size(px(TITLE_TEXT_SIZE))
+        .text_size(ui_px_at(offset, TITLE_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(gpui::rgb(t.text))
         .child(label);
@@ -2631,7 +2674,7 @@ fn popped_out_card(
         .border_1()
         .border_color(gpui::rgb(t.line))
         .bg(gpui::rgb(t.surface))
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.muted))
         .child(heading)
         .child(POPPED_OUT_NOTE)
@@ -2704,14 +2747,15 @@ fn drop_layer(tab_id: &str, cx: &mut Context<RootView>) -> Stateful<Div> {
 
 /// The tint over pane `pane_id` for a drop on `edge`, in the pane's
 /// `accent`: a half, an outer strip, or the centre box with its badge,
-/// drawn in the interface's `family`.
+/// drawn in the interface's family at its text size.
 fn drop_overlay(
     pane_id: &str,
     edge: PaneDropEdge,
     accent: u32,
-    family: SharedString,
+    cx: &App,
     t: &UiTheme,
 ) -> AnyElement {
+    let family = crate::fonts::ui_family(cx);
     let overlay = drag::drop_overlay(edge, tabs::Rect::new(0.0, 0.0, 1.0, 1.0));
     let (alpha, border) = match overlay.kind {
         OverlayKind::Half | OverlayKind::Centre => (DROP_TINT_ALPHA, 1.0),
@@ -2738,7 +2782,13 @@ fn drop_overlay(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(ghost_pill(drag::SWAP_BADGE, accent, family, t))
+                .child(ghost_pill(
+                    crate::fonts::ui_text_size(cx),
+                    drag::SWAP_BADGE,
+                    accent,
+                    family,
+                    t,
+                ))
         })
         .into_any_element()
 }

@@ -2,6 +2,7 @@
 //! screen: rendering, keys and clicks, forwarded to [`crate::notices`] and
 //! [`crate::spawns`].
 
+use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke,
     SharedString, Stateful, Window, WindowId, div, point, prelude::*, px, relative,
@@ -542,9 +543,9 @@ impl RootView {
             return None;
         }
         let bottom = if here == self.layouts.main() {
-            FOOTER_HEIGHT + 8.0
+            ui_px(cx, FOOTER_HEIGHT) + px(8.0)
         } else {
-            8.0
+            px(8.0)
         };
         let cards: Vec<AnyElement> = toasts
             .into_iter()
@@ -560,7 +561,7 @@ impl RootView {
             div()
                 .absolute()
                 .right(px(8.0))
-                .bottom(px(bottom))
+                .bottom(bottom)
                 .w(px(TOAST_WIDTH))
                 .flex()
                 .flex_col()
@@ -717,16 +718,20 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
         .children(progress.map(|fraction| progress_bar(id, fraction, &t)))
         .children(toast_actions(toast, cx));
     let name = format!("toast-{id}");
-    toast_frame(ElementId::Name(SharedString::from(name.clone())), &t)
-        .debug_selector(|| name)
-        .flex()
-        .items_start()
-        .gap(px(8.0))
-        .when_some(accent, |card, accent| card.border_color(gpui::rgb(accent)))
-        .occlude()
-        .child(body)
-        .child(close)
-        .into_any_element()
+    toast_frame(
+        crate::fonts::ui_text_size(cx),
+        ElementId::Name(SharedString::from(name.clone())),
+        &t,
+    )
+    .debug_selector(|| name)
+    .flex()
+    .items_start()
+    .gap(px(8.0))
+    .when_some(accent, |card, accent| card.border_color(gpui::rgb(accent)))
+    .occlude()
+    .child(body)
+    .child(close)
+    .into_any_element()
 }
 
 /// A thin bar in `t` filled `fraction` (0 to 1) of its width, under toast
@@ -781,7 +786,7 @@ fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
 /// The card a toast, an undo entry and the copied chip sit in, tagged `id`:
 /// the popover fill with its edge in `t`, which an error or a warning
 /// recolours.
-pub(crate) fn toast_frame(id: impl Into<ElementId>, t: &UiTheme) -> Stateful<Div> {
+pub(crate) fn toast_frame(offset: i8, id: impl Into<ElementId>, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(id)
         .px(px(14.0))
@@ -791,7 +796,7 @@ pub(crate) fn toast_frame(id: impl Into<ElementId>, t: &UiTheme) -> Stateful<Div
         .border_color(gpui::rgb(t.popover_edge))
         .rounded(px(TOAST_RADIUS))
         .shadow(vec![drop_shadow(t.toast_shadow, 18.0, 40.0)])
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.text))
 }
 

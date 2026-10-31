@@ -766,10 +766,13 @@ impl RootView {
         let view = self.level_view(&editor.level)?;
         let reset = editor.level.reset_label();
         // The interface's font is the app's alone.
-        let ui_font = if editor.level == Level::App {
-            self.family_section(FontList::Ui, self.ui_font_hint(cx), focus, cx)
+        let (ui_font, ui_text_size) = if editor.level == Level::App {
+            (
+                self.family_section(FontList::Ui, self.ui_font_hint(cx), focus, cx),
+                Some(self.ui_text_size_section(focus, cx)),
+            )
         } else {
-            None
+            (None, None)
         };
         let colours = div()
             .flex()
@@ -778,7 +781,8 @@ impl RootView {
             .w(px(COLUMN_WIDTH))
             .child(self.color_section(editor, &view, ColorRow::Accent, focus, cx))
             .child(self.color_section(editor, &view, ColorRow::Background, focus, cx))
-            .children(ui_font);
+            .children(ui_font)
+            .children(ui_text_size);
         let font = div()
             .flex()
             .flex_col()
@@ -797,6 +801,67 @@ impl RootView {
             self.sidebar.ui_state().ui_font_family.as_deref(),
             &fonts::ui_family(cx),
         )
+    }
+
+    /// The UI text size offset one `delta` from the saved one, or `None`
+    /// past the end of the range.
+    fn ui_text_size_steps(&self, delta: i8) -> Option<i8> {
+        let next = self.sidebar.ui_state().ui_text_size.checked_add(delta)?;
+        fonts::UI_TEXT_SIZE_OFFSETS.contains(&next).then_some(next)
+    }
+
+    /// Steps the UI text size one `delta`; at an end of the range nothing
+    /// changes.
+    fn step_ui_text_size(&mut self, delta: i8, cx: &mut Context<Self>) {
+        if let Some(next) = self.ui_text_size_steps(delta) {
+            self.set_ui_text_size(next, cx);
+        }
+    }
+
+    /// The UI text size row: `−`, the offset, `+`, each button disabled at
+    /// its end of the range.
+    fn ui_text_size_section(&self, focus: Option<AppearanceStop>, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let mut stepper = div().flex().items_center().gap(px(8.0));
+        for (stop, label, delta) in [
+            (AppearanceStop::UiTextSizeDown, "−", -1),
+            (AppearanceStop::UiTextSizeUp, "+", 1),
+        ] {
+            let enabled = self.ui_text_size_steps(delta).is_some();
+            let button = dialog_button(
+                stop.selector(),
+                label.to_owned(),
+                dialog_look(false, enabled, &t),
+                focus == Some(stop),
+            );
+            let button = if enabled {
+                button.on_click(click_stop(stop, Aim::Stop, cx))
+            } else {
+                button
+            };
+            if delta > 0 {
+                stepper = stepper.child(
+                    div()
+                        .debug_selector(|| "appearance-ui-text-size-value".to_owned())
+                        .child(ui_text_size_label(self.sidebar.ui_state().ui_text_size)),
+                );
+            }
+            stepper = stepper.child(button);
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .child(field_label("UI text size", &t))
+            .child(stepper)
+    }
+
+    /// What the UI text size row shows between its buttons, while Settings
+    /// › Appearance is open.
+    #[must_use]
+    pub fn appearance_ui_text_size_label(&self) -> Option<String> {
+        self.ui_font_shown()
+            .then(|| ui_text_size_label(self.sidebar.ui_state().ui_text_size))
     }
 
     /// Font list `list`: its filter, then the list under it, its highlight
@@ -1070,6 +1135,8 @@ impl RootView {
             AppearanceStop::Reset(row) => {
                 view.as_ref().is_some_and(|view| can_reset(row, &view.own))
             }
+            AppearanceStop::UiTextSizeDown => self.ui_text_size_steps(-1).is_some(),
+            AppearanceStop::UiTextSizeUp => self.ui_text_size_steps(1).is_some(),
             _ => true,
         })
     }
@@ -1278,6 +1345,8 @@ impl RootView {
             AppearanceStop::Reset(row) => self.reset_appearance_row(row, cx),
             AppearanceStop::FamilyList => self.pick_highlighted_family(FontList::Terminal, cx),
             AppearanceStop::UiFamilyList => self.pick_highlighted_family(FontList::Ui, cx),
+            AppearanceStop::UiTextSizeDown => self.step_ui_text_size(-1, cx),
+            AppearanceStop::UiTextSizeUp => self.step_ui_text_size(1, cx),
             AppearanceStop::SizeDown => self.step_appearance_size(-1.0, cx),
             AppearanceStop::SizeUp => self.step_appearance_size(1.0, cx),
             AppearanceStop::Bold => self.toggle_appearance_bold(cx),
@@ -1691,6 +1760,16 @@ fn list_row(
                 .child(if chosen { "✓" } else { "" }),
         )
         .child(label.into())
+}
+
+/// The UI text size row's value: `Default` at no offset, else the signed
+/// whole pixels, `+1 px` or `−1 px`.
+fn ui_text_size_label(offset: i8) -> String {
+    match offset {
+        0 => "Default".to_owned(),
+        up if up > 0 => format!("+{up} px"),
+        down => format!("−{} px", down.unsigned_abs()),
+    }
 }
 
 /// The size: `−`, the size it resolves to, `+`.

@@ -53,6 +53,54 @@ fn home_of(h: &mut Harness<'_>, id: &str) -> Option<(&'static str, String, bool,
 }
 
 #[gpui::test]
+fn rows_grow_with_the_ui_text_size_and_clicks_still_hit_them(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        split(
+            SplitDirection::Horizontal,
+            pane("p2", Some("s2")),
+            pane("p3", Some("s3")),
+        ),
+    );
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").build(),
+            session("s2").build(),
+            session("s3").build(),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let base = h.bounds("leaf-s3").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    let third = h.bounds("leaf-s3");
+    assert!(
+        third.size.height > base,
+        "the row grows at +3: {:?} from {base:?}",
+        third.size.height
+    );
+    assert!(
+        h.bounds("leaf-s2").bottom() <= third.top(),
+        "the rows do not overlap"
+    );
+    assert_ne!(
+        h.root(|root, _| root.focused_pane()),
+        Some("p3".to_owned()),
+        "precondition: the third session's pane is not focused yet"
+    );
+    h.click(third.center(), Modifiers::none());
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()),
+        Some("p3".to_owned()),
+        "a click at the third row's drawn centre picks the third session"
+    );
+}
+
+#[gpui::test]
 fn containers_render_workspace_repo_shell_dir_detached_in_order(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = Fixture {
