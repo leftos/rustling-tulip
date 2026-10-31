@@ -16,7 +16,9 @@
 //! passing Test connection), `multi-host` (the main window with the
 //! tailnet host "box" online, one of its sessions in a pane of the first
 //! tab, and the tailnet host "lab" offline), `spawn-hosts` (the spawn
-//! dialog over those hosts, its picker grouped by host), `menu` (the sessions panel's ⋯
+//! dialog over those hosts, its picker grouped by host), `settings-hosts`
+//! (Settings on the Claude page over those hosts, the host selector showing
+//! This PC), `menu` (the sessions panel's ⋯
 //! menu open over the repo rows, with a toast over the panes), `chat` (the
 //! Petal pane switched to its chat, a row of each kind, an answer with one
 //! stretch open and two closed, and a live answer) and `summary` (the Petal
@@ -169,10 +171,11 @@ enum View {
     Summary,
     MultiHost,
     SpawnHosts,
+    SettingsHosts,
 }
 
 impl View {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 19] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -191,6 +194,7 @@ impl View {
         Self::Summary,
         Self::MultiHost,
         Self::SpawnHosts,
+        Self::SettingsHosts,
     ];
 
     fn name(self) -> &'static str {
@@ -213,6 +217,7 @@ impl View {
             Self::Summary => "summary",
             Self::MultiHost => "multi-host",
             Self::SpawnHosts => "spawn-hosts",
+            Self::SettingsHosts => "settings-hosts",
         }
     }
 
@@ -254,7 +259,10 @@ impl View {
     /// Whether the view opens over the `multi-host` shot's hosts: "box"
     /// online, "lab" offline.
     fn on_hosts(self) -> bool {
-        matches!(self, Self::MultiHost | Self::SpawnHosts)
+        matches!(
+            self,
+            Self::MultiHost | Self::SpawnHosts | Self::SettingsHosts
+        )
     }
 
     /// Whether `root` shows this view.
@@ -307,6 +315,13 @@ impl View {
             Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
             Self::Update => root.settings_open() && root.update_footer_text().is_some(),
             Self::SpawnHosts => root.spawn_dialog_open() && Self::MultiHost.reached(root),
+            // This PC and box choosable, lab listed offline.
+            Self::SettingsHosts => {
+                let choices = root.settings_host_choices();
+                Self::SettingsClaude.reached(root)
+                    && choices.len() == 3
+                    && choices.iter().filter(|(_, open)| *open).count() == 2
+            }
             Self::MultiHost => {
                 !root.tab_ids().is_empty()
                     && root
@@ -376,7 +391,8 @@ impl Shot {
             | View::Chat
             | View::Summary
             | View::MultiHost
-            | View::SpawnHosts => None,
+            | View::SpawnHosts
+            | View::SettingsHosts => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -391,7 +407,7 @@ impl Shot {
         let state = match self.view {
             View::MainCompact => compact_ui_state(),
             View::Connections | View::ConnectionsSsh => connections_ui_state(),
-            View::MultiHost | View::SpawnHosts => multi_host_ui_state(),
+            View::MultiHost | View::SpawnHosts | View::SettingsHosts => multi_host_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -776,7 +792,7 @@ fn drive(
         View::Settings => press("ctrl-,", window, cx),
         // Settings opens with the keyboard on its tab list, where Down
         // walks the tabs to the last, Claude.
-        View::SettingsClaude => {
+        View::SettingsClaude | View::SettingsHosts => {
             press("ctrl-,", window, cx)?;
             for _ in 0..CLAUDE_TAB_DOWNS {
                 press("down", window, cx)?;

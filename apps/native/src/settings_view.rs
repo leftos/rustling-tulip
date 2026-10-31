@@ -844,24 +844,27 @@ impl RootView {
     }
 
     /// The selector moves to `host`: the shown tab stays while `host`
-    /// offers it, else General; a shown agent page holds `host`'s page
-    /// state for that agent, as selecting the tab would. Another tab's
-    /// drafts stay.
+    /// offers it, else General; a shown agent or Worktrees page holds
+    /// `host`'s page state, built as selecting the tab would when `host`
+    /// has none. Every host's drafts stay.
     fn show_settings_host(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_host = host;
         self.keep_offered_tab();
         self.settings_control = None;
-        if self.settings_open()
-            && let Some(agent) = self.settings_tab.agent()
-        {
-            self.hold_agent_tab(agent, window, cx);
+        if self.settings_open() {
+            if let Some(agent) = self.settings_tab.agent() {
+                self.hold_agent_tab(agent, window, cx);
+            }
+            if self.settings_tab == SettingsTab::Worktrees {
+                self.hold_worktrees_tab(true, window, cx);
+            }
         }
         cx.notify();
     }
 
-    /// `host`'s connection closed: a remote host's agent pages and their
-    /// drafts go, and the selector returns to This PC when it showed
-    /// `host`.
+    /// `host`'s connection closed: a remote host's agent and Worktrees
+    /// pages and their drafts go, and the selector returns to This PC when
+    /// it showed `host`.
     pub(crate) fn settings_host_closed(
         &mut self,
         host: &HostKey,
@@ -870,6 +873,7 @@ impl RootView {
     ) {
         if *host != HostKey::Local {
             self.agent_tabs.drop_host(host);
+            self.worktrees_tabs.remove(host);
         }
         let shown = settings_host_after_close(&self.settings_host, host);
         if shown != self.settings_host {
@@ -911,11 +915,15 @@ impl RootView {
         row_tabs(&self.settings_rows())
     }
 
-    /// The rows the tab list draws on this target, in order: Remote access
-    /// configures this PC's daemon, so it is offered only where the client
-    /// manages it, and an agent's page only while the daemon lists it.
+    /// The rows the tab list draws for the host Settings shows, in order:
+    /// Remote access configures this PC's daemon, so it is offered only
+    /// where the client manages it, and an agent's page only while the
+    /// daemon lists it.
     fn settings_rows(&self) -> Vec<SettingsRow> {
-        tab_rows(self.agents(), self.capabilities().manages_daemon())
+        tab_rows(
+            self.agents(),
+            self.capabilities_of(&self.settings_host).manages_daemon(),
+        )
     }
 
     /// After the connection target or its state changed: a shown tab the
@@ -1043,13 +1051,13 @@ impl RootView {
     /// reported one and the choices are locked.
     #[must_use]
     pub fn keep_awake_mode(&self) -> Option<KeepAwakeMode> {
-        self.mirrors().keep_awake.map(|state| state.mode)
+        self.settings_mirrors().keep_awake.map(|state| state.mode)
     }
 
-    /// The keep-awake status line.
+    /// The keep-awake status line of the host Settings shows.
     #[must_use]
     pub fn keep_awake_status(&self) -> &'static str {
-        keep_awake_status(self.mirrors().keep_awake)
+        keep_awake_status(self.settings_mirrors().keep_awake)
     }
 
     /// The App title tab's preview: the title for a tab named "Tab name"
@@ -1095,7 +1103,7 @@ impl RootView {
     /// left out.
     fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
-            SettingsTab::General => general_controls(self.mirrors().keep_awake.is_some()),
+            SettingsTab::General => general_controls(self.settings_mirrors().keep_awake.is_some()),
             SettingsTab::AppTitle => COUNT_MODE_CHOICES
                 .map(SettingsControl::CountMode)
                 .into_iter()
@@ -1113,7 +1121,7 @@ impl RootView {
             SettingsTab::Agent(_) => self.agent_controls(),
             SettingsTab::Worktrees => {
                 let mut controls = vec![SettingsControl::WorktreesPath];
-                if self.capabilities().opens_local_files() {
+                if self.worktrees_browses() {
                     controls.push(SettingsControl::WorktreesBrowse);
                 }
                 if self.worktrees_save_enabled() {
@@ -1700,11 +1708,20 @@ impl RootView {
     /// later broadcast from another client is not taken for its echo. The
     /// refusal is not claimed: the tab has no inline slot for it, and the
     /// generic toast still shows the message.
-    pub(crate) fn on_worktrees_root_error(&mut self, code: Option<&str>, cx: &mut Context<Self>) {
+    pub(crate) fn on_worktrees_root_error(
+        &mut self,
+        host: &HostKey,
+        code: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         if code != Some(error_codes::WORKTREES_ROOT_REFUSED) {
             return;
         }
-        let Some(tab) = self.worktrees_tab.as_mut().filter(|tab| tab.awaiting > 0) else {
+        let Some(tab) = self
+            .worktrees_tabs
+            .get_mut(host)
+            .filter(|tab| tab.awaiting > 0)
+        else {
             return;
         };
         tab.awaiting = tab.awaiting.saturating_sub(1);
@@ -1794,7 +1811,7 @@ impl RootView {
     fn settings_field_focus(&self, control: SettingsControl) -> Option<FocusHandle> {
         match control {
             SettingsControl::WorktreesPath => {
-                self.worktrees_tab.as_ref().map(|tab| tab.focus.clone())
+                self.shown_worktrees_tab().map(|tab| tab.focus.clone())
             }
             SettingsControl::RemotePort => {
                 self.remote_access_tab.as_ref().map(|tab| tab.focus.clone())
@@ -1921,8 +1938,7 @@ impl RootView {
         self.settings_open()
             && self.settings_tab == SettingsTab::Worktrees
             && self
-                .worktrees_tab
-                .as_ref()
+                .shown_worktrees_tab()
                 .is_some_and(|tab| tab.focus.is_focused(window))
     }
 
@@ -2035,25 +2051,30 @@ impl RootView {
         }
     }
 
-    /// The worktrees root the user set, if they set one.
+    /// The worktrees root the user set on the host Settings shows, if they
+    /// set one.
     fn worktrees_override(&self) -> Option<&str> {
-        match &self.mirrors().worktrees_root {
+        match &self.settings_mirrors().worktrees_root {
             Some((root, true)) => Some(root),
             _ => None,
         }
     }
 
+    /// The Worktrees tab of the host Settings shows, once it was shown.
+    fn shown_worktrees_tab(&self) -> Option<&WorktreesTab> {
+        self.worktrees_tabs.get(&self.settings_host)
+    }
+
     /// Whether the path field differs from the override (empty when none).
     fn worktrees_save_enabled(&self) -> bool {
-        self.worktrees_tab
-            .as_ref()
+        self.shown_worktrees_tab()
             .is_some_and(|tab| tab.draft.trim() != self.worktrees_override().unwrap_or(""))
     }
 
     /// The Worktrees tab's line on the root in use.
     #[must_use]
     pub fn worktrees_active_line(&self) -> String {
-        match &self.mirrors().worktrees_root {
+        match &self.settings_mirrors().worktrees_root {
             Some((root, true)) => format!("Active: {root} — user override"),
             Some((root, false)) => format!("Active: {root} — default (env or platform fallback)"),
             None => format!("Active: {NOT_CONNECTED} — default (env or platform fallback)"),
@@ -2064,7 +2085,7 @@ impl RootView {
     #[must_use]
     pub fn worktrees_save_button(&self) -> (&'static str, bool) {
         let enabled = self.worktrees_save_enabled();
-        let saved = self.worktrees_tab.as_ref().is_some_and(|tab| tab.saved);
+        let saved = self.shown_worktrees_tab().is_some_and(|tab| tab.saved);
         (if saved && !enabled { "Saved" } else { "Save" }, enabled)
     }
 
@@ -2074,17 +2095,49 @@ impl RootView {
         self.worktrees_override().is_some()
     }
 
+    /// The Worktrees tab's note under the path on a remote host: Save
+    /// creates a missing folder there, so a typo is not refused.
+    #[must_use]
+    pub fn worktrees_host_note(&self) -> Option<String> {
+        self.conn_of(&self.settings_host)
+            .and_then(|conn| conn.target().short_name())
+            .map(|host| format!("Created on {host} if it does not exist."))
+    }
+
+    /// Whether the Worktrees tab draws Browse: only on a host whose folders
+    /// this PC's picker reaches.
+    fn worktrees_browses(&self) -> bool {
+        self.capabilities_of(&self.settings_host)
+            .opens_local_files()
+    }
+
     /// The Worktrees tab's path field, while the tab has been shown.
     #[must_use]
     pub fn worktrees_path(&self) -> Option<String> {
-        self.worktrees_tab.as_ref().map(|tab| tab.draft.clone())
+        self.shown_worktrees_tab().map(|tab| tab.draft.clone())
     }
 
-    /// The path field afresh, holding the override.
-    fn new_worktrees_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> WorktreesTab {
+    /// The shown host's Worktrees tab, built afresh unless `keep` and it is
+    /// held.
+    fn hold_worktrees_tab(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
+        if keep && self.worktrees_tabs.contains_key(&host) {
+            return;
+        }
+        let tab = self.new_worktrees_tab(host.clone(), window, cx);
+        self.worktrees_tabs.insert(host, tab);
+    }
+
+    /// `host`'s path field afresh, holding its override.
+    fn new_worktrees_tab(
+        &self,
+        host: HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> WorktreesTab {
         let draft = self.worktrees_override().unwrap_or("").to_owned();
         let placeholder = self
-            .mirrors()
+            .settings_mirrors()
             .worktrees_root
             .as_ref()
             .map_or(NOT_CONNECTED, |(root, _)| root.as_str())
@@ -2101,13 +2154,17 @@ impl RootView {
                 TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
             },
         );
-        let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
-            let text = input.read(cx).text().to_owned();
-            if let Some(tab) = &mut this.worktrees_tab {
-                tab.draft = text;
-            }
-            cx.notify();
-        });
+        let edits = cx.subscribe_in(
+            &input,
+            window,
+            move |this, input, _: &TextChanged, _, cx| {
+                let text = input.read(cx).text().to_owned();
+                if let Some(tab) = this.worktrees_tabs.get_mut(&host) {
+                    tab.draft = text;
+                }
+                cx.notify();
+            },
+        );
         WorktreesTab {
             input,
             focus,
@@ -2123,38 +2180,37 @@ impl RootView {
         if !self.worktrees_save_enabled() {
             return;
         }
-        let Some(tab) = &mut self.worktrees_tab else {
+        let host = self.settings_host.clone();
+        let Some(tab) = self.worktrees_tabs.get_mut(&host) else {
             return;
         };
         let trimmed = tab.draft.trim();
         let path = (!trimmed.is_empty()).then(|| trimmed.to_owned());
         tab.awaiting += 1;
         tab.saved = false;
-        tracing::info!(?path, "settings: saving the worktrees root");
-        self.send_to(&HostKey::Local, ClientMessage::SetWorktreesRoot { path });
+        tracing::info!(?path, ?host, "settings: saving the worktrees root");
+        self.send_to(&host, ClientMessage::SetWorktreesRoot { path });
     }
 
     fn reset_worktrees_root(&mut self, cx: &mut Context<Self>) {
         if self.worktrees_override().is_none() {
             return;
         }
-        if let Some(tab) = &mut self.worktrees_tab {
+        let host = self.settings_host.clone();
+        if let Some(tab) = self.worktrees_tabs.get_mut(&host) {
             tab.awaiting += 1;
             tab.saved = false;
             tab.draft.clear();
             tab.input.update(cx, |input, cx| input.set_text("", cx));
         }
-        tracing::info!("settings: resetting the worktrees root");
-        self.send_to(
-            &HostKey::Local,
-            ClientMessage::SetWorktreesRoot { path: None },
-        );
+        tracing::info!(?host, "settings: resetting the worktrees root");
+        self.send_to(&host, ClientMessage::SetWorktreesRoot { path: None });
     }
 
     /// Browse: the folder picked fills the path field, if the field is
     /// still the one that asked.
     fn browse_worktrees_root(&mut self, cx: &mut Context<Self>) {
-        let Some(tab) = &self.worktrees_tab else {
+        let Some(tab) = self.shown_worktrees_tab() else {
             return;
         };
         let asked = tab.input.entity_id();
@@ -2162,7 +2218,7 @@ impl RootView {
         // daemon uses.
         let current = tab.input.read(cx).text().trim().to_owned();
         let start = if current.is_empty() {
-            self.mirrors()
+            self.settings_mirrors()
                 .worktrees_root
                 .as_ref()
                 .map(|(root, _)| PathBuf::from(root))
@@ -2177,36 +2233,40 @@ impl RootView {
     }
 
     fn finish_worktrees_browse(&mut self, asked: EntityId, path: String, cx: &mut Context<Self>) {
-        let Some(tab) = &mut self.worktrees_tab else {
+        let Some(tab) = self
+            .worktrees_tabs
+            .values_mut()
+            .find(|tab| tab.input.entity_id() == asked)
+        else {
             return;
         };
-        if tab.input.entity_id() != asked {
-            return;
-        }
         tab.draft.clone_from(&path);
         tab.input.update(cx, |input, cx| input.set_text(path, cx));
         cx.notify();
     }
 
-    /// The daemon's worktrees root. Each echo answers one of this tab's
-    /// sends, and the one answering the last shows `Saved` and puts the
-    /// override the daemon settled on in the field. An echo answering none
-    /// is another client's change: it fills the field only while the field
-    /// still reads as the daemon left it.
+    /// `host`'s daemon's worktrees root. Each echo answers one of that
+    /// host's tab's sends, and the one answering the last shows `Saved` and
+    /// puts the override the daemon settled on in the field. An echo
+    /// answering none is another client's change: it fills the field only
+    /// while the field still reads as the daemon left it.
     pub(crate) fn on_worktrees_root_changed(
         &mut self,
+        host: &HostKey,
         root: &str,
         is_override: bool,
         cx: &mut Context<Self>,
     ) {
-        let previous = self
-            .mirrors()
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
+        let previous = mirrors
             .worktrees_root
             .as_ref()
             .filter(|(_, was_overridden)| *was_overridden)
             .map_or_else(String::new, |(root, _)| root.clone());
-        self.mirrors_mut().worktrees_root = Some((root.to_owned(), is_override));
-        if let Some(tab) = &mut self.worktrees_tab {
+        mirrors.worktrees_root = Some((root.to_owned(), is_override));
+        if let Some(tab) = self.worktrees_tabs.get_mut(host) {
             let placeholder = root.to_owned();
             tab.input
                 .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
@@ -2230,10 +2290,10 @@ impl RootView {
         cx.notify();
     }
 
-    /// Forgets the root and the tab's field, as a new connection does.
+    /// Forgets This PC's root and its tab's field, as a new connection does.
     pub(crate) fn reset_worktrees_tab(&mut self) {
         self.mirrors_mut().worktrees_root = None;
-        self.worktrees_tab = None;
+        self.worktrees_tabs.remove(&HostKey::Local);
     }
 
     /// `host`'s daemon's last `RemoteStatus`, or `None` when its connection
@@ -2532,7 +2592,7 @@ impl RootView {
             self.read_notify_state(window, cx);
         }
         if tab == SettingsTab::Worktrees {
-            self.worktrees_tab = Some(self.new_worktrees_tab(window, cx));
+            self.hold_worktrees_tab(false, window, cx);
         }
         if tab == SettingsTab::RemoteAccess {
             self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
@@ -2801,8 +2861,11 @@ impl RootView {
     /// Asks the daemon for `mode`; the choice follows its echo. Nothing is
     /// sent while the daemon is not connected.
     fn choose_keep_awake_mode(&mut self, mode: KeepAwakeMode) {
-        if self.mirrors().keep_awake.is_some() {
-            self.send_to(&HostKey::Local, ClientMessage::SetKeepAwakeMode { mode });
+        if self.settings_mirrors().keep_awake.is_some() {
+            self.send_to(
+                &self.settings_host,
+                ClientMessage::SetKeepAwakeMode { mode },
+            );
         }
     }
 
@@ -3157,7 +3220,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = theme(cx);
-        let Some(tab) = &self.worktrees_tab else {
+        let Some(tab) = self.shown_worktrees_tab() else {
             return Vec::new();
         };
         let path = SettingsControl::WorktreesPath;
@@ -3172,22 +3235,22 @@ impl RootView {
                 }),
             )
             .child(tab.input.clone());
-        let refusal = self.capabilities().local_files_refusal();
-        let browse = settings_button(
-            SettingsControl::WorktreesBrowse,
-            "Browse…",
-            refusal.is_none(),
-            focused,
-            cx,
-        )
-        .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)));
+        let browse = self.worktrees_browses().then(|| {
+            settings_button(
+                SettingsControl::WorktreesBrowse,
+                "Browse…",
+                true,
+                focused,
+                cx,
+            )
+        });
         let path_row = div()
             .flex()
             .items_center()
             .gap(px(8.0))
             .child("Path")
             .child(field)
-            .child(browse);
+            .children(browse);
         let active = div()
             .debug_selector(|| "settings-worktrees-active".to_owned())
             .text_color(gpui::rgb(t.text_2))
@@ -3217,14 +3280,10 @@ impl RootView {
                 focused,
                 cx,
             ));
-        // Save creates a missing folder on the host, so a typo is not refused.
-        let host_hint = self.conn().target().short_name().map(|host| {
-            crate::tagged_text(
-                "settings-worktrees-host-hint",
-                format!("Created on {host} if it does not exist."),
-            )
-            .text_size(crate::fonts::ui_px(cx, HINT_SIZE))
-            .text_color(gpui::rgb(t.subtle))
+        let host_hint = self.worktrees_host_note().map(|note| {
+            crate::tagged_text("settings-worktrees-host-hint", note)
+                .text_size(crate::fonts::ui_px(cx, HINT_SIZE))
+                .text_color(gpui::rgb(t.subtle))
         });
         let section = section(crate::fonts::ui_text_size(cx), "Worktrees root")
             .child(hint(crate::fonts::ui_text_size(cx), WORKTREES_HINT, &t))

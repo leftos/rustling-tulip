@@ -1093,8 +1093,9 @@ pub struct RootView {
     /// How many times the launch toasts' buttons were refitted; specs read
     /// it to see a terminal frame skip that upkeep.
     preset_launch_syncs: u64,
-    /// The Settings Worktrees tab's path field and its save in flight.
-    worktrees_tab: Option<settings_view::WorktreesTab>,
+    /// The Settings Worktrees tab's path field and its save in flight, per
+    /// host the selector has shown it for while Settings is open.
+    worktrees_tabs: HashMap<HostKey, settings_view::WorktreesTab>,
     /// The Manage worktrees modal, while open.
     worktrees_manager: Option<worktrees_manager::WorktreesManager>,
     /// The Manage worktrees modal's keyboard focus.
@@ -1462,7 +1463,7 @@ impl RootView {
             vscode_suggestions: VscodeSuggestions::default(),
             vscode_prompt_focus: cx.focus_handle(),
             cwd_workspace_scans: HashMap::new(),
-            worktrees_tab: None,
+            worktrees_tabs: HashMap::new(),
             worktrees_manager: None,
             worktrees_focus: cx.focus_handle(),
             session_history: recover::HostHistories::default(),
@@ -4270,8 +4271,8 @@ impl RootView {
             request_id,
             code,
         } = failure;
-        if *host == HostKey::Local && request_id.is_none() {
-            self.on_worktrees_root_error(code, cx);
+        if request_id.is_none() {
+            self.on_worktrees_root_error(host, code, cx);
         }
         let inline = match request_id {
             None => self.on_creator_error(&message, cx),
