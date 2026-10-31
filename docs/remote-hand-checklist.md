@@ -38,17 +38,18 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 
 - [ ] On the device, press `Connections` in the footer. **Expect:** the `Connections` dialog shows `Looking for your devices…` under `On your tailnet`, then `This PC` (chip `Connected`) and `<host>` among the online peers.
 - [ ] Press `+ Add host`, type `box` (a bare label) as the Name in Tailnet mode and press `Add and connect`. **Expect:** `Use the full name, for example box.tail1234.ts.net.` and nothing dialled.
-- [ ] Pick the `<host>` row. **Expect:** the dialog closes, and the "Pair with `<host>`" dialog opens by itself with `<host> does not know this PC.` and the buttons `Ask to pair` and `Close`; the footer pill reads `<short> · not paired`.
+- [ ] Pick the `<host>` row. **Expect:** the host is saved, switched on and connected, and its row's chip reads `Not paired` with `Pair` and `Reconnect now` buttons; no dialog opens by itself.
+- [ ] Press the row's `Pair`. **Expect:** the "Pair with `<host>`" dialog opens with `<host> does not know this PC.` and the buttons `Ask to pair` and `Close`.
 - [ ] Press `Ask to pair`. **Expect:** the device shows `Approve this PC on <host>.` with an `expires in m:ss` countdown and `Cancel`; the host raises the Windows toast `A device asks for remote access` with `Approve…` and `Deny`, and Settings → Remote access on the host shows `Waiting devices · 1` with the device's name, its Tailscale login and an `m:ss left` countdown.
 - [ ] On the device, press `Have a code?` (it is also reachable with Tab). **Expect:** a `6 digits` field with `Pair` and `Cancel` appears under the line and the countdown keeps running. Type `000000` and press `Pair`. **Expect:** `That code is not right.` in the same place as after approval, and the request keeps waiting (the host's Waiting devices row stays).
 - [ ] On the host, press `Deny` on the toast. **Expect:** the device ends on `<host> turned this PC down.` with `Ask again` and `Close`, and the host's Waiting devices row is gone.
 - [ ] On the device, press `Ask again`. **Expect:** a new toast and Waiting devices row on the host, as above.
 - [ ] On the host, press `Approve…` on the toast. **Expect:** the window comes forward with the dialog `Approve <device>`, the line `Approving shows a one-time code for this device.` and `Approve`, `Deny` and `Close`; nothing is sent until `Approve` is pressed.
 - [ ] Press `Approve`. **Expect:** the host shows a QR code, a six-digit code such as `735 160`, `or type on the phone` and `expires in m:ss · this request only`; the Waiting devices row reads `Approved · waiting for the device`; the device's dialog moves to `Type the code <host> shows.` with a `6 digits` field and `Pair`.
-- [ ] Type a wrong code on the device and press `Pair`. **Expect:** `That code is not right.` under the field. Type the right code and press `Pair`. **Expect:** the dialog closes, the device connects, and its footer pill shows `<short> · <n> sessions`; the host's Waiting devices row is gone.
+- [ ] Type a wrong code on the device and press `Pair`. **Expect:** `That code is not right.` under the field. Type the right code and press `Pair`. **Expect:** the dialog closes, the device connects, and the host's row chip reads `Connected`; the host's Waiting devices row is gone.
 - [ ] On the host, open Settings → Remote access. **Expect:** the `Devices` section lists the device with `Connected` and a `Block` button.
 - [ ] On the host, in a terminal, run `rustling-tulipd pair` (the daemon must be running). **Expect:** `Pairing code: <six digits>` and `Type it on the device's pairing screen within <n> minutes. It works once, for one device.`, and `daemon.log` shows `pairing: a CLI code was minted`. The device types such a code under `Have a code?` while its request waits (section 5), and the phone types it on its pairing screen (see the last section).
-- [ ] Close the device's client and open it again. **Expect:** it boots straight onto `<host>` with no Pair dialog, since `native-ui.json` keeps `last_target` and the device token is in Credential Manager.
+- [ ] Close the device's client and open it again. **Expect:** it connects to `<host>` at launch with no Pair dialog, since `native-ui.json` keeps the host in `saved_hosts` (switched on) and the device token is in Credential Manager.
 
 ## 4. Driving the host from the device
 
@@ -62,8 +63,8 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 ## 5. Block, forget and pair again
 
 - [ ] With the device connected, press `Block` on its row in the host's `Devices` section. **Expect:** the dialog `Block <device>?` with `Its live connections end now, and it cannot pair again until you forget it.` and `Cancel` and `Block`.
-- [ ] Press `Block`. **Expect:** the device's connection drops at once and, on its next connect, its footer pill reads `<short> · not paired`; the host's row shows `Blocked` with a `Forget` button.
-- [ ] On the device, press the footer pill. **Expect:** "Pair with `<host>`" opens with `<host> no longer accepts this PC's pairing.`
+- [ ] Press `Block`. **Expect:** the device's connection drops at once and, on its next connect, the host's row chip on the device reads `Not paired`; the host's row shows `Blocked` with a `Forget` button.
+- [ ] On the device, press the host row's `Pair` in `Connections`. **Expect:** "Pair with `<host>`" opens with `<host> no longer accepts this PC's pairing.`
 - [ ] Press `Ask to pair`. **Expect:** `<host> did not accept this PC's request.` with `Ask again` and `Close`; the host raises no toast and shows no Waiting devices row.
 - [ ] On the host, press `Forget` on the blocked row. **Expect:** the row is gone (`No device has paired yet.` when it was the only one).
 - [ ] On the host, run `rustling-tulipd pair`. On the device, press `Ask again`, then `Have a code?`, type the printed code and press `Pair`, without approving on the host. **Expect:** the dialog closes and the device pairs and connects, and the host's Waiting devices row is gone.
