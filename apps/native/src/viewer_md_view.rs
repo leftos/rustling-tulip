@@ -1097,7 +1097,7 @@ mod tests {
                 .iter()
                 .find(|span| span.text == label)
                 .expect("the link's span");
-            let style = span_style(span, LinkRoute::WebOnly);
+            let style = span_style(span, LinkRoute::WebOnly, &UiTheme::CONTRAST);
             assert!(
                 style.underline.is_none() && style.color.is_none(),
                 "{label} is plain text: {style:?}"

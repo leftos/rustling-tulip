@@ -2564,6 +2564,7 @@ fn header_button(
 /// marked; each segment is tagged `pane-view-<view>-<pane>` and a click
 /// switches pane `pane_id` to its view.
 fn view_segments(pane_id: &str, shown: PaneView, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let segments: Vec<AnyElement> = [
         (PaneView::Terminal, "pane-view-terminal"),
         (PaneView::Chat, "pane-view-chat"),
@@ -2577,7 +2578,7 @@ fn view_segments(pane_id: &str, shown: PaneView, cx: &mut Context<RootView>) -> 
             .w_auto()
             .px(px(8.0))
             .when(view == shown, |segment| {
-                segment.bg(gpui::rgb(CHIP)).text_color(gpui::rgb(TEXT))
+                segment.bg(gpui::rgb(t.chip)).text_color(gpui::rgb(t.text))
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 if this.pane_view(&pane) != view {

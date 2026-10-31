@@ -164,11 +164,12 @@ impl RootView {
         let Some(pane_id) = self.pane_view_menu_pane().map(ToOwned::to_owned) else {
             return Vec::new();
         };
+        let t = theme(cx);
         pane_view_rows(self.pane_view(&pane_id))
             .into_iter()
             .map(|(selector, label, view)| {
                 let pane_id = pane_id.clone();
-                menu_item(selector, label, false)
+                menu_item(selector, label, false, &t)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.close_session_menu(window, cx);
                         this.set_pane_view(&pane_id, view, window, cx);

@@ -7,20 +7,27 @@ use gpui::{AnyElement, ElementId, IntoElement, SharedString, div, prelude::*, px
 
 use crate::chat::{STRIP_SEPARATOR, Strip, StripItem, StripKind};
 use crate::chat_view::{BODY_PAD_X, SMALL_TEXT_SIZE};
-use crate::palette::{FAINT, LINE, TEXT_2};
+use crate::fonts::ui_px_at;
 use crate::tooltip;
+use crate::ui_theme::UiTheme;
 
-/// The room above and below the strip's text.
-const STRIP_PAD_Y: f32 = 4.0;
+/// The strip's height, which holds one line of text.
+const STRIP_HEIGHT: f32 = 28.0;
 
-/// `strip` as a row, with the shell command drawn in `mono`.
-pub fn strip_row(strip: &Strip, mono: &SharedString) -> impl IntoElement + use<> {
+/// `strip` as a row at UI text size `offset`, with the shell command drawn
+/// in `mono`.
+pub fn strip_row(
+    offset: i8,
+    strip: &Strip,
+    mono: &SharedString,
+    t: &UiTheme,
+) -> impl IntoElement + use<> {
     let mut children: Vec<AnyElement> = Vec::with_capacity(strip.parts.len() * 2);
     for (index, part) in strip.parts.iter().enumerate() {
         if index > 0 {
             children.push(
                 div()
-                    .text_color(gpui::rgb(FAINT))
+                    .text_color(gpui::rgb(t.faint))
                     .child(STRIP_SEPARATOR)
                     .into_any_element(),
             );
@@ -42,11 +49,11 @@ pub fn strip_row(strip: &Strip, mono: &SharedString) -> impl IntoElement + use<>
         .whitespace_nowrap()
         .overflow_hidden()
         .px(px(BODY_PAD_X))
-        .py(px(STRIP_PAD_Y))
+        .h(ui_px_at(offset, STRIP_HEIGHT))
         .border_t_1()
-        .border_color(gpui::rgb(LINE))
-        .text_size(px(SMALL_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT_2))
+        .border_color(gpui::rgb(t.line))
+        .text_size(ui_px_at(offset, SMALL_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text_2))
         .children(children)
 }
 

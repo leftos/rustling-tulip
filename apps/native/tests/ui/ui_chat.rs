@@ -20,7 +20,8 @@ use protocol::{
     ClientMessage, ComposerState, DaemonMessage, GridNode, SplitDirection, ToolOutcome, WorkShell,
     WorkSubagent,
 };
-use rustling_tulip_native::{OpenOutcome, PopoutKey};
+use rustling_tulip_native::ui_theme::UiTheme;
+use rustling_tulip_native::{OpenOutcome, PopoutKey, RootView};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 
 const TO_TERMINAL: &str = "pane-view-terminal-p1";
@@ -1586,4 +1587,46 @@ fn a_stretch_in_a_code_block_stays_literal(cx: &mut TestAppContext) {
         Some("Write {{a|b}} like so:\n{{name|value}}")
     );
     assert_eq!(stretch_links(&mut h, "a1"), []);
+}
+
+#[gpui::test]
+fn the_work_strip_grows_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    send_full_work(&mut h);
+    let base = h.bounds("work-strip").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    let strip = h.bounds("work-strip");
+    assert_eq!(
+        strip.size.height,
+        base + px(3.0),
+        "three pixels taller at +3"
+    );
+    let text = h.bounds("work-item-0");
+    assert!(
+        text.top() >= strip.top() && text.bottom() <= strip.bottom(),
+        "its text stays inside the strip: {text:?} in {strip:?}"
+    );
+}
+
+#[gpui::test]
+fn a_chat_pane_redraws_in_a_new_theme(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    let mut mine = UiTheme::CONTRAST;
+    mine.ground = 0x0010_2030;
+
+    h.root_update(|root, _, cx| root.set_theme(mine, cx));
+    assert_eq!(
+        h.root(RootView::main_area_fill),
+        mine.ground,
+        "the gutter around the chat pane paints the new ground"
+    );
+    assert!(
+        painted(&mut h, "chat-row-p1-u1"),
+        "the chat's rows are still drawn"
+    );
 }

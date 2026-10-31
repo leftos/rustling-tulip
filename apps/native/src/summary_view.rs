@@ -14,11 +14,11 @@ use crate::chat_view::{
     BODY_PAD_X, LOADING_NOTE as CHAT_LOADING_NOTE, RowLook, SessionChat, card_key, chat_note,
     chat_row, follow_bottom, muted_line,
 };
-use crate::palette::{HOVER, TEXT_2};
+use crate::fonts::ui_px_at;
 use crate::scrollbar::Scrollbar;
 use crate::summary::{LineEntries, OpenLine, SummaryLog, open_line};
 use crate::work_strip::strip_row;
-use crate::{MUTED, RootView, TEXT, UI_TEXT_SIZE};
+use crate::{RootView, UI_TEXT_SIZE};
 
 /// What a summary pane says while its lines are on their way.
 const LOADING_NOTE: &str = "Loading the summary…";
@@ -50,15 +50,17 @@ impl RootView {
         let name = format!("pane-summary-{pane_id}");
         let chat = self.chat.session(session_id);
         let summary = self.chat.summaries.get(session_id);
-        let look = self.row_look(pane_id, session_id);
+        let look = self.row_look(pane_id, session_id, cx);
         let main = match summary {
             Some(summary) if !summary.lines().is_empty() => {
                 summary_column(&look, summary, chat, self.chat.scrolls.get(pane_id), cx)
             }
-            Some(summary) if !summary.is_loading() => chat_note(EMPTY_NOTE)
-                .debug_selector(|| "summary-empty".to_owned())
-                .into_any_element(),
-            _ => chat_note(LOADING_NOTE)
+            Some(summary) if !summary.is_loading() => {
+                chat_note(look.text_offset, EMPTY_NOTE, &look.theme)
+                    .debug_selector(|| "summary-empty".to_owned())
+                    .into_any_element()
+            }
+            _ => chat_note(look.text_offset, LOADING_NOTE, &look.theme)
                 .debug_selector(|| "summary-loading".to_owned())
                 .into_any_element(),
         };
@@ -83,7 +85,9 @@ impl RootView {
             }))
             .children(cards.map(|cards| div().flex_none().pt(px(BODY_PAD_Y)).child(cards)))
             .child(main)
-            .children(strip.map(|strip| strip_row(&strip, &look.mono)))
+            .children(
+                strip.map(|strip| strip_row(look.text_offset, &strip, &look.mono, &look.theme)),
+            )
             .children(composer)
             .into_any_element()
     }
@@ -160,8 +164,8 @@ fn summary_column(
         .flex()
         .flex_col()
         .gap(px(LINE_GAP))
-        .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+        .text_size(ui_px_at(look.text_offset, UI_TEXT_SIZE))
+        .text_color(gpui::rgb(look.theme.text))
         .children(rows);
     let column = match scroll {
         Some(scroll) => column.track_scroll(scroll.handle()),
@@ -183,6 +187,7 @@ fn line_row(look: &RowLook<'_>, line: &StretchLine, cx: &mut Context<RootView>) 
     let name = format!("summary-line-{}-{}", look.pane_id, line.id);
     let session_id = look.session_id.to_owned();
     let line_id = line.id.clone();
+    let hover = look.theme.hover;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -191,7 +196,7 @@ fn line_row(look: &RowLook<'_>, line: &StretchLine, cx: &mut Context<RootView>) 
         .py(px(LINE_PAD_Y))
         .rounded(px(LINE_RADIUS))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER)))
+        .hover(move |style| style.bg(gpui::rgb(hover)))
         .child(line.text.clone())
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.toggle_summary_line(&session_id, &line_id, cx);
@@ -213,7 +218,7 @@ fn open_line_block(
         Some((chat, OpenLine::Entries(slice))) => entry_rows(look, chat, line, slice, cx),
         Some((_, OpenLine::Loading)) | None => {
             let name = format!("summary-line-loading-{}-{}", look.pane_id, line.id);
-            vec![note_row(CHAT_LOADING_NOTE, name)]
+            vec![note_row(look, CHAT_LOADING_NOTE, name)]
         }
     };
     div()
@@ -223,7 +228,7 @@ fn open_line_block(
         .gap(px(LINE_GAP * 2.0))
         .pl(px(ENTRIES_INDENT))
         .pb(px(LINE_GAP))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(look.theme.text_2))
         .children(rows)
         .into_any_element()
 }
@@ -240,7 +245,7 @@ fn entry_rows(
 ) -> Vec<AnyElement> {
     let note = slice.earlier_missing.then(|| {
         let name = format!("summary-earlier-{}-{}", look.pane_id, line.id);
-        note_row(EARLIER_NOTE, name)
+        note_row(look, EARLIER_NOTE, name)
     });
     note.into_iter()
         .chain(
@@ -253,9 +258,8 @@ fn entry_rows(
 }
 
 /// A muted note among an open line's rows, tagged `name`.
-fn note_row(text: &str, name: String) -> AnyElement {
-    muted_line(text.to_owned())
+fn note_row(look: &RowLook<'_>, text: &str, name: String) -> AnyElement {
+    muted_line(look.text_offset, text.to_owned(), &look.theme)
         .debug_selector(|| name)
-        .text_color(gpui::rgb(MUTED))
         .into_any_element()
 }

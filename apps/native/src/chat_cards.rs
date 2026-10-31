@@ -11,10 +11,11 @@ use std::time::Instant;
 use gpui::{AnyElement, App, ClickEvent, Div, Window, div, prelude::*, px};
 use protocol::{ChatAnswerKind, ChatPrompt, ChatPromptKind, ClientMessage};
 
-use crate::buttons::{ButtonSize, outlined_button, primary_button};
+use crate::UI_TEXT_SIZE;
+use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::chat::{PromptStack, allow_with_text, deny_with_text, type_something_answer};
-use crate::palette::{DANGER, LINE, LINE_STRONG, TEXT_2};
-use crate::{MUTED, TEXT, UI_TEXT_SIZE};
+use crate::fonts::ui_px_at;
+use crate::ui_theme::UiTheme;
 
 /// The line a card closed in the terminal or on another device leaves.
 pub const ANSWERED_ELSEWHERE: &str = "Answered elsewhere";
@@ -555,11 +556,11 @@ pub type OnPress = Rc<dyn Fn(&ButtonAnswer, &mut Window, &mut App)>;
 /// "Sending…"; a refusal shows under the buttons (`chat-card-refusal`); a
 /// kind the chat cannot answer says to open the terminal
 /// (`chat-card-terminal`).
-pub fn prompt_card(view: &CardView<'_>, on_press: &OnPress) -> AnyElement {
+pub fn prompt_card(offset: i8, view: &CardView<'_>, on_press: &OnPress, t: &UiTheme) -> AnyElement {
     let prompt = view.prompt;
     let buttons = card_buttons(prompt, view.agent);
     let actions = if buttons.is_empty() {
-        small(OPEN_THE_TERMINAL, MUTED)
+        small(offset, OPEN_THE_TERMINAL, t.muted)
             .debug_selector(|| "chat-card-terminal".to_owned())
             .into_any_element()
     } else {
@@ -570,40 +571,41 @@ pub fn prompt_card(view: &CardView<'_>, on_press: &OnPress) -> AnyElement {
             .children(
                 buttons
                     .iter()
-                    .map(|button| card_button(button, prompt, view.busy, on_press)),
+                    .map(|button| card_button(button, prompt, view.busy, on_press, t)),
             )
             .into_any_element()
     };
-    let card =
-        div()
-            .debug_selector(|| "chat-card".to_owned())
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .p(px(CARD_PAD))
-            .rounded(px(CARD_RADIUS))
-            .border_1()
-            .border_color(gpui::rgb(LINE_STRONG))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
-            .when(!prompt.subject.is_empty(), |card| {
-                card.child(div().child(prompt.subject.clone()))
-            })
-            .when(!prompt.body.is_empty(), |card| {
-                card.child(small(&prompt.body, TEXT_2))
-            })
-            .child(actions)
-            .when(view.busy, |card| {
-                card.child(small(SENDING, MUTED).debug_selector(|| "chat-card-busy".to_owned()))
-            })
-            .children(view.refusal.map(|reason| {
-                small(reason, DANGER).debug_selector(|| "chat-card-refusal".to_owned())
-            }));
+    let card = div()
+        .debug_selector(|| "chat-card".to_owned())
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .p(px(CARD_PAD))
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(gpui::rgb(t.line_strong))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text))
+        .when(!prompt.subject.is_empty(), |card| {
+            card.child(div().child(prompt.subject.clone()))
+        })
+        .when(!prompt.body.is_empty(), |card| {
+            card.child(small(offset, &prompt.body, t.text_2))
+        })
+        .child(actions)
+        .when(view.busy, |card| {
+            card.child(
+                small(offset, SENDING, t.muted).debug_selector(|| "chat-card-busy".to_owned()),
+            )
+        })
+        .children(view.refusal.map(|reason| {
+            small(offset, reason, t.danger).debug_selector(|| "chat-card-refusal".to_owned())
+        }));
     let edges = view.ghosts.min(GHOST_EDGES);
     div()
         .flex()
         .flex_col()
-        .children((1..=edges).rev().map(ghost_edge))
+        .children((1..=edges).rev().map(|depth| ghost_edge(depth, t)))
         .child(card)
         .into_any_element()
 }
@@ -614,6 +616,7 @@ fn card_button(
     prompt: &ChatPrompt,
     busy: bool,
     on_press: &OnPress,
+    t: &UiTheme,
 ) -> AnyElement {
     let selector = format!("chat-card-{}", button.id);
     let selected = prompt.multi
@@ -622,9 +625,9 @@ fn card_button(
             .iter()
             .any(|option| option.selected && option.number.to_string() == button.id);
     let base = if selected {
-        primary_button(&selector, ButtonSize::Compact, !busy)
+        primary_button(&selector, ButtonSize::Compact, !busy, Layer::Base, t)
     } else {
-        outlined_button(&selector, ButtonSize::Compact, !busy)
+        outlined_button(&selector, ButtonSize::Compact, !busy, Layer::Base, t)
     };
     let answer = button.answer.clone();
     let on_press = Rc::clone(on_press);
@@ -639,7 +642,7 @@ fn card_button(
 }
 
 /// The top edge of the `depth`th card behind the current one.
-fn ghost_edge(depth: usize) -> Div {
+fn ghost_edge(depth: usize, t: &UiTheme) -> Div {
     let inset = GHOST_INSET * f32::from(u8::try_from(depth).unwrap_or(u8::MAX));
     div()
         .mx(px(inset))
@@ -647,13 +650,13 @@ fn ghost_edge(depth: usize) -> Div {
         .rounded_t(px(CARD_RADIUS))
         .border_1()
         .border_b_0()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
 }
 
 /// One small line of `text` in `color`.
-fn small(text: &str, color: u32) -> Div {
+fn small(offset: i8, text: &str, color: u32) -> Div {
     div()
-        .text_size(px(SMALL_TEXT))
+        .text_size(ui_px_at(offset, SMALL_TEXT))
         .text_color(gpui::rgb(color))
         .child(text.to_owned())
 }

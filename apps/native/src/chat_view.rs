@@ -24,7 +24,7 @@ use protocol::{
     SessionMode, SessionSnapshot, ToolOutcome,
 };
 
-use crate::buttons::{ButtonSize, field_frame, outlined_button, primary_button};
+use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
     self, ChatLoads, ChatLog, ComposerNote, PaneView, PaneViews, PromptStack, RunningWork,
     SendTracker, Strip, ViewKey,
@@ -34,16 +34,16 @@ use crate::chat_cards::{
     OnPress, card_answer_message, composer_actions, key_action, prompt_card, ride_no_label,
     ride_yes_label,
 };
-use crate::fonts::DEFAULT_FAMILY;
-use crate::palette::{CHIP, DANGER, FAINT, LINE_STRONG, SUBTLE, TEXT_2, WAITING, WORKING};
+use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::scrollbar::Scrollbar;
 use crate::sidebar::LOCAL_HOST_KEY;
 use crate::stretchtext;
 use crate::summary::{SummaryLog, wanted_loads};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare_answer, render_row};
 use crate::work_strip::strip_row;
-use crate::{MUTED, RootView, TEXT, UI_TEXT_SIZE, new_request_id};
+use crate::{RootView, UI_TEXT_SIZE, new_request_id};
 
 /// What a pane whose chat the daemon refused says above its terminal.
 pub(crate) const UNSUPPORTED_NOTE: &str = "This session offers no chat, so it shows its terminal";
@@ -444,6 +444,9 @@ pub(crate) struct RowLook<'a> {
     pub(crate) mono: SharedString,
     pub(crate) mono_family: Option<&'a str>,
     pub(crate) mono_size: f32,
+    /// The whole pixels added to the UI text sizes.
+    pub(crate) text_offset: i8,
+    pub(crate) theme: UiTheme,
 }
 
 /// The parts of a tool call a card draws.
@@ -1318,6 +1321,7 @@ impl RootView {
             return terminal.into_any_element();
         };
         let name = format!("pane-chat-note-{pane_id}");
+        let muted = theme(cx).muted;
         div()
             .flex()
             .flex_col()
@@ -1330,8 +1334,8 @@ impl RootView {
                     .flex_none()
                     .px(px(BODY_PAD_X))
                     .py(px(4.0))
-                    .text_size(px(SMALL_TEXT_SIZE))
-                    .text_color(gpui::rgb(MUTED))
+                    .text_size(fonts::ui_px(cx, SMALL_TEXT_SIZE))
+                    .text_color(gpui::rgb(muted))
                     .child(note),
             )
             .child(terminal)
@@ -1345,7 +1349,7 @@ impl RootView {
     fn chat_body(&self, pane_id: &str, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let name = format!("pane-chat-{pane_id}");
         let chat = self.chat.sessions.get(session_id);
-        let look = self.row_look(pane_id, session_id);
+        let look = self.row_look(pane_id, session_id, cx);
         let strip = chat.and_then(|chat| chat.work.strip(self.wall_now()));
         let rows = chat.filter(|chat| !chat.log.is_empty() || chat.log.hidden() > 0);
         let main = if let Some(chat) = rows {
@@ -1353,7 +1357,7 @@ impl RootView {
         } else {
             let loading = chat.is_none_or(|chat| chat.request.is_some());
             let note = if loading { LOADING_NOTE } else { EMPTY_NOTE };
-            chat_note(note).into_any_element()
+            chat_note(look.text_offset, note, &look.theme).into_any_element()
         };
         let loaded = chat.filter(|chat| chat.request.is_none());
         let cards = loaded.and_then(|chat| self.card_area(session_id, chat, cx));
@@ -1375,14 +1379,22 @@ impl RootView {
             }))
             .child(main)
             .children(cards)
-            .children(strip.map(|strip| strip_row(&strip, &look.mono)))
+            .children(
+                strip.map(|strip| strip_row(look.text_offset, &strip, &look.mono, &look.theme)),
+            )
             .children(composer)
             .into_any_element()
     }
 
     /// What every row pane `pane_id` draws for session `session_id` is
-    /// drawn with: the terminal's font for code.
-    pub(crate) fn row_look<'a>(&'a self, pane_id: &'a str, session_id: &'a str) -> RowLook<'a> {
+    /// drawn with: the terminal's font for code, the UI text size and the
+    /// theme.
+    pub(crate) fn row_look<'a>(
+        &'a self,
+        pane_id: &'a str,
+        session_id: &'a str,
+        cx: &App,
+    ) -> RowLook<'a> {
         let font = &self.sidebar.ui_state().terminal_font;
         let family = font.family.as_deref();
         RowLook {
@@ -1391,6 +1403,8 @@ impl RootView {
             mono: SharedString::from(family.unwrap_or(DEFAULT_FAMILY).to_owned()),
             mono_family: family,
             mono_size: font.size,
+            text_offset: fonts::ui_text_size(cx),
+            theme: theme(cx),
         }
     }
 
@@ -1402,8 +1416,9 @@ impl RootView {
         chat: &SessionChat,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
         let elsewhere = chat.cards.answered_elsewhere().then(|| {
-            muted_line(ANSWERED_ELSEWHERE.to_owned())
+            muted_line(offset, ANSWERED_ELSEWHERE.to_owned(), &t)
                 .debug_selector(|| "chat-answered-elsewhere".to_owned())
         });
         let agent = self.agent_label(session_id);
@@ -1421,7 +1436,7 @@ impl RootView {
                 Rc::new(cx.listener(move |this, answer: &ButtonAnswer, _, cx| {
                     this.press_card(&id, &drawn, answer, cx);
                 }));
-            prompt_card(&view, &on_press)
+            prompt_card(offset, &view, &on_press, &t)
         });
         if elsewhere.is_none() && card.is_none() {
             return None;
@@ -1453,11 +1468,12 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let composer = chat.composer.as_ref()?;
+        let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
         let note = self.composer_note_of(chat);
         let disabled = note.as_ref().is_some_and(ComposerNote::disables);
         let text = composer.input.read(cx).text().to_owned();
         let blank = text.trim().is_empty();
-        let field = field_frame(false)
+        let field = field_frame(false, &t)
             .debug_selector(|| "chat-composer".to_owned())
             .flex_1()
             .min_w(px(0.0))
@@ -1474,14 +1490,20 @@ impl RootView {
                 ComposerAction::Send => {
                     let enabled = !blank && !disabled && !sending;
                     let id = session_id.to_owned();
-                    primary_button(action.selector(), ButtonSize::Compact, enabled)
-                        .child("Send")
-                        .when(enabled, |send| {
-                            send.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.send_composer(&id, cx);
-                            }))
-                        })
-                        .into_any_element()
+                    primary_button(
+                        action.selector(),
+                        ButtonSize::Compact,
+                        enabled,
+                        Layer::Base,
+                        &t,
+                    )
+                    .child("Send")
+                    .when(enabled, |send| {
+                        send.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.send_composer(&id, cx);
+                        }))
+                    })
+                    .into_any_element()
                 }
                 ComposerAction::RideYes | ComposerAction::RideNo => {
                     let allow = action == ComposerAction::RideYes;
@@ -1511,7 +1533,8 @@ impl RootView {
                 .pt(px(6.0))
                 .pb(px(BODY_PAD_Y))
                 .children(note.map(|note| {
-                    muted_line(note.text()).debug_selector(|| "chat-composer-note".to_owned())
+                    muted_line(offset, note.text(), &t)
+                        .debug_selector(|| "chat-composer-note".to_owned())
                 }))
                 .child(
                     div()
@@ -1524,8 +1547,8 @@ impl RootView {
                 .children(chat.send_error.clone().map(|reason| {
                     div()
                         .debug_selector(|| "chat-composer-error".to_owned())
-                        .text_size(px(SMALL_TEXT_SIZE))
-                        .text_color(gpui::rgb(DANGER))
+                        .text_size(ui_px_at(offset, SMALL_TEXT_SIZE))
+                        .text_color(gpui::rgb(t.danger))
                         .child(reason)
                 }))
                 .into_any_element(),
@@ -1543,16 +1566,22 @@ impl RootView {
             busy,
             prompt,
         } = ride;
-        outlined_button(selector, ButtonSize::Compact, !busy)
-            .child(label)
-            .when(!busy, |button| {
-                button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    if let Some(prompt) = &prompt {
-                        this.ride_on(&id, prompt, allow, cx);
-                    }
-                }))
-            })
-            .into_any_element()
+        outlined_button(
+            selector,
+            ButtonSize::Compact,
+            !busy,
+            Layer::Base,
+            &theme(cx),
+        )
+        .child(label)
+        .when(!busy, |button| {
+            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if let Some(prompt) = &prompt {
+                    this.ride_on(&id, prompt, allow, cx);
+                }
+            }))
+        })
+        .into_any_element()
     }
 }
 
@@ -1595,7 +1624,7 @@ fn chat_column(
 ) -> AnyElement {
     let mut rows: Vec<AnyElement> = Vec::with_capacity(chat.log.len() + 1);
     if chat.log.hidden() > 0 {
-        rows.push(hidden_row(chat.log.hidden()));
+        rows.push(hidden_row(look, chat.log.hidden()));
     }
     rows.extend(
         chat.log
@@ -1614,8 +1643,8 @@ fn chat_column(
         .flex()
         .flex_col()
         .gap(px(ROW_GAP))
-        .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+        .text_size(ui_px_at(look.text_offset, UI_TEXT_SIZE))
+        .text_color(gpui::rgb(look.theme.text))
         .children(rows);
     let column = match scroll {
         Some(scroll) => {
@@ -1662,15 +1691,15 @@ pub(crate) fn view_segment(view: PaneView) -> (&'static str, &'static str) {
 const CHAT_ROW: &str = "chat-row";
 
 /// One muted line centred in the chat pane.
-pub(crate) fn chat_note(text: &'static str) -> Div {
+pub(crate) fn chat_note(offset: i8, text: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_1()
         .size_full()
         .items_center()
         .justify_center()
-        .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(MUTED))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
+        .text_color(gpui::rgb(t.muted))
         .child(text)
 }
 
@@ -1686,12 +1715,13 @@ pub(crate) fn chat_row(
     let Some(id) = chat::entry_id(entry) else {
         return div().into_any_element();
     };
+    let muted = |text: String| muted_line(look.text_offset, text, &look.theme);
     let row = match entry {
-        ChatEntry::User { text, pending, .. } => user_row(text, *pending),
+        ChatEntry::User { text, pending, .. } => user_row(look, text, *pending),
         ChatEntry::Answer { text, live, .. } => {
             answer_row(look, id, text, *live, chat.docs.get(id))
         }
-        ChatEntry::Thinking { secs, .. } => muted_line(thinking_label(*secs)),
+        ChatEntry::Thinking { secs, .. } => muted(thinking_label(*secs)),
         ChatEntry::Tool {
             name,
             summary,
@@ -1708,11 +1738,11 @@ pub(crate) fn chat_row(
             };
             tool_card(look, &tool, chat.log.is_expanded(id), cx)
         }
-        ChatEntry::System { text, .. } => system_pill(text),
+        ChatEntry::System { text, .. } => system_pill(look, text),
         ChatEntry::Receipt {
             question, answer, ..
-        } => muted_line(format!("{question} \u{2014} {answer}")),
-        ChatEntry::TurnEnd { duration_ms, .. } => muted_line(turn_label(*duration_ms)),
+        } => muted(format!("{question} \u{2014} {answer}")),
+        ChatEntry::TurnEnd { duration_ms, .. } => muted(turn_label(*duration_ms)),
         ChatEntry::Unknown => div(),
     };
     let name = format!("{prefix}-{}-{id}", look.pane_id);
@@ -1725,25 +1755,29 @@ pub(crate) fn chat_row(
 }
 
 /// The muted first row of a chat whose older rows were left out.
-fn hidden_row(hidden: u32) -> AnyElement {
+fn hidden_row(look: &RowLook<'_>, hidden: u32) -> AnyElement {
     let noun = if hidden == 1 { "message" } else { "messages" };
     div()
         .flex()
         .justify_center()
-        .child(muted_line(format!("{hidden} earlier {noun}")))
+        .child(muted_line(
+            look.text_offset,
+            format!("{hidden} earlier {noun}"),
+            &look.theme,
+        ))
         .into_any_element()
 }
 
 /// A message the user sent: a bubble on the right, dimmed until the
 /// transcript has it.
-fn user_row(text: &str, pending: bool) -> Div {
+fn user_row(look: &RowLook<'_>, text: &str, pending: bool) -> Div {
     div().flex().justify_end().child(
         div()
             .max_w(relative(BUBBLE_MAX_SHARE))
             .px(px(BUBBLE_PAD_X))
             .py(px(BUBBLE_PAD_Y))
             .rounded(px(BUBBLE_RADIUS))
-            .bg(gpui::rgb(CHIP))
+            .bg(gpui::rgb(look.theme.chip))
             .when(pending, |bubble| bubble.opacity(PENDING_OPACITY))
             .child(text.to_owned()),
     )
@@ -1765,6 +1799,7 @@ fn answer_row(
                 LinkRoute::WebOnly,
                 look.mono_family,
                 look.mono_size,
+                &look.theme,
             )
             .for_answer(look.session_id, id);
             div()
@@ -1778,20 +1813,21 @@ fn answer_row(
         return body;
     }
     let name = format!("chat-live-{}-{id}", look.pane_id);
+    let t = &look.theme;
     let cursor = div()
         .w(px(CURSOR_WIDTH))
-        .h(px(CURSOR_HEIGHT))
-        .bg(gpui::rgb(WORKING));
+        .h(ui_px_at(look.text_offset, CURSOR_HEIGHT))
+        .bg(gpui::rgb(t.working));
     let tag = div()
-        .text_size(px(TAG_TEXT_SIZE))
-        .text_color(gpui::rgb(FAINT))
+        .text_size(ui_px_at(look.text_offset, TAG_TEXT_SIZE))
+        .text_color(gpui::rgb(t.faint))
         .child(writing_tag(text.lines().count()));
     div()
         .debug_selector(|| name)
         .flex()
         .flex_col()
         .border_l_2()
-        .border_color(gpui::rgb(WORKING))
+        .border_color(gpui::rgb(t.working))
         .pl(px(LIVE_PAD))
         .child(body)
         .child(
@@ -1813,10 +1849,11 @@ fn tool_card(
     open: bool,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = &look.theme;
     let (state, mark, color) = match tool.result {
-        None => ("running", "running", WORKING),
-        Some(outcome) if outcome.is_error => ("error", "failed", DANGER),
-        Some(_) => ("done", "done", WAITING),
+        None => ("running", "running", t.working),
+        Some(outcome) if outcome.is_error => ("error", "failed", t.danger),
+        Some(_) => ("done", "done", t.waiting),
     };
     let mark_name = format!("chat-tool-{state}-{}-{}", look.pane_id, tool.id);
     let header = div()
@@ -1826,7 +1863,7 @@ fn tool_card(
         .child(
             div()
                 .flex_none()
-                .text_color(gpui::rgb(TEXT))
+                .text_color(gpui::rgb(t.text))
                 .child(tool.name.to_owned()),
         )
         .child(
@@ -1853,37 +1890,37 @@ fn tool_card(
         .py(px(CARD_PAD_Y))
         .rounded(px(CARD_RADIUS))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(t.line_strong))
         .font_family(look.mono.clone())
-        .text_size(px(CARD_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_size(ui_px_at(look.text_offset, CARD_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text_2))
         .cursor_pointer()
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.toggle_chat_card(&session_id, &id, cx);
         }))
         .child(header)
         .when(open, |card| {
-            card.child(tool_detail("Input", tool.input))
+            card.child(tool_detail("Input", tool.input, t))
                 .children(tool.result.map(|outcome| {
                     let label = if outcome.is_error { "Error" } else { "Result" };
-                    tool_detail(label, &outcome.text)
+                    tool_detail(label, &outcome.text, t)
                 }))
         });
     div().child(card)
 }
 
 /// One labelled block of an open tool card.
-fn tool_detail(label: &'static str, text: &str) -> Div {
+fn tool_detail(label: &'static str, text: &str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .child(div().text_color(gpui::rgb(FAINT)).child(label))
+        .child(div().text_color(gpui::rgb(t.faint)).child(label))
         .child(div().child(text.to_owned()))
 }
 
 /// A row the daemon wrote: a muted pill centred in the column.
-fn system_pill(text: &str) -> Div {
+fn system_pill(look: &RowLook<'_>, text: &str) -> Div {
     div().flex().justify_center().child(
         div()
             .px(px(PILL_PAD_X))
@@ -1891,18 +1928,18 @@ fn system_pill(text: &str) -> Div {
             .rounded_full()
             .border_1()
             .border_dashed()
-            .border_color(gpui::rgb(LINE_STRONG))
-            .text_size(px(SMALL_TEXT_SIZE))
-            .text_color(gpui::rgb(SUBTLE))
+            .border_color(gpui::rgb(look.theme.line_strong))
+            .text_size(ui_px_at(look.text_offset, SMALL_TEXT_SIZE))
+            .text_color(gpui::rgb(look.theme.subtle))
             .child(text.to_owned()),
     )
 }
 
 /// One small muted line.
-pub(crate) fn muted_line(text: String) -> Div {
+pub(crate) fn muted_line(offset: i8, text: String, t: &UiTheme) -> Div {
     div()
-        .text_size(px(SMALL_TEXT_SIZE))
-        .text_color(gpui::rgb(MUTED))
+        .text_size(ui_px_at(offset, SMALL_TEXT_SIZE))
+        .text_color(gpui::rgb(t.muted))
         .child(text)
 }
 
