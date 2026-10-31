@@ -1146,6 +1146,20 @@ fn the_composer_sends_with_ctrl_enter_and_keeps_its_text_when_refused(cx: &mut T
 }
 
 #[gpui::test]
+fn a_composer_draft_survives_leaving_the_chat_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "keep me");
+    h.click_on(TO_TERMINAL);
+    assert_eq!(unloads(&h.sent()), 1, "the chat unloads");
+    h.click_on(TO_CHAT);
+    let id = load_request(&h.sent()).expect("the toggle asks for the chat again");
+    h.send(reply(Some(&id), vec![]));
+    assert_eq!(composer_text(&mut h).as_deref(), Some("keep me"));
+}
+
+#[gpui::test]
 fn while_a_dialog_is_up_the_composer_offers_the_two_ride_on_answers(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir);

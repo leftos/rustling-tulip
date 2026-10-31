@@ -267,7 +267,7 @@ impl RootView {
         if let Some(id) = self.shown_session() {
             self.sidebar.mark_seen(&id);
         }
-        self.sync_chat_loads();
+        self.sync_chat_loads(cx);
         self.update_pane_roles(cx);
         self.follow_pane_focus_windows(cx);
     }
@@ -898,7 +898,7 @@ impl RootView {
             slot.attached = false;
         }
         self.chat.reset_connection(host);
-        self.sync_chat_loads();
+        self.sync_chat_loads(cx);
     }
 
     /// Gives `session`'s pop-out a terminal of its own, outside every grid,
@@ -917,7 +917,7 @@ impl RootView {
         self.open_pane_view(&slot_id, Some(&session.id));
         self.apply_fonts_where(|slot| slot.shows(session), false, cx);
         self.sync_session(session, cx);
-        self.sync_chat_loads();
+        self.sync_chat_loads(cx);
         self.update_pane_roles(cx);
     }
 
@@ -955,7 +955,7 @@ impl RootView {
         }
         self.apply_fonts_where(|slot| slot.shows(new), false, cx);
         self.sync_session(new, cx);
-        self.sync_chat_loads();
+        self.sync_chat_loads(cx);
     }
 
     /// Drops `session`'s pop-out terminal as its window closes; a session
@@ -968,7 +968,7 @@ impl RootView {
         };
         slot.view.update(cx, |pane, _| pane.release());
         self.chat.forget_pane(&slot_id);
-        self.sync_chat_loads();
+        self.sync_chat_loads(cx);
         if self.popout_focused.as_deref() == Some(slot_id.as_str()) {
             self.popout_focused = None;
         }

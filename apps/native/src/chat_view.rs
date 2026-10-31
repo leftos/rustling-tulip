@@ -287,6 +287,9 @@ pub(crate) struct ChatPanes {
     views: PaneViews,
     loads: ChatLoads,
     sessions: HashMap<String, SessionChat>,
+    /// By session id, the composer text its chat held when it unloaded,
+    /// given back to the composer when the chat loads again.
+    drafts: HashMap<String, String>,
     /// The summaries this connection has loaded, and each one's lines.
     summary_loads: ChatLoads,
     pub(crate) summaries: HashMap<String, SummaryLog>,
@@ -343,6 +346,7 @@ impl ChatPanes {
             views: PaneViews::default(),
             loads: ChatLoads::default(),
             sessions: HashMap::new(),
+            drafts: HashMap::new(),
             summary_loads: ChatLoads::default(),
             summaries: HashMap::new(),
             scrolls: HashMap::new(),
@@ -618,7 +622,7 @@ impl RootView {
         }
         self.chat.views.set(pane_id, view);
         self.remember_pane_view(pane_id, view);
-        self.sync_chat_loads();
+        self.sync_chat_loads(cx);
         self.arm_work_strip_repaint(cx);
         self.update_pane_roles(cx);
         if view.hides_terminal() {
@@ -753,7 +757,7 @@ impl RootView {
     /// window) now shows, `LoadSummary` for one the first summary pane now
     /// shows, and `UnloadChat` or `UnloadSummary` once the last such pane
     /// stopped showing it. A pane that is gone forgets its view.
-    pub(crate) fn sync_chat_loads(&mut self) {
+    pub(crate) fn sync_chat_loads(&mut self, cx: &App) {
         let panes = &self.panes;
         self.chat
             .views
@@ -800,7 +804,14 @@ impl RootView {
         self.sync_summary_loads(wanted.summary);
         let changes = self.chat.loads.diff(wanted.chat);
         for session_id in changes.unload {
-            self.chat.sessions.remove(&session_id);
+            if let Some(chat) = self.chat.sessions.remove(&session_id) {
+                let text = chat.composer_text(cx);
+                if text.is_empty() {
+                    self.chat.drafts.remove(&session_id);
+                } else {
+                    self.chat.drafts.insert(session_id.clone(), text);
+                }
+            }
             let host = self.chat.host_of(&session_id);
             self.send_to(&host, ClientMessage::UnloadChat { session_id });
         }
@@ -999,7 +1010,7 @@ impl RootView {
             self.chat.views.set(&pane_id, PaneView::Terminal);
             self.chat.notes.insert(pane_id, note.clone());
         }
-        self.sync_chat_loads();
+        self.sync_chat_loads(cx);
         self.arm_work_strip_repaint(cx);
         self.update_pane_roles(cx);
         cx.notify();
@@ -1047,9 +1058,12 @@ impl RootView {
         if !wanted {
             return;
         }
+        let draft = self.chat.drafts.remove(session_id).unwrap_or_default();
         let input = cx.new(|cx| {
-            TextInput::multi_line("", COMPOSER_PLACEHOLDER, cx)
-                .with_rows(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
+            let mut input = TextInput::multi_line("", COMPOSER_PLACEHOLDER, cx)
+                .with_rows(COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS);
+            input.set_text(draft, cx);
+            input
         });
         let id = session_id.to_owned();
         let keys = cx.subscribe(&input, move |this, _, event: &TextInputEvent, cx| {
