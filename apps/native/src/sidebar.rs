@@ -1374,6 +1374,12 @@ impl SidebarModel {
         &self.local.workspaces
     }
 
+    /// `host`'s registered workspaces, in its daemon's order; none for a
+    /// remote host that never sent a list.
+    pub fn workspaces_of(&self, host: &HostKey) -> &[WorkspaceEntry] {
+        self.slice(host).map_or(&[], |slice| &slice.workspaces)
+    }
+
     /// The spawn config `container` last launched with, when it has one.
     #[must_use]
     pub fn last_spawn_config(&self, container: launch_last::Container<'_>) -> Option<SpawnConfig> {

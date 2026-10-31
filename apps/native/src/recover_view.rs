@@ -178,19 +178,19 @@ impl RootView {
         self.recover.as_ref().and_then(RecoverDialog::empty_text)
     }
 
-    /// The names the dialog shows for the registry's repos and workspaces,
-    /// with `host`'s agents.
+    /// The names the dialog shows for `host`'s repos and workspaces, with
+    /// its agents.
     fn recover_names(&self, host: &HostKey) -> Names {
         Names {
             workspaces: self
                 .sidebar
-                .workspaces()
+                .workspaces_of(host)
                 .iter()
                 .map(|w| (w.id.clone(), w.name.clone()))
                 .collect(),
             repos: self
                 .sidebar
-                .repos()
+                .repos_of(host)
                 .iter()
                 .map(|r| (r.id.clone(), r.name.clone()))
                 .collect(),
@@ -305,13 +305,24 @@ impl RootView {
         }
     }
 
-    /// A new connection: the dialog closes, nothing waits to be placed, and
-    /// the history is asked for afresh.
+    /// A new connection: the dialog closes, nothing of This PC's waits to be
+    /// placed, and the history is asked for afresh.
     pub(crate) fn reset_recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.recover_requests.clear();
-        self.recover_batches.clear();
+        self.forget_recoveries_of(&HostKey::Local);
         self.drop_recover(window, cx);
         self.ask_history(&HostKey::Local);
+    }
+
+    /// Forgets `host`'s recoveries: its requests still unanswered, the
+    /// sessions it would have placed, and its rows in flight. A connection
+    /// that went answers neither, and another host's recoveries stay.
+    pub(crate) fn forget_recoveries_of(&mut self, host: &HostKey) {
+        self.recover_requests
+            .retain(|_, (owner, _)| *owner != *host);
+        self.recover_batches.retain(|(owner, _)| *owner != *host);
+        if let Some(dialog) = &mut self.recover {
+            dialog.forget_host(host);
+        }
     }
 
     /// A lost connection: the dialog closes.
@@ -338,7 +349,7 @@ impl RootView {
             DaemonMessage::RecoverResult {
                 request_id,
                 results,
-            } => self.on_recover_result(request_id.as_deref(), results, window, cx),
+            } => self.on_recover_result(host, request_id.as_deref(), results, window, cx),
             DaemonMessage::SessionUpdated { .. } if !self.recover_batches.is_empty() => {
                 self.place_ready_batches();
             }
@@ -348,21 +359,23 @@ impl RootView {
 
     fn on_recover_result(
         &mut self,
+        host: &HostKey,
         request_id: Option<&str>,
         results: &[RecoverItemResult],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(abandoned) = request_id.and_then(|id| self.recover_requests.remove(id)) {
+        if let Some((_, abandoned)) = request_id.and_then(|id| self.recover_requests.remove(id)) {
             // The daemon hands an abandoned session's panes to its recovery
-            // itself; only the rest are placed here.
+            // itself; only the rest are placed here, on the host that
+            // answered.
             let batch: Vec<String> = results
                 .iter()
                 .filter(|r| !abandoned.contains(&r.history_id))
                 .filter_map(|r| r.session_id.clone())
                 .collect();
             if !batch.is_empty() {
-                self.recover_batches.push(batch);
+                self.recover_batches.push((host.clone(), batch));
                 self.place_ready_batches();
             }
         } else {
@@ -387,29 +400,39 @@ impl RootView {
         cx.notify();
     }
 
-    /// Places every batch whose sessions' snapshots have all arrived, each
-    /// in one go so no two of a batch take the same pane; the rest wait.
+    /// Places every batch whose sessions' snapshots have all arrived on
+    /// their own host, each in one go so no two of a batch take the same
+    /// pane; the rest wait.
     fn place_ready_batches(&mut self) {
-        for batch in std::mem::take(&mut self.recover_batches) {
-            let snapshots: Option<Vec<SessionSnapshot>> = batch
-                .iter()
-                .map(|id| self.sidebar.session(id).cloned())
-                .collect();
+        for (host, batch) in std::mem::take(&mut self.recover_batches) {
+            let snapshots: Option<Vec<SessionSnapshot>> = {
+                let listed = self.sidebar.sessions_of(&host);
+                batch
+                    .iter()
+                    .map(|id| listed.iter().find(|s| &s.id == id).cloned())
+                    .collect()
+            };
             match snapshots {
-                Some(snapshots) => self.place_recovered(&snapshots),
-                None => self.recover_batches.push(batch),
+                Some(snapshots) => self.place_recovered(&host, &snapshots),
+                None => self.recover_batches.push((host, batch)),
             }
         }
     }
 
-    /// Places `recovered` where normal spawns would go, one after another.
-    fn place_recovered(&mut self, recovered: &[SessionSnapshot]) {
+    /// Places `host`'s `recovered` where normal spawns would go, one after
+    /// another, each in a pane that names its host; the layout is This PC's.
+    fn place_recovered(&mut self, host: &HostKey, recovered: &[SessionSnapshot]) {
         if recovered.is_empty() {
             return;
         }
-        let messages =
-            spawns::place_several(recovered, &self.tabs, &self.sidebar.sessions_by_host());
+        let messages = spawns::place_several(
+            host,
+            recovered,
+            &self.tabs,
+            &self.sidebar.sessions_by_host(),
+        );
         tracing::info!(
+            ?host,
             sessions = recovered.len(),
             requests = messages.len(),
             "recover dialog: placing the recovered sessions"
@@ -438,12 +461,18 @@ impl RootView {
             } = &msg
             {
                 tracing::info!(request = %request_id, ?host, "recover dialog: recovering");
+                let listed = self.sidebar.sessions_of(&host);
                 let abandoned: HashSet<String> = items
                     .iter()
                     .map(|item| item.history_id.clone())
-                    .filter(|id| self.sidebar.session(id).is_some_and(|s| s.is_abandoned))
+                    .filter(|id| {
+                        listed
+                            .iter()
+                            .any(|session| &session.id == id && session.is_abandoned)
+                    })
                     .collect();
-                self.recover_requests.insert(request_id.clone(), abandoned);
+                self.recover_requests
+                    .insert(request_id.clone(), (host.clone(), abandoned));
             }
             self.send_to(&host, msg);
         }

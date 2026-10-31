@@ -1108,13 +1108,13 @@ pub struct RootView {
     tokens: Arc<dyn DeviceTokenStore>,
     /// Ends the wait for a recovery that goes unanswered.
     recover_timer: Option<Task<()>>,
-    /// The recoveries this connection sent and has had no answer to, by
-    /// request id, each with the requested sessions that were abandoned
-    /// (the daemon hands those their old panes itself).
-    recover_requests: HashMap<String, HashSet<String>>,
-    /// Recovered sessions to place, one batch per answer, waiting for every
-    /// snapshot of their batch.
-    recover_batches: Vec<Vec<String>>,
+    /// The recoveries this window sent and has had no answer to, by request
+    /// id, each with the host that recovers them and the requested sessions
+    /// that were abandoned (the daemon hands those their old panes itself).
+    recover_requests: HashMap<String, (HostKey, HashSet<String>)>,
+    /// Recovered sessions to place, one batch per answer with the host that
+    /// recovers them, waiting for every snapshot of their batch there.
+    recover_batches: Vec<(HostKey, Vec<String>)>,
     /// Repaints the Needs You panel while it shows, so its waits count up.
     needs_you_timer: Option<Task<()>>,
     /// How many times that timer has repainted the panel.
@@ -4336,8 +4336,8 @@ impl RootView {
     }
 
     /// Forgets everything remote host `host`'s daemon sent: its sessions,
-    /// repos and workspaces, and the panels and history that read them.
-    /// Sends nothing.
+    /// repos and workspaces, and the panels, history and recoveries that
+    /// read them. Sends nothing.
     pub(crate) fn clear_remote_slice(
         &mut self,
         host: &HostKey,
@@ -4352,6 +4352,7 @@ impl RootView {
         self.reset_dashboard_for_target(host);
         self.forget_sc_host(host);
         self.session_history.forget(host);
+        self.forget_recoveries_of(host);
         self.refresh_recover();
         self.drop_stale_session_ui(window, cx);
         self.prune_container_row_focus();
