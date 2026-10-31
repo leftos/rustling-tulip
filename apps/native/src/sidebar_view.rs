@@ -125,7 +125,7 @@ impl RootView {
         DimmedRows {
             containers: containers
                 .iter()
-                .filter(|container| self.container_dimmed(&container.key))
+                .filter(|container| self.host_dimmed(&container.host))
                 .map(|container| container.key.clone())
                 .collect(),
             sessions: self
@@ -294,12 +294,7 @@ impl RootView {
             hosts: containers
                 .iter()
                 .chain(groups.iter().flat_map(|group| group.containers.iter()))
-                .map(|container| {
-                    (
-                        container.key.clone(),
-                        self.host_of_container(&container.key),
-                    )
-                })
+                .map(|container| (container.key.clone(), container.host.clone()))
                 .collect(),
             dimmed: self.dimmed_rows(containers),
             highlighted: &self.launched_highlight,
@@ -311,10 +306,7 @@ impl RootView {
             let add_workspace = container
                 .path
                 .as_deref()
-                .and_then(|path| {
-                    let host = self.host_of_container(&container.key);
-                    self.cwd_workspace_suggestion_on(&host, path)
-                })
+                .and_then(|path| self.cwd_workspace_suggestion_on(&container.host, path))
                 .map(|suggestion| suggestion.suggested_name.clone());
             container_rows(container, add_workspace.as_deref(), &rows, window, cx)
         };
@@ -587,21 +579,23 @@ impl RootView {
         self.send_to(&HostKey::Local, add.message());
     }
 
-    /// Add repo for a DIR or SH container's folder: the folder is registered
-    /// straight away, with no picker and no change to the next pick's folder.
-    pub(crate) fn add_repo_at(&mut self, path: String, _cx: &mut Context<Self>) {
-        tracing::info!("adding repo {path}");
-        self.send_to(&HostKey::Local, ClientMessage::AddRepo { path, name: None });
+    /// Add repo for a DIR or SH container's folder on `host`, the
+    /// container's own: the folder is registered there straight away, with
+    /// no picker and no change to the next pick's folder.
+    pub(crate) fn add_repo_at(&mut self, host: &HostKey, path: String) {
+        tracing::info!(?host, "adding repo {path}");
+        self.send_to(host, ClientMessage::AddRepo { path, name: None });
     }
 
-    /// Add workspace for a DIR or SH container's folder: accepts the
-    /// `.code-workspace` its scan found, without watching it.
-    pub(crate) fn add_workspace_from_scan(&mut self, path: &str, _cx: &mut Context<Self>) {
-        let Some(suggestion) = self.cwd_workspace_suggestion(path).cloned() else {
+    /// Add workspace for a DIR or SH container's folder on `host`, the
+    /// container's own: accepts the `.code-workspace` that host's scan
+    /// found, without watching it.
+    pub(crate) fn add_workspace_from_scan(&mut self, host: &HostKey, path: &str) {
+        let Some(suggestion) = self.cwd_workspace_suggestion_on(host, path).cloned() else {
             return;
         };
         self.send_to(
-            &HostKey::Local,
+            host,
             ClientMessage::AcceptVscodeWorkspaceSuggestion {
                 suggestion,
                 watch: false,
@@ -1552,6 +1546,7 @@ fn path_banner(
     let banner_selector = format!("container-{key}-banner");
     let repo_selector = format!("container-{key}-add-repo");
     let repo_path = path.to_owned();
+    let repo_host = container.host.clone();
     let repo_tip = format!("Add repo: {path}");
     let banner = div()
         .debug_selector(move || banner_selector.clone())
@@ -1570,8 +1565,8 @@ fn path_banner(
         )))
         .child(
             banner_link(repo_selector, "Add repo", repo_tip, &t).on_click(cx.listener(
-                move |this, _: &ClickEvent, _window, cx| {
-                    this.add_repo_at(repo_path.clone(), cx);
+                move |this, _: &ClickEvent, _window, _cx| {
+                    this.add_repo_at(&repo_host, repo_path.clone());
                 },
             )),
         );
@@ -1580,11 +1575,12 @@ fn path_banner(
     };
     let workspace_selector = format!("container-{key}-add-workspace");
     let workspace_path = path.to_owned();
+    let workspace_host = container.host.clone();
     let workspace_tip = format!("Add workspace: {name}");
     banner.child(
         banner_link(workspace_selector, "Add workspace", workspace_tip, &t).on_click(cx.listener(
-            move |this, _: &ClickEvent, _window, cx| {
-                this.add_workspace_from_scan(&workspace_path, cx);
+            move |this, _: &ClickEvent, _window, _cx| {
+                this.add_workspace_from_scan(&workspace_host, &workspace_path);
             },
         )),
     )

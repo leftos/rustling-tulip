@@ -73,7 +73,7 @@ pub struct Hub {
     pub state: Arc<AppState>,
     pub sessions: Arc<SessionRegistry>,
     pub auth_token: String,
-    /// This daemon's stable id (`<config>/daemon-id`), sent in every
+    /// This daemon's stable id (`paths::resolve_daemon_id_file`), sent in every
     /// `Welcome`; kept across restarts.
     pub daemon_id: String,
     /// `tracer_protocol::daemon_proof_key(auth_token)`, derived once per run:
@@ -379,7 +379,7 @@ pub async fn run(
     remove_retired_lan_files(&dirs.config);
     let remote = crate::remote_config::load(&dirs);
     let auth_token = crate::secret::generate_auth_token();
-    let daemon_id = crate::daemon_id::load_or_create(&dirs).context("loading the daemon id")?;
+    let daemon_id = crate::daemon_id::load(&dirs).context("loading the daemon id")?;
 
     let (attention_tx, attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());

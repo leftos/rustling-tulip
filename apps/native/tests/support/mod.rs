@@ -30,7 +30,7 @@ use rustling_tulip_native::{
     RootView, ScPanel, Transport, bind_keys,
     remote_access::Autostart,
     spawn_net,
-    target::Target,
+    target::{HostKey, Target},
     ui_theme::UiTheme,
     update::{AlreadyRunning, LastResult, Ready, Updater},
 };
@@ -339,20 +339,20 @@ fn container_banner_part_shown(root: &RootView, selector: &str) -> Option<bool> 
     } else {
         (rest.strip_suffix("-add-workspace")?, true)
     };
-    let Some(path) = banner_path(root, key) else {
+    let Some((host, path)) = banner_path(root, key) else {
         return Some(false);
     };
-    Some(!wants_suggestion || root.cwd_workspace_suggestion(&path).is_some())
+    Some(!wants_suggestion || root.cwd_workspace_suggestion_on(&host, &path).is_some())
 }
 
-/// The folder an expanded DIR or SH container with `key` draws its banner
-/// for.
-fn banner_path(root: &RootView, key: &str) -> Option<String> {
+/// The host and folder an expanded DIR or SH container with `key` draws its
+/// banner for.
+fn banner_path(root: &RootView, key: &str) -> Option<(HostKey, String)> {
     root.sidebar_containers()
         .into_iter()
         .find(|c| c.key == key && !c.collapsed)
         .filter(|c| matches!(c.kind, ContainerKind::Shell | ContainerKind::Dir))
-        .and_then(|c| c.path)
+        .and_then(|c| c.path.map(|path| (c.host, path)))
 }
 
 /// Whether the shown source-control panel draws what `selector` tags.

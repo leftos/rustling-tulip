@@ -43,10 +43,11 @@ impl RootView {
             .collect()
     }
 
-    /// The daemon's `LayoutInitRequired`: the chooser opens on Start empty
-    /// and the client waits for a choice.
+    /// `host`'s daemon's `LayoutInitRequired`: the chooser opens on Start
+    /// empty and the client waits for a choice, which goes to `host`.
     pub(crate) fn open_layout_chooser(
         &mut self,
+        host: &HostKey,
         has_legacy: bool,
         active_session_count: u32,
         clonable: Vec<ClonableLayout>,
@@ -54,6 +55,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         tracing::info!(
+            ?host,
             has_legacy,
             active_session_count,
             clonable = clonable.len(),
@@ -61,6 +63,7 @@ impl RootView {
         );
         let count = usize::try_from(active_session_count).unwrap_or(usize::MAX);
         self.layout_chooser = Some(LayoutChooser::new(has_legacy, count, clonable));
+        self.layout_chooser_host = host.clone();
         if self.exit.is_none() {
             self.chooser_focus.focus(window);
         }
@@ -117,8 +120,9 @@ impl RootView {
             return;
         };
         if let Some((kind, arrangement)) = chooser.press(control, aspect) {
-            tracing::info!(?kind, ?arrangement, "layout chooser: chosen");
-            self.send_to(&HostKey::Local, ClientMessage::InitLayout { kind });
+            let host = self.layout_chooser_host.clone();
+            tracing::info!(?host, ?kind, ?arrangement, "layout chooser: chosen");
+            self.send_to(&host, ClientMessage::InitLayout { kind });
             self.pending_arrangement = arrangement;
             self.close_layout_chooser(window, cx);
         }

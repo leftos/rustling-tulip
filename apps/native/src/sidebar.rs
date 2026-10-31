@@ -336,6 +336,9 @@ pub struct Container {
     /// Any leaf shows attention ([`Leaf::shows_attention`]).
     pub attention: bool,
     pub collapsed: bool,
+    /// The host whose sessions, repos and workspaces the row was built
+    /// from.
+    pub host: HostKey,
 }
 
 impl Container {
@@ -1442,6 +1445,7 @@ impl SidebarModel {
             for container in &mut built {
                 container.key = host_container_key(host, &container.key);
                 container.collapsed = collapsed.contains(&container.key);
+                container.host = host.clone();
             }
         }
         built
@@ -2423,6 +2427,7 @@ fn container(
     Container {
         collapsed: inputs.collapsed.contains(&key),
         attention: leaves.iter().any(Leaf::shows_attention),
+        host: HostKey::Local,
         key,
         id: id.to_owned(),
         kind,
@@ -2670,6 +2675,7 @@ fn tab_view_container(
     Container {
         collapsed: collapsed.contains(&key),
         attention: leaves.iter().any(Leaf::shows_attention),
+        host: HostKey::Local,
         key,
         id: id.to_owned(),
         kind,

@@ -13,7 +13,7 @@ use protocol::{
 };
 
 use crate::RootView;
-use crate::connection::Connection;
+use crate::connection::{Connection, State};
 use crate::connection_picker::SavedHost;
 use crate::net::{HandshakeInfo, NetCommand};
 use crate::remote_access::RemoteStatusView;
@@ -293,6 +293,7 @@ impl RootView {
         if held {
             tracing::info!(?host, "disconnected from the host");
             self.on_host_closed(host, window, cx);
+            self.reconnect_duplicates_of(host, window, cx);
         }
         held
     }
@@ -300,10 +301,11 @@ impl RootView {
     /// `host`'s connection closed or the window let it go: its agents,
     /// daemon settings, daemon id, fetches, the Fetch file… dialog fetching
     /// from it and remote access status go with it, a remote host's spawns and duplicates in flight end with their
-    /// spawning toasts, and each host dropped as its duplicate is dialled
-    /// again. Once
-    /// the window holds no connection to it, a Pair armed for it is
-    /// forgotten and its pairing dialog closes.
+    /// spawning toasts. Once the window holds no connection to it, a Pair
+    /// armed for it is forgotten and its pairing dialog closes. The hosts
+    /// dropped as its duplicates stay dropped: they are freed only once its
+    /// connection ends ([`Self::release_duplicates_if_ended`]) or the
+    /// window lets it go.
     pub(crate) fn on_host_closed(
         &mut self,
         host: &HostKey,
@@ -330,7 +332,21 @@ impl RootView {
         if self.hosts.get(host).is_none() {
             self.forget_device_pairing(host, window, cx);
         }
-        self.reconnect_duplicates_of(host, window, cx);
+    }
+
+    /// `host`'s connection reported `state`: once it has ended (closed,
+    /// refused or stopped) its duplicates are freed and dialled again; while
+    /// it is still on its way, its own retry included, they stay dropped.
+    pub(crate) fn release_duplicates_if_ended(
+        &mut self,
+        host: &HostKey,
+        state: &State,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(state, State::Init | State::Connecting | State::Open { .. }) {
+            self.reconnect_duplicates_of(host, window, cx);
+        }
     }
 
     /// `owner` no longer holds its daemon: every host dropped as its
@@ -682,18 +698,19 @@ impl RootView {
             .map_or(HostKey::Local, |(host, _)| host)
     }
 
-    /// The host that owns container `id`: a repo or workspace id, or a
-    /// sidebar container key. A key carrying the prefix of a remote host
-    /// the window holds or has saved (a switched-off host keeps its rows)
-    /// names that host, so its DIR and SH containers resolve too; a
-    /// `repo:` or `ws:` key resolves by the id it holds. This PC for
-    /// anything else.
+    /// The host that owns container `id`: a sidebar container key resolves
+    /// to the host its row was built from, so a DIR or SH container and a
+    /// host whose key holds `::` resolve too; a repo or workspace id, bare
+    /// or as a `repo:` or `ws:` key, resolves by the host that registered
+    /// it. This PC for anything else.
     pub(crate) fn host_of_container(&self, id: &str) -> HostKey {
-        if let Some((name, _)) = id.split_once("::") {
-            let host = HostKey::Remote(name.to_owned());
-            if self.hosts.get(&host).is_some() || self.is_saved_host(&host) {
-                return host;
-            }
+        if let Some(container) = self
+            .sidebar
+            .containers()
+            .into_iter()
+            .find(|container| container.key == id)
+        {
+            return container.host;
         }
         let id = id
             .strip_prefix("repo:")
