@@ -4,6 +4,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.6.0-alpha
+
 ### Added
 
 - Settings › Appearance opens a Themes window: pick a built-in or your own theme from a live preview with its contrast check.
