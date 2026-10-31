@@ -10,15 +10,10 @@
 
 ## Wave 16 — Several hosts in one window
 
-- [ ] RT-118 Connect to several daemons at once, grouped by host · release vNext
-  - [/] RT-569 Spawn, settings and recover across hosts (MH.7) · release vNext
-  - [ ] RT-570 Prove several hosts in one window live, and document it (MH.8) · release vNext
-  - [ ] RT-573 Merge feat/multi-host to main (#204) · release vNext
-  - [ ] RT-578 Register a workspace or repo from a remote folder's banner on that host
-  - [ ] RT-579 Fix remote-host labels, Recover names, creator routing and IPv6 SSH keys left by MH.3
-  - [ ] RT-580 Drop only the reset host's cleanup-failed entries, and re-arm Recover's timer
-  - [ ] RT-584 Give a remote repo's container menu the remote-host refusal, not 'no folder'
-  - [ ] RT-600 Keep a fixed owner when two remote host keys reach one daemon · release vNext
+- [ ] RT-584 Give a remote repo's container menu the remote-host refusal, not 'no folder'
+- [ ] RT-580 Drop only the reset host's cleanup-failed entries, and re-arm Recover's timer
+- [ ] RT-579 Fix remote-host labels, Recover names, creator routing and IPv6 SSH keys left by MH.3
+- [ ] RT-578 Register a workspace or repo from a remote folder's banner on that host
 - [ ] RT-620 Route the remaining session and repo lookups by their own host
 - [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline
 - [ ] RT-623 Close three rare gaps in the host-aware spawn dialog: field redraw on a snap, agent refresh, preview key
@@ -179,6 +174,7 @@
 - [ ] RT-376 Re-read docs/release.md and docs/env-secrets.md against their named files' changes since 2026-10-22
 - [ ] RT-602 Describe the Contrast look where the docs still describe Petal
 - [ ] RT-616 Re-read the UI language README and the hook-status spike against their moved files
+- [ ] RT-635 Retire or update the remote-access and ssh-remote design files
 
 ## Build tooling
 
@@ -205,6 +201,8 @@
   - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
+- [ ] RT-634 Let native-e2e run one e2e file as a routed gated job
+- [ ] RT-636 Map the multi-host files in tools/test-map.json so -Validate passes
 
 ## macOS
 
@@ -320,3 +318,7 @@
 - [ ] RT-615 Keep a weight difference between chosen and unchosen at UI weight SemiBold
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
+- [ ] RT-630 Open a remote host's preset wizard while This PC is offline
+- [ ] RT-631 Drop only the reconnected host's preset launch jobs
+- [ ] RT-632 Close five edge cases in shared-daemon ownership and pop-out moves
+- [ ] RT-633 Close a remote host's layout question when its tab list arrives
