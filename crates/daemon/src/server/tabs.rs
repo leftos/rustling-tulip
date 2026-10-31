@@ -423,6 +423,16 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 send_tab_failure(out_tx, &err, request_id);
             }
         }
+        ClientMessage::RehostPanes {
+            from,
+            to,
+            session_ids,
+            request_id,
+        } => {
+            if let Err(err) = rehost_panes(hub, client_id, &from, to.as_deref(), &session_ids) {
+                send_tab_failure(out_tx, &err, request_id);
+            }
+        }
         _ => warn!("tabs::handle: dispatch routed a message this module does not handle"),
     }
     Ok(())
@@ -666,7 +676,7 @@ fn short_rev(rev: &str) -> &str {
 
 /// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `ClosePane`,
 /// `MergeTabs`, `MovePane`, `SwapPanes`, `ReorderTabs`, `ExtractToNewTab`,
-/// `ForgetHostSessions`, `RebindHostSessions`) with
+/// `ForgetHostSessions`, `RebindHostSessions`, `RehostPanes`) with
 /// an `Error` to this requester only, carrying the `request_id` it asked with
 /// so the client can drop what it armed for it.
 fn send_tab_failure(
@@ -720,6 +730,30 @@ pub(super) fn close_session_panes(hub: &Hub, session_id: &str) {
     }) {
         warn!(?err, "close_session_panes: state.mutate failed");
     }
+}
+
+/// Move this client's panes of `from` whose sessions are in `session_ids` to
+/// `to`, then emit one scoped `TabUpdated` for each tab that changed. The
+/// requester's layout only: another client's layout holds its own host keys.
+/// No matching pane writes nothing and emits nothing.
+fn rehost_panes(
+    hub: &Hub,
+    client_id: &str,
+    from: &str,
+    to: Option<&str>,
+    session_ids: &[String],
+) -> anyhow::Result<()> {
+    let mut changed: Vec<TabEntry> = Vec::new();
+    let written = hub.state.mutate_client_layout(client_id, |tabs| {
+        changed = crate::tabs::rehost_panes(tabs, from, to, session_ids);
+    });
+    // [`crate::state::AppState::mutate`] changes the live state before it
+    // writes the file, so a failed write is returned only after the emit:
+    // clients must see the layout the daemon now holds.
+    for tab in changed {
+        hub.emit_tab(client_id, TabEvent::Updated(tab));
+    }
+    written
 }
 
 /// [`close_session_panes`] for another daemon's sessions: close, across all
@@ -1890,6 +1924,95 @@ mod tests {
             assert_eq!(panes[1], rebind_panes_fixture()[1], "the local pane stays");
             assert_eq!(panes[2], rebind_panes_fixture()[2], "another host's stays");
             assert_eq!(panes[3], rebind_panes_fixture()[3], "another session stays");
+        }
+
+        const REHOST_FROM: &str = "a";
+
+        /// The only pane of tab `t1`, a pane of [`REHOST_FROM`] on `s1`.
+        fn seed_rehost_pane(hub: &Hub, client_id: &str) {
+            let grid = crate::tabs::build_balanced(
+                &[crate::tabs::PaneRef {
+                    pane_id: "p1".to_string(),
+                    session_id: Some("s1".to_string()),
+                    host: Some(REHOST_FROM.to_string()),
+                }],
+                protocol::SplitDirection::Horizontal,
+            )
+            .expect("one pane builds a grid");
+            hub.state
+                .mutate_client_layout(client_id, |tabs| {
+                    tabs.push(TabEntry {
+                        id: "t1".to_string(),
+                        name: "Tab".to_string(),
+                        content: TabContent::Grid { grid },
+                        created_at: Utc::now(),
+                        picked_layout: None,
+                    });
+                })
+                .expect("seed the client layout");
+        }
+
+        fn rehost_message(from: &str, to: Option<&str>, request_id: Option<&str>) -> ClientMessage {
+            ClientMessage::RehostPanes {
+                from: from.to_string(),
+                to: to.map(str::to_owned),
+                session_ids: vec!["s1".to_string()],
+                request_id: request_id.map(str::to_owned),
+            }
+        }
+
+        #[tokio::test]
+        async fn rehost_panes_moves_only_the_requesters_panes() {
+            let (hub, _scratch) = test_hub("rehost-requester-only");
+            seed_rehost_pane(&hub, "c1");
+            seed_rehost_pane(&hub, "c2");
+            let other_before = hub.state.client_layout("c2");
+            let mut events = hub.tab_events.subscribe();
+
+            dispatch_ok(&hub, rehost_message(REHOST_FROM, Some("c"), None)).await;
+
+            let moved = crate::tabs::collect_panes(only_tab(&hub, "c1").grid().expect("grid"));
+            assert_eq!(
+                moved[0].host.as_deref(),
+                Some("c"),
+                "the requester's pane moved"
+            );
+            assert_eq!(
+                hub.state.client_layout("c2"),
+                other_before,
+                "another client's layout is untouched"
+            );
+            let mut scoped = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                scoped.push(event);
+            }
+            assert!(
+                matches!(
+                    scoped.as_slice(),
+                    [crate::server::ScopedTabEvent { client_id, event: TabEvent::Updated(tab) }]
+                        if client_id == "c1" && tab.id == "t1"
+                ),
+                "one update, to the requester only: {scoped:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn rehost_panes_with_no_match_sends_nothing() {
+            let (hub, _scratch) = test_hub("rehost-no-match");
+            seed_rehost_pane(&hub, "c1");
+            let before = hub.state.client_layout("c1");
+            let mut events = hub.tab_events.subscribe();
+
+            let sent = dispatch_all(&hub, rehost_message("ghost", Some("c"), Some("r1"))).await;
+
+            assert!(sent.is_empty(), "no match answers nothing: {sent:?}");
+            assert_eq!(
+                hub.state.client_layout("c1"),
+                before,
+                "no match changes nothing"
+            );
+            let updated = super::take_tab_events(&mut events);
+            assert!(updated.is_empty(), "no match sends nothing: {updated:?}");
         }
 
         /// Make every later write of `state.json` fail.

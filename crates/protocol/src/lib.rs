@@ -3850,6 +3850,24 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Move this client's panes of one host to another, in the requester's
+    /// layout only: each pane whose `host` equals `from` and whose `session_id`
+    /// is in `session_ids` takes host `to` (`None` is This PC). Sent only to This
+    /// PC, whose layouts hold the panes of remote hosts, when two host keys reach
+    /// one daemon. The host is compared when the daemon applies it, so a pane
+    /// re-bound since the client sent it is left alone. A changed tab gets its
+    /// usual [`DaemonMessage::TabUpdated`]; no matching pane changes nothing and
+    /// sends nothing. A refusal is an [`DaemonMessage::Error`] with code
+    /// `tab_refused`.
+    RehostPanes {
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        session_ids: Vec<String>,
+        /// Echoed on a [`DaemonMessage::Error`] answering it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Request the list of presets available for a repo or workspace. The
     /// daemon reads `.rustling-tulip/presets.json` from the target repo (or
     /// from each member repo of a workspace) and replies with
@@ -5832,7 +5850,7 @@ mod tests {
     }
 
     /// The tab-layout requests, each carrying `request_id`.
-    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 9] {
+    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 10] {
         let request_id = request_id.map(str::to_owned);
         [
             ClientMessage::SplitPane {
@@ -5862,6 +5880,12 @@ mod tests {
                     old_id: "s1".to_owned(),
                     new_id: "s2".to_owned(),
                 }],
+                request_id: request_id.clone(),
+            },
+            ClientMessage::RehostPanes {
+                from: "ssh:devbox".to_owned(),
+                to: Some("tailnet:laptop".to_owned()),
+                session_ids: vec!["s1".to_owned()],
                 request_id: request_id.clone(),
             },
             ClientMessage::MergeTabs {
@@ -5910,7 +5934,8 @@ mod tests {
             | ClientMessage::ReorderTabs { request_id, .. }
             | ClientMessage::ExtractToNewTab { request_id, .. }
             | ClientMessage::ForgetHostSessions { request_id, .. }
-            | ClientMessage::RebindHostSessions { request_id, .. } => request_id.as_deref(),
+            | ClientMessage::RebindHostSessions { request_id, .. }
+            | ClientMessage::RehostPanes { request_id, .. } => request_id.as_deref(),
             other => panic!("not a tab-layout request: {other:?}"),
         }
     }
@@ -6156,6 +6181,41 @@ mod tests {
                 &back,
                 ClientMessage::RebindHostSessions { host, rebinds, request_id: Some(id) }
                     if host == "tailnet:laptop" && rebinds == std::slice::from_ref(&rebind) && id == "req-5"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn rehost_panes_round_trips_with_and_without_to() {
+        let decoded: ClientMessage = serde_json::from_str(
+            r#"{"type":"rehost_panes","from":"ssh:devbox","to":"tailnet:laptop","session_ids":["s1","s2"]}"#,
+        )
+        .expect("a rehost decodes");
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::RehostPanes { from, to: Some(to), session_ids, request_id: None }
+                    if from == "ssh:devbox" && to == "tailnet:laptop" && session_ids == &["s1", "s2"]
+            ),
+            "{decoded:?}"
+        );
+
+        let msg = ClientMessage::RehostPanes {
+            from: "ssh:devbox".to_owned(),
+            to: None,
+            session_ids: vec!["s1".to_owned()],
+            request_id: Some("req-6".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"rehost_panes""#), "{json}");
+        assert!(!json.contains(r#""to""#), "None is omitted: {json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::RehostPanes { from, to: None, request_id: Some(id), .. }
+                    if from == "ssh:devbox" && id == "req-6"
             ),
             "{json}"
         );

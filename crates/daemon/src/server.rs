@@ -739,7 +739,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::MergeTabs { .. }
         | ClientMessage::ExtractToNewTab { .. }
         | ClientMessage::ForgetHostSessions { .. }
-        | ClientMessage::RebindHostSessions { .. }) => tabs::handle(hub, m, ctx)?,
+        | ClientMessage::RebindHostSessions { .. }
+        | ClientMessage::RehostPanes { .. }) => tabs::handle(hub, m, ctx)?,
         m @ (ClientMessage::ResumeAbandoned { .. }
         | ClientMessage::DiscardAbandoned { .. }
         | ClientMessage::ResumeAllAbandoned

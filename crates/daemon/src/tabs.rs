@@ -650,6 +650,53 @@ fn rebind_grid(grid: &mut GridNode, target: Option<&str>, old: &str, new: &str) 
     }
 }
 
+/// Move every pane of `from` in `tabs` whose session is in `session_ids` to
+/// host `to` (`None` for this daemon's own), in place. Used by
+/// `RehostPanes` when two host keys turn out to reach one daemon. A pane of
+/// any other host, or of `from` with a session not listed, stays. Topology,
+/// pane ids, ratios and bindings are untouched. Returns clones of the tabs
+/// whose grids changed so the caller can broadcast scoped tab events.
+pub fn rehost_panes(
+    tabs: &mut [TabEntry],
+    from: &str,
+    to: Option<&str>,
+    session_ids: &[String],
+) -> Vec<TabEntry> {
+    let mut updated = Vec::new();
+    for tab in tabs.iter_mut() {
+        let Some(grid) = tab.grid_mut() else {
+            continue;
+        };
+        if rehost_grid(grid, from, to, session_ids) {
+            updated.push(tab.clone());
+        }
+    }
+    updated
+}
+
+fn rehost_grid(grid: &mut GridNode, from: &str, to: Option<&str>, session_ids: &[String]) -> bool {
+    match grid {
+        GridNode::Pane {
+            session_id, host, ..
+        } => {
+            let listed = session_id
+                .as_deref()
+                .is_some_and(|sid| session_ids.iter().any(|id| id == sid));
+            if host.as_deref() == Some(from) && listed {
+                *host = to.map(str::to_string);
+                true
+            } else {
+                false
+            }
+        }
+        GridNode::Split { first, second, .. } => {
+            let a = rehost_grid(first, from, to, session_ids);
+            let b = rehost_grid(second, from, to, session_ids);
+            a || b
+        }
+    }
+}
+
 /// Extract a pane (leaf) from the grid, collapsing parent splits as needed.
 /// Returns the extracted Pane node plus a flag indicating whether the source
 /// tab is now empty (caller should remove the tab).
@@ -1832,6 +1879,67 @@ mod tests {
         assert_eq!(
             tabs[0].grid(),
             Some(&split(Horizontal, 0.5, pane("a1", Some("new")), host_pane)),
+        );
+    }
+
+    #[test]
+    fn rehost_panes_moves_only_panes_of_that_host_and_session() {
+        let mut tabs = vec![grid_tab(
+            "A",
+            split(
+                Horizontal,
+                0.5,
+                foreign_pane("p1", "s1", "a"),
+                split(
+                    Vertical,
+                    0.5,
+                    foreign_pane("p2", "s2", "a"),
+                    split(
+                        Horizontal,
+                        0.5,
+                        foreign_pane("p3", "s1", "b"),
+                        pane("p4", Some("s1")),
+                    ),
+                ),
+            ),
+        )];
+
+        let updated = rehost_panes(&mut tabs, "a", Some("c"), &["s1".to_string()]);
+
+        let updated_ids: Vec<&str> = updated.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(updated_ids, ["A"]);
+        let hosts: Vec<Option<String>> = collect_panes(tabs[0].grid().expect("A grid"))
+            .into_iter()
+            .map(|pane| pane.host)
+            .collect();
+        assert_eq!(
+            hosts,
+            vec![
+                Some("c".to_string()),
+                Some("a".to_string()),
+                Some("b".to_string()),
+                None,
+            ],
+            "only the listed session of host a moved"
+        );
+
+        assert!(
+            rehost_panes(&mut tabs, "a", Some("c"), &["s1".to_string()]).is_empty(),
+            "a second rehost matches nothing"
+        );
+    }
+
+    #[test]
+    fn rehost_panes_to_this_pc_clears_the_host() {
+        let mut tabs = vec![grid_tab("A", foreign_pane("p1", "s1", "a"))];
+
+        let updated = rehost_panes(&mut tabs, "a", None, &["s1".to_string()]);
+
+        assert_eq!(updated.len(), 1);
+        assert_eq!(
+            collect_panes(tabs[0].grid().expect("A grid"))[0].host,
+            None,
+            "This PC's panes carry no host"
         );
     }
 
