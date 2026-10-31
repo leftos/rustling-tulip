@@ -144,7 +144,7 @@ impl RootView {
             // A host path is not on this PC; resolving it here could open
             // a local file of the same name, so it is fetched instead.
             LinkKind::Path if !opens_here => {
-                self.fetch_path_link(link, session, cx);
+                self.fetch_path_link(link, &host, session, cx);
             }
             LinkKind::Path => {
                 let candidates = link.candidates.clone();

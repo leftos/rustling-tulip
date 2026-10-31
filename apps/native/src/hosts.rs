@@ -311,6 +311,11 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.lists_since_welcome.remove(host);
+        // This PC's next tab list is its next connection's: until then its
+        // layout is the old one's.
+        if *host == HostKey::Local {
+            self.pane_forgets.tabs_in = false;
+        }
         self.forget_agents(host);
         self.forget_daemon_settings(host);
         self.forget_daemon_id(host);
@@ -735,7 +740,8 @@ pub(crate) struct PaneForgets {
     /// The hosts forgotten while This PC was offline, in order, sent after
     /// its next tab list.
     queued: Vec<HostKey>,
-    /// Whether This PC's tab list has arrived on its current connection.
+    /// Whether This PC's tab list has arrived on its current connection;
+    /// cleared when that connection closes and on its next `Welcome`.
     tabs_in: bool,
     /// Whether the current connection's sweep of unsaved hosts has run.
     swept: bool,
@@ -813,8 +819,13 @@ impl RootView {
     /// Asks This PC to forget each pane whose remote session its host's
     /// fresh list no longer names, one message per host, ids sorted; a
     /// session or host whose forget is in flight is not asked again.
-    /// Nothing is pruned until This PC is open with its tab list in.
+    /// Nothing is pruned until This PC is open with its tab list in, and
+    /// until that list is in on its current connection no forget in flight
+    /// is let go against the old layout.
     pub(crate) fn prune_remote_panes(&mut self) {
+        if !self.pane_forgets.tabs_in {
+            return;
+        }
         let bindings = self.tabs.bindings();
         self.pane_forgets
             .sessions
@@ -822,7 +833,7 @@ impl RootView {
         self.pane_forgets
             .hosts
             .retain(|host| bindings.iter().any(|binding| binding.host == *host));
-        if !(self.conn().is_open() && self.pane_forgets.tabs_in) {
+        if !self.conn().is_open() {
             return;
         }
         for host in self.held_hosts() {
@@ -857,6 +868,13 @@ impl RootView {
                 },
             );
         }
+    }
+
+    /// Whether a forget of `session`'s panes, or of every pane of its host,
+    /// is on its way to This PC.
+    pub(crate) fn forget_in_flight(&self, session: &SessionRef) -> bool {
+        self.pane_forgets.sessions.contains(session)
+            || self.pane_forgets.hosts.contains(&session.host)
     }
 
     /// Whether `host`'s panes may be pruned: a remote host held, open, and

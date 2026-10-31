@@ -1720,7 +1720,7 @@ impl RootView {
         if shown {
             self.popout_focused = Some(pane_id.to_owned());
             if let Some(session) = self.popout_focused_session() {
-                self.sidebar.mark_seen(&session);
+                self.sidebar.mark_seen(&session.id);
             }
         } else if self.popout_focused.as_deref() == Some(pane_id) {
             self.popout_focused = None;
@@ -1730,18 +1730,18 @@ impl RootView {
 
     /// The session a pop-out's terminal shows with its window's keyboard,
     /// while that pane, its tab or that session is still popped out.
-    fn popout_focused_session(&self) -> Option<String> {
+    fn popout_focused_session(&self) -> Option<SessionRef> {
         let pane_id = self.popout_focused.as_deref()?;
         if let Some(session) = popouts::slot_session(pane_id) {
             let key = PopoutKey::session(&session.host, &session.id);
-            return self.popouts.is_open(&key).then_some(session.id);
+            return self.popouts.is_open(&key).then_some(session);
         }
         if self.tab_popout_of_pane(pane_id).is_some() {
-            return self.panes.get(pane_id)?.session().map(str::to_owned);
+            return self.panes.get(pane_id)?.session_ref();
         }
         self.popouts.popped_key(pane_id)?;
-        let session = popouts::pane_in_tabs(pane_id, self.tabs.tabs())?.session?;
-        Some(session.to_owned())
+        let pane = popouts::pane_in_tabs(pane_id, self.tabs.tabs())?;
+        Some(SessionRef::new(pane.host.clone(), pane.session?))
     }
 
     /// Closes the pop-outs whose content has gone: a pane pop-out whose pane
@@ -1897,23 +1897,30 @@ impl RootView {
         }
     }
 
-    /// Whether session `session_id` has a pop-out window of its own, so a
-    /// restart from any window reopens the copy there.
-    pub(crate) fn has_session_popout(&self, session_id: &str) -> bool {
+    /// Whether `session`, host and id both, has a pop-out window of its own,
+    /// so a restart from any window reopens the copy there.
+    pub(crate) fn has_session_popout(&self, session: &SessionRef) -> bool {
         self.popouts
-            .session_key(session_id)
+            .session_key(session)
             .is_some_and(|key| self.popout_windows.contains_key(key))
     }
 
-    /// A restart of `old`, whose session pop-out is open, arrived as `new`
-    /// on the same host: the pop-out, its window and its terminal now show
-    /// `new`.
-    pub(crate) fn rekey_session_popout(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
+    /// A restart of `old`, whose session pop-out is open, arrived as `new`:
+    /// the pop-out, its window and its terminal now show `new`'s id on
+    /// `old`'s host.
+    pub(crate) fn rekey_session_popout(
+        &mut self,
+        old: &SessionRef,
+        new: &SessionRef,
+        cx: &mut Context<Self>,
+    ) {
         let Some(old_key) = self.popouts.session_key(old).cloned() else {
-            tracing::debug!(%old, "the restarted session's pop-out has closed");
+            tracing::debug!(?old, "the restarted session's pop-out has closed");
             return;
         };
-        let new_key = PopoutKey::session(&old_key.host(), new);
+        let host = old.host.clone();
+        let (old, new) = (old.id.as_str(), new.id.as_str());
+        let new_key = PopoutKey::session(&host, new);
         self.popouts.rekey(&old_key, new_key.clone());
         if self.sidebar.rekey_saved_popout(&old_key, new_key.clone()) {
             self.schedule_ui_save(cx);
@@ -1929,7 +1936,7 @@ impl RootView {
             }
             self.popout_windows.insert(new_key.clone(), popout);
         }
-        self.rekey_session_slot(&old_key.host(), old, new, cx);
+        self.rekey_session_slot(&host, old, new, cx);
         self.update_pane_roles(cx);
         self.mark_popout_resized(&new_key, cx);
         self.refresh_popout_titles(cx);
@@ -1962,9 +1969,13 @@ impl RootView {
     }
 
     /// What `key`'s pop-out window is titled, read against its host's
-    /// sessions and agents.
+    /// sessions and agents: a pane's session's host, from the layout.
     fn popout_title(&self, key: &PopoutKey) -> String {
-        let host = key.host();
+        let host = match key {
+            // An empty pane names no host, and is titled as empty on any.
+            PopoutKey::Pane { .. } => key.hosts(self.tabs.tabs()).pop().unwrap_or(HostKey::Local),
+            PopoutKey::Tab { .. } | PopoutKey::Session { .. } => key.host(),
+        };
         popouts::title(
             key,
             self.tabs.tabs(),
@@ -2983,13 +2994,17 @@ impl RootView {
     fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.clear_attention(id);
         self.sidebar.mark_seen(id);
-        if let Some(key) = self.popouts.showing_session(id, self.tabs.tabs()).cloned() {
+        let shown = SessionRef::new(self.host_of_session(id), id);
+        if let Some(key) = self
+            .popouts
+            .showing_session(&shown, self.tabs.tabs())
+            .cloned()
+        {
             // Its pane draws in a pop-out: that window comes to the front.
             self.activate_popout(&key, cx);
-        } else if let Some((tab_id, pane_id)) = find_tab_containing_session(
-            self.tabs.tabs(),
-            &SessionRef::new(self.host_of_session(id), id),
-        ) {
+        } else if let Some((tab_id, pane_id)) =
+            find_tab_containing_session(self.tabs.tabs(), &shown)
+        {
             if self.is_tab_popped(&tab_id) {
                 // Its tab draws in a pop-out: the pane takes its tab's focus
                 // and that window comes to the front, whichever tab the main
@@ -3100,6 +3115,10 @@ impl RootView {
             }
             tried += 1;
             let key = entry.key.clone();
+            if self.popout_pane_forgotten(&key) {
+                tracing::info!(?key, "a saved pop-out's pane is gone or being forgotten");
+                continue;
+            }
             let place = PopoutPlace::Restored(entry.window);
             if self.open_popout_at(key.clone(), &place, window, cx) == OpenOutcome::Opened {
                 reopened += 1;
@@ -3130,10 +3149,12 @@ impl RootView {
         }
     }
 
-    /// Splits the saved pop-outs into those the restore tries now and the
-    /// remote sessions' ones that wait for their host's session list. A
-    /// pop-out of a remote host the window holds no connection to is
-    /// dropped.
+    /// Splits the saved pop-outs into those the restore tries now and those
+    /// that wait for the session lists of the remote hosts they show (a
+    /// session key's own, a pane's or a tab's from the layout) that the
+    /// window holds; a host it does not hold is not waited for. A session
+    /// pop-out of a remote host the window holds no connection to and that
+    /// never listed is dropped.
     fn split_awaited_popouts(
         &self,
         saved: Vec<SavedPopout>,
@@ -3141,66 +3162,107 @@ impl RootView {
         let (mut now, mut awaiting) = (Vec::new(), Vec::new());
         for entry in saved {
             let host = entry.key.host();
-            if host == HostKey::Local || self.remote_lists_in.contains(&host) {
-                now.push(entry);
-            } else if self.hosts.get(&host).is_some() {
-                awaiting.push(entry);
-            } else {
+            let host_gone = matches!(entry.key, PopoutKey::Session { .. })
+                && host != HostKey::Local
+                && !self.remote_lists_in.contains(&host)
+                && self.hosts.get(&host).is_none();
+            if host_gone {
                 tracing::info!(key = ?entry.key, "a saved pop-out's host is not connected; dropped");
+            } else if self.unlisted_hosts(&entry.key).is_empty() {
+                now.push(entry);
+            } else {
+                awaiting.push(entry);
             }
         }
         (now, awaiting)
     }
 
-    /// `host`'s session list arrived: the saved pop-outs that waited for it
-    /// reopen in the main window, and one whose session it does not list is
-    /// dropped.
-    fn restore_awaited_popouts(
-        &mut self,
-        host: &HostKey,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// The remote hosts `key` shows sessions of (a session key's own, a
+    /// pane's or a tab's from the layout) that the window holds and that
+    /// have sent no session list yet.
+    fn unlisted_hosts(&self, key: &PopoutKey) -> Vec<HostKey> {
+        let named = match key {
+            PopoutKey::Session { .. } => vec![key.host()],
+            PopoutKey::Pane { .. } | PopoutKey::Tab { .. } => key.hosts(self.tabs.tabs()),
+        };
+        named
+            .into_iter()
+            .filter(|host| {
+                *host != HostKey::Local
+                    && !self.remote_lists_in.contains(host)
+                    && self.hosts.get(host).is_some()
+            })
+            .collect()
+    }
+
+    /// Whether `key` is a pane pop-out whose pane is in no tab, or whose
+    /// session a forget of its panes is on its way for: restoring it would
+    /// open a window the forget closes again.
+    fn popout_pane_forgotten(&self, key: &PopoutKey) -> bool {
+        let PopoutKey::Pane { tab_id, pane_id } = key else {
+            return false;
+        };
+        let Some(grid) = self.tabs.tab(tab_id).and_then(TabEntry::grid) else {
+            return true;
+        };
+        let Some(pane) = tabs::collect_panes(grid)
+            .into_iter()
+            .find(|pane| pane.id == pane_id)
+        else {
+            return true;
+        };
+        pane.session
+            .is_some_and(|id| self.forget_in_flight(&SessionRef::new(pane.host.clone(), id)))
+    }
+
+    /// A remote host's session list arrived: the saved pop-outs no longer
+    /// waiting for any host's list reopen in the main window, and one whose
+    /// content is gone is dropped.
+    fn restore_awaited_popouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self
             .popouts_awaiting_hosts
             .iter()
-            .any(|entry| entry.key.host() == *host)
+            .any(|entry| self.unlisted_hosts(&entry.key).is_empty())
         {
             return;
         }
         if self.is_main_window(window) {
-            self.reopen_awaited_popouts(host, window, cx);
+            self.reopen_awaited_popouts(window, cx);
         } else {
-            let host = host.clone();
-            Self::in_window(self.layouts.main(), cx, move |root, window, cx| {
-                root.reopen_awaited_popouts(&host, window, cx);
-            });
+            Self::in_window(self.layouts.main(), cx, Self::reopen_awaited_popouts);
         }
     }
 
-    fn reopen_awaited_popouts(
-        &mut self,
-        host: &HostKey,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Reopens each awaited pop-out whose hosts have all listed, a moved
+    /// pane under its new tab; a pane pop-out whose pane is gone or being
+    /// forgotten, or one that does not open, is dropped and un-saved.
+    fn reopen_awaited_popouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (due, rest): (Vec<SavedPopout>, Vec<SavedPopout>) =
             std::mem::take(&mut self.popouts_awaiting_hosts)
                 .into_iter()
-                .partition(|entry| entry.key.host() == *host);
+                .partition(|entry| self.unlisted_hosts(&entry.key).is_empty());
         self.popouts_awaiting_hosts = rest;
-        let mut dropped = false;
-        for entry in due {
+        let followed = popouts::follow_saved_moves(due.clone(), self.tabs.tabs());
+        let mut changed = false;
+        for (was, entry) in due.iter().zip(followed) {
+            if entry.key != was.key {
+                changed |= self.sidebar.forget_saved_popout(&was.key);
+            }
             if self.popouts.is_open(&entry.key) {
+                continue;
+            }
+            if self.popout_pane_forgotten(&entry.key) {
+                tracing::info!(key = ?entry.key, "a saved pop-out's pane is gone or being forgotten; dropped");
+                changed |= self.sidebar.forget_saved_popout(&entry.key);
                 continue;
             }
             let place = PopoutPlace::Restored(entry.window.clone());
             if self.open_popout_at(entry.key.clone(), &place, window, cx) != OpenOutcome::Opened {
                 tracing::info!(key = ?entry.key, "a saved pop-out's session is not on its host; dropped");
-                dropped |= self.sidebar.forget_saved_popout(&entry.key);
+                changed |= self.sidebar.forget_saved_popout(&entry.key);
             }
         }
-        if dropped {
+        if changed {
             self.schedule_ui_save(cx);
         }
     }
@@ -3793,7 +3855,7 @@ impl RootView {
         // A session focused in a pop-out is shown too: a turn ending there
         // is seen.
         if let Some(session) = self.popout_focused_session() {
-            self.sidebar.mark_seen(&session);
+            self.sidebar.mark_seen(&session.id);
         }
         self.prune_container_row_focus();
         self.forget_remembered_session(msg);
@@ -4436,10 +4498,14 @@ impl RootView {
         self.attach_waiting_panes(cx);
         self.apply_pane_fonts(false, cx);
         self.try_wanted_session(window, cx);
+        // The prune first, so a restore never opens a pane its forget
+        // closes again.
+        if *host != HostKey::Local {
+            self.prune_remote_panes();
+        }
         self.try_restore_popouts(window, cx);
         if *host != HostKey::Local {
-            self.restore_awaited_popouts(host, window, cx);
-            self.prune_remote_panes();
+            self.restore_awaited_popouts(window, cx);
         }
         self.scan_unseen_cwd_paths();
     }

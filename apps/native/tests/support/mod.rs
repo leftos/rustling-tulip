@@ -927,6 +927,75 @@ pub fn mixed_tabs<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> 
     h
 }
 
+/// Writes `ui` as the `native-ui.json` the window opens over.
+pub fn seed_ui(dir: &TestDir, ui: &Value) {
+    std::fs::write(dir.path().join("native-ui.json"), ui.to_string())
+        .expect("write native-ui.json");
+}
+
+/// The `native-ui.json` the window last saved.
+pub fn saved_ui(dir: &TestDir) -> Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    serde_json::from_str(&text).expect("native-ui.json is JSON")
+}
+
+/// The saved host [`REMOTE`] as launch dials it.
+pub fn saved_remote() -> Target {
+    Target::tailnet(REMOTE, Some(8787))
+}
+
+/// This PC lists `a1`; tab `t1` splits it (pane `p1`) beside [`REMOTE`]'s
+/// `b1` (pane `p2`), and tab `t2` holds [`REMOTE`]'s `b2` (pane `p3`).
+pub fn two_tab_fixture() -> Fixture {
+    Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: two_tabs(),
+        ..Fixture::default()
+    }
+}
+
+/// The tabs of [`two_tab_fixture`].
+pub fn two_tabs() -> Vec<TabEntry> {
+    vec![
+        tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("a1")),
+                remote_pane("p2", "b1"),
+            ),
+        ),
+        tab("t2", &remote_pane("p3", "b2")),
+    ]
+}
+
+/// [`REMOTE`] saved and connected beside This PC over `fixture`, listing
+/// `remote_sessions`; nothing sent is left unread on either host.
+pub fn saved_remote_over<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    fixture: &Fixture,
+    remote_sessions: &[&str],
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, dir, fixture);
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, remote_sessions);
+    h.sent();
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// [`REMOTE`]'s daemon lists `ids`.
+pub fn remote_lists(h: &mut Harness<'_>, ids: &[&str]) {
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: ids.iter().map(|id| session(id).build()).collect(),
+    });
+}
+
 /// What the fake daemon holds at connect.
 #[derive(Default)]
 pub struct Fixture {

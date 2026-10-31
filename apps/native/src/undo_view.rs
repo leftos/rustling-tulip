@@ -12,6 +12,7 @@ use gpui::{
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::ellipsis::truncating;
 use crate::notice_view::{CLOSE_SIZE, toast_frame};
+use crate::tabs::SessionRef;
 use crate::target::HostKey;
 use crate::ui_theme::theme;
 use crate::undo::{self, TabSnapshot, UndoEntry};
@@ -99,10 +100,15 @@ impl RootView {
         // put it back.
         let live = undo::live_tabs(self.tabs.tabs(), self.tabs.closing());
         let open_viewers = undo::take_open_viewers(&mut entry, self.tabs.tabs(), &live);
-        let known: HashSet<String> = self
+        let known: HashSet<SessionRef> = self
             .sidebar
-            .all_sessions()
-            .map(|session| session.id.clone())
+            .sessions_by_host()
+            .into_iter()
+            .flat_map(|(host, sessions)| {
+                sessions
+                    .iter()
+                    .map(move |session| SessionRef::new(host.clone(), session.id.clone()))
+            })
             .collect();
         let messages = undo::restore_messages(&entry, &live, &known);
         for snapshot in entry.ordered() {

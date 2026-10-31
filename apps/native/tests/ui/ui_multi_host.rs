@@ -18,10 +18,13 @@ use rustling_tulip_native::ScKey;
 use rustling_tulip_native::connection_picker::PeerSource;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, NetCommand, NetEvent, toast_action_selector};
+use rustling_tulip_native::{
+    Connection, HeaderChipKind, NetCommand, NetEvent, toast_action_selector,
+};
 use support::{
     Fixture, Forget, Harness, PROTOCOL, TestDir, facts, facts_message, forgets, history_item, pane,
-    remote_pane, repo, session, split, tab, welcome,
+    remote_lists, remote_pane, repo, saved_remote, saved_remote_over, saved_ui, seed_ui, session,
+    split, tab, two_tab_fixture, two_tabs, welcome,
 };
 
 #[gpui::test]
@@ -1195,18 +1198,6 @@ fn a_remote_hosts_pending_scan_is_asked_again_after_it_reconnects(cx: &mut TestA
     );
 }
 
-/// Writes `ui` as the `native-ui.json` the window opens over.
-fn seed_ui(dir: &TestDir, ui: &serde_json::Value) {
-    std::fs::write(dir.path().join("native-ui.json"), ui.to_string())
-        .expect("write native-ui.json");
-}
-
-/// The `native-ui.json` the window last saved.
-fn saved_ui(dir: &TestDir) -> serde_json::Value {
-    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
-    serde_json::from_str(&text).expect("native-ui.json is JSON")
-}
-
 /// A second tailnet host the launch specs save.
 const OTHER: &str = "den.tail1234.ts.net";
 
@@ -1552,11 +1543,6 @@ fn quit_sends_shutdown_only_to_this_pc(cx: &mut TestAppContext) {
             .any(|command| matches!(command, NetCommand::Shutdown { .. } | NetCommand::Stop)),
         "the remote host's daemon is neither shut down nor stopped: {remote_commands:?}"
     );
-}
-
-/// The saved host [`REMOTE`] as launch dials it.
-fn saved_remote() -> Target {
-    Target::tailnet(REMOTE, Some(8787))
 }
 
 /// The remote host's repo row, keyed with its host in front.
@@ -2310,58 +2296,6 @@ fn an_unapproved_reconnect_keeps_a_remote_panes_last_frame(cx: &mut TestAppConte
     );
 }
 
-/// This PC lists `a1`; tab `t1` splits it (pane `p1`) beside [`REMOTE`]'s
-/// `b1` (pane `p2`), and tab `t2` holds [`REMOTE`]'s `b2` (pane `p3`).
-fn two_tab_fixture() -> Fixture {
-    Fixture {
-        sessions: vec![session("a1").build()],
-        tabs: two_tabs(),
-        ..Fixture::default()
-    }
-}
-
-/// The tabs of [`two_tab_fixture`].
-fn two_tabs() -> Vec<TabEntry> {
-    vec![
-        tab(
-            "t1",
-            &split(
-                SplitDirection::Horizontal,
-                pane("p1", Some("a1")),
-                remote_pane("p2", "b1"),
-            ),
-        ),
-        tab("t2", &remote_pane("p3", "b2")),
-    ]
-}
-
-/// [`REMOTE`] saved and connected beside This PC over `fixture`, listing
-/// `remote_sessions`; nothing sent is left unread on either host.
-fn saved_remote_over<'a>(
-    cx: &'a mut TestAppContext,
-    dir: &TestDir,
-    fixture: &Fixture,
-    remote_sessions: &[&str],
-) -> Harness<'a> {
-    seed_ui(
-        dir,
-        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
-    );
-    let mut h = Harness::with(cx, dir, fixture);
-    h.host(&saved_remote()).connect();
-    remote_lists(&mut h, remote_sessions);
-    h.sent();
-    h.host(&saved_remote()).sent();
-    h
-}
-
-/// [`REMOTE`]'s daemon lists `ids`.
-fn remote_lists(h: &mut Harness<'_>, ids: &[&str]) {
-    h.host(&saved_remote()).send(DaemonMessage::Sessions {
-        sessions: ids.iter().map(|id| session(id).build()).collect(),
-    });
-}
-
 /// The forgets This PC was sent since the last look.
 fn this_pc_forgets(h: &mut Harness<'_>) -> Vec<Forget> {
     forgets(&h.sent())
@@ -2676,5 +2610,103 @@ fn panes_of_a_host_no_longer_saved_are_forgotten_after_this_pcs_tabs(cx: &mut Te
         this_pc_forgets(&mut h),
         [forget_all(OTHER)],
         "a new This PC connection sweeps again"
+    );
+}
+
+#[gpui::test]
+fn a_remote_list_between_this_pcs_reconnect_and_its_welcome_forgets_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+
+    h.set_connection(dropped(Target::Local));
+    h.set_connection(this_pc_open());
+    remote_lists(&mut h, &["b1"]);
+    h.send_welcome(PROTOCOL);
+    h.load(&two_tab_fixture());
+
+    assert_eq!(
+        this_pc_forgets(&mut h),
+        [forget_of(&["b2"])],
+        "the layout before This PC's Welcome is the old connection's: b2 is forgotten once, after the new tab list"
+    );
+}
+
+/// This PC and [`REMOTE`] each list a session `s1`; the only pane, `p1`,
+/// shows [`REMOTE`]'s.
+fn one_id_on_both_hosts<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    remote_s1: SessionSnapshot,
+) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &remote_pane("p1", "s1"))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/repos/r1")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![remote_s1],
+    });
+    h
+}
+
+#[gpui::test]
+fn the_pane_header_chip_names_the_panes_host_for_a_session_id_both_hosts_hold(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = one_id_on_both_hosts(cx, &dir, session("s1").build());
+
+    let chips: Vec<String> = h
+        .root(|root, _| root.pane_header_parts("p1"))
+        .expect("the pane shows a session")
+        .chips
+        .into_iter()
+        .filter(|chip| chip.kind == HeaderChipKind::Host)
+        .map(|chip| chip.text)
+        .collect();
+    assert_eq!(chips, ["box"], "the pane is bound to the remote host's s1");
+}
+
+#[gpui::test]
+fn a_path_link_in_a_remote_pane_fetches_from_that_host_when_both_hosts_hold_the_id(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let remote_s1 = session("s1").shell("C:/wt/x/sub").worktree("r1").build();
+    let mut h = one_id_on_both_hosts(cx, &dir, remote_s1);
+    h.host(&remote()).answer_scrollback("s1", b"");
+    h.host(&remote())
+        .pty("s1", b"wrote C:\\wt\\x\\docs\\notes.md");
+    h.host(&remote()).sent();
+    h.sent();
+
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, Modifiers::secondary_key());
+
+    let fetched: Vec<String> = h
+        .host(&remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchFile { path, .. } => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fetched,
+        ["docs/notes.md"],
+        "the link resolves against the remote host's s1 and its repos"
+    );
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::FetchFile { .. })),
+        "nothing is fetched from This PC"
     );
 }

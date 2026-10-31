@@ -59,19 +59,20 @@ impl RootView {
         self.start_fetch(request, None, cx)
     }
 
-    /// A Ctrl+click on a path link on a remote host: fetches the first of
-    /// the link's readings under `session`'s repos and worktrees that the
-    /// host has, trying them one at a time.
+    /// A Ctrl+click on a path link in a pane of remote host `host`: fetches
+    /// the first of the link's readings under the repos and worktrees of
+    /// `session` as that host lists it, trying them one at a time.
     pub(crate) fn fetch_path_link(
         &mut self,
         link: &TerminalLink,
+        host: &HostKey,
         session: Option<&str>,
         cx: &mut Context<Self>,
     ) {
         let mut readings = session
-            .and_then(|id| self.sidebar.session(id))
+            .and_then(|id| self.sidebar.sessions_of(host).iter().find(|s| s.id == id))
             .map(|session| {
-                fetch_link::session_readings(&link.candidates, session, self.sidebar.repos())
+                fetch_link::session_readings(&link.candidates, session, self.sidebar.repos_of(host))
             })
             .unwrap_or_default();
         if readings.is_empty() {

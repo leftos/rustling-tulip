@@ -2096,9 +2096,10 @@ impl RootView {
                 self.open_in_new_tab(session_id);
             }
             SessionRow::PopOut => {
-                let key = match pane_to_pop(session_id, self.tabs.tabs(), self.tabs.active_id()) {
+                let shown = SessionRef::new(self.host_of_session(session_id), session_id);
+                let key = match pane_to_pop(&shown, self.tabs.tabs(), self.tabs.active_id()) {
                     Some((tab_id, pane_id)) => PopoutKey::Pane { tab_id, pane_id },
-                    None => PopoutKey::session(&self.host_of_session(session_id), session_id),
+                    None => PopoutKey::session(&shown.host, &shown.id),
                 };
                 self.close_session_menu(window, cx);
                 self.open_popout(key, window, cx);
@@ -2190,12 +2191,13 @@ impl RootView {
             Step::EditName => self.start_session_rename(&session, window, cx),
             Step::Duplicate => {
                 let request_id = crate::new_request_id();
-                let target = if self.has_session_popout(session_id) {
+                let host = self.host_of_session(session_id);
+                let target = if self.has_session_popout(&SessionRef::new(host.clone(), session_id))
+                {
                     DuplicateTarget::RestartInPopout
                 } else {
                     DuplicateTarget::Restart
                 };
-                let host = self.host_of_session(session_id);
                 if let Some(request) = self
                     .duplicates
                     .request(&host, session_id, request_id, target)
@@ -2212,7 +2214,7 @@ impl RootView {
     fn is_shown(&self, session_id: &str) -> bool {
         let shown = SessionRef::new(self.host_of_session(session_id), session_id);
         find_tab_containing_session(self.tabs.tabs(), &shown).is_some()
-            || self.popouts.session_key(session_id).is_some()
+            || self.popouts.session_key(&shown).is_some()
     }
 
     /// Swaps the menu's rows for a name editor seeded with the name the
@@ -2287,7 +2289,10 @@ impl RootView {
             PlacedFocus::Pane { tab_id, pane_id } => self.tabs.focus_pane(tab_id, pane_id),
             PlacedFocus::Tab(tab_id) => self.tabs.activate(tab_id),
             PlacedFocus::Popout { original } => {
-                self.rekey_session_popout(original, &copy.session.id, cx);
+                let host = &placed.session_host;
+                let old = SessionRef::new(host.clone(), original.clone());
+                let new = SessionRef::new(host.clone(), copy.session.id.clone());
+                self.rekey_session_popout(&old, &new, cx);
             }
         }
         for msg in placed.messages {

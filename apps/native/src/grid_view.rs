@@ -114,7 +114,7 @@ impl PaneSlot {
     }
 
     /// The session the pane shows, with its host.
-    fn session_ref(&self) -> Option<SessionRef> {
+    pub(crate) fn session_ref(&self) -> Option<SessionRef> {
         self.session
             .as_ref()
             .map(|id| SessionRef::new(self.host.clone(), id.clone()))
@@ -1767,7 +1767,7 @@ impl RootView {
             .debug_selector(|| name);
             return popout_column(toolbar, note.into_any_element());
         };
-        let parts = self.session_header_parts(session);
+        let parts = self.session_header_parts(host, session);
         let title = header_title(&slot_id, Some(&parts), cx);
         let mut controls = self.header_stop(&slot_id, Some(session_id), StopPlace::Popout, cx);
         controls.push(Self::popout_close_window(&slot_id, cx));
@@ -1896,8 +1896,8 @@ impl RootView {
     ) -> Stateful<Div> {
         let t = theme(cx);
         let parts = session_id
-            .and_then(|id| self.sidebar.session(id))
-            .map(|session| self.session_header_parts(session));
+            .and_then(|_| self.pane_session_in(tab_id, pane_id))
+            .map(|(host, session)| self.session_header_parts(&host, session));
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
         let name = format!("pane-header-{pane_id}");
@@ -2169,14 +2169,32 @@ impl RootView {
         buttons
     }
 
-    /// The session shown by pane `pane_id` of the tab on screen.
+    /// The session shown by pane `pane_id` of the tab on screen, as the
+    /// pane's host lists it.
     pub(crate) fn active_pane_session(&self, pane_id: &str) -> Option<&SessionSnapshot> {
-        let grid = self.tabs.active_tab()?.grid()?;
-        let session = tabs::collect_panes(grid)
+        self.active_pane_hosted(pane_id).map(|(_, session)| session)
+    }
+
+    /// [`Self::active_pane_session`], with the pane's host.
+    fn active_pane_hosted(&self, pane_id: &str) -> Option<(HostKey, &SessionSnapshot)> {
+        let tab_id = &self.tabs.active_tab()?.id;
+        self.pane_session_in(tab_id, pane_id)
+    }
+
+    /// The session pane `pane_id` of tab `tab_id` shows, with the host the
+    /// pane names, as that host lists it.
+    fn pane_session_in(&self, tab_id: &str, pane_id: &str) -> Option<(HostKey, &SessionSnapshot)> {
+        let grid = self.tabs.tab(tab_id)?.grid()?;
+        let pane = tabs::collect_panes(grid)
             .into_iter()
-            .find(|pane| pane.id == pane_id)?
-            .session?;
-        self.sidebar.session(session)
+            .find(|pane| pane.id == pane_id)?;
+        let session = self.hosted_session(&pane.host, pane.session?)?;
+        Some((pane.host, session))
+    }
+
+    /// Session `id` as `host` lists it.
+    fn hosted_session(&self, host: &HostKey, id: &str) -> Option<&SessionSnapshot> {
+        self.sidebar.sessions_of(host).iter().find(|s| s.id == id)
     }
 
     /// Whether pane `pane_id`'s previous and next prompt buttons have
@@ -2209,14 +2227,14 @@ impl RootView {
     /// session; `None` for an empty pane.
     #[must_use]
     pub fn pane_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
-        self.active_pane_session(pane_id)
-            .map(|session| self.session_header_parts(session))
+        self.active_pane_hosted(pane_id)
+            .map(|(host, session)| self.session_header_parts(&host, session))
     }
 
-    /// What a pane header shows of `session`, with its host's chip when a
-    /// remote host lists it.
-    fn session_header_parts(&self, session: &SessionSnapshot) -> PaneHeaderParts {
-        let host = self.host_chip_label(&self.host_of_session(&session.id));
+    /// What a pane header shows of `host`'s `session`, with the host's chip
+    /// when it is a remote one.
+    fn session_header_parts(&self, host: &HostKey, session: &SessionSnapshot) -> PaneHeaderParts {
+        let host = self.host_chip_label(host);
         header_parts(
             session,
             self.sidebar.is_unseen(&session.id),
@@ -2261,7 +2279,7 @@ impl RootView {
     pub fn popout_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
         self.popouts.popped_key(pane_id)?;
         self.popped_pane_session(pane_id)
-            .map(|session| self.session_header_parts(session))
+            .map(|(host, session)| self.session_header_parts(&host, session))
     }
 
     /// The pop-out toolbar's "in {tab name}": the tab pane `pane_id` is
@@ -2278,10 +2296,12 @@ impl RootView {
         Some(format!("in {name}"))
     }
 
-    /// The session pane `pane_id` shows, in whichever tab holds it.
-    fn popped_pane_session(&self, pane_id: &str) -> Option<&SessionSnapshot> {
-        let session = popouts::pane_in_tabs(pane_id, self.tabs.tabs())?.session?;
-        self.sidebar.session(session)
+    /// The session pane `pane_id` shows, in whichever tab holds it, with the
+    /// host the pane names, as that host lists it.
+    fn popped_pane_session(&self, pane_id: &str) -> Option<(HostKey, &SessionSnapshot)> {
+        let pane = popouts::pane_in_tabs(pane_id, self.tabs.tabs())?;
+        let session = self.hosted_session(&pane.host, pane.session?)?;
+        Some((pane.host, session))
     }
 
     /// The body of a pane showing `session_id` before its terminal attaches:

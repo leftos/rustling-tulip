@@ -10,11 +10,15 @@ use gpui::{
     size,
 };
 use protocol::{AttentionReason, ClientMessage, DaemonMessage, SplitDirection, TabEntry};
+use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
     OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
 };
 use serde_json::json;
-use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
+use support::{
+    Fixture, Harness, REMOTE, TestDir, mixed_tabs, pane, remote_lists, repo, saved_remote,
+    saved_remote_over, saved_ui, seed_ui, session, split, tab, two_tab_fixture,
+};
 
 /// A diff tab of `path` in `r1`'s main tree.
 fn diff_tab(id: &str, path: &str) -> TabEntry {
@@ -3471,18 +3475,6 @@ fn removing_a_diff_tab_closes_its_popout(cx: &mut TestAppContext) {
     assert!(!tab_popped(&mut h, "d1"));
 }
 
-/// `native-ui.json` in the spec's ui dir, as it stands on disk.
-fn saved_ui(dir: &TestDir) -> serde_json::Value {
-    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
-    serde_json::from_str(&text).expect("native-ui.json is JSON")
-}
-
-/// Writes `native-ui.json` in `dir` before the window opens.
-fn seed_ui(dir: &TestDir, ui: &serde_json::Value) {
-    std::fs::write(dir.path().join("native-ui.json"), ui.to_string())
-        .expect("write native-ui.json");
-}
-
 /// What `native-ui.json` keeps for pane `pane_id` of tab `tab_id` popped out
 /// before its window has moved.
 fn saved_pane(tab_id: &str, pane_id: &str) -> serde_json::Value {
@@ -3895,5 +3887,181 @@ fn a_restore_triggered_from_a_popout_uses_the_main_window(cx: &mut TestAppContex
     assert!(
         h.cx.update(|window, _| window.is_window_active()),
         "the main window is the one in front"
+    );
+}
+
+#[gpui::test]
+fn a_pane_popout_over_a_remote_session_is_titled_by_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = mixed_tabs(cx, &dir);
+
+    assert_eq!(pop_out(&mut h, "t1", "p2"), OpenOutcome::Opened);
+
+    let mut popout = h.popout_window();
+    assert_eq!(
+        popout.window_title().as_deref(),
+        Some("b1"),
+        "titled by the remote session the pane shows, not as an empty pane"
+    );
+}
+
+/// Seeds [`REMOTE`] as a saved host and `popouts` as the pop-outs saved at
+/// the last quit.
+fn seed_saved_popouts(dir: &TestDir, popouts: &serde_json::Value) {
+    seed_ui(
+        dir,
+        &json!({
+            "saved_hosts": [{ "name": REMOTE, "port": 8787 }],
+            "popouts": popouts,
+        }),
+    );
+}
+
+#[gpui::test]
+fn a_saved_tab_popout_waits_for_every_host_it_names(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let saved = json!({ "key": { "kind": "tab", "tab_id": "t1" }, "window": null });
+    seed_saved_popouts(&dir, &json!([saved]));
+    let mut h = Harness::with(cx, &dir, &two_tab_fixture());
+    assert_eq!(
+        h.window_count(),
+        1,
+        "t1 shows a session of the remote host, whose list has not arrived"
+    );
+
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, &["b1", "b2"]);
+
+    assert_eq!(h.window_count(), 2, "the tab reopens on the host's list");
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(saved_ui(&dir)["popouts"], json!([saved]));
+}
+
+#[gpui::test]
+fn a_saved_pane_popout_whose_session_the_remote_list_omits_never_opens(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let saved = json!({
+        "key": { "kind": "pane", "tab_id": "t2", "pane_id": "p3" },
+        "window": null,
+    });
+    seed_saved_popouts(&dir, &json!([saved]));
+    let mut h = Harness::with(cx, &dir, &two_tab_fixture());
+    assert_eq!(h.window_count(), 1, "p3 waits for the remote host's list");
+
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, &["b1"]);
+
+    assert_eq!(
+        h.window_count(),
+        1,
+        "the pane's session is being forgotten, so its pop-out never opens"
+    );
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([]),
+        "the saved entry is gone"
+    );
+}
+
+#[gpui::test]
+fn a_pruned_pane_closes_its_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+    assert_eq!(pop_out(&mut h, "t2", "p3"), OpenOutcome::Opened);
+    assert_eq!(h.window_count(), 2);
+
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t2".to_owned(),
+    });
+
+    assert_eq!(h.window_count(), 1, "the pruned pane's pop-out closed");
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([]),
+        "the saved entry is gone"
+    );
+}
+
+/// The open window titled `title`.
+fn window_titled(h: &mut Harness<'_>, title: &str) -> VisualTestContext {
+    h.cx.run_until_parked();
+    h.cx.windows()
+        .into_iter()
+        .map(|window| VisualTestContext::from_window(window, &h.cx.cx))
+        .find_map(|mut window| (window.window_title().as_deref() == Some(title)).then_some(window))
+        .expect("a window with the title is open")
+}
+
+#[gpui::test]
+fn rekeying_a_remote_session_popout_keeps_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("a1").build());
+    fixture
+        .sessions
+        .push(session("b1").user_label("Here").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let remote = Target::tailnet(REMOTE, None);
+    let mut host = h.host(&remote);
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+    let here = PopoutKey::session(&HostKey::Local, "b1");
+    let there = PopoutKey::session(&HostKey::Remote(REMOTE.to_owned()), "b1");
+    for key in [here, there] {
+        assert_eq!(
+            h.root_update(move |root, window, cx| root.open_popout(key, window, cx)),
+            OpenOutcome::Opened,
+            "each host's b1 has a pop-out of its own"
+        );
+    }
+    // This PC's b1 goes; its pop-out stays open on its key, beside the
+    // remote host's b1 that is restarted.
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "b1".to_owned(),
+    });
+    h.host(&remote).answer_scrollback("b1", b"");
+    h.host(&remote).send(DaemonMessage::SessionUpdated {
+        session: session("b1").exited(3).build(),
+        request_id: None,
+    });
+    h.host(&remote).sent();
+
+    let mut popout = window_titled(&mut h, "b1");
+    click_in_popout(&mut popout, "exited-restart-popout:box.tail1234.ts.net:b1");
+    let restart = h
+        .host(&remote)
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::DuplicateSession {
+                session_id,
+                request_id,
+                ..
+            } if session_id == "b1" => request_id,
+            _ => None,
+        })
+        .expect("a restart of the remote b1 with a request id");
+    h.host(&remote).send(DaemonMessage::SessionUpdated {
+        session: session("b1b").build(),
+        request_id: Some(restart),
+    });
+
+    assert_eq!(h.window_count(), 3, "both pop-outs stay open");
+    window_titled(&mut h, "b1b");
+    window_titled(&mut h, "Session not found");
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([
+            { "key": { "kind": "session", "session_id": "b1" }, "window": null },
+            {
+                "key": { "kind": "session", "session_id": "b1b", "host": REMOTE },
+                "window": null,
+            },
+        ]),
+        "the remote pop-out follows the copy on its host; This PC's b1 keeps its own"
     );
 }

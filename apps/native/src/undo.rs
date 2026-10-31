@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use protocol::{ClientMessage, GridNode, TabContent, TabEntry};
 
+use crate::tabs::{SessionRef, host_of_wire};
+
 /// How long an entry stays before it goes by itself.
 pub const UNDO_LIFETIME: Duration = Duration::from_secs(8);
 /// The most entries on screen at once.
@@ -144,13 +146,14 @@ impl UndoShelf {
 /// The messages that put `entry` back, in ascending tab-index order: a tab
 /// still among `live_tab_ids` is replaced by
 /// [`ClientMessage::RestoreTabSnapshot`], a tab that is gone returns at its
-/// index by [`ClientMessage::RestoreTab`]. A snapshot pane whose session is
-/// not among `known_sessions` comes back empty.
+/// index by [`ClientMessage::RestoreTab`]. A snapshot pane whose session,
+/// host and id both, is not among `known_sessions` comes back empty, with
+/// no host.
 #[must_use]
 pub fn restore_messages(
     entry: &UndoEntry,
     live_tab_ids: &HashSet<String>,
-    known_sessions: &HashSet<String>,
+    known_sessions: &HashSet<SessionRef>,
 ) -> Vec<ClientMessage> {
     entry
         .ordered()
@@ -228,7 +231,7 @@ pub fn live_tabs(tabs: &[TabEntry], closing: &HashSet<String>) -> HashSet<String
 }
 
 /// `tab` with every pane whose session the client no longer knows emptied.
-fn keeping_known_sessions(tab: &TabEntry, known_sessions: &HashSet<String>) -> TabEntry {
+fn keeping_known_sessions(tab: &TabEntry, known_sessions: &HashSet<SessionRef>) -> TabEntry {
     let mut tab = tab.clone();
     if let Some(grid) = tab.grid_mut() {
         *grid = emptied(grid, known_sessions);
@@ -236,21 +239,24 @@ fn keeping_known_sessions(tab: &TabEntry, known_sessions: &HashSet<String>) -> T
     tab
 }
 
-/// `grid` with the panes of forgotten sessions emptied.
-fn emptied(grid: &GridNode, known_sessions: &HashSet<String>) -> GridNode {
+/// `grid` with the panes of forgotten sessions emptied, an emptied pane
+/// naming no host.
+fn emptied(grid: &GridNode, known_sessions: &HashSet<SessionRef>) -> GridNode {
     match grid {
         GridNode::Pane {
             pane_id,
             session_id,
             host,
-        } => GridNode::Pane {
-            pane_id: pane_id.clone(),
-            session_id: session_id
-                .as_ref()
-                .filter(|id| known_sessions.contains(*id))
-                .cloned(),
-            host: host.clone(),
-        },
+        } => {
+            let known = session_id.as_ref().is_some_and(|id| {
+                known_sessions.contains(&SessionRef::new(host_of_wire(host.as_deref()), id.clone()))
+            });
+            GridNode::Pane {
+                pane_id: pane_id.clone(),
+                session_id: session_id.clone().filter(|_| known),
+                host: host.clone().filter(|_| known),
+            }
+        }
         GridNode::Split {
             direction,
             ratio,
@@ -515,7 +521,7 @@ mod tests {
         );
         let entry = shelf.take(id).expect("the entry is there");
 
-        let sent = restore_messages(&entry, &ids(&["t2"]), &ids(&["s1"]));
+        let sent = restore_messages(&entry, &ids(&["t2"]), &known(&[(HostKey::Local, "s1")]));
         assert_eq!(restored(&sent), ["t1", "t2"], "ascending index");
         assert!(
             matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 1),
@@ -541,7 +547,7 @@ mod tests {
         );
         let entry = shelf.take(id).expect("the entry is there");
 
-        let sent = restore_messages(&entry, &ids(&["t2"]), &ids(&["s1"]));
+        let sent = restore_messages(&entry, &ids(&["t2"]), &known(&[(HostKey::Local, "s1")]));
         assert_eq!(restored(&sent), ["t1", "t2"]);
         assert!(
             matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 0),
@@ -568,7 +574,7 @@ mod tests {
         let live = live_tabs(&listed, &ids(&["t1"]));
         assert_eq!(live, ids(&["t2"]), "the closing tab is not live");
 
-        let sent = restore_messages(&entry, &live, &ids(&["s1"]));
+        let sent = restore_messages(&entry, &live, &known(&[(HostKey::Local, "s1")]));
         assert!(
             matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 1),
             "its removal is on its way, so it comes back at its index: {sent:?}"
@@ -591,7 +597,7 @@ mod tests {
 
         let listed = [tab_of("t1", Some("s1")), tab_of("t2", Some("s1"))];
         let live = live_tabs(&listed, &ids(&["t1"]));
-        let sent = restore_messages(&entry, &live, &ids(&["s1"]));
+        let sent = restore_messages(&entry, &live, &known(&[(HostKey::Local, "s1")]));
         assert_eq!(restored(&sent), ["t1", "t2"]);
         assert!(
             matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 0),
@@ -629,7 +635,7 @@ mod tests {
         );
         let entry = shelf.take(id).expect("the entry is there");
 
-        let sent = restore_messages(&entry, &ids(&["t1"]), &ids(&["s1"]));
+        let sent = restore_messages(&entry, &ids(&["t1"]), &known(&[(HostKey::Local, "s1")]));
         assert!(
             matches!(sent.as_slice(), [ClientMessage::RestoreTabSnapshot { .. }]),
             "the tab is still open, so it is replaced in place: {sent:?}"
@@ -642,6 +648,74 @@ mod tests {
                 ("p2".to_owned(), None)
             ],
             "the pane whose session is gone comes back empty"
+        );
+    }
+
+    use crate::target::HostKey;
+
+    /// The sessions the client knows, each with its host.
+    fn known(sessions: &[(HostKey, &str)]) -> HashSet<SessionRef> {
+        sessions
+            .iter()
+            .map(|(host, id)| SessionRef::new(host.clone(), *id))
+            .collect()
+    }
+
+    #[test]
+    fn a_pane_whose_host_no_longer_lists_its_session_comes_back_empty_and_hostless() {
+        let grid: GridNode = serde_json::from_value(serde_json::json!({
+            "kind": "split",
+            "direction": "horizontal",
+            "ratio": 0.5,
+            "first": { "kind": "pane", "pane_id": "p1", "session_id": "b1", "host": "box" },
+            "second": {
+                "kind": "split",
+                "direction": "vertical",
+                "ratio": 0.5,
+                "first": { "kind": "pane", "pane_id": "p2", "session_id": "b2", "host": "box" },
+                "second": { "kind": "pane", "pane_id": "p3", "session_id": "b1" },
+            },
+        }))
+        .expect("a grid fixture");
+        let mut tab = tab_of("t1", None);
+        tab.content = protocol::TabContent::Grid { grid };
+        let mut shelf = UndoShelf::default();
+        let id = shelf.push(
+            closed_pane_message("b2"),
+            vec![TabSnapshot {
+                tab,
+                index: 0,
+                restore_active: true,
+                focus_pane: None,
+            }],
+            Instant::now(),
+        );
+        let entry = shelf.take(id).expect("the entry is there");
+        let box_host = HostKey::Remote("box".to_owned());
+
+        let sent = restore_messages(&entry, &ids(&[]), &known(&[(box_host, "b1")]));
+
+        let pane = |id: &str, session: Option<&str>, host: Option<&str>| serde_json::json!({ "kind": "pane", "pane_id": id, "session_id": session, "host": host });
+        let grid = restored_tab(&sent[0])
+            .and_then(TabEntry::grid)
+            .expect("a restored grid");
+        let expected: GridNode = serde_json::from_value(serde_json::json!({
+                "kind": "split",
+                "direction": "horizontal",
+                "ratio": 0.5,
+                "first": pane("p1", Some("b1"), Some("box")),
+                "second": {
+                    "kind": "split",
+                    "direction": "vertical",
+                    "ratio": 0.5,
+                    "first": pane("p2", None, None),
+                "second": pane("p3", None, None),
+            },
+        }))
+        .expect("the expected grid");
+        assert_eq!(
+            grid, &expected,
+            "the remote host's b1 stays; its b2 and This PC's b1 come back empty, with no host"
         );
     }
 }
