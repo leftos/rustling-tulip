@@ -486,9 +486,6 @@ fn option_row(
     .into_any_element()
 }
 
-/// An option row tagged `selector`: `label` over its muted `detail`,
-/// filled while `selected` and outlined while `focused`; the caller adds
-/// the click.
 /// How an option row is marked: outlined while focused, filled while
 /// selected.
 struct RowMarks {
@@ -496,6 +493,9 @@ struct RowMarks {
     selected: bool,
 }
 
+/// An option row tagged `selector`: `label` over its muted `detail`,
+/// filled while `selected` and outlined while `focused`; the caller adds
+/// the click.
 fn option_row_element(
     selector: String,
     label: String,
