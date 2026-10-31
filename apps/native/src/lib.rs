@@ -1290,6 +1290,7 @@ impl RootView {
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
         fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
         fonts::set_ui_text_size(ui.ui_text_size, cx);
+        fonts::set_ui_weight(ui.ui_font_weight, cx);
         let themes_dir = ui_dir
             .as_deref()
             .map(|dir| dir.join(theme_store::THEMES_DIR));
@@ -2399,6 +2400,16 @@ impl RootView {
     pub fn set_ui_text_size(&mut self, offset: i8, cx: &mut Context<Self>) {
         self.sidebar.set_ui_text_size(offset);
         fonts::set_ui_text_size(self.sidebar.ui_state().ui_text_size, cx);
+        self.save_ui();
+        cx.refresh_windows();
+    }
+
+    /// Makes `weight` (one of [`fonts::UI_WEIGHTS`]) the interface's body
+    /// weight, every other UI weight moving with it: saved on this machine
+    /// and applied to every window at once.
+    pub fn set_ui_weight(&mut self, weight: u16, cx: &mut Context<Self>) {
+        self.sidebar.set_ui_font_weight(weight);
+        fonts::set_ui_weight(self.sidebar.ui_state().ui_font_weight, cx);
         self.save_ui();
         cx.refresh_windows();
     }
@@ -4680,6 +4691,7 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .font_family(fonts::ui_family(cx))
+            .font_weight(fonts::ui_weight(cx, gpui::FontWeight::NORMAL))
             .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(Self::on_key_capture))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
@@ -4884,7 +4896,11 @@ impl RootView {
             .flex_col()
             .gap(px(8.0))
             .p(px(10.0))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Daemon"))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child("Daemon"),
+            )
             .child(details)
             .child(self.files_section(manages_daemon, &theme(cx)))
             .child(self.control_section(manages_daemon, cx))
@@ -5191,6 +5207,7 @@ impl Render for Tip {
             .px(px(6.0))
             .py(px(2.0))
             .font_family(fonts::ui_family(cx))
+            .font_weight(fonts::ui_weight(cx, gpui::FontWeight::NORMAL))
             .bg(gpui::rgb(t.popover))
             .border_1()
             .border_color(gpui::rgb(t.popover_edge))

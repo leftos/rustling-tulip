@@ -556,7 +556,13 @@ pub type OnPress = Rc<dyn Fn(&ButtonAnswer, &mut Window, &mut App)>;
 /// "Sending…"; a refusal shows under the buttons (`chat-card-refusal`); a
 /// kind the chat cannot answer says to open the terminal
 /// (`chat-card-terminal`).
-pub fn prompt_card(offset: i8, view: &CardView<'_>, on_press: &OnPress, t: &UiTheme) -> AnyElement {
+pub fn prompt_card(
+    offset: i8,
+    shift: i8,
+    view: &CardView<'_>,
+    on_press: &OnPress,
+    t: &UiTheme,
+) -> AnyElement {
     let prompt = view.prompt;
     let buttons = card_buttons(prompt, view.agent);
     let actions = if buttons.is_empty() {
@@ -571,7 +577,7 @@ pub fn prompt_card(offset: i8, view: &CardView<'_>, on_press: &OnPress, t: &UiTh
             .children(
                 buttons
                     .iter()
-                    .map(|button| card_button(offset, button, view, on_press, t)),
+                    .map(|button| card_button(offset, shift, button, view, on_press, t)),
             )
             .into_any_element()
     };
@@ -613,6 +619,7 @@ pub fn prompt_card(offset: i8, view: &CardView<'_>, on_press: &OnPress, t: &UiTh
 /// One button of a card; a selected multi-select option is filled.
 fn card_button(
     offset: i8,
+    shift: i8,
     button: &CardButton,
     view: &CardView<'_>,
     on_press: &OnPress,
@@ -628,6 +635,7 @@ fn card_button(
     let base = if selected {
         primary_button(
             offset,
+            shift,
             &selector,
             ButtonSize::Compact,
             !busy,
@@ -637,6 +645,7 @@ fn card_button(
     } else {
         outlined_button(
             offset,
+            shift,
             &selector,
             ButtonSize::Compact,
             !busy,

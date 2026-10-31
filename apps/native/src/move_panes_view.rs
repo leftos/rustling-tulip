@@ -243,6 +243,7 @@ impl RootView {
         let dialog = self.pane_ui.move_panes.as_ref()?;
         let model = &dialog.model;
         let aspect = self.pane_area_aspect();
+        let title_weight = crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD);
         let mut button = |control: Control, selected: bool| {
             let label = match control {
                 Control::Pane(index) => {
@@ -257,7 +258,7 @@ impl RootView {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+            .child(div().font_weight(title_weight).child(TITLE))
             .child(button(Control::Dismiss, false));
         let checks: Vec<Stateful<Div>> = (0..model.panes().len())
             .map(|index| button(Control::Pane(index), false))
@@ -337,7 +338,13 @@ fn move_panes_button(
     let button = dialog_button(
         &model.selector(control),
         label,
-        dialog_look(crate::fonts::ui_text_size(cx), false, enabled, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            false,
+            enabled,
+            &theme(cx),
+        ),
         control == model.focused(),
     )
     .when(selected, |button| button.bg(gpui::rgb(t.popover_hover)));

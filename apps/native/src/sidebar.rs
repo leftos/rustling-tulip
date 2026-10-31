@@ -435,6 +435,10 @@ pub struct UiState {
     /// clamps on load.
     #[serde(default, deserialize_with = "clamped_ui_text_size")]
     pub ui_text_size: i8,
+    /// The interface's body weight, one of [`crate::fonts::UI_WEIGHTS`]; any
+    /// other stored value loads as [`crate::fonts::DEFAULT_UI_WEIGHT`].
+    #[serde(deserialize_with = "offered_ui_font_weight")]
+    pub ui_font_weight: u16,
     /// The theme the interface draws in: a built-in's id or a user theme's
     /// file slug; `None` is the built-in theme.
     #[serde(default)]
@@ -676,6 +680,23 @@ fn clamped_ui_text_size<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i8
         },
         crate::fonts::clamped_ui_text_size,
     ))
+}
+
+/// Reads `ui_font_weight`, never failing the file: anything but a weight the
+/// setting offers loads as the default with a warning naming it.
+fn offered_ui_font_weight<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let offered = value
+        .as_u64()
+        .and_then(|weight| u16::try_from(weight).ok())
+        .filter(|weight| crate::fonts::UI_WEIGHTS.contains(weight));
+    Ok(offered.unwrap_or_else(|| {
+        tracing::warn!(
+            "ui_font_weight {value} is not 400, 500 or 600; drawing at {}",
+            crate::fonts::DEFAULT_UI_WEIGHT
+        );
+        crate::fonts::DEFAULT_UI_WEIGHT
+    }))
 }
 
 /// Reads `last_target` so that a value that is not a host record loads as
@@ -959,6 +980,7 @@ impl Default for UiState {
             terminal_font: FontSettings::default(),
             ui_font_family: None,
             ui_text_size: 0,
+            ui_font_weight: crate::fonts::DEFAULT_UI_WEIGHT,
             theme: None,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
@@ -1446,6 +1468,16 @@ impl SidebarModel {
     /// [`crate::fonts::UI_TEXT_SIZE_OFFSETS`].
     pub fn set_ui_text_size(&mut self, offset: i8) {
         self.ui.ui_text_size = crate::fonts::clamped_ui_text_size(i64::from(offset));
+    }
+
+    /// Makes `weight` the interface's body weight; one the setting does not
+    /// offer is [`crate::fonts::DEFAULT_UI_WEIGHT`].
+    pub fn set_ui_font_weight(&mut self, weight: u16) {
+        self.ui.ui_font_weight = if crate::fonts::UI_WEIGHTS.contains(&weight) {
+            weight
+        } else {
+            crate::fonts::DEFAULT_UI_WEIGHT
+        };
     }
 
     /// Sets the theme the interface draws in; `None` is the built-in theme.
@@ -4206,6 +4238,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ui_state_without_ui_font_weight_loads_400() {
+        assert_eq!(UiState::default().ui_font_weight, 400);
+        let older: UiState = serde_json::from_value(json!({ "sidebar_width": 300.0 }))
+            .expect("a file from before the UI weight was saved");
+        assert_eq!(older.ui_font_weight, 400, "absent: Regular");
+    }
+
+    #[test]
+    fn ui_state_round_trips_ui_font_weight() {
+        let dir = TestDir::new("ui-font-weight");
+        let state = UiState {
+            ui_font_weight: 600,
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0).ui_font_weight, 600);
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("the saved layout");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["ui_font_weight"], 600, "saved as a number");
+    }
+
+    #[test]
+    fn an_unknown_ui_font_weight_loads_400() {
+        let load = |value: serde_json::Value| -> UiState {
+            serde_json::from_value(json!({ "sidebar_width": 300.0, "ui_font_weight": value }))
+                .expect("a UI weight never fails the file")
+        };
+        assert_eq!(load(json!(500)).ui_font_weight, 500, "offered: kept");
+        for bad in [
+            json!(450),
+            json!(700),
+            json!(-400),
+            json!(100_000),
+            json!(500.5),
+            json!("bold"),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(load(bad.clone()).ui_font_weight, 400, "{bad}");
+        }
+        assert!(
+            (load(json!("bold")).sidebar_width - 300.0).abs() < f32::EPSILON,
+            "the rest of the file loads"
+        );
+    }
+
+    #[test]
     fn ui_state_without_a_theme_key_loads_none() {
         assert_eq!(UiState::default().theme, None);
         let older: UiState = serde_json::from_value(json!({ "sidebar_width": 300.0 }))
@@ -4248,6 +4326,7 @@ pub(crate) mod tests {
             },
             ui_font_family: Some("Inter".to_owned()),
             ui_text_size: 3,
+            ui_font_weight: 500,
             theme: Some("my-theme".to_owned()),
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {

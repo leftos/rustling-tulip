@@ -557,7 +557,13 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     label.to_owned(),
-                    dialog_look(crate::fonts::ui_text_size(cx), danger, true, &theme(cx)),
+                    dialog_look(
+                        crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
+                        danger,
+                        true,
+                        &theme(cx),
+                    ),
                     confirm.focused() == button,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -569,7 +575,13 @@ impl RootView {
         let close = dialog_button(
             "stash-drop-confirm-close",
             "✕".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             false,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -581,7 +593,7 @@ impl RootView {
             .justify_between()
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                     .child(confirm.title()),
             )
             .child(close);
@@ -647,7 +659,16 @@ fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> 
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .child(caret(part.collapsed, &t))
-        .child(head_title(crate::fonts::ui_text_size(cx), &title_id, STASHES_TITLE, &t).flex_1())
+        .child(
+            head_title(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                &title_id,
+                STASHES_TITLE,
+                &t,
+            )
+            .flex_1(),
+        )
         .when_some(part.count, |header, count| {
             header.child(count_pill(crate::fonts::ui_text_size(cx), count, &t))
         })
@@ -688,6 +709,7 @@ fn push_row(
     let key = key.clone();
     let button = outlined_button(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         &push.selector,
         ButtonSize::Compact,
         push.enabled,
@@ -744,6 +766,7 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
             div()
                 .flex_none()
                 .font_family(DEFAULT_FAMILY)
+                .font_weight(crate::fonts::mono_weight())
                 .text_size(ui_px(cx, ID_TEXT_SIZE))
                 .text_color(gpui::rgb(t.subtle))
                 .group_hover(group, |style| style.text_color(gpui::rgb(t.text_2)))

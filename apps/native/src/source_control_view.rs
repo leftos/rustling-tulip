@@ -535,7 +535,7 @@ impl RootView {
                 div()
                     .flex_none()
                     .text_size(ui_px(cx, HEADER_TEXT_SIZE))
-                    .font_weight(FontWeight::BOLD)
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::BOLD))
                     .text_color(gpui::rgb(t.text))
                     .child(SC_TITLE),
             )
@@ -673,12 +673,22 @@ fn section_view(
         .flex_col()
         .flex_1()
         .min_w(px(0.0))
-        .child(head_title(offset, &format!("{name}-repo"), &row.repo, &t))
-        .children(
-            row.branch
-                .as_deref()
-                .map(|branch| head_title(offset, &format!("{name}-branch"), branch, &t)),
-        );
+        .child(head_title(
+            offset,
+            crate::fonts::ui_weight_shift(cx),
+            &format!("{name}-repo"),
+            &row.repo,
+            &t,
+        ))
+        .children(row.branch.as_deref().map(|branch| {
+            head_title(
+                offset,
+                crate::fonts::ui_weight_shift(cx),
+                &format!("{name}-branch"),
+                branch,
+                &t,
+            )
+        }));
     let key = row.key.clone();
     let header = div()
         .id(SharedString::from(name.clone()))

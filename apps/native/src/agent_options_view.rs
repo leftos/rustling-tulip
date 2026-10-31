@@ -81,6 +81,7 @@ fn row(
     };
     field(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         view.label.clone(),
         &theme(cx),
     )
@@ -107,6 +108,7 @@ fn toggle_row(view: &FieldView, focus: &Control, cx: &mut Context<RootView>) -> 
     );
     let row = checkbox_row(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         &control.selector(),
         checked,
         focused,

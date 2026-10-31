@@ -386,10 +386,10 @@ fn status_color(status: &str, t: &UiTheme) -> u32 {
 /// A section head's title, uppercased: 11 px bold in the secondary text
 /// colour, ending in `…` when its head narrows it. The caller sizes it in
 /// its head; `id` names it for the ellipsis probe.
-pub(crate) fn head_title(offset: i8, id: &str, title: &str, t: &UiTheme) -> Div {
+pub(crate) fn head_title(offset: i8, shift: i8, id: &str, title: &str, t: &UiTheme) -> Div {
     truncating(id, StyledText::new(title.to_uppercase()))
         .text_size(ui_px_at(offset, HEAD_TEXT_SIZE))
-        .font_weight(FontWeight::BOLD)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
         .text_color(gpui::rgb(t.text_2))
 }
 
@@ -847,7 +847,13 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     label,
-                    dialog_look(crate::fonts::ui_text_size(cx), danger, true, &theme(cx)),
+                    dialog_look(
+                        crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
+                        danger,
+                        true,
+                        &theme(cx),
+                    ),
                     confirm.focused() == button,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -859,7 +865,13 @@ impl RootView {
         let close = dialog_button(
             "discard-confirm-close",
             "✕".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             false,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -869,7 +881,11 @@ impl RootView {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(title),
+            )
             .child(close);
         let paths = div()
             .id("discard-confirm-paths")
@@ -1177,6 +1193,7 @@ fn commit_box(
     let key = key.clone();
     let button = primary_button(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         &commit.selector,
         ButtonSize::Regular,
         commit.enabled,
@@ -1292,7 +1309,16 @@ fn bucket_header(key: &ScKey, bucket: &ScBucketRow, cx: &mut Context<RootView>) 
         .gap(px(6.0))
         .h(ui_px(cx, HEAD_HEIGHT))
         .px(px(ROW_PADDING))
-        .child(head_title(crate::fonts::ui_text_size(cx), &title_id, bucket.title, &t).flex_1())
+        .child(
+            head_title(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                &title_id,
+                bucket.title,
+                &t,
+            )
+            .flex_1(),
+        )
         .children(actions)
         .child(count_pill(crate::fonts::ui_text_size(cx), bucket.count, &t))
 }

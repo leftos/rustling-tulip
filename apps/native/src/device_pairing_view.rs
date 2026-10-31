@@ -629,7 +629,11 @@ impl RootView {
             &theme(cx),
         )
         .track_focus(&self.device_pairing.focus)
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(model.title()))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(model.title()),
+        )
         .child(body)
         .child(footer);
         Some(backdrop("device-pairing", panel, &theme(cx)))
@@ -703,6 +707,7 @@ fn device_button(
         pressed.selector(),
         button_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             kind,
             size,
             enabled,

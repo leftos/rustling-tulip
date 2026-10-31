@@ -215,6 +215,7 @@ impl RootView {
             .when_some(badge_text(item.badge), |row, text| {
                 row.child(badge(
                     crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
                     item.badge_selector,
                     text,
                     &t,
@@ -238,6 +239,7 @@ impl RootView {
             .when_some(badge_text(count), |row, text| {
                 row.child(badge(
                     crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
                     "dashboard-badge",
                     text,
                     &t,
@@ -260,6 +262,7 @@ impl RootView {
                 |row, text| {
                     row.child(badge(
                         crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
                         "recover-badge",
                         text,
                         &t,
@@ -454,7 +457,7 @@ fn rail_button(
         .child(tile)
 }
 
-fn badge(offset: i8, selector: &'static str, text: String, t: &UiTheme) -> Div {
+fn badge(offset: i8, shift: i8, selector: &'static str, text: String, t: &UiTheme) -> Div {
     div()
         .absolute()
         .right(px(BADGE_INSET))
@@ -471,7 +474,7 @@ fn badge(offset: i8, selector: &'static str, text: String, t: &UiTheme) -> Div {
         .border_color(gpui::rgb(t.sunken))
         .text_color(gpui::rgb(t.text))
         .text_size(ui_px_at(offset, BADGE_TEXT_SIZE))
-        .font_weight(FontWeight::BOLD)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
         .debug_selector(move || selector.to_owned())
         .child(text)
 }

@@ -172,6 +172,7 @@ impl RootView {
                 dialog.label(control),
                 dialog_look(
                     crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
                     control.danger(),
                     true,
                     &theme(cx),
@@ -186,7 +187,11 @@ impl RootView {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(TITLE),
+            )
             .child(button(Control::Dismiss));
         let footer: Vec<_> = dialog
             .controls()

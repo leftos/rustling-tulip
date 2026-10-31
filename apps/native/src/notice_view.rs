@@ -596,7 +596,13 @@ impl RootView {
         let ok = dialog_button(
             "action-failed-dismiss",
             "OK".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             true,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -614,7 +620,7 @@ impl RootView {
             .track_focus(&self.notice_focus)
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                     .child(notice.title.clone()),
             )
             .child(div().flex().flex_col().children(detail))
@@ -634,7 +640,13 @@ impl RootView {
         let close = dialog_button(
             "checkout-close",
             "✕".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             false,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -646,7 +658,7 @@ impl RootView {
             .justify_between()
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                     .child(title.to_owned()),
             )
             .child(close);
@@ -659,7 +671,13 @@ impl RootView {
                 dialog_button(
                     choice.selector(),
                     choice.label().to_owned(),
-                    dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+                    dialog_look(
+                        crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
+                        false,
+                        true,
+                        &theme(cx),
+                    ),
                     prompt.focused() == choice,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -686,6 +704,7 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
     let id = toast.id;
     let close = outlined_button(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         &format!("toast-close-{id}"),
         ButtonSize::Compact,
         true,
@@ -715,7 +734,7 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
         .gap(px(2.0))
         .child(
             div()
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child(toast.title.clone()),
         )
         .children(detail)
@@ -771,6 +790,7 @@ fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
         let action_id = action.id;
         outlined_button(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             &toast_action_selector(id, action_id),
             ButtonSize::Compact,
             true,

@@ -91,7 +91,7 @@ pub(crate) struct ButtonLook {
     pub border: Option<u32>,
     /// The label's colour, as `0xRRGGBB`.
     pub text: u32,
-    /// The label's weight.
+    /// The label's weight, at the UI weight shift.
     pub weight: FontWeight,
     /// The whole button's opacity.
     pub opacity: f32,
@@ -136,10 +136,11 @@ impl Layer {
     }
 }
 
-/// The look of a `kind` button of `size` at UI text `offset`, drawn on
-/// `layer` in `t`; a disabled one is dimmed and neither hover nor press changes it.
+/// The look of a `kind` button of `size` at UI text `offset` and UI weight
+/// `shift`, drawn on `layer` in `t`; a disabled one is dimmed and neither hover nor press changes it.
 pub(crate) fn button_look(
     offset: i8,
+    shift: i8,
     kind: ButtonKind,
     size: ButtonSize,
     enabled: bool,
@@ -185,7 +186,7 @@ pub(crate) fn button_look(
         pressed_fill: enabled.then_some(pressed),
         border,
         text,
-        weight,
+        weight: crate::fonts::ui_weight_at(shift, weight),
         opacity: if enabled { 1.0 } else { DISABLED_OPACITY },
         enabled,
     }
@@ -234,26 +235,28 @@ pub(crate) fn button(selector: &str, look: ButtonLook) -> Stateful<Div> {
 /// An [`ButtonKind::Outlined`] button in `t`; see [`button`].
 pub(crate) fn outlined_button(
     offset: i8,
+    shift: i8,
     selector: &str,
     size: ButtonSize,
     enabled: bool,
     layer: Layer,
     t: &UiTheme,
 ) -> Stateful<Div> {
-    let look = button_look(offset, ButtonKind::Outlined, size, enabled, layer, t);
+    let look = button_look(offset, shift, ButtonKind::Outlined, size, enabled, layer, t);
     button(selector, look)
 }
 
 /// A [`ButtonKind::Primary`] button in `t`; see [`button`].
 pub(crate) fn primary_button(
     offset: i8,
+    shift: i8,
     selector: &str,
     size: ButtonSize,
     enabled: bool,
     layer: Layer,
     t: &UiTheme,
 ) -> Stateful<Div> {
-    let look = button_look(offset, ButtonKind::Primary, size, enabled, layer, t);
+    let look = button_look(offset, shift, ButtonKind::Primary, size, enabled, layer, t);
     button(selector, look)
 }
 
@@ -370,7 +373,7 @@ mod tests {
         for size in SIZES {
             assert!(
                 (size.radius()
-                    - button_look(0, ButtonKind::Outlined, size, true, Layer::Base, T).radius)
+                    - button_look(0, 0, ButtonKind::Outlined, size, true, Layer::Base, T).radius)
                     .abs()
                     < f32::EPSILON
             );
@@ -388,6 +391,7 @@ mod tests {
     fn outlined_button_is_line_strong_on_transparent() {
         let look = button_look(
             0,
+            0,
             ButtonKind::Outlined,
             ButtonSize::Regular,
             true,
@@ -401,6 +405,7 @@ mod tests {
         assert_eq!(look.hover_fill, Some(HOVER));
         assert_eq!(look.pressed_fill, Some(PRESSED));
         let floating = button_look(
+            0,
             0,
             ButtonKind::Outlined,
             ButtonSize::Regular,
@@ -416,6 +421,7 @@ mod tests {
     fn primary_button_is_light_fill_with_on_accent_bold() {
         let look = button_look(
             0,
+            0,
             ButtonKind::Primary,
             ButtonSize::Compact,
             true,
@@ -429,6 +435,7 @@ mod tests {
         assert_eq!(look.hover_fill, Some(PRIMARY_HOVER));
         assert_eq!(look.pressed_fill, Some(PRIMARY_PRESSED));
         let outlined = button_look(
+            0,
             0,
             ButtonKind::Outlined,
             ButtonSize::Compact,
@@ -447,6 +454,7 @@ mod tests {
     fn danger_button_is_outlined_with_danger_text() {
         let look = button_look(
             0,
+            0,
             ButtonKind::Danger,
             ButtonSize::Regular,
             true,
@@ -454,6 +462,7 @@ mod tests {
             T,
         );
         let outlined = button_look(
+            0,
             0,
             ButtonKind::Outlined,
             ButtonSize::Regular,
@@ -464,6 +473,7 @@ mod tests {
         assert_eq!(look.text, DANGER);
         assert_eq!(ButtonLook { text: TEXT, ..look }, outlined);
         let floating = button_look(
+            0,
             0,
             ButtonKind::Danger,
             ButtonSize::Regular,
@@ -482,7 +492,7 @@ mod tests {
         let boxes: Vec<(f32, f32, f32, f32)> = SIZES
             .iter()
             .map(|&size| {
-                let look = button_look(0, ButtonKind::Outlined, size, true, Layer::Base, T);
+                let look = button_look(0, 0, ButtonKind::Outlined, size, true, Layer::Base, T);
                 (
                     f32::from(look.height),
                     look.pad_x,
@@ -506,7 +516,7 @@ mod tests {
     fn button_look_grows_with_the_offset() {
         for size in SIZES {
             let look =
-                |offset| button_look(offset, ButtonKind::Outlined, size, true, Layer::Base, T);
+                |offset| button_look(offset, 0, ButtonKind::Outlined, size, true, Layer::Base, T);
             let base = look(0);
             for (offset, by) in [(2, px(2.0)), (-2, px(-2.0))] {
                 let scaled = look(offset);
@@ -530,6 +540,37 @@ mod tests {
     }
 
     #[test]
+    fn button_look_moves_its_weight_by_the_shift() {
+        let weight = |shift, kind| {
+            button_look(0, shift, kind, ButtonSize::Regular, true, Layer::Base, T).weight
+        };
+        assert_eq!(weight(1, ButtonKind::Outlined), FontWeight::MEDIUM);
+        assert_eq!(weight(2, ButtonKind::Danger), FontWeight::SEMIBOLD);
+        assert_eq!(
+            weight(2, ButtonKind::Primary),
+            FontWeight::BOLD,
+            "already at the cap"
+        );
+    }
+
+    #[gpui::test]
+    fn a_shifted_weight_reaches_a_button(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            crate::fonts::set_ui_weight(600, cx);
+            let look = button_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                ButtonKind::Outlined,
+                ButtonSize::Regular,
+                true,
+                Layer::Floating,
+                T,
+            );
+            assert_eq!(look.weight, FontWeight::SEMIBOLD);
+        });
+    }
+
+    #[test]
     fn disabled_button_dims_to_45_percent() {
         for kind in [
             ButtonKind::Outlined,
@@ -537,14 +578,14 @@ mod tests {
             ButtonKind::Danger,
         ] {
             for size in SIZES {
-                let look = button_look(0, kind, size, false, Layer::Base, T);
+                let look = button_look(0, 0, kind, size, false, Layer::Base, T);
                 assert!(
                     (look.opacity - 0.45).abs() < f32::EPSILON,
                     "{kind:?} {size:?}"
                 );
                 assert_eq!(look.hover_fill, None, "{kind:?} {size:?} takes no hover");
                 assert_eq!(look.pressed_fill, None, "{kind:?} {size:?} takes no press");
-                let enabled = button_look(0, kind, size, true, Layer::Base, T);
+                let enabled = button_look(0, 0, kind, size, true, Layer::Base, T);
                 assert!((enabled.opacity - 1.0).abs() < f32::EPSILON);
             }
         }

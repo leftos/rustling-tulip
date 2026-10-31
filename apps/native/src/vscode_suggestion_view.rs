@@ -146,10 +146,14 @@ impl RootView {
             return None;
         }
         let focus = self.vscode_suggestions.focus();
+        let (offset, shift) = (
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+        );
         let dismiss = dialog_button(
             "vscode-prompt-dismiss",
             "✕".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(offset, shift, false, true, &theme(cx)),
             false,
         )
         .tooltip(tooltip(DISMISS_LABEL))
@@ -161,7 +165,11 @@ impl RootView {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(TITLE),
+            )
             .child(dismiss);
         // The drawn sentence is the model's own parts, so a spec that reads
         // them reads what is on screen: the path in code styling, the name
@@ -182,8 +190,12 @@ impl RootView {
                             let part = div().child(text);
                             match style {
                                 BodyStyle::Text => part,
-                                BodyStyle::Code => part.font_family(fonts::DEFAULT_FAMILY),
-                                BodyStyle::Bold => part.font_weight(FontWeight::BOLD),
+                                BodyStyle::Code => part
+                                    .font_family(fonts::DEFAULT_FAMILY)
+                                    .font_weight(fonts::mono_weight()),
+                                BodyStyle::Bold => {
+                                    part.font_weight(crate::fonts::ui_weight(cx, FontWeight::BOLD))
+                                }
                             }
                         },
                     )),
@@ -211,7 +223,7 @@ impl RootView {
                 let element = dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+                    dialog_look(offset, shift, false, true, &theme(cx)),
                     focus == button,
                 )
                 .when_some(tip, |element, tip| element.tooltip(tooltip(tip)))

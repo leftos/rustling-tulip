@@ -483,7 +483,11 @@ impl RootView {
             .child(control_button(dialog, Control::Recover, cx));
         let panel = modal_panel(crate::fonts::ui_text_size(cx), "recover-panel", &theme(cx))
             .track_focus(&self.recover_focus)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(TITLE),
+            )
             .child(list)
             .children(dialog.error().map(|error| warning(error.to_owned(), &t)))
             .child(footer);
@@ -605,6 +609,7 @@ fn control_button(
         control_label(dialog, &control),
         dialog_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             false,
             enabled(dialog, &control),
             &theme(cx),
@@ -633,7 +638,11 @@ fn group_block(dialog: &RecoverDialog, group: &Group, cx: &mut Context<RootView>
             .children(group.rows.iter().map(|id| row_block(dialog, id, cx)));
     }
     block
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(group.title()))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(group.title()),
+        )
         .children(group.rows.iter().map(|id| row_block(dialog, id, cx)))
 }
 

@@ -1442,7 +1442,13 @@ impl RootView {
                 Rc::new(cx.listener(move |this, answer: &ButtonAnswer, _, cx| {
                     this.press_card(&id, &drawn, answer, cx);
                 }));
-            prompt_card(offset, &view, &on_press, &t)
+            prompt_card(
+                offset,
+                crate::fonts::ui_weight_shift(cx),
+                &view,
+                &on_press,
+                &t,
+            )
         });
         if elsewhere.is_none() && card.is_none() {
             return None;
@@ -1498,6 +1504,7 @@ impl RootView {
                     let id = session_id.to_owned();
                     primary_button(
                         offset,
+                        crate::fonts::ui_weight_shift(cx),
                         action.selector(),
                         ButtonSize::Compact,
                         enabled,
@@ -1576,6 +1583,7 @@ impl RootView {
         } = ride;
         outlined_button(
             fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             selector,
             ButtonSize::Compact,
             !busy,
@@ -1901,6 +1909,7 @@ fn tool_card(
         .border_1()
         .border_color(gpui::rgb(t.line_strong))
         .font_family(look.mono.clone())
+        .font_weight(crate::fonts::mono_weight())
         .text_size(ui_px_at(look.text_offset, CARD_TEXT_SIZE))
         .text_color(gpui::rgb(t.text_2))
         .cursor_pointer()

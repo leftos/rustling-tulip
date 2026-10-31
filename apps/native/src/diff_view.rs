@@ -865,6 +865,7 @@ impl Render for DiffView {
             .bg(rgb(crate::appearance::packed(t.terminal.bg)))
             .text_color(rgb(t.text))
             .font_family(metrics.family)
+            .font_weight(crate::fonts::mono_weight())
             .text_size(px(self.font.size))
             .line_height(px(metrics.line_height))
             .child(div().flex_1().min_w(px(0.0)).h_full().child(list))

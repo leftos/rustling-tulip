@@ -207,6 +207,7 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
     let id = entry.id;
     let action = primary_button(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         &format!("undo-action-{id}"),
         ButtonSize::Compact,
         true,
@@ -220,6 +221,7 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
     }));
     let dismiss = outlined_button(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         &format!("undo-dismiss-{id}"),
         ButtonSize::Compact,
         true,

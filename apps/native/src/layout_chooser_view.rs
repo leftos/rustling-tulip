@@ -205,7 +205,11 @@ impl RootView {
             &theme(cx),
         )
         .track_focus(&self.chooser_focus)
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(TITLE),
+        )
         .child(div().text_color(gpui::rgb(t.muted)).child(INTRO))
         .child(div().flex().flex_col().gap(px(6.0)).children(options));
         Some(backdrop("layout-chooser", panel, &theme(cx)))
@@ -420,6 +424,7 @@ impl RootView {
         ] {
             let pressed = control.clone();
             let row = option_row_element(
+                crate::fonts::ui_weight_shift(cx),
                 control.selector(),
                 import.label(&control, aspect),
                 control.detail(),
@@ -448,7 +453,11 @@ impl RootView {
             .items_center()
             .justify_between()
             .gap(px(8.0))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(IMPORT_TITLE))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(IMPORT_TITLE),
+            )
             .child(close);
         let panel = modal_panel(crate::fonts::ui_text_size(cx), "import-panel", &theme(cx))
             .track_focus(&self.chooser_focus)
@@ -475,6 +484,7 @@ fn option_row(
 ) -> AnyElement {
     let pressed = control.clone();
     option_row_element(
+        crate::fonts::ui_weight_shift(cx),
         control.selector(),
         chooser.label(control, aspect),
         chooser.detail(control),
@@ -501,6 +511,7 @@ struct RowMarks {
 /// filled while `selected` and outlined while `focused`; the caller adds
 /// the click.
 fn option_row_element(
+    shift: i8,
     selector: String,
     label: String,
     detail: Option<String>,
@@ -521,7 +532,11 @@ fn option_row_element(
         .when(selected, |row| row.bg(gpui::rgb(t.selected_bg)))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(label))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
+                .child(label),
+        )
         .children(detail.map(|detail| div().text_color(gpui::rgb(t.muted)).child(detail)))
 }
 
@@ -538,7 +553,13 @@ fn picker_button(
     dialog_button(
         &control.selector(),
         chooser.label(control, aspect),
-        dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            false,
+            true,
+            &theme(cx),
+        ),
         focused == Some(control),
     )
     .when(chooser.is_selected(control), |button| {

@@ -399,7 +399,11 @@ impl RootView {
             &theme(cx),
         )
         .track_focus(&self.worktrees_focus)
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(TITLE),
+        )
         .child(muted(root, &t))
         .child(toolbar)
         .children(lines.map(|line| div().child(line)))
@@ -472,7 +476,11 @@ fn manager_row(
         .border_1()
         .border_color(gpui::rgb(t.border))
         .rounded(px(4.0))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(row.title))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(row.title),
+        )
         .child(div().child(status))
         .children(meta.into_iter().map(|text| muted(text, &t)))
         .children(members)
@@ -494,6 +502,7 @@ fn manager_button(
         manager.label(&control),
         dialog_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             danger,
             manager.enabled(&control),
             &theme(cx),
@@ -522,6 +531,7 @@ fn confirm_layer(confirm: &Confirm, cx: &mut Context<RootView>) -> AnyElement {
             confirm.label(button).to_owned(),
             dialog_look(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 button == ConfirmButton::Ok,
                 true,
                 &theme(cx),
@@ -539,7 +549,7 @@ fn confirm_layer(confirm: &Confirm, cx: &mut Context<RootView>) -> AnyElement {
     )
     .child(
         div()
-            .font_weight(FontWeight::SEMIBOLD)
+            .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
             .child(confirm.title()),
     )
     .child(div().child(confirm.body()))

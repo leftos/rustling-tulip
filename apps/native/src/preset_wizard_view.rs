@@ -558,7 +558,7 @@ impl RootView {
         .child(
             div()
                 .debug_selector(|| "preset-wizard-title".to_owned())
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child(wizard.title()),
         )
         .children(description)
@@ -1007,6 +1007,7 @@ fn pick_button(selector: &str, button: PickButton, cx: &mut Context<RootView>) -
         PICK_LABEL.to_owned(),
         dialog_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             false,
             pick_enabled,
             &theme(cx),
@@ -1050,7 +1051,13 @@ fn picked_path_row(
         dialog_button(
             &format!("{selector}-clear"),
             CLEAR_LABEL.to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             false,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_clear(this, cx)))
@@ -1258,6 +1265,7 @@ fn variable_field(
     } else if matches!(variable.kind, PresetVariableKind::Toggle { .. }) {
         checkbox_row(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             &selector,
             wizard.toggle_on(&name),
             false,
@@ -1298,7 +1306,13 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
     let cancel = dialog_button(
         "preset-cancel",
         "Cancel".to_owned(),
-        dialog_look(crate::fonts::ui_text_size(cx), false, idle, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            false,
+            idle,
+            &theme(cx),
+        ),
         false,
     )
     .when(idle, |button| {
@@ -1310,7 +1324,13 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
         dialog_button(
             "preset-back",
             "Back".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, idle, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                idle,
+                &theme(cx),
+            ),
             false,
         )
         .when(idle, |button| {
@@ -1328,6 +1348,7 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
             state.label,
             dialog_look(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 false,
                 state.enabled,
                 &theme(cx),
@@ -1347,6 +1368,7 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
             "Next".to_owned(),
             dialog_look(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 false,
                 state.enabled,
                 &theme(cx),

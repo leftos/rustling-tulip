@@ -381,7 +381,16 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
                 .text_color(gpui::rgb(t.muted))
                 .child(caret),
         )
-        .child(head_title(crate::fonts::ui_text_size(cx), &label_id, HISTORY_LABEL, &t).flex_none())
+        .child(
+            head_title(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                &label_id,
+                HISTORY_LABEL,
+                &t,
+            )
+            .flex_none(),
+        )
         .when_some(block.title.clone(), |toggle, title| {
             toggle.child(
                 div()
@@ -584,17 +593,21 @@ fn detail_pane(
                 this.open_commit_file(&key, &sha, &path);
             }))
     });
-    pane.child(div().font_weight(FontWeight::SEMIBOLD).child(view.heading))
-        .child(muted(view.author))
-        .child(muted(view.date))
-        .when_some(view.body, |pane, body| {
-            pane.child(div().py(px(4.0)).child(body))
-        })
-        .child(muted("Files:".to_owned()))
-        .children(files)
-        .when_some(view.no_files, |pane, note| {
-            pane.child(muted(note.to_owned()))
-        })
+    pane.child(
+        div()
+            .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+            .child(view.heading),
+    )
+    .child(muted(view.author))
+    .child(muted(view.date))
+    .when_some(view.body, |pane, body| {
+        pane.child(div().py(px(4.0)).child(body))
+    })
+    .child(muted("Files:".to_owned()))
+    .children(files)
+    .when_some(view.no_files, |pane, note| {
+        pane.child(muted(note.to_owned()))
+    })
 }
 
 /// An invisible layer that records where the panel's body was laid out, for

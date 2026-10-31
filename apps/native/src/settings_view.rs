@@ -2737,6 +2737,7 @@ impl RootView {
         .track_focus(&self.appearance_focus)
         .child(dialog_title_bar(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             "Settings",
             close,
             &theme(cx),
@@ -2756,9 +2757,13 @@ impl RootView {
             .settings_rows()
             .into_iter()
             .map(|row| match row {
-                SettingsRow::Group(label) => {
-                    group_row(crate::fonts::ui_text_size(cx), label, &t).into_any_element()
-                }
+                SettingsRow::Group(label) => group_row(
+                    crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
+                    label,
+                    &t,
+                )
+                .into_any_element(),
                 SettingsRow::Tab(tab) => self
                     .settings_tab_row(tab, list_focused, cx)
                     .into_any_element(),
@@ -2808,7 +2813,7 @@ impl RootView {
             .rounded(px(TAB_ROW_RADIUS))
             .border_1()
             .border_color(gpui::rgba(t.transparent))
-            .font_weight(weight)
+            .font_weight(crate::fonts::ui_weight(cx, weight))
             .text_color(gpui::rgb(text))
             .cursor_pointer()
             .when(shown, |row| row.bg(gpui::rgb(t.selection)))
@@ -2827,7 +2832,11 @@ impl RootView {
             }))
             .child(label)
             .children(if tab == SettingsTab::RemoteAccess {
-                self.remote_access_tab_badge(crate::fonts::ui_text_size(cx), &t)
+                self.remote_access_tab_badge(
+                    crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
+                    &t,
+                )
             } else {
                 None
             })
@@ -2928,12 +2937,16 @@ impl RootView {
             .text_size(crate::fonts::ui_px(cx, HINT_SIZE))
             .text_color(gpui::rgb(t.subtle))
         });
-        let section = section(crate::fonts::ui_text_size(cx), "Worktrees root")
-            .child(hint(crate::fonts::ui_text_size(cx), WORKTREES_HINT, &t))
-            .child(path_row)
-            .children(host_hint)
-            .child(active)
-            .child(buttons);
+        let section = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Worktrees root",
+        )
+        .child(hint(crate::fonts::ui_text_size(cx), WORKTREES_HINT, &t))
+        .child(path_row)
+        .children(host_hint)
+        .child(active)
+        .child(buttons);
         vec![section.into_any_element()]
     }
 
@@ -2973,19 +2986,23 @@ impl RootView {
             hint(crate::fonts::ui_text_size(cx), error, &t)
                 .debug_selector(|| "settings-remote-port-error".to_owned())
         });
-        let section = section(crate::fonts::ui_text_size(cx), "Remote access (Tailscale)")
-            .child(hint(crate::fonts::ui_text_size(cx), REMOTE_INTRO, &t))
-            .child(switch)
-            .child(status)
-            .children(address)
-            .children(cert)
-            .children(self.waiting_devices_section(cx))
-            .children(self.devices_section(cx))
-            .child(self.remote_port_row(tab, enabled, focused, cx))
-            .children(port_error)
-            .child(hint(crate::fonts::ui_text_size(cx), REMOTE_PORT_HINT, &t))
-            .child(hint(crate::fonts::ui_text_size(cx), REMOTE_RUN_HINT, &t))
-            .children(self.autostart_rows(tab, focused, cx));
+        let section = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Remote access (Tailscale)",
+        )
+        .child(hint(crate::fonts::ui_text_size(cx), REMOTE_INTRO, &t))
+        .child(switch)
+        .child(status)
+        .children(address)
+        .children(cert)
+        .children(self.waiting_devices_section(cx))
+        .children(self.devices_section(cx))
+        .child(self.remote_port_row(tab, enabled, focused, cx))
+        .children(port_error)
+        .child(hint(crate::fonts::ui_text_size(cx), REMOTE_PORT_HINT, &t))
+        .child(hint(crate::fonts::ui_text_size(cx), REMOTE_RUN_HINT, &t))
+        .children(self.autostart_rows(tab, focused, cx));
         vec![section.into_any_element()]
     }
 
@@ -3085,18 +3102,22 @@ impl RootView {
             focused,
             cx,
         );
-        let section = section(crate::fonts::ui_text_size(cx), "Spawn defaults")
-            .child(hint(
-                crate::fonts::ui_text_size(cx),
-                "Pre-fill these in the spawn dialog. You can override on every spawn.",
-                &t,
-            ))
-            .child(trusted)
-            .child(hint(
-                crate::fonts::ui_text_size(cx),
-                "When enabled, new agent sessions skip their approval prompts.",
-                &t,
-            ));
+        let section = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Spawn defaults",
+        )
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "Pre-fill these in the spawn dialog. You can override on every spawn.",
+            &t,
+        ))
+        .child(trusted)
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "When enabled, new agent sessions skip their approval prompts.",
+            &t,
+        ));
         vec![section.into_any_element()]
     }
 
@@ -3126,9 +3147,13 @@ impl RootView {
         let mut sections = Vec::new();
         if !rows.is_empty() {
             sections.push(
-                section(crate::fonts::ui_text_size(cx), page.label.clone())
-                    .children(rows)
-                    .into_any_element(),
+                section(
+                    crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
+                    page.label.clone(),
+                )
+                .children(rows)
+                .into_any_element(),
             );
         }
         sections.extend(self.launch_command_section(&page, focused, cx));
@@ -3151,7 +3176,11 @@ impl RootView {
         if !live && !self.launch_command_unsupported() {
             return None;
         }
-        let section = section(crate::fonts::ui_text_size(cx), "Launch command");
+        let section = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Launch command",
+        );
         let section = if live {
             let tab = self.agent_tabs.tabs.get(&page.id)?;
             let refusal = |row| {
@@ -3186,14 +3215,20 @@ impl RootView {
             });
             section
                 .child(
-                    field(crate::fonts::ui_text_size(cx), "Program", &theme(cx))
-                        .child(program)
-                        .children(env_note)
-                        .children(program_error),
+                    field(
+                        crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
+                        "Program",
+                        &theme(cx),
+                    )
+                    .child(program)
+                    .children(env_note)
+                    .children(program_error),
                 )
                 .child(
                     field(
                         crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
                         "Extra arguments",
                         &theme(cx),
                     )
@@ -3205,6 +3240,7 @@ impl RootView {
             section
                 .child(disabled_launch_row(
                     crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
                     "Program",
                     SettingsControl::AgentProgram,
                     page.tag.clone(),
@@ -3212,6 +3248,7 @@ impl RootView {
                 ))
                 .child(disabled_launch_row(
                     crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
                     "Extra arguments",
                     SettingsControl::AgentArgs,
                     LAUNCH_ARGS_PLACEHOLDER.to_owned(),
@@ -3305,18 +3342,22 @@ impl RootView {
             focused,
             cx,
         );
-        let section = section(crate::fonts::ui_text_size(cx), "Notifications")
-            .child(windows)
-            .child(hint(
-                crate::fonts::ui_text_size(cx),
-                "Fire an OS notification when a session needs you (a question, \
+        let section = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Notifications",
+        )
+        .child(windows)
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "Fire an OS notification when a session needs you (a question, \
                  a permission prompt or a plan approval) or finishes its turn \
                  with no background work left.",
-                &t,
-            ))
-            .child(needs_you)
-            .child(finished)
-            .child(skip_row);
+            &t,
+        ))
+        .child(needs_you)
+        .child(finished)
+        .child(skip_row);
         vec![section.into_any_element()]
     }
 
@@ -3348,15 +3389,19 @@ impl RootView {
             hint(crate::fonts::ui_text_size(cx), status_text, &t)
                 .debug_selector(move || status_selector.to_owned())
         });
-        let power = section(crate::fonts::ui_text_size(cx), "Power")
-            .child(choice_row(
-                "Keep this PC awake",
-                &modes,
-                locked,
-                focused,
-                cx,
-            ))
-            .children(status);
+        let power = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Power",
+        )
+        .child(choice_row(
+            "Keep this PC awake",
+            &modes,
+            locked,
+            focused,
+            cx,
+        ))
+        .children(status);
         let sidebar = self.sidebar_section(focused, cx);
         let copy = toggle(
             SettingsControl::CopyOnSelect,
@@ -3368,14 +3413,18 @@ impl RootView {
             focused,
             cx,
         );
-        let terminal = section(crate::fonts::ui_text_size(cx), "Terminal behavior")
-            .child(copy)
-            .child(hint(
-                crate::fonts::ui_text_size(cx),
-                "Off: select to highlight, copy explicitly with Ctrl+C \
+        let terminal = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Terminal behavior",
+        )
+        .child(copy)
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "Off: select to highlight, copy explicitly with Ctrl+C \
              (when there's a selection) or Ctrl+Shift+C.",
-                &t,
-            ));
+            &t,
+        ));
         let open_text = toggle(
             SettingsControl::OpenTextExternally,
             ToggleState {
@@ -3386,7 +3435,12 @@ impl RootView {
             focused,
             cx,
         );
-        let files = section(crate::fonts::ui_text_size(cx), "Files").child(open_text);
+        let files = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Files",
+        )
+        .child(open_text);
         vec![
             power.into_any_element(),
             sidebar,
@@ -3418,17 +3472,21 @@ impl RootView {
             focused,
             cx,
         );
-        section(crate::fonts::ui_text_size(cx), "Updates")
-            .child(check)
-            .child(
-                hint(crate::fonts::ui_text_size(cx), version, &t)
-                    .debug_selector(|| "settings-update-version".to_owned()),
-            )
-            .child(
-                hint(crate::fonts::ui_text_size(cx), last, &t)
-                    .debug_selector(|| "settings-update-last-check".to_owned()),
-            )
-            .child(div().flex().child(check_now))
+        section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Updates",
+        )
+        .child(check)
+        .child(
+            hint(crate::fonts::ui_text_size(cx), version, &t)
+                .debug_selector(|| "settings-update-version".to_owned()),
+        )
+        .child(
+            hint(crate::fonts::ui_text_size(cx), last, &t)
+                .debug_selector(|| "settings-update-last-check".to_owned()),
+        )
+        .child(div().flex().child(check_now))
     }
 
     /// The Sidebar section: the default view, how much room a leaf takes, how
@@ -3461,30 +3519,34 @@ impl RootView {
         });
         let under = sessions_under_repos_choices(self.sidebar.sessions_under_repos());
         let sorts = repo_sort_choices(self.sidebar.repo_sort());
-        section(crate::fonts::ui_text_size(cx), "Sidebar")
-            .child(choice_row(
-                "Default view",
-                &choices,
-                RowLock::Live,
-                focused,
-                cx,
-            ))
-            .child(choice_row(
-                "Leaf density",
-                &densities,
-                RowLock::Live,
-                focused,
-                cx,
-            ))
-            .child(choice_row(
-                "Sessions under repos",
-                &under,
-                RowLock::Live,
-                focused,
-                cx,
-            ))
-            .child(choice_row("Sort repos", &sorts, RowLock::Live, focused, cx))
-            .into_any_element()
+        section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Sidebar",
+        )
+        .child(choice_row(
+            "Default view",
+            &choices,
+            RowLock::Live,
+            focused,
+            cx,
+        ))
+        .child(choice_row(
+            "Leaf density",
+            &densities,
+            RowLock::Live,
+            focused,
+            cx,
+        ))
+        .child(choice_row(
+            "Sessions under repos",
+            &under,
+            RowLock::Live,
+            focused,
+            cx,
+        ))
+        .child(choice_row("Sort repos", &sorts, RowLock::Live, focused, cx))
+        .into_any_element()
     }
 
     fn app_title_tab(
@@ -3524,54 +3586,58 @@ impl RootView {
                 .bg(gpui::rgb(t.chip))
                 .child(self.title_preview()),
         );
-        let section = section(crate::fonts::ui_text_size(cx), "App title")
-            .child(hint(
-                crate::fonts::ui_text_size(cx),
-                "Controls what the OS window title bar shows for the main window.",
-                &t,
-            ))
-            .child(choice_row(
-                "Tab and title count",
-                &modes,
-                RowLock::Live,
-                focused,
-                cx,
-            ))
-            .child(hint(
-                crate::fonts::ui_text_size(cx),
-                "What the tab pills and the window title count. Needs you counts the \
+        let section = section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "App title",
+        )
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "Controls what the OS window title bar shows for the main window.",
+            &t,
+        ))
+        .child(choice_row(
+            "Tab and title count",
+            &modes,
+            RowLock::Live,
+            focused,
+            cx,
+        ))
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "What the tab pills and the window title count. Needs you counts the \
                  terminals waiting on you and shows nothing at 0; Busy / total and Idle / \
                  total count the busy or idle terminals out of all of them.",
-                &t,
-            ))
-            .child(count)
-            .child(hint(
-                crate::fonts::ui_text_size(cx),
-                "Renders the count in parentheses before the active tab's name. Hidden \
+            &t,
+        ))
+        .child(count)
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "Renders the count in parentheses before the active tab's name. Hidden \
                  when the tab has nothing to count.",
-                &t,
-            ))
-            .child(suffix)
-            .child(hint(
-                crate::fonts::ui_text_size(cx),
-                "Keeps OS taskbars grouping rustling-tulip windows together. Turn off \
+            &t,
+        ))
+        .child(suffix)
+        .child(hint(
+            crate::fonts::ui_text_size(cx),
+            "Keeps OS taskbars grouping rustling-tulip windows together. Turn off \
                  for a tighter title.",
-                &t,
-            ))
-            .child(preview);
+            &t,
+        ))
+        .child(preview);
         vec![section.into_any_element()]
     }
 }
 
 /// A group label in the tab list: painted, never a tab stop.
-fn group_row(offset: i8, label: &'static str, t: &UiTheme) -> Div {
+fn group_row(offset: i8, shift: i8, label: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_none()
         .items_center()
         .h(crate::fonts::ui_px_at(offset, TAB_ROW_HEIGHT))
         .px(px(12.0))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
         .text_color(gpui::rgb(t.subtle))
         .child(label)
 }
@@ -3606,7 +3672,13 @@ fn settings_button(
     let button = dialog_button(
         control.selector(),
         label.to_owned(),
-        dialog_look(crate::fonts::ui_text_size(cx), false, enabled, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            false,
+            enabled,
+            &theme(cx),
+        ),
         focused == Some(control),
     );
     if enabled {
@@ -3635,6 +3707,7 @@ fn toggle(
 ) -> Div {
     let row = checkbox_row(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         control.selector(),
         state.checked,
         focused == Some(control),
@@ -3872,6 +3945,7 @@ fn agent_field_row(
                     };
                     choice_button(
                         crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
                         control.selector().to_owned(),
                         SharedString::from(choice.label.clone()),
                         look,
@@ -3883,6 +3957,7 @@ fn agent_field_row(
                 .collect();
             field(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 view.label.clone(),
                 &theme(cx),
             )
@@ -3908,6 +3983,7 @@ fn agent_field_row(
             let frame = input_frame(control, &setting.input, enabled, focused, cx);
             field(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 view.label.clone(),
                 &theme(cx),
             )
@@ -3921,6 +3997,7 @@ fn agent_field_row(
             let selector = format!("settings-{tag}-{}", field_part(&view.id));
             field(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 view.label.clone(),
                 &theme(cx),
             )
@@ -3977,6 +4054,7 @@ fn input_frame(
 /// to get it.
 fn disabled_launch_row(
     offset: i8,
+    shift: i8,
     label: &'static str,
     control: SettingsControl,
     placeholder: String,
@@ -3990,7 +4068,7 @@ fn disabled_launch_row(
         .text_color(gpui::rgb(t.subtle))
         .tooltip(tooltip(LAUNCH_COMMAND_UNSUPPORTED_TIP))
         .child(placeholder);
-    field(offset, label, t).child(frame)
+    field(offset, shift, label, t).child(frame)
 }
 
 /// Whether a choice row takes input, and the note that says why not.
@@ -4069,6 +4147,7 @@ fn choice_row(
             };
             choice_button(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 control.selector().to_owned(),
                 *text,
                 look,
@@ -4085,10 +4164,15 @@ fn choice_row(
         ),
         RowLock::Live => None,
     };
-    field(crate::fonts::ui_text_size(cx), label, &theme(cx))
-        .child(div().flex().child(segmented(buttons, &theme(cx))))
-        .children(note)
-        .into_any_element()
+    field(
+        crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
+        label,
+        &theme(cx),
+    )
+    .child(div().flex().child(segmented(buttons, &theme(cx))))
+    .children(note)
+    .into_any_element()
 }
 
 #[cfg(test)]

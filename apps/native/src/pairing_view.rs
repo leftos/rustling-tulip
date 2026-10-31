@@ -649,7 +649,7 @@ impl RootView {
             .gap(px(6.0))
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                     .child(waiting_heading(rows.len())),
             )
             .children(rows.iter().map(|row| waiting_row(row, cx)));
@@ -657,7 +657,12 @@ impl RootView {
     }
 
     /// The Remote access tab's count of waiting requests, when there is one.
-    pub(crate) fn remote_access_tab_badge(&self, offset: i8, t: &UiTheme) -> Option<AnyElement> {
+    pub(crate) fn remote_access_tab_badge(
+        &self,
+        offset: i8,
+        shift: i8,
+        t: &UiTheme,
+    ) -> Option<AnyElement> {
         let text = self.pairing_badge()?;
         let badge = div()
             .debug_selector(|| "settings-tab-remote-access-badge".to_owned())
@@ -673,7 +678,7 @@ impl RootView {
             .bg(gpui::rgb(t.asking))
             .text_color(gpui::rgb(t.on_asking))
             .text_size(crate::fonts::ui_px_at(offset, BADGE_TEXT_SIZE))
-            .font_weight(FontWeight::BOLD)
+            .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
             .child(text);
         Some(badge.into_any_element())
     }
@@ -704,7 +709,7 @@ impl RootView {
             .track_focus(&self.pairing.focus)
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                     .child(dialog.title()),
             )
             .child(body)
@@ -886,6 +891,7 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
         &format!("settings-waiting-deny-{id}"),
         button_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             ButtonKind::Danger,
             ButtonSize::Compact,
             true,
@@ -903,6 +909,7 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
             &format!("settings-waiting-approve-{id}"),
             button_look(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 ButtonKind::Primary,
                 ButtonSize::Compact,
                 true,
@@ -941,6 +948,7 @@ fn dialog_button(
         pressed.selector(),
         button_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             pressed.kind(),
             size,
             enabled,

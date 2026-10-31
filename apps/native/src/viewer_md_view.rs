@@ -607,6 +607,7 @@ impl Painter {
             RowKind::Rule => div().w_full().h(px(1.0)).bg(gpui::rgb(t.line)),
             RowKind::Html(text) => div()
                 .font_family(self.mono.clone())
+                .font_weight(crate::fonts::mono_weight())
                 .text_size(px(self.mono_size))
                 .text_color(gpui::rgb(t.subtle))
                 .child(text.clone()),
@@ -706,6 +707,7 @@ impl Painter {
             .bg(gpui::rgb(t.sunken))
             .overflow_hidden()
             .font_family(self.mono.clone())
+            .font_weight(crate::fonts::mono_weight())
             .text_size(px(self.mono_size))
             .when(first, |top| top.pt(px(CODE_PAD)).rounded_t(px(CODE_RADIUS)))
             .when(last, |bottom| {
@@ -1019,6 +1021,7 @@ pub(crate) fn markdown_toggle(
         let button = if mode == shown {
             primary_button(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 &selector,
                 ButtonSize::Compact,
                 enabled,
@@ -1028,6 +1031,7 @@ pub(crate) fn markdown_toggle(
         } else {
             outlined_button(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 &selector,
                 ButtonSize::Compact,
                 enabled,

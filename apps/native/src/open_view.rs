@@ -586,6 +586,7 @@ impl RootView {
                     button.label().to_owned(),
                     dialog_look(
                         crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
                         button == RunButton::Run,
                         true,
                         &theme(cx),
@@ -606,7 +607,7 @@ impl RootView {
         .track_focus(&self.run_focus)
         .child(
             div()
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child(confirm.title()),
         )
         .child(div().text_color(gpui::rgb(t.muted)).child(confirm.detail()))

@@ -216,6 +216,7 @@ impl RootView {
         let text = self.update_footer_text()?;
         let button = outlined_button(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             "footer-update",
             ButtonSize::Compact,
             true,

@@ -137,7 +137,7 @@ impl RootView {
             .flex_col()
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                     .child(dialog.title()),
             )
             .child(
@@ -164,6 +164,7 @@ impl RootView {
                     button.label().to_owned(),
                     dialog_look(
                         crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
                         button.is_danger(),
                         true,
                         &theme(cx),

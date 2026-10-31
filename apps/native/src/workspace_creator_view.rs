@@ -486,7 +486,13 @@ impl RootView {
         let cancel = dialog_button(
             CreatorControl::Cancel.selector(),
             "Cancel".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             focus == CreatorControl::Cancel,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -498,6 +504,7 @@ impl RootView {
             "Create".to_owned(),
             dialog_look(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 false,
                 can_submit,
                 &theme(cx),
@@ -515,7 +522,11 @@ impl RootView {
             &theme(cx),
         )
         .track_focus(&self.workspace_creator_focus)
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(TITLE),
+        )
         .child(tabs)
         .child(body)
         .children(error)
@@ -752,6 +763,7 @@ fn repos_body(
                 .to_owned();
             checkbox_row(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 &selector,
                 checked,
                 false,
@@ -836,6 +848,7 @@ fn browse_row(
         "Browse…".to_owned(),
         dialog_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             false,
             browse_enabled,
             &theme(cx),

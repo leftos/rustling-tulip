@@ -1497,6 +1497,7 @@ impl RootView {
         };
         popped_out_card(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             names,
             label,
             [focus, dock],
@@ -1535,6 +1536,7 @@ impl RootView {
         };
         popped_out_card(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             names,
             tab.name.clone(),
             [focus, dock],
@@ -1589,7 +1591,7 @@ impl RootView {
             .debug_selector(|| name)
             .flex_none()
             .whitespace_nowrap()
-            .font_weight(FontWeight::SEMIBOLD)
+            .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
             .text_color(gpui::rgb(t.text))
             .child(tab.name.clone())
             .into_any_element();
@@ -2334,7 +2336,7 @@ fn header_title(
     };
     let title = title
         .text_size(ui_px(cx, TITLE_TEXT_SIZE))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
         .text_color(gpui::rgb(t.text));
     let mut out = vec![
         div()
@@ -2672,6 +2674,7 @@ impl Render for PaneGhost {
         div().child(
             ghost_pill(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 self.label.clone(),
                 self.accent,
                 crate::fonts::ui_family(cx),
@@ -2689,6 +2692,7 @@ impl Render for PaneGhost {
 /// swap badge, drawn in the interface's `family`.
 fn ghost_pill(
     offset: i8,
+    shift: i8,
     text: impl Into<SharedString>,
     accent: u32,
     family: SharedString,
@@ -2704,6 +2708,7 @@ fn ghost_pill(
         .border_color(gpui::rgb(accent))
         .whitespace_nowrap()
         .font_family(family)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::NORMAL))
         .text_size(ui_px_at(offset, GHOST_TEXT_SIZE))
         .text_color(gpui::rgb(t.text))
         .child(text.into())
@@ -2750,6 +2755,7 @@ struct CardNames {
 /// popped-out note and `buttons`.
 fn popped_out_card(
     offset: i8,
+    shift: i8,
     names: CardNames,
     label: String,
     buttons: [Stateful<Div>; 2],
@@ -2765,7 +2771,7 @@ fn popped_out_card(
         .overflow_hidden()
         .whitespace_nowrap()
         .text_size(ui_px_at(offset, TITLE_TEXT_SIZE))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
         .text_color(gpui::rgb(t.text))
         .child(label);
     let buttons = div().flex().justify_center().gap(px(6.0)).children(buttons);
@@ -2892,6 +2898,7 @@ fn drop_overlay(
                 .justify_center()
                 .child(ghost_pill(
                     crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
                     drag::SWAP_BADGE,
                     accent,
                     family,

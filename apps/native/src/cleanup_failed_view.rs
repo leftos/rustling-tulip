@@ -210,13 +210,14 @@ impl RootView {
         let t = theme(cx);
         let dialog = self.cleanup_failed.head()?;
         let refusal = self.capabilities().local_files_refusal();
+        let title_weight = crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD);
         let mut button =
             |control: Control, danger: bool| cleanup_button(dialog, control, danger, refusal, cx);
         let header = div()
             .flex()
             .items_center()
             .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+            .child(div().font_weight(title_weight).child(TITLE))
             .child(button(Control::Close, false));
         let failures: Vec<Div> = dialog
             .failures()
@@ -309,6 +310,7 @@ fn cleanup_button(
         label,
         dialog_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             danger,
             refusal.is_none(),
             &theme(cx),

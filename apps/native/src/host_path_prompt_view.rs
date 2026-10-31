@@ -297,7 +297,7 @@ impl RootView {
         .track_focus(&self.host_path_focus)
         .child(
             div()
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child(prompt.title()),
         )
         .child(field)
@@ -330,7 +330,13 @@ fn footer(focus: PromptControl, cx: &mut Context<RootView>) -> Div {
         dialog_button(
             control.selector(),
             label.to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             focus == control,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {

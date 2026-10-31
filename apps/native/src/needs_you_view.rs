@@ -173,6 +173,7 @@ impl RootView {
             .text_color(gpui::rgb(t.text))
             .child(header(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 header_text(rows.len()),
                 &t,
             ))
@@ -224,7 +225,7 @@ impl RootView {
     }
 }
 
-fn header(offset: i8, text: String, t: &UiTheme) -> Div {
+fn header(offset: i8, shift: i8, text: String, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_none()
@@ -235,7 +236,11 @@ fn header(offset: i8, text: String, t: &UiTheme) -> Div {
         .border_color(gpui::rgb(t.border))
         .text_color(gpui::rgb(t.muted))
         .debug_selector(|| "needs-you-header".to_owned())
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(text))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
+                .child(text),
+        )
 }
 
 fn empty_state(t: &UiTheme) -> Div {

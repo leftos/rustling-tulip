@@ -370,6 +370,7 @@ impl RootView {
             "✕".to_owned(),
             dialog_look(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 false,
                 dismissable,
                 &theme(cx),
@@ -385,7 +386,11 @@ impl RootView {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(TITLE),
+            )
             .child(close);
         let field = div()
             .flex()
@@ -447,7 +452,13 @@ fn scope_row(form: &FetchForm, focus: FetchControl, cx: &mut Context<RootView>) 
         dialog_button(
             &control.selector(),
             root.repo_name.clone(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, enabled, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                enabled,
+                &theme(cx),
+            ),
             focus == control,
         )
         .when(chosen.as_deref() == Some(root.repo_id.as_str()), |button| {
@@ -514,6 +525,7 @@ fn footer(
         "Cancel".to_owned(),
         dialog_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             false,
             dismissable,
             &theme(cx),
@@ -530,6 +542,7 @@ fn footer(
         "Fetch".to_owned(),
         dialog_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             false,
             can_submit,
             &theme(cx),

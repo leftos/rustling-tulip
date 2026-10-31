@@ -395,7 +395,12 @@ impl RootView {
             .flex_1()
             .min_h_0()
             .child(theme_list(modal, cx))
-            .child(details(modal, offset, &t));
+            .child(details(
+                modal,
+                offset,
+                crate::fonts::ui_weight_shift(cx),
+                &t,
+            ));
         let error = modal.error.clone().map(|error| {
             div()
                 .debug_selector(|| "themes-error".to_owned())
@@ -412,7 +417,13 @@ impl RootView {
             .max_w(relative(WINDOW_SHARE))
             .max_h(relative(WINDOW_SHARE))
             .track_focus(&self.themes_focus)
-            .child(dialog_title_bar(offset, "Themes", close, &t))
+            .child(dialog_title_bar(
+                offset,
+                crate::fonts::ui_weight_shift(cx),
+                "Themes",
+                close,
+                &t,
+            ))
             .child(body)
             .children(error)
             .child(footer(modal, cx));
@@ -428,7 +439,7 @@ impl RootView {
 }
 
 /// A heading of the list.
-fn heading(selector: &'static str, label: &'static str, offset: i8, t: &UiTheme) -> Div {
+fn heading(selector: &'static str, label: &'static str, offset: i8, shift: i8, t: &UiTheme) -> Div {
     div()
         .debug_selector(move || selector.to_owned())
         .flex_none()
@@ -436,7 +447,7 @@ fn heading(selector: &'static str, label: &'static str, offset: i8, t: &UiTheme)
         .px(px(8.0))
         .pb(px(3.0))
         .text_size(fonts::ui_px_at(offset, 11.5))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
         .text_color(gpui::rgb(t.text_2))
         .child(label)
 }
@@ -465,10 +476,22 @@ fn theme_list(modal: &ThemesModal, cx: &mut Context<RootView>) -> Stateful<Div> 
                 this.hover_theme_row(None, cx);
             }
         }))
-        .child(heading("themes-built-in", "Built-in", offset, &t));
+        .child(heading(
+            "themes-built-in",
+            "Built-in",
+            offset,
+            crate::fonts::ui_weight_shift(cx),
+            &t,
+        ));
     for (index, row) in modal.dialog.rows.iter().enumerate() {
         if index == yours {
-            list = list.child(heading("themes-yours", "Yours", offset, &t));
+            list = list.child(heading(
+                "themes-yours",
+                "Yours",
+                offset,
+                crate::fonts::ui_weight_shift(cx),
+                &t,
+            ));
         }
         list = list.child(theme_row(index, row, modal, cx));
     }
@@ -480,7 +503,7 @@ fn theme_list(modal: &ThemesModal, cx: &mut Context<RootView>) -> Stateful<Div> 
             .child(dialog_button(
                 "themes-import",
                 "Import".to_owned(),
-                dialog_look(offset, false, false, &t),
+                dialog_look(offset, crate::fonts::ui_weight_shift(cx), false, false, &t),
                 false,
             )),
     )
@@ -571,7 +594,7 @@ fn theme_row(
 }
 
 /// The right column: the preview and what it tells of the previewed theme.
-fn details(modal: &ThemesModal, offset: i8, t: &UiTheme) -> Stateful<Div> {
+fn details(modal: &ThemesModal, offset: i8, shift: i8, t: &UiTheme) -> Stateful<Div> {
     let column = div()
         .id("themes-details")
         .debug_selector(|| "themes-details".to_owned())
@@ -602,7 +625,7 @@ fn details(modal: &ThemesModal, offset: i8, t: &UiTheme) -> Stateful<Div> {
         .child(
             div()
                 .debug_selector(|| "themes-light-word".to_owned())
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(t.text))
                 .child(light_word(row)),
         )
@@ -631,14 +654,14 @@ fn footer(modal: &ThemesModal, cx: &mut Context<RootView>) -> Div {
         dialog_button(
             selector,
             label.to_owned(),
-            dialog_look(offset, false, false, &t),
+            dialog_look(offset, crate::fonts::ui_weight_shift(cx), false, false, &t),
             false,
         )
     };
     let cancel = dialog_button(
         ThemesControl::Cancel.selector(),
         "Cancel".to_owned(),
-        dialog_look(offset, false, true, &t),
+        dialog_look(offset, crate::fonts::ui_weight_shift(cx), false, true, &t),
         modal.focus == ThemesControl::Cancel,
     )
     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -647,6 +670,7 @@ fn footer(modal: &ThemesModal, cx: &mut Context<RootView>) -> Div {
     let can_use = modal.dialog.can_use();
     let use_theme = primary_button(
         offset,
+        crate::fonts::ui_weight_shift(cx),
         ThemesControl::Use.selector(),
         ButtonSize::Regular,
         can_use,
@@ -689,6 +713,7 @@ fn miniature(t: &UiTheme) -> impl IntoElement {
         .child(miniature_diff(t));
     div()
         .debug_selector(|| "themes-miniature".to_owned())
+        .font_weight(FontWeight::NORMAL)
         .flex_none()
         .flex()
         .flex_col()
@@ -841,6 +866,7 @@ fn miniature_terminal(t: &UiTheme) -> Div {
         .gap(px(2.0))
         .bg(gpui::rgb(packed(palette.bg)))
         .font_family(DEFAULT_FAMILY)
+        .font_weight(crate::fonts::mono_weight())
         .children(lines.into_iter().map(|spans| {
             div().flex().whitespace_nowrap().children(
                 spans
@@ -880,6 +906,7 @@ fn miniature_diff(t: &UiTheme) -> Div {
         .flex()
         .flex_col()
         .font_family(DEFAULT_FAMILY)
+        .font_weight(crate::fonts::mono_weight())
         .text_color(gpui::rgb(t.text))
         .bg(gpui::rgb(t.ground))
         .border_t_1()

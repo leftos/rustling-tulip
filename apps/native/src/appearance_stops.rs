@@ -62,6 +62,9 @@ pub(crate) enum AppearanceStop {
     /// the range.
     UiTextSizeDown,
     UiTextSizeUp,
+    /// The app level's UI weight button at this place of
+    /// [`crate::fonts::UI_WEIGHTS`].
+    UiWeight(u8),
     SizeDown,
     SizeUp,
     Bold,
@@ -96,6 +99,9 @@ impl AppearanceStop {
             Self::UiFamilyList => "appearance-ui-family-list",
             Self::UiTextSizeDown => "appearance-ui-text-size-down",
             Self::UiTextSizeUp => "appearance-ui-text-size-up",
+            Self::UiWeight(0) => "appearance-ui-weight-regular",
+            Self::UiWeight(1) => "appearance-ui-weight-medium",
+            Self::UiWeight(_) => "appearance-ui-weight-semibold",
             Self::SizeDown => "appearance-size-down",
             Self::SizeUp => "appearance-size-up",
             Self::Bold => "appearance-bold",
@@ -166,7 +172,8 @@ impl FontList {
 /// The stops Tab walks, in reading order: the Theme row (`app_level`);
 /// per colour row its preset line,
 /// its recent line (`has_recent`), its hex field, Apply and its reset link;
-/// the UI font filter and list and the UI text size − and + (`app_level`);
+/// the UI font filter and list, the UI text size − and + and the UI weight
+/// buttons (`app_level`);
 /// then the font filter and list, size − and + and the size reset, the bold
 /// checkbox and its reset, and Close (`close`). Apply, the reset links and
 /// the UI text size buttons are left out while `enabled` says they do
@@ -198,6 +205,9 @@ pub(crate) fn stops(
             AppearanceStop::UiFamilyList,
             AppearanceStop::UiTextSizeDown,
             AppearanceStop::UiTextSizeUp,
+            AppearanceStop::UiWeight(0),
+            AppearanceStop::UiWeight(1),
+            AppearanceStop::UiWeight(2),
         ]);
     }
     ring.extend([
@@ -413,7 +423,7 @@ mod tests {
 
     use AppearanceStop::{
         Apply, Bold, Close, FamilyFilter, FamilyList, Hex, Reset, SizeDown, SizeUp, Swatches,
-        UiFamilyList, UiTextSizeDown, UiTextSizeUp,
+        UiFamilyList, UiTextSizeDown, UiTextSizeUp, UiWeight,
     };
     use ColorRow::{Accent, Background};
     use SwatchLine::{Presets, Recent};
@@ -570,13 +580,29 @@ mod tests {
         let after: Vec<AppearanceStop> = ring
             .iter()
             .skip_while(|stop| **stop != UiFamilyList)
-            .take(4)
+            .take(7)
             .copied()
             .collect();
         assert_eq!(
             after,
-            [UiFamilyList, UiTextSizeDown, UiTextSizeUp, FamilyFilter],
+            [
+                UiFamilyList,
+                UiTextSizeDown,
+                UiTextSizeUp,
+                UiWeight(0),
+                UiWeight(1),
+                UiWeight(2),
+                FamilyFilter,
+            ],
             "after the UI font list, before the terminal font"
+        );
+        assert!(
+            !stops(false, false, false, |_| true).contains(&UiWeight(0)),
+            "only the app level has the weight row"
+        );
+        assert!(
+            stops(false, true, false, |_| false).contains(&UiWeight(2)),
+            "a weight button is never disabled"
         );
         assert!(
             !stops(false, false, false, |_| true).contains(&UiTextSizeUp),

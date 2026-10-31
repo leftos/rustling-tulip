@@ -127,6 +127,7 @@ impl RootView {
         for (heading, rows) in self.dashboard_view_rows() {
             body.push(group_heading(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 heading,
                 rows.len(),
                 &t,
@@ -141,6 +142,7 @@ impl RootView {
                 body.extend(cells.nested.iter().map(|nested| {
                     nested_row(
                         crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
                         &cells.session_id,
                         nested,
                         columns,
@@ -164,6 +166,7 @@ impl RootView {
             .child(width_probe(cx))
             .child(header_strip(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 counts,
                 self.dashboard_figures(),
                 &theme(cx),
@@ -171,7 +174,12 @@ impl RootView {
             .when(!chips.is_empty(), |view| {
                 view.child(queue_strip(&chips, &row_at, cx))
             })
-            .child(column_header(crate::fonts::ui_text_size(cx), columns, &t))
+            .child(column_header(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                columns,
+                &t,
+            ))
             .child(
                 div()
                     .id("dashboard-body")
@@ -250,7 +258,14 @@ impl RootView {
                 &format!("{name}-glyph"),
                 &theme(cx),
             )))
-            .child(fixed(SESSION_W).child(session_cell(offset, cells, accent, &name, &t)))
+            .child(fixed(SESSION_W).child(session_cell(
+                offset,
+                crate::fonts::ui_weight_shift(cx),
+                cells,
+                accent,
+                &name,
+                &t,
+            )))
             .when(columns.linear, |row| {
                 row.child(
                     fixed(LINEAR_W).child(
@@ -260,7 +275,14 @@ impl RootView {
                     ),
                 )
             })
-            .child(flexible().child(now_cell(offset, cells, mark.shape, &name, &t)))
+            .child(flexible().child(now_cell(
+                offset,
+                crate::fonts::ui_weight_shift(cx),
+                cells,
+                mark.shape,
+                &name,
+                &t,
+            )))
             .when(columns.summary, |row| {
                 row.child(flexible().child(summary_cell(offset, cells, &name, &t)))
             })
@@ -398,7 +420,14 @@ fn two_lines(offset: i8, first: impl IntoElement, second: Option<Div>) -> Div {
         })
 }
 
-fn session_cell(offset: i8, cells: &RowCells, accent: u32, name: &str, t: &UiTheme) -> Div {
+fn session_cell(
+    offset: i8,
+    shift: i8,
+    cells: &RowCells,
+    accent: u32,
+    name: &str,
+    t: &UiTheme,
+) -> Div {
     let second = div()
         .flex()
         .items_center()
@@ -421,11 +450,13 @@ fn session_cell(offset: i8, cells: &RowCells, accent: u32, name: &str, t: &UiThe
             line_text(&format!("{name}-branch"), &cells.branch)
                 .flex_1()
                 .font_family(DEFAULT_FAMILY)
+                .font_weight(crate::fonts::mono_weight())
                 .text_color(gpui::rgb(t.subtle)),
         );
     two_lines(
         offset,
-        line_text(&format!("{name}-label"), &cells.label).font_weight(FontWeight::SEMIBOLD),
+        line_text(&format!("{name}-label"), &cells.label)
+            .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD)),
         Some(second),
     )
 }
@@ -443,34 +474,31 @@ fn state_colour(shape: Shape, t: &UiTheme) -> u32 {
     }
 }
 
-fn now_cell(offset: i8, cells: &RowCells, shape: Shape, name: &str, t: &UiTheme) -> Div {
-    let first =
-        div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .child(
+fn now_cell(offset: i8, shift: i8, cells: &RowCells, shape: Shape, name: &str, t: &UiTheme) -> Div {
+    let first = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex_none()
+                .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
+                .text_color(gpui::rgb(state_colour(shape, t)))
+                .child(cells.state_word.clone()),
+        )
+        .when_some(cells.age.clone(), |line, age| {
+            line.child(
                 div()
                     .flex_none()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(gpui::rgb(state_colour(shape, t)))
-                    .child(cells.state_word.clone()),
+                    .text_color(gpui::rgb(t.subtle))
+                    .child(format!("· {age}")),
             )
-            .when_some(cells.age.clone(), |line, age| {
-                line.child(
-                    div()
-                        .flex_none()
-                        .text_color(gpui::rgb(t.subtle))
-                        .child(format!("· {age}")),
-                )
-            })
-            .children(
-                cells.stuck.iter().enumerate().map(|(index, flag)| {
-                    stuck_flag(offset, &format!("{name}-flag-{index}"), flag, t)
-                }),
-            );
+        })
+        .children(cells.stuck.iter().enumerate().map(|(index, flag)| {
+            stuck_flag(offset, shift, &format!("{name}-flag-{index}"), flag, t)
+        }));
     two_lines(
         offset,
         first,
@@ -490,7 +518,7 @@ fn summary_cell(offset: i8, cells: &RowCells, name: &str, t: &UiTheme) -> Div {
 
 /// One stuck flag: a tag that shrinks with its line and ends in `…` rather
 /// than spilling into the next column.
-fn stuck_flag(offset: i8, id: &str, text: &str, t: &UiTheme) -> Div {
+fn stuck_flag(offset: i8, shift: i8, id: &str, text: &str, t: &UiTheme) -> Div {
     let selector = id.to_owned();
     truncating(id, StyledText::new(text.to_owned()))
         .debug_selector(move || selector.clone())
@@ -500,7 +528,7 @@ fn stuck_flag(offset: i8, id: &str, text: &str, t: &UiTheme) -> Div {
         .rounded(px(3.0))
         .bg(gpui::rgba(t.danger_wash))
         .text_size(crate::fonts::ui_px_at(offset, 11.0))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
         .text_color(gpui::rgb(t.danger))
 }
 
@@ -591,6 +619,7 @@ fn numbers(offset: i8, first: &str, second: &str, t: &UiTheme) -> Div {
 /// age under Run.
 fn nested_row(
     offset: i8,
+    shift: i8,
     session_id: &str,
     nested: &NestedRow,
     columns: Columns,
@@ -609,6 +638,7 @@ fn nested_row(
     let task = line_text(&format!("{name}-task"), &nested.task).text_color(gpui::rgb(t.text_2));
     let task = if nested.mono {
         task.font_family(DEFAULT_FAMILY)
+            .font_weight(crate::fonts::mono_weight())
             .text_size(crate::fonts::ui_px_at(offset, SMALL_TEXT))
     } else {
         task
@@ -634,6 +664,7 @@ fn nested_row(
                             .flex_none()
                             .w(px(14.0))
                             .font_family(DEFAULT_FAMILY)
+                            .font_weight(crate::fonts::mono_weight())
                             .text_color(gpui::rgb(t.line_strong))
                             .child("└"),
                     )
@@ -649,7 +680,7 @@ fn nested_row(
         .child(flexible().child(task))
         .child(
             fixed(stuck_w).when_some(nested.stuck.as_deref(), |cell, flag| {
-                cell.child(stuck_flag(offset, &format!("{name}-flag"), flag, t))
+                cell.child(stuck_flag(offset, shift, &format!("{name}-flag"), flag, t))
             }),
         )
         .child(
@@ -665,7 +696,13 @@ fn nested_row(
 }
 
 /// A group's heading and its row count; the Needs you heading in amber.
-fn group_heading(offset: i8, heading: &'static str, count: usize, t: &UiTheme) -> AnyElement {
+fn group_heading(
+    offset: i8,
+    shift: i8,
+    heading: &'static str,
+    count: usize,
+    t: &UiTheme,
+) -> AnyElement {
     let colour = if heading == GroupKind::NeedsYou.heading() {
         t.asking
     } else {
@@ -688,7 +725,7 @@ fn group_heading(offset: i8, heading: &'static str, count: usize, t: &UiTheme) -
         .child(
             div()
                 .text_size(crate::fonts::ui_px_at(offset, CAPS_TEXT))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(colour))
                 .child(heading.to_uppercase()),
         )
@@ -702,11 +739,11 @@ fn group_heading(offset: i8, heading: &'static str, count: usize, t: &UiTheme) -
 }
 
 /// The column names over the rows, outside the scrolled body so they stay.
-fn column_header(offset: i8, columns: Columns, t: &UiTheme) -> Div {
+fn column_header(offset: i8, shift: i8, columns: Columns, t: &UiTheme) -> Div {
     let caps = |text: &'static str| {
         div()
             .text_size(crate::fonts::ui_px_at(offset, CAPS_TEXT))
-            .font_weight(FontWeight::SEMIBOLD)
+            .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
             .text_color(gpui::rgb(t.subtle))
             .child(text)
     };
@@ -739,6 +776,7 @@ fn column_header(offset: i8, columns: Columns, t: &UiTheme) -> Div {
 /// The title, the count pills and, once known, the day's figures.
 fn header_strip(
     offset: i8,
+    shift: i8,
     counts: HeaderCounts,
     figures: Option<HeaderFigures>,
     t: &UiTheme,
@@ -803,7 +841,7 @@ fn header_strip(
                     ))
                     .child(
                         div()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
                             .text_color(gpui::rgb(if asking { t.asking } else { t.text }))
                             .child(pill.count.to_string()),
                     )
@@ -824,7 +862,7 @@ fn header_strip(
         .child(
             div()
                 .text_size(crate::fonts::ui_px_at(offset, 15.0))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
                 .child("Dashboard"),
         )
         .child(
@@ -836,24 +874,24 @@ fn header_strip(
         )
         .child(div().flex_1())
         .when_some(figures, |strip, figures| {
-            strip.child(figures_view(offset, figures, t))
+            strip.child(figures_view(offset, shift, figures, t))
         })
 }
 
-fn figure(value: String, after: &'static str, t: &UiTheme) -> Div {
+fn figure(shift: i8, value: String, after: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .gap(px(4.0))
         .child(
             div()
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(t.text))
                 .child(value),
         )
         .child(after)
 }
 
-fn figures_view(offset: i8, figures: HeaderFigures, t: &UiTheme) -> Div {
+fn figures_view(offset: i8, shift: i8, figures: HeaderFigures, t: &UiTheme) -> Div {
     let releases = figures.releases.into_iter().map(|release| {
         #[expect(
             clippy::cast_possible_truncation,
@@ -884,16 +922,20 @@ fn figures_view(offset: i8, figures: HeaderFigures, t: &UiTheme) -> Div {
         .text_size(crate::fonts::ui_px_at(offset, 12.0))
         .text_color(gpui::rgb(t.text_2))
         .debug_selector(|| "dashboard-figures".to_owned())
-        .child(
-            div()
-                .flex()
-                .gap(px(4.0))
-                .child("Today")
-                .child(figure(figures.cost, "API-equiv", t)),
-        )
-        .child(figure(figures.tokens, "tokens", t))
-        .child(figure(figures.commits.to_string(), "commits", t))
-        .child(figure(figures.issues_done.to_string(), "issues Done", t))
+        .child(div().flex().gap(px(4.0)).child("Today").child(figure(
+            shift,
+            figures.cost,
+            "API-equiv",
+            t,
+        )))
+        .child(figure(shift, figures.tokens, "tokens", t))
+        .child(figure(shift, figures.commits.to_string(), "commits", t))
+        .child(figure(
+            shift,
+            figures.issues_done.to_string(),
+            "issues Done",
+            t,
+        ))
         .children(releases)
         .when_some(figures.synced, |strip, synced| {
             strip.child(
@@ -959,7 +1001,7 @@ fn queue_strip(
             .child(
                 div()
                     .flex_none()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                     .text_color(gpui::rgb(t.asking))
                     .child(chip.age.clone()),
             )
@@ -985,7 +1027,7 @@ fn queue_strip(
             div()
                 .flex_none()
                 .text_size(crate::fonts::ui_px(cx, CAPS_TEXT))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(t.asking))
                 .child("QUEUE"),
         )

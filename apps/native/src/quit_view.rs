@@ -512,6 +512,7 @@ impl RootView {
                     model.label(button, counts),
                     dialog_look(
                         crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
                         button.is_danger(),
                         enabled,
                         &theme(cx),
@@ -545,7 +546,11 @@ impl RootView {
             &theme(cx),
         )
         .track_focus(&self.quit_focus)
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+        .child(
+            div()
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .child(TITLE),
+        )
         .child(div().child(BODY))
         .child(active)
         .children(

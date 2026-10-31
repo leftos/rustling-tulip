@@ -2621,6 +2621,7 @@ impl RootView {
             selector,
             button_look(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 kind,
                 ButtonSize::Compact,
                 ready,
@@ -3342,7 +3343,13 @@ impl RootView {
         let close = dialog_button(
             "delete-worktree-dialog-close",
             "✕".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             false,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -3362,7 +3369,7 @@ impl RootView {
                     .flex_col()
                     .child(
                         div()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                             .child("Delete worktree?"),
                     )
                     .children(progress),
@@ -3378,6 +3385,7 @@ impl RootView {
                     confirm.label(button),
                     dialog_look(
                         crate::fonts::ui_text_size(cx),
+                        crate::fonts::ui_weight_shift(cx),
                         button.is_danger(),
                         true,
                         &theme(cx),
@@ -3397,21 +3405,21 @@ impl RootView {
         )
         .track_focus(&self.dialog_focus)
         .child(header)
-        .child(self.delete_dialog_body(confirm, &theme(cx)))
+        .child(self.delete_dialog_body(crate::fonts::ui_weight_shift(cx), confirm, &theme(cx)))
         .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         Some(backdrop("delete-worktree-dialog", panel, &theme(cx)))
     }
 
     /// Whose worktree goes, the wait or its failure, and each member's
     /// branch with its fate.
-    fn delete_dialog_body(&self, confirm: &DeleteWorktreeConfirm, t: &UiTheme) -> Div {
+    fn delete_dialog_body(&self, shift: i8, confirm: &DeleteWorktreeConfirm, t: &UiTheme) -> Div {
         let intro = div()
             .flex()
             .flex_wrap()
             .child("Removing the worktree for ")
             .child(
                 div()
-                    .font_weight(FontWeight::BOLD)
+                    .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
                     .child(self.session_label(confirm.session_id())),
             )
             .child(".");
@@ -3423,7 +3431,11 @@ impl RootView {
                 .flex()
                 .flex_wrap()
                 .gap(px(8.0))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(row.repo))
+                .child(
+                    div()
+                        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
+                        .child(row.repo),
+                )
                 .child(div().text_color(gpui::rgb(t.muted)).child(row.branch))
                 .child(row.fate)
         });
@@ -3461,7 +3473,13 @@ pub(crate) struct DialogLook {
 
 /// The look of a dialog's button in `t`: outlined, or outlined with the
 /// danger colour's text, on the floating layer; dimmed unless `enabled`.
-pub(crate) fn dialog_look(offset: i8, danger: bool, enabled: bool, t: &UiTheme) -> DialogLook {
+pub(crate) fn dialog_look(
+    offset: i8,
+    shift: i8,
+    danger: bool,
+    enabled: bool,
+    t: &UiTheme,
+) -> DialogLook {
     let kind = if danger {
         ButtonKind::Danger
     } else {
@@ -3469,7 +3487,7 @@ pub(crate) fn dialog_look(offset: i8, danger: bool, enabled: bool, t: &UiTheme) 
     };
     let size = ButtonSize::Regular;
     DialogLook {
-        button: button_look(offset, kind, size, enabled, Layer::Floating, t),
+        button: button_look(offset, shift, kind, size, enabled, Layer::Floating, t),
         ring: focus_ring(size.radius(), t),
     }
 }
@@ -3541,6 +3559,7 @@ pub(crate) fn bordered_button(
     } = button;
     let base = outlined_button(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         &selector,
         ButtonSize::Compact,
         enabled,

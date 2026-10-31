@@ -220,7 +220,11 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Devices"))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child("Devices"),
+            )
             .children(empty)
             .children(rows.iter().map(|row| device_row(row, cx)));
         Some(section.into_any_element())
@@ -236,6 +240,7 @@ impl RootView {
                 pressed.label().to_owned(),
                 dialog_look(
                     crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
                     pressed == ConfirmButton::Block,
                     true,
                     &theme(cx),
@@ -254,7 +259,7 @@ impl RootView {
         .track_focus(&self.devices.focus)
         .child(
             div()
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child(confirm.title()),
         )
         .child(div().text_color(gpui::rgb(t.muted)).child(CONFIRM_BODY))
@@ -274,6 +279,7 @@ fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
         &action.selector(&id),
         button_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             match action {
                 RowAction::Block => ButtonKind::Danger,
                 RowAction::Forget => ButtonKind::Outlined,

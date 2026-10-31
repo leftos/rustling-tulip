@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use gpui::{Modifiers, Point, TestAppContext, point, px};
+use gpui::{FontWeight, Modifiers, Point, TestAppContext, point, px};
 use protocol::{
     AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValue,
     OptionValues, SplitDirection, TabEntry, error_codes,
@@ -2707,6 +2707,9 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
         "appearance-ui-family-list",
         "appearance-ui-text-size-down",
         "appearance-ui-text-size-up",
+        "appearance-ui-weight-regular",
+        "appearance-ui-weight-medium",
+        "appearance-ui-weight-semibold",
         "appearance-family-filter",
         "appearance-family-list",
         "appearance-size-down",
@@ -2895,6 +2898,72 @@ fn appearance_ring(h: &mut Harness<'_>) -> Vec<&'static str> {
         "Tab never came back to the tab list: {ring:?}"
     );
     ring
+}
+
+/// The weight inherited body text draws at.
+fn body_weight(h: &mut Harness<'_>) -> FontWeight {
+    h.cx.update(|_, cx| fonts::ui_weight(cx, FontWeight::NORMAL))
+}
+
+/// Clicks the UI weight row's `regular`, `medium` or `semibold` button,
+/// scrolled into view.
+fn press_ui_weight(h: &mut Harness<'_>, which: &str) {
+    let selector = format!("appearance-ui-weight-{which}");
+    h.scroll_into_view("settings-content", &selector);
+    h.click_on(&selector);
+}
+
+#[gpui::test]
+fn ui_weight_buttons_set_and_save_the_weight(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    assert_eq!(body_weight(&mut h), FontWeight::NORMAL, "nothing picked");
+
+    press_ui_weight(&mut h, "semibold");
+    assert_eq!(
+        body_weight(&mut h),
+        FontWeight::SEMIBOLD,
+        "the press applies at once"
+    );
+    assert_eq!(
+        saved_ui(&dir)["ui_font_weight"],
+        600,
+        "saved on this machine"
+    );
+
+    press_ui_weight(&mut h, "medium");
+    assert_eq!(body_weight(&mut h), FontWeight::MEDIUM);
+    assert_eq!(saved_ui(&dir)["ui_font_weight"], 500);
+    assert_eq!(
+        h.cx.update(|_, cx| fonts::ui_text_size(cx)),
+        0,
+        "the weight leaves the text size alone"
+    );
+
+    press_ui_weight(&mut h, "regular");
+    assert_eq!(body_weight(&mut h), FontWeight::NORMAL);
+    assert_eq!(saved_ui(&dir)["ui_font_weight"], 400);
+}
+
+#[gpui::test]
+fn the_ui_weight_buttons_follow_the_ui_text_size_in_the_ring(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    let ring = appearance_ring(&mut h);
+    let up = ring
+        .iter()
+        .position(|stop| *stop == "appearance-ui-text-size-up")
+        .expect("the UI text size + is in the ring");
+    assert_eq!(
+        ring[up + 1..up + 5],
+        [
+            "appearance-ui-weight-regular",
+            "appearance-ui-weight-medium",
+            "appearance-ui-weight-semibold",
+            "appearance-family-filter",
+        ],
+        "after the UI text size, before the terminal font"
+    );
 }
 
 #[gpui::test]

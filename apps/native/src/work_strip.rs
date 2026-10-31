@@ -104,6 +104,7 @@ fn segment_text(text: &str, items: &[&StripItem], mono: &SharedString) -> Vec<An
         plain(&format!("{before}(")),
         div()
             .font_family(mono.clone())
+            .font_weight(crate::fonts::mono_weight())
             .child(item.label.clone())
             .into_any_element(),
         plain(&format!(", {after}")),

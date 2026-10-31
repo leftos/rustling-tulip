@@ -925,6 +925,7 @@ impl RootView {
         for (n, section) in dialog.picker.sections().iter().enumerate() {
             list = list.child(section_header(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 section,
                 n == 0,
                 scan_failed,
@@ -987,6 +988,7 @@ fn control_button(
         &control.selector(draw.rows),
         button_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             kind,
             size,
             true,
@@ -1038,7 +1040,7 @@ fn header(cx: &mut Context<RootView>) -> Div {
         .child(
             div()
                 .text_size(crate::fonts::ui_px(cx, 14.0))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child(TITLE),
         )
         .child(close)
@@ -1057,6 +1059,7 @@ const fn section_slug(section: Section) -> &'static str {
 /// note is the scan's wait, its count, or its error in the danger colour.
 fn section_header(
     offset: i8,
+    shift: i8,
     section: &PickerSection,
     first: bool,
     scan_failed: bool,
@@ -1074,7 +1077,7 @@ fn section_header(
             .when(tailnet, |note| {
                 note.debug_selector(|| "connections-scan".to_owned())
             })
-            .font_weight(FontWeight::NORMAL)
+            .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::NORMAL))
             .text_size(crate::fonts::ui_px_at(offset, 11.0))
             .text_color(gpui::rgb(color))
             .child(note)
@@ -1088,7 +1091,7 @@ fn section_header(
         .px(px(10.0))
         .pb(px(4.0))
         .text_size(crate::fonts::ui_px_at(offset, 11.5))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
         .text_color(gpui::rgb(t.text_2))
         .child(section.section.title())
         .children(note)
@@ -1118,12 +1121,15 @@ fn host_row(
         .gap(px(8.0))
         .text_size(crate::fonts::ui_px(cx, 11.5))
         .text_color(gpui::rgb(t.text_2))
-        .children(
-            detail
-                .state
-                .as_ref()
-                .map(|state| state_chip(crate::fonts::ui_text_size(cx), row, state, &t)),
-        )
+        .children(detail.state.as_ref().map(|state| {
+            state_chip(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                row,
+                state,
+                &t,
+            )
+        }))
         .when(saved && forget_shown, |trail| trail.opacity(0.0))
         .when(saved && !forget_shown, |trail| {
             trail.group_hover(group.clone(), |style| style.opacity(0.0))
@@ -1133,7 +1139,12 @@ fn host_row(
         .min_w_0()
         .flex()
         .flex_col()
-        .child(name_line(crate::fonts::ui_text_size(cx), row, &t))
+        .child(name_line(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            row,
+            &t,
+        ))
         .child(detail_line(
             crate::fonts::ui_text_size(cx),
             &row.key(),
@@ -1238,19 +1249,19 @@ fn kind_tile(host: RowHost, t: &UiTheme) -> Div {
 }
 
 /// The row's name, a tailnet host's suffix greyed.
-fn name_line(offset: i8, row: &Row, t: &UiTheme) -> Div {
+fn name_line(offset: i8, shift: i8, row: &Row, t: &UiTheme) -> Div {
     let (name, suffix) = row.name_parts();
     div()
         .flex()
         .overflow_hidden()
         .whitespace_nowrap()
         .text_size(crate::fonts::ui_px_at(offset, 12.5))
-        .font_weight(FontWeight::MEDIUM)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::MEDIUM))
         .line_height(relative(1.25))
         .child(name)
         .children(suffix.map(|suffix| {
             div()
-                .font_weight(FontWeight::NORMAL)
+                .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::NORMAL))
                 .text_color(gpui::rgb(t.faint))
                 .child(suffix)
         }))
@@ -1346,6 +1357,7 @@ fn detail_piece(offset: i8, piece: DetailPiece, t: &UiTheme) -> Div {
             .child(
                 div()
                     .font_family(DEFAULT_FAMILY)
+                    .font_weight(crate::fonts::mono_weight())
                     .text_size(crate::fonts::ui_px_at(offset, 10.5))
                     .child(value),
             ),
@@ -1363,17 +1375,18 @@ fn dot(size: f32, color: u32) -> Div {
 
 /// The chip at a row's trail: a dot and the state for the current row, an
 /// amber tag for one that needs pairing.
-fn state_chip(offset: i8, row: &Row, state: &RowState, t: &UiTheme) -> Div {
+fn state_chip(offset: i8, shift: i8, row: &Row, state: &RowState, t: &UiTheme) -> Div {
     let label = state.label();
     let selector = format!("connections-state-{}", row.key());
     match state {
         RowState::NotPaired => tag(
             offset,
+            shift,
             format!("connections-not-paired-{}", row.label),
             label,
             t,
         ),
-        RowState::NeedsPairing => tag(offset, selector, label, t),
+        RowState::NeedsPairing => tag(offset, shift, selector, label, t),
         RowState::Connected => dotted(selector, t.status_ok, label),
         RowState::Disconnected { .. } => dotted(selector, t.status_idle, label),
         RowState::Connecting => div().debug_selector(move || selector).child(label),
@@ -1392,7 +1405,7 @@ fn dotted(selector: String, color: u32, label: &'static str) -> Div {
 }
 
 /// An amber tag reading `label`.
-fn tag(offset: i8, selector: String, label: &'static str, t: &UiTheme) -> Div {
+fn tag(offset: i8, shift: i8, selector: String, label: &'static str, t: &UiTheme) -> Div {
     div()
         .debug_selector(move || selector)
         .flex()
@@ -1401,7 +1414,7 @@ fn tag(offset: i8, selector: String, label: &'static str, t: &UiTheme) -> Div {
         .px(px(6.0))
         .rounded(px(5.0))
         .text_size(crate::fonts::ui_px_at(offset, 10.5))
-        .font_weight(FontWeight::MEDIUM)
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::MEDIUM))
         .text_color(gpui::rgb(t.asking))
         .bg(gpui::rgba(t.ask_wash))
         .border_1()
@@ -1546,7 +1559,7 @@ fn form_top(mode: AddMode, draw: &Draw<'_>, cx: &mut Context<RootView>) -> Div {
         .child(
             div()
                 .text_size(crate::fonts::ui_px(cx, 12.5))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child("Add host"),
         )
         .child(switch)
@@ -1576,7 +1589,7 @@ fn segment(
             segment
                 .bg(gpui::rgb(t.popover_hover))
                 .text_color(gpui::rgb(t.text))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
         })
         .when(!on, |segment| {
             segment
@@ -1633,6 +1646,7 @@ fn field_row(
         .when(field.mono, |frame| {
             frame
                 .font_family(DEFAULT_FAMILY)
+                .font_weight(crate::fonts::mono_weight())
                 .text_size(crate::fonts::ui_px_at(offset, 11.5))
         })
         .child(input.clone());

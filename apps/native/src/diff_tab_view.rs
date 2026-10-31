@@ -604,6 +604,7 @@ fn nav_button(
     let t = theme(cx);
     outlined_button(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         selector,
         ButtonSize::Compact,
         enabled,

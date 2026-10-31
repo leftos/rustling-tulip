@@ -1170,6 +1170,15 @@ struct Shaping {
     font_size: Pixels,
 }
 
+/// The font a field draws in: the inherited family and size at Regular, since
+/// what the user types stays outside the UI weight.
+fn input_font(style: &gpui::TextStyle) -> gpui::Font {
+    gpui::Font {
+        weight: gpui::FontWeight::NORMAL,
+        ..style.font()
+    }
+}
+
 impl Shaping {
     fn of(input: &TextInput, window: &Window, t: &UiTheme) -> Self {
         let style = window.text_style();
@@ -1187,7 +1196,7 @@ impl Shaping {
         };
         let run = TextRun {
             len: text.len(),
-            font: style.font(),
+            font: input_font(&style),
             color: color.into(),
             background_color: None,
             underline: None,
@@ -1381,6 +1390,15 @@ mod tests {
         TextChanged, TextInput, TextInputEvent, bind_keys, next_boundary, offset_from_utf16,
         offset_to_utf16, previous_boundary, single_line,
     };
+
+    #[test]
+    fn a_text_input_ignores_the_ui_weight() {
+        let style = gpui::TextStyle {
+            font_weight: gpui::FontWeight::SEMIBOLD,
+            ..gpui::TextStyle::default()
+        };
+        assert_eq!(super::input_font(&style).weight, gpui::FontWeight::NORMAL);
+    }
 
     /// A focused, drawn input in its own window holding `text`, the cursor at
     /// its end.

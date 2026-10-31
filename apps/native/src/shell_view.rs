@@ -393,7 +393,13 @@ impl RootView {
         let close = dialog_button(
             ShellControl::Close.selector(),
             "✕".to_owned(),
-            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                true,
+                &theme(cx),
+            ),
             focus == ShellControl::Close,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -403,7 +409,11 @@ impl RootView {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+            .child(
+                div()
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .child(TITLE),
+            )
             .child(close);
         let refusal = self.capabilities().local_files_refusal();
         let browse_enabled = !form.browsing() && refusal.is_none();
@@ -412,6 +422,7 @@ impl RootView {
             "Browse…".to_owned(),
             dialog_look(
                 crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
                 false,
                 browse_enabled,
                 &theme(cx),
@@ -504,6 +515,7 @@ fn save_default_row(
 ) -> Stateful<Div> {
     checkbox_row(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         ShellControl::SaveDefault.selector(),
         form.save_default(),
         focus == ShellControl::SaveDefault,
@@ -543,7 +555,13 @@ fn footer(can_submit: bool, focus: ShellControl, cx: &mut Context<RootView>) -> 
     let cancel = dialog_button(
         ShellControl::Cancel.selector(),
         "Cancel".to_owned(),
-        dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            false,
+            true,
+            &theme(cx),
+        ),
         focus == ShellControl::Cancel,
     )
     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -554,6 +572,7 @@ fn footer(can_submit: bool, focus: ShellControl, cx: &mut Context<RootView>) -> 
         "Open shell".to_owned(),
         dialog_look(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             false,
             can_submit,
             &theme(cx),

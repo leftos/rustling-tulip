@@ -299,11 +299,12 @@ fn editor_tab_walks_the_same_stops_as_settings(cx: &mut TestAppContext) {
         ring.len() > 5,
         "Settings walks its Appearance stops: {ring:?}"
     );
-    // The theme, the UI font and the text size are the app's alone: no
+    // The theme, the UI font, its text size and weight are the app's alone: no
     // session's editor shows them.
     ring.retain(|stop| {
         !stop.starts_with("appearance-ui-family")
             && !stop.starts_with("appearance-ui-text-size")
+            && !stop.starts_with("appearance-ui-weight")
             && *stop != "appearance-theme"
     });
     ring.push("appearance-footer-close");

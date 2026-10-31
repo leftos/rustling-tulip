@@ -1018,6 +1018,7 @@ impl RootView {
             .flex_1()
             .min_h(px(0.0))
             .font_family(family)
+            .font_weight(crate::fonts::mono_weight())
             .text_size(px(font.size))
             .child(list)
     }
@@ -1154,6 +1155,7 @@ fn find_button(
     let button = if action == FindAction::MatchCase && case_on {
         primary_button(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             &selector,
             ButtonSize::Compact,
             true,
@@ -1163,6 +1165,7 @@ fn find_button(
     } else {
         outlined_button(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             &selector,
             ButtonSize::Compact,
             true,
@@ -1222,6 +1225,7 @@ fn header_button(
 ) -> Stateful<Div> {
     let button = outlined_button(
         crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
         &action.selector(tab_id),
         ButtonSize::Compact,
         enabled,

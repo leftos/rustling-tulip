@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::ops::RangeInclusive;
 
-use gpui::{App, Global, Pixels, SharedString, TextSystem, px};
+use gpui::{App, FontWeight, Global, Pixels, SharedString, TextSystem, px};
 use serde::{Deserialize, Serialize};
 
 /// The family a pane renders in when the settings name none.
@@ -216,20 +216,35 @@ pub fn set_ui_family_among(requested: Option<&str>, installed: &[SharedString], 
 pub const UI_TEXT_SIZE_OFFSETS: RangeInclusive<i8> = -2..=4;
 /// The smallest a UI text size gets, whatever the offset.
 const MIN_UI_PX: f32 = 8.0;
+/// The weights the user may draw the interface's body text at, lightest
+/// first; each place past the first is one shift of every UI weight.
+pub const UI_WEIGHTS: [u16; 3] = [400, 500, 600];
+/// The body weight the interface draws at when the user picked none.
+pub const DEFAULT_UI_WEIGHT: u16 = UI_WEIGHTS[0];
+/// The heaviest weight a shift reaches: the heaviest bundled UI face.
+const MAX_SHIFTED_WEIGHT: f32 = 700.0;
 
 /// How the interface's text is drawn beyond its family: the whole pixels
-/// added to every UI text size and to the fixed heights that hold one line.
+/// added to every UI text size and to the fixed heights that hold one line,
+/// and the hundreds added to every UI weight.
+#[derive(Clone, Copy, Default)]
 struct UiText {
     size_offset: i8,
+    weight_shift: i8,
 }
 
 impl Global for UiText {}
+
+/// How the app draws the interface's text; nothing added until a setter ran.
+fn ui_text(cx: &App) -> UiText {
+    cx.try_global::<UiText>().copied().unwrap_or_default()
+}
 
 /// The offset every UI text size is drawn at; 0 until
 /// [`set_ui_text_size`] has run.
 #[must_use]
 pub fn ui_text_size(cx: &App) -> i8 {
-    cx.try_global::<UiText>().map_or(0, |text| text.size_offset)
+    ui_text(cx).size_offset
 }
 
 /// Makes `offset`, clamped to [`UI_TEXT_SIZE_OFFSETS`], the offset every UI
@@ -237,7 +252,49 @@ pub fn ui_text_size(cx: &App) -> i8 {
 pub fn set_ui_text_size(offset: i8, cx: &mut App) {
     cx.set_global(UiText {
         size_offset: clamped_ui_text_size(i64::from(offset)),
+        ..ui_text(cx)
     });
+}
+
+/// The hundreds added to every UI weight; 0 until [`set_ui_weight`] has run.
+#[must_use]
+pub fn ui_weight_shift(cx: &App) -> i8 {
+    ui_text(cx).weight_shift
+}
+
+/// Makes `weight`, one of [`UI_WEIGHTS`], the interface's body weight; any
+/// other weight draws as [`DEFAULT_UI_WEIGHT`].
+pub fn set_ui_weight(weight: u16, cx: &mut App) {
+    let shift = UI_WEIGHTS
+        .iter()
+        .position(|offered| *offered == weight)
+        .and_then(|place| i8::try_from(place).ok())
+        .unwrap_or(0);
+    cx.set_global(UiText {
+        weight_shift: shift,
+        ..ui_text(cx)
+    });
+}
+
+/// The weight mono text draws at: the bundled mono faces are Regular and Bold
+/// only, so a shift would draw all source code Bold.
+#[must_use]
+pub const fn mono_weight() -> FontWeight {
+    FontWeight::NORMAL
+}
+
+/// Weight `requested` at the app's shift.
+#[must_use]
+pub fn ui_weight(cx: &App, requested: FontWeight) -> FontWeight {
+    ui_weight_at(ui_weight_shift(cx), requested)
+}
+
+/// Weight `requested` raised by `shift` hundreds, stopping at 700; a weight
+/// already past that stays where it is.
+#[must_use]
+pub fn ui_weight_at(shift: i8, requested: FontWeight) -> FontWeight {
+    let shifted = requested.0 + 100.0 * f32::from(shift);
+    FontWeight(shifted.min(MAX_SHIFTED_WEIGHT).max(requested.0))
 }
 
 /// `offset` clamped to [`UI_TEXT_SIZE_OFFSETS`].
@@ -494,6 +551,50 @@ mod tests {
             assert_eq!(ui_px(cx, 12.0), gpui::px(14.0));
             set_ui_text_size(7, cx);
             assert_eq!(ui_text_size(cx), 4, "clamped to the range");
+        });
+    }
+
+    #[test]
+    fn ui_weight_moves_by_the_shift_and_stops_at_700() {
+        let at = |shift, requested| ui_weight_at(shift, FontWeight(requested)).0;
+        for (requested, moved) in [
+            (400.0, [400.0, 500.0, 600.0]),
+            (600.0, [600.0, 700.0, 700.0]),
+            (700.0, [700.0, 700.0, 700.0]),
+        ] {
+            assert_eq!(
+                [at(0, requested), at(1, requested), at(2, requested)],
+                moved,
+                "{requested} at shifts 0, 1 and 2"
+            );
+        }
+        assert_eq!(at(2, 900.0), 900.0, "the cap never lowers a weight");
+    }
+
+    #[gpui::test]
+    fn ui_weight_reads_the_shift_the_app_set(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert_eq!(ui_weight(cx, FontWeight::NORMAL), FontWeight::NORMAL);
+            set_ui_weight(600, cx);
+            assert_eq!(ui_weight(cx, FontWeight::NORMAL), FontWeight::SEMIBOLD);
+            set_ui_weight(450, cx);
+            assert_eq!(
+                ui_weight(cx, FontWeight::NORMAL),
+                FontWeight::NORMAL,
+                "a weight the setting does not offer: no shift"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn setting_the_weight_keeps_the_text_size(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            set_ui_text_size(3, cx);
+            set_ui_weight(500, cx);
+            assert_eq!(ui_text_size(cx), 3, "the weight leaves the size alone");
+            assert_eq!(ui_weight_shift(cx), 1);
+            set_ui_text_size(-1, cx);
+            assert_eq!(ui_weight_shift(cx), 1, "the size leaves the weight alone");
         });
     }
 

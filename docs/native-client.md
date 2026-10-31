@@ -426,6 +426,8 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 
   It applies to all UI text: the shell, every panel and dialog, modals, popovers, menus, toasts, the chat and summary panes and all four button sizes. Every fixed height that holds one line of text grows by the same amount, two-line rows by twice it; `min_h` floors, panel sizes and `dashboard_view`'s `ROW_MIN_H` stay. Terminal text, the viewer and diff gutters, a viewer tab's text and rendered Markdown, and code blocks in a chat keep their own sizes. A chat answer's headings, task boxes and list markers follow the offset; a tick in a fixed box stays 11 px.
 
+  The UI weight (`native-ui.json`'s `ui_font_weight`: 400, 500 or 600) shifts every UI weight by the same step, capped at 700, through `fonts::ui_weight`, and the roots that set the UI family set the shifted Regular, so unweighted body text moves too. Text inputs, the terminal, all mono text (`fonts::mono_weight`, since the bundled mono faces are 400 and 700 only), rendered Markdown's bold and the Themes miniature stay as they are.
+
   Geist Mono, Fira Code, JetBrains Mono and Cascadia Code are bundled for terminals, and Inter, Geist and Schibsted Grotesk at 400 to 700 for the interface (OFL, `assets/fonts/`); a family resolves against the installed list, falling back to Geist Mono, Cascadia Mono, Consolas, then Courier New.
 - **Status glyphs**: a session's status draws as a shape as well as a colour (`status_glyph.rs`, tinted SVG layers in `assets/icons/status-*.svg`) in sidebar leaves, pane headers, Needs You rows, the tab bar's busy pill and the footer.
 

@@ -208,6 +208,7 @@ impl Render for PopoutView {
             .flex_col()
             .bg(gpui::rgb(t.ground))
             .font_family(fonts::ui_family(cx))
+            .font_weight(fonts::ui_weight(cx, gpui::FontWeight::NORMAL))
             .capture_any_mouse_down(move |_: &MouseDownEvent, window, cx| {
                 if let Err(err) = on_press.update(cx, |root, _| root.note_interaction(window)) {
                     tracing::debug!("a pop-out press after the root view went: {err:#}");
