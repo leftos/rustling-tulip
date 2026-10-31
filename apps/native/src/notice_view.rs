@@ -479,16 +479,13 @@ impl RootView {
         }
     }
 
-    /// Forgets every spawn and its spawning toast and closes both modal
-    /// notices, as a new or lost connection must.
+    /// Ends This PC's spawns in flight with their spawning toasts, its
+    /// duplicates and its recoveries too, and closes both modal notices, as
+    /// a new or lost connection must. A remote host's pending entries stay:
+    /// its connection did not change.
     pub(crate) fn reset_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.spawns.clear();
+        self.drop_pending_of(&HostKey::Local, cx);
         self.quick_shell_saves.clear();
-        if self.notices.dismiss_spawning() {
-            self.forget_closed_jobs();
-            self.schedule_toast_expiry(cx);
-            cx.notify();
-        }
         if self.notices.close_modals() {
             self.after_notice_closed(window, cx);
         }

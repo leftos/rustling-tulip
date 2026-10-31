@@ -939,11 +939,6 @@ impl Duplicates {
         self.pending.remove(request_id).is_some()
     }
 
-    /// Forgets every duplicate, as a new connection must.
-    pub(crate) fn clear(&mut self) {
-        self.pending.clear();
-    }
-
     /// Forgets the duplicates sent to `host`, whose connection closed;
     /// returns whether any was pending.
     pub(crate) fn drop_host(&mut self, host: &HostKey) -> bool {
@@ -2360,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    fn actions_duplicate_is_one_at_a_time_until_answered_or_cleared() {
+    fn actions_duplicate_is_one_at_a_time_until_answered_or_dropped() {
         let restart = || DuplicateTarget::Restart;
         let mut dups = Duplicates::default();
         assert!(
@@ -2385,7 +2380,7 @@ mod tests {
             dups.request(&HostKey::Local, "s1", "req-4".to_owned(), restart())
                 .is_some()
         );
-        dups.clear();
+        assert!(dups.drop_host(&HostKey::Local));
         assert!(!dups.is_pending("s1") && !dups.is_pending("s2"));
     }
 

@@ -5,11 +5,12 @@ use crate::support;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
-    AgentDescriptor, AgentId, ClientMessage, DaemonMessage, InitLayoutKind, SplitDirection,
-    VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
+    AgentDescriptor, AgentId, ClientMessage, DaemonMessage, InitLayoutKind, SessionMode,
+    SessionSnapshot, SpawnRequest, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
+    VscodeWorkspaceSuggestion, WorktreeReusePolicy,
 };
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, HeaderChipKind, NetEvent, OpenOutcome, PopoutKey};
+use rustling_tulip_native::{Connection, HeaderChipKind, NetEvent, OpenIn, OpenOutcome, PopoutKey};
 use support::{
     Fixture, Harness, PROTOCOL, TestDir, pane, remote_in_pane, remote_pane, repo, saved_remote,
     seed_ui, session, split, tab,
@@ -827,5 +828,226 @@ fn a_remote_session_popouts_orphan_banner_names_its_own_hosts_agent(cx: &mut Tes
     assert!(
         !line.contains("local-x"),
         "This PC's descriptor stays off it: {line}"
+    );
+}
+
+/// This PC lists `a1` in pane `p1` beside [`REMOTE`]'s `b1` in pane `p2`;
+/// [`REMOTE`] lists repo `r2` and `remote_session`. Nothing sent is left
+/// unread.
+fn two_hosts<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    remote_session: SessionSnapshot,
+) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("a1")),
+                remote_pane("p2", "b1"),
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![remote_session],
+    });
+    host.sent();
+    h.sent();
+    h
+}
+
+/// Reports This PC's connection lost and back: the connecting overlay, then
+/// its `Welcome` and its own session list again.
+fn this_pc_reconnects(h: &mut Harness<'_>) {
+    h.lose_connection();
+    h.welcome_with_features();
+    h.send_welcome(PROTOCOL);
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("a1").build()],
+    });
+    h.sent();
+}
+
+/// A claude spawn on branch `feature` of [`REMOTE`]'s repo `r2`.
+fn remote_request() -> SpawnRequest {
+    SpawnRequest {
+        label: None,
+        target: SpawnTarget::Single {
+            repo_id: "r2".to_owned(),
+            branch_name: "feature".to_owned(),
+            base_branch: None,
+            use_worktree: true,
+            checkout_strategy: None,
+            worktree_reuse: WorktreeReusePolicy::default(),
+            existing_worktree: None,
+        },
+        mode: SessionMode::Interactive,
+        initial_prompt: None,
+        dangerously_skip_permissions: false,
+        agent: Some(
+            serde_json::from_value(serde_json::json!({ "agent": "claude", "options": {} }))
+                .expect("agent selection"),
+        ),
+        extra_env: Vec::new(),
+        secret_env_keys: Vec::new(),
+        prompt_injector: None,
+        request_id: None,
+        resume_conversation: None,
+    }
+}
+
+/// The request ids of the spawns among `sent`.
+fn spawn_ids(sent: &[ClientMessage]) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SpawnSession(request) => Some(request.request_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `session` placed with [`REMOTE`] as its host.
+fn placed_on_remote(session: &str) -> (Option<String>, Option<String>) {
+    (Some(session.to_owned()), Some(REMOTE.to_owned()))
+}
+
+/// The session placements among `sent`: every `CreateTab`,
+/// `SplitPane` and `ReplacePaneSession`, as the session and host it names.
+fn placements(sent: &[ClientMessage]) -> Vec<(Option<String>, Option<String>)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::CreateTab {
+                initial_session_id,
+                host,
+                ..
+            }
+            | ClientMessage::SplitPane {
+                new_session_id: initial_session_id,
+                host,
+                ..
+            }
+            | ClientMessage::ReplacePaneSession {
+                session_id: initial_session_id,
+                host,
+                ..
+            } => Some((initial_session_id.clone(), host.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The sessions `sent` discards.
+fn discards(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::DiscardSession { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a spawning toast is on screen.
+fn spawning_shown(h: &mut Harness<'_>) -> bool {
+    toast_titles(h)
+        .iter()
+        .any(|title| title == "Spawning session…")
+}
+
+#[gpui::test]
+fn a_remote_restart_survives_this_pcs_reconnect(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").exited(1).build());
+
+    h.click_on("exited-restart-p2");
+    let restart = h
+        .host(&remote())
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::DuplicateSession {
+                session_id,
+                request_id,
+                ..
+            } if session_id == "b1" => request_id,
+            _ => None,
+        })
+        .expect("a restart of b1 under a request id");
+
+    this_pc_reconnects(&mut h);
+
+    h.host(&remote()).send(DaemonMessage::SessionUpdated {
+        session: session("b1b").build(),
+        request_id: Some(restart),
+    });
+    let replaced: Vec<(String, Option<String>, Option<String>)> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ReplacePaneSession {
+                pane_id,
+                session_id,
+                host,
+                ..
+            } => Some((pane_id, session_id, host)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replaced,
+        [(
+            "p2".to_owned(),
+            Some("b1b".to_owned()),
+            Some(REMOTE.to_owned())
+        )],
+        "the copy takes the original's pane after This PC's reconnect"
+    );
+    assert_eq!(
+        discards(&h.host(&remote()).sent()),
+        ["b1"],
+        "the original is discarded on the remote host that answered"
+    );
+}
+
+#[gpui::test]
+fn a_remote_spawns_toast_survives_this_pcs_reconnect(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").build());
+
+    let id = h.root_update(|root, _, cx| root.spawn(remote_request(), OpenIn::NewTab, cx));
+    assert_eq!(
+        spawn_ids(&h.host(&remote()).sent()),
+        [Some(id.clone())],
+        "the spawn goes to the remote host"
+    );
+    assert!(spawning_shown(&mut h), "the spawn shows its toast");
+
+    this_pc_reconnects(&mut h);
+
+    assert!(
+        spawning_shown(&mut h),
+        "the remote host's spawning toast stays across This PC's reconnect"
+    );
+
+    h.host(&remote()).send(DaemonMessage::SessionUpdated {
+        session: session("b2").in_repo("r2").build(),
+        request_id: Some(id.clone()),
+    });
+    assert!(
+        !spawning_shown(&mut h),
+        "the remote host's reply ends the toast"
+    );
+    assert_eq!(
+        placements(&h.sent()),
+        [placed_on_remote("b2")],
+        "the spawn is placed though This PC reconnected"
     );
 }
