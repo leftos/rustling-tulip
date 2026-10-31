@@ -1263,20 +1263,15 @@ fn host_row(
         .gap(px(8.0))
         .text_size(crate::fonts::ui_px(cx, 11.5))
         .text_color(gpui::rgb(t.text_2))
-        .children(
-            detail
-                .state
-                .as_ref()
-                .map(|state| {
-                    state_chip(
-                        crate::fonts::ui_text_size(cx),
-                        crate::fonts::ui_weight_shift(cx),
-                        row,
-                        state,
-                        &t,
-                    )
-                }),
-        )
+        .children(detail.state.as_ref().map(|state| {
+            state_chip(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                row,
+                state,
+                &t,
+            )
+        }))
         .when(saved && forget_shown, |chip| chip.opacity(0.0))
         .when(saved && !forget_shown, |chip| {
             chip.group_hover(group.clone(), |style| style.opacity(0.0))

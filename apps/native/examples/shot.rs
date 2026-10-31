@@ -67,8 +67,7 @@ use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
     RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker, ToastKind, ToastSpec, Transport,
-    ViewerLoad,
-    bind_keys, remote_access::Autostart,
+    ViewerLoad, bind_keys, remote_access::Autostart,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
