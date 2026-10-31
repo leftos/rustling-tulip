@@ -2734,7 +2734,7 @@ impl RootView {
         let panel = dialog_card("settings-panel", PANEL_WIDTH, &theme(cx))
             .h(px(PANEL_HEIGHT.min(cap)))
             .track_focus(&self.appearance_focus)
-            .child(dialog_title_bar("Settings", close))
+            .child(dialog_title_bar("Settings", close, &theme(cx)))
             .child(body)
             .child(close_footer("settings-footer-close", false, cx));
         Some(backdrop("settings", panel, &theme(cx)))
@@ -3155,12 +3155,16 @@ impl RootView {
                 .then(|| hint("Saved").debug_selector(|| "settings-agent-saved".to_owned()));
             section
                 .child(
-                    field("Program")
+                    field("Program", &theme(cx))
                         .child(program)
                         .children(env_note)
                         .children(program_error),
                 )
-                .child(field("Extra arguments").child(args).children(args_error))
+                .child(
+                    field("Extra arguments", &theme(cx))
+                        .child(args)
+                        .children(args_error),
+                )
                 .children(saved)
         } else {
             section
@@ -3807,7 +3811,8 @@ fn agent_field_row(
                     .into_any_element()
                 })
                 .collect();
-            field(view.label.clone()).child(div().flex().child(segmented(buttons)))
+            field(view.label.clone(), &theme(cx))
+                .child(div().flex().child(segmented(buttons, &theme(cx))))
         }
         FieldEditor::Toggle => {
             let control = *controls.first()?;
@@ -3827,7 +3832,7 @@ fn agent_field_row(
             let control = *controls.first()?;
             let setting = page.tab?.texts.iter().find(|text| text.field == view.id)?;
             let frame = input_frame(control, &setting.input, enabled, focused, cx);
-            field(view.label.clone()).child(if enabled {
+            field(view.label.clone(), &theme(cx)).child(if enabled {
                 frame
             } else {
                 frame.opacity(DISABLED_OPACITY)
@@ -3835,11 +3840,11 @@ fn agent_field_row(
         }
         FieldEditor::Unknown => {
             let selector = format!("settings-{tag}-{}", field_part(&view.id));
-            field(view.label.clone()).child(
+            field(view.label.clone(), &theme(cx)).child(
                 div()
                     .debug_selector(move || selector)
                     .opacity(DISABLED_OPACITY)
-                    .child(muted(UPDATE_CLIENT)),
+                    .child(muted(UPDATE_CLIENT, &theme(cx))),
             )
         }
     };
@@ -3896,7 +3901,7 @@ fn disabled_launch_row(
         .text_color(gpui::rgb(SUBTLE))
         .tooltip(tooltip(LAUNCH_COMMAND_UNSUPPORTED_TIP))
         .child(placeholder);
-    field(label).child(frame)
+    field(label, t).child(frame)
 }
 
 /// Whether a choice row takes input, and the note that says why not.
@@ -3988,8 +3993,8 @@ fn choice_row(
         }
         RowLock::Live => None,
     };
-    field(label)
-        .child(div().flex().child(segmented(buttons)))
+    field(label, &theme(cx))
+        .child(div().flex().child(segmented(buttons, &theme(cx))))
         .children(note)
         .into_any_element()
 }

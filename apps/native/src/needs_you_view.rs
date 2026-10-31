@@ -19,8 +19,8 @@ use crate::needs_you::{self, NeedsYouRow, Reason};
 use crate::sidebar::Activity;
 use crate::sidebar_view::{ROW_HEIGHT, ROW_PADDING};
 use crate::status_glyph::{Glyph, GlyphSize, glyph, glyph_view};
-use crate::ui_theme::theme;
-use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 const HEADER_HEIGHT: f32 = 26.0;
 const TITLE: &str = "NEEDS YOU";
@@ -122,6 +122,7 @@ impl RootView {
 
     /// The panel, `width` wide.
     pub(crate) fn needs_you_view(&self, width: f32, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let rows = self.needs_you_list();
         let now = Utc::now();
         let body = div()
@@ -132,7 +133,7 @@ impl RootView {
             .min_h(px(0.0))
             .overflow_y_scroll();
         let body = if rows.is_empty() {
-            body.child(empty_state())
+            body.child(empty_state(&t))
         } else {
             body.children(rows.iter().map(|row| {
                 let mark = self.sidebar.session(&row.session_id).map_or_else(
@@ -166,10 +167,10 @@ impl RootView {
             .h_full()
             .debug_selector(|| "needs-you-panel".to_owned())
             .track_focus(&self.sidebar_focus)
-            .bg(gpui::rgb(PANEL_BG))
+            .bg(gpui::rgb(t.panel_bg))
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
-            .child(header(header_text(rows.len())))
+            .text_color(gpui::rgb(t.text))
+            .child(header(header_text(rows.len()), &t))
             .child(body)
     }
 
@@ -218,7 +219,7 @@ impl RootView {
     }
 }
 
-fn header(text: String) -> Div {
+fn header(text: String, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_none()
@@ -226,20 +227,20 @@ fn header(text: String) -> Div {
         .h(px(HEADER_HEIGHT))
         .px(px(ROW_PADDING))
         .border_b_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_color(gpui::rgb(MUTED))
+        .border_color(gpui::rgb(t.border))
+        .text_color(gpui::rgb(t.muted))
         .debug_selector(|| "needs-you-header".to_owned())
         .child(div().font_weight(FontWeight::SEMIBOLD).child(text))
 }
 
-fn empty_state() -> Div {
+fn empty_state(t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
         .gap(px(2.0))
         .px(px(ROW_PADDING))
         .py(px(6.0))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .debug_selector(|| "needs-you-empty".to_owned())
         .child("Nothing needs you")
         .child(div().child("Sessions waiting on an answer, a permission or a look show here."))
@@ -253,6 +254,7 @@ fn needs_you_row(
     now: DateTime<Utc>,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let id = row.session_id.clone();
     let menu_id = row.session_id.clone();
     let name = format!("needs-you-row-{}", row.session_id);
@@ -281,21 +283,26 @@ fn needs_you_row(
                         .text_color(gpui::rgb(row.accent))
                         .child(row.container_name.clone()),
                 )
-                .child(div().flex_none().text_color(gpui::rgb(MUTED)).child("·"))
+                .child(div().flex_none().text_color(gpui::rgb(t.muted)).child("·"))
                 .child(
                     truncating(&format!("{name}-label"), StyledText::new(row.label.clone()))
                         .flex_1(),
                 ),
         )
         .when_some(waited, |line, waited| {
-            line.child(div().flex_none().text_color(gpui::rgb(MUTED)).child(waited))
+            line.child(
+                div()
+                    .flex_none()
+                    .text_color(gpui::rgb(t.muted))
+                    .child(waited),
+            )
         });
     let second = div()
         .relative()
         .min_w(px(0.0))
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .children(ellipsized(
             &format!("{name}-detail"),
             SharedString::from(row.detail.clone()),
@@ -310,7 +317,7 @@ fn needs_you_row(
         .px(px(ROW_PADDING))
         .pb(px(4.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         .tooltip(tooltip(row.detail.clone()))
         .child(first)
         .child(second)

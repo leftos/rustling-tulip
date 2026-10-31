@@ -18,10 +18,7 @@ use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::launch_last;
-use crate::palette::{
-    ACCENT, ASKING, CHIP, GROUND, HOVER, LAUNCHED_TINT, LILAC, LINE, LINE_STRONG, ON_ACCENT,
-    ON_ASKING, RAISED, ROW_CARD, ROW_GAP, ROW_HOVER, SELECTION, SUBTLE, TEXT_2, TRANSPARENT,
-};
+use crate::palette::ROW_GAP;
 use crate::preset_launch::LaunchHighlight;
 use crate::remote_mode::{Capabilities, sidebar_no_repos_note};
 use crate::repo_add::RepoAdd;
@@ -40,10 +37,7 @@ use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
 use crate::target::Target;
 use crate::ui_theme::{UiTheme, theme};
-use crate::{
-    DANGER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle,
-    tagged_text, tooltip,
-};
+use crate::{Drag, RootView, UI_TEXT_SIZE, drag_handle, tagged_text, tooltip};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Corner, Corners, Div, DragMoveEvent, Entity,
     FontWeight, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, SharedString, Stateful,
@@ -83,6 +77,7 @@ impl RootView {
     /// The rail, the panel it picks with its divider, and the terminal pane
     /// side by side; a folded panel leaves the rail alone.
     pub(crate) fn main_row(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let row = div()
             .flex()
             .flex_row()
@@ -108,7 +103,7 @@ impl RootView {
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
-                .bg(gpui::rgb(GROUND))
+                .bg(gpui::rgb(t.ground))
                 .child(self.tab_bar(cx))
                 .child(self.grid_area(cx)),
         )
@@ -118,11 +113,12 @@ impl RootView {
     /// shows through the tab bar's strip, an empty main area, the pane
     /// gutter or the first-run dialog's backdrop.
     #[must_use]
-    pub fn main_area_fill(&self) -> u32 {
-        GROUND
+    pub fn main_area_fill(&self, cx: &App) -> u32 {
+        theme(cx).ground
     }
 
     fn sidebar_panel(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let attached = self.focused_session();
         let containers = self.sidebar_containers();
         // The chip is the only way to arm, so an arm cannot outlive it.
@@ -150,11 +146,11 @@ impl RootView {
                 body.child(no_repos_note(self.add_repo_gate(), self.conn.target(), cx))
             })
             .when(filter_empty, |body| {
-                body.child(body_note(Some("sidebar-filter-empty"), NO_ACTIVE_REPOS))
+                body.child(body_note(Some("sidebar-filter-empty"), NO_ACTIVE_REPOS, &t))
             });
         let body = if containers.is_empty() {
             body.when(!no_repos && !filter_empty, |body| {
-                body.child(body_note(None, "No sessions"))
+                body.child(body_note(None, "No sessions", &t))
             })
         } else {
             // The ring and the row keys follow the keyboard: a row the
@@ -215,9 +211,9 @@ impl RootView {
             .h_full()
             .debug_selector(|| "sidebar-panel".to_owned())
             .track_focus(&self.sidebar_focus)
-            .bg(gpui::rgb(PANEL_BG))
+            .bg(gpui::rgb(t.panel_bg))
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
+            .text_color(gpui::rgb(t.text))
             .child(header(
                 self.sidebar.sidebar_view(),
                 self.sidebar.repo_filter(),
@@ -245,6 +241,7 @@ impl RootView {
 
     /// The ⋯ button, with its menu under it while open.
     fn more_button(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         // The tip names the rows the menu actually shows: Resume all is
         // suppressed below two abandoned sessions.
         let tip = if crate::sidebar::resume_all_label(self.sidebar.abandoned_count()).is_some() {
@@ -262,9 +259,9 @@ impl RootView {
             .size(px(MORE_BUTTON_SIZE))
             .rounded(px(6.0))
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER)))
+            .hover(move |style| style.bg(gpui::rgb(t.hover)))
             .tooltip(tooltip(tip))
-            .child(icon(SIDEBAR_MORE_ICON, 15.0, TEXT_2))
+            .child(icon(SIDEBAR_MORE_ICON, 15.0, t.text_2))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_more_menu(window, cx);
             }));
@@ -287,7 +284,7 @@ impl RootView {
                     .px(px(8.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child("Add workspace…")
                     .child(
                         div()
@@ -543,6 +540,7 @@ const MORE_TIP_WITHOUT_RESUME: &str = "More: Shell…, Add repo…, Add workspac
 /// The note an empty registry shows, with the Add repo button under it,
 /// drawn as `gate` says, in the wording `target` calls for.
 fn no_repos_note(gate: AddRepoGate, target: &Target, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let add = BorderedButton {
         selector: "sidebar-add-repo".to_owned(),
         label: "Add repo",
@@ -559,7 +557,7 @@ fn no_repos_note(gate: AddRepoGate, target: &Target, cx: &mut Context<RootView>)
         .py(px(6.0))
         .child(
             tagged_text("sidebar-no-repos-note", sidebar_no_repos_note(target))
-                .text_color(gpui::rgb(MUTED)),
+                .text_color(gpui::rgb(t.muted)),
         )
         .child(bordered_button(add, cx, |this, window, cx| {
             this.add_repo(window, cx);
@@ -580,6 +578,7 @@ fn icon(path: &'static str, size: f32, color: u32) -> Svg {
 /// Session, which opens the spawn dialog, with its `Ctrl N` hint; disabled
 /// with no repo, when the hint still shows.
 fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let tip = if has_repos { SPAWN_TIP } else { NO_REPOS_TIP };
     let hint = div()
         .debug_selector(|| "sidebar-session-hint".to_owned())
@@ -600,7 +599,7 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     .min_w(px(0.0))
     .overflow_hidden()
     .gap(px(6.0))
-    .child(icon(SIDEBAR_PLUS_ICON, 14.0, ON_ACCENT))
+    .child(icon(SIDEBAR_PLUS_ICON, 14.0, t.on_accent))
     .child("Session")
     .child(hint)
     .tooltip(tooltip(tip))
@@ -614,6 +613,7 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
 /// Shell, a standalone shell in the remembered folder; enabled even with no
 /// repo.
 fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let tip = match quick_shell_dir {
         Some(dir) => format!("Open a standalone shell in {dir}"),
         None => "Open a standalone shell in your home folder".to_owned(),
@@ -627,21 +627,21 @@ fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> State
     )
     .flex_none()
     .gap(px(6.0))
-    .child(icon(SIDEBAR_SHELL_ICON, 14.0, TEXT))
+    .child(icon(SIDEBAR_SHELL_ICON, 14.0, t.text))
     .child("Shell")
     .tooltip(tooltip(tip))
     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.quick_shell(cx)))
 }
 
 /// A muted line in the sessions body; `selector` tags it for the specs.
-fn body_note(selector: Option<&'static str>, text: &'static str) -> impl IntoElement {
+fn body_note(selector: Option<&'static str>, text: &'static str, t: &UiTheme) -> impl IntoElement {
     div()
         .when_some(selector, |line, selector| {
             line.debug_selector(move || selector.to_owned())
         })
         .px(px(ROW_PADDING))
         .py(px(6.0))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(text)
 }
 
@@ -690,6 +690,7 @@ fn segmented<C: Copy + PartialEq + 'static>(
     cx: &mut Context<RootView>,
     pick: fn(&mut RootView, C, &mut Context<RootView>),
 ) -> Div {
+    let t = theme(cx);
     let segments = choices.iter().map(|&(choice, label, tip, selector)| {
         let active = choice == current;
         div()
@@ -705,14 +706,14 @@ fn segmented<C: Copy + PartialEq + 'static>(
             .tooltip(tooltip(tip))
             .when(active, |segment| {
                 segment
-                    .bg(gpui::rgb(HOVER))
+                    .bg(gpui::rgb(t.hover))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(gpui::rgb(TEXT))
+                    .text_color(gpui::rgb(t.text))
             })
             .when(!active, |segment| {
                 segment
-                    .text_color(gpui::rgb(TEXT_2))
-                    .hover(|style| style.text_color(gpui::rgb(TEXT)))
+                    .text_color(gpui::rgb(t.text_2))
+                    .hover(move |style| style.text_color(gpui::rgb(t.text)))
             })
             .child(label)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| pick(this, choice, cx)))
@@ -722,13 +723,14 @@ fn segmented<C: Copy + PartialEq + 'static>(
         .flex_none()
         .p(px(2.0))
         .rounded(px(6.0))
-        .bg(gpui::rgb(RAISED))
+        .bg(gpui::rgb(t.raised))
         .children(segments)
 }
 
 /// The panel's title, the All / Active row filter the repos view gets and the
 /// Repos / Tabs grouping toggle.
 fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let filtering = view == SidebarView::Repos;
     let pad = if filtering { 7.0 } else { 9.0 };
     let filter_control = filtering.then(|| {
@@ -748,13 +750,13 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
         .pl(px(14.0))
         .pr(px(10.0))
         .border_b_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
         .child(
             div()
                 .flex_1()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(gpui::rgb(TEXT))
+                .text_color(gpui::rgb(t.text))
                 .child("Sessions"),
         )
         .children(filter_control)
@@ -763,7 +765,8 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
 
 /// The drag handle; a press starts a resize the root follows until release.
 fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
-    drag_handle("sidebar-divider", true, active)
+    let t = theme(cx);
+    drag_handle("sidebar-divider", true, active, &t)
         .debug_selector(|| "sidebar-divider".to_owned())
         .on_mouse_down(MouseButton::Left, cx.listener(RootView::start_drag))
 }
@@ -779,6 +782,7 @@ fn container_rows(
     window: &Window,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let focused = ctx.focused_row == Some(container.key.as_str());
     let hovered = ctx.hovered_row == Some(container.key.as_str());
     let header = SidebarRow::Container(container.key.clone());
@@ -799,7 +803,7 @@ fn container_rows(
             rows.push(path_banner(container, path, add_workspace, cx).into_any_element());
         }
         if container.kind == ContainerKind::Unbound {
-            rows.push(unbound_banner().into_any_element());
+            rows.push(unbound_banner(&t).into_any_element());
         }
         if container.kind == ContainerKind::Detached {
             rows.push(detached_banner(container, ctx.detached_stop_all, cx).into_any_element());
@@ -814,7 +818,7 @@ fn container_rows(
     }
     let line = ctx.mark_at(&header).map(|side| {
         let selector = format!("sidebar-drop-mark-{}", container.key);
-        drop_line(selector, side)
+        drop_line(selector, side, &t)
     });
     div()
         .id(SharedString::from(format!("group-{}", container.key)))
@@ -848,6 +852,7 @@ fn leaf_drag_row(
     window: &Window,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let target = SidebarRow::Leaf {
         container_key: container.key.clone(),
         session_id: leaf.id.clone(),
@@ -856,7 +861,7 @@ fn leaf_drag_row(
     let dragged = payload.is_some() && ctx.dragged == payload;
     let line = ctx.mark_at(&target).map(|side| {
         let selector = format!("sidebar-drop-mark-{}-{}", container.key, leaf.id);
-        drop_line(selector, side)
+        drop_line(selector, side, &t)
     });
     let row = leaf_row(leaf, ctx, window, cx);
     draggable_row(row, payload, &target, &leaf.label, cx)
@@ -910,7 +915,7 @@ fn row_ghost(
 
 /// The accent line at `side` of a row or a container's group, where a
 /// dragged row lands.
-fn drop_line(selector: String, side: Side) -> Div {
+fn drop_line(selector: String, side: Side, t: &UiTheme) -> Div {
     let line = div()
         .debug_selector(move || selector)
         .absolute()
@@ -918,7 +923,7 @@ fn drop_line(selector: String, side: Side) -> Div {
         .right(px(ROW_PADDING))
         .h(px(DROP_LINE_HEIGHT))
         .rounded(px(DROP_LINE_HEIGHT / 2.0))
-        .bg(gpui::rgb(ACCENT));
+        .bg(gpui::rgb(t.accent));
     match side {
         Side::Before => line.top(px(-DROP_LINE_HEIGHT / 2.0)),
         Side::After => line.bottom(px(-DROP_LINE_HEIGHT / 2.0)),
@@ -936,6 +941,7 @@ pub(crate) struct RowGhost {
 
 impl Render for RowGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
         div().child(
             div()
                 .debug_selector(|| "sidebar-drag-ghost".to_owned())
@@ -948,14 +954,14 @@ impl Render for RowGhost {
                 .px(px(10.0))
                 .whitespace_nowrap()
                 .rounded(px(6.0))
-                .bg(gpui::rgb(RAISED))
+                .bg(gpui::rgb(t.raised))
                 .border_1()
-                .border_color(gpui::rgb(LINE_STRONG))
+                .border_color(gpui::rgb(t.line_strong))
                 .shadow_lg()
                 .opacity(0.85)
                 .font_family(fonts::ui_family(cx))
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(TEXT))
+                .text_color(gpui::rgb(t.text))
                 .child(self.label.clone()),
         )
     }
@@ -1101,6 +1107,7 @@ fn path_banner(
     add_workspace: Option<&str>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let key = container.key.clone();
     let banner_selector = format!("container-{key}-banner");
     let repo_selector = format!("container-{key}-add-repo");
@@ -1116,13 +1123,13 @@ fn path_banner(
         .pr(px(ROW_PADDING))
         .py(px(4.0))
         .text_size(px(TAG_TEXT_SIZE + 1.0))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(div().flex_1().min_w(px(0.0)).child(truncating(
             &format!("container-{key}-path"),
             StyledText::new(path.to_owned()),
         )))
         .child(
-            banner_link(repo_selector, "Add repo", repo_tip).on_click(cx.listener(
+            banner_link(repo_selector, "Add repo", repo_tip, &t).on_click(cx.listener(
                 move |this, _: &ClickEvent, _window, cx| {
                     this.add_repo_at(repo_path.clone(), cx);
                 },
@@ -1135,7 +1142,7 @@ fn path_banner(
     let workspace_path = path.to_owned();
     let workspace_tip = format!("Add workspace: {name}");
     banner.child(
-        banner_link(workspace_selector, "Add workspace", workspace_tip).on_click(cx.listener(
+        banner_link(workspace_selector, "Add workspace", workspace_tip, &t).on_click(cx.listener(
             move |this, _: &ClickEvent, _window, cx| {
                 this.add_workspace_from_scan(&workspace_path, cx);
             },
@@ -1145,20 +1152,20 @@ fn path_banner(
 
 /// A banner action: plain text that reads as a link, naming what it acts on
 /// in its hover text.
-fn banner_link(selector: String, label: &'static str, tip: String) -> Stateful<Div> {
+fn banner_link(selector: String, label: &'static str, tip: String, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(SharedString::from(selector.clone()))
         .debug_selector(move || selector.clone())
         .flex_none()
         .cursor_pointer()
-        .text_color(gpui::rgb(TEXT_2))
-        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .text_color(gpui::rgb(t.text_2))
+        .hover(move |style| style.text_color(gpui::rgb(t.text)))
         .tooltip(tooltip(tip))
         .child(label)
 }
 
 /// The text under an expanded Unbound container, with the pill it names.
-fn unbound_banner() -> Div {
+fn unbound_banner(t: &UiTheme) -> Div {
     div()
         .debug_selector(|| "unbound-banner".to_owned())
         .flex()
@@ -1169,9 +1176,9 @@ fn unbound_banner() -> Div {
         .pr(px(ROW_PADDING))
         .py(px(4.0))
         .text_size(px(TAG_TEXT_SIZE + 1.0))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child("These sessions are alive but no tab currently references them. Click the")
-        .child(unbound_pill_look(div()).child("unbound"))
+        .child(unbound_pill_look(div(), t).child("unbound"))
         .child("pill on a session to open it in a new tab.")
 }
 
@@ -1229,6 +1236,7 @@ fn detached_stop_all_shown(containers: &[Container]) -> bool {
 /// The text under an expanded Detached container, with its Stop all chip
 /// while one of its leaves still runs.
 fn detached_banner(container: &Container, armed: bool, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let live: Vec<String> = container
         .leaves
         .iter()
@@ -1245,7 +1253,7 @@ fn detached_banner(container: &Container, armed: bool, cx: &mut Context<RootView
         .pr(px(ROW_PADDING))
         .py(px(4.0))
         .text_size(px(TAG_TEXT_SIZE + 1.0))
-        .text_color(gpui::rgb(MUTED));
+        .text_color(gpui::rgb(t.muted));
     if live.is_empty() {
         return banner.child(DETACHED_BANNER);
     }
@@ -1261,6 +1269,7 @@ fn detached_stop_all_chip(
     armed: bool,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let tip = if armed {
         DETACHED_STOP_ALL_ARMED_TIP
     } else {
@@ -1271,10 +1280,11 @@ fn detached_stop_all_chip(
             .id(SharedString::from(DETACHED_STOP_ALL_SELECTOR))
             .debug_selector(|| DETACHED_STOP_ALL_SELECTOR.to_owned()),
         ChipSize::Row,
+        &t,
     )
     .cursor_pointer()
-    .text_color(gpui::rgb(if armed { DANGER } else { TEXT_2 }))
-    .hover(|style| style.bg(gpui::rgb(HOVER)))
+    .text_color(gpui::rgb(if armed { t.danger } else { t.text_2 }))
+    .hover(move |style| style.bg(gpui::rgb(t.hover)))
     .tooltip(tooltip(tip))
     .child(if armed {
         DETACHED_STOP_ALL_ARMED
@@ -1288,14 +1298,14 @@ fn detached_stop_all_chip(
 }
 
 /// The unbound pill's look: dim italic text in a dim border.
-fn unbound_pill_look<E: Styled>(pill: E) -> E {
+fn unbound_pill_look<E: Styled>(pill: E, t: &UiTheme) -> E {
     pill.flex_none()
         .px(px(4.0))
         .rounded(px(3.0))
         .border_1()
-        .border_color(gpui::rgb(MUTED))
+        .border_color(gpui::rgb(t.muted))
         .text_size(px(TAG_TEXT_SIZE))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .italic()
         .opacity(0.8)
 }
@@ -1399,8 +1409,8 @@ impl ChipSize {
     }
 }
 
-/// An outlined Geist Mono chip of `size`, lettered in [`SUBTLE`].
-fn chip<E: Styled>(element: E, size: ChipSize) -> E {
+/// An outlined Geist Mono chip of `size`, lettered in `t.subtle`.
+fn chip<E: Styled>(element: E, size: ChipSize, t: &UiTheme) -> E {
     element
         .flex()
         .flex_none()
@@ -1409,10 +1419,10 @@ fn chip<E: Styled>(element: E, size: ChipSize) -> E {
         .px(px(size.padding()))
         .rounded(px(5.0))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(t.line_strong))
         .font_family(DEFAULT_FAMILY)
         .text_size(px(size.text_size()))
-        .text_color(gpui::rgb(SUBTLE))
+        .text_color(gpui::rgb(t.subtle))
 }
 
 /// A chip's lettering, ending in `…` when the chip is capped. `id` names it
@@ -1454,6 +1464,7 @@ fn leaf_pill(
     size: ChipSize,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let selector = format!("leaf-pill-{session_id}");
     let text = chip_text(&selector, pill_text(pill));
     let base = chip(
@@ -1461,6 +1472,7 @@ fn leaf_pill(
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector),
         size,
+        &t,
     )
     .child(text);
     let tip = pill.hover();
@@ -1471,7 +1483,7 @@ fn leaf_pill(
         TabPill::Unbound => {
             let id = session_id.to_owned();
             base.cursor_pointer()
-                .hover(|style| style.bg(gpui::rgb(HOVER)))
+                .hover(move |style| style.bg(gpui::rgb(t.hover)))
                 .tooltip(tooltip(tip))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.open_in_new_tab(&id);
@@ -1484,9 +1496,9 @@ fn leaf_pill(
             .tooltip(tooltip(tip))
             .into_any_element(),
         TabPill::Many(_) => base
-            .bg(gpui::rgb(RAISED))
-            .border_color(gpui::rgb(RAISED))
-            .text_color(gpui::rgb(TEXT_2))
+            .bg(gpui::rgb(t.raised))
+            .border_color(gpui::rgb(t.raised))
+            .text_color(gpui::rgb(t.text_2))
             .tooltip(tooltip(tip))
             .into_any_element(),
     }
@@ -1501,6 +1513,7 @@ fn leaf_chips(
     size: ChipSize,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
+    let t = theme(cx);
     let mut chips: Vec<AnyElement> = pill
         .map(|pill| leaf_pill(&pill, &leaf.id, attachable, size, cx))
         .into_iter()
@@ -1518,10 +1531,11 @@ fn leaf_chips(
                     .id(SharedString::from(name.clone()))
                     .debug_selector(move || selector),
                 size,
+                &t,
             )
-            .bg(gpui::rgb(CHIP))
-            .border_color(gpui::rgba(TRANSPARENT))
-            .text_color(gpui::rgb(TEXT_2))
+            .bg(gpui::rgb(t.chip))
+            .border_color(gpui::rgba(t.transparent))
+            .text_color(gpui::rgb(t.text_2))
             .tooltip(tooltip(chip_tip(agent_chip).to_owned()))
             .child(chip_text(&name, agent_chip.text.clone()))
             .into_any_element(),
@@ -1530,7 +1544,7 @@ fn leaf_chips(
     if let Some((text, tip)) = leaf.state.tag() {
         let name = format!("leaf-state-{}", leaf.id);
         chips.push(
-            chip(div().id(SharedString::from(name.clone())), size)
+            chip(div().id(SharedString::from(name.clone())), size, &t)
                 .tooltip(tooltip(tip))
                 .child(chip_text(&name, text))
                 .into_any_element(),
@@ -1600,7 +1614,7 @@ fn chips_fit(
 
 /// The chevron before a container's name: right while folded, down while
 /// open, none (an empty slot) for a tab with no sessions.
-fn chevron(container: &Container) -> AnyElement {
+fn chevron(container: &Container, t: &UiTheme) -> AnyElement {
     let path = if container.kind == ContainerKind::Tab && container.leaves.is_empty() {
         None
     } else if container.collapsed {
@@ -1609,22 +1623,22 @@ fn chevron(container: &Container) -> AnyElement {
         Some(SIDEBAR_CHEVRON_DOWN_ICON)
     };
     match path {
-        Some(path) => icon(path, 13.0, SUBTLE).into_any_element(),
+        Some(path) => icon(path, 13.0, t.subtle).into_any_element(),
         None => div().flex_none().size(px(13.0)).into_any_element(),
     }
 }
 
 /// A container kind's icon, the selector suffix naming it and its colour;
 /// none for Unbound.
-fn kind_icon(kind: ContainerKind) -> Option<(&'static str, &'static str, u32)> {
+fn kind_icon(kind: ContainerKind, t: &UiTheme) -> Option<(&'static str, &'static str, u32)> {
     match kind {
-        ContainerKind::Workspace => Some((SIDEBAR_WORKSPACE_ICON, "ws", LILAC)),
-        ContainerKind::Repo => Some((SIDEBAR_BRANCH_ICON, "repo", TEXT_2)),
-        ContainerKind::Shell => Some((SIDEBAR_SHELL_ICON, "shell", TEXT_2)),
+        ContainerKind::Workspace => Some((SIDEBAR_WORKSPACE_ICON, "ws", t.lilac)),
+        ContainerKind::Repo => Some((SIDEBAR_BRANCH_ICON, "repo", t.text_2)),
+        ContainerKind::Shell => Some((SIDEBAR_SHELL_ICON, "shell", t.text_2)),
         ContainerKind::Dir | ContainerKind::Detached => {
-            Some((SIDEBAR_FOLDER_ICON, "folder", TEXT_2))
+            Some((SIDEBAR_FOLDER_ICON, "folder", t.text_2))
         }
-        ContainerKind::Tab => Some((SIDEBAR_TABS_ICON, "tabs", TEXT_2)),
+        ContainerKind::Tab => Some((SIDEBAR_TABS_ICON, "tabs", t.text_2)),
         ContainerKind::Unbound => None,
     }
 }
@@ -1632,19 +1646,19 @@ fn kind_icon(kind: ContainerKind) -> Option<(&'static str, &'static str, u32)> {
 /// A container row's parts after the chevron: the kind icon, the name, the
 /// attention badge, the kind tag and the session count, each tagged
 /// `container-<key>-<part>`.
-fn container_parts(container: &Container) -> Vec<AnyElement> {
+fn container_parts(container: &Container, t: &UiTheme) -> Vec<AnyElement> {
     let mut parts = Vec::new();
-    if let Some(icon) = container_icon(container) {
+    if let Some(icon) = container_icon(container, t) {
         parts.push(icon);
     }
-    parts.extend(container_info_parts(container));
+    parts.extend(container_info_parts(container, t));
     parts
 }
 
 /// The container's kind icon, when its kind has one.
-fn container_icon(container: &Container) -> Option<AnyElement> {
+fn container_icon(container: &Container, t: &UiTheme) -> Option<AnyElement> {
     let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
-    let (path, suffix, color) = kind_icon(container.kind)?;
+    let (path, suffix, color) = kind_icon(container.kind, t)?;
     let selector = part(&format!("icon-{suffix}"));
     Some(
         div()
@@ -1657,7 +1671,7 @@ fn container_icon(container: &Container) -> Option<AnyElement> {
 }
 
 /// The row's name, badge, tag and count.
-fn container_info_parts(container: &Container) -> Vec<AnyElement> {
+fn container_info_parts(container: &Container, t: &UiTheme) -> Vec<AnyElement> {
     let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
     let mut parts = Vec::new();
     parts.push(
@@ -1665,11 +1679,11 @@ fn container_info_parts(container: &Container) -> Vec<AnyElement> {
             .flex_1()
             .text_size(px(12.5))
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(gpui::rgb(TEXT))
+            .text_color(gpui::rgb(t.text))
             .into_any_element(),
     );
     if container.attention {
-        parts.push(container_badge(part("badge")).into_any_element());
+        parts.push(container_badge(part("badge"), t).into_any_element());
     }
     let tag = part("tag");
     parts.push(
@@ -1678,7 +1692,7 @@ fn container_info_parts(container: &Container) -> Vec<AnyElement> {
             .flex_none()
             .font_family(DEFAULT_FAMILY)
             .text_size(px(TAG_TEXT_SIZE))
-            .text_color(gpui::rgb(SUBTLE))
+            .text_color(gpui::rgb(t.subtle))
             .child(container.kind.tag())
             .into_any_element(),
     );
@@ -1690,7 +1704,7 @@ fn container_info_parts(container: &Container) -> Vec<AnyElement> {
             .min_w(px(14.0))
             .text_right()
             .text_size(px(11.0))
-            .text_color(gpui::rgb(SUBTLE))
+            .text_color(gpui::rgb(t.subtle))
             .child(container.leaves.len().to_string())
             .into_any_element(),
     );
@@ -1698,7 +1712,7 @@ fn container_info_parts(container: &Container) -> Vec<AnyElement> {
 }
 
 /// The `!` badge of a container holding a session that needs attention.
-fn container_badge(selector: String) -> Div {
+fn container_badge(selector: String, t: &UiTheme) -> Div {
     div()
         .debug_selector(|| selector)
         .flex()
@@ -1707,8 +1721,8 @@ fn container_badge(selector: String) -> Div {
         .justify_center()
         .size(px(16.0))
         .rounded(px(4.0))
-        .bg(gpui::rgb(ASKING))
-        .text_color(gpui::rgb(ON_ASKING))
+        .bg(gpui::rgb(t.asking))
+        .text_color(gpui::rgb(t.on_asking))
         .text_size(px(11.0))
         .font_weight(FontWeight::BOLD)
         .child("!")
@@ -1724,6 +1738,7 @@ fn container_row(
     hovered: bool,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let key = container.key.clone();
     let hover_key = key.clone();
     let click_key = key.clone();
@@ -1748,7 +1763,7 @@ fn container_row(
         .pl(px(4.0))
         .pr(px(8.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         .when(focused, |row| {
             row.child(container_focus_ring(container, &theme(cx)))
                 .child(focused_row_marker(key.clone(), cx))
@@ -1759,16 +1774,16 @@ fn container_row(
         row.items_center()
     };
     let row = if let Some(summary) = summary.as_deref() {
-        let row = row.child(div().mt(px(2.0)).child(chevron(container)));
-        let row = if let Some(icon) = container_icon(container) {
+        let row = row.child(div().mt(px(2.0)).child(chevron(container, &t)));
+        let row = if let Some(icon) = container_icon(container, &t) {
             row.child(div().mt(px(2.0)).child(icon))
         } else {
             row
         };
-        row.child(container_lines(container, summary))
+        row.child(container_lines(container, summary, &t))
     } else {
-        row.child(chevron(container))
-            .children(container_parts(container))
+        row.child(chevron(container, &t))
+            .children(container_parts(container, &t))
     };
     let row = row.when(launchable && (hovered || focused), |row| {
         row.child(container_launch(container, two_line, cx))
@@ -1827,6 +1842,7 @@ fn container_launch(
     two_line: bool,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let selector = format!("container-{}-launch", container.key);
     let name = selector.clone();
     let id = container.id.clone();
@@ -1841,10 +1857,10 @@ fn container_launch(
         .size(px(16.0))
         .rounded(px(4.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover)))
         .when(two_line, |button| button.mt(px(2.0)))
         .tooltip(tooltip("Launch last again in the current tab"))
-        .child(icon(SIDEBAR_PLAY_ICON, 12.0, SUBTLE))
+        .child(icon(SIDEBAR_PLAY_ICON, 12.0, t.subtle))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -1865,13 +1881,13 @@ fn container_focus_ring(container: &Container, t: &UiTheme) -> Div {
 }
 
 /// A two-line row's text: the name line over the launch summary.
-fn container_lines(container: &Container, summary: &str) -> Div {
+fn container_lines(container: &Container, summary: &str, t: &UiTheme) -> Div {
     let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
     let line = div()
         .flex()
         .items_center()
         .gap(px(6.0))
-        .children(container_info_parts(container));
+        .children(container_info_parts(container, t));
     let selector = part("summary");
     div()
         .flex()
@@ -1884,7 +1900,7 @@ fn container_lines(container: &Container, summary: &str) -> Div {
                 .debug_selector(|| selector)
                 .mt(px(1.0))
                 .text_size(px(10.5))
-                .text_color(gpui::rgb(MUTED)),
+                .text_color(gpui::rgb(t.muted)),
         )
 }
 
@@ -1897,6 +1913,7 @@ fn leaf_row(
     window: &Window,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let id = leaf.id.as_str();
     let selected = ctx.attached == Some(id);
     let accent = ctx
@@ -1904,7 +1921,7 @@ fn leaf_row(
         .get(id)
         .copied()
         .unwrap_or(appearance::BUILTIN_ACCENT);
-    let ground = leaf_ground(selected, ctx.highlighted.contains(id));
+    let ground = leaf_ground(selected, ctx.highlighted.contains(id), &t);
     let row = leaf_frame(leaf, ground, accent, ctx.density, cx);
     match ctx.density {
         LeafDensity::Compact => {
@@ -1933,19 +1950,19 @@ fn leaf_row(
 impl RootView {
     /// The fill session `id`'s leaf draws with: see [`leaf_ground`].
     #[must_use]
-    pub fn leaf_fill(&self, id: &str) -> Option<u32> {
+    pub fn leaf_fill(&self, id: &str, cx: &App) -> Option<u32> {
         let selected = self.focused_session().as_deref() == Some(id);
-        leaf_ground(selected, self.launched_highlight.contains(id))
+        leaf_ground(selected, self.launched_highlight.contains(id), &theme(cx))
     }
 }
 
 /// A leaf's fill: the chip while `selected`, else the launched tint while
 /// `highlighted` by Select launched; None leaves the ground, lit on hover.
-fn leaf_ground(selected: bool, highlighted: bool) -> Option<u32> {
+fn leaf_ground(selected: bool, highlighted: bool, t: &UiTheme) -> Option<u32> {
     if selected {
-        Some(SELECTION)
+        Some(t.selection)
     } else if highlighted {
-        Some(LAUNCHED_TINT)
+        Some(t.launched_tint)
     } else {
         None
     }
@@ -1960,6 +1977,7 @@ fn leaf_frame(
     density: LeafDensity,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let id = leaf.id.clone();
     let menu_id = leaf.id.clone();
     let name = format!("leaf-{}", leaf.id);
@@ -1976,8 +1994,8 @@ fn leaf_frame(
         .cursor_pointer()
         .when_some(ground, |row, ground| row.bg(gpui::rgb(ground)))
         .when(ground.is_none(), |row| {
-            row.bg(gpui::rgba(ROW_CARD))
-                .hover(|style| style.bg(gpui::rgb(ROW_HOVER)))
+            row.bg(gpui::rgba(t.row_card))
+                .hover(move |style| style.bg(gpui::rgb(t.row_hover)))
         })
         .tooltip(tooltip(leaf.hover(density)))
         .child(
@@ -2027,14 +2045,14 @@ fn label_head(leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement> {
         .flex_1()
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(gpui::rgb(if seen_idle { TEXT_2 } else { TEXT }))
+        .text_color(gpui::rgb(if seen_idle { t.text_2 } else { t.text }))
         .into_any_element(),
     ];
     if leaf.shows_attention() {
-        parts.push(container_badge(format!("leaf-badge-{}", leaf.id)).into_any_element());
+        parts.push(container_badge(format!("leaf-badge-{}", leaf.id), t).into_any_element());
     }
     if leaf.busy_excluded {
-        parts.push(busy_excluded_marker(&leaf.id));
+        parts.push(busy_excluded_marker(&leaf.id, t));
     }
     if let Some((text, tip)) = leaf.runtime_tag() {
         parts.push(
@@ -2043,7 +2061,7 @@ fn label_head(leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement> {
                 .flex_none()
                 .font_family(DEFAULT_FAMILY)
                 .text_size(px(10.5))
-                .text_color(gpui::rgb(runtime_color(leaf)))
+                .text_color(gpui::rgb(runtime_color(leaf, t)))
                 .child(text)
                 .tooltip(tooltip(tip))
                 .into_any_element(),
@@ -2067,8 +2085,9 @@ const BUSY_EXCLUDED_STROKES: [&[(f32, f32)]; 3] = [
 
 /// The muted crossed-out pulse an excluded leaf wears in the `!` badge's
 /// slot.
-fn busy_excluded_marker(id: &str) -> AnyElement {
+fn busy_excluded_marker(id: &str, t: &UiTheme) -> AnyElement {
     let selector = format!("leaf-busy-excluded-{id}");
+    let t = *t;
     div()
         .id(SharedString::from(selector.clone()))
         .debug_selector(|| selector)
@@ -2077,7 +2096,7 @@ fn busy_excluded_marker(id: &str) -> AnyElement {
         .child(
             canvas(
                 |_, _, _| {},
-                |bounds, (), window, _| paint_busy_excluded(bounds, window),
+                move |bounds, (), window, _| paint_busy_excluded(bounds, window, &t),
             )
             .size_full(),
         )
@@ -2085,7 +2104,7 @@ fn busy_excluded_marker(id: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn paint_busy_excluded(bounds: Bounds<Pixels>, window: &mut Window) {
+fn paint_busy_excluded(bounds: Bounds<Pixels>, window: &mut Window, t: &UiTheme) {
     for stroke in BUSY_EXCLUDED_STROKES {
         let mut path = PathBuilder::stroke(px(BUSY_EXCLUDED_STROKE));
         for (i, &(x, y)) in stroke.iter().enumerate() {
@@ -2097,7 +2116,7 @@ fn paint_busy_excluded(bounds: Bounds<Pixels>, window: &mut Window) {
             }
         }
         match path.build() {
-            Ok(path) => window.paint_path(path, gpui::rgb(SUBTLE)),
+            Ok(path) => window.paint_path(path, gpui::rgb(t.subtle)),
             Err(err) => tracing::warn!("the busy-excluded marker's stroke did not build: {err:?}"),
         }
         // gpui does not expose lyon's line caps and joins; a dot of the
@@ -2108,17 +2127,17 @@ fn paint_busy_excluded(bounds: Bounds<Pixels>, window: &mut Window) {
                 gpui::size(px(BUSY_EXCLUDED_STROKE), px(BUSY_EXCLUDED_STROKE)),
             );
             window.paint_quad(
-                gpui::fill(dot, gpui::rgb(SUBTLE))
+                gpui::fill(dot, gpui::rgb(t.subtle))
                     .corner_radii(Corners::all(px(BUSY_EXCLUDED_STROKE / 2.0))),
             );
         }
     }
 }
 
-/// The runtime tag's colour: the agent's accent, or [`SUBTLE`] for a shell's
+/// The runtime tag's colour: the agent's accent, or `t.subtle` for a shell's
 /// program and a tag that is not the agent itself.
-fn runtime_color(leaf: &Leaf) -> u32 {
-    if leaf.accent { ACCENT } else { SUBTLE }
+fn runtime_color(leaf: &Leaf, t: &UiTheme) -> u32 {
+    if leaf.accent { t.accent } else { t.subtle }
 }
 
 /// A Comfortable leaf's subline, with the chips at its end when they fit
@@ -2130,6 +2149,7 @@ fn comfortable_lower(
     window: &Window,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
+    let t = theme(cx);
     let pill = ctx.pill(&leaf.id);
     let attachable = ctx.attachable(&leaf.id);
     let texts = chip_texts(leaf, pill.as_ref());
@@ -2165,7 +2185,7 @@ fn comfortable_lower(
                 .mt(px(1.0))
                 .pl(px(SUBLINE_INDENT))
                 .text_size(px(SUBLINE_TEXT_SIZE))
-                .text_color(gpui::rgb(SUBTLE))
+                .text_color(gpui::rgb(t.subtle))
                 .children(leaf.subline.clone().map(|text| {
                     ellipsized_box().children(ellipsized(
                         &text_id,
@@ -2195,8 +2215,8 @@ fn comfortable_lower(
     lower
 }
 
-/// An inline action's 20 px chip, outlined in [`LINE_STRONG`].
-fn action_chip(element: Stateful<Div>) -> Stateful<Div> {
+/// An inline action's 20 px chip, outlined in `t.line_strong`.
+fn action_chip(element: Stateful<Div>, t: &UiTheme) -> Stateful<Div> {
     element
         .flex()
         .flex_none()
@@ -2205,16 +2225,17 @@ fn action_chip(element: Stateful<Div>) -> Stateful<Div> {
         .px(px(7.0))
         .rounded(px(5.0))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(t.line_strong))
         .text_size(px(11.0))
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover)))
 }
 
 /// The leaf's Resume and Dismiss. They act on the press and keep it from
 /// the row, so the row's click never shows the session.
 fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
+    let t = theme(cx);
     inline_actions(&leaf.state)
         .into_iter()
         .map(|inline| {
@@ -2224,6 +2245,7 @@ fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
                 div()
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(|| selector),
+                &t,
             )
             .child(inline.action.label(false, false))
             .tooltip(tooltip(inline.tip))

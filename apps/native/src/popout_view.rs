@@ -10,10 +10,10 @@ use gpui::{
 };
 
 use crate::overlay_owner::Overlay;
-use crate::palette::GROUND;
 use crate::popouts::{self, PopoutKey};
 use crate::term_view::PaneEvent;
-use crate::{MUTED, RootView, UI_TEXT_SIZE, fonts};
+use crate::ui_theme::theme;
+use crate::{RootView, UI_TEXT_SIZE, fonts};
 
 /// What a pop-out whose pane has gone shows.
 pub(crate) const PANE_GONE_NOTE: &str = "This pane is no longer open";
@@ -180,6 +180,7 @@ fn watch_close_request(
 
 impl Render for PopoutView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
         let here = window.window_handle().window_id();
         let body: AnyElement = self.pane(here, cx).unwrap_or_else(|| {
             div()
@@ -189,7 +190,7 @@ impl Render for PopoutView {
                 .items_center()
                 .justify_center()
                 .text_size(px(UI_TEXT_SIZE))
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .debug_selector(|| "popout-pane-gone".to_owned())
                 .child(PANE_GONE_NOTE)
                 .into_any_element()
@@ -204,7 +205,7 @@ impl Render for PopoutView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui::rgb(GROUND))
+            .bg(gpui::rgb(t.ground))
             .font_family(fonts::ui_family(cx))
             .capture_any_mouse_down(move |_: &MouseDownEvent, window, cx| {
                 if let Err(err) = on_press.update(cx, |root, _| root.note_interaction(window)) {

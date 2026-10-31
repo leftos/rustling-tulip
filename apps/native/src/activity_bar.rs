@@ -13,9 +13,9 @@ use gpui::{
 use crate::assets::{
     DASHBOARD_ICON, NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SETTINGS_ICON, SOURCE_CONTROL_ICON,
 };
-use crate::palette::{ACCENT, CHIP, HOVER, SUBTLE, SUNKEN};
 use crate::sidebar::{Activity, SidebarModel};
-use crate::{BORDER, RootView, TEXT, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, tooltip};
 
 /// The rail's width in logical pixels, its right border included.
 pub const RAIL_WIDTH: f32 = 52.0;
@@ -157,6 +157,7 @@ impl RootView {
 
     /// The rail, always shown, left of the panel.
     pub(crate) fn activity_rail(&self, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let items = [
             Item {
                 activity: Activity::Sessions,
@@ -194,9 +195,9 @@ impl RootView {
             .h_full()
             .pb(px(RAIL_BOTTOM))
             .debug_selector(|| "activity-rail".to_owned())
-            .bg(gpui::rgb(SUNKEN))
+            .bg(gpui::rgb(t.sunken))
             .border_r_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(t.border))
             .children(items.into_iter().map(|item| self.rail_item(item, cx)))
             .child(self.rail_dashboard_button(cx))
             .child(Self::rail_spacer(cx))
@@ -205,12 +206,13 @@ impl RootView {
     }
 
     fn rail_item(&self, item: Item, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
         let active = self.sidebar.activity() == item.activity;
         let collapsed = self.sidebar.is_collapsed();
         let activity = item.activity;
-        let button = rail_button(item.selector, item.icon, active)
+        let button = rail_button(item.selector, item.icon, active, &t)
             .when_some(badge_text(item.badge), |row, text| {
-                row.child(badge(item.badge_selector, text))
+                row.child(badge(item.badge_selector, text, &t))
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.click_activity(activity, window, cx);
@@ -223,11 +225,12 @@ impl RootView {
     /// tab or shows the listed one, lit while that tab is the active one,
     /// with the Needs You badge's count.
     fn rail_dashboard_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
         let selector = "activity-dashboard";
         let count = self.needs_you_count();
-        let button = rail_button(selector, DASHBOARD_ICON, self.dashboard_active())
+        let button = rail_button(selector, DASHBOARD_ICON, self.dashboard_active(), &t)
             .when_some(badge_text(count), |row, text| {
-                row.child(badge("dashboard-badge", text))
+                row.child(badge("dashboard-badge", text, &t))
             })
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_or_focus_dashboard(window, cx);
@@ -238,11 +241,12 @@ impl RootView {
     /// The Recover sessions button, above Settings, with its badge counting
     /// the sessions lost and not yet recovered.
     fn rail_recover_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
         let selector = "activity-recover";
-        let button = rail_button(selector, RECOVER_ICON, false)
+        let button = rail_button(selector, RECOVER_ICON, false, &t)
             .when_some(
                 badge_text(self.session_history.badge_count()),
-                |row, text| row.child(badge("recover-badge", text)),
+                |row, text| row.child(badge("recover-badge", text, &t)),
             )
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.toggle_recover(window, cx);
@@ -252,8 +256,9 @@ impl RootView {
 
     /// The Settings button, pinned to the rail's bottom.
     fn rail_settings_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
         let selector = "settings-open";
-        let button = rail_button(selector, SETTINGS_ICON, false).on_click(cx.listener(
+        let button = rail_button(selector, SETTINGS_ICON, false, &t).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
                 this.open_settings(window, cx);
             },
@@ -382,22 +387,27 @@ impl RootView {
 
 /// A rail button tagged `selector`: `icon` on a rounded tile, which is
 /// filled and led by the accent bar while `active`, and lit on hover.
-fn rail_button(selector: &'static str, icon: &'static str, active: bool) -> Stateful<Div> {
+fn rail_button(
+    selector: &'static str,
+    icon: &'static str,
+    active: bool,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let tile = div()
         .flex()
         .items_center()
         .justify_center()
         .size(px(TILE_SIZE))
         .rounded(px(TILE_RADIUS))
-        .when(active, |tile| tile.bg(gpui::rgb(CHIP)))
+        .when(active, move |tile| tile.bg(gpui::rgb(t.chip)))
         .when(!active, |tile| {
-            tile.group_hover(selector, |style| style.bg(gpui::rgb(HOVER)))
+            tile.group_hover(selector, move |style| style.bg(gpui::rgb(t.hover)))
         })
         .child(
             svg()
                 .path(icon)
                 .size(px(ICON_SIZE))
-                .text_color(gpui::rgb(if active { TEXT } else { SUBTLE })),
+                .text_color(gpui::rgb(if active { t.text } else { t.subtle })),
         );
     div()
         .id(selector)
@@ -420,13 +430,13 @@ fn rail_button(selector: &'static str, icon: &'static str, active: bool) -> Stat
                     .bottom(px(ACTIVE_BAR_INSET))
                     .w(px(ACTIVE_BAR_WIDTH))
                     .rounded(px(ACTIVE_BAR_WIDTH))
-                    .bg(gpui::rgb(ACCENT)),
+                    .bg(gpui::rgb(t.accent)),
             )
         })
         .child(tile)
 }
 
-fn badge(selector: &'static str, text: String) -> Div {
+fn badge(selector: &'static str, text: String, t: &UiTheme) -> Div {
     div()
         .absolute()
         .right(px(BADGE_INSET))
@@ -438,10 +448,10 @@ fn badge(selector: &'static str, text: String) -> Div {
         .h(px(BADGE_HEIGHT))
         .px(px(4.0))
         .rounded_full()
-        .bg(gpui::rgb(HOVER))
+        .bg(gpui::rgb(t.hover))
         .border(px(BADGE_RING))
-        .border_color(gpui::rgb(SUNKEN))
-        .text_color(gpui::rgb(TEXT))
+        .border_color(gpui::rgb(t.sunken))
+        .text_color(gpui::rgb(t.text))
         .text_size(px(BADGE_TEXT_SIZE))
         .font_weight(FontWeight::BOLD)
         .debug_selector(move || selector.to_owned())

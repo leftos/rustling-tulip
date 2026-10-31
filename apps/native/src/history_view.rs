@@ -21,7 +21,8 @@ use crate::open::{self, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Then};
 use crate::sidebar::Activity;
 use crate::source_control::{Part, ScKey, Section, sections};
-use crate::{BORDER, Drag, HOVER_BG, MUTED, RootView, TEXT, drag_handle, tooltip};
+use crate::ui_theme::theme;
+use crate::{Drag, RootView, drag_handle, tooltip};
 
 /// The forge button's label.
 pub const FORGE_LABEL: &str = "Open in forge";
@@ -197,6 +198,7 @@ impl RootView {
         changes: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let t = theme(cx);
         let (shown, focused) = self.history_sections();
         let show_title = shown.len() > 1;
         let blocks: Vec<(ScKey, HistoryBlock)> = shown
@@ -227,7 +229,7 @@ impl RootView {
         };
         let handle = any_expanded.then(|| {
             let active = matches!(self.drag, Some(Drag::ScSplit));
-            drag_handle("sc-split", false, active)
+            drag_handle("sc-split", false, active, &t)
                 .debug_selector(|| "sc-split".to_owned())
                 .on_mouse_down(
                     MouseButton::Left,
@@ -273,12 +275,13 @@ impl RootView {
         block: HistoryBlock,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         let frame = div()
             .flex()
             .flex_col()
             .min_h(px(0.0))
             .border_t_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(t.border))
             .child(history_header(key, &block, cx));
         if !block.expanded {
             return frame.flex_none().into_any_element();
@@ -295,7 +298,7 @@ impl RootView {
                     .pl(px(ROW_PADDING * 2.0))
                     .pr(px(ROW_PADDING))
                     .pb(px(6.0))
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(other.text().unwrap_or_default().to_owned())
                     .into_any_element()
             }
@@ -311,6 +314,7 @@ impl RootView {
         (rows, more, detail): (Vec<CommitRow>, Option<MoreRow>, Option<DetailPane>),
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         let list_name = format!("sc-history-list-{id}");
         let list = div()
             .id(SharedString::from(list_name.clone()))
@@ -336,7 +340,7 @@ impl RootView {
         let active = matches!(&self.drag, Some(Drag::HistoryList(dragged)) if dragged == id);
         let name = format!("sc-history-split-{id}");
         let drag_id = id.to_owned();
-        let handle = drag_handle(SharedString::from(name.clone()), false, active)
+        let handle = drag_handle(SharedString::from(name.clone()), false, active, &t)
             .debug_selector(|| name)
             .on_mouse_down(
                 MouseButton::Left,
@@ -355,6 +359,7 @@ impl RootView {
 
 /// A block's header: the fold toggle, then the forge button.
 fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let name = format!("sc-history-{}", block.id);
     let (label_id, title_id) = (format!("{name}-label"), format!("{name}-title"));
     let caret = if block.expanded { "▾" } else { "▸" };
@@ -369,7 +374,12 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
         .items_center()
         .gap(px(6.0))
         .cursor_pointer()
-        .child(div().flex_none().text_color(gpui::rgb(MUTED)).child(caret))
+        .child(
+            div()
+                .flex_none()
+                .text_color(gpui::rgb(t.muted))
+                .child(caret),
+        )
         .child(head_title(&label_id, HISTORY_LABEL).flex_none())
         .when_some(block.title.clone(), |toggle, title| {
             toggle.child(
@@ -378,7 +388,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .children(ellipsized(
                         &title_id,
                         SharedString::from(title.clone()),
@@ -403,6 +413,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
 }
 
 fn forge_button(id: &str, forge: ForgeButton, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let name = format!("sc-history-forge-{id}");
     let button = div()
         .id(SharedString::from(name.clone()))
@@ -414,14 +425,18 @@ fn forge_button(id: &str, forge: ForgeButton, cx: &mut Context<RootView>) -> Sta
         .px(px(6.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_color(gpui::rgb(MUTED))
+        .border_color(gpui::rgb(t.border))
+        .text_color(gpui::rgb(t.muted))
         .child(FORGE_LABEL)
         .tooltip(tooltip(forge.tooltip));
     match forge.url {
         Some(url) => button
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+            .hover(move |style| {
+                style
+                    .bg(gpui::rgb(t.hover_bg))
+                    .text_color(gpui::rgb(t.text))
+            })
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.open_forge(&url, window, cx);
             })),
@@ -430,6 +445,7 @@ fn forge_button(id: &str, forge: ForgeButton, cx: &mut Context<RootView>) -> Sta
 }
 
 fn commit_row(key: &ScKey, id: &str, row: CommitRow, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let name = format!("sc-commit-{id}-{}", row.sha);
     let (subject_id, author_id) = (format!("{name}-subject"), format!("{name}-author"));
     let author = SharedString::from(row.author);
@@ -445,14 +461,14 @@ fn commit_row(key: &ScKey, id: &str, row: CommitRow, cx: &mut Context<RootView>)
         .pl(px(ROW_PADDING * 2.0))
         .pr(px(ROW_PADDING))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         .when(row.selected, |row| {
-            row.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT))
+            row.bg(gpui::rgb(t.hover_bg)).text_color(gpui::rgb(t.text))
         })
         .child(
             div()
                 .flex_none()
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(row.short_sha),
         )
         .child(truncating(&subject_id, StyledText::new(row.subject)).flex_1())
@@ -464,7 +480,7 @@ fn commit_row(key: &ScKey, id: &str, row: CommitRow, cx: &mut Context<RootView>)
                 .max_w(px(AUTHOR_WIDTH))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .children(ellipsized(
                     &author_id,
                     author.clone(),
@@ -479,6 +495,7 @@ fn commit_row(key: &ScKey, id: &str, row: CommitRow, cx: &mut Context<RootView>)
 }
 
 fn more_row(key: &ScKey, id: &str, more: &MoreRow, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let name = format!("sc-history-more-{id}");
     let text = truncating(&name, StyledText::new(more.text().to_owned()));
     let row = div()
@@ -488,14 +505,18 @@ fn more_row(key: &ScKey, id: &str, more: &MoreRow, cx: &mut Context<RootView>) -
         .h(px(ROW_HEIGHT))
         .pl(px(ROW_PADDING * 2.0))
         .pr(px(ROW_PADDING))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(text);
     if *more == MoreRow::Loading {
         return row;
     }
     let key = key.clone();
     row.cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .hover(move |style| {
+            style
+                .bg(gpui::rgb(t.hover_bg))
+                .text_color(gpui::rgb(t.text))
+        })
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.click_more(&key);
             cx.notify();
@@ -510,6 +531,7 @@ fn detail_pane(
     detail: DetailPane,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let name = format!("sc-detail-{id}");
     let pane = div()
         .id(SharedString::from(name.clone()))
@@ -525,13 +547,13 @@ fn detail_pane(
     let view = match detail {
         DetailPane::Loading => {
             return pane
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(crate::history::LOADING);
         }
-        DetailPane::Failed(text) => return pane.text_color(gpui::rgb(MUTED)).child(text),
+        DetailPane::Failed(text) => return pane.text_color(gpui::rgb(t.muted)).child(text),
         DetailPane::Loaded(view) => view,
     };
-    let muted = |text: String| div().text_color(gpui::rgb(MUTED)).child(text);
+    let muted = |text: String| div().text_color(gpui::rgb(t.muted)).child(text);
     let files = view.files.into_iter().enumerate().map(|(index, file)| {
         let name = format!("sc-detail-file-{id}-{index}");
         let path_id = format!("{name}-path");
@@ -546,11 +568,11 @@ fn detail_pane(
             .h(px(ROW_HEIGHT))
             .px(px(4.0))
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+            .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
             .child(
                 div()
                     .flex_none()
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(file.status),
             )
             .child(truncating(&path_id, StyledText::new(file.path)).flex_1())

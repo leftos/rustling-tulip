@@ -653,10 +653,6 @@ const FOOTER_GAP: f32 = 14.0;
 pub use activity_bar::{ITEM_HEIGHT as RAIL_ITEM_HEIGHT, RAIL_WIDTH};
 pub use palette::{BAR_BG, PANEL_BG};
 pub(crate) use palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, TEXT, WARNING};
-use palette::{
-    LINE_STRONG, MODAL, MODAL_EDGE, POPOVER, POPOVER_EDGE, SCRIM, STATUS_ERR, STATUS_IDLE,
-    STATUS_OK, SUNKEN, TEXT_2,
-};
 
 /// What a press on a drag handle is resizing.
 enum Drag {
@@ -4635,13 +4631,18 @@ pub(crate) fn new_request_id() -> String {
 
 /// A handle a press starts dragging: a vertical line between side-by-side
 /// parts, or a horizontal one between stacked parts.
-fn drag_handle(id: impl Into<ElementId>, vertical_line: bool, active: bool) -> Stateful<Div> {
+fn drag_handle(
+    id: impl Into<ElementId>,
+    vertical_line: bool,
+    active: bool,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let handle = div()
         .id(id)
         .flex_none()
-        .bg(gpui::rgb(BORDER))
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .when(active, |handle| handle.bg(gpui::rgb(HOVER_BG)));
+        .bg(gpui::rgb(t.border))
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
+        .when(active, move |handle| handle.bg(gpui::rgb(t.hover_bg)));
     if vertical_line {
         handle
             .w(px(DIVIDER_WIDTH))
@@ -4660,6 +4661,7 @@ impl RootView {
     /// counts, then the attached session's status, right-aligned and the
     /// first to truncate.
     fn footer_bar(&self, footer: &Footer, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let connections = div()
             .id("footer-connections")
             .debug_selector(|| "footer-connections".to_owned())
@@ -4670,10 +4672,10 @@ impl RootView {
             .px(px(9.0))
             .rounded(px(FOOTER_PILL_HEIGHT / 2.0))
             .border_1()
-            .border_color(gpui::rgb(LINE_STRONG))
+            .border_color(gpui::rgb(t.line_strong))
             .text_size(px(FOOTER_PILL_TEXT_SIZE))
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+            .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
             .child("Connections")
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_connection_picker(window, cx);
@@ -4691,12 +4693,12 @@ impl RootView {
             .px(px(9.0))
             .rounded(px(FOOTER_PILL_HEIGHT / 2.0))
             .border_1()
-            .border_color(gpui::rgb(LINE_STRONG))
+            .border_color(gpui::rgb(t.line_strong))
             .text_size(px(FOOTER_PILL_TEXT_SIZE))
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-            .when(self.flyout_open, |pill| pill.bg(gpui::rgb(HOVER_BG)))
-            .child(status_dot(footer.dot, "footer-dot"))
+            .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
+            .when(self.flyout_open, move |pill| pill.bg(gpui::rgb(t.hover_bg)))
+            .child(status_dot(footer.dot, "footer-dot", &t))
             .child(tagged_text("daemon-pill", text))
             .tooltip(tooltip(footer.tooltip.clone()))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -4714,11 +4716,11 @@ impl RootView {
             .gap(px(FOOTER_GAP))
             .px(px(12.0))
             .h(px(FOOTER_HEIGHT))
-            .bg(gpui::rgb(SUNKEN))
+            .bg(gpui::rgb(t.sunken))
             .border_t_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(t.border))
             .text_size(px(FOOTER_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT_2))
+            .text_color(gpui::rgb(t.text_2))
             .child(connections)
             .child(pill)
             .children(
@@ -4738,6 +4740,7 @@ impl RootView {
 
     /// The troubleshooting flyout above the pill: details, files, control.
     fn flyout(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
         let manages_daemon = self.capabilities().manages_daemon();
         let rows = flyout_rows(
             &self.conn,
@@ -4752,7 +4755,7 @@ impl RootView {
             .gap(px(2.0))
             .children(
                 rows.into_iter()
-                    .map(|(label, value)| detail_row(label, value)),
+                    .map(|(label, value)| detail_row(label, value, &t)),
             )
             .when(manages_daemon, |details| {
                 details.child(self.handshake_row(cx))
@@ -4776,7 +4779,8 @@ impl RootView {
     /// The "Handshake file" row with its copy button. The button keeps its
     /// label and the copy answers with the chip, which draws over the flyout.
     fn handshake_row(&self, cx: &mut Context<Self>) -> Div {
-        let button = action_button("copy-handshake", "copy", TEXT, self.paths.is_ok());
+        let t = theme(cx);
+        let button = action_button("copy-handshake", "copy", t.text, self.paths.is_ok(), &t);
         let button = match &self.paths {
             Ok(paths) => {
                 let path = paths.handshake.display().to_string();
@@ -4788,7 +4792,7 @@ impl RootView {
             }
             Err(_) => button,
         };
-        detail_row("Handshake file", button)
+        detail_row("Handshake file", button, &t)
     }
 
     /// "Logs & files": open the logs, reveal the config folder; disabled with
@@ -4803,16 +4807,18 @@ impl RootView {
                         "open-daemon-log",
                         "Open daemon.log",
                         &paths.daemon_log,
+                        t,
                     ))
                 })
                 .child(open_button(
                     "open-native-log",
                     "Open native.log",
                     &paths.native_log,
+                    t,
                 ))
                 .child({
                     let dir = paths.config_dir.clone();
-                    action_button("reveal-config", "Reveal config folder", TEXT, true)
+                    action_button("reveal-config", "Reveal config folder", t.text, true, t)
                         .on_click(move |_, _, cx| cx.reveal_path(&dir))
                 }),
             Err(err) => section
@@ -4820,43 +4826,52 @@ impl RootView {
                     section.child(action_button(
                         "open-daemon-log",
                         "Open daemon.log",
-                        TEXT,
+                        t.text,
                         false,
+                        t,
                     ))
                 })
                 .child(action_button(
                     "open-native-log",
                     "Open native.log",
-                    TEXT,
+                    t.text,
                     false,
+                    t,
                 ))
                 .child(action_button(
                     "reveal-config",
                     "Reveal config folder",
-                    TEXT,
+                    t.text,
                     false,
+                    t,
                 ))
-                .child(div().text_color(gpui::rgb(DANGER)).child(err.clone())),
+                .child(div().text_color(gpui::rgb(t.danger)).child(err.clone())),
         }
     }
 
     /// "Control": restart (Reconnect now on a remote host), and the
     /// two-click stop only with `stop`.
     fn control_section(&self, stop: bool, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let armed = self.stop.armed;
         flyout_section("Control", &theme(cx))
             .child(
-                action_button("restart-daemon", self.conn.restart_label(), TEXT, true).on_click(
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.restart();
-                        cx.notify();
-                    }),
-                ),
+                action_button(
+                    "restart-daemon",
+                    self.conn.restart_label(),
+                    t.text,
+                    true,
+                    &t,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.restart();
+                    cx.notify();
+                })),
             )
             .when(stop, |section| {
                 section.child(
-                    action_button("stop-daemon", self.stop.label(), DANGER, true)
-                        .when(armed, |button| button.bg(gpui::rgb(DANGER_BG)))
+                    action_button("stop-daemon", self.stop.label(), t.danger, true, &t)
+                        .when(armed, move |button| button.bg(gpui::rgb(t.danger_bg)))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.click_stop();
                             cx.notify();
@@ -4891,12 +4906,13 @@ fn connecting_overlay(
     dot: DotKind,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let restart = div()
         .id("overlay-restart")
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
-        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .hover(move |style| style.text_color(gpui::rgb(t.text)))
         .child(tagged_text("overlay-restart", restart_label))
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             this.restart();
@@ -4906,9 +4922,9 @@ fn connecting_overlay(
         .id("overlay-connections")
         .debug_selector(|| "overlay-connections".to_owned())
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
-        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .hover(move |style| style.text_color(gpui::rgb(t.text)))
         .child("Connections")
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.open_connection_picker(window, cx);
@@ -4927,12 +4943,12 @@ fn connecting_overlay(
         .px(px(40.0))
         .py(px(32.0))
         .min_w(px(280.0))
-        .bg(gpui::rgb(MODAL))
+        .bg(gpui::rgb(t.modal))
         .border_1()
-        .border_color(gpui::rgb(MODAL_EDGE))
+        .border_color(gpui::rgb(t.modal_edge))
         .rounded(px(MODAL_RADIUS))
-        .child(status_dot(dot, "overlay-dot"))
-        .child(tagged_text("connecting-overlay", text).text_color(gpui::rgb(TEXT)))
+        .child(status_dot(dot, "overlay-dot", &t))
+        .child(tagged_text("connecting-overlay", text).text_color(gpui::rgb(t.text)))
         .child(links);
     div()
         .id("connecting-overlay")
@@ -4943,7 +4959,7 @@ fn connecting_overlay(
         .flex()
         .items_center()
         .justify_center()
-        .bg(gpui::rgba(SCRIM))
+        .bg(gpui::rgba(t.scrim))
         .occlude()
         .child(card)
 }
@@ -4968,12 +4984,12 @@ fn footer_count(span: CountSpan, t: &UiTheme) -> Div {
 }
 
 /// The status dot: pulsing while pending, dimmed when stopped.
-fn status_dot(dot: DotKind, id: impl Into<ElementId>) -> AnyElement {
+fn status_dot(dot: DotKind, id: impl Into<ElementId>, t: &UiTheme) -> AnyElement {
     let base = div()
         .flex_none()
         .size(px(8.0))
         .rounded_full()
-        .bg(gpui::rgb(dot_color(dot)));
+        .bg(gpui::rgb(dot_color(dot, t)));
     match dot {
         DotKind::Pending => base
             .with_animation(
@@ -4990,23 +5006,23 @@ fn status_dot(dot: DotKind, id: impl Into<ElementId>) -> AnyElement {
 }
 
 /// The footer dot's colour, from the Tauri app's status tokens.
-fn dot_color(dot: DotKind) -> u32 {
+fn dot_color(dot: DotKind, t: &UiTheme) -> u32 {
     match dot {
-        DotKind::Ok => STATUS_OK,
-        DotKind::Pending => WARNING,
-        DotKind::Idle | DotKind::Stopped => STATUS_IDLE,
-        DotKind::Err => STATUS_ERR,
+        DotKind::Ok => t.status_ok,
+        DotKind::Pending => t.warning,
+        DotKind::Idle | DotKind::Stopped => t.status_idle,
+        DotKind::Err => t.status_err,
     }
 }
 
 /// A flyout detail row: a muted label, the value on the right.
-fn detail_row(label: &'static str, value: impl IntoElement) -> Div {
+fn detail_row(label: &'static str, value: impl IntoElement, t: &UiTheme) -> Div {
     div()
         .flex()
         .justify_between()
         .items_center()
         .gap(px(12.0))
-        .child(div().text_color(gpui::rgb(MUTED)).child(label))
+        .child(div().text_color(gpui::rgb(t.muted)).child(label))
         .child(value)
 }
 
@@ -5016,6 +5032,7 @@ fn action_button(
     label: &'static str,
     color: u32,
     enabled: bool,
+    t: &UiTheme,
 ) -> Stateful<Div> {
     div()
         .id(id)
@@ -5027,7 +5044,7 @@ fn action_button(
         .when(enabled, |button| {
             button
                 .cursor_pointer()
-                .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+                .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         })
         .when(!enabled, |button| button.opacity(0.5))
         .child(tagged_text(id, label))
@@ -5044,9 +5061,9 @@ fn tagged_text(selector: &'static str, text: impl Into<SharedString>) -> Div {
 }
 
 /// A button that opens `path` with the system's default application.
-fn open_button(id: &'static str, label: &'static str, path: &Path) -> Stateful<Div> {
+fn open_button(id: &'static str, label: &'static str, path: &Path, t: &UiTheme) -> Stateful<Div> {
     let path: PathBuf = path.to_path_buf();
-    action_button(id, label, TEXT, true).on_click(move |_, _, cx| cx.open_with_system(&path))
+    action_button(id, label, t.text, true, t).on_click(move |_, _, cx| cx.open_with_system(&path))
 }
 
 /// A plain text tooltip.
@@ -5054,16 +5071,17 @@ struct Tip(SharedString);
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
         div()
             .px(px(6.0))
             .py(px(2.0))
             .font_family(fonts::ui_family(cx))
-            .bg(gpui::rgb(POPOVER))
+            .bg(gpui::rgb(t.popover))
             .border_1()
-            .border_color(gpui::rgb(POPOVER_EDGE))
+            .border_color(gpui::rgb(t.popover_edge))
             .rounded(px(10.0))
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
+            .text_color(gpui::rgb(t.text))
             .debug_selector(|| format!("tooltip={}", self.0))
             .child(self.0.clone())
     }

@@ -29,7 +29,6 @@ use crate::links::TerminalLink;
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open;
-use crate::palette::{DANGER, SHELL_MARK_BORDER, WAITING};
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::shell_marks::{ShellDot, ShellStatus};
 use crate::term::prompt_nav::{self, Dir, Jump};
@@ -37,6 +36,7 @@ use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, ShellCommand, Snapshot, Termin
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
 use crate::theme;
+use crate::ui_theme::{self, UiTheme};
 
 /// `DSR 6`: the program asks where the cursor is and waits for the reply.
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
@@ -1850,6 +1850,7 @@ fn gutter_dot(
     line_height: f32,
     cx: &mut Context<TerminalPane>,
 ) -> impl IntoElement {
+    let t = ui_theme::theme(cx);
     let selector = format!("shell-dot-{pane_id}-{n}");
     #[expect(clippy::cast_precision_loss, reason = "a viewport row is small")]
     let top = dot.row as f32 * line_height + (line_height - DOT) / 2.0;
@@ -1861,9 +1862,9 @@ fn gutter_dot(
         .top(px(top))
         .size(px(DOT))
         .rounded_full()
-        .bg(dot_color(dot.status))
+        .bg(dot_color(dot.status, &t))
         .border_1()
-        .border_color(gpui::rgba(SHELL_MARK_BORDER))
+        .border_color(gpui::rgba(t.shell_mark_border))
         .tooltip(crate::tooltip(dot.tooltip))
         .on_mouse_down(
             MouseButton::Left,
@@ -1876,11 +1877,11 @@ fn gutter_dot(
 
 /// Green for a command that exited 0, red for any other code, muted for one
 /// the shell gave no code for.
-fn dot_color(status: ShellStatus) -> Rgba {
+fn dot_color(status: ShellStatus, t: &UiTheme) -> Rgba {
     gpui::rgb(match status {
-        ShellStatus::Ok => WAITING,
-        ShellStatus::Fail => DANGER,
-        ShellStatus::Unknown => crate::MUTED,
+        ShellStatus::Ok => t.waiting,
+        ShellStatus::Fail => t.danger,
+        ShellStatus::Unknown => t.muted,
     })
 }
 
@@ -2231,6 +2232,7 @@ mod tests {
     };
     use crate::palette::{DANGER, WAITING};
     use crate::term_input;
+    use crate::ui_theme::UiTheme;
 
     fn attach(attachment: &mut Attachment, id: &str) {
         attachment.attach(id.to_owned(), Instant::now());
@@ -2282,9 +2284,18 @@ mod tests {
 
     #[test]
     fn dots_are_green_for_success_red_for_failure_and_muted_without_a_code() {
-        assert_eq!(dot_color(ShellStatus::Ok), gpui::rgb(WAITING));
-        assert_eq!(dot_color(ShellStatus::Fail), gpui::rgb(DANGER));
-        assert_eq!(dot_color(ShellStatus::Unknown), gpui::rgb(crate::MUTED));
+        assert_eq!(
+            dot_color(ShellStatus::Ok, &UiTheme::CONTRAST),
+            gpui::rgb(WAITING)
+        );
+        assert_eq!(
+            dot_color(ShellStatus::Fail, &UiTheme::CONTRAST),
+            gpui::rgb(DANGER)
+        );
+        assert_eq!(
+            dot_color(ShellStatus::Unknown, &UiTheme::CONTRAST),
+            gpui::rgb(crate::MUTED)
+        );
     }
 
     #[test]

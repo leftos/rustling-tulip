@@ -16,9 +16,6 @@ use crate::assets::{DASHBOARD_ICON, TAB_CLOSE_ICON, TAB_NEW_ICON};
 use crate::drag::{self, DragPayload, Side};
 use crate::fonts;
 use crate::overlay_owner::Overlay;
-use crate::palette::{
-    ACCENT, ASKING, CHIP, GROUND, LINE_STRONG, ON_ASKING, RAISED, SUBTLE, SURFACE, WORKING,
-};
 use crate::popouts::PopoutKey;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator, muted_row};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -28,7 +25,7 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::undo;
 use crate::viewer_tab::display_name;
-use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 const TAB_BAR_HEIGHT: f32 = 38.0;
 const RENAME_WIDTH: f32 = 140.0;
@@ -468,13 +465,13 @@ impl RootView {
 
 /// The mark after a popped-out tab's name on its pill, in the strip's muted
 /// text.
-fn popped_mark(tab_id: &str) -> Stateful<Div> {
+fn popped_mark(tab_id: &str, t: &UiTheme) -> Stateful<Div> {
     let name = format!("tab-pill-popped-{tab_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
         .flex_none()
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .tooltip(tooltip("Popped out"))
         .child("↗")
 }
@@ -572,6 +569,7 @@ enum RenameEnd {
 
 impl RootView {
     pub(crate) fn tab_bar(&self, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let accent = self.sidebar.appearance(None).accent.value;
         let pills: Vec<AnyElement> = self
             .tabs
@@ -584,17 +582,18 @@ impl RootView {
             .flex_none()
             .items_center()
             .h(px(TAB_BAR_HEIGHT))
-            .bg(gpui::rgb(SURFACE))
+            .bg(gpui::rgb(t.surface))
             .border_b_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(t.border))
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(MUTED))
+            .text_color(gpui::rgb(t.muted))
             .children(pills)
             .child(new_tab_button(cx))
     }
 
     /// `tab`'s pill; selection shows in `accent`, `0xRRGGBB`.
     fn tab_pill(&self, tab: &TabEntry, accent: u32, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
         let active = self.tabs.active_id() == Some(tab.id.as_str());
         let look = PillLook::of(active, self.tabs.selection.contains(&tab.id));
         let armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
@@ -602,9 +601,9 @@ impl RootView {
             .tab_badge(&tab.id)
             .map(|badge| count_badge(&tab.id, badge, &theme(cx)));
         let dashboard = matches!(tab.content, TabContent::Dashboard);
-        let icon = dashboard.then(|| dashboard_icon(&tab.id));
+        let icon = dashboard.then(|| dashboard_icon(&tab.id, &t));
         let need_badge = dashboard
-            .then(|| need_you_badge(&tab.id, self.needs_you_count()))
+            .then(|| need_you_badge(&tab.id, self.needs_you_count(), &t))
             .flatten();
         let rename = self.renaming.as_ref().filter(|r| r.tab_id == tab.id);
         let label = match rename {
@@ -626,10 +625,12 @@ impl RootView {
         let mark = self
             .tab_drop_mark(cx)
             .filter(|(id, _)| *id == tab.id)
-            .map(|(_, side)| insertion_mark(&tab.id, side));
+            .map(|(_, side)| insertion_mark(&tab.id, side, &t));
         let (move_id, drop_id) = (tab.id.clone(), tab.id.clone());
         let ghost = self.pill_ghost(tab, cx);
-        let popped = self.is_tab_popped(&tab.id).then(|| popped_mark(&tab.id));
+        let popped = self
+            .is_tab_popped(&tab.id)
+            .then(|| popped_mark(&tab.id, &t));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
@@ -656,16 +657,18 @@ impl RootView {
             .pl(px(14.0))
             .pr(px(12.0))
             .border_r_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(t.border))
             .cursor_pointer()
             .when(no_drop, |pill| {
                 pill.cursor(CursorStyle::OperationNotAllowed)
             })
-            .when(active, |pill| pill.text_color(gpui::rgb(TEXT)))
+            .when(active, move |pill| pill.text_color(gpui::rgb(t.text)))
             .when(!active, |pill| {
-                pill.hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+                pill.hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
             })
-            .when_some(look.background(accent), |pill, bg| pill.bg(gpui::rgba(bg)))
+            .when_some(look.background(accent, &t), |pill, bg| {
+                pill.bg(gpui::rgba(bg))
+            })
             .when_some(look.outline(accent), |pill, outline| {
                 pill.border_1().border_color(gpui::rgb(outline))
             })
@@ -1133,10 +1136,10 @@ impl PillLook {
     }
 
     /// The background, `0xRRGGBBAA`, for an `accent` of `0xRRGGBB`.
-    fn background(self, accent: u32) -> Option<u32> {
+    fn background(self, accent: u32, t: &UiTheme) -> Option<u32> {
         match self {
             Self::Plain => None,
-            Self::Active | Self::ActiveOutlined => Some((GROUND << 8) | 0xff),
+            Self::Active | Self::ActiveOutlined => Some((t.ground << 8) | 0xff),
             Self::Washed => Some((accent << 8) | SELECTED_WASH_ALPHA),
         }
     }
@@ -1177,27 +1180,27 @@ impl CountPill {
     /// Needs you: the count on the asking amber. Busy: the working colour
     /// with its glyph while a pane is busy, else a grey `0/N`. Idle: a grey
     /// `idle/total`.
-    fn of(badge: TabBadge) -> Self {
+    fn of(badge: TabBadge, t: &UiTheme) -> Self {
         match badge {
             TabBadge::NeedsYou(n) => Self {
                 text: badge_text(n).unwrap_or_default(),
                 glyph: false,
-                color: ON_ASKING,
-                background: ASKING,
+                color: t.on_asking,
+                background: t.asking,
                 tooltip: format!("{n} need you"),
             },
             TabBadge::Busy { busy, total } => Self {
                 text: format!("{busy}/{total}"),
                 glyph: busy > 0,
-                color: if busy > 0 { WORKING } else { SUBTLE },
-                background: CHIP,
+                color: if busy > 0 { t.working } else { t.subtle },
+                background: t.chip,
                 tooltip: format!("{busy} of {total} panes busy"),
             },
             TabBadge::Idle { idle, total } => Self {
                 text: format!("{idle}/{total}"),
                 glyph: false,
-                color: SUBTLE,
-                background: CHIP,
+                color: t.subtle,
+                background: t.chip,
                 tooltip: format!("{idle} of {total} panes idle"),
             },
         }
@@ -1207,7 +1210,7 @@ impl CountPill {
 /// The count pill after a grid tab's name, tagged `tab-badge-<id>`; its
 /// working glyph is tagged `tab-badge-glyph-<id>-working`.
 fn count_badge(tab_id: &str, badge: TabBadge, t: &UiTheme) -> Stateful<Div> {
-    let pill = CountPill::of(badge);
+    let pill = CountPill::of(badge, t);
     let name = format!("tab-badge-{tab_id}");
     let glyph_id = format!("tab-badge-glyph-{tab_id}");
     div()
@@ -1244,19 +1247,19 @@ fn count_badge(tab_id: &str, badge: TabBadge, t: &UiTheme) -> Stateful<Div> {
 
 /// The Dashboard icon before a Dashboard tab's name, tagged
 /// `tab-dashboard-icon-<id>`.
-fn dashboard_icon(tab_id: &str) -> Div {
+fn dashboard_icon(tab_id: &str, t: &UiTheme) -> Div {
     let name = format!("tab-dashboard-icon-{tab_id}");
     div().debug_selector(|| name).flex().flex_none().child(
         svg()
             .path(DASHBOARD_ICON)
             .size(px(TAB_ICON_SIZE))
-            .text_color(gpui::rgb(SUBTLE)),
+            .text_color(gpui::rgb(t.subtle)),
     )
 }
 
 /// The pill after a Dashboard tab's name counting the sessions waiting on
 /// the user, tagged `tab-need-badge-<id>`; none at 0.
-fn need_you_badge(tab_id: &str, waiting: usize) -> Option<Stateful<Div>> {
+fn need_you_badge(tab_id: &str, waiting: usize, t: &UiTheme) -> Option<Stateful<Div>> {
     let text = badge_text(waiting)?;
     let name = format!("tab-need-badge-{tab_id}");
     Some(
@@ -1269,10 +1272,10 @@ fn need_you_badge(tab_id: &str, waiting: usize) -> Option<Stateful<Div>> {
             .h(px(BUSY_PILL_HEIGHT))
             .px(px(6.0))
             .rounded(px(BUSY_PILL_HEIGHT / 2.0))
-            .bg(gpui::rgb(CHIP))
+            .bg(gpui::rgb(t.chip))
             .font_family(fonts::DEFAULT_FAMILY)
             .text_size(px(BUSY_PILL_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
+            .text_color(gpui::rgb(t.text))
             .tooltip(tooltip(format!("{waiting} waiting on you")))
             .child(text),
     )
@@ -1299,7 +1302,7 @@ const GHOST_BADGE_HEIGHT: f32 = 15.0;
 const GHOST_BADGE_TEXT_SIZE: f32 = 9.5;
 
 /// The accent bar at `side` of `tab_id`'s pill, where a dragged pill lands.
-fn insertion_mark(tab_id: &str, side: Side) -> Div {
+fn insertion_mark(tab_id: &str, side: Side, t: &UiTheme) -> Div {
     let selector = format!("tab-drop-mark-{tab_id}");
     let bar = div()
         .debug_selector(move || selector)
@@ -1308,7 +1311,7 @@ fn insertion_mark(tab_id: &str, side: Side) -> Div {
         .bottom(px(MARK_INSET))
         .w(px(MARK_WIDTH))
         .rounded(px(MARK_WIDTH / 2.0))
-        .bg(gpui::rgb(ACCENT));
+        .bg(gpui::rgb(t.accent));
     match side {
         Side::Before => bar.left(px(-MARK_OUTSET)),
         Side::After => bar.right(px(-MARK_OUTSET)),
@@ -1330,8 +1333,9 @@ pub(crate) struct PillGhost {
 
 impl Render for PillGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
         let badge = self.badge.map(|badge| {
-            let pill = CountPill::of(badge);
+            let pill = CountPill::of(badge, &t);
             let glyph_id = format!("tab-ghost-glyph-{}", self.tab_id);
             div()
                 .flex()
@@ -1373,15 +1377,15 @@ impl Render for PillGhost {
                 .h(px(GHOST_HEIGHT))
                 .px(px(10.0))
                 .whitespace_nowrap()
-                .bg(gpui::rgb(RAISED))
+                .bg(gpui::rgb(t.raised))
                 .border_1()
-                .border_color(gpui::rgb(LINE_STRONG))
+                .border_color(gpui::rgb(t.line_strong))
                 .rounded(px(4.0))
                 .shadow_lg()
                 .opacity(GHOST_OPACITY)
                 .font_family(fonts::ui_family(cx))
                 .text_size(px(GHOST_TEXT_SIZE))
-                .text_color(gpui::rgb(TEXT))
+                .text_color(gpui::rgb(t.text))
                 .children(badge)
                 .child(self.label.clone()),
         )
@@ -1391,6 +1395,7 @@ impl Render for PillGhost {
 /// The close icon, or ✓ while a close waits for its second click. It acts
 /// on the press so the root's click-elsewhere reset never sees it.
 fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let id = tab_id.to_owned();
     let tip = if armed {
         "Click again to confirm closing this tab"
@@ -1408,17 +1413,17 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
         .min_w(px(CLOSE_ICON_SIZE + 4.0))
         .h(px(CLOSE_ICON_SIZE + 4.0))
         .rounded(px(3.0))
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         .tooltip(tooltip(tip))
         .map(|button| {
             if armed {
-                button.text_color(gpui::rgb(DANGER)).child("✓")
+                button.text_color(gpui::rgb(t.danger)).child("✓")
             } else {
                 button.child(
                     svg()
                         .path(TAB_CLOSE_ICON)
                         .size(px(CLOSE_ICON_SIZE))
-                        .text_color(gpui::rgb(SUBTLE)),
+                        .text_color(gpui::rgb(t.subtle)),
                 )
             }
         })
@@ -1433,6 +1438,7 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
 }
 
 fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     div()
         .id("new-tab")
         .debug_selector(|| "new-tab".to_owned())
@@ -1442,13 +1448,13 @@ fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         .tooltip(tooltip("New tab"))
         .child(
             svg()
                 .path(TAB_NEW_ICON)
                 .size(px(NEW_TAB_ICON_SIZE))
-                .text_color(gpui::rgb(MUTED)),
+                .text_color(gpui::rgb(t.muted)),
         )
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             this.new_tab();
@@ -1459,6 +1465,7 @@ fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::{ASKING, CHIP, GROUND, ON_ASKING, SUBTLE, WORKING};
 
     const ACCENT: u32 = 0x005b_9bff;
 
@@ -1467,21 +1474,33 @@ mod tests {
         let active = PillLook::of(true, false);
         let both = PillLook::of(true, true);
         assert_eq!(both, PillLook::ActiveOutlined);
-        assert_eq!(both.background(ACCENT), active.background(ACCENT));
-        assert_eq!(both.background(ACCENT), Some((GROUND << 8) | 0xff));
+        assert_eq!(
+            both.background(ACCENT, &UiTheme::CONTRAST),
+            active.background(ACCENT, &UiTheme::CONTRAST)
+        );
+        assert_eq!(
+            both.background(ACCENT, &UiTheme::CONTRAST),
+            Some((GROUND << 8) | 0xff)
+        );
         assert_eq!(both.outline(ACCENT), Some(ACCENT));
         assert_eq!(active.outline(ACCENT), None);
 
         let washed = PillLook::of(false, true);
-        assert_eq!(washed.background(ACCENT), Some((ACCENT << 8) | 0x24));
+        assert_eq!(
+            washed.background(ACCENT, &UiTheme::CONTRAST),
+            Some((ACCENT << 8) | 0x24)
+        );
         assert_eq!(washed.outline(ACCENT), None);
-        assert_eq!(PillLook::of(false, false).background(ACCENT), None);
+        assert_eq!(
+            PillLook::of(false, false).background(ACCENT, &UiTheme::CONTRAST),
+            None
+        );
     }
 
     #[test]
     fn busy_pill_shows_the_working_glyph_while_a_pane_is_busy() {
         assert_eq!(
-            CountPill::of(TabBadge::Busy { busy: 1, total: 2 }),
+            CountPill::of(TabBadge::Busy { busy: 1, total: 2 }, &UiTheme::CONTRAST),
             CountPill {
                 text: "1/2".to_owned(),
                 glyph: true,
@@ -1495,7 +1514,7 @@ mod tests {
     #[test]
     fn idle_busy_pill_is_a_grey_zero_over_total_with_no_glyph() {
         assert_eq!(
-            CountPill::of(TabBadge::Busy { busy: 0, total: 3 }),
+            CountPill::of(TabBadge::Busy { busy: 0, total: 3 }, &UiTheme::CONTRAST),
             CountPill {
                 text: "0/3".to_owned(),
                 glyph: false,
@@ -1509,7 +1528,7 @@ mod tests {
     #[test]
     fn needs_you_pill_is_the_count_on_amber() {
         assert_eq!(
-            CountPill::of(TabBadge::NeedsYou(2)),
+            CountPill::of(TabBadge::NeedsYou(2), &UiTheme::CONTRAST),
             CountPill {
                 text: "2".to_owned(),
                 glyph: false,
@@ -1523,7 +1542,7 @@ mod tests {
     #[test]
     fn idle_pill_is_grey_idle_over_total() {
         assert_eq!(
-            CountPill::of(TabBadge::Idle { idle: 2, total: 3 }),
+            CountPill::of(TabBadge::Idle { idle: 2, total: 3 }, &UiTheme::CONTRAST),
             CountPill {
                 text: "2/3".to_owned(),
                 glyph: false,

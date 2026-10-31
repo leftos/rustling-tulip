@@ -21,12 +21,12 @@ pub(crate) fn section(title: impl Into<SharedString>) -> Div {
 }
 
 /// A form-field column: its label, then what the caller adds under it.
-pub(crate) fn field_column(label: &'static str) -> Div {
+pub(crate) fn field_column(label: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
         .gap(px(7.0))
-        .child(field_label(label))
+        .child(field_label(label, t))
 }
 
 /// A flyout section in `t`: a top border and a muted heading.

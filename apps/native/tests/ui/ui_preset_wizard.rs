@@ -636,7 +636,7 @@ fn press(h: &mut Harness<'_>, job_id: &str, action: &str) {
 }
 
 fn leaf_fill(h: &mut Harness<'_>, id: &str) -> Option<u32> {
-    h.root(|root, _| root.leaf_fill(id))
+    h.root(|root, cx| root.leaf_fill(id, cx))
 }
 
 fn active_tab(h: &mut Harness<'_>) -> Option<String> {

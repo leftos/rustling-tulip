@@ -65,8 +65,8 @@ fn row(
                 })
                 .collect();
             match style {
-                ChoiceStyle::Segmented => div().flex().child(segmented(buttons)),
-                ChoiceStyle::Dropdown | ChoiceStyle::Unknown => segmented(buttons),
+                ChoiceStyle::Segmented => div().flex().child(segmented(buttons, &theme(cx))),
+                ChoiceStyle::Dropdown | ChoiceStyle::Unknown => segmented(buttons, &theme(cx)),
             }
         }
         FieldEditor::Text { .. } => text_row(view, inputs, &[], focus, cx),
@@ -77,12 +77,12 @@ fn row(
                 move || selector
             })
             .opacity(DISABLED_OPACITY)
-            .child(muted(UPDATE_CLIENT)),
+            .child(muted(UPDATE_CLIENT, &theme(cx))),
     };
-    field(view.label.clone())
+    field(view.label.clone(), &theme(cx))
         .child(body)
-        .children(view.help.clone().map(note))
-        .children(locked.then(|| muted(LOCKED)))
+        .children(view.help.clone().map(|text| note(text, &theme(cx))))
+        .children(locked.then(|| muted(LOCKED, &theme(cx))))
         .into_any_element()
 }
 
@@ -91,7 +91,10 @@ fn toggle_row(view: &FieldView, focus: &Control, cx: &mut Context<RootView>) -> 
     let control = Control::FieldToggle(view.id.clone());
     let focused = focus == &control;
     let checked = view.value == OptionValue::Bool(true);
-    let label = check_label(view.label.clone(), view.help.clone().map(note));
+    let label = check_label(
+        view.label.clone(),
+        view.help.clone().map(|text| note(text, &theme(cx))),
+    );
     let row = checkbox_row(&control.selector(), checked, focused, label, &theme(cx));
     let row = if view.disabled {
         row.opacity(DISABLED_OPACITY)
@@ -138,6 +141,6 @@ fn text_row(
         .when(view.disabled, |row| row.opacity(DISABLED_OPACITY))
         .children(input)
         .when(!chips.is_empty(), |row| {
-            row.child(div().flex().flex_none().child(segmented(chips)))
+            row.child(div().flex().flex_none().child(segmented(chips, &theme(cx))))
         })
 }

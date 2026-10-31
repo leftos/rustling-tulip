@@ -18,10 +18,9 @@ use crate::connection::State;
 use crate::device_pairing::{DeviceButton, DevicePairing};
 use crate::net::{NetCommand, NetEvent};
 use crate::notice_view::modal_panel;
-use crate::palette::{BORDER, DANGER, DANGER_BG, MUTED, TEXT};
 use crate::session_menu::backdrop;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::ui_theme::theme;
+use crate::ui_theme::{UiTheme, theme};
 
 /// How often the countdown redraws.
 const TICK: Duration = Duration::from_secs(1);
@@ -582,6 +581,7 @@ impl RootView {
     /// The dialog over a backdrop that takes every click beneath it, drawn
     /// above the first-connect overlay.
     pub(crate) fn device_pairing_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.device_pairing.dialog.as_ref()?;
         let model = &dialog.model;
         let body = div()
@@ -597,11 +597,11 @@ impl RootView {
                 let focused = dialog.control == Some(DeviceControl::CodeLink);
                 div().flex().child(code_link(focused, cx))
             }))
-            .children(model.code().map(|_| code_box(dialog)))
+            .children(model.code().map(|_| code_box(dialog, &t)))
             .children(model.countdown((self.now)()).map(|countdown| {
                 div()
                     .debug_selector(|| "device-pairing-countdown".to_owned())
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(countdown)
             }))
             .children(model.refusal().map(|refusal| {
@@ -610,8 +610,8 @@ impl RootView {
                     .px(px(6.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
-                    .bg(gpui::rgb(DANGER_BG))
-                    .text_color(gpui::rgb(DANGER))
+                    .bg(gpui::rgb(t.danger_bg))
+                    .text_color(gpui::rgb(t.danger))
                     .child(refusal.to_owned())
             }));
         let footer = div()
@@ -643,6 +643,7 @@ fn clear_code_field(dialog: &DevicePairingDialog, cx: &mut Context<RootView>) {
 /// "Have a code?": plain text that lights up under the pointer, ringed
 /// while it has the keyboard.
 fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     div()
         .id(CODE_LINK_SELECTOR)
         .debug_selector(|| CODE_LINK_SELECTOR.to_owned())
@@ -650,12 +651,12 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .px(px(4.0))
         .py(px(2.0))
         .rounded(px(LINK_RADIUS))
-        .text_color(gpui::rgb(if focused { TEXT } else { MUTED }))
+        .text_color(gpui::rgb(if focused { t.text } else { t.muted }))
         .cursor_pointer()
         .hover(|style| {
             style
-                .bg(gpui::rgb(crate::palette::POPOVER_HOVER))
-                .text_color(gpui::rgb(TEXT))
+                .bg(gpui::rgb(t.popover_hover))
+                .text_color(gpui::rgb(t.text))
         })
         .when(focused, |link| {
             link.child(focus_ring(LINK_RADIUS, &theme(cx)))
@@ -667,7 +668,7 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
 }
 
 /// The code field in its box, outlined brighter while it has the focus.
-fn code_box(dialog: &DevicePairingDialog) -> Div {
+fn code_box(dialog: &DevicePairingDialog, t: &UiTheme) -> Div {
     let focused = dialog.control == Some(DeviceControl::Field);
     div()
         .debug_selector(|| "device-pairing-code".to_owned())
@@ -677,7 +678,7 @@ fn code_box(dialog: &DevicePairingDialog) -> Div {
         .py(px(3.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(gpui::rgb(if focused { TEXT } else { BORDER }))
+        .border_color(gpui::rgb(if focused { t.text } else { t.border }))
         .child(dialog.code_input.clone())
 }
 

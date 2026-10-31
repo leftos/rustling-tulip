@@ -22,10 +22,6 @@ use crate::combobox::{ComboRow, list_placement};
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::notices;
 use crate::overlay_owner::Overlay;
-use crate::palette::{
-    ACCENT, LINE, LINE_STRONG, MODAL_INSET, ON_ACCENT, POPOVER, POPOVER_EDGE, POPOVER_HOVER,
-    SPAWN_BADGE_OK, SUBTLE, TEXT_2, TRANSPARENT,
-};
 use crate::remote_mode::spawn_no_repos_note;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_form::{
@@ -39,7 +35,7 @@ use crate::spawn_preview::{
 use crate::spawns::PaneAim;
 use crate::text_input::{NavKey, TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
-use crate::{DANGER, MUTED, RootView, TEXT, WARNING, tagged_text, tooltip};
+use crate::{RootView, tagged_text, tooltip};
 
 /// The spawn dialog's width, as on the Spawn board.
 const DIALOG_WIDTH: f32 = 640.0;
@@ -1275,6 +1271,7 @@ impl RootView {
     /// The dialog over a backdrop that takes every click beneath it, and the
     /// share confirm over it while open.
     pub(crate) fn spawn_dialog_layers(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = theme(cx);
         let dialog = match &self.spawn_dialog {
             None => return Vec::new(),
             Some(SpawnModal::NoRepos(_)) => return vec![self.no_repos_layer(cx)],
@@ -1293,7 +1290,7 @@ impl RootView {
                 cx,
             ))
             .child(open_in_field(form, &focus, cx));
-        let run = divided()
+        let run = divided(&t)
             .children(trusted_rows(form, &focus, cx))
             .child(advanced_section(dialog, &focus, cx));
         let body = div()
@@ -1308,7 +1305,7 @@ impl RootView {
             .overflow_y_scroll()
             .track_scroll(&dialog.scroll)
             .child(placement)
-            .child(divided().children(self.worktree_rows(dialog, &focus, cx)))
+            .child(divided(&t).children(self.worktree_rows(dialog, &focus, cx)))
             .child(run);
         let close = close_button("spawn-close", focus == Control::Close, &theme(cx)).on_click(
             cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
@@ -1318,7 +1315,7 @@ impl RootView {
             .when(form.share_confirm().is_none(), |panel| {
                 panel.track_focus(&self.spawn_focus)
             })
-            .child(dialog_title_bar(DIALOG_TITLE, close))
+            .child(dialog_title_bar(DIALOG_TITLE, close, &t))
             .child(body)
             .child(footer(form, &focus, cx))
             .child(measurer(Measured::Panel, cx));
@@ -1362,6 +1359,7 @@ impl RootView {
     /// The dialog with no repo to spawn into: the target's no-repos note over
     /// Add repo, and Spawn disabled.
     fn no_repos_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
         let close = close_button("spawn-close", false, &theme(cx)).on_click(
             cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
         );
@@ -1397,7 +1395,7 @@ impl RootView {
                     "spawn-no-repos-note",
                     spawn_no_repos_note(self.conn.target()),
                 )
-                .text_color(gpui::rgb(TEXT_2)),
+                .text_color(gpui::rgb(t.text_2)),
             )
             .child(add);
         let cancel = button(
@@ -1429,9 +1427,9 @@ impl RootView {
         .child("Spawn");
         let panel = dialog_card("spawn-panel", DIALOG_WIDTH, &theme(cx))
             .track_focus(&self.spawn_focus)
-            .child(dialog_title_bar(DIALOG_TITLE, close))
+            .child(dialog_title_bar(DIALOG_TITLE, close, &t))
             .child(body)
-            .child(dialog_footer().child(cancel).child(submit));
+            .child(dialog_footer(&t).child(cancel).child(submit));
         backdrop("spawn-dialog", panel, &theme(cx))
     }
 
@@ -1497,7 +1495,11 @@ pub(crate) fn dialog_card(id: &'static str, width: f32, t: &UiTheme) -> Stateful
 
 /// A dialog's header band: the bold title, then `close` at the right, over
 /// a divider.
-pub(crate) fn dialog_title_bar(title: impl Into<SharedString>, close: impl IntoElement) -> Div {
+pub(crate) fn dialog_title_bar(
+    title: impl Into<SharedString>,
+    close: impl IntoElement,
+    t: &UiTheme,
+) -> Div {
     div()
         .flex()
         .flex_none()
@@ -1507,7 +1509,7 @@ pub(crate) fn dialog_title_bar(title: impl Into<SharedString>, close: impl IntoE
         .pr(px(12.0))
         .py(px(11.0))
         .border_b_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
         .child(
             div()
                 .flex_1()
@@ -1521,7 +1523,7 @@ pub(crate) fn dialog_title_bar(title: impl Into<SharedString>, close: impl IntoE
 
 /// A dialog's footer band, on the raised ground under a divider; the caller
 /// adds its buttons, which sit at the right.
-pub(crate) fn dialog_footer() -> Div {
+pub(crate) fn dialog_footer(t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_none()
@@ -1531,8 +1533,8 @@ pub(crate) fn dialog_footer() -> Div {
         .px(px(DIALOG_PAD_X))
         .py(px(14.0))
         .border_t_1()
-        .border_color(gpui::rgb(LINE))
-        .bg(gpui::rgb(MODAL_INSET))
+        .border_color(gpui::rgb(t.line))
+        .bg(gpui::rgb(t.modal_inset))
         .rounded_b(px(MODAL_RADIUS - 1.0))
 }
 
@@ -1550,13 +1552,13 @@ pub(crate) fn close_button(selector: &str, focused: bool, t: &UiTheme) -> Statef
         .size(px(CLOSE_SIZE))
         .rounded(px(CLOSE_RADIUS))
         .border_1()
-        .border_color(gpui::rgba(TRANSPARENT))
-        .text_color(gpui::rgb(TEXT_2))
+        .border_color(gpui::rgba(t.transparent))
+        .text_color(gpui::rgb(t.text_2))
         .cursor_pointer()
         .hover(|style| {
             style
-                .bg(gpui::rgb(POPOVER_HOVER))
-                .text_color(gpui::rgb(TEXT))
+                .bg(gpui::rgb(t.popover_hover))
+                .text_color(gpui::rgb(t.text))
         })
         .child("✕")
         .when(focused, |close| close.child(focus_ring(CLOSE_RADIUS, t)))
@@ -1568,55 +1570,55 @@ fn group() -> Div {
 }
 
 /// A group of the dialog's rows under a divider.
-fn divided() -> Div {
+fn divided(t: &UiTheme) -> Div {
     group()
         .pt(px(14.0))
         .border_t_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
 }
 
 /// A field's label: small, semibold and secondary.
-pub(crate) fn field_label(label: impl Into<SharedString>) -> Div {
+pub(crate) fn field_label(label: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .text_size(px(LABEL_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .child(label.into())
 }
 
 /// A labelled field.
-pub(crate) fn field(label: impl Into<SharedString>) -> Div {
+pub(crate) fn field(label: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
         .gap(px(7.0))
-        .child(field_label(label))
+        .child(field_label(label, t))
 }
 
 /// A segmented control: its segments in a well a step lighter than the
 /// modal, inside a thin edge, wrapping onto more lines when they do not fit.
-pub(crate) fn segmented(buttons: Vec<AnyElement>) -> Div {
+pub(crate) fn segmented(buttons: Vec<AnyElement>, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_wrap()
         .gap(px(2.0))
         .p(px(3.0))
         .rounded(px(SEGMENTED_RADIUS))
-        .bg(gpui::rgb(MODAL_INSET))
+        .bg(gpui::rgb(t.modal_inset))
         .border_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
         .children(buttons)
 }
 
-pub(crate) fn muted(text: impl Into<SharedString>) -> Div {
-    div().text_color(gpui::rgb(MUTED)).child(text.into())
+pub(crate) fn muted(text: impl Into<SharedString>, t: &UiTheme) -> Div {
+    div().text_color(gpui::rgb(t.muted)).child(text.into())
 }
 
 /// A note under a checkbox's or a radio's label.
-pub(crate) fn note(text: impl Into<SharedString>) -> Div {
+pub(crate) fn note(text: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .text_size(px(NOTE_SIZE))
-        .text_color(gpui::rgb(SUBTLE))
+        .text_color(gpui::rgb(t.subtle))
         .child(text.into())
 }
 
@@ -1631,9 +1633,9 @@ pub(crate) fn choice_button(
     t: &UiTheme,
 ) -> Stateful<Div> {
     let (text, weight) = if look.selected {
-        (TEXT, FontWeight::SEMIBOLD)
+        (t.text, FontWeight::SEMIBOLD)
     } else {
-        (TEXT_2, FontWeight::MEDIUM)
+        (t.text_2, FontWeight::MEDIUM)
     };
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -1647,17 +1649,17 @@ pub(crate) fn choice_button(
         .px(px(12.0))
         .rounded(px(SEGMENT_RADIUS))
         .border_1()
-        .border_color(gpui::rgba(TRANSPARENT))
+        .border_color(gpui::rgba(t.transparent))
         .text_size(px(SEGMENT_TEXT_SIZE))
         .font_weight(weight)
         .text_color(gpui::rgb(text))
         .when(look.selected, |segment| {
-            segment.bg(gpui::rgb(POPOVER_HOVER))
+            segment.bg(gpui::rgb(t.popover_hover))
         })
         .when(look.enabled, |segment| {
             segment
                 .cursor_pointer()
-                .hover(|style| style.text_color(gpui::rgb(TEXT)))
+                .hover(move |style| style.text_color(gpui::rgb(t.text)))
                 .on_click(on_click)
         })
         .when(!look.enabled, |segment| {
@@ -1695,14 +1697,14 @@ pub(crate) fn checkbox_row(
         .font_weight(FontWeight::BOLD)
         .when(checked, |mark| {
             mark.debug_selector(|| format!("{name}-tick"))
-                .bg(gpui::rgb(ACCENT))
-                .border_color(gpui::rgb(ACCENT))
-                .text_color(gpui::rgb(ON_ACCENT))
+                .bg(gpui::rgb(t.accent))
+                .border_color(gpui::rgb(t.accent))
+                .text_color(gpui::rgb(t.on_accent))
                 .child("✓")
         })
         .when(!checked, |mark| {
             mark.debug_selector(|| format!("{name}-empty"))
-                .border_color(gpui::rgb(LINE_STRONG))
+                .border_color(gpui::rgb(t.line_strong))
         })
         .when(focused, |mark| mark.child(focus_ring(CHECK_RADIUS, t)));
     div()
@@ -1746,13 +1748,13 @@ fn radio_row(
         .size(px(CHECK_SIZE))
         .rounded_full()
         .border_1()
-        .border_color(gpui::rgb(if chosen { ACCENT } else { LINE_STRONG }))
+        .border_color(gpui::rgb(if chosen { t.accent } else { t.line_strong }))
         .when(chosen, |ring| {
             ring.child(
                 div()
                     .size(px(RADIO_DOT))
                     .rounded_full()
-                    .bg(gpui::rgb(ACCENT)),
+                    .bg(gpui::rgb(t.accent)),
             )
         })
         .when(focused, |ring| ring.child(focus_ring(CHECK_SIZE / 2.0, t)));
@@ -1891,6 +1893,7 @@ fn choice(
 }
 
 fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let buttons = form
         .shown_targets()
         .into_iter()
@@ -1906,10 +1909,11 @@ fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
             option_button(&control, label, look, cx).into_any_element()
         })
         .collect();
-    field("Target").child(segmented(buttons))
+    field("Target", &t).child(segmented(buttons, &t))
 }
 
 fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let buttons = form
         .runtimes()
         .into_iter()
@@ -1919,10 +1923,11 @@ fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
             choice(&Control::Runtime(runtime), label, selected, focus, cx)
         })
         .collect();
-    field("Runtime").child(segmented(buttons))
+    field("Runtime", &t).child(segmented(buttons, &t))
 }
 
 fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     if let Some(id) = form.open_in_locked() {
         let control = Control::OpenIn(OpenChoice::Tab(id.to_owned()));
         let name = form
@@ -1934,7 +1939,7 @@ fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
             enabled: false,
         };
         let chip = option_button(&control, name, look, cx);
-        return field("Open in").child(segmented(vec![chip.into_any_element()]));
+        return field("Open in", &t).child(segmented(vec![chip.into_any_element()], &t));
     }
     let chosen = form.open_in();
     let tabs = form.tabs();
@@ -1943,7 +1948,7 @@ fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
         .flex()
         .gap(px(6.0))
         .child("Current tab")
-        .children(tabs.current.as_ref().map(|tab| muted(tab.name.clone())));
+        .children(tabs.current.as_ref().map(|tab| muted(tab.name.clone(), &t)));
     let look = Look {
         selected: *chosen == OpenChoice::CurrentTab,
         focused: *focus == current,
@@ -1975,7 +1980,7 @@ fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
             cx,
         ));
     }
-    field("Open in").child(segmented(buttons))
+    field("Open in", &t).child(segmented(buttons, &t))
 }
 
 /// A checkbox of the dialog: its box and `label`, pressing its control.
@@ -1996,12 +2001,14 @@ fn checkbox(
 }
 
 fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Vec<AnyElement> {
+    let t = theme(cx);
     if !form.trusted_shown() {
         return Vec::new();
     }
     let label = check_label(
         "Trusted launch",
-        form.trusted_detail().map(|detail| note(detail.to_owned())),
+        form.trusted_detail()
+            .map(|detail| note(detail.to_owned(), &t)),
     );
     let mut rows = vec![checkbox(
         &Control::Trusted,
@@ -2011,7 +2018,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
         cx,
     )];
     if form.trusted() {
-        let warning = warning_box()
+        let warning = warning_box(&t)
             .debug_selector(|| "spawn-trusted-launch-warning".to_owned())
             .gap(px(2.0))
             .child(
@@ -2026,6 +2033,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
 }
 
 fn worktree_checkbox(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let (text, unchecked) = if form.is_workspace() {
         (
             "Create worktrees",
@@ -2037,11 +2045,12 @@ fn worktree_checkbox(form: &SpawnForm, focus: &Control, cx: &mut Context<RootVie
             "Unchecked: run the agent in the repo's main directory",
         )
     };
-    let label = check_label(text, Some(note(unchecked)));
+    let label = check_label(text, Some(note(unchecked, &t)));
     checkbox(&Control::UseWorktree, form.use_worktree(), focus, label, cx)
 }
 
 fn mode_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let (label, new) = if form.is_workspace() {
         ("Worktrees", "New worktrees")
     } else {
@@ -2054,10 +2063,13 @@ fn mode_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> 
     .into_iter()
     .map(|(mode, text)| choice(&Control::Mode(mode), text, form.mode() == mode, focus, cx))
     .collect();
-    field(label).child(segmented(buttons)).into_any_element()
+    field(label, &t)
+        .child(segmented(buttons, &t))
+        .into_any_element()
 }
 
 fn existing_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let label = if form.is_workspace() {
         "Existing worktree group"
     } else {
@@ -2076,15 +2088,15 @@ fn existing_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>)
     let placeholder = form
         .existing_selected()
         .is_none()
-        .then(|| muted(form.existing_placeholder()));
-    let note = form.existing_note().map(muted);
+        .then(|| muted(form.existing_placeholder(), &t));
+    let note = form.existing_note().map(|text| muted(text, &t));
     let warning = form
         .existing_warning()
-        .map(|text| div().text_color(gpui::rgb(WARNING)).child(text));
-    field(label)
+        .map(|text| div().text_color(gpui::rgb(t.warning)).child(text));
+    field(label, &t)
         .children(placeholder)
         .when(!options.is_empty(), |field| {
-            field.child(segmented(options).flex_col())
+            field.child(segmented(options, &t).flex_col())
         })
         .children(note)
         .children(warning)
@@ -2158,6 +2170,7 @@ fn list_input(
 
 /// The open list of `list`'s field, drawn over the dialog.
 fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let form = &dialog.form;
     let rows = form.list_rows(list);
     let highlight = form.list_highlight(list);
@@ -2202,9 +2215,9 @@ fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>
         .flex()
         .flex_col()
         .p(px(4.0))
-        .bg(gpui::rgb(POPOVER))
+        .bg(gpui::rgb(t.popover))
         .border_1()
-        .border_color(gpui::rgb(POPOVER_EDGE))
+        .border_color(gpui::rgb(t.popover_edge))
         .rounded(px(LIST_RADIUS))
         .occlude()
         .children(items);
@@ -2220,13 +2233,14 @@ fn list_row(
     (highlighted, current): (bool, bool),
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let name = format!("{prefix}-option-{index}");
     let tag_name = format!("{name}-current");
-    let tag = current.then(|| muted(CURRENT_TAG).debug_selector(move || tag_name));
+    let tag = current.then(|| muted(CURRENT_TAG, &t).debug_selector(move || tag_name));
     let detail_name = format!("{name}-scopes");
     let detail = row
         .detail()
-        .map(|detail| muted(detail.to_owned()).debug_selector(move || detail_name));
+        .map(|detail| muted(detail.to_owned(), &t).debug_selector(move || detail_name));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -2237,7 +2251,7 @@ fn list_row(
         .py(px(4.0))
         .rounded(px(SEGMENT_RADIUS))
         .cursor_pointer()
-        .when(highlighted, |row| row.bg(gpui::rgb(POPOVER_HOVER)))
+        .when(highlighted, move |row| row.bg(gpui::rgb(t.popover_hover)))
         .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
             this.hover_spawn_list(list, index, cx);
         }))
@@ -2266,6 +2280,7 @@ fn branch_field(
     now: Instant,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let form = &dialog.form;
     let label = match (form.is_workspace(), form.use_worktree()) {
         (true, true) => "New worktree branch (same across all members)",
@@ -2282,18 +2297,20 @@ fn branch_field(
         spawn_button(&Control::Random, OUTLINED, "Random", true, focus, cx)
             .tooltip(tooltip(RANDOM_TIP))
     });
-    let pending = (form.use_worktree() && form.suggestion_pending(now)).then(|| muted(SUGGESTING));
-    field(label)
+    let pending =
+        (form.use_worktree() && form.suggestion_pending(now)).then(|| muted(SUGGESTING, &t));
+    field(label, &t)
         .child(div().flex().gap(px(8.0)).child(input).children(random))
         .children(pending)
         .into_any_element()
 }
 
 fn base_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let form = &dialog.form;
     let input = list_input(dialog, ListField::Base, focus, cx);
-    let failed = (form.fetch_failed() && !form.is_workspace()).then(|| muted(FETCH_FAILED));
-    field("Base branch (optional)")
+    let failed = (form.fetch_failed() && !form.is_workspace()).then(|| muted(FETCH_FAILED, &t));
+    field("Base branch (optional)", &t)
         .child(input)
         .children(failed)
         .into_any_element()
@@ -2302,17 +2319,18 @@ fn base_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>)
 /// What follows the base field: a repo's staleness warning, a workspace's
 /// Preview button and table, and the collision notice with its choice.
 fn preview_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Vec<AnyElement> {
+    let t = theme(cx);
     let mut rows = Vec::new();
     if form.is_workspace() {
         let enabled = form.preview_enabled();
         let button = spawn_button(&Control::Preview, OUTLINED, "Preview", enabled, focus, cx);
         rows.push(div().flex().child(button).into_any_element());
         if !form.preview_members().is_empty() {
-            rows.push(preview_table(form));
+            rows.push(preview_table(form, &t));
         }
     } else if let Some(text) = form.preview_members().first().and_then(staleness_notice) {
         rows.push(
-            warning_box()
+            warning_box(&t)
                 .debug_selector(|| "spawn-base-stale".to_owned())
                 .child(text)
                 .into_any_element(),
@@ -2325,7 +2343,7 @@ fn preview_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
 }
 
 /// A box outlined in the warning colour.
-fn warning_box() -> Div {
+fn warning_box(t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
@@ -2334,7 +2352,7 @@ fn warning_box() -> Div {
         .py(px(9.0))
         .rounded(px(NOTICE_RADIUS))
         .border_1()
-        .border_color(gpui::rgb(WARNING))
+        .border_color(gpui::rgb(t.warning))
 }
 
 /// The collision notice: what is already there, and Reuse or Recreate.
@@ -2344,16 +2362,21 @@ fn collision_box(
     focus: &Control,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let recreate_note = if notice.danger {
         div()
             .debug_selector(|| "spawn-collision-danger".to_owned())
-            .text_color(gpui::rgb(DANGER))
+            .text_color(gpui::rgb(t.danger))
             .child(notice.recreate_note)
     } else {
-        muted(notice.recreate_note)
+        muted(notice.recreate_note, &t)
     };
     let choices = [
-        (ReuseChoice::Reuse, notice.reuse_label, muted(REUSE_NOTE)),
+        (
+            ReuseChoice::Reuse,
+            notice.reuse_label,
+            muted(REUSE_NOTE, &t),
+        ),
         (ReuseChoice::Recreate, RECREATE_LABEL, recreate_note),
     ]
     .into_iter()
@@ -2379,7 +2402,7 @@ fn collision_box(
             .child(reveal_when_focused(row, &control, focused, cx))
             .into_any_element()
     });
-    warning_box()
+    warning_box(&t)
         .debug_selector(|| "spawn-collision".to_owned())
         .child(notice.headline.clone())
         .children(choices)
@@ -2387,18 +2410,18 @@ fn collision_box(
 }
 
 /// One cell of the workspace preview table.
-fn table_cell(column: usize) -> Div {
+fn table_cell(column: usize, t: &UiTheme) -> Div {
     let cell = div().min_w(px(0.0));
     match column {
         0 => cell.w(px(90.0)),
         1 => cell.w(px(110.0)),
         2 => cell.flex_1().flex().flex_wrap().gap(px(4.0)),
-        _ => cell.w(px(130.0)).text_color(gpui::rgb(MUTED)),
+        _ => cell.w(px(130.0)).text_color(gpui::rgb(t.muted)),
     }
 }
 
 /// Each member's repo, branch, what the spawn does there and its path.
-fn preview_table(form: &SpawnForm) -> AnyElement {
+fn preview_table(form: &SpawnForm, t: &UiTheme) -> AnyElement {
     let header = div()
         .flex()
         .gap(px(6.0))
@@ -2407,7 +2430,7 @@ fn preview_table(form: &SpawnForm) -> AnyElement {
             PREVIEW_HEADERS
                 .iter()
                 .enumerate()
-                .map(|(column, title)| table_cell(column).child(*title)),
+                .map(|(column, title)| table_cell(column, t).child(*title)),
         );
     let (branch, default_base) = (form.branch().trim(), form.default_base());
     let rows = form.preview_members().iter().map(|member| {
@@ -2415,8 +2438,8 @@ fn preview_table(form: &SpawnForm) -> AnyElement {
         let selector = format!("spawn-preview-row-{}", member.repo_id);
         let badges = row.badges.into_iter().map(|(text, tone)| {
             let color = match tone {
-                Tone::Ok => SPAWN_BADGE_OK,
-                Tone::Warn => WARNING,
+                Tone::Ok => t.spawn_badge_ok,
+                Tone::Warn => t.warning,
             };
             div()
                 .px(px(4.0))
@@ -2430,10 +2453,10 @@ fn preview_table(form: &SpawnForm) -> AnyElement {
             .debug_selector(move || selector)
             .flex()
             .gap(px(6.0))
-            .child(table_cell(0).child(row.repo))
-            .child(table_cell(1).child(row.branch))
-            .child(table_cell(2).children(badges))
-            .child(table_cell(3).child(row.path))
+            .child(table_cell(0, t).child(row.repo))
+            .child(table_cell(1, t).child(row.branch))
+            .child(table_cell(2, t).children(badges))
+            .child(table_cell(3, t).child(row.path))
     });
     div()
         .debug_selector(|| "spawn-preview-table".to_owned())
@@ -2448,6 +2471,7 @@ fn preview_table(form: &SpawnForm) -> AnyElement {
 /// The Advanced toggle, and while open the agent's Advanced fields and the
 /// env rows.
 fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let form = &dialog.form;
     let open = form.advanced_open();
     let control = Control::AdvancedToggle;
@@ -2466,18 +2490,18 @@ fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<Root
         .px(px(2.0))
         .rounded(px(CHECK_RADIUS))
         .border_1()
-        .border_color(gpui::rgba(TRANSPARENT))
+        .border_color(gpui::rgba(t.transparent))
         .text_size(px(SEGMENT_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .cursor_pointer()
-        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .hover(move |style| style.text_color(gpui::rgb(t.text)))
         .on_click(press_control(&control, cx))
         .child(
             svg()
                 .path(chevron)
                 .flex_none()
                 .size(px(12.0))
-                .text_color(gpui::rgb(TEXT_2)),
+                .text_color(gpui::rgb(t.text_2)),
         )
         .child("Advanced")
         .when(focused, |toggle| {
@@ -2504,15 +2528,16 @@ fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<Root
 
 /// The env rows, each with its problem, and `+ Add env var`.
 fn env_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let rows: Vec<AnyElement> = dialog
         .env_inputs
         .iter()
         .enumerate()
         .map(|(index, inputs)| env_row(dialog, index, inputs, focus, cx))
         .collect();
-    let empty = rows.is_empty().then(|| muted(NO_ENV));
+    let empty = rows.is_empty().then(|| muted(NO_ENV, &t));
     let add = spawn_button(&Control::EnvAdd, OUTLINED, "+ Add env var", true, focus, cx);
-    field("Extra environment variables")
+    field("Extra environment variables", &t)
         .children(empty)
         .children(rows)
         .child(div().flex().child(add))
@@ -2525,22 +2550,27 @@ fn env_row(
     focus: &Control,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let form = &dialog.form;
     let problem = form.env_problem(index);
     let key = input_box(&Control::EnvKey(index), &inputs.key, focus, cx)
         .when(problem.is_some(), |key| {
-            key.border_color(gpui::rgb(WARNING))
+            key.border_color(gpui::rgb(t.warning))
         });
     let remove = spawn_button(&Control::EnvRemove(index), OUTLINED, "✕", true, focus, cx)
         .tooltip(tooltip(REMOVE_ENV_TIP));
     let message = problem.map(|problem| {
         div()
             .debug_selector(move || format!("spawn-env-problem-{index}"))
-            .text_color(gpui::rgb(WARNING))
+            .text_color(gpui::rgb(t.warning))
             .child(problem.message())
     });
     let note = form.env_row_note(index).map(|note| {
-        let color = if note.is_warning() { WARNING } else { MUTED };
+        let color = if note.is_warning() {
+            t.warning
+        } else {
+            t.muted
+        };
         div()
             .debug_selector(move || format!("spawn-env-note-{index}"))
             .text_color(gpui::rgb(color))
@@ -2572,6 +2602,7 @@ fn env_value_cells(
     focus: &Control,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
+    let t = theme(cx);
     let form = &dialog.form;
     let saved = form
         .env_rows()
@@ -2582,7 +2613,7 @@ fn env_value_cells(
             .debug_selector(move || format!("spawn-env-saved-{index}"))
             .flex_1()
             .min_w(px(0.0))
-            .text_color(gpui::rgb(MUTED))
+            .text_color(gpui::rgb(t.muted))
             .child(SAVED_SECRET);
         let replace = spawn_button(
             &Control::EnvReplace(index),
@@ -2623,9 +2654,10 @@ fn env_value_cells(
 
 /// Cancel and Spawn, the footer's large buttons.
 fn footer(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let cancel = (ButtonKind::Outlined, ButtonSize::Large);
     let submit = (ButtonKind::Primary, ButtonSize::Large);
-    dialog_footer()
+    dialog_footer(&t)
         .child(spawn_button(
             &Control::Cancel,
             cancel,

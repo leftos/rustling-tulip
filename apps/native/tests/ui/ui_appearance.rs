@@ -44,13 +44,13 @@ fn accent_of(h: &mut Harness<'_>, id: &str) -> Option<u32> {
 
 fn frame_of(h: &mut Harness<'_>, pane_id: &str) -> PaneFrame {
     let pane_id = pane_id.to_owned();
-    h.root(move |root, _| root.pane_frame_colors(&pane_id))
+    h.root(move |root, cx| root.pane_frame_colors(&pane_id, cx))
         .expect("the pane is in a tab")
 }
 
 fn header_fill_of(h: &mut Harness<'_>, pane_id: &str) -> u32 {
     let pane_id = pane_id.to_owned();
-    h.root(move |root, _| root.pane_header_fill(&pane_id))
+    h.root(move |root, cx| root.pane_header_fill(&pane_id, cx))
         .expect("the pane is in a tab")
 }
 

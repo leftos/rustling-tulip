@@ -16,8 +16,8 @@ use crate::shell_dialog::{
 use crate::spawn_view::checkbox_row;
 use crate::spawns::OpenIn;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::ui_theme::theme;
-use crate::{BORDER, MUTED, Pick, RootView, TEXT, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{Pick, RootView, tooltip};
 
 const TITLE: &str = "Open a shell";
 const SAVE_DEFAULT_LABEL: &str = "Use as quick shell default";
@@ -385,6 +385,7 @@ impl RootView {
     /// The dialog over a backdrop that takes every click beneath it; a click
     /// on the backdrop itself does nothing.
     pub(crate) fn shell_dialog_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.shell_dialog.as_ref()?;
         let form = &dialog.form;
         let folder = shell_folder(dialog, cx).to_owned();
@@ -422,21 +423,22 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(div().text_color(gpui::rgb(MUTED)).child("Folder"))
+            .child(div().text_color(gpui::rgb(t.muted)).child("Folder"))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(input_box(dialog, focus))
+                    .child(input_box(dialog, focus, &t))
                     .child(browse),
             )
-            .children(hint_row(form, &folder));
+            .children(hint_row(form, &folder, &t));
         let clear = form.remembered().then(|| {
             link_button(
                 ShellControl::ClearDefault.selector(),
                 CLEAR_DEFAULT_LABEL,
                 focus == ShellControl::ClearDefault,
+                &t,
             )
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.press_shell_control(ShellControl::ClearDefault, window, cx);
@@ -462,7 +464,7 @@ fn shell_folder<'a>(dialog: &'a ShellDialog, cx: &'a App) -> &'a str {
 }
 
 /// The folder field in its box.
-fn input_box(dialog: &ShellDialog, focus: ShellControl) -> Div {
+fn input_box(dialog: &ShellDialog, focus: ShellControl, t: &UiTheme) -> Div {
     div()
         .debug_selector(|| ShellControl::Folder.selector().to_owned())
         .flex()
@@ -472,19 +474,19 @@ fn input_box(dialog: &ShellDialog, focus: ShellControl) -> Div {
         .rounded(px(4.0))
         .border_1()
         .border_color(gpui::rgb(if focus == ShellControl::Folder {
-            TEXT
+            t.text
         } else {
-            BORDER
+            t.border
         }))
         .child(dialog.folder_input.clone())
 }
 
 /// What the folder field says about a text that is not yet a full path.
-fn hint_row(form: &ShellForm, folder: &str) -> Option<Div> {
+fn hint_row(form: &ShellForm, folder: &str, t: &UiTheme) -> Option<Div> {
     form.hint(folder).map(|hint| {
         div()
             .debug_selector(|| "shell-path-hint".to_owned())
-            .text_color(gpui::rgb(MUTED))
+            .text_color(gpui::rgb(t.muted))
             .child(hint)
     })
 }
@@ -508,19 +510,24 @@ fn save_default_row(
 }
 
 /// A link-style button: plain text that lights up under the pointer.
-fn link_button(selector: &'static str, label: &'static str, focused: bool) -> Stateful<Div> {
+fn link_button(
+    selector: &'static str,
+    label: &'static str,
+    focused: bool,
+    t: &UiTheme,
+) -> Stateful<Div> {
     div()
         .id(selector)
         .debug_selector(move || selector.to_owned())
         .px(px(4.0))
         .py(px(2.0))
         .rounded(px(4.0))
-        .text_color(gpui::rgb(if focused { TEXT } else { MUTED }))
+        .text_color(gpui::rgb(if focused { t.text } else { t.muted }))
         .cursor_pointer()
         .hover(|style| {
             style
-                .bg(gpui::rgb(crate::palette::POPOVER_HOVER))
-                .text_color(gpui::rgb(TEXT))
+                .bg(gpui::rgb(t.popover_hover))
+                .text_color(gpui::rgb(t.text))
         })
         .child(label)
 }

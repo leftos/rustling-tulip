@@ -24,7 +24,6 @@ use crate::appearance_stops::{
 use crate::buttons::{ButtonSize, Layer, field_frame_with_ring, focus_ring, outlined_button};
 use crate::fonts;
 use crate::notices::ToastKind;
-use crate::palette::{GROUND, LINE_STRONG, POPOVER_HOVER};
 use crate::section::field_column;
 use crate::session_menu::{backdrop, dialog_button, dialog_look, muted_row};
 use crate::settings_view::SettingsControl;
@@ -33,7 +32,7 @@ use crate::spawn_view::{
 };
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
-use crate::{APPEARANCE_FAILED_TITLE, MUTED, RootView, TEXT, font_size_to_u16, tooltip};
+use crate::{APPEARANCE_FAILED_TITLE, RootView, font_size_to_u16, tooltip};
 
 const EDITOR_WIDTH: f32 = 700.0;
 const COLUMN_WIDTH: f32 = 320.0;
@@ -710,6 +709,7 @@ impl RootView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let t = theme(cx);
         let editor = self.appearance_editor.as_ref()?;
         if editor.level == Level::App {
             return None;
@@ -727,7 +727,7 @@ impl RootView {
             .children(self.appearance_body(focus, cx));
         let panel = dialog_card("appearance-panel", EDITOR_WIDTH, &theme(cx))
             .track_focus(&self.appearance_focus)
-            .child(dialog_title_bar(title, close))
+            .child(dialog_title_bar(title, close, &t))
             .child(body)
             .child(close_footer(
                 AppearanceStop::Close.selector(),
@@ -790,6 +790,7 @@ impl RootView {
         focus: Option<AppearanceStop>,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
+        let t = theme(cx);
         let editor = self.appearance_editor.as_ref()?;
         let (entries, own) = self.family_list(list, cx)?;
         let rows_of = RowsOf {
@@ -815,9 +816,9 @@ impl RootView {
             .flex()
             .flex_col()
             .p(px(3.0))
-            .bg(gpui::rgb(GROUND))
+            .bg(gpui::rgb(t.ground))
             .border_1()
-            .border_color(gpui::rgb(LINE_STRONG))
+            .border_color(gpui::rgb(t.line_strong))
             .rounded(px(LIST_RADIUS))
             .children(rows);
         let (label, hint_selector) = match list {
@@ -825,7 +826,7 @@ impl RootView {
             FontList::Ui => ("UI font", "appearance-ui-family-hint"),
         };
         Some(
-            field_column(label)
+            field_column(label, &t)
                 .child(input_box(
                     list.filter_stop(),
                     editor.filter(list),
@@ -833,7 +834,7 @@ impl RootView {
                     cx,
                 ))
                 .child(list_box)
-                .child(hint_line(hint_selector, hint)),
+                .child(hint_line(hint_selector, hint, &t)),
         )
     }
 }
@@ -891,9 +892,10 @@ fn header_with_reset(
     own: &AppearanceOverrides,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let stop = AppearanceStop::Reset(reset.row);
     let enabled = can_reset(reset.row, own);
-    let link = link(stop.selector(), reset.label, enabled).when(reset.focused, |link| {
+    let link = link(stop.selector(), reset.label, enabled, &t).when(reset.focused, |link| {
         link.child(focus_ring(LINK_RADIUS, &theme(cx)))
     });
     let link = if enabled {
@@ -934,6 +936,7 @@ impl RootView {
         focus: Option<AppearanceStop>,
         cx: &mut Context<Self>,
     ) -> Div {
+        let t = theme(cx);
         let recent = self.sidebar.recent_colors();
         let ready = self.hex_ready_in(row, view, cx).is_some();
         let own = row.own(&view.own);
@@ -997,7 +1000,7 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let label = field_label(row.label());
+        let label = field_label(row.label(), &t);
         div()
             .flex()
             .flex_col()
@@ -1023,6 +1026,7 @@ impl RootView {
                     ColorRow::Background => "appearance-background-hint",
                 },
                 view.color_hint(row),
+                &t,
             ))
     }
 }
@@ -1480,6 +1484,7 @@ fn hex_line(
     focus: Option<AppearanceStop>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let input = row.input(editor);
     let text = input.read(cx).text().to_owned();
     let parsed = appearance::parse_hex_input(&text);
@@ -1491,7 +1496,7 @@ fn hex_line(
         .size(px(SWATCH_SIZE))
         .rounded(px(SWATCH_RADIUS))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(t.line_strong))
         .when_some(
             parsed.as_deref().and_then(appearance::parse_color),
             |swatch, color| swatch.bg(gpui::rgb(color)),
@@ -1520,7 +1525,7 @@ fn hex_line(
                 div()
                     .debug_selector(|| hint_name)
                     .flex_none()
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(HEX_HINT),
             )
         })
@@ -1564,9 +1569,9 @@ fn swatch(selector: String, color: u32, tip: String, mark: Mark, t: &UiTheme) ->
             swatch.child(focus_ring(SWATCH_RADIUS, t))
         });
     if mark.chosen {
-        swatch.border_2().border_color(gpui::rgb(TEXT))
+        swatch.border_2().border_color(gpui::rgb(t.text))
     } else {
-        swatch.border_1().border_color(gpui::rgb(LINE_STRONG))
+        swatch.border_1().border_color(gpui::rgb(t.line_strong))
     }
 }
 
@@ -1587,6 +1592,7 @@ fn family_row(
     highlighted: bool,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let RowsOf { list, own, reset } = rows_of;
     let prefix = list.prefix();
     let ring = |row: Stateful<Div>| {
@@ -1596,9 +1602,14 @@ fn family_row(
     };
     match entry {
         FamilyEntry::Header(header) => muted_row(*header, &theme(cx)).into_any_element(),
-        FamilyEntry::Reset => ring(list_row(&format!("{prefix}-reset"), reset, own.is_none()))
-            .on_click(click_stop(list.stop(), Aim::Family(FamilyPick::Reset), cx))
-            .into_any_element(),
+        FamilyEntry::Reset => ring(list_row(
+            &format!("{prefix}-reset"),
+            reset,
+            own.is_none(),
+            &t,
+        ))
+        .on_click(click_stop(list.stop(), Aim::Family(FamilyPick::Reset), cx))
+        .into_any_element(),
         FamilyEntry::Family { name, saved } => {
             let label = if *saved {
                 format!("{name} (saved)")
@@ -1606,19 +1617,29 @@ fn family_row(
                 name.to_string()
             };
             let chosen = same_family(own, name);
-            ring(list_row(&format!("{prefix}-option-{name}"), label, chosen))
-                .on_click(click_stop(
-                    list.stop(),
-                    Aim::Family(FamilyPick::Family(name.clone())),
-                    cx,
-                ))
-                .into_any_element()
+            ring(list_row(
+                &format!("{prefix}-option-{name}"),
+                label,
+                chosen,
+                &t,
+            ))
+            .on_click(click_stop(
+                list.stop(),
+                Aim::Family(FamilyPick::Family(name.clone())),
+                cx,
+            ))
+            .into_any_element()
         }
     }
 }
 
 /// A clickable row of a list, `✓` before the chosen one.
-fn list_row(selector: &str, label: impl Into<SharedString>, chosen: bool) -> Stateful<Div> {
+fn list_row(
+    selector: &str,
+    label: impl Into<SharedString>,
+    chosen: bool,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -1630,7 +1651,7 @@ fn list_row(selector: &str, label: impl Into<SharedString>, chosen: bool) -> Sta
         .py(px(2.0))
         .rounded(px(ROW_RADIUS))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(POPOVER_HOVER)))
+        .hover(move |style| style.bg(gpui::rgb(t.popover_hover)))
         .child(
             div()
                 .flex_none()
@@ -1647,6 +1668,7 @@ fn size_section(
     focus: Option<AppearanceStop>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let focused = |stop| focus == Some(stop);
     let down = dialog_button(
         AppearanceStop::SizeDown.selector(),
@@ -1674,7 +1696,7 @@ fn size_section(
                 .child(value),
         )
         .child(up);
-    let label = field_label("Font size");
+    let label = field_label("Font size", &t);
     div()
         .flex()
         .flex_col()
@@ -1690,7 +1712,7 @@ fn size_section(
             cx,
         ))
         .child(stepper)
-        .child(hint_line("appearance-size-hint", view.size_hint()))
+        .child(hint_line("appearance-size-hint", view.size_hint(), &t))
 }
 
 /// The bold checkbox, ticked while the level resolves to bold.
@@ -1700,6 +1722,7 @@ fn bold_section(
     focus: Option<AppearanceStop>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let checkbox = checkbox_row(
         AppearanceStop::Bold.selector(),
         view.resolved.font_bold.value,
@@ -1722,7 +1745,7 @@ fn bold_section(
             &view.own,
             cx,
         ))
-        .child(hint_line("appearance-bold-hint", view.bold_hint()))
+        .child(hint_line("appearance-bold-hint", view.bold_hint(), &t))
 }
 
 /// Field stop `stop`'s text field in its frame, tagged `<selector>`. The
@@ -1754,28 +1777,28 @@ fn input_box(
 }
 
 /// A row's muted `Resolved: … from …` line.
-fn hint_line(selector: &'static str, text: String) -> Div {
+fn hint_line(selector: &'static str, text: String, t: &UiTheme) -> Div {
     div()
         .debug_selector(move || selector.to_owned())
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(text)
 }
 
 /// A link-style button: plain text that lights up under the pointer; a
 /// disabled one is dimmed, with the default cursor and no hover.
-fn link(selector: &'static str, label: &'static str, enabled: bool) -> Stateful<Div> {
+fn link(selector: &'static str, label: &'static str, enabled: bool, t: &UiTheme) -> Stateful<Div> {
     let link = div()
         .id(selector)
         .debug_selector(move || selector.to_owned())
         .px(px(4.0))
         .rounded(px(LINK_RADIUS))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(label);
     if enabled {
         link.cursor_pointer().hover(|style| {
             style
-                .bg(gpui::rgb(POPOVER_HOVER))
-                .text_color(gpui::rgb(TEXT))
+                .bg(gpui::rgb(t.popover_hover))
+                .text_color(gpui::rgb(t.text))
         })
     } else {
         link.opacity(0.5).cursor_default()
@@ -1789,9 +1812,10 @@ pub(crate) fn close_footer(
     focused: bool,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let ring = focus_ring(ButtonSize::Regular.radius(), &theme(cx))
         .debug_selector(move || format!("{selector}-ring"));
-    dialog_footer().child(
+    dialog_footer(&t).child(
         dialog_button(
             selector,
             "Close".to_owned(),

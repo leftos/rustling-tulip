@@ -2748,7 +2748,7 @@ fn t1_popped<'a>(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -
 
 /// The fill of pane `pane_id`'s header, which shows its tab's focus.
 fn header_fill(h: &mut Harness<'_>, pane_id: &'static str) -> Option<u32> {
-    h.root(move |root, _| root.pane_header_fill(pane_id))
+    h.root(move |root, cx| root.pane_header_fill(pane_id, cx))
 }
 
 #[gpui::test]

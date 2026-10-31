@@ -25,7 +25,7 @@ fn inside(outer: &Bounds<Pixels>, inner: &Bounds<Pixels>) -> bool {
 
 /// The fill the main area paints.
 fn main_fill(h: &mut Harness<'_>) -> u32 {
-    h.root(|root, _| root.main_area_fill())
+    h.root(rustling_tulip_native::RootView::main_area_fill)
 }
 
 #[gpui::test]

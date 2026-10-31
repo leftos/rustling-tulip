@@ -20,9 +20,6 @@ use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
-use crate::palette::{
-    ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2, TRANSPARENT,
-};
 use crate::popouts::{self, PopoutKey};
 use crate::session_actions::StopPlace;
 use crate::session_menu::{BorderedButton, bordered_button};
@@ -36,10 +33,8 @@ use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{self, PaneBinding, TabsModel};
 use crate::term::prompt_nav::Dir;
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
-use crate::ui_theme::theme;
-use crate::{
-    BORDER, Drag, MUTED, PANE_GUTTER, RootView, TEXT, UI_TEXT_SIZE, new_request_id, tooltip,
-};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{Drag, PANE_GUTTER, RootView, UI_TEXT_SIZE, new_request_id, tooltip};
 
 /// Why a repo-tied spawn button is disabled.
 pub(crate) const NO_REPOS_TIP: &str = "Register a repo to spawn repo-tied sessions.";
@@ -621,17 +616,17 @@ impl RootView {
     /// The colours pane `pane_id` paints on its edges: its border and its
     /// accent line.
     #[must_use]
-    pub fn pane_frame_colors(&self, pane_id: &str) -> Option<PaneFrame> {
+    pub fn pane_frame_colors(&self, pane_id: &str, cx: &App) -> Option<PaneFrame> {
         let (session, focused) = self.pane_place(pane_id)?;
-        Some(self.frame_colors(pane_id, session, focused))
+        Some(self.frame_colors(pane_id, session, focused, &theme(cx)))
     }
 
     /// The fill of pane `pane_id`'s header, `0xRRGGBB`: raised while the
     /// pane has its tab's focus, the surface otherwise.
     #[must_use]
-    pub fn pane_header_fill(&self, pane_id: &str) -> Option<u32> {
+    pub fn pane_header_fill(&self, pane_id: &str, cx: &App) -> Option<u32> {
         let (_, focused) = self.pane_place(pane_id)?;
-        Some(header_fill(focused))
+        Some(header_fill(focused, &theme(cx)))
     }
 
     /// The session pane `pane_id` shows, and whether the pane has its
@@ -650,13 +645,19 @@ impl RootView {
     /// The colours pane `pane_id`, showing `session`, paints on its edges,
     /// from the accent its last apply resolved; a pane without a terminal
     /// yet resolves its session's.
-    fn frame_colors(&self, pane_id: &str, session: Option<&str>, focused: bool) -> PaneFrame {
+    fn frame_colors(
+        &self,
+        pane_id: &str,
+        session: Option<&str>,
+        focused: bool,
+        t: &UiTheme,
+    ) -> PaneFrame {
         let accent = self.panes.get(pane_id).map_or_else(
             || self.sidebar.appearance(session).accent.value,
             |slot| slot.accent,
         );
         PaneFrame {
-            border: if focused { accent } else { BORDER },
+            border: if focused { accent } else { t.border },
             accent_line: accent,
         }
     }
@@ -1058,8 +1059,9 @@ impl RootView {
     /// disabled. Before the
     /// connection, the tabs and the repos are in, only "No tab open".
     fn no_tab(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
         if !self.no_tab_choices_shown() {
-            return muted_note("No tab open").into_any_element();
+            return muted_note("No tab open", &t).into_any_element();
         }
         let has_repos = self.has_repos();
         let spawn = BorderedButton {
@@ -1091,7 +1093,7 @@ impl RootView {
                 this.add_repo(window, cx);
             }));
         }
-        spawn_choices("No tab open", buttons)
+        spawn_choices("No tab open", buttons, &t)
             .when(!has_repos, |note| {
                 note.child(
                     div()
@@ -1111,6 +1113,7 @@ impl RootView {
         focus: Option<FocusHandle>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         let has_repos = self.has_repos();
         let pending = self.spawns.aims_at(tab_id, pane_id);
         let refused = self.pane_spawn_refusal(tab_id);
@@ -1149,7 +1152,7 @@ impl RootView {
             this.shell_in_pane(&ids.0, &ids.1, window, cx);
         });
         let ids = (tab_id.to_owned(), pane_id.to_owned());
-        let body = spawn_choices("No session", [spawn, shell]).on_mouse_down(
+        let body = spawn_choices("No session", [spawn, shell], &t).on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.open_empty_pane_menu(&ids.0, &ids.1, event.position, window, cx);
@@ -1170,6 +1173,7 @@ impl RootView {
     /// The active tab: its split tree, a diff or viewer tab's body, the card
     /// a popped-out tab leaves, or the spawn choices when there is no tab.
     pub(crate) fn grid_area(&self, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let content = match self.tabs.active_tab() {
             None => self.no_tab(cx),
             Some(tab) => match &tab.content {
@@ -1180,13 +1184,15 @@ impl RootView {
                 }
                 TabContent::Diff { .. } => self
                     .diff_tab_element(&tab.id)
-                    .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
+                    .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT, &t).into_any_element()),
                 TabContent::Viewer { .. } => self
                     .viewer_tab_element(&tab.id, cx)
                     .unwrap_or_else(|| div().into_any_element()),
                 TabContent::Grid { grid } => self.tab_grid(&tab.id, grid, self.layouts.main(), cx),
                 TabContent::Dashboard => self.dashboard_tab_element(cx),
-                TabContent::Unknown => muted_note("This tab needs a newer app.").into_any_element(),
+                TabContent::Unknown => {
+                    muted_note("This tab needs a newer app.", &t).into_any_element()
+                }
             },
         };
         grid_frame(content, cx)
@@ -1264,11 +1270,12 @@ impl RootView {
         here: WindowId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         let active = self.divider_highlighted(tab_id, path, here);
         let name = format!("divider-{tab_id}-{path:?}");
         let id = ElementId::Name(SharedString::from(name.clone()));
         let (tab_id, split_path) = (tab_id.to_owned(), path.to_vec());
-        gutter_handle(id, direction == SplitDirection::Horizontal, active)
+        gutter_handle(id, direction == SplitDirection::Horizontal, active, &t)
             .debug_selector(|| name)
             .on_mouse_down(
                 MouseButton::Left,
@@ -1293,6 +1300,7 @@ impl RootView {
         session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         if let Some(key) = self.popouts.popped_key(pane_id).cloned() {
             // One terminal draws in one window: the pop-out's.
             return self.popped_card(key, pane_id, session_id, cx);
@@ -1322,7 +1330,7 @@ impl RootView {
             .child(body)
             .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
-        let colors = self.frame_colors(pane_id, session_id, focused);
+        let colors = self.frame_colors(pane_id, session_id, focused, &t);
         let overlay = self
             .pane_drop_overlay(cx)
             .filter(|(target, _)| target == pane_id)
@@ -1332,12 +1340,13 @@ impl RootView {
                     edge,
                     colors.accent_line,
                     crate::fonts::ui_family(cx),
+                    &t,
                 )
             });
         let frame = format!("pane-frame-{pane_id}");
         let header = self
             .pane_header(tab_id, pane_id, session_id, colors.accent_line, cx)
-            .bg(gpui::rgb(header_fill(focused)))
+            .bg(gpui::rgb(header_fill(focused, &t)))
             .child(
                 div()
                     .absolute()
@@ -1373,6 +1382,7 @@ impl RootView {
         session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         let label = session_id
             .and_then(|id| self.sidebar.session(id))
             .map_or_else(
@@ -1400,13 +1410,14 @@ impl RootView {
             card: format!("pane-popped-{pane_id}"),
             label: format!("popped-label-{pane_id}"),
         };
-        popped_out_card(names, label, [focus, dock])
+        popped_out_card(names, label, [focus, dock], &t)
     }
 
     /// The card a popped-out tab leaves in the main window in place of its
     /// grid: the tab's name, the popped-out note, Focus window and Dock
     /// back. It holds no focus, so keys typed while it shows go nowhere.
     fn popped_tab_card(tab: &TabEntry, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
         let key = PopoutKey::Tab {
             tab_id: tab.id.clone(),
         };
@@ -1431,7 +1442,7 @@ impl RootView {
             card: format!("popped-tab-{}", tab.id),
             label: format!("popped-tab-label-{}", tab.id),
         };
-        popped_out_card(names, tab.name.clone(), [focus, dock])
+        popped_out_card(names, tab.name.clone(), [focus, dock], &t)
     }
 
     /// Why an empty pane of `tab_id` offers no spawn: a popped-out tab
@@ -1467,12 +1478,13 @@ impl RootView {
         here: WindowId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let t = theme(cx);
         let tab = self.tabs.tab(tab_id)?;
         let content = match &tab.content {
             TabContent::Grid { grid } => self.tab_grid(tab_id, grid, here, cx),
             TabContent::Diff { .. } => self
                 .diff_tab_element(tab_id)
-                .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
+                .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT, &t).into_any_element()),
             TabContent::Viewer { .. } | TabContent::Dashboard | TabContent::Unknown => return None,
         };
         let name = format!("popout-tab-title-{tab_id}");
@@ -1481,7 +1493,7 @@ impl RootView {
             .flex_none()
             .whitespace_nowrap()
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(gpui::rgb(TEXT))
+            .text_color(gpui::rgb(t.text))
             .child(tab.name.clone())
             .into_any_element();
         let dock = Self::popout_tab_dock_back(tab_id, cx);
@@ -1495,6 +1507,7 @@ impl RootView {
     /// daemon has dropped the session, the not-found note under a toolbar
     /// holding only Close window.
     fn popped_session(&self, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
         let slot_id = popouts::session_slot_id(session_id);
         let Some(session) = self.sidebar.session(session_id) else {
             let toolbar = popout_toolbar_row(
@@ -1504,7 +1517,7 @@ impl RootView {
                 cx,
             );
             let name = format!("popout-not-found-{slot_id}");
-            let note = muted_note(popouts::SESSION_NOT_FOUND).debug_selector(|| name);
+            let note = muted_note(popouts::SESSION_NOT_FOUND, &t).debug_selector(|| name);
             return popout_column(toolbar, note.into_any_element());
         };
         let parts = header_parts(session, self.sidebar.is_unseen(session_id), &self.agents);
@@ -1590,6 +1603,7 @@ impl RootView {
         session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         let parts = self.popout_header_parts(pane_id);
         let mut title = header_title(pane_id, parts.as_ref(), cx);
         if let Some(docked) = self.popout_docked_in(pane_id) {
@@ -1598,7 +1612,7 @@ impl RootView {
                 .debug_selector(|| name)
                 .flex_none()
                 .whitespace_nowrap()
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(docked)
                 .into_any_element();
             // After the glyph and the name, before the chips.
@@ -1623,6 +1637,7 @@ impl RootView {
         accent: u32,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let t = theme(cx);
         let parts = session_id
             .and_then(|id| self.sidebar.session(id))
             .map(|session| {
@@ -1694,9 +1709,9 @@ impl RootView {
             .pr(px(8.0))
             .rounded_t(px(PANE_RADIUS))
             .border_b_1()
-            .border_color(gpui::rgb(LINE))
+            .border_color(gpui::rgb(t.line))
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT_2))
+            .text_color(gpui::rgb(t.text_2))
             .children(header_title(pane_id, parts.as_ref(), cx))
             .child(div().flex_1())
             .children(controls)
@@ -1966,8 +1981,10 @@ impl RootView {
         slot: Option<&PaneSlot>,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         let session = self.sidebar.session(session_id);
-        let note = muted_note(body_note(session)).debug_selector(|| format!("pane-note-{pane_id}"));
+        let note =
+            muted_note(body_note(session), &t).debug_selector(|| format!("pane-note-{pane_id}"));
         let headless = session.is_some_and(|session| session.mode == SessionMode::Headless);
         match slot.filter(|_| headless) {
             Some(slot) => {
@@ -2165,8 +2182,8 @@ fn member_tip(name: String, member: &SessionMember) -> String {
 }
 
 /// A pane header's fill: raised while the pane has its tab's focus.
-fn header_fill(focused: bool) -> u32 {
-    if focused { RAISED } else { SURFACE }
+fn header_fill(focused: bool, t: &UiTheme) -> u32 {
+    if focused { t.raised } else { t.surface }
 }
 
 /// The header's left side: the status glyph, the name and the chips, or
@@ -2176,6 +2193,7 @@ fn header_title(
     parts: Option<&PaneHeaderParts>,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
+    let t = theme(cx);
     let title_id = format!("pane-title-{pane_id}");
     let selector = title_id.clone();
     let title = div()
@@ -2191,7 +2209,7 @@ fn header_title(
     let title = title
         .text_size(px(TITLE_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(gpui::rgb(TEXT));
+        .text_color(gpui::rgb(t.text));
     let mut out = vec![
         div()
             .id(SharedString::from(format!("pane-status-{pane_id}")))
@@ -2231,6 +2249,7 @@ fn header_title(
 /// A 20 px Geist Mono chip: the agent runtime washed in the accent,
 /// repo:branch with its repo name bright, trusted outlined, the rest filled.
 fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let name = format!("pane-chip-{pane_id}-{}", chip.kind.name());
     let selector = name.clone();
     let base = div()
@@ -2247,12 +2266,12 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
         .px(px(7.0))
         .rounded(px(CHIP_RADIUS))
         .border_1()
-        .border_color(gpui::rgba(TRANSPARENT))
-        .bg(gpui::rgb(CHIP))
+        .border_color(gpui::rgba(t.transparent))
+        .bg(gpui::rgb(t.chip))
         .font_family(DEFAULT_FAMILY)
         .font_weight(FontWeight::NORMAL)
         .text_size(px(CHIP_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .tooltip(tooltip(chip.tip.clone()));
     let base = if chip.kind == HeaderChipKind::Branch {
         base
@@ -2264,17 +2283,17 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
         HeaderChipKind::Runtime => if chip.accent {
             base.bg(gpui::Rgba {
                 a: RUNTIME_WASH_ALPHA,
-                ..gpui::rgb(ACCENT)
+                ..gpui::rgb(t.accent)
             })
-            .text_color(gpui::rgb(ACCENT))
+            .text_color(gpui::rgb(t.accent))
         } else {
             base
         }
         .child(text),
-        HeaderChipKind::Branch => branch_chip(&name, base, text),
+        HeaderChipKind::Branch => branch_chip(&name, base, text, &t),
         HeaderChipKind::Trusted => base
-            .bg(gpui::rgba(TRANSPARENT))
-            .border_color(gpui::rgb(LINE_STRONG))
+            .bg(gpui::rgba(t.transparent))
+            .border_color(gpui::rgb(t.line_strong))
             .child(text),
         HeaderChipKind::More | HeaderChipKind::Provider => base.child(text),
     }
@@ -2285,13 +2304,16 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
 /// the first part of a header to give way when the header runs short: it
 /// shrinks and truncates with `…` before the title does, its tooltip
 /// keeping the whole text. `id` names its text for the ellipsis probe.
-fn branch_chip(id: &str, base: Stateful<Div>, text: String) -> Stateful<Div> {
+fn branch_chip(id: &str, base: Stateful<Div>, text: String, t: &UiTheme) -> Stateful<Div> {
     let highlights = text.find(':').map(|colon| {
         let color = |token: u32| HighlightStyle {
             color: Some(gpui::rgb(token).into()),
             ..HighlightStyle::default()
         };
-        [(0..colon, color(TEXT)), (colon..colon + 1, color(SUBTLE))]
+        [
+            (0..colon, color(t.text)),
+            (colon..colon + 1, color(t.subtle)),
+        ]
     });
     let label = StyledText::new(text).with_highlights(highlights.into_iter().flatten());
     let mut chip = base
@@ -2349,7 +2371,7 @@ fn status_label(status: SessionStatus, background: bool) -> &'static str {
 }
 
 /// Muted text centred in the space it is given.
-fn muted_note(text: &'static str) -> Div {
+fn muted_note(text: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_1()
@@ -2357,14 +2379,18 @@ fn muted_note(text: &'static str) -> Div {
         .items_center()
         .justify_center()
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(text)
 }
 
 /// A muted `heading` over a row of `buttons`, centred in the space it is
 /// given.
-fn spawn_choices(heading: &'static str, buttons: impl IntoIterator<Item = Stateful<Div>>) -> Div {
-    muted_note(heading).flex_col().gap(px(8.0)).child(
+fn spawn_choices(
+    heading: &'static str,
+    buttons: impl IntoIterator<Item = Stateful<Div>>,
+    t: &UiTheme,
+) -> Div {
+    muted_note(heading, t).flex_col().gap(px(8.0)).child(
         div()
             .flex()
             .flex_wrap()
@@ -2382,6 +2408,7 @@ fn header_button(
     tip: &'static str,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let name = format!("{action}-{pane_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -2396,9 +2423,9 @@ fn header_button(
         .justify_center()
         .size(px(HEADER_BUTTON_SIZE))
         .rounded(px(HEADER_BUTTON_RADIUS))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover)).text_color(gpui::rgb(t.text)))
         .tooltip(tooltip(tip))
         .child(glyph)
 }
@@ -2428,14 +2455,14 @@ fn prompt_button(pane_id: &str, dir: Dir, enabled: bool, cx: &mut Context<RootVi
 }
 
 /// The gutter between two pane cards: transparent until hovered or
-/// dragged, when it shows [`HOVER`]. A vertical line between side-by-side
+/// dragged, when it shows `t.hover`. A vertical line between side-by-side
 /// panes, a horizontal one between stacked panes.
-fn gutter_handle(id: ElementId, vertical_line: bool, active: bool) -> Stateful<Div> {
+fn gutter_handle(id: ElementId, vertical_line: bool, active: bool, t: &UiTheme) -> Stateful<Div> {
     let handle = div()
         .id(id)
         .flex_none()
-        .hover(|style| style.bg(gpui::rgb(HOVER)))
-        .when(active, |handle| handle.bg(gpui::rgb(HOVER)));
+        .hover(move |style| style.bg(gpui::rgb(t.hover)))
+        .when(active, move |handle| handle.bg(gpui::rgb(t.hover)));
     if vertical_line {
         handle
             .w(px(PANE_GUTTER))
@@ -2449,9 +2476,11 @@ fn gutter_handle(id: ElementId, vertical_line: bool, active: bool) -> Stateful<D
     }
 }
 
-/// The fill of a dragged pane's ghost and of the swap badge: the ground at
-/// 78%, as `0xRRGGBBAA`.
-const GHOST_FILL: u32 = (GROUND << 8) | 0xc7;
+/// The fill of a dragged pane's ghost and of the swap badge in `t`: the
+/// ground at 78%, as `0xRRGGBBAA`.
+fn ghost_fill(t: &UiTheme) -> u32 {
+    (t.ground << 8) | 0xc7
+}
 /// How strongly a half or the centre box is tinted with the accent.
 const DROP_TINT_ALPHA: f32 = 0.22;
 /// How strongly an outer strip is tinted with the accent.
@@ -2472,31 +2501,42 @@ struct PaneGhost {
 
 impl Render for PaneGhost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
         div().child(
-            ghost_pill(self.label.clone(), self.accent, crate::fonts::ui_family(cx))
-                .debug_selector(|| "pane-drag-ghost".to_owned())
-                .absolute()
-                .left(self.offset.x)
-                .top(self.offset.y),
+            ghost_pill(
+                self.label.clone(),
+                self.accent,
+                crate::fonts::ui_family(cx),
+                &t,
+            )
+            .debug_selector(|| "pane-drag-ghost".to_owned())
+            .absolute()
+            .left(self.offset.x)
+            .top(self.offset.y),
         )
     }
 }
 
 /// A translucent pill with `text`, edged in `accent`: the drag ghost and the
 /// swap badge, drawn in the interface's `family`.
-fn ghost_pill(text: impl Into<SharedString>, accent: u32, family: SharedString) -> Div {
+fn ghost_pill(
+    text: impl Into<SharedString>,
+    accent: u32,
+    family: SharedString,
+    t: &UiTheme,
+) -> Div {
     div()
         .flex_none()
         .px(px(10.0))
         .py(px(3.0))
         .rounded_full()
-        .bg(gpui::rgba(GHOST_FILL))
+        .bg(gpui::rgba(ghost_fill(t)))
         .border_1()
         .border_color(gpui::rgb(accent))
         .whitespace_nowrap()
         .font_family(family)
         .text_size(px(GHOST_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
         .child(text.into())
 }
 
@@ -2508,6 +2548,7 @@ fn popout_toolbar_row(
     controls: Vec<AnyElement>,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let name = format!("popout-toolbar-{slot_id}");
     div()
         .debug_selector(|| name)
@@ -2519,10 +2560,10 @@ fn popout_toolbar_row(
         .pl(px(12.0))
         .pr(px(8.0))
         .border_b_1()
-        .border_color(gpui::rgb(LINE))
-        .bg(gpui::rgb(RAISED))
+        .border_color(gpui::rgb(t.line))
+        .bg(gpui::rgb(t.raised))
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .children(title)
         .child(div().flex_1())
         .child(header_controls(cx).children(controls))
@@ -2538,7 +2579,12 @@ struct CardNames {
 
 /// A card standing in for content a pop-out window draws: `label` over the
 /// popped-out note and `buttons`.
-fn popped_out_card(names: CardNames, label: String, buttons: [Stateful<Div>; 2]) -> AnyElement {
+fn popped_out_card(
+    names: CardNames,
+    label: String,
+    buttons: [Stateful<Div>; 2],
+    t: &UiTheme,
+) -> AnyElement {
     let CardNames {
         card,
         label: label_name,
@@ -2550,7 +2596,7 @@ fn popped_out_card(names: CardNames, label: String, buttons: [Stateful<Div>; 2])
         .whitespace_nowrap()
         .text_size(px(TITLE_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
         .child(label);
     let buttons = div().flex().justify_center().gap(px(6.0)).children(buttons);
     div()
@@ -2564,10 +2610,10 @@ fn popped_out_card(names: CardNames, label: String, buttons: [Stateful<Div>; 2])
         .px(px(12.0))
         .rounded(px(PANE_RADIUS))
         .border_1()
-        .border_color(gpui::rgb(LINE))
-        .bg(gpui::rgb(SURFACE))
+        .border_color(gpui::rgb(t.line))
+        .bg(gpui::rgb(t.surface))
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(heading)
         .child(POPPED_OUT_NOTE)
         .child(buttons)
@@ -2645,6 +2691,7 @@ fn drop_overlay(
     edge: PaneDropEdge,
     accent: u32,
     family: SharedString,
+    t: &UiTheme,
 ) -> AnyElement {
     let overlay = drag::drop_overlay(edge, tabs::Rect::new(0.0, 0.0, 1.0, 1.0));
     let (alpha, border) = match overlay.kind {
@@ -2672,7 +2719,7 @@ fn drop_overlay(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(ghost_pill(drag::SWAP_BADGE, accent, family))
+                .child(ghost_pill(drag::SWAP_BADGE, accent, family, t))
         })
         .into_any_element()
 }
