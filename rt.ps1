@@ -140,6 +140,10 @@ param(
     # `test`: check tools/test-map.json covers every native file and names real binaries.
     [switch]$Validate,
 
+    # `native-e2e` internal: the re-entry that builds and runs only the sealed-secret
+    # spec on this PC (.gate/local.toml keeps it here; it needs Credential Manager).
+    [switch]$SealedSecretOnly,
+
     # Extra arguments forwarded to the underlying tool (e.g. `cargo nextest
     # run` filters). Only meaningful for `launch`, `restart`, `test`, `clippy`,
     # `fmt`, `native`, `native-shot` (the view).
@@ -993,11 +997,53 @@ function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slo
 # That build lands only in target\test-release, which the client's daemon
 # lookup never searches; -Release would put it in target\release, which it
 # does, so it is refused before anything builds.
+#
+# The sealed-secret spec stores a secret in Credential Manager, which a routed
+# run's ssh logon has none of, so it skips there (GATE_BOX_JOB). Outside a gate,
+# native-e2e therefore makes two gate calls: the full e2e, which may route, and
+# the -SealedSecretOnly re-entry, which .gate/local.toml keeps on this PC. Under
+# a gate it runs the full e2e directly, as one call.
 function Invoke-NativeE2e {
     if ($Release) {
         throw 'native-e2e builds a test-only daemon (e2e-loopback-peers); it runs in the test-release profile only, so drop -Release.'
     }
-    Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh') -Slot heavy -Name e2e -DaemonFeatures @('e2e-loopback-peers')
+    if ($SealedSecretOnly) {
+        Invoke-SealedSecretSpec
+        return
+    }
+    if (Test-UnderGate) {
+        Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh') -Slot heavy -Name e2e -DaemonFeatures @('e2e-loopback-peers')
+        return
+    }
+    Assert-Nextest
+    Invoke-Gated -Slot heavy -Name e2e -Command @('pwsh', '-NoProfile', '-File', $PSCommandPath, 'native-e2e')
+    $e2eExit = $LASTEXITCODE
+    Write-Host "==> Running $SealedSecretSpec on this PC..." -ForegroundColor Cyan
+    Invoke-Gated -Slot heavy -Name e2e-sealed -Command @('pwsh', '-NoProfile', '-File', $PSCommandPath, 'native-e2e', '-SealedSecretOnly')
+    $sealedExit = $LASTEXITCODE
+    if ($e2eExit -ne 0) { exit $e2eExit }
+    exit $sealedExit
+}
+
+# The spec that needs this PC's Credential Manager.
+$SealedSecretSpec = 'live_a_sealed_secret_reaches_the_child_and_no_file'
+
+# Builds the e2e daemon and tracer and runs only $SealedSecretSpec, both in one
+# gate call (the re-entry) so the spec finds the daemon it built.
+function Invoke-SealedSecretSpec {
+    Assert-Nextest
+    if (-not (Test-UnderGate)) {
+        Invoke-Gated -Slot heavy -Name e2e-sealed -Command @('pwsh', '-NoProfile', '-File', $PSCommandPath, 'native-e2e', '-SealedSecretOnly')
+        exit $LASTEXITCODE
+    }
+    Build-DaemonAndTracer 'test-release' -Features @('e2e-loopback-peers')
+    $specArgs = @(
+        'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
+        '-p', 'rustling-tulip-native', '--cargo-profile', 'test-release', '--run-ignored', 'only',
+        '--test', 'e2e_recover', '-E', "test(=$SealedSecretSpec)"
+    )
+    Invoke-Gated -Slot heavy -Name e2e-sealed -Command $specArgs
+    Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($SealedSecretSpec)"
 }
 
 function Invoke-NativeSmoke { Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke }
@@ -1069,7 +1115,10 @@ Commands:
   native-e2e Build daemon (with e2e-loopback-peers) + tracer, then run
              the native client's end-to-end specs (e2e_live, e2e_recover,
              e2e_remote, e2e_ssh) against an isolated daemon (needs `node`).
-             Test-release only: refuses -Release.
+             Test-release only: refuses -Release. Then runs the sealed-secret
+             spec again on this PC in its own gate call (it needs Credential
+             Manager and skips in a routed run); -SealedSecretOnly is that
+             internal re-entry, kept local by .gate/local.toml.
   native-smoke
              Build daemon + tracer, then run the native client's OS smoke
              specs in a cloaked window that never takes focus; checks it
