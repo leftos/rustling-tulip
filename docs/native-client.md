@@ -172,6 +172,16 @@ This doc records the decisions a change to the client needs to know; what each f
 
   `+ Shell` on a remote header sends a plain shell with no folder straight to that host (`quick_shell_on`); This PC's is the toolbar's quick shell. A remote session's pane header and pop-out header carry a host chip with the host's short name (full name on hover), and a tab whose session panes all sit on one remote host shows it on its pill (`sole_remote_host`). This PC never gets a chip, and neither does a tab that mixes hosts.
 
+  **Mixed tabs** (`tabs.rs` `SessionRef`, `hosts.rs` `HostSender`, `spawns.rs`, `drag.rs`): a pane names its session as a (host, id) pair, `SessionRef`, so two hosts' sessions with one id are two panes, two tab-pill counts and two slots.
+
+  Layout messages (`CreateTab`, `SplitPane`, `MovePane`, `ExtractToNewTab` and the rest) go to This PC with the session's host in the message; session messages go to the session's own host. A remote spawn or duplicate is placed into This PC's layout, and a restart keeps its original host. A remote session drags into any tab, and the sidebar leaf, the Move to ▸ menu and undo all compare pairs.
+
+  A pane's input, resize and query replies go to its own host through that host's `HostSender`, a handle the host's connection fills and clears, so a reconnect needs no pane rebuilt. A remote host's panes re-attach once, at its first `Sessions` after `Welcome`. A remote host's `Welcome` leaves This PC's pending diff and viewer opens alone, and the Fetch file dialog closes and deletes its part when the host it fetches from drops.
+
+  **Pruning** (`hosts.rs` `prune_remote_panes`, `forget_host_panes`): when a remote host's fresh `Sessions` omits a session a pane references, the client sends `ForgetHostSessions` to This PC with the missing ids. It is level-triggered and sent once per (host, id) pair per This PC connection, and never for a host that is offline, switched off, a duplicate or not approved.
+
+  Forget in Connections sends `ForgetHostSessions` with `all: true` (queued while This PC is offline), and a sweep once per This PC connection forgets every host that is no longer saved. `native.log` records at info "forgetting every pane of the host on This PC" (field `host`) and "forgetting the panes of sessions the host no longer lists" (fields `host`, `missing`).
+
   **Host picker** (`connection_picker.rs` model, plain Rust; `connection_picker_view.rs` view): the footer's `Connections` button, left of the daemon pill on every target, and a `Connections` link beside `Reconnect now` in the first-connect overlay open a centred modal drawn above that overlay, and no key reaches a layer under it.
 
   The modal is one 440 px panel kept 24 px inside the window, its list scrolling, in three sections: "This PC", "Saved hosts" (with its count; hidden when empty) and "On your tailnet" (its note reads "N online", "Looking for your devices…" or the scan error; hidden once a scan offers no unsaved peer). Every host is a row with a kind icon (`assets/icons/host-pc.svg`, `host-tailnet.svg`, `host-ssh.svg`): the name (a tailnet suffix greyed) over a second line ("This PC's daemon · 7 sessions", "Tailnet · port 8787 · 3 sessions last time", "SSH · rustling-tulipd bridge", "Online · port 8787 · connecting saves it"), and a state chip. A connected host shows its live session count without "last time". A saved host's row also has an `On` switch (`connections-row-{key}-enabled`) and, on a third line when they apply, `Pair` and `Reconnect now` buttons.
@@ -182,7 +192,9 @@ This doc records the decisions a change to the client needs to know; what each f
 
   One `+ Add host` opens an inline form with a Tailnet | SSH switch. Tailnet has Name and Port (prefilled 8787) fields with Cancel and `Add and connect`, and a refusal shows under them and sends nothing. Each mode keeps its own typed fields when the switch moves away; Cancel and Esc drop the typed text.
 
-  Forget sits on a saved row and shows on hover or when Tab reaches Forget itself (focus on the row keeps the chip); while hidden it still takes a click. It rewrites `saved_hosts`; for a tailnet host it also deletes the host's device token (a failure warns "deleting the forgotten host's device token: …" and toasts "Couldn't forget this host's device token"), and for an SSH host it deletes no token and drops the `ssh:<name>` session count. Forget also drops the host's connection, sidebar rows and session count. An SSH host and a tailnet host of one name are listed and forgotten separately.
+  Forget sits on a saved row and shows on hover or when Tab reaches Forget itself (focus on the row keeps the chip); while hidden it still takes a click. It rewrites `saved_hosts`; for a tailnet host it also deletes the host's device token (a failure warns "deleting the forgotten host's device token: …" and toasts "Couldn't forget this host's device token"), and for an SSH host it deletes no token and drops the `ssh:<name>` session count.
+
+  Forget also drops the host's connection, sidebar rows and session count, and sends `ForgetHostSessions` with `all: true` to This PC so the host's panes leave every tab. An SSH host and a tailnet host of one name are listed and forgotten separately.
 
   The SSH mode of the add form has Host (placeholder `devbox or user@host`, an alias from the SSH config or `user@host`) and Remote command (placeholder `rustling-tulipd bridge`) fields, the test result line and the buttons Cancel, `Test connection` and `Add and connect`. Refusals show under the fields and send nothing: "Type an SSH host: an alias from your SSH config, or user@host.", "An SSH host cannot start with a dash.", "An SSH host cannot contain spaces or control characters."
 
@@ -769,9 +781,13 @@ A pop-out's terminal or diff takes its window's keyboard when the window opens a
 
 Menus, dialogs and toasts open in the window that asked (`overlay_owner.rs` records each overlay's window, and a closing window drops its overlays). A toast shows in the window the user last interacted with, else the main window.
 
-`native-ui.json` keeps the open pop-outs in open order, each with its key and its window's place (`window_state.rs`), saved as the window moves or resizes with the layout's 500 ms debounce. Once per launch, when the tabs and sessions have both arrived (a remote session's pop-out waits for its host's session list), the client reopens them in saved order behind the main window at their saved places, on the primary display when the monitor is gone and at the cascade place when the entry never moved.
+The terminal slot a session pop-out draws is `popout:<host key>:<id>` for a remote session (This PC's is `popout:<id>`), and the id is read after the last `:`, since an SSH host key holds colons, so one id on two hosts is two slots. A session pop-out's saved key carries the host as well.
 
-A restore leaves the keyboard in the main window and raises it only if it was active, and an entry whose pane, tab or session is gone is dropped (a pane that moved reopens under its new tab). A reconnect reopens nothing, and a switch of host skips the restore until the first pop-out opens or closes there.
+`native-ui.json` keeps the open pop-outs in open order, each with its key and its window's place (`window_state.rs`), saved as the window moves or resizes with the layout's 500 ms debounce.
+
+Once per launch, when the tabs and sessions have both arrived (a remote session's pop-out, and a pane or tab pop-out holding a remote session, waits for that host's session list), the client reopens them in saved order behind the main window at their saved places, on the primary display when the monitor is gone and at the cascade place when the entry never moved.
+
+A restore leaves the keyboard in the main window and raises it only if it was active, and an entry whose pane, tab or session is gone is dropped (a pane that moved reopens under its new tab). A saved pane pop-out whose remote session is gone, or is being forgotten, never opens; `native.log` records at info "a saved pop-out's pane is gone or being forgotten; dropped". A reconnect reopens nothing, and a switch of host skips the restore until the first pop-out opens or closes there.
 
 Quitting closes the pop-outs with the app after saving the open set, and the exit dialog counts sessions only. Closing every window, the main one included, keeps the pop-outs for the next launch. A missing `popouts` key or a value that is not a list loads as empty, and an entry whose key does not decode is dropped alone.
 
