@@ -173,7 +173,6 @@ fn a_killed_ssh_dims_only_its_host_and_reconnects(cx: &mut TestAppContext) {
     let local_from = local.states().len();
     let states_from = remote.states().len();
     let from = remote.message_count();
-    let frame = rows(&mut h, &remote_pane);
     // Refused logins hold the host down until the spec lets it back in, so
     // the down state is observed whatever the reconnect's pace.
     fake.set_fail(Some((255, DENIED)));
@@ -183,6 +182,9 @@ fn a_killed_ssh_dims_only_its_host_and_reconnects(cx: &mut TestAppContext) {
         h.root(|root, _| root.host_dimmed(&key(HOST)))
     });
     assert!(!h.root(|root, _| root.host_dimmed(&HostKey::Local)));
+    // Taken once the host is down, when nothing reaches the pane any more:
+    // the shell's prompt after the last echo may land later than the echo.
+    let frame = rows(&mut h, &remote_pane);
     echo(&mut h, &local_pane, "rt-mh-local-while-down");
     assert_eq!(
         rows(&mut h, &remote_pane),
