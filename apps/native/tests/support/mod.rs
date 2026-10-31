@@ -996,6 +996,66 @@ pub fn remote_lists(h: &mut Harness<'_>, ids: &[&str]) {
     });
 }
 
+/// This PC lists `a1`; tab `t1` splits it (pane `p1`) beside [`REMOTE`]'s
+/// `remote` (pane `p2`). [`REMOTE`] is saved and connected, listing the
+/// repos `repos` (each at `C:/repos/<id>`). `native-ui.json` holds `ui`
+/// with [`REMOTE`] put first in its `saved_hosts`, so a host `ui` saves is
+/// dialled too, after it; both sessions' scrollback is answered, `p2` is
+/// focused, and nothing sent is left unread on This PC or [`REMOTE`].
+pub fn remote_in_pane<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    ui: &Value,
+    repos: &[&str],
+    remote: SessionSnapshot,
+) -> Harness<'a> {
+    let mut hosts = vec![json!({ "name": REMOTE, "port": 8787 })];
+    if let Some(more) = ui.get("saved_hosts").and_then(Value::as_array) {
+        hosts.extend(more.iter().cloned());
+    }
+    let mut seeded = ui.clone();
+    seeded["saved_hosts"] = Value::Array(hosts);
+    seed_ui(dir, &seeded);
+    let id = remote.id.clone();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("a1")),
+        remote_pane("p2", &id),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("a1", b"");
+    let mut host = h.host(&saved_remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: repos
+            .iter()
+            .map(|id| repo(id, &format!("C:/repos/{id}")))
+            .collect(),
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![remote],
+    });
+    host.answer_scrollback(&id, b"");
+    // The window starts inactive and gets no focus events until it is
+    // activated; a frame lets the activation land.
+    h.cx.update(|window, _| window.activate_window());
+    let at = h.cell_center("p2", 0, 0);
+    h.click(at, Modifiers::none());
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()).as_deref(),
+        Some("p2"),
+        "the click focuses the remote pane"
+    );
+    h.sent();
+    h.host(&saved_remote()).sent();
+    h
+}
+
 /// What the fake daemon holds at connect.
 #[derive(Default)]
 pub struct Fixture {

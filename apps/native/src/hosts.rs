@@ -298,8 +298,8 @@ impl RootView {
     }
 
     /// `host`'s connection closed or the window let it go: its agents,
-    /// daemon settings, daemon id, fetches and remote access status go with
-    /// it, a remote host's spawns and duplicates in flight end with their
+    /// daemon settings, daemon id, fetches, the Fetch file… dialog fetching
+    /// from it and remote access status go with it, a remote host's spawns and duplicates in flight end with their
     /// spawning toasts, and each host dropped as its duplicate is dialled
     /// again. Once
     /// the window holds no connection to it, a Pair armed for it is
@@ -320,6 +320,7 @@ impl RootView {
         self.forget_daemon_settings(host);
         self.forget_daemon_id(host);
         self.end_fetches_on_disconnect(host, window, cx);
+        self.close_fetch_dialog_of(host, window, cx);
         self.set_remote_status(host, None, cx);
         // A remote host's spawns and duplicates in flight end with its
         // connection; This PC's end with its reset.

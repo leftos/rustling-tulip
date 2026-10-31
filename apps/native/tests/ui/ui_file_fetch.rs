@@ -17,11 +17,13 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext};
-use protocol::{ClientMessage, DaemonMessage};
+use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetEvent};
-use support::{Fixture, Harness, HostHandle, Opened, TestDir, repo, session};
+use support::{
+    Fixture, Harness, HostHandle, Opened, TestDir, remote_in_pane, repo, saved_remote, session,
+};
 
 const HOST: &str = "box.tail1234.ts.net";
 
@@ -405,10 +407,15 @@ fn a_disconnect_after_done_lets_the_file_save_and_open(cx: &mut TestAppContext) 
 /// The member worktree of `session("s1").worktree("r1")`.
 const WORKTREE: &str = "C:/wt/x";
 
-/// The `FetchFile`s sent since the last look, as `(id, worktree, path)`;
-/// every one names the repo `r1`.
+/// The `FetchFile`s sent to [`HOST`] since the last look, as `(id,
+/// worktree, path)`; every one names the repo `r1`.
 fn fetches_sent(h: &mut Harness<'_>) -> Vec<(String, Option<String>, String)> {
-    remote(h)
+    fetches_on(h, &remote_target())
+}
+
+/// [`fetches_sent`] on the host `target`.
+fn fetches_on(h: &mut Harness<'_>, target: &Target) -> Vec<(String, Option<String>, String)> {
+    h.host(target)
         .sent()
         .into_iter()
         .filter_map(|msg| match msg {
@@ -436,6 +443,226 @@ fn missing(id: &str, rel: &str) -> DaemonMessage {
 /// How many toasts are titled `title`.
 fn titled(h: &mut Harness<'_>, title: &str) -> usize {
     toasts(h).iter().filter(|(t, _)| t == title).count()
+}
+
+/// `s` in pane `p2` beside This PC's `a1`, on the saved host [`HOST`]
+/// listing the repo `r1`, `p2` focused, its downloads under `dir`; returns
+/// the download root. Text files open externally, as these specs pin the
+/// external route.
+fn linked_with<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    s: SessionSnapshot,
+) -> (Harness<'a>, PathBuf) {
+    let ui = serde_json::json!({ "general": { "open_text_externally": true } });
+    let mut h = remote_in_pane(cx, dir, &ui, &["r1"], s);
+    let root = dir.path().join("remote-files");
+    let set = root.clone();
+    h.root_update(move |view, _, _| view.set_remote_files_root(set));
+    h.sent();
+    (h, root)
+}
+
+/// [`linked_with`] a session on the worktree [`WORKTREE`] of the repo `r1`.
+fn linked<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBuf) {
+    linked_with(cx, dir, session("s1").worktree("r1").build())
+}
+
+/// Writes `text` to `s1`'s pane `p2` and Ctrl+clicks column `col` of its
+/// first row.
+fn click_link(h: &mut Harness<'_>, text: &str, col: usize) {
+    h.host(&saved_remote()).pty("s1", text.as_bytes());
+    click_again(h, col);
+}
+
+/// Ctrl+clicks column `col` of `p2`'s first row.
+fn click_again(h: &mut Harness<'_>, col: usize) {
+    let on = h.cell_center("p2", col, 0);
+    h.click(on, Modifiers::secondary_key());
+}
+
+/// The one `FetchFile` sent to the saved [`HOST`] since the last look,
+/// checked to read `path` in [`WORKTREE`]; returns its id.
+fn one_fetch(h: &mut Harness<'_>, path: &str) -> String {
+    let sent = fetches_on(h, &saved_remote());
+    let [(id, worktree, sent_path)] = sent.as_slice() else {
+        panic!("one FetchFile is sent, got {sent:?}");
+    };
+    assert_eq!(worktree.as_deref(), Some(WORKTREE));
+    assert_eq!(sent_path, path);
+    id.clone()
+}
+
+/// A shell in `C:/wt/x/sub` on the member worktree [`WORKTREE`], so a
+/// relative link reads under `sub` first, then under the worktree.
+fn shell_in_worktree() -> SessionSnapshot {
+    session("s1").shell("C:/wt/x/sub").worktree("r1").build()
+}
+
+#[gpui::test]
+fn a_download_root_path_in_a_remote_pane_is_fetched_not_run(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+    let file = root.join(HOST).join("repo").join("run.bat");
+    fs::create_dir_all(file.parent().expect("a parent")).expect("make the folder");
+    fs::write(&file, "@echo off\r\n").expect("write the file");
+
+    click_link(&mut h, &format!("see {}", file.display()), 6);
+
+    assert_eq!(
+        h.opened(),
+        [],
+        "a path's place does not make it a fetched file"
+    );
+    assert!(h.run_confirm().is_none(), "nothing asks to run it");
+    assert!(
+        fetches_on(&mut h, &saved_remote()).is_empty(),
+        "nothing is asked of the host"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't fetch run.bat".to_owned(),
+            Some("Not inside a repo or worktree of this session.".to_owned())
+        )],
+        "the fetch refuses a path outside the session's roots"
+    );
+}
+
+#[gpui::test]
+fn a_link_fetch_tries_the_next_reading_after_a_missing_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked_with(cx, &dir, shell_in_worktree());
+
+    click_link(&mut h, "wrote docs/notes.md", 9);
+    let first = one_fetch(&mut h, "sub/docs/notes.md");
+    h.host(&saved_remote())
+        .send(missing(&first, "sub/docs/notes.md"));
+    let second = one_fetch(&mut h, "docs/notes.md");
+    assert!(
+        !toasts(&mut h)
+            .iter()
+            .any(|(title, _)| title.starts_with("Couldn't")),
+        "a missed reading is not a failure: {:?}",
+        toasts(&mut h)
+    );
+    stream_on(&mut h, &saved_remote(), &second, b"# Notes", b"\n");
+
+    let saved = root.join(HOST).join("r1").join("docs").join("notes.md");
+    assert_eq!(fs::read(&saved).expect("the file is saved"), b"# Notes\n");
+    assert_eq!(h.opened(), [Opened::DefaultApp(saved)]);
+    assert_eq!(
+        titled(&mut h, &format!("Fetching notes.md from {HOST}")),
+        1,
+        "one toast says the link is fetching: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn a_link_fetch_with_a_line_opens_in_vscode_at_the_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+
+    click_link(&mut h, r"at C:\wt\x\src\main.rs:12:3 here", 6);
+    let id = one_fetch(&mut h, "src/main.rs");
+    stream_on(&mut h, &saved_remote(), &id, b"fn main() {\n", b"}\n");
+
+    let saved = root.join(HOST).join("r1").join("src").join("main.rs");
+    assert_eq!(
+        h.opened(),
+        [Opened::VsCode {
+            path: saved,
+            line: 12,
+            column: 3
+        }]
+    );
+}
+
+#[gpui::test]
+fn a_link_without_a_line_opens_in_the_default_app(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    let id = one_fetch(&mut h, "docs/notes.txt");
+    stream_on(&mut h, &saved_remote(), &id, b"first, ", b"second");
+
+    let saved = root.join(HOST).join("r1").join("docs").join("notes.txt");
+    assert_eq!(h.opened(), [Opened::DefaultApp(saved)]);
+}
+
+#[gpui::test]
+fn every_reading_missing_shows_one_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked_with(cx, &dir, shell_in_worktree());
+
+    click_link(&mut h, "wrote docs/notes.md", 9);
+    let first = one_fetch(&mut h, "sub/docs/notes.md");
+    h.host(&saved_remote())
+        .send(missing(&first, "sub/docs/notes.md"));
+    let second = one_fetch(&mut h, "docs/notes.md");
+    h.host(&saved_remote())
+        .send(missing(&second, "docs/notes.md"));
+
+    assert!(
+        fetches_on(&mut h, &saved_remote()).is_empty(),
+        "no reading is left to try"
+    );
+    let failures: Vec<(String, Option<String>)> = toasts(&mut h)
+        .into_iter()
+        .filter(|(title, _)| title.starts_with("Couldn't"))
+        .collect();
+    assert_eq!(
+        failures,
+        [(
+            "Couldn't fetch notes.md".to_owned(),
+            Some(format!(
+                "path \"docs/notes.md\" does not exist under {WORKTREE}"
+            ))
+        )],
+        "one toast names the last reading's error"
+    );
+    assert_eq!(titled(&mut h, &format!("Fetching notes.md from {HOST}")), 1);
+    assert!(h.opened().is_empty(), "nothing opens");
+    assert!(names_in(&root).is_empty(), "nothing is written");
+}
+
+#[gpui::test]
+fn a_path_outside_every_root_toasts_without_sending(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+
+    click_link(&mut h, r"see D:\elsewhere\a.rs", 6);
+
+    assert!(
+        fetches_on(&mut h, &saved_remote()).is_empty(),
+        "nothing is asked of the host"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't fetch a.rs".to_owned(),
+            Some("Not inside a repo or worktree of this session.".to_owned())
+        )]
+    );
+    assert!(h.opened().is_empty(), "nothing opens");
+}
+
+#[gpui::test]
+fn a_second_click_on_a_fetching_file_says_already_fetching(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    one_fetch(&mut h, "docs/notes.txt");
+    click_again(&mut h, 6);
+
+    assert!(
+        fetches_on(&mut h, &saved_remote()).is_empty(),
+        "the file is not asked for twice"
+    );
+    assert_eq!(titled(&mut h, "Already fetching notes.txt"), 1);
 }
 
 /// What the fake host has at a path, for [`serve`].

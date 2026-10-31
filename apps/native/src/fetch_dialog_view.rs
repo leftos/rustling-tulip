@@ -14,14 +14,17 @@ use crate::fetch_link;
 use crate::file_fetch::FetchEntry;
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 
 const TITLE: &str = "Fetch file";
 
-/// The open Fetch file… dialog: its form and its path field.
+/// The open Fetch file… dialog: its form, its path field and the host its
+/// fetch goes to.
 pub(crate) struct FetchDialog {
     form: FetchForm,
+    host: HostKey,
     path_input: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
 }
@@ -119,6 +122,7 @@ impl RootView {
             })
             .unwrap_or_default();
         let form = FetchForm::new(roots, cwd.as_deref());
+        let host = self.host_of_session(&session_id);
         let path_input = cx.new(|cx| TextInput::new(String::new(), PLACEHOLDER, cx));
         let subscriptions = Self::watch_fetch_field(&path_input, window, cx);
         self.renaming = None;
@@ -126,6 +130,7 @@ impl RootView {
         self.close_tab_menu(window, cx);
         self.fetch_dialog = Some(FetchDialog {
             form,
+            host,
             path_input,
             _subscriptions: subscriptions,
         });
@@ -143,6 +148,24 @@ impl RootView {
         }
         self.focus_active_pane(window, cx);
         cx.notify();
+    }
+
+    /// `host`'s connection closed: the dialog fetching from it closes. Its
+    /// fetch ended with the connection, part file and all; a dialog
+    /// fetching from another host stays open.
+    pub(crate) fn close_fetch_dialog_of(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .fetch_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.host == *host)
+        {
+            self.close_fetch_dialog(window, cx);
+        }
     }
 
     /// Esc, Cancel or ✕: cancels the fetch and closes, except once the
