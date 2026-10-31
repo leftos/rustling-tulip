@@ -14,7 +14,7 @@ use std::rc::Rc;
 use futures::FutureExt as _;
 use gpui::{App, Window};
 
-use crate::{FileFilter, FilePicker, FolderPicker};
+use crate::{FileFilter, FilePicker, FolderPicker, SavePicker};
 
 /// How long the start folder's existence check may take before the dialog
 /// opens without it: a folder on an offline network share would otherwise
@@ -43,6 +43,52 @@ pub(crate) fn system_file_picker(window: &Window) -> FilePicker {
             pick(cx, start, Some(filter))
         },
     )
+}
+
+/// The OS save dialog, modal to `window`, offering the filter's types with
+/// the suggested file name filled in and asking before it replaces a file:
+/// the Themes modal's Export. Same threading rules as
+/// [`system_folder_picker`].
+#[cfg(windows)]
+pub(crate) fn system_save_picker(window: &Window) -> SavePicker {
+    let owner = owner_address(window);
+    Rc::new(
+        move |cx: &mut App, start: Option<PathBuf>, suggested: String, filter: FileFilter| {
+            let checked = start.map(|start| {
+                cx.background_executor().spawn(async move {
+                    start_folder_check(start, START_CHECK_TIMEOUT, std::path::Path::is_dir)
+                })
+            });
+            let foreground = cx.foreground_executor().clone();
+            async move {
+                let start = match checked {
+                    Some(check) => check.await,
+                    None => None,
+                };
+                foreground
+                    .spawn(async move {
+                        save_dialog(&filter, &suggested, start.as_deref(), owner)
+                            .map(|picked| picked.map(|path| with_default_extension(path, &filter)))
+                            .map_err(|err| {
+                                tracing::warn!("the save picker failed: {err:#}");
+                                format!("{err:#}")
+                            })
+                    })
+                    .await
+            }
+            .boxed_local()
+        },
+    )
+}
+
+/// `path`, with the filter's first extension added when it has none.
+fn with_default_extension(mut path: PathBuf, filter: &FileFilter) -> PathBuf {
+    if path.extension().is_none()
+        && let Some(ext) = filter.extensions.first()
+    {
+        path.set_extension(ext.strip_prefix('.').unwrap_or(ext));
+    }
+    path
 }
 
 /// A picker for a folder (no filter) or for a file of the filter's types.
@@ -142,6 +188,30 @@ pub(crate) fn system_file_picker(_window: &Window) -> FilePicker {
     Rc::new(|cx: &mut App, _start: Option<PathBuf>, _filter: FileFilter| system_pick(cx, true))
 }
 
+/// The platform's save dialog through GPUI, at the start folder (the
+/// platform's own when there is none) with the suggested name; a chosen
+/// name without an extension takes the filter's.
+#[cfg(not(windows))]
+pub(crate) fn system_save_picker(_window: &Window) -> SavePicker {
+    Rc::new(
+        |cx: &mut App, start: Option<PathBuf>, suggested: String, filter: FileFilter| {
+            let picked = cx.prompt_for_new_path(&start.unwrap_or_default(), Some(&suggested));
+            async move {
+                match picked.await {
+                    Ok(Ok(Some(path))) => Ok(Some(with_default_extension(path, &filter))),
+                    Ok(Err(err)) => {
+                        tracing::warn!("the save picker failed: {err:#}");
+                        Err(format!("{err:#}"))
+                    }
+                    // Cancelled, or the picker's sender went before it answered.
+                    Ok(Ok(None)) | Err(_) => Ok(None),
+                }
+            }
+            .boxed_local()
+        },
+    )
+}
+
 #[cfg(not(windows))]
 fn system_pick(
     cx: &mut App,
@@ -211,12 +281,10 @@ fn pick_dialog(
     owner: Option<usize>,
 ) -> anyhow::Result<Option<PathBuf>> {
     use anyhow::Context as _;
-    use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
-    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
     use windows::Win32::UI::Shell::{
         Common::COMDLG_FILTERSPEC, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS,
-        FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName,
-        SIGDN_FILESYSPATH,
+        FileOpenDialog, IFileOpenDialog,
     };
     use windows::core::{HSTRING, PCWSTR};
 
@@ -244,29 +312,10 @@ fn pick_dialog(
         unsafe { dialog.SetFileTypes(&filters) }.context("setting the file dialog's filter")?;
     }
     if let Some(start) = start {
-        let path = HSTRING::from(start.as_os_str());
-        // SAFETY: `path` is a NUL-terminated wide string that outlives the
-        // call, and no bind context is passed.
-        let item: windows::core::Result<IShellItem> =
-            unsafe { SHCreateItemFromParsingName(&path, None) };
-        // SAFETY: `dialog` is live and `item` is a shell item the call
-        // above created.
-        let set = item.and_then(|item| unsafe { dialog.SetFolder(&item) });
-        if let Err(err) = set {
-            tracing::warn!(
-                "the picker opens at its own folder, not {}: {err}",
-                start.display()
-            );
-        }
+        set_start_folder(&dialog, start);
     }
-    let owner = owner.map(|address| HWND(std::ptr::with_exposed_provenance_mut(address)));
-    // SAFETY: `dialog` is live, and `owner`, when given, is the client's
-    // main window, which lives as long as the app.
-    if let Err(err) = unsafe { dialog.Show(owner) } {
-        if err.code() == ERROR_CANCELLED.to_hresult() {
-            return Ok(None);
-        }
-        return Err(err).context("showing the picker dialog");
+    if !show_dialog(&dialog, owner)? {
+        return Ok(None);
     }
     // SAFETY: `dialog` is live and was shown and confirmed.
     let results = unsafe { dialog.GetResults() }.context("reading the picked item")?;
@@ -276,6 +325,113 @@ fn pick_dialog(
     }
     // SAFETY: `results` holds at least one item.
     let item = unsafe { results.GetItemAt(0) }.context("reading the picked item")?;
+    item_path(&item).map(Some)
+}
+
+/// Shows the save dialog for a file of the filter's type, the suggested
+/// name filled in and the filter's first extension added to a name typed
+/// without one, at `start` when given, modal to the window at `owner`;
+/// `None` when the user cancels. Replacing a file asks first.
+#[cfg(windows)]
+fn save_dialog(
+    filter: &FileFilter,
+    suggested: &str,
+    start: Option<&std::path::Path>,
+    owner: Option<usize>,
+) -> anyhow::Result<Option<PathBuf>> {
+    use anyhow::Context as _;
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+    use windows::Win32::UI::Shell::{
+        Common::COMDLG_FILTERSPEC, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FileSaveDialog,
+        IFileSaveDialog,
+    };
+    use windows::core::{HSTRING, PCWSTR};
+
+    // SAFETY: COM is initialised on this thread, as for `pick_dialog`.
+    let dialog: IFileSaveDialog = unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_ALL) }
+        .context("creating the save dialog")?;
+    // SAFETY: `dialog` is a live dialog this thread created.
+    unsafe { dialog.SetOptions(FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM) }
+        .context("setting the save dialog's options")?;
+    let (name, spec) = filter_spec(filter);
+    let (name, spec) = (HSTRING::from(name), HSTRING::from(spec));
+    let filters = [COMDLG_FILTERSPEC {
+        pszName: PCWSTR(name.as_ptr()),
+        pszSpec: PCWSTR(spec.as_ptr()),
+    }];
+    // SAFETY: `dialog` is live, and `filters` and the strings it points into
+    // outlive the call.
+    unsafe { dialog.SetFileTypes(&filters) }.context("setting the save dialog's filter")?;
+    if let Some(ext) = filter.extensions.first() {
+        let ext = HSTRING::from(ext.strip_prefix('.').unwrap_or(ext));
+        // SAFETY: `dialog` is live and `ext` outlives the call.
+        unsafe { dialog.SetDefaultExtension(&ext) }
+            .context("setting the save dialog's extension")?;
+    }
+    // SAFETY: `dialog` is live and the name outlives the call.
+    unsafe { dialog.SetFileName(&HSTRING::from(suggested)) }
+        .context("setting the save dialog's file name")?;
+    if let Some(start) = start {
+        set_start_folder(&dialog, start);
+    }
+    if !show_dialog(&dialog, owner)? {
+        return Ok(None);
+    }
+    // SAFETY: `dialog` is live and was shown and confirmed.
+    let item = unsafe { dialog.GetResult() }.context("reading the chosen file")?;
+    item_path(&item).map(Some)
+}
+
+/// Points `dialog` at `start`, or leaves it at its own folder with a warning
+/// when the shell cannot parse the path.
+#[cfg(windows)]
+fn set_start_folder(dialog: &windows::Win32::UI::Shell::IFileDialog, start: &std::path::Path) {
+    use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName};
+    use windows::core::HSTRING;
+
+    let path = HSTRING::from(start.as_os_str());
+    // SAFETY: `path` is a NUL-terminated wide string that outlives the
+    // call, and no bind context is passed.
+    let item: windows::core::Result<IShellItem> =
+        unsafe { SHCreateItemFromParsingName(&path, None) };
+    // SAFETY: `dialog` is live and `item` is a shell item the call above
+    // created.
+    let set = item.and_then(|item| unsafe { dialog.SetFolder(&item) });
+    if let Err(err) = set {
+        tracing::warn!(
+            "the picker opens at its own folder, not {}: {err}",
+            start.display()
+        );
+    }
+}
+
+/// Shows `dialog` modal to the window at `owner`: `true` once the user
+/// confirms, `false` when they cancel.
+#[cfg(windows)]
+fn show_dialog(
+    dialog: &windows::Win32::UI::Shell::IFileDialog,
+    owner: Option<usize>,
+) -> anyhow::Result<bool> {
+    use anyhow::Context as _;
+    use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
+
+    let owner = owner.map(|address| HWND(std::ptr::with_exposed_provenance_mut(address)));
+    // SAFETY: `dialog` is live, and `owner`, when given, is the client's
+    // main window, which lives as long as the app.
+    match unsafe { dialog.Show(owner) } {
+        Ok(()) => Ok(true),
+        Err(err) if err.code() == ERROR_CANCELLED.to_hresult() => Ok(false),
+        Err(err) => Err(err).context("showing the picker dialog"),
+    }
+}
+
+/// The file-system path of the item a dialog returned.
+#[cfg(windows)]
+fn item_path(item: &windows::Win32::UI::Shell::IShellItem) -> anyhow::Result<PathBuf> {
+    use anyhow::Context as _;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::SIGDN_FILESYSPATH;
+
     // SAFETY: `item` is a live shell item; the dialog forced file-system
     // items, so it has a file-system path.
     let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }
@@ -287,7 +443,7 @@ fn pick_dialog(
     // used after this.
     unsafe { CoTaskMemFree(Some(name.0.cast_const().cast())) };
     let path = path.context("the picked item's path is not valid UTF-16")?;
-    Ok(Some(PathBuf::from(path)))
+    Ok(PathBuf::from(path))
 }
 
 #[cfg(all(test, windows))]
@@ -295,8 +451,35 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::{filter_spec, start_folder_check};
+    use super::{filter_spec, start_folder_check, with_default_extension};
     use crate::FileFilter;
+
+    #[test]
+    fn a_saved_name_without_an_extension_takes_the_filters() {
+        let theme = FileFilter::new("Theme", &["json"]);
+        assert_eq!(
+            with_default_extension(PathBuf::from("C:/out/nord"), &theme),
+            PathBuf::from("C:/out/nord.json")
+        );
+        assert_eq!(
+            with_default_extension(PathBuf::from("C:/out/nord.txt"), &theme),
+            PathBuf::from("C:/out/nord.txt"),
+            "a chosen extension stays"
+        );
+        assert_eq!(
+            with_default_extension(
+                PathBuf::from("C:/out/nord"),
+                &FileFilter::new("Logs", &[".log"])
+            ),
+            PathBuf::from("C:/out/nord.log"),
+            "a filter's dot is not doubled"
+        );
+        assert_eq!(
+            with_default_extension(PathBuf::from("C:/out/nord"), &FileFilter::new("Any", &[])),
+            PathBuf::from("C:/out/nord"),
+            "a filter of every file adds none"
+        );
+    }
 
     /// A hang guard passed as the check's wait: a passing check answers long
     /// before it.

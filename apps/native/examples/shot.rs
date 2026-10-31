@@ -61,8 +61,8 @@ use rustling_tulip_native::update::{LastResult, Ready, Updater};
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, ToastKind, ToastSpec, ViewerLoad, bind_keys,
-    remote_access::Autostart,
+    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker, ToastKind, ToastSpec, ViewerLoad,
+    bind_keys, remote_access::Autostart,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -625,6 +625,11 @@ fn deps(
     let pick_file: FilePicker = Rc::new(|_: &mut App, _: Option<PathBuf>, _: FileFilter| {
         futures::future::ready(None).boxed_local()
     });
+    let pick_save: SavePicker = Rc::new(
+        |_: &mut App, _: Option<PathBuf>, _: String, _: FileFilter| {
+            futures::future::ready(Ok(None)).boxed_local()
+        },
+    );
     RootDeps {
         tx,
         events,
@@ -637,6 +642,7 @@ fn deps(
         notify: Arc::new(NoNotifier),
         pick_folder,
         pick_file,
+        pick_save,
         autostart: Arc::new(NoAutostart),
         // No device token, so the `connections` shots' saved tailnet host
         // reads as not paired.

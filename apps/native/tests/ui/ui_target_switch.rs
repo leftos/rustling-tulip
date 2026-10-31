@@ -20,7 +20,9 @@ use futures::channel::mpsc::unbounded;
 use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, FilePicker, FolderPicker, NetCommand, RootDeps, RootView};
+use rustling_tulip_native::{
+    Connection, FilePicker, FolderPicker, NetCommand, RootDeps, RootView, SavePicker,
+};
 use serde_json::json;
 use support::{
     AutostartRecorder, Fixture, Harness, NotifyRecorder, OpenRecorder, TestDir, history_item, pane,
@@ -443,6 +445,7 @@ fn boot_on_a_saved_host_starts_on_that_target(cx: &mut TestAppContext) {
     let quits = Rc::new(Cell::new(0));
     let pick_folder: FolderPicker = Rc::new(|_, _| Box::pin(async { None }));
     let pick_file: FilePicker = Rc::new(|_, _, _| Box::pin(async { None }));
+    let pick_save: SavePicker = Rc::new(|_, _, _, _| Box::pin(async { Ok(None) }));
     let deps = RootDeps {
         tx,
         events,
@@ -455,6 +458,7 @@ fn boot_on_a_saved_host_starts_on_that_target(cx: &mut TestAppContext) {
         notify: Arc::new(NotifyRecorder::default()),
         pick_folder,
         pick_file,
+        pick_save,
         autostart: Arc::new(AutostartRecorder::default()),
         tokens: Arc::new(daemon_client::device_tokens::MemoryTokens::default()),
         updater: Arc::new(support::UpdaterRecorder::default()),

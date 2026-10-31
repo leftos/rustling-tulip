@@ -18,6 +18,13 @@ pub const THEMES_DIR: &str = "themes";
 /// The largest theme text the store reads or imports: 1 MiB.
 pub const MAX_THEME_BYTES: usize = 1_048_576;
 
+/// The most characters an imported theme's name keeps.
+const MAX_IMPORTED_NAME_CHARS: usize = 64;
+
+/// The name an imported theme takes when its own has nothing left once
+/// cleaned.
+const IMPORTED_NAME: &str = "Imported theme";
+
 /// What a parse error names when the theme came from text rather than a file.
 const THEME_TEXT: &str = "the theme text";
 
@@ -348,11 +355,19 @@ impl ThemeStore {
         write_then_rename(&tmp, &path, &json)
     }
 
-    /// Saves the theme `text` holds as a new user theme, under a free name and
-    /// a free file name; returns its id.
+    /// Saves the theme `text` holds as a new user theme, returning its id. Its
+    /// name loses its control characters, is trimmed and cut to 64 characters
+    /// ("Imported theme" when nothing is left) and, when a theme already has it,
+    /// takes the copy suffix (`name copy`, `name copy 2`, …); its file takes a
+    /// free slug. An unknown base or terminal source is kept as provenance.
     pub fn import(&self, text: &str) -> Result<String, ThemeError> {
         let (name, theme, base, terminal_source) = parse_theme_json(text)?;
-        let name = self.free_name(&name);
+        let name = import_name(&name);
+        let name = if self.name_taken(&name, None) {
+            self.copy_name(&name)
+        } else {
+            name
+        };
         self.save(&name, &theme, base.as_deref(), terminal_source.as_deref())
     }
 
@@ -455,6 +470,20 @@ impl ThemeStore {
             }
             n += 1;
         }
+    }
+}
+
+/// An imported theme's name without its control characters, trimmed and cut
+/// to [`MAX_IMPORTED_NAME_CHARS`] characters (trimmed again after the cut);
+/// [`IMPORTED_NAME`] when nothing is left.
+fn import_name(raw: &str) -> String {
+    let kept: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let cut: String = kept.trim().chars().take(MAX_IMPORTED_NAME_CHARS).collect();
+    let cut = cut.trim_end();
+    if cut.is_empty() {
+        IMPORTED_NAME.to_owned()
+    } else {
+        cut.to_owned()
     }
 }
 
@@ -562,7 +591,7 @@ fn read_file(path: &Path) -> Result<ThemeFile, ThemeError> {
 
 /// `name` lower-cased, each run of characters outside `a-z0-9` one `-`,
 /// no `-` at either end; `theme` when nothing is left.
-fn slug(name: &str) -> String {
+pub(crate) fn slug(name: &str) -> String {
     let mut out = String::new();
     let mut gap = false;
     for c in name.to_lowercase().chars() {
@@ -1377,19 +1406,57 @@ mod tests {
         let text =
             export_json("Nord", &crate::builtin_themes::NORD, Some("nord"), None).expect("export");
         let first = store.import(&text).expect("import");
-        assert_eq!(first, "nord-2");
-        assert_eq!(store.name_of(&first).as_deref(), Some("Nord 2"));
+        assert_eq!(first, "nord-copy");
+        assert_eq!(store.name_of(&first).as_deref(), Some("Nord copy"));
         assert_eq!(
             store.load(&first).expect("load"),
             crate::builtin_themes::NORD
         );
-        assert_eq!(store.import(&text).expect("import"), "nord-3");
+        assert_eq!(store.import(&text).expect("import"), "nord-copy-2");
         let entries = store.list();
         let names: Vec<&str> = users(&entries)
             .iter()
             .map(|entry| entry.name.as_str())
             .collect();
-        assert_eq!(names, ["Nord 2", "Nord 3"]);
+        assert_eq!(names, ["Nord copy", "Nord copy 2"]);
+    }
+
+    /// The name the theme `name` is imported under, into an empty store.
+    fn imported_name(name: &str) -> Option<String> {
+        let dir = TestDir::new("import-name");
+        let store = dir.store();
+        let text = export_json(name, &UiTheme::CONTRAST, None, None).expect("export");
+        let id = store.import(&text).expect("import");
+        store.name_of(&id)
+    }
+
+    #[test]
+    fn import_cleans_the_name() {
+        assert_eq!(
+            imported_name("Ni\u{7}ce\nTheme\u{1b}").as_deref(),
+            Some("NiceTheme"),
+            "control characters go"
+        );
+        assert_eq!(
+            imported_name("  Padded \t").as_deref(),
+            Some("Padded"),
+            "the ends are trimmed"
+        );
+        assert_eq!(
+            imported_name(&"x".repeat(80)),
+            Some("x".repeat(64)),
+            "a long name is cut to 64 characters"
+        );
+        assert_eq!(
+            imported_name(&format!("{}  tail", "é".repeat(63))),
+            Some("é".repeat(63)),
+            "the cut counts characters, and its trailing space is trimmed"
+        );
+        assert_eq!(
+            imported_name(" \u{1}\u{7f} ").as_deref(),
+            Some("Imported theme"),
+            "nothing left takes the default"
+        );
     }
 
     #[test]

@@ -366,6 +366,19 @@ impl FileFilter {
 pub type FilePicker =
     Rc<dyn Fn(&mut App, Option<PathBuf>, FileFilter) -> LocalBoxFuture<'static, Option<PathBuf>>>;
 
+/// Asks the user where to save a file of the filter's type, opening at the
+/// given folder when there is one with the suggested file name filled in;
+/// resolves to `Ok(None)` when they cancel and to the picker's error when it
+/// fails. The Themes modal's Export calls it.
+pub type SavePicker = Rc<
+    dyn Fn(
+        &mut App,
+        Option<PathBuf>,
+        String,
+        FileFilter,
+    ) -> LocalBoxFuture<'static, Result<Option<PathBuf>, String>>,
+>;
+
 /// Which of this PC's pickers [`RootView::pick_local`] asks, and for a file
 /// the types it offers.
 #[derive(Debug, Clone)]
@@ -402,6 +415,8 @@ pub struct RootDeps {
     /// Asks for a file: the workspace creator's `.code-workspace` Browse and
     /// the preset wizard's file pickers.
     pub pick_file: FilePicker,
+    /// Asks where to save a file: the Themes modal's Export.
+    pub pick_save: SavePicker,
     /// Reads and switches whether this PC starts the daemon at login: the
     /// Remote access page's toggle.
     pub autostart: Arc<dyn remote_access::Autostart>,
@@ -1067,6 +1082,8 @@ pub struct RootView {
     /// Asks for a file: a `.code-workspace` for the workspace creator, a
     /// prompts or variable file for the preset wizard.
     pick_file: FilePicker,
+    /// Asks where to save a file: an exported theme.
+    pick_save: SavePicker,
     /// The preset wizard, while open.
     preset_wizard: Option<preset_wizard_view::PresetWizardDialog>,
     /// The preset wizard's keyboard focus.
@@ -1172,6 +1189,7 @@ impl RootView {
             },
             pick_folder: folder_picker::system_folder_picker(window),
             pick_file: folder_picker::system_file_picker(window),
+            pick_save: folder_picker::system_save_picker(window),
             autostart: Arc::new(remote_access::SystemAutostart),
             tokens,
             // The cloaked smoke window neither checks nor takes the last
@@ -1276,6 +1294,7 @@ impl RootView {
             notify,
             pick_folder,
             pick_file,
+            pick_save,
             autostart,
             tokens,
             updater,
@@ -1449,6 +1468,7 @@ impl RootView {
             last_focused_session: None,
             pick_folder,
             pick_file,
+            pick_save,
             preset_wizard: None,
             preset_wizard_focus: cx.focus_handle(),
             preset_launches: preset_launch::PresetLaunches::default(),

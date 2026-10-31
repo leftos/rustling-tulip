@@ -1162,6 +1162,7 @@ impl<'a> Harness<'a> {
             notify: notifier.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
+            pick_save: PickRecorder::save_picker(&picker),
             autostart: autostart.clone(),
             tokens: tokens.clone(),
             updater: updater.clone(),

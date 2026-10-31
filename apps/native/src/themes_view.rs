@@ -6,13 +6,14 @@
 //! [`crate::themes`]. The window takes a theme only on Use and on a save of
 //! the theme in use, so no way out of the modal has anything to restore.
 
+use std::path::Path;
+
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable, FontWeight,
     KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, ScrollHandle, SharedString, Stateful,
     Subscription, WeakEntity, Window, div, prelude::*, px, relative,
 };
 
-use crate::RootView;
 use crate::appearance::packed;
 use crate::appearance_stops::AppearanceStop;
 use crate::buttons::{ButtonSize, Layer, field_frame_with_ring, focus_ring, primary_button};
@@ -26,6 +27,7 @@ use crate::theme_store::{self, ThemeError, ThemeStore};
 use crate::theme_tokens::{self, TokenGroup, TokenKind, TokenRow, TokenValue};
 use crate::themes::{ContrastBadge, ThemeEditor, ThemeRow, ThemesDialog, badge_in};
 use crate::ui_theme::{UiTheme, theme};
+use crate::{FileFilter, RootView};
 
 const WIDTH: f32 = 860.0;
 const HEIGHT: f32 = 600.0;
@@ -44,6 +46,10 @@ const MINIATURE_HEIGHT: f32 = 300.0;
 const MINIATURE_SIDEBAR_WIDTH: f32 = 148.0;
 /// The note a blank name shows.
 const BLANK_NAME: &str = "Give the theme a name";
+/// What the error row says before a failed export's error.
+const EXPORT_FAILED: &str = "Couldn't export the theme";
+/// What the error row says before a refused import's error.
+const IMPORT_FAILED: &str = "Couldn't import the theme";
 
 /// A control of the modal that Tab reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +92,43 @@ struct DeleteTarget {
     name: String,
     /// The file is named after a built-in, which the id still names.
     shadow: bool,
+}
+
+/// A theme as Export writes it.
+struct ExportSource {
+    name: String,
+    theme: UiTheme,
+    base: Option<String>,
+    terminal_source: Option<String>,
+}
+
+/// The file type Export saves and Import opens.
+fn theme_file_filter() -> FileFilter {
+    FileFilter::new("Theme", &["json"])
+}
+
+/// Saves the theme file at `path` into `store` as a new user theme, returning
+/// its id. A file over [`theme_store::MAX_THEME_BYTES`] is refused unread,
+/// and a parse error names the file.
+fn import_file(store: &ThemeStore, path: &Path) -> Result<String, ThemeError> {
+    let io = |source| ThemeError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let len = std::fs::metadata(path).map_err(io)?.len();
+    // A length past usize is past the cap too.
+    let bytes = usize::try_from(len).unwrap_or(usize::MAX);
+    if bytes > theme_store::MAX_THEME_BYTES {
+        return Err(ThemeError::TooLarge { bytes });
+    }
+    let text = std::fs::read_to_string(path).map_err(io)?;
+    store.import(&text).map_err(|err| match err {
+        ThemeError::Parse { source, .. } => ThemeError::Parse {
+            path: path.to_path_buf(),
+            source,
+        },
+        other => other,
+    })
 }
 
 /// The question the modal asks in a row above its footer.
@@ -210,6 +253,28 @@ impl ThemesModal {
         match &mut self.mode {
             Mode::Edit(editor) => Some(editor),
             Mode::List => None,
+        }
+    }
+
+    /// What Export writes: the editor's working copy under the name field's
+    /// trimmed text, else the keyboard's row when it has a theme.
+    fn export_source(&self, cx: &App) -> Option<ExportSource> {
+        match &self.mode {
+            Mode::Edit(editor) => Some(ExportSource {
+                name: self.name_input.read(cx).text().trim().to_owned(),
+                theme: editor.working,
+                base: editor.base.clone(),
+                terminal_source: editor.terminal_source.clone(),
+            }),
+            Mode::List => {
+                let row = self.cursor_row()?;
+                Some(ExportSource {
+                    name: row.entry.name.clone(),
+                    theme: row.theme?,
+                    base: row.entry.base.clone(),
+                    terminal_source: row.entry.terminal_source.clone(),
+                })
+            }
         }
     }
 
@@ -675,16 +740,17 @@ fn theme_list(modal: &ThemesModal, cx: &mut Context<RootView>) -> Stateful<Div> 
         list = list.child(theme_row(index, row, modal, cx));
     }
     list.child(
-        div()
-            .flex_none()
-            .pt(px(10.0))
-            .px(px(4.0))
-            .child(dialog_button(
+        div().flex_none().pt(px(10.0)).px(px(4.0)).child(
+            dialog_button(
                 "themes-import",
                 "Import".to_owned(),
-                dialog_look(offset, crate::fonts::ui_weight_shift(cx), false, false, &t),
+                dialog_look(offset, crate::fonts::ui_weight_shift(cx), false, true, &t),
                 false,
-            )),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.import_theme(cx);
+            })),
+        ),
     )
 }
 
@@ -825,7 +891,8 @@ fn details(modal: &ThemesModal, offset: i8, shift: i8, t: &UiTheme) -> Stateful<
 }
 
 /// The footer's left side: Duplicate and edit for a row with a theme, Edit
-/// for a user's, Delete for any user row, then Export, disabled.
+/// for a user's, Delete for any user row, then Export for a row with a
+/// theme. None of them is a Tab stop.
 fn row_actions(modal: &ThemesModal, cx: &mut Context<RootView>) -> Div {
     let shift = fonts::ui_weight_shift(cx);
     let t = theme(cx);
@@ -868,9 +935,14 @@ fn row_actions(modal: &ThemesModal, cx: &mut Context<RootView>) -> Div {
     let export = dialog_button(
         "themes-export",
         "Export".to_owned(),
-        dialog_look(offset, shift, false, false, &t),
+        dialog_look(offset, shift, false, can_duplicate, &t),
         false,
-    );
+    )
+    .when(can_duplicate, |button| {
+        button.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.export_theme(cx);
+        }))
+    });
     div()
         .flex()
         .gap(px(10.0))
@@ -1446,6 +1518,114 @@ impl RootView {
         }
     }
 
+    /// Export: the theme's JSON goes on the clipboard, then the save picker
+    /// asks where to write it, off the UI thread; a cancel keeps the
+    /// clipboard. This PC's picker and file, whatever host the window is on.
+    fn export_theme(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self
+            .themes_modal
+            .as_ref()
+            .and_then(|modal| modal.export_source(cx))
+        else {
+            return;
+        };
+        if let Some(modal) = self.themes_modal.as_mut() {
+            modal.error = None;
+        }
+        let json = match theme_store::export_json(
+            &source.name,
+            &source.theme,
+            source.base.as_deref(),
+            source.terminal_source.as_deref(),
+        ) {
+            Ok(json) => json,
+            Err(err) => {
+                self.show_themes_failure(EXPORT_FAILED, &err.to_string(), cx);
+                return;
+            }
+        };
+        self.copy_to_clipboard(&json, cx);
+        let suggested = format!("{}.json", theme_store::slug(&source.name));
+        let picked = (self.pick_save)(cx, None, suggested, theme_file_filter());
+        cx.spawn(async move |this, cx| {
+            let written = match picked.await {
+                Ok(Some(path)) => {
+                    cx.background_executor()
+                        .spawn(async move {
+                            std::fs::write(&path, json)
+                                .map_err(|err| format!("{}: {err}", path.display()))
+                        })
+                        .await
+                }
+                Ok(None) => Ok(()),
+                Err(err) => Err(err),
+            };
+            if let Err(err) = written {
+                // Fails only when the view is gone, and the modal with it.
+                this.update(cx, |this, cx| {
+                    this.show_themes_failure(EXPORT_FAILED, &err, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Import: the theme file this PC's file picker returns is saved as a new
+    /// user theme off the UI thread, and the list comes back with the cursor
+    /// on it. Nothing is applied; Use does that.
+    fn import_theme(&mut self, cx: &mut Context<Self>) {
+        if let Some(modal) = self.themes_modal.as_mut() {
+            modal.error = None;
+        }
+        let store = self.theme_store();
+        let picked = (self.pick_file)(cx, None, theme_file_filter());
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                return;
+            };
+            let imported = cx
+                .background_executor()
+                .spawn(async move { import_file(&store, &path) })
+                .await;
+            // Fails only when the view is gone, and the modal with it.
+            this.update(cx, |this, cx| match imported {
+                Ok(id) => this.show_imported_theme(&id, cx),
+                Err(err) => this.show_themes_failure(IMPORT_FAILED, &err.to_string(), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Lists the store again with the cursor on the imported theme `id`.
+    fn show_imported_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.rebuild_themes_dialog();
+        if let Some(modal) = self.themes_modal.as_mut() {
+            let at = modal
+                .dialog
+                .rows
+                .iter()
+                .position(|row| row.entry.id == id && !row.entry.built_in);
+            if let Some(at) = at {
+                modal.dialog.cursor = at;
+                modal.dialog.hover = None;
+                modal.scroll.scroll_to_item(list_child(&modal.dialog, at));
+            }
+            modal.error = None;
+        }
+        cx.notify();
+    }
+
+    /// Shows `what: err` in the modal's error row.
+    fn show_themes_failure(&mut self, what: &str, err: &str, cx: &mut Context<Self>) {
+        tracing::warn!("{what}: {err}");
+        if let Some(modal) = self.themes_modal.as_mut() {
+            modal.error = Some(format!("{what}: {err}"));
+        }
+        cx.notify();
+    }
+
     fn show_themes_error(&mut self, doing: &str, err: &ThemeError, cx: &mut Context<Self>) {
         tracing::warn!("{doing}: {err}");
         if let Some(modal) = self.themes_modal.as_mut() {
@@ -1957,7 +2137,7 @@ fn preview_column(
 }
 
 /// The editor's footer: the contrast verdict, then Delete for a saved theme,
-/// Revert, a disabled Export and Save.
+/// Revert, Export (not a Tab stop) and Save.
 fn edit_footer(modal: &ThemesModal, editor: &ThemeEditor, cx: &mut Context<RootView>) -> Div {
     let shift = fonts::ui_weight_shift(cx);
     let t = theme(cx);
@@ -1989,9 +2169,12 @@ fn edit_footer(modal: &ThemesModal, editor: &ThemeEditor, cx: &mut Context<RootV
     let export = dialog_button(
         "themes-export",
         "Export".to_owned(),
-        dialog_look(offset, shift, false, false, &t),
+        dialog_look(offset, shift, false, true, &t),
         false,
-    );
+    )
+    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+        this.export_theme(cx);
+    }));
     let save = primary_button(
         offset,
         shift,

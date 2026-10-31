@@ -27,7 +27,7 @@ use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
     HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure,
     OpenLocalFuture, Opener, PairingAction, PairingActionSink, PairingToast, QuitFn, RootDeps,
-    RootView, ScPanel, bind_keys,
+    RootView, SavePicker, ScPanel, bind_keys,
     remote_access::Autostart,
     spawn_net,
     target::{TailnetHost, Target},
@@ -933,6 +933,8 @@ pub struct PickRecorder {
     starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
     file_starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
     file_filters: std::cell::RefCell<Vec<FileFilter>>,
+    next_save: std::cell::RefCell<Option<PathBuf>>,
+    saves: std::cell::RefCell<Vec<SaveAsk>>,
     /// While set, a folder ask waits for [`Harness::release_picked_folder`].
     hold: Cell<bool>,
     held: std::cell::RefCell<Option<futures::channel::oneshot::Sender<Option<PathBuf>>>>,
@@ -966,6 +968,30 @@ impl PickRecorder {
             },
         )
     }
+
+    fn save_picker(recorder: &Rc<Self>) -> SavePicker {
+        let recorder = Rc::clone(recorder);
+        Rc::new(
+            move |_: &mut App, dir: Option<PathBuf>, suggested: String, filter: FileFilter| {
+                recorder.saves.borrow_mut().push(SaveAsk {
+                    dir,
+                    suggested,
+                    filter,
+                });
+                let picked = recorder.next_save.borrow().clone();
+                Box::pin(async move { Ok(picked) })
+            },
+        )
+    }
+}
+
+/// One ask of the save picker: the folder it opened at, the file name it
+/// suggested and the types it offered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveAsk {
+    pub dir: Option<PathBuf>,
+    pub suggested: String,
+    pub filter: FileFilter,
 }
 
 /// What a Ctrl+click on a terminal link opened.
@@ -1452,6 +1478,7 @@ impl<'a> Harness<'a> {
             notify: notifier.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
+            pick_save: PickRecorder::save_picker(&picker),
             autostart: autostart.clone(),
             tokens: tokens.clone(),
             updater: updater.clone(),
@@ -1513,6 +1540,7 @@ impl<'a> Harness<'a> {
             notify: notifier.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
+            pick_save: PickRecorder::save_picker(&picker),
             autostart: autostart.clone(),
             tokens: tokens.clone(),
             updater: updater.clone(),
@@ -1641,6 +1669,16 @@ impl<'a> Harness<'a> {
     /// The filter each ask of the file picker offered, oldest first.
     pub fn file_filters(&self) -> Vec<FileFilter> {
         self.picker.file_filters.borrow().clone()
+    }
+
+    /// Makes the save picker answer `file` (a cancel when `None`).
+    pub fn set_saved_file(&self, file: Option<&Path>) {
+        *self.picker.next_save.borrow_mut() = file.map(Path::to_path_buf);
+    }
+
+    /// Each ask of the save picker, oldest first.
+    pub fn save_asks(&self) -> Vec<SaveAsk> {
+        self.picker.saves.borrow().clone()
     }
 
     /// Reports `host` as behind a mapped network drive from now on.

@@ -11,12 +11,14 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext};
 use protocol::{DaemonMessage, WorktreeCleanupFailure};
-use rustling_tulip_native::Connection;
 use rustling_tulip_native::builtin_themes::{DRACULA, NORD};
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
+use rustling_tulip_native::theme_store::{
+    MAX_THEME_BYTES, THEMES_DIR, ThemeStore, export_json, parse_theme_json,
+};
 use rustling_tulip_native::ui_theme::{self, UiTheme};
-use support::{Fixture, Harness, TestDir, repo, session};
+use rustling_tulip_native::{Connection, FileFilter};
+use support::{Fixture, Harness, SaveAsk, TestDir, repo, session};
 
 const HOST: &str = "box.tail1234.ts.net";
 
@@ -538,4 +540,204 @@ fn the_close_button_returns_to_the_settings_stop(cx: &mut TestAppContext) {
     h.click_on("themes-close");
 
     assert_returned_to_settings(&mut h);
+}
+
+/// The theme the clipboard holds: its name, theme and base.
+fn copied_theme(h: &mut Harness<'_>) -> (String, UiTheme, Option<String>) {
+    let text = h.clipboard().expect("the clipboard holds the theme");
+    let (name, theme, base, _) = parse_theme_json(&text).expect("a whole theme");
+    (name, theme, base)
+}
+
+/// The names of the files in `dir`, but `native-ui.json`, which the window
+/// saves on its own.
+fn files_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read the folder")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name != "native-ui.json")
+        .collect();
+    names.sort();
+    names
+}
+
+fn theme_filter() -> FileFilter {
+    FileFilter::new("Theme", &["json"])
+}
+
+#[gpui::test]
+fn export_copies_the_theme_then_saves_it_where_asked(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let out = dir.path().join("exported.json");
+    let mut h = opened(cx, &dir);
+    cursor_to(&mut h, "dracula", true);
+    h.set_saved_file(Some(&out));
+
+    h.click_on("themes-export");
+    h.cx.run_until_parked();
+
+    let (name, theme, _) = copied_theme(&mut h);
+    assert_eq!((name.as_str(), theme), ("Dracula", DRACULA));
+    assert!(
+        h.root(|root, _| root.copied_chip()).is_some(),
+        "the Copied chip shows"
+    );
+    assert_eq!(
+        h.save_asks(),
+        [SaveAsk {
+            dir: None,
+            suggested: "dracula.json".to_owned(),
+            filter: theme_filter(),
+        }]
+    );
+    let written = std::fs::read_to_string(&out).expect("the file is written");
+    assert_eq!(
+        Some(written),
+        h.clipboard(),
+        "the file holds the copied JSON"
+    );
+    assert_eq!(h.root(|root, _| root.themes_modal_error()), None);
+    assert_eq!(drawn(&mut h), NORD, "nothing is applied");
+}
+
+#[gpui::test]
+fn cancelling_the_save_keeps_the_clipboard_and_writes_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let before = files_in(dir.path());
+    h.set_saved_file(None);
+
+    h.click_on("themes-export");
+    h.cx.run_until_parked();
+
+    assert_eq!(h.save_asks().len(), 1, "the save picker was asked");
+    assert_eq!(
+        copied_theme(&mut h).0,
+        "Nord",
+        "the clipboard keeps the theme"
+    );
+    assert_eq!(files_in(dir.path()), before, "nothing is written");
+    assert_eq!(h.root(|root, _| root.themes_modal_error()), None);
+}
+
+#[gpui::test]
+fn export_in_the_editor_takes_the_working_theme_under_the_typed_name(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let out = dir.path().join("mine.json");
+    let mut h = opened(cx, &dir);
+    h.click_on("themes-duplicate");
+    h.click_on("themes-name");
+    h.keys("ctrl-a m i n e");
+    h.set_saved_file(Some(&out));
+
+    h.click_on("themes-export");
+    h.cx.run_until_parked();
+
+    let working = h.root(|root, _| root.themes_editor().expect("the editor is open").working);
+    let (name, theme, base) = copied_theme(&mut h);
+    assert_eq!(name, "mine");
+    assert_eq!(theme, working);
+    assert_eq!(
+        base.as_deref(),
+        Some("nord"),
+        "with the theme it was made from"
+    );
+    assert_eq!(h.save_asks()[0].suggested, "mine.json");
+    let written = std::fs::read_to_string(&out).expect("the file is written");
+    assert_eq!(Some(written), h.clipboard());
+    assert!(
+        !dir.path().join(THEMES_DIR).exists(),
+        "an export saves no theme"
+    );
+}
+
+/// Writes `text` to `name` in `dir` and makes the file picker answer it.
+fn pick_theme_file(h: &mut Harness<'_>, dir: &TestDir, name: &str, text: &[u8]) {
+    let path = dir.path().join(name);
+    std::fs::write(&path, text).expect("write the theme file");
+    h.set_picked_file(Some(path.to_str().expect("a UTF-8 path")));
+}
+
+/// The keyboard's row: its name, and whether it sits under Yours.
+fn cursor_row(h: &mut Harness<'_>) -> (String, bool) {
+    h.root(|root, _| {
+        let dialog = root.themes_modal().expect("the dialog is open");
+        let row = &dialog.rows[dialog.cursor];
+        let yours = !row.entry.built_in && dialog.cursor >= dialog.yours_start();
+        (row.entry.name.clone(), yours)
+    })
+}
+
+fn modal_error(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.themes_modal_error())
+}
+
+#[gpui::test]
+fn import_adds_the_theme_under_yours_with_the_cursor_on_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let text = export_json("Night", &DRACULA, Some("dracula"), None).expect("export");
+    pick_theme_file(&mut h, &dir, "night-export.json", text.as_bytes());
+
+    h.click_on("themes-import");
+    h.cx.run_until_parked();
+
+    assert_eq!(h.file_filters(), [theme_filter()]);
+    assert_eq!(cursor_row(&mut h), ("Night".to_owned(), true));
+    assert!(
+        dir.path().join(THEMES_DIR).join("night.json").exists(),
+        "the theme has its own file"
+    );
+    assert!(shown(&mut h, "themes-row-user-night"));
+    assert_eq!(modal_error(&mut h), None);
+    assert_eq!(drawn(&mut h), NORD, "nothing is applied");
+}
+
+#[gpui::test]
+fn an_imported_name_that_is_taken_gets_the_copy_suffix(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let text = export_json("Nord", &NORD, None, None).expect("export");
+    pick_theme_file(&mut h, &dir, "nord-export.json", text.as_bytes());
+
+    h.click_on("themes-import");
+    h.cx.run_until_parked();
+
+    assert_eq!(cursor_row(&mut h), ("Nord copy".to_owned(), true));
+    assert!(dir.path().join(THEMES_DIR).join("nord-copy.json").exists());
+}
+
+#[gpui::test]
+fn an_oversized_or_malformed_file_is_refused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    pick_theme_file(&mut h, &dir, "big.json", &vec![b' '; MAX_THEME_BYTES + 1]);
+
+    h.click_on("themes-import");
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        modal_error(&mut h).as_deref(),
+        Some("Couldn't import the theme: the theme file is 1048577 bytes; the limit is 1 MiB")
+    );
+    assert!(shown(&mut h, "themes-error"));
+    assert!(!dir.path().join(THEMES_DIR).exists(), "nothing is written");
+
+    pick_theme_file(&mut h, &dir, "bad.json", b"{");
+    h.click_on("themes-import");
+    h.cx.run_until_parked();
+
+    let error = modal_error(&mut h).expect("the error row shows");
+    assert!(
+        error.starts_with("Couldn't import the theme: ")
+            && error.contains("bad.json is not a whole theme"),
+        "{error}"
+    );
+    assert!(!dir.path().join(THEMES_DIR).exists(), "nothing is written");
 }
