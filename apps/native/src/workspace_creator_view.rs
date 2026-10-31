@@ -24,9 +24,12 @@ use crate::workspace_creator::{
 };
 use crate::{Pick, RootView, tagged_text};
 
-/// The open creator: its model, the name field's input entity and, on a
-/// remote host, the typed `.code-workspace` field with the host's name.
+/// The open creator: the host it acts on, its model, the name field's input
+/// entity and, on a remote host, the typed `.code-workspace` field with the
+/// host's name.
 pub(crate) struct WorkspaceCreatorDialog {
+    /// The host whose repos it lists and whose daemon parses and creates.
+    host: HostKey,
     creator: WorkspaceCreator,
     name_input: Entity<TextInput>,
     file_field: Option<FileField>,
@@ -40,9 +43,14 @@ struct FileField {
 }
 
 impl RootView {
-    /// "Add workspace…": opens the creator, unless the connection is down or
-    /// another dialog, menu or prompt is up.
-    pub(crate) fn open_workspace_creator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// "Add workspace…": opens the creator on `host`, unless the connection
+    /// is down or another dialog, menu or prompt is up.
+    pub(crate) fn open_workspace_creator(
+        &mut self,
+        host: HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let blocked = self.workspace_creator.is_some()
             || self.vscode_prompt_open()
             || self.exit.is_some()
@@ -68,24 +76,38 @@ impl RootView {
         let mut subscriptions = Self::watch_workspace_name(&name_input, window, cx);
         // No remembered folder is offered: this PC's folders mean nothing
         // on the host.
-        let file_field = self.conn().target().short_name().map(|host| {
-            let placeholder = file_field_placeholder(host);
+        let file_field = (!self.capabilities_of(&host).opens_local_files()).then(|| {
+            let name = self.host_name(&host);
+            let placeholder = file_field_placeholder(&name);
             let input = cx.new(|cx| TextInput::new(String::new(), placeholder, cx));
-            FileField {
-                host: host.to_owned(),
-                input,
-            }
+            FileField { host: name, input }
         });
         if let Some(field) = &file_field {
             subscriptions.extend(Self::watch_workspace_file(&field.input, window, cx));
         }
         self.workspace_creator = Some(WorkspaceCreatorDialog {
+            host,
             creator: WorkspaceCreator::default(),
             name_input,
             file_field,
             _subscriptions: subscriptions,
         });
         self.apply_workspace_creator_focus(window, cx);
+    }
+
+    /// Whether the open creator's host offers Browse: only a host whose
+    /// files are on this PC.
+    fn creator_browse(&self) -> bool {
+        self.workspace_creator
+            .as_ref()
+            .is_some_and(|dialog| self.capabilities_of(&dialog.host).opens_local_files())
+    }
+
+    /// The open creator's host's repos; none while it is closed.
+    fn creator_repos(&self) -> &[RepoEntry] {
+        self.workspace_creator
+            .as_ref()
+            .map_or(&[], |dialog| self.sidebar.repos_of(&dialog.host))
     }
 
     /// Closes the creator and hands the keyboard back to the active pane.
@@ -120,7 +142,7 @@ impl RootView {
         });
         let handle = input.read(cx).focus_handle(cx);
         let focus = cx.on_focus(&handle, window, |this, _, cx| {
-            let browse = this.capabilities().opens_local_files();
+            let browse = this.creator_browse();
             if let Some(dialog) = &mut this.workspace_creator {
                 dialog.creator.set_focus(CreatorControl::Name, browse);
             }
@@ -153,7 +175,7 @@ impl RootView {
         });
         let handle = input.read(cx).focus_handle(cx);
         let focus = cx.on_focus(&handle, window, |this, _, cx| {
-            let browse = this.capabilities().opens_local_files();
+            let browse = this.creator_browse();
             if let Some(dialog) = &mut this.workspace_creator {
                 dialog.creator.set_focus(CreatorControl::File, browse);
             }
@@ -179,11 +201,8 @@ impl RootView {
         match host_workspace_file(&text) {
             Ok(path) => {
                 dialog.creator.begin_parse(path.clone());
-                // The host comes from the dialog's chosen host.
-                self.send_to(
-                    &HostKey::Local,
-                    ClientMessage::ParseVscodeWorkspace { path },
-                );
+                let host = dialog.host.clone();
+                self.send_to(&host, ClientMessage::ParseVscodeWorkspace { path });
             }
             Err(problem) => {
                 let message = problem.message(&field.host);
@@ -215,7 +234,7 @@ impl RootView {
                 true
             }
             "tab" => {
-                let browse = self.capabilities().opens_local_files();
+                let browse = self.creator_browse();
                 if let Some(dialog) = &mut self.workspace_creator {
                     dialog
                         .creator
@@ -241,7 +260,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let browse = self.capabilities().opens_local_files();
+        let browse = self.creator_browse();
         if let Some(dialog) = &mut self.workspace_creator {
             match control {
                 CreatorControl::FromRepos => dialog.creator.set_mode(CreatorMode::FromRepos),
@@ -342,24 +361,21 @@ impl RootView {
             self.save_ui();
         }
         let path = picked.to_string_lossy().into_owned();
-        {
+        let host = {
             let Some(dialog) = &mut self.workspace_creator else {
                 return;
             };
             dialog.creator.begin_parse(path.clone());
-        }
-        // The host comes from the dialog's chosen host.
-        self.send_to(
-            &HostKey::Local,
-            ClientMessage::ParseVscodeWorkspace { path },
-        );
+            dialog.host.clone()
+        };
+        self.send_to(&host, ClientMessage::ParseVscodeWorkspace { path });
         cx.notify();
     }
 
     /// Create: sends the form and keeps the creator open until the daemon's
     /// workspace list holds the name.
     fn submit_workspace_creator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let message = {
+        let (host, message) = {
             let Some(dialog) = &mut self.workspace_creator else {
                 return;
             };
@@ -367,10 +383,9 @@ impl RootView {
                 return;
             };
             dialog.creator.begin_create();
-            message
+            (dialog.host.clone(), message)
         };
-        // The host comes from the dialog's chosen host.
-        self.send_to(&HostKey::Local, message);
+        self.send_to(&host, message);
         // A submit from the name field takes the keyboard off the field, so
         // the open creator still answers Esc while it waits.
         self.workspace_creator_focus.focus(window);
@@ -482,8 +497,11 @@ impl RootView {
             .children(CreatorMode::ALL.map(|mode| workspace_tab(mode, creator.mode(), cx)));
         let body = match creator.mode() {
             CreatorMode::FromRepos => {
-                let note = no_repos_note(self.conn().target().short_name());
-                repos_body(dialog, self.sidebar.repos(), focus, note, cx).into_any_element()
+                let note = no_repos_note(
+                    self.conn_of(&dialog.host)
+                        .and_then(|conn| conn.target().short_name()),
+                );
+                repos_body(dialog, self.creator_repos(), focus, note, cx).into_any_element()
             }
             CreatorMode::FromVscode => vscode_body(dialog, focus, cx).into_any_element(),
         };
@@ -602,7 +620,7 @@ impl RootView {
         self.workspace_creator
             .as_ref()
             .map_or_else(Vec::new, |dialog| {
-                dialog.creator.member_rows(self.sidebar.repos())
+                dialog.creator.member_rows(self.creator_repos())
             })
     }
 
@@ -695,7 +713,7 @@ impl RootView {
         controls.extend(
             dialog
                 .creator
-                .member_rows(self.sidebar.repos())
+                .member_rows(self.creator_repos())
                 .into_iter()
                 .map(|(selector, label, _)| (selector, label)),
         );

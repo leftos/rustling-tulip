@@ -321,6 +321,7 @@ impl RootView {
             let state = self.host_header_state(&group.host);
             shown.push(host_header(group, state, index == 0, cx));
             if !group.collapsed {
+                shown.extend(self.host_no_repos_note(&group.host, cx));
                 shown.extend(
                     group
                         .containers
@@ -431,10 +432,12 @@ impl RootView {
         div().relative().flex_none().child(button).children(menu)
     }
 
-    /// The ⋯ menu's Add workspace row: muted, with why, below two repos.
+    /// The ⋯ menu's Add workspace row: muted, with why, below two repos on
+    /// the focused session's host (This PC with none focused), which the
+    /// creator it opens acts on.
     fn more_add_workspace_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
-        if self.sidebar.repos().len() < 2 {
+        if self.sidebar.repos_of(&self.focused_host()).len() < 2 {
             div()
                 .id(MORE_ADD_WORKSPACE_ROW)
                 .debug_selector(|| MORE_ADD_WORKSPACE_ROW.to_owned())
@@ -456,7 +459,8 @@ impl RootView {
             menu_item(MORE_ADD_WORKSPACE_ROW, "Add workspace…", false, &t).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| {
                     this.close_more_menu(window, cx);
-                    this.open_workspace_creator(window, cx);
+                    let host = this.focused_host();
+                    this.open_workspace_creator(host, window, cx);
                 },
             ))
         }
@@ -488,6 +492,34 @@ impl RootView {
             self.focus_active_pane(window, cx);
             cx.notify();
         }
+    }
+
+    /// The muted line an online remote host's group shows while its
+    /// registry holds no repo or workspace; This PC's empty registry has
+    /// the window-wide note instead.
+    fn host_no_repos_note(&self, host: &HostKey, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if *host == HostKey::Local
+            || self.is_remote_offline(host)
+            || !self.sidebar.repos_of(host).is_empty()
+            || !self.sidebar.workspaces_of(host).is_empty()
+        {
+            return None;
+        }
+        let target = self.conn_of(host)?.target();
+        let key = host.wire().unwrap_or("local");
+        let tag = format!("sidebar-host-no-repos-{key}");
+        let text = sidebar_no_repos_note(target);
+        let shown = format!("{tag}={text}");
+        let t = theme(cx);
+        Some(
+            div()
+                .debug_selector(move || tag)
+                .px(px(ROW_PADDING))
+                .py(px(6.0))
+                .text_color(gpui::rgb(t.muted))
+                .child(div().debug_selector(move || shown).child(text))
+                .into_any_element(),
+        )
     }
 
     /// Whether the daemon's registry is in and holds no repo or workspace,
