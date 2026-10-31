@@ -195,7 +195,8 @@ pub fn parse_theme_json(
     if text.len() > MAX_THEME_BYTES {
         return Err(ThemeError::TooLarge { bytes: text.len() });
     }
-    let file: ThemeFile = serde_json::from_str(text).map_err(|source| ThemeError::Parse {
+    let json = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let file: ThemeFile = serde_json::from_str(json).map_err(|source| ThemeError::Parse {
         path: PathBuf::from(THEME_TEXT),
         source,
     })?;
@@ -656,7 +657,8 @@ fn read_file(path: &Path) -> Result<ThemeFile, ThemeError> {
         path: path.to_path_buf(),
         source,
     })?;
-    serde_json::from_str(&text).map_err(|source| ThemeError::Parse {
+    let json = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    serde_json::from_str(json).map_err(|source| ThemeError::Parse {
         path: path.to_path_buf(),
         source,
     })
@@ -1550,6 +1552,32 @@ mod tests {
                 Err(ThemeError::Parse { .. })
             ),
             "a malformed colour"
+        );
+    }
+
+    #[test]
+    fn a_theme_text_with_a_utf8_bom_parses() {
+        let text = export_json("Marked", &UiTheme::CONTRAST, None, None).expect("export");
+        let marked = format!("\u{feff}{text}");
+        let (name, theme, _, _) = parse_theme_json(&marked).expect("parse the marked text");
+        let (plain_name, plain_theme, _, _) = parse_theme_json(&text).expect("parse");
+        assert_eq!(name, plain_name);
+        assert_eq!(theme, plain_theme);
+        assert_eq!(name, "Marked");
+    }
+
+    #[test]
+    fn a_theme_file_with_a_utf8_bom_is_listed() {
+        let dir = TestDir::new("bom");
+        std::fs::create_dir_all(&dir.0).expect("make the folder");
+        let text = export_json("Marked", &UiTheme::CONTRAST, None, None).expect("export");
+        std::fs::write(dir.file("marked"), format!("\u{feff}{text}")).expect("write");
+        let entries = dir.store().list();
+        assert!(
+            users(&entries)
+                .iter()
+                .any(|entry| entry.id == "marked" && entry.error.is_none()),
+            "listed as a user theme, not broken"
         );
     }
 
