@@ -499,19 +499,6 @@ impl Notices {
         self.toasts.len() != before
     }
 
-    /// Drops every spawn's "Spawning session…" toast, as a new or lost
-    /// connection must; returns whether any was shown.
-    pub fn dismiss_spawning(&mut self) -> bool {
-        let before = self.toasts.len();
-        self.toasts.retain(|toast| {
-            !toast
-                .key
-                .as_deref()
-                .is_some_and(|key| key.starts_with(SPAWNING_PREFIX))
-        });
-        self.toasts.len() != before
-    }
-
     /// Drops the timed toasts whose time is up at `now`; returns whether any
     /// went. A sticky toast has no time to be up.
     pub fn expire(&mut self, now: Instant) -> bool {
@@ -946,10 +933,6 @@ mod tests {
         );
         notices.push(ToastKind::Error, "Daemon error", None, now);
         assert_eq!(titles(&notices), ["r1", "r2", "Daemon error"]);
-
-        assert!(notices.dismiss_spawning());
-        assert_eq!(titles(&notices), ["Daemon error"], "only spawn toasts go");
-        assert!(!notices.dismiss_spawning(), "none left");
     }
 
     #[test]

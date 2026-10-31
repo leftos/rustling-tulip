@@ -197,11 +197,6 @@ impl PendingSpawns {
         self.pending.remove(request_id).is_some()
     }
 
-    /// Forgets every spawn, as a new connection must.
-    pub(crate) fn clear(&mut self) {
-        self.pending.clear();
-    }
-
     /// Forgets the spawns sent to `host`, whose connection closed; returns
     /// their request ids.
     pub(crate) fn drop_host(&mut self, host: &HostKey) -> Vec<String> {
@@ -1266,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_clears_pending_spawns() {
+    fn a_hosts_drop_clears_its_pending_spawns() {
         let mut tabs = model_with(&[tab("t1", &pane("a", None))]);
         let mut spawns = PendingSpawns::default();
         spawns.start(
@@ -1281,7 +1276,11 @@ mod tests {
             "q2".to_owned(),
             OpenIn::NewTab,
         );
-        spawns.clear();
+        assert_eq!(
+            spawns.drop_host(&HostKey::Local).len(),
+            2,
+            "This PC's drop ends both of its spawns"
+        );
         assert!(!spawns.has_request("q1"));
         assert!(
             spawns

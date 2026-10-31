@@ -4446,7 +4446,6 @@ impl RootView {
         self.pending_appearance.clear();
         self.container_sends.clear();
         self.status.clear();
-        self.duplicates.clear();
         self.prefills.clear();
         self.launch_last.clear();
         self.close_spawn_dialog(window, cx);
