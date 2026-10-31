@@ -4,10 +4,9 @@
 
 ## Wave 17 — Themes
 
-- [/] RT-583 Theme selector and editor for the UI and the terminal, with built-in and custom themes · release vNext
 - [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette
-- [/] RT-607 Add a font weight setting for the UI font and the terminal font · release vNext
 - [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons
+- [ ] RT-619 Match italic terminal text to the Medium and SemiBold terminal weights
 
 ## Wave 16 — Several hosts in one window
 
@@ -19,12 +18,16 @@
   - [ ] RT-579 Fix remote-host labels, Recover names, creator routing and IPv6 SSH keys left by MH.3
   - [ ] RT-580 Drop only the reset host's cleanup-failed entries, and re-arm Recover's timer
   - [ ] RT-584 Give a remote repo's container menu the remote-host refusal, not 'no folder'
-  - [ ] RT-591 Resolve a remote pane's agents against its own host in pane headers · release vNext
-  - [/] RT-598 Verify and fix eight candidate multi-host defects before the feature merges · release vNext
-  - [ ] RT-599 Open diff and viewer tabs from a remote pane on its own host · release vNext
   - [ ] RT-600 Keep a fixed owner when two remote host keys reach one daemon · release vNext
-  - [ ] RT-603 Keep remote hosts' pending spawns when This PC reconnects · release vNext
-  - [ ] RT-610 Decide whether an offline host's sidebar leaf can be dragged into a tab · release vNext
+- [ ] RT-620 Route the remaining session and repo lookups by their own host
+- [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline
+- [ ] RT-623 Close three rare gaps in the host-aware spawn dialog: field redraw on a snap, agent refresh, preview key
+- [ ] RT-624 Keep a remote quick shell's remembered folder across This PC's reconnect
+- [ ] RT-625 Close the multi-host spawn and creator gaps left by MH.7 brief D
+- [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host
+- [ ] RT-627 Tell apart two machines that share a daemon id, and check cross-client host sweeps
+- [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts
+- [ ] RT-629 Open Manage worktrees on the host chosen in Settings
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -175,7 +178,6 @@
 - [ ] RT-277 Rewrite design files' Codex and Cursor claims for the Claude-only app
 - [ ] RT-376 Re-read docs/release.md and docs/env-secrets.md against their named files' changes since 2026-10-22
 - [ ] RT-602 Describe the Contrast look where the docs still describe Petal
-- [ ] RT-609 Restate CLAUDE.md's no-backward-compatibility rule for a released app, and fix the glossary's test mode
 - [ ] RT-616 Re-read the UI language README and the hook-status spike against their moved files
 
 ## Build tooling
@@ -316,3 +318,5 @@
 - [ ] RT-612 Keep a session pop-out on its session after a resume
 - [ ] RT-613 Close a parked remote session's pane in This PC's layout
 - [ ] RT-615 Keep a weight difference between chosen and unchosen at UI weight SemiBold
+- [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
+- [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
