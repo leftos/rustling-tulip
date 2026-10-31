@@ -880,9 +880,12 @@ pub struct RootView {
     settings_ring_control: Option<settings_view::SettingsControl>,
     /// The Remote access page's port field and login launch, once shown.
     remote_access_tab: Option<settings_view::RemoteAccessTab>,
-    /// The agent pages' launch-command and text fields, each kept per
-    /// agent once its page was shown, while Settings is open.
+    /// The agent pages' launch-command and text fields, each kept per host
+    /// and agent once its page was shown, while Settings is open.
     agent_tabs: settings_view::AgentTabs,
+    /// The host whose agent pages Settings shows: This PC each time
+    /// Settings opens, and again once the shown host's connection closes.
+    settings_host: HostKey,
     /// Reads and switches whether this PC starts the daemon at login.
     autostart: Arc<dyn remote_access::Autostart>,
     /// The title last set on the window.
@@ -1369,6 +1372,7 @@ impl RootView {
             settings_ring_control: None,
             remote_access_tab: None,
             agent_tabs: settings_view::AgentTabs::default(),
+            settings_host: HostKey::Local,
             autostart,
             window_title: String::new(),
             title_pending: None,
@@ -3853,7 +3857,7 @@ impl RootView {
             self.on_host_closed(host, window, cx);
         }
         if !conn.is_open() && *host == HostKey::Local {
-            self.agent_tabs.forget_applies();
+            self.agent_tabs.forget_applies(&HostKey::Local);
             self.launch_last.clear();
         }
         // The handshake, the fetches streaming over the connection and the
@@ -4266,17 +4270,14 @@ impl RootView {
             request_id,
             code,
         } = failure;
-        let settings = *host == HostKey::Local;
-        if settings && request_id.is_none() {
+        if *host == HostKey::Local && request_id.is_none() {
             self.on_worktrees_root_error(code, cx);
         }
         let inline = match request_id {
             None => self.on_creator_error(&message, cx),
             Some(id) => {
-                if settings {
-                    self.on_agent_setting_refused(id, &message, cx);
-                }
-                (settings && self.on_agent_command_error(id, code, &message, cx))
+                self.on_agent_setting_refused(host, id, &message, cx);
+                self.on_agent_command_error(host, id, code, &message, cx)
                     || self.on_preset_list_failed(id, &message, cx)
             }
         };
@@ -4392,6 +4393,7 @@ impl RootView {
         self.set_remote_status(host, None, cx);
         self.cwd_workspace_scans
             .retain(|(owner, _), _| owner != host);
+        self.agent_tabs.drop_host(host);
         if *host != HostKey::Local {
             if let Some(mirrors) = self.mirrors_of_mut(host) {
                 mirrors.worktrees_root = None;
@@ -4399,7 +4401,6 @@ impl RootView {
             self.drop_stale_session_ui(window, cx);
             return;
         }
-        self.agent_tabs = settings_view::AgentTabs::default();
         self.reset_panes(cx);
         self.pending_appearance.clear();
         self.container_sends.clear();

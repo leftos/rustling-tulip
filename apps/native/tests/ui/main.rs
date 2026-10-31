@@ -61,6 +61,7 @@ mod ui_repos;
 mod ui_resume_report;
 mod ui_session_actions;
 mod ui_settings;
+mod ui_settings_hosts;
 mod ui_shell;
 mod ui_shell_integration;
 mod ui_shortcuts;

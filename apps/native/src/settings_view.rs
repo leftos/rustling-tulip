@@ -5,7 +5,7 @@
 //! settings; every change applies at once. The main window's title, which
 //! the App title tab controls, is kept here too.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -508,13 +508,13 @@ pub(crate) struct SettingApply {
 /// ids and agents of the launch-command applies that still owe the
 /// daemon's answer, oldest first.
 #[derive(Default)]
-pub(crate) struct AgentTabs {
+pub(crate) struct HostAgentTabs {
     tabs: BTreeMap<AgentId, AgentTab>,
     current: Option<AgentId>,
     applies: VecDeque<(String, AgentId)>,
 }
 
-impl AgentTabs {
+impl HostAgentTabs {
     /// Drops the pages of the agents `agents` no longer lists, and their
     /// applies from the queue.
     fn keep_listed(&mut self, agents: &[AgentDescriptor]) {
@@ -541,6 +541,59 @@ impl AgentTabs {
             tab.sent = None;
             tab.saved = false;
         }
+    }
+}
+
+/// The agent pages' state of each host whose pages Settings has shown, so
+/// moving the host selector keeps every host's drafts and applies apart.
+#[derive(Default)]
+pub(crate) struct AgentTabs {
+    hosts: HashMap<HostKey, HostAgentTabs>,
+}
+
+impl AgentTabs {
+    /// `host`'s agent pages, once Settings has shown one of them.
+    fn of(&self, host: &HostKey) -> Option<&HostAgentTabs> {
+        self.hosts.get(host)
+    }
+
+    /// `host`'s agent pages, to update, once Settings has shown one.
+    fn of_mut(&mut self, host: &HostKey) -> Option<&mut HostAgentTabs> {
+        self.hosts.get_mut(host)
+    }
+
+    /// `host`'s agent pages, to update, made empty when it has none yet.
+    fn entry(&mut self, host: &HostKey) -> &mut HostAgentTabs {
+        self.hosts.entry(host.clone()).or_default()
+    }
+
+    /// Every host's agent pages.
+    fn all(&self) -> impl Iterator<Item = (&HostKey, &HostAgentTabs)> {
+        self.hosts.iter()
+    }
+
+    /// Drops `host`'s agent pages, their drafts and their applies; every
+    /// other host's stay.
+    pub(crate) fn drop_host(&mut self, host: &HostKey) {
+        self.hosts.remove(host);
+    }
+
+    /// `host`'s connection was lost: its applies in flight are forgotten as
+    /// [`HostAgentTabs::forget_applies`] says; every other host's stay.
+    pub(crate) fn forget_applies(&mut self, host: &HostKey) {
+        if let Some(tabs) = self.of_mut(host) {
+            tabs.forget_applies();
+        }
+    }
+}
+
+/// The host Settings shows once `closed`'s connection closed: This PC when
+/// `closed` was the one shown, else the one shown.
+pub(crate) fn settings_host_after_close(shown: &HostKey, closed: &HostKey) -> HostKey {
+    if shown == closed {
+        HostKey::Local
+    } else {
+        shown.clone()
     }
 }
 
@@ -695,7 +748,7 @@ impl RootView {
         self.agents()
             .iter()
             .find(|agent| agent.tag == tag)
-            .and_then(|descriptor| self.agent_page(&descriptor.id))
+            .and_then(|descriptor| self.agent_page(&self.settings_host, &descriptor.id))
             .map(|page| page.fields.into_iter().map(|view| view.id).collect())
             .unwrap_or_default()
     }
@@ -706,7 +759,7 @@ impl RootView {
     #[must_use]
     pub fn settings_text_placeholder(&self, tag: &str, field: &str) -> Option<String> {
         let descriptor = self.agents().iter().find(|agent| agent.tag == tag)?;
-        self.agent_tabs
+        self.shown_agent_tabs()?
             .tabs
             .get(&descriptor.id)?
             .texts
@@ -717,17 +770,21 @@ impl RootView {
 
     fn settings_page_field(&self, tag: &str, field: &str) -> Option<FieldView> {
         let descriptor = self.agents().iter().find(|agent| agent.tag == tag)?;
-        self.agent_page(&descriptor.id)?
+        self.agent_page(&self.settings_host, &descriptor.id)?
             .fields
             .into_iter()
             .find(|view| view.id == field)
     }
 
-    /// The Settings page of agent `id` as the daemon last described it and
-    /// broadcast its values; `None` while the daemon lists no such agent.
-    fn agent_page(&self, id: &AgentId) -> Option<AgentPage> {
-        let descriptor = descriptor_for(self.agents(), id)?;
-        let options = AgentOptions::new(descriptor.clone(), self.agent_settings().get(id));
+    /// The Settings page of `host`'s agent `id` as its daemon last
+    /// described it and broadcast its values; `None` while that daemon
+    /// lists no such agent.
+    fn agent_page(&self, host: &HostKey, id: &AgentId) -> Option<AgentPage> {
+        let descriptor = descriptor_for(self.sidebar.agents(host), id)?;
+        let values = self
+            .mirrors_of(host)
+            .and_then(|mirrors| mirrors.agent_settings.get(id));
+        let options = AgentOptions::new(descriptor.clone(), values);
         Some(AgentPage {
             id: descriptor.id.clone(),
             tag: descriptor.tag.clone(),
@@ -738,7 +795,77 @@ impl RootView {
 
     /// The page of the agent whose tab is shown.
     fn shown_page(&self) -> Option<AgentPage> {
-        self.agent_page(&self.settings_tab.agent()?)
+        self.agent_page(&self.settings_host, &self.settings_tab.agent()?)
+    }
+
+    /// The agent pages of the host the selector shows, once Settings has
+    /// shown one of them.
+    fn shown_agent_tabs(&self) -> Option<&HostAgentTabs> {
+        self.agent_tabs.of(&self.settings_host)
+    }
+
+    /// The host whose agent pages Settings shows.
+    #[must_use]
+    pub fn settings_host(&self) -> &HostKey {
+        &self.settings_host
+    }
+
+    /// The host selector's rows: each held host and whether it can be
+    /// chosen (a remote host only while its connection is open); empty
+    /// while the window holds one host, when no selector is drawn.
+    #[must_use]
+    pub fn settings_host_choices(&self) -> Vec<(HostKey, bool)> {
+        let held = self.held_hosts();
+        if held.len() < 2 {
+            return Vec::new();
+        }
+        held.into_iter()
+            .map(|host| {
+                let open = host == HostKey::Local
+                    || self.conn_of(&host).is_some_and(crate::Connection::is_open);
+                (host, open)
+            })
+            .collect()
+    }
+
+    /// A click on the selector's row for `host`: the agent pages show
+    /// `host`'s, the shown tab kept while `host` offers it. A host not
+    /// connected is not chosen.
+    fn choose_settings_host(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self
+            .settings_host_choices()
+            .into_iter()
+            .any(|(choice, open)| choice == host && open);
+        if !open || host == self.settings_host {
+            return;
+        }
+        tracing::info!(?host, "settings: showing the host's agent pages");
+        self.settings_host = host;
+        self.keep_offered_tab();
+        // Only an agent page follows the selector; another tab's drafts stay.
+        if matches!(self.settings_tab, SettingsTab::Agent(_)) {
+            self.select_settings_tab(self.settings_tab, window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// `host`'s connection closed: a remote host's agent pages and their
+    /// drafts go, and the selector returns to This PC when it showed
+    /// `host`.
+    pub(crate) fn settings_host_closed(&mut self, host: &HostKey) {
+        if *host != HostKey::Local {
+            self.agent_tabs.drop_host(host);
+        }
+        let shown = settings_host_after_close(&self.settings_host, host);
+        if shown != self.settings_host {
+            tracing::info!(
+                ?host,
+                "settings: the shown host's connection closed; showing This PC"
+            );
+            self.settings_host = shown;
+            self.keep_offered_tab();
+        }
     }
 
     /// The Settings tabs' labels, in the list's order.
@@ -783,13 +910,15 @@ impl RootView {
         }
     }
 
-    /// After a connected daemon listed its agents: the page of an agent it
-    /// no longer lists gives way to General, and drops its drafts and
-    /// applies.
-    fn follow_agent_list(&mut self) {
+    /// After `host`'s connected daemon listed its agents: the page of an
+    /// agent it no longer lists gives way to General while `host` is shown,
+    /// and drops `host`'s drafts and applies for it.
+    fn follow_agent_list(&mut self, host: &HostKey) {
         self.keep_offered_tab();
-        let agents = self.sidebar.agents(&crate::target::HostKey::Local).to_vec();
-        self.agent_tabs.keep_listed(&agents);
+        let agents = self.sidebar.agents(host).to_vec();
+        if let Some(tabs) = self.agent_tabs.of_mut(host) {
+            tabs.keep_listed(&agents);
+        }
     }
 
     /// The shown tab, or General when the list no longer offers it.
@@ -813,23 +942,20 @@ impl RootView {
         let listed = matches!(msg, DaemonMessage::Agents { .. });
         let pages_follow = listed || matches!(msg, DaemonMessage::AgentSettings { .. });
         self.on_agents(host, msg);
-        if *host != crate::target::HostKey::Local {
-            return;
-        }
         if listed {
-            self.follow_agent_list();
+            self.follow_agent_list(host);
         }
         if pages_follow {
-            self.refresh_setting_texts(cx);
+            self.refresh_setting_texts(host, cx);
         }
     }
 
-    /// After the daemon's agents or their Settings values arrived: each
-    /// text field shows the placeholder its page's values now set, and one
-    /// the user has not edited shows the value its page now holds.
-    fn refresh_setting_texts(&mut self, cx: &mut Context<Self>) {
-        for refresh in self.text_refreshes() {
-            let Some(setting) = self.setting_text_mut(&refresh.agent, &refresh.field) else {
+    /// After `host`'s agents or their Settings values arrived: each of its
+    /// pages' text fields shows the placeholder its page's values now set,
+    /// and one the user has not edited shows the value its page now holds.
+    fn refresh_setting_texts(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        for refresh in self.text_refreshes(host) {
+            let Some(setting) = self.setting_text_mut(host, &refresh.agent, &refresh.field) else {
                 continue;
             };
             if let Some(text) = refresh.text {
@@ -850,10 +976,13 @@ impl RootView {
 
     /// The text fields whose value or placeholder no longer reads as their
     /// page's values say, and what each should show.
-    fn text_refreshes(&self) -> Vec<TextRefresh> {
+    fn text_refreshes(&self, host: &HostKey) -> Vec<TextRefresh> {
         let mut refreshes = Vec::new();
-        for (agent, tab) in &self.agent_tabs.tabs {
-            let Some(page) = self.agent_page(agent) else {
+        let Some(tabs) = self.agent_tabs.of(host) else {
+            return refreshes;
+        };
+        for (agent, tab) in &tabs.tabs {
+            let Some(page) = self.agent_page(host, agent) else {
                 continue;
             };
             for setting in &tab.texts {
@@ -1043,16 +1172,17 @@ impl RootView {
         let Some(page) = self.shown_page() else {
             return Vec::new();
         };
+        let host = &self.settings_host;
         let mut controls = Vec::new();
-        if self.agent_rows_live(&page.id) {
+        if self.agent_rows_live(host, &page.id) {
             for (index, view) in page.fields.iter().enumerate() {
                 if !view.disabled {
                     controls.extend(field_controls(&page.tag, index, view));
                 }
             }
         }
-        if self.launch_rows_live(&page.id) {
-            if !self.program_read_only(&page.id) {
+        if self.launch_rows_live(host, &page.id) {
+            if !self.program_read_only(host, &page.id) {
                 controls.push(SettingsControl::AgentProgram);
             }
             controls.push(SettingsControl::AgentArgs);
@@ -1060,30 +1190,41 @@ impl RootView {
         controls
     }
 
-    /// Whether the connected daemon stores a launch command.
-    fn launch_command_supported(&self) -> bool {
-        self.conn().supports(FEATURE_AGENT_COMMANDS)
+    /// Whether `host`'s connected daemon stores a launch command.
+    fn launch_command_supported(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.supports(FEATURE_AGENT_COMMANDS))
     }
 
-    /// Agent `agent`'s launch command as the daemon last reported it.
-    fn agent_command(&self, agent: &AgentId) -> Option<&AgentCommandEntry> {
-        self.mirrors().agent_commands.as_ref()?.get(agent)
+    /// `host`'s agent `agent`'s launch command as its daemon last reported
+    /// it.
+    fn agent_command(&self, host: &HostKey, agent: &AgentId) -> Option<&AgentCommandEntry> {
+        self.mirrors_of(host)?.agent_commands.as_ref()?.get(agent)
     }
 
     /// The agent page last selected and its fields, while Settings has
-    /// shown one.
+    /// shown one of the shown host's.
     fn current_agent_tab(&self) -> Option<(&AgentId, &AgentTab)> {
-        let agent = self.agent_tabs.current.as_ref()?;
-        Some((agent, self.agent_tabs.tabs.get(agent)?))
+        let tabs = self.shown_agent_tabs()?;
+        let agent = tabs.current.as_ref()?;
+        Some((agent, tabs.tabs.get(agent)?))
     }
 
     /// The shown agent page's fields.
     fn shown_agent_tab(&self) -> Option<&AgentTab> {
-        self.agent_tabs.tabs.get(&self.settings_tab.agent()?)
+        self.shown_agent_tabs()?
+            .tabs
+            .get(&self.settings_tab.agent()?)
     }
 
-    fn setting_text_mut(&mut self, agent: &AgentId, field: &str) -> Option<&mut SettingText> {
+    fn setting_text_mut(
+        &mut self,
+        host: &HostKey,
+        agent: &AgentId,
+        field: &str,
+    ) -> Option<&mut SettingText> {
         self.agent_tabs
+            .of_mut(host)?
             .tabs
             .get_mut(agent)?
             .texts
@@ -1091,17 +1232,19 @@ impl RootView {
             .find(|setting| setting.field == field)
     }
 
-    /// Whether the connected daemon's Welcome leaves the launch command out:
-    /// an older daemon. A connection that is not open says nothing either
-    /// way.
+    /// Whether the shown host's connected daemon's Welcome leaves the
+    /// launch command out: an older daemon. A connection that is not open
+    /// says nothing either way.
     fn launch_command_unsupported(&self) -> bool {
-        self.conn().is_open() && !self.launch_command_supported()
+        let host = &self.settings_host;
+        self.conn_of(host).is_some_and(crate::Connection::is_open)
+            && !self.launch_command_supported(host)
     }
 
-    /// Whether agent `agent`'s launch-command rows take input: the daemon
-    /// stores a launch command and has reported the agent's.
-    fn launch_rows_live(&self, agent: &AgentId) -> bool {
-        self.launch_command_supported() && self.agent_command(agent).is_some()
+    /// Whether `host`'s agent `agent`'s launch-command rows take input: its
+    /// daemon stores a launch command and has reported the agent's.
+    fn launch_rows_live(&self, host: &HostKey, agent: &AgentId) -> bool {
+        self.launch_command_supported(host) && self.agent_command(host, agent).is_some()
     }
 
     /// The Program field's text on the agent page last selected.
@@ -1135,7 +1278,7 @@ impl RootView {
     }
 
     fn shows_saved(&self, agent: &AgentId, tab: &AgentTab) -> bool {
-        let Some(stored) = self.agent_command(agent) else {
+        let Some(stored) = self.agent_command(&self.settings_host, agent) else {
             return false;
         };
         tab.saved
@@ -1148,14 +1291,13 @@ impl RootView {
     /// read-only: an environment variable on the host sets the program.
     #[must_use]
     pub fn launch_program_read_only(&self) -> bool {
-        self.agent_tabs
-            .current
-            .as_ref()
-            .is_some_and(|agent| self.program_read_only(agent))
+        self.shown_agent_tabs()
+            .and_then(|tabs| tabs.current.as_ref())
+            .is_some_and(|agent| self.program_read_only(&self.settings_host, agent))
     }
 
-    fn program_read_only(&self, agent: &AgentId) -> bool {
-        self.agent_command(agent)
+    fn program_read_only(&self, host: &HostKey, agent: &AgentId) -> bool {
+        self.agent_command(host, agent)
             .is_some_and(|entry| entry.program_env.is_some())
     }
 
@@ -1163,11 +1305,14 @@ impl RootView {
     /// selected, naming the variable.
     #[must_use]
     pub fn launch_program_env_note(&self) -> Option<String> {
-        self.program_env_note(self.agent_tabs.current.as_ref()?)
+        self.program_env_note(self.shown_agent_tabs()?.current.as_ref()?)
     }
 
     fn program_env_note(&self, agent: &AgentId) -> Option<String> {
-        let env = self.agent_command(agent)?.program_env.as_ref()?;
+        let env = self
+            .agent_command(&self.settings_host, agent)?
+            .program_env
+            .as_ref()?;
         Some(format!("Set by {env}"))
     }
 
@@ -1179,22 +1324,23 @@ impl RootView {
             .then_some(LAUNCH_COMMAND_UNSUPPORTED_TIP)
     }
 
-    /// Agent `agent`'s page afresh: its launch-command fields holding the
-    /// daemon's command, Program's placeholder the agent's tag, and an
-    /// input per text or model field.
+    /// `host`'s agent `agent`'s page afresh: its launch-command fields
+    /// holding the daemon's command, Program's placeholder the agent's tag,
+    /// and an input per text or model field.
     fn new_agent_tab(
         &self,
+        host: &HostKey,
         agent: &AgentId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AgentTab {
         let (program_draft, args_draft) = self
-            .agent_command(agent)
+            .agent_command(host, agent)
             .map_or_else(Default::default, |entry| {
                 (entry.program.clone(), entry.args.clone())
             });
-        let read_only = self.program_read_only(agent);
-        let placeholder = descriptor_for(self.agents(), agent)
+        let read_only = self.program_read_only(host, agent);
+        let placeholder = descriptor_for(self.sidebar.agents(host), agent)
             .map_or_else(|| agent.0.clone(), |descriptor| descriptor.tag.clone());
         let program = cx.new(|cx| {
             let mut input = TextInput::new(program_draft.clone(), placeholder, cx);
@@ -1209,25 +1355,29 @@ impl RootView {
             (&program, LaunchCommandRow::Program),
             (&args, LaunchCommandRow::Args),
         ] {
-            let submitter = agent.clone();
+            let submitter = (host.clone(), agent.clone());
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
                 move |this, _, event: &TextInputEvent, window, cx| match event {
                     TextInputEvent::Submit => {
-                        this.apply_launch_command(&submitter);
+                        this.apply_launch_command(&submitter.0, &submitter.1);
                         cx.notify();
                     }
                     TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
                 },
             ));
-            let editor = agent.clone();
+            let editor = (host.clone(), agent.clone());
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
                 move |this, input, _: &TextChanged, _, cx| {
                     let text = input.read(cx).text().to_owned();
-                    if let Some(tab) = this.agent_tabs.tabs.get_mut(&editor) {
+                    let tab = this
+                        .agent_tabs
+                        .of_mut(&editor.0)
+                        .and_then(|tabs| tabs.tabs.get_mut(&editor.1));
+                    if let Some(tab) = tab {
                         match row {
                             LaunchCommandRow::Program => tab.program_draft = text,
                             LaunchCommandRow::Args => tab.args_draft = text,
@@ -1239,8 +1389,8 @@ impl RootView {
             ));
         }
         let mut texts = Vec::new();
-        for seed in self.text_seeds(agent) {
-            let (text, text_subscriptions) = new_setting_text(agent, seed, window, cx);
+        for seed in self.text_seeds(host, agent) {
+            let (text, text_subscriptions) = new_setting_text(host, agent, seed, window, cx);
             texts.push(text);
             subscriptions.extend(text_subscriptions);
         }
@@ -1260,13 +1410,14 @@ impl RootView {
         }
     }
 
-    /// What each text or model field agent `agent`'s descriptor marks for
-    /// Settings starts with: the value its page shows, and its placeholder.
-    fn text_seeds(&self, agent: &AgentId) -> Vec<TextSeed> {
-        let Some(descriptor) = descriptor_for(self.agents(), agent) else {
+    /// What each text or model field `host`'s agent `agent`'s descriptor
+    /// marks for Settings starts with: the value its page shows, and its
+    /// placeholder.
+    fn text_seeds(&self, host: &HostKey, agent: &AgentId) -> Vec<TextSeed> {
+        let Some(descriptor) = descriptor_for(self.sidebar.agents(host), agent) else {
             return Vec::new();
         };
-        let shown = self.agent_page(agent).map(|page| page.fields);
+        let shown = self.agent_page(host, agent).map(|page| page.fields);
         descriptor
             .fields
             .iter()
@@ -1287,15 +1438,16 @@ impl RootView {
             .collect()
     }
 
-    /// Enter in, or leaving, the input of agent `agent`'s text field
-    /// `field`: an edited value is sent as the field's Settings value, an
-    /// empty one as no value. Nothing is sent for a field that is locked or
-    /// hidden, or while the agent's rows are disabled.
-    fn apply_setting_text(&mut self, agent: &AgentId, field: &str) {
+    /// Enter in, or leaving, the input of `host`'s agent `agent`'s text
+    /// field `field`: an edited value is sent to `host` as the field's
+    /// Settings value, an empty one as no value. Nothing is sent for a
+    /// field that is locked or hidden, or while the agent's rows are
+    /// disabled.
+    fn apply_setting_text(&mut self, host: &HostKey, agent: &AgentId, field: &str) {
         let Some(setting) = self
             .agent_tabs
-            .tabs
-            .get(agent)
+            .of(host)
+            .and_then(|tabs| tabs.tabs.get(agent))
             .and_then(|tab| tab.texts.iter().find(|setting| setting.field == field))
         else {
             return;
@@ -1305,10 +1457,10 @@ impl RootView {
         }
         let value = typed_value(&setting.draft);
         let open = self
-            .agent_page(agent)
+            .agent_page(host, agent)
             .and_then(|page| page.fields.into_iter().find(|view| view.id == field))
             .is_some_and(|view| !view.disabled);
-        if !open || !self.agent_rows_live(agent) {
+        if !open || !self.agent_rows_live(host, agent) {
             tracing::info!(
                 agent = %agent.0,
                 key = field,
@@ -1316,47 +1468,53 @@ impl RootView {
             );
             return;
         }
-        if let Some(setting) = self.setting_text_mut(agent, field) {
+        if let Some(setting) = self.setting_text_mut(host, agent, field) {
             setting.edited = false;
         }
-        self.set_agent_setting(agent, field, value, true);
+        self.set_agent_setting(host, agent, field, value, true);
     }
 
     /// Tab leaving the field with id `field` on the shown agent page
     /// applies it, as any other way of leaving the input does.
     fn leave_agent_text(&mut self, field: &str) {
         if let Some(agent) = self.settings_tab.agent() {
-            self.apply_setting_text(&agent, field);
+            let host = self.settings_host.clone();
+            self.apply_setting_text(&host, &agent, field);
         }
     }
 
-    /// Settings closing: every text field the user edited is applied, as
-    /// Enter in it would apply it.
+    /// Settings closing: every text field the user edited, on any host's
+    /// pages, is applied to its host, as Enter in it would apply it.
     pub(crate) fn apply_edited_texts(&mut self) {
-        let edited: Vec<(AgentId, String)> = self
+        let edited: Vec<(HostKey, AgentId, String)> = self
             .agent_tabs
-            .tabs
-            .iter()
-            .flat_map(|(agent, tab)| {
-                tab.texts
-                    .iter()
-                    .filter(|setting| setting.edited)
-                    .map(move |setting| (agent.clone(), setting.field.clone()))
+            .all()
+            .flat_map(|(host, tabs)| {
+                tabs.tabs.iter().flat_map(move |(agent, tab)| {
+                    tab.texts
+                        .iter()
+                        .filter(|setting| setting.edited)
+                        .map(move |setting| (host.clone(), agent.clone(), setting.field.clone()))
+                })
             })
             .collect();
-        for (agent, field) in edited {
-            self.apply_setting_text(&agent, &field);
+        for (host, agent, field) in edited {
+            self.apply_setting_text(&host, &agent, &field);
         }
     }
 
-    /// Enter in either launch-command row of agent `agent`'s page: both
-    /// fields, trimmed, as the agent's command; two empty fields clear it.
-    /// Nothing is sent before the daemon reported the agent's command.
-    fn apply_launch_command(&mut self, agent: &AgentId) {
-        if !self.launch_rows_live(agent) {
+    /// Enter in either launch-command row of `host`'s agent `agent`'s page:
+    /// both fields, trimmed, as the agent's command on `host`; two empty
+    /// fields clear it. Nothing is sent before the daemon reported the
+    /// agent's command.
+    fn apply_launch_command(&mut self, host: &HostKey, agent: &AgentId) {
+        if !self.launch_rows_live(host, agent) {
             return;
         }
-        let Some(tab) = self.agent_tabs.tabs.get_mut(agent) else {
+        let Some(tabs) = self.agent_tabs.of_mut(host) else {
+            return;
+        };
+        let Some(tab) = tabs.tabs.get_mut(agent) else {
             return;
         };
         let program = tab.program_draft.trim().to_owned();
@@ -1366,12 +1524,10 @@ impl RootView {
         tab.saved = false;
         tab.refusal = None;
         let request_id = crate::new_request_id();
-        self.agent_tabs
-            .applies
-            .push_back((request_id.clone(), agent.clone()));
-        tracing::info!(agent = %agent.0, %program, %args, %request_id, "settings: applying an agent's launch command");
+        tabs.applies.push_back((request_id.clone(), agent.clone()));
+        tracing::info!(agent = %agent.0, ?host, %program, %args, %request_id, "settings: applying an agent's launch command");
         self.send_to(
-            &HostKey::Local,
+            host,
             ClientMessage::SetAgentCommand {
                 agent: agent.clone(),
                 program,
@@ -1381,9 +1537,9 @@ impl RootView {
         );
     }
 
-    /// The daemon's launch commands. Each echo answers the oldest apply
-    /// still waiting, and every agent page takes the broadcast as
-    /// [`AgentTab::on_echo`] says.
+    /// `host`'s daemon's launch commands. Each echo answers `host`'s oldest
+    /// apply still waiting, and every one of `host`'s agent pages takes the
+    /// broadcast as [`AgentTab::on_echo`] says.
     pub(crate) fn on_agent_commands(
         &mut self,
         host: &HostKey,
@@ -1402,23 +1558,27 @@ impl RootView {
                 .map(|entry| (entry.agent.clone(), entry))
                 .collect(),
         );
-        // The agent pages edit This PC's launch commands only.
-        if *host != HostKey::Local {
+        let Some(tabs) = self.agent_tabs.of_mut(host) else {
+            cx.notify();
             return;
-        }
-        let answered = self.agent_tabs.applies.pop_front().map(|(_, agent)| agent);
-        let agents: Vec<AgentId> = self.agent_tabs.tabs.keys().cloned().collect();
+        };
+        let answered = tabs.applies.pop_front().map(|(_, agent)| agent);
+        let agents: Vec<AgentId> = tabs.tabs.keys().cloned().collect();
         for agent in agents {
             let echo = CommandEcho {
                 old: previous
                     .as_ref()
                     .and_then(|commands| commands.get(&agent))
                     .cloned(),
-                stored: self.agent_command(&agent).cloned(),
-                read_only: self.program_read_only(&agent),
+                stored: self.agent_command(host, &agent).cloned(),
+                read_only: self.program_read_only(host, &agent),
                 answers: answered.as_ref() == Some(&agent),
             };
-            if let Some(tab) = self.agent_tabs.tabs.get_mut(&agent) {
+            let tab = self
+                .agent_tabs
+                .of_mut(host)
+                .and_then(|tabs| tabs.tabs.get_mut(&agent));
+            if let Some(tab) = tab {
                 tab.on_echo(echo, cx);
             }
         }
@@ -1432,28 +1592,22 @@ impl RootView {
     /// is left to toast.
     pub(crate) fn on_agent_command_error(
         &mut self,
+        host: &HostKey,
         request_id: &str,
         code: Option<&str>,
         message: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(at) = self
-            .agent_tabs
-            .applies
-            .iter()
-            .position(|(id, _)| id == request_id)
-        else {
+        let Some(tabs) = self.agent_tabs.of_mut(host) else {
             return false;
         };
-        let Some((_, agent)) = self.agent_tabs.applies.remove(at) else {
+        let Some(at) = tabs.applies.iter().position(|(id, _)| id == request_id) else {
             return false;
         };
-        let Some(tab) = self
-            .agent_tabs
-            .tabs
-            .get_mut(&agent)
-            .filter(|tab| tab.awaiting > 0)
-        else {
+        let Some((_, agent)) = tabs.applies.remove(at) else {
+            return false;
+        };
+        let Some(tab) = tabs.tabs.get_mut(&agent).filter(|tab| tab.awaiting > 0) else {
             return false;
         };
         tab.awaiting -= 1;
@@ -1475,32 +1629,31 @@ impl RootView {
     /// typed on since. The refusal itself still toasts.
     pub(crate) fn on_agent_setting_refused(
         &mut self,
+        host: &HostKey,
         request_id: &str,
         message: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(at) = self
-            .mirrors()
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
+        let Some(at) = mirrors
             .agent_setting_applies
             .iter()
             .position(|apply| apply.id == request_id)
         else {
             return;
         };
-        let Some(apply) = self.mirrors_mut().agent_setting_applies.remove(at) else {
+        let Some(apply) = mirrors.agent_setting_applies.remove(at) else {
             return;
         };
-        tracing::warn!(agent = %apply.agent.0, request_id, message, "settings: the daemon refused an agent's values");
-        let stored = self
-            .mirrors()
+        tracing::warn!(agent = %apply.agent.0, ?host, request_id, message, "settings: the daemon refused an agent's values");
+        let stored = mirrors
             .agent_settings
             .get(&apply.agent)
             .and_then(|values| values.get(&apply.key))
             .cloned();
-        if let Some(pending) = self
-            .mirrors_mut()
-            .agent_settings_pending
-            .get_mut(&apply.agent)
+        if let Some(pending) = mirrors.agent_settings_pending.get_mut(&apply.agent)
             && pending.get(&apply.key) == Some(&apply.value)
         {
             match stored {
@@ -1509,7 +1662,7 @@ impl RootView {
             };
         }
         if apply.from_text
-            && let Some(setting) = self.setting_text_mut(&apply.agent, &apply.key)
+            && let Some(setting) = self.setting_text_mut(host, &apply.agent, &apply.key)
             && !setting.edited
         {
             let text = setting_text(&apply.value);
@@ -1730,7 +1883,7 @@ impl RootView {
     /// The focus of the input of the field with id `field` on the shown
     /// agent page.
     fn agent_text_focus(&self, field: &str) -> Option<FocusHandle> {
-        self.agent_tabs
+        self.shown_agent_tabs()?
             .tabs
             .get(&self.settings_tab.agent()?)?
             .texts
@@ -2337,6 +2490,7 @@ impl RootView {
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_appearance_editor(Level::App, window, cx);
         if self.settings_open() {
+            self.settings_host = HostKey::Local;
             self.settings_tab = SettingsTab::General;
             self.settings_scroll = Scrollbar::default();
             self.settings_control = None;
@@ -2367,12 +2521,17 @@ impl RootView {
         // An agent page keeps its fields and the apply they wait on until
         // Settings closes, so selecting it again loses nothing.
         if let Some(agent) = tab.agent() {
-            let fresh = (!self.agent_tabs.tabs.contains_key(&agent))
-                .then(|| self.new_agent_tab(&agent, window, cx));
+            let host = self.settings_host.clone();
+            let held = self
+                .agent_tabs
+                .of(&host)
+                .is_some_and(|tabs| tabs.tabs.contains_key(&agent));
+            let fresh = (!held).then(|| self.new_agent_tab(&host, &agent, window, cx));
+            let tabs = self.agent_tabs.entry(&host);
             if let Some(fresh) = fresh {
-                self.agent_tabs.tabs.insert(agent.clone(), fresh);
+                tabs.tabs.insert(agent.clone(), fresh);
             }
-            self.agent_tabs.current = Some(agent);
+            tabs.current = Some(agent);
         }
         self.settings_tabs_focus.focus(window);
         cx.notify();
@@ -2471,41 +2630,47 @@ impl RootView {
             );
             return;
         };
-        self.set_agent_setting(&page.id, &view.id, value, false);
+        let host = self.settings_host.clone();
+        self.set_agent_setting(&host, &page.id, &view.id, value, false);
     }
 
-    /// Sends `agent`'s Settings values with `key` set to `value`, on top of
-    /// any change still waiting for the daemon's broadcast, under a fresh
-    /// request id; `from_text` marks the apply of text field `key`. Nothing
-    /// is sent while the agent's rows are disabled.
+    /// Sends `host`'s agent `agent`'s Settings values with `key` set to
+    /// `value`, on top of any change still waiting for that daemon's
+    /// broadcast, under a fresh request id; `from_text` marks the apply of
+    /// text field `key`. Nothing is sent while the agent's rows are
+    /// disabled.
     fn set_agent_setting(
         &mut self,
+        host: &HostKey,
         agent: &AgentId,
         key: &str,
         value: OptionValue,
         from_text: bool,
     ) {
-        if !self.agent_rows_live(agent) {
+        if !self.agent_rows_live(host, agent) {
             tracing::info!(agent = %agent.0, key, "settings: the agent's rows are disabled; nothing sent");
             return;
         }
+        let Some(options) = self.merge_agent_setting(host, agent, key, value.clone()) else {
+            return;
+        };
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
         let request_id = crate::new_request_id();
-        tracing::info!(agent = %agent.0, key, %request_id, "settings: setting an agent option");
-        let options = self.merge_agent_setting(agent, key, value.clone());
-        self.mirrors_mut()
-            .agent_setting_applies
-            .push_back(SettingApply {
-                id: request_id.clone(),
-                agent: agent.clone(),
-                key: key.to_owned(),
-                value,
-                from_text,
-            });
-        while self.mirrors().agent_setting_applies.len() > WAITING_SETTING_APPLIES {
-            self.mirrors_mut().agent_setting_applies.pop_front();
+        tracing::info!(agent = %agent.0, ?host, key, %request_id, "settings: setting an agent option");
+        mirrors.agent_setting_applies.push_back(SettingApply {
+            id: request_id.clone(),
+            agent: agent.clone(),
+            key: key.to_owned(),
+            value,
+            from_text,
+        });
+        while mirrors.agent_setting_applies.len() > WAITING_SETTING_APPLIES {
+            mirrors.agent_setting_applies.pop_front();
         }
         self.send_to(
-            &HostKey::Local,
+            host,
             ClientMessage::SetAgentSettings {
                 agent: agent.clone(),
                 options,
@@ -2514,13 +2679,15 @@ impl RootView {
         );
     }
 
-    /// Whether agent `agent`'s Settings rows take input: connected, this
-    /// connection has heard the agents' Settings values, and the daemon
-    /// lists the agent.
-    fn agent_rows_live(&self, agent: &AgentId) -> bool {
-        self.conn().is_open()
-            && self.agent_settings_received()
-            && descriptor_for(self.agents(), agent).is_some()
+    /// Whether `host`'s agent `agent`'s Settings rows take input: `host` is
+    /// connected, its connection has heard the agents' Settings values, and
+    /// its daemon lists the agent.
+    fn agent_rows_live(&self, host: &HostKey, agent: &AgentId) -> bool {
+        self.conn_of(host).is_some_and(crate::Connection::is_open)
+            && self
+                .mirrors_of(host)
+                .is_some_and(|mirrors| mirrors.agent_settings_received)
+            && descriptor_for(self.sidebar.agents(host), agent).is_some()
     }
 
     /// Opens Windows' notification settings on a background thread; a
@@ -2822,7 +2989,67 @@ impl RootView {
             .bg(gpui::rgb(t.modal_inset))
             .border_r_1()
             .border_color(gpui::rgb(t.card_edge))
+            .children(self.settings_host_row(cx))
             .children(tabs)
+    }
+
+    /// The host selector over the tab list, while the window holds two or
+    /// more hosts: a Host label, then one row per held host, the shown one
+    /// filled. A host not connected is dimmed and takes no click. It is not
+    /// a keyboard stop.
+    fn settings_host_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let choices = self.settings_host_choices();
+        if choices.is_empty() {
+            return None;
+        }
+        let t = theme(cx);
+        let size = crate::fonts::ui_text_size(cx);
+        let rows: Vec<AnyElement> = choices
+            .into_iter()
+            .map(|(host, open)| {
+                let shown = host == self.settings_host;
+                let selector = format!("settings-host-{}", host.wire().unwrap_or("local"));
+                let label = crate::sidebar::host_label(&host);
+                let text = match (shown, open) {
+                    (true, _) => t.text,
+                    (false, true) => t.text_2,
+                    (false, false) => t.muted,
+                };
+                div()
+                    .id(gpui::SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(crate::fonts::ui_px(cx, TAB_ROW_HEIGHT))
+                    .px(px(12.0))
+                    .rounded(px(TAB_ROW_RADIUS))
+                    .text_color(gpui::rgb(text))
+                    .when(shown, |row| {
+                        row.bg(gpui::rgb(t.selection))
+                            .font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .when(!shown && open, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.choose_settings_host(host.clone(), window, cx);
+                            }))
+                    })
+                    .child(label)
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            div()
+                .debug_selector(|| "settings-host-row".to_owned())
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .pb(px(8.0))
+                .child(group_row(size, "Host", &t))
+                .children(rows),
+        )
     }
 
     /// One clickable tab row; the shown one is filled, bold, and ringed
@@ -3158,8 +3385,10 @@ impl RootView {
         };
         let rows_of = RowPage {
             tag: &page.tag,
-            live: self.agent_rows_live(&page.id),
-            tab: self.agent_tabs.tabs.get(&page.id),
+            live: self.agent_rows_live(&self.settings_host, &page.id),
+            tab: self
+                .shown_agent_tabs()
+                .and_then(|tabs| tabs.tabs.get(&page.id)),
             focused,
         };
         let rows: Vec<AnyElement> = page
@@ -3192,13 +3421,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let t = theme(cx);
-        let live = self.launch_rows_live(&page.id);
+        let host = &self.settings_host;
+        let live = self.launch_rows_live(host, &page.id);
         if !live && !self.launch_command_unsupported() {
             return None;
         }
         let section = section(crate::fonts::ui_text_size(cx), "Launch command");
         let section = if live {
-            let tab = self.agent_tabs.tabs.get(&page.id)?;
+            let tab = self.shown_agent_tabs()?.tabs.get(&page.id)?;
             let refusal = |row| {
                 tab.refusal
                     .as_ref()
@@ -3220,7 +3450,7 @@ impl RootView {
             let program = input_frame(
                 SettingsControl::AgentProgram,
                 &tab.program,
-                !self.program_read_only(&page.id),
+                !self.program_read_only(host, &page.id),
                 focused,
                 cx,
             );
@@ -3812,10 +4042,11 @@ fn text_placeholder(view: &FieldView) -> Option<String> {
     }
 }
 
-/// The input of agent `agent`'s text field `seed` names, and its
+/// The input of `host`'s agent `agent`'s text field `seed` names, and its
 /// subscriptions: typing keeps the draft, and Enter or leaving the input
-/// applies it.
+/// applies it to `host`.
 fn new_setting_text(
+    host: &HostKey,
     agent: &AgentId,
     seed: TextSeed,
     window: &mut Window,
@@ -3823,34 +4054,34 @@ fn new_setting_text(
 ) -> (SettingText, Vec<Subscription>) {
     let input = cx.new(|cx| TextInput::new(seed.draft.clone(), seed.placeholder.clone(), cx));
     let focus = input.read(cx).focus_handle(cx);
-    let (submitter, submitted) = (agent.clone(), seed.field.clone());
+    let (submit_host, submitter, submitted) = (host.clone(), agent.clone(), seed.field.clone());
     let keys = cx.subscribe_in(
         &input,
         window,
         move |this, _, event: &TextInputEvent, window, cx| match event {
             TextInputEvent::Submit => {
-                this.apply_setting_text(&submitter, &submitted);
+                this.apply_setting_text(&submit_host, &submitter, &submitted);
                 cx.notify();
             }
             TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
         },
     );
-    let (editor, edited) = (agent.clone(), seed.field.clone());
+    let (edit_host, editor, edited) = (host.clone(), agent.clone(), seed.field.clone());
     let edits = cx.subscribe_in(
         &input,
         window,
         move |this, input, _: &TextChanged, _, cx| {
             let text = input.read(cx).text().to_owned();
-            if let Some(setting) = this.setting_text_mut(&editor, &edited) {
+            if let Some(setting) = this.setting_text_mut(&edit_host, &editor, &edited) {
                 setting.draft = text;
                 setting.edited = true;
             }
             cx.notify();
         },
     );
-    let (leaver, left) = (agent.clone(), seed.field.clone());
+    let (leave_host, leaver, left) = (host.clone(), agent.clone(), seed.field.clone());
     let blur = cx.on_blur(&focus, window, move |this, _, cx| {
-        this.apply_setting_text(&leaver, &left);
+        this.apply_setting_text(&leave_host, &leaver, &left);
         cx.notify();
     });
     let text = SettingText {
@@ -4148,9 +4379,11 @@ mod tests {
     use protocol::{AgentDescriptor, AgentId, OptionValue, SpawnPlacement};
 
     use super::{
-        AgentTab, AgentTabs, SettingsTab, control_matches, intern, row_tabs, tab_kept, tab_rows,
+        AgentTab, AgentTabs, HostAgentTabs, SettingsTab, control_matches, intern, row_tabs,
+        settings_host_after_close, tab_kept, tab_rows,
     };
     use crate::agent_options::{FieldEditor, FieldView};
+    use crate::target::HostKey;
     use crate::text_input::TextInput;
 
     const FIXED: [&str; 7] = [
@@ -4232,6 +4465,89 @@ mod tests {
         );
     }
 
+    fn box_host() -> HostKey {
+        HostKey::Remote("box.tail1234.ts.net".to_owned())
+    }
+
+    /// Host agent pages where This PC and `box` each wait on one apply.
+    fn two_hosts_waiting() -> AgentTabs {
+        let mut hosts = AgentTabs::default();
+        for (host, id) in [(HostKey::Local, "local-apply"), (box_host(), "box-apply")] {
+            hosts
+                .entry(&host)
+                .applies
+                .push_back((id.to_owned(), AgentId("claude".to_owned())));
+        }
+        hosts
+    }
+
+    fn waiting(hosts: &AgentTabs, host: &HostKey) -> Vec<String> {
+        hosts
+            .of(host)
+            .map(|tabs| tabs.applies.iter().map(|(id, _)| id.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn each_hosts_agent_pages_are_kept_apart() {
+        let hosts = two_hosts_waiting();
+        assert_eq!(waiting(&hosts, &HostKey::Local), ["local-apply"]);
+        assert_eq!(waiting(&hosts, &box_host()), ["box-apply"]);
+        assert!(
+            hosts.of(&HostKey::Remote("lab".to_owned())).is_none(),
+            "a host whose pages were never shown has none"
+        );
+    }
+
+    #[test]
+    fn dropping_a_hosts_pages_leaves_every_other_hosts() {
+        let mut hosts = two_hosts_waiting();
+        hosts.drop_host(&box_host());
+        assert!(hosts.of(&box_host()).is_none(), "box's pages go");
+        assert_eq!(waiting(&hosts, &HostKey::Local), ["local-apply"]);
+
+        let mut hosts = two_hosts_waiting();
+        hosts.drop_host(&HostKey::Local);
+        assert!(hosts.of(&HostKey::Local).is_none(), "This PC's pages go");
+        assert_eq!(waiting(&hosts, &box_host()), ["box-apply"]);
+    }
+
+    #[test]
+    fn a_lost_connection_forgets_only_its_hosts_applies() {
+        let mut hosts = two_hosts_waiting();
+        hosts.forget_applies(&HostKey::Local);
+        assert_eq!(waiting(&hosts, &HostKey::Local), Vec::<String>::new());
+        assert_eq!(waiting(&hosts, &box_host()), ["box-apply"]);
+        hosts.forget_applies(&HostKey::Remote("lab".to_owned()));
+        assert_eq!(
+            waiting(&hosts, &box_host()),
+            ["box-apply"],
+            "a host with no pages changes nothing"
+        );
+    }
+
+    #[test]
+    fn the_selector_falls_back_to_this_pc_only_when_the_shown_host_closes() {
+        assert_eq!(
+            settings_host_after_close(&box_host(), &box_host()),
+            HostKey::Local
+        );
+        assert_eq!(
+            settings_host_after_close(&box_host(), &HostKey::Remote("lab".to_owned())),
+            box_host(),
+            "another host's close leaves the shown one"
+        );
+        assert_eq!(
+            settings_host_after_close(&HostKey::Local, &HostKey::Local),
+            HostKey::Local
+        );
+        assert_eq!(
+            settings_host_after_close(&box_host(), &HostKey::Local),
+            box_host(),
+            "This PC's close leaves a remote host shown"
+        );
+    }
+
     #[test]
     fn a_shown_agent_page_falls_back_to_general_when_its_agent_leaves() {
         let shown = SettingsTab::Agent(intern("test-agent".to_owned()));
@@ -4283,7 +4599,7 @@ mod tests {
 
     #[gpui::test]
     fn a_dropped_page_leaves_the_apply_queue(cx: &mut TestAppContext) {
-        let mut tabs = AgentTabs::default();
+        let mut tabs = HostAgentTabs::default();
         tabs.tabs
             .insert(id("claude"), waiting_tab(cx, "wrapper", ""));
         tabs.tabs
@@ -4305,7 +4621,7 @@ mod tests {
 
     #[gpui::test]
     fn a_disconnect_clears_the_apply_queue_and_keeps_the_drafts(cx: &mut TestAppContext) {
-        let mut tabs = AgentTabs::default();
+        let mut tabs = HostAgentTabs::default();
         tabs.tabs
             .insert(id("claude"), waiting_tab(cx, "wrapper", "-v"));
         tabs.applies = VecDeque::from([("r1".to_owned(), id("claude"))]);
