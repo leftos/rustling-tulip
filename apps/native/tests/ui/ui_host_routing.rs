@@ -3,7 +3,7 @@
 
 use crate::support;
 
-use gpui::{Modifiers, Pixels, Point, TestAppContext, point};
+use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
     ClientMessage, DaemonMessage, InitLayoutKind, SplitDirection, VscodeWorkspaceFolder,
     VscodeWorkspaceSuggestion,
@@ -404,6 +404,54 @@ fn a_duplicate_from_a_remote_pane_of_a_shared_id_goes_to_that_host(cx: &mut Test
         "the remote pane's session is duplicated on its host"
     );
     assert_eq!(duplicates(h.sent()), 0, "This PC is not asked");
+}
+
+#[gpui::test]
+fn add_to_new_tab_from_a_remote_sessions_menu_binds_that_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // Neither host's s1 shows in a pane, and the tab's empty pane has room,
+    // so the menu offers Add to new tab.
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.tabs = vec![tab("t1", &pane("p1", None))];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+    host.sent();
+    h.sent();
+    let remote_key = HostKey::of(&remote());
+    h.root_update(move |root, window, cx| {
+        root.open_session_menu(
+            &remote_key,
+            "s1",
+            None,
+            point(px(40.0), px(12.0)),
+            window,
+            cx,
+        );
+    });
+
+    h.click_on("session-menu-add-new");
+
+    let new_tabs: Vec<(Option<String>, Option<String>)> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::CreateTab {
+                initial_session_id,
+                host,
+                ..
+            } => Some((initial_session_id, host)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        new_tabs,
+        [(Some("s1".to_owned()), Some(REMOTE.to_owned()))],
+        "the new tab, kept in This PC's layout, binds its pane to the remote host's s1"
+    );
 }
 
 #[gpui::test]

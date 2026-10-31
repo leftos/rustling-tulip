@@ -1258,7 +1258,7 @@ fn leaf_drag_row(
     // The menu opens for the session of this row's host, whichever other
     // host lists the same id.
     let menu_session = session.clone();
-    let row = leaf_row(leaf, ctx, window, cx).on_mouse_down(
+    let row = leaf_row(leaf, &session.host, ctx, window, cx).on_mouse_down(
         MouseButton::Right,
         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             let SessionRef { host, id } = &menu_session;
@@ -1933,16 +1933,24 @@ fn pill_text(pill: &TabPill) -> String {
     }
 }
 
+/// A leaf's tab pill as its row draws it: whether its session can show in
+/// a pane, and the host of the row, whose session the pill opens.
+struct PillChip<'a> {
+    pill: TabPill,
+    attachable: bool,
+    host: &'a HostKey,
+}
+
 /// A leaf's tab pill: `unbound` opens the session in a new tab when it can
 /// be shown in a pane; `T:<name>` and `T:×N` say where it is shown and do
 /// nothing of their own.
 fn leaf_pill(
-    pill: &TabPill,
+    shown: &PillChip<'_>,
     session_id: &str,
-    attachable: bool,
     size: ChipSize,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let (pill, attachable) = (&shown.pill, shown.attachable);
     let t = theme(cx);
     let selector = format!("leaf-pill-{session_id}");
     let text = chip_text(&selector, pill_text(pill));
@@ -1962,11 +1970,12 @@ fn leaf_pill(
         }
         TabPill::Unbound => {
             let id = session_id.to_owned();
+            let host = shown.host.clone();
             base.cursor_pointer()
                 .hover(move |style| style.bg(gpui::rgb(t.hover)))
                 .tooltip(tooltip(tip))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.open_in_new_tab(&id);
+                    this.open_in_new_tab(&host, &id);
                     cx.stop_propagation();
                 }))
                 .into_any_element()
@@ -1988,14 +1997,13 @@ fn leaf_pill(
 /// session's provider, then its orphan, abandoned or parked tag.
 fn leaf_chips(
     leaf: &Leaf,
-    pill: Option<TabPill>,
-    attachable: bool,
+    pill: Option<PillChip<'_>>,
     size: ChipSize,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
     let t = theme(cx);
     let mut chips: Vec<AnyElement> = pill
-        .map(|pill| leaf_pill(&pill, &leaf.id, attachable, size, cx))
+        .map(|pill| leaf_pill(&pill, &leaf.id, size, cx))
         .into_iter()
         .collect();
     for (index, agent_chip) in leaf.chips.iter().enumerate() {
@@ -2431,6 +2439,7 @@ fn container_lines(
 /// the chips do not fit beside it, the chip row.
 fn leaf_row(
     leaf: &Leaf,
+    host: &HostKey,
     ctx: &LeafRows<'_>,
     window: &Window,
     cx: &mut Context<RootView>,
@@ -2443,7 +2452,12 @@ fn leaf_row(
     let row = leaf_frame(leaf, ground, accent, ctx.density, cx);
     match ctx.density {
         LeafDensity::Compact => {
-            let chips = leaf_chips(leaf, ctx.pill(id), ctx.attachable(id), ChipSize::Row, cx);
+            let pill = ctx.pill(id).map(|pill| PillChip {
+                pill,
+                attachable: ctx.attachable(id),
+                host,
+            });
+            let chips = leaf_chips(leaf, pill, ChipSize::Row, cx);
             row.flex_row()
                 .items_center()
                 .gap(px(8.0))
@@ -2469,7 +2483,7 @@ fn leaf_row(
                     &theme(cx),
                 ))
                 .children(inline_buttons(leaf, cx));
-            let lower = comfortable_lower(leaf, ctx, window, cx);
+            let lower = comfortable_lower(leaf, host, ctx, window, cx);
             row.flex_col().py(px(6.0)).child(label_line).children(lower)
         }
     }
@@ -2668,6 +2682,7 @@ fn runtime_color(leaf: &Leaf, t: &UiTheme) -> u32 {
 /// left out.
 fn comfortable_lower(
     leaf: &Leaf,
+    host: &HostKey,
     ctx: &LeafRows<'_>,
     window: &Window,
     cx: &mut Context<RootView>,
@@ -2685,14 +2700,32 @@ fn comfortable_lower(
     );
     let (inline, below) = if fits {
         (
-            leaf_chips(leaf, pill, attachable, ChipSize::Subline, cx),
+            leaf_chips(
+                leaf,
+                pill.map(|pill| PillChip {
+                    pill,
+                    attachable,
+                    host,
+                }),
+                ChipSize::Subline,
+                cx,
+            ),
             Vec::new(),
         )
     } else {
         let pill = pill.filter(|pill| *pill != TabPill::Unbound);
         (
             Vec::new(),
-            leaf_chips(leaf, pill, attachable, ChipSize::Row, cx),
+            leaf_chips(
+                leaf,
+                pill.map(|pill| PillChip {
+                    pill,
+                    attachable,
+                    host,
+                }),
+                ChipSize::Row,
+                cx,
+            ),
         )
     };
     let mut lower = Vec::new();

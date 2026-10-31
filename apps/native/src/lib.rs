@@ -2283,22 +2283,18 @@ impl RootView {
         cx.notify();
     }
 
-    /// The unbound pill: opens session `id` in a new tab, when it can be
-    /// shown in a pane.
-    pub(crate) fn open_in_new_tab(&mut self, id: &str) {
-        let Some(host) = self
-            .sidebar
-            .find_session(id)
-            .filter(|(_, session)| can_attach(session))
-            .map(|(host, _)| host)
-        else {
+    /// The unbound pill or the menu's Add to new tab: opens `host`'s session
+    /// `id` in a new tab, when that host lists it and it can be shown in a
+    /// pane.
+    pub(crate) fn open_in_new_tab(&mut self, host: &HostKey, id: &str) {
+        if !self.sidebar.session_on(host, id).is_some_and(can_attach) {
             return;
-        };
+        }
         let request_id = new_request_id();
         self.tabs.arm_create(&request_id);
         self.send_to(
             &HostKey::Local,
-            Placement::NewTab.message(&host, id, Some(request_id)),
+            Placement::NewTab.message(host, id, Some(request_id)),
         );
     }
 
