@@ -254,6 +254,18 @@ mod tests {
         assert_eq!(refusal.to_string(), env_secrets::VAULT_UNREACHABLE);
     }
 
+    /// The Credential Manager user name v0.5.1-alpha filed a provider's key
+    /// under. A change to it orphans every key a released user saved.
+    #[test]
+    fn summarizer_key_user_names_match_v0_5_1_alpha() {
+        assert_eq!(
+            user("deepseek"),
+            "summarizer/deepseek",
+            "a provider's key is filed under summarizer/ and its id"
+        );
+        assert_eq!(user("openai"), "summarizer/openai");
+    }
+
     #[test]
     fn a_key_read_without_credential_manager_is_unreachable_not_missing() {
         let _scratch = scratch("summ-keys");

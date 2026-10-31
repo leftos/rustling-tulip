@@ -247,6 +247,33 @@ mod tests {
         assert_eq!(user_for("BOX"), "device/box");
     }
 
+    /// The entry names v0.5.1-alpha filed a device token under. A change to
+    /// either half orphans the token a released client holds, and the device
+    /// then fails to pair with its host until it is approved again.
+    #[test]
+    fn device_tokens_entry_names_match_v0_5_1_alpha() {
+        assert_eq!(
+            service_for(Path::new(r"X:\rt\config"), false),
+            "rustling-tulip",
+            "the production service is the plain name"
+        );
+        assert_eq!(
+            service_for(Path::new(r"X:\rt\config"), true),
+            "rustling-tulip:f10321bb",
+            "an isolated client files under the first 8 hex of its config dir"
+        );
+        assert_eq!(
+            user_for("box.tail1234.ts.net"),
+            "device/box.tail1234.ts.net",
+            "a host's token is filed under device/ and its name"
+        );
+        assert_eq!(
+            user_for("Box.Tail1234.TS.net:8787"),
+            "device/box.tail1234.ts.net",
+            "the user is lower-cased and carries no port"
+        );
+    }
+
     #[test]
     fn memory_store_round_trips_and_deletes() {
         let store = MemoryTokens::default();

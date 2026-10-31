@@ -698,6 +698,370 @@ mod tests {
         assert!(state.layouts.is_empty(), "layouts start empty");
     }
 
+    /// The `state.json` v0.5.1-alpha wrote: every field of the released
+    /// `PersistedState`, each set to a value no default would produce.
+    const V0_5_1_STATE_JSON: &str = r##"{
+        "repos": [
+            {
+                "id": "repo-a",
+                "name": "Alpha",
+                "path": "X:\\dev\\alpha",
+                "default_branch": "trunk",
+                "default_use_worktree": false,
+                "appearance": {
+                    "accent_color": "#f07a62",
+                    "terminal_background_color": "#101010",
+                    "terminal_frame_color": "#202020",
+                    "terminal_font_family": "JetBrains Mono",
+                    "terminal_font_size": 15,
+                    "terminal_font_bold": true
+                },
+                "last_agent": "claude",
+                "last_spawn_config": {
+                    "target": {
+                        "kind": "single",
+                        "repo_id": "repo-a",
+                        "branch_name": "feat/alpha",
+                        "base_branch": "trunk",
+                        "use_worktree": true,
+                        "checkout_strategy": null,
+                        "worktree_reuse": "reuse",
+                        "existing_worktree": null
+                    },
+                    "mode": "interactive",
+                    "dangerously_skip_permissions": true,
+                    "agent": {
+                        "agent": "claude",
+                        "options": {"model": "opus", "trusted": true}
+                    },
+                    "extra_env": [["ALPHA_ENV", "${secret:1f0c2b3a}"]]
+                }
+            }
+        ],
+        "workspaces": [
+            {
+                "id": "ws-a",
+                "name": "Alpha Workspace",
+                "member_repo_ids": ["repo-a", "repo-b"],
+                "linked_vscode_workspace": "X:\\dev\\alpha\\alpha.code-workspace",
+                "watch_vscode_workspace": true,
+                "default_use_worktree": false,
+                "appearance": {
+                    "accent_color": null,
+                    "terminal_background_color": null,
+                    "terminal_frame_color": null,
+                    "terminal_font_family": "Fira Code",
+                    "terminal_font_size": 13,
+                    "terminal_font_bold": false
+                },
+                "last_spawn_config": {
+                    "target": {
+                        "kind": "workspace",
+                        "workspace_id": "ws-a",
+                        "branch_name": "feat/alpha",
+                        "base_branch": "trunk",
+                        "use_worktree": true,
+                        "worktree_reuse": "reuse",
+                        "existing_worktrees": [
+                            {"repo_id": "repo-a", "path": "X:\\dev\\wt\\alpha"}
+                        ]
+                    },
+                    "mode": "headless",
+                    "dangerously_skip_permissions": true,
+                    "agent": {
+                        "agent": "claude",
+                        "options": {"model": "sonnet"}
+                    },
+                    "extra_env": [["WORKSPACE_ENV", "on"]]
+                }
+            }
+        ],
+        "layouts": {
+            "client-1": {
+                "name": "leftos-desktop",
+                "tabs": [
+                    {
+                        "id": "tab-1",
+                        "name": "Alpha",
+                        "content": {
+                            "kind": "grid",
+                            "grid": {"kind": "pane", "pane_id": "pane-1", "session_id": "sess-1"}
+                        },
+                        "created_at": "2025-01-02T03:04:05Z",
+                        "picked_layout": {"kind": "grid", "cols": 2, "aspect": 1.5}
+                    }
+                ]
+            }
+        },
+        "legacy_tabs": [
+            {
+                "id": "tab-legacy",
+                "name": "Legacy",
+                "content": {
+                    "kind": "grid",
+                    "grid": {"kind": "pane", "pane_id": "pane-legacy", "session_id": "sess-2"}
+                },
+                "created_at": "2024-12-01T00:00:00Z",
+                "picked_layout": {"kind": "horizontal"}
+            }
+        ],
+        "container_order": [
+            {"kind": "repo", "id": "repo-a"},
+            {"kind": "workspace", "id": "ws-a"}
+        ],
+        "session_order": {"repo-a": ["sess-1", "sess-2"]},
+        "worktrees_root_override": "X:\\dev\\wt",
+        "keep_awake_mode": "always",
+        "agent_commands": {
+            "claude": {"program": "C:\\Tools\\claude.cmd", "args": "--verbose"}
+        },
+        "agent_settings": {
+            "claude": {"model": "opus", "trusted": true}
+        },
+        "summarizer": {
+            "enabled": true,
+            "provider": "deepseek",
+            "key_source": {"kind": "env", "variable": "DEEPSEEK_API_KEY"},
+            "daily_cap_usd": 2.5
+        }
+    }"##;
+
+    /// The repo a v0.5.1-alpha `state.json` held, field by field.
+    fn assert_v0_5_1_repo(repo: &protocol::RepoEntry) {
+        assert_eq!(repo.id, "repo-a");
+        assert_eq!(repo.name, "Alpha");
+        assert_eq!(repo.path, r"X:\dev\alpha");
+        assert_eq!(repo.default_branch.as_deref(), Some("trunk"));
+        assert!(
+            !repo.default_use_worktree,
+            "the repo's worktree default is kept"
+        );
+        assert_eq!(repo.appearance.accent_color.as_deref(), Some("#f07a62"));
+        assert_eq!(
+            repo.appearance.terminal_background_color.as_deref(),
+            Some("#101010")
+        );
+        assert_eq!(
+            repo.appearance.terminal_frame_color.as_deref(),
+            Some("#202020")
+        );
+        assert_eq!(
+            repo.appearance.terminal_font_family.as_deref(),
+            Some("JetBrains Mono")
+        );
+        assert_eq!(repo.appearance.terminal_font_size, Some(15));
+        assert_eq!(
+            repo.appearance.terminal_font_bold,
+            Some(true),
+            "the released bold switch is kept"
+        );
+        assert_eq!(
+            repo.appearance.terminal_font_weight, None,
+            "a weight in a field the release never wrote stays unset"
+        );
+        assert_eq!(
+            repo.last_agent,
+            Some(protocol::AgentId("claude".to_owned()))
+        );
+
+        let spawn = repo
+            .last_spawn_config
+            .as_ref()
+            .expect("the repo keeps its last spawn config");
+        assert_eq!(spawn.mode, protocol::SessionMode::Interactive);
+        assert!(spawn.dangerously_skip_permissions);
+        assert_eq!(
+            spawn.extra_env,
+            vec![("ALPHA_ENV".to_owned(), "${secret:1f0c2b3a}".to_owned())],
+            "a stored secret reference is kept as a reference"
+        );
+        let selection = spawn.agent.as_ref().expect("the spawn keeps its agent");
+        assert_eq!(selection.agent, protocol::AgentId("claude".to_owned()));
+        assert_eq!(
+            selection.options.get("model"),
+            Some(&protocol::OptionValue::Text("opus".to_owned()))
+        );
+        assert_eq!(
+            selection.options.get("trusted"),
+            Some(&protocol::OptionValue::Bool(true))
+        );
+        assert!(
+            matches!(
+                &spawn.target,
+                protocol::SpawnTarget::Single {
+                    repo_id,
+                    branch_name,
+                    base_branch,
+                    use_worktree,
+                    checkout_strategy,
+                    worktree_reuse,
+                    existing_worktree,
+                } if repo_id == "repo-a"
+                    && branch_name == "feat/alpha"
+                    && base_branch.as_deref() == Some("trunk")
+                    && *use_worktree
+                    && checkout_strategy.is_none()
+                    && *worktree_reuse == protocol::WorktreeReusePolicy::Reuse
+                    && existing_worktree.is_none()
+            ),
+            "the released single target reads back field for field: {:?}",
+            spawn.target
+        );
+    }
+
+    /// The workspace a v0.5.1-alpha `state.json` held, field by field.
+    fn assert_v0_5_1_workspace(workspace: &protocol::WorkspaceEntry) {
+        assert_eq!(workspace.id, "ws-a");
+        assert_eq!(workspace.name, "Alpha Workspace");
+        assert_eq!(
+            workspace.member_repo_ids,
+            vec!["repo-a".to_owned(), "repo-b".to_owned()]
+        );
+        assert_eq!(
+            workspace.linked_vscode_workspace.as_deref(),
+            Some(r"X:\dev\alpha\alpha.code-workspace")
+        );
+        assert!(workspace.watch_vscode_workspace);
+        assert!(!workspace.default_use_worktree);
+        assert_eq!(
+            workspace.appearance.terminal_font_family.as_deref(),
+            Some("Fira Code")
+        );
+        assert_eq!(workspace.appearance.terminal_font_size, Some(13));
+        assert_eq!(workspace.appearance.terminal_font_bold, Some(false));
+        let spawn = workspace
+            .last_spawn_config
+            .as_ref()
+            .expect("the workspace keeps its last spawn config");
+        assert_eq!(spawn.mode, protocol::SessionMode::Headless);
+        assert!(
+            matches!(
+                &spawn.target,
+                protocol::SpawnTarget::Workspace {
+                    workspace_id,
+                    branch_name,
+                    existing_worktrees,
+                    ..
+                } if workspace_id == "ws-a"
+                    && branch_name == "feat/alpha"
+                    && existing_worktrees.len() == 1
+                    && existing_worktrees[0].repo_id == "repo-a"
+                    && existing_worktrees[0].path == r"X:\dev\wt\alpha"
+            ),
+            "the released workspace target keeps its pinned member: {:?}",
+            spawn.target
+        );
+    }
+
+    /// The tab layouts a v0.5.1-alpha `state.json` held, field by field.
+    fn assert_v0_5_1_layout(persisted: &PersistedState) {
+        let layout = persisted
+            .layouts
+            .get("client-1")
+            .expect("the client's layout is kept");
+        assert_eq!(layout.name.as_deref(), Some("leftos-desktop"));
+        assert_eq!(layout.tabs.len(), 1);
+        let tab = &layout.tabs[0];
+        assert_eq!(tab.id, "tab-1");
+        assert_eq!(tab.name, "Alpha");
+        assert_eq!(tab.created_at.to_rfc3339(), "2025-01-02T03:04:05+00:00");
+        assert_eq!(
+            tab.picked_layout,
+            Some(protocol::RearrangeLayout::Grid {
+                cols: 2,
+                aspect: Some(1.5)
+            })
+        );
+        assert!(
+            matches!(
+                &tab.content,
+                protocol::TabContent::Grid {
+                    grid: protocol::GridNode::Pane { pane_id, session_id }
+                } if pane_id == "pane-1" && session_id.as_deref() == Some("sess-1")
+            ),
+            "the tab's pane and session are kept: {:?}",
+            tab.content
+        );
+        assert_eq!(
+            persisted.legacy_tabs.len(),
+            1,
+            "the pre-per-client tabs field keeps its tab"
+        );
+        assert_eq!(persisted.legacy_tabs[0].id, "tab-legacy");
+    }
+
+    /// The host settings a v0.5.1-alpha `state.json` held, field by field.
+    fn assert_v0_5_1_host_settings(persisted: &PersistedState) {
+        assert_eq!(
+            persisted.container_order,
+            vec![
+                protocol::ContainerRef::Repo("repo-a".to_owned()),
+                protocol::ContainerRef::Workspace("ws-a".to_owned())
+            ]
+        );
+        assert_eq!(
+            persisted.session_order.get("repo-a"),
+            Some(&vec!["sess-1".to_owned(), "sess-2".to_owned()])
+        );
+        assert_eq!(
+            persisted.worktrees_root_override.as_deref(),
+            Some(r"X:\dev\wt")
+        );
+        assert_eq!(persisted.keep_awake_mode, protocol::KeepAwakeMode::Always);
+        assert_eq!(
+            persisted
+                .agent_commands
+                .get(&protocol::AgentId("claude".to_owned())),
+            Some(&AgentCommand {
+                program: r"C:\Tools\claude.cmd".to_owned(),
+                args: "--verbose".to_owned()
+            })
+        );
+        assert_eq!(
+            persisted
+                .agent_settings
+                .get(&protocol::AgentId("claude".to_owned()))
+                .and_then(|values| values.get("model")),
+            Some(&protocol::OptionValue::Text("opus".to_owned()))
+        );
+        assert_eq!(
+            persisted.summarizer,
+            Some(protocol::SummarizerSettings {
+                enabled: true,
+                provider: "deepseek".to_owned(),
+                key_source: protocol::SummarizerKeySource::Env {
+                    variable: "DEEPSEEK_API_KEY".to_owned()
+                },
+                daily_cap_usd: 2.5
+            })
+        );
+    }
+
+    /// A `state.json` written by the oldest release users may still run keeps
+    /// every value it set: the repos, workspaces, layouts and host settings
+    /// are read through the daemon's own load path.
+    #[test]
+    fn state_json_written_by_v0_5_1_alpha_loads_with_every_set_value_kept() {
+        let dirs = scratch_dirs("v051-shape");
+        std::fs::write(&dirs.state_file, V0_5_1_STATE_JSON).expect("write the v0.5.1 state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("the v0.5.1 state.json loads");
+        assert!(!state.state_file_corrupt(), "the released file parses");
+        assert!(
+            corrupt_copies(&dirs.config).is_empty(),
+            "nothing was quarantined"
+        );
+        let persisted = state.with_persisted(PersistedState::clone);
+
+        assert_eq!(persisted.repos.len(), 1, "the repo is kept");
+        assert_v0_5_1_repo(&persisted.repos[0]);
+        assert_eq!(persisted.workspaces.len(), 1, "the workspace is kept");
+        assert_v0_5_1_workspace(&persisted.workspaces[0]);
+        assert_v0_5_1_layout(&persisted);
+        assert_v0_5_1_host_settings(&persisted);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
     #[test]
     fn per_client_layouts_are_independent() {
         let dirs = scratch_dirs("independent");

@@ -1951,6 +1951,141 @@ mod tests {
         assert!(entry.busy_excluded, "a recovered session keeps the flag");
     }
 
+    /// A `history/<id>.json` written by v0.5.1-alpha: every field of the
+    /// released `HistoryEntry` set to a value no default would produce.
+    const V0_5_1_HISTORY_JSON: &str = r#"{
+        "session_id": "sess-v051",
+        "label": "Alpha:feat/alpha",
+        "kind": "single",
+        "mode": "interactive",
+        "agent": "claude",
+        "spawn_config": {
+            "target": {
+                "kind": "single",
+                "repo_id": "repo-a",
+                "branch_name": "feat/alpha",
+                "base_branch": "trunk",
+                "use_worktree": true,
+                "checkout_strategy": "carry",
+                "worktree_reuse": "recreate_from_base",
+                "existing_worktree": "X:\\dev\\wt\\alpha"
+            },
+            "mode": "interactive",
+            "dangerously_skip_permissions": true,
+            "agent": {"agent": "claude", "options": {"model": "opus"}},
+            "extra_env": [["ALPHA_ENV", "${secret:1f0c2b3a}"]]
+        },
+        "members": [
+            {
+                "repo_id": "repo-a",
+                "repo_name": "Alpha",
+                "branch": "feat/alpha",
+                "worktree_path": "X:\\dev\\wt\\alpha"
+            }
+        ],
+        "workspace_id": "ws-a",
+        "primary_cwd": "X:\\dev\\wt\\alpha",
+        "current_cwd": "X:\\dev\\wt\\alpha\\src",
+        "program_name": "claude",
+        "started_at": "2025-01-02T03:04:05Z",
+        "ended_at": "2025-01-02T04:05:06Z",
+        "end": {"type": "exited", "code": 3},
+        "conversation_id": "conv-v051",
+        "source": "tracer_log",
+        "recovered_at": "2025-01-03T00:00:00Z",
+        "end_time_known": true,
+        "import_rev": 4,
+        "busy_excluded": true,
+        "options": {"model": "opus"},
+        "trusted": true
+    }"#;
+
+    /// A `history/<id>.json` written by the oldest release users may still run
+    /// reads back with every value it set, so the Recover dialog can resume it
+    /// as the session it was.
+    #[test]
+    fn history_entry_written_by_v0_5_1_alpha_still_reads() {
+        let dirs = scratch_dirs("v051-shape");
+        std::fs::create_dir_all(dirs.history_dir()).expect("create history dir");
+        std::fs::write(
+            dirs.history_dir().join("sess-v051.json"),
+            V0_5_1_HISTORY_JSON,
+        )
+        .expect("write the v0.5.1 history entry");
+
+        let entries = read_all(&dirs);
+
+        assert_eq!(entries.len(), 1, "the released entry is read");
+        let entry = &entries[0];
+        assert_eq!(entry.session_id, "sess-v051");
+        assert_eq!(entry.label, "Alpha:feat/alpha");
+        assert_eq!(entry.kind, SessionKind::Single);
+        assert_eq!(entry.mode, SessionMode::Interactive);
+        assert_eq!(entry.agent, Some(protocol::AgentId("claude".to_owned())));
+        assert_eq!(entry.members.len(), 1);
+        assert_eq!(entry.members[0].repo_id, "repo-a");
+        assert_eq!(entry.members[0].repo_name, "Alpha");
+        assert_eq!(entry.members[0].branch, "feat/alpha");
+        assert_eq!(entry.members[0].worktree_path, r"X:\dev\wt\alpha");
+        assert_eq!(entry.workspace_id.as_deref(), Some("ws-a"));
+        assert_eq!(entry.primary_cwd.as_deref(), Some(r"X:\dev\wt\alpha"));
+        assert_eq!(entry.current_cwd.as_deref(), Some(r"X:\dev\wt\alpha\src"));
+        assert_eq!(entry.program_name.as_deref(), Some("claude"));
+        assert_eq!(
+            entry.started_at.map(|at| at.to_rfc3339()),
+            Some("2025-01-02T03:04:05+00:00".to_owned())
+        );
+        assert_eq!(entry.ended_at.to_rfc3339(), "2025-01-02T04:05:06+00:00");
+        assert_eq!(entry.end, SessionEnd::Exited { code: 3 });
+        assert_eq!(entry.conversation_id.as_deref(), Some("conv-v051"));
+        assert_eq!(entry.source, HistorySource::TracerLog);
+        assert_eq!(
+            entry.recovered_at.map(|at| at.to_rfc3339()),
+            Some("2025-01-03T00:00:00+00:00".to_owned())
+        );
+        assert!(entry.end_time_known);
+        assert_eq!(entry.import_rev, 4);
+        assert!(
+            entry.busy_excluded,
+            "a session excluded from the busy count stays excluded"
+        );
+        assert_eq!(
+            entry.options,
+            Some(protocol::OptionValues::from([(
+                "model".to_owned(),
+                protocol::OptionValue::Text("opus".to_owned())
+            )]))
+        );
+        assert!(entry.trusted);
+
+        let spawn = entry
+            .spawn_config
+            .as_ref()
+            .expect("the entry keeps the config it was spawned with");
+        assert_eq!(spawn.mode, SessionMode::Interactive);
+        assert!(spawn.dangerously_skip_permissions);
+        assert!(
+            matches!(
+                &spawn.target,
+                protocol::SpawnTarget::Single {
+                    repo_id,
+                    branch_name,
+                    checkout_strategy,
+                    worktree_reuse,
+                    existing_worktree,
+                    ..
+                } if repo_id == "repo-a"
+                    && branch_name == "feat/alpha"
+                    && *checkout_strategy == Some(protocol::CheckoutStrategy::Carry)
+                    && *worktree_reuse == protocol::WorktreeReusePolicy::RecreateFromBase
+                    && existing_worktree.as_deref() == Some(r"X:\dev\wt\alpha")
+            ),
+            "the released spawn target reads back field for field: {:?}",
+            spawn.target
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
     #[test]
     fn write_if_absent_keeps_first_write() {
         let dirs = scratch_dirs("first-write");

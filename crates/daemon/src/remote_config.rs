@@ -175,4 +175,21 @@ mod tests {
         assert_eq!(cfg.port, DEFAULT_REMOTE_PORT);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
+
+    /// The v0.5.1-alpha `remote.json` shape, as that release wrote it.
+    #[test]
+    fn remote_json_written_by_v0_5_1_alpha_loads_enabled_and_port() {
+        let dirs = scratch_dirs("v051-shape");
+        std::fs::write(
+            &dirs.remote_config_file,
+            br#"{"enabled": true, "port": 9123}"#,
+        )
+        .expect("write the v0.5.1 remote.json");
+
+        let cfg = load(&dirs);
+
+        assert!(cfg.enabled, "remote access the user turned on stays on");
+        assert_eq!(cfg.port, 9123, "the port the user chose is kept");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
 }

@@ -811,6 +811,68 @@ mod tests {
         (request.id, code)
     }
 
+    /// The v0.5.1-alpha `devices.json` shape: two approved devices, the second
+    /// one blocked. A device's token hash and its revoked flag must read back
+    /// exactly as that release wrote them, since a lost hash revokes a device
+    /// and a lost flag unblocks one.
+    #[test]
+    fn devices_json_written_by_v0_5_1_alpha_keeps_its_hashes_and_revoked_flags() {
+        let scratch = Scratch::new("v051-shape");
+        let json = r#"{
+            "devices": [
+                {
+                    "id": "dev-1",
+                    "stable_id": "node-aaaa1111",
+                    "name": "leftos-phone",
+                    "login": "lefto@example.com",
+                    "token_sha256": "9f2c1d3e4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+                    "created_at": "2025-01-02T03:04:05Z",
+                    "last_seen": "2025-02-03T04:05:06Z",
+                    "revoked": false
+                },
+                {
+                    "id": "dev-2",
+                    "stable_id": "node-bbbb2222",
+                    "name": "leftos-laptop",
+                    "login": "lefto@example.com",
+                    "token_sha256": "0a1b2c3d4e5f60718293a4b5c6d7e8f91a2b3c4d5e6f708192a3b4c5d6e7f809",
+                    "created_at": "2025-01-03T05:06:07Z",
+                    "last_seen": null,
+                    "revoked": true
+                }
+            ]
+        }"#;
+        std::fs::write(scratch.path(), json).expect("write the v0.5.1 devices.json");
+
+        let store = scratch.store();
+
+        assert!(!store.is_corrupt(), "the released file decodes");
+        let devices = store.list();
+        assert_eq!(devices.len(), 2, "both records load");
+        assert_eq!(
+            devices[0].token_sha256,
+            "9f2c1d3e4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "the approved device's hash is kept"
+        );
+        assert!(!devices[0].revoked, "an approved device stays approved");
+        assert_eq!(devices[0].name, "leftos-phone");
+        assert_eq!(devices[0].login, "lefto@example.com");
+        assert_eq!(
+            devices[0].last_seen.map(|at| at.to_rfc3339()),
+            Some("2025-02-03T04:05:06+00:00".to_owned())
+        );
+        assert_eq!(
+            devices[1].token_sha256,
+            "0a1b2c3d4e5f60718293a4b5c6d7e8f91a2b3c4d5e6f708192a3b4c5d6e7f809",
+            "the blocked device's hash is kept"
+        );
+        assert!(devices[1].revoked, "a blocked device stays blocked");
+        assert_eq!(
+            devices[1].last_seen, None,
+            "a device that never reconnected keeps no last-seen time"
+        );
+    }
+
     #[test]
     fn issued_token_is_stored_only_as_its_hash() {
         let scratch = Scratch::new("hash");

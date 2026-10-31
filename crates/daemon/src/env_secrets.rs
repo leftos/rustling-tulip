@@ -927,6 +927,44 @@ mod tests {
         );
     }
 
+    /// The v0.5.1-alpha `env-secrets.json` shape: one line per sealed value.
+    /// The index is what turns a stored `${secret:<id>}` reference back into a
+    /// row, so every id, key and stamp must read back as that release wrote
+    /// them. Only the file is read; no Credential Manager entry is touched.
+    #[test]
+    fn env_secrets_index_written_by_v0_5_1_alpha_still_resolves_its_references() {
+        const FIRST_ID: &str = "1f0c2b3a4d5e6f708192a3b4c5d6e7f8";
+        const SECOND_ID: &str = "8e7d6c5b4a39281706f5e4d3c2b1a098";
+        let json = r#"[
+            {"id":"1f0c2b3a4d5e6f708192a3b4c5d6e7f8","key":"EXAMPLE_API_KEY","created_at":"2025-01-02T03:04:05Z"},
+            {"id":"8e7d6c5b4a39281706f5e4d3c2b1a098","key":"GH_PAT","created_at":"2025-02-03T04:05:06Z"}
+        ]"#;
+        let path = std::env::temp_dir().join(format!(
+            "rt-env-secrets-index-{}-v051.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, json).expect("write the v0.5.1 index");
+
+        let entries = read_index(&path).expect("the v0.5.1 index reads");
+
+        assert_eq!(entries.len(), 2, "both index lines load");
+        assert_eq!(entries[0].id, FIRST_ID);
+        assert_eq!(entries[0].key, "EXAMPLE_API_KEY");
+        assert_eq!(
+            entries[0].created_at.to_rfc3339(),
+            "2025-01-02T03:04:05+00:00",
+            "the line's stamp is kept"
+        );
+        assert_eq!(entries[1].id, SECOND_ID);
+        assert_eq!(entries[1].key, "GH_PAT");
+        assert_eq!(
+            user(&entries[0].key, &entries[0].id),
+            format!("env/EXAMPLE_API_KEY/{FIRST_ID}"),
+            "a reference resolves to the credential user the value was saved under"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Two client connections spawn at once, each sealing its own rows. Every
     /// id a `seal` reported has to be in the index afterwards: a line lost to
     /// another seal's write is a value nothing can open or delete.

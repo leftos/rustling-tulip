@@ -3667,4 +3667,32 @@ mod tests {
             "Stop ran on an SSH host"
         );
     }
+
+    /// The v0.5.1-alpha `client-id-native` shape: a bare UUID with no newline.
+    /// A changed shape would mint a new identity and orphan the tab layout
+    /// `state.json` keys by the old one.
+    #[test]
+    fn client_id_file_written_by_v0_5_1_alpha_is_reused() {
+        const WRITTEN_ID: &str = "3c9f5a1e-2b7d-4e86-9a30-5d1f8c0b6e42";
+        let dir =
+            std::env::temp_dir().join(format!("rt-net-client-id-{}-v051", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the config dir");
+        let path = dir.join(super::CLIENT_ID_FILE);
+        std::fs::write(&path, WRITTEN_ID).expect("write the v0.5.1 client id");
+
+        let identity = daemon_client::client_identity_in(&dir, super::CLIENT_ID_FILE)
+            .expect("the client id reads");
+
+        assert_eq!(
+            identity.client_id, WRITTEN_ID,
+            "the released identity is the one the client sends"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read the id file back"),
+            WRITTEN_ID,
+            "the file is left exactly as it was written"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
