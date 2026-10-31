@@ -23,9 +23,9 @@ use rustling_tulip_native::{
     Connection, HeaderChipKind, NetCommand, NetEvent, toast_action_selector,
 };
 use support::{
-    Fixture, Forget, Harness, PROTOCOL, TestDir, facts, facts_message, forgets, history_item, pane,
-    remote_in_pane, remote_lists, remote_pane, repo, saved_remote, saved_remote_over, saved_ui,
-    seed_ui, session, split, tab, two_tab_fixture, two_tabs, welcome,
+    Fixture, Forget, Harness, PROTOCOL, Rehost, TestDir, facts, facts_message, forgets,
+    history_item, pane, rehosts, remote_in_pane, remote_lists, remote_pane, repo, saved_remote,
+    saved_remote_over, saved_ui, seed_ui, session, split, tab, two_tab_fixture, two_tabs, welcome,
 };
 
 #[gpui::test]
@@ -2991,49 +2991,395 @@ fn nothing_is_pruned_while_a_host_is_offline_switched_off_or_unapproved(cx: &mut
     assert!(this_pc_forgets(&mut h).is_empty(), "switched off");
 }
 
-#[gpui::test]
-fn a_dropped_duplicates_panes_are_not_pruned(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    seed_ui(
-        &dir,
-        &serde_json::json!({ "saved_hosts": [
-            { "name": REMOTE, "port": 8787 },
-            { "kind": "ssh", "name": "me@devbox" },
-        ] }),
-    );
-    let ssh_pane = protocol::GridNode::Pane {
-        pane_id: "p9".to_owned(),
-        session_id: Some("d1".to_owned()),
-        host: HostKey::of(&ssh_box()).wire().map(str::to_owned),
+/// The SSH host `me@devbox`'s key as the wire's `host` value.
+const SSH_KEY: &str = "ssh:me@devbox";
+
+/// Saves [`REMOTE`] and the SSH host `me@devbox`, both switched on, the
+/// tailnet host first unless `ssh_first`.
+fn seed_two_paths(dir: &TestDir, ssh_first: bool) {
+    let tailnet = serde_json::json!({ "name": REMOTE, "port": 8787 });
+    let ssh = serde_json::json!({ "kind": "ssh", "name": "me@devbox" });
+    let saved = if ssh_first {
+        [ssh, tailnet]
+    } else {
+        [tailnet, ssh]
     };
-    let fixture = Fixture {
-        tabs: vec![tab(
-            "t1",
-            &split(
-                SplitDirection::Horizontal,
-                remote_pane("p2", "b1"),
-                ssh_pane,
-            ),
-        )],
+    seed_ui(dir, &serde_json::json!({ "saved_hosts": saved }));
+}
+
+/// A pane showing `session` of the SSH host `me@devbox`.
+fn ssh_pane(id: &str, session: &str) -> protocol::GridNode {
+    protocol::GridNode::Pane {
+        pane_id: id.to_owned(),
+        session_id: Some(session.to_owned()),
+        host: Some(SSH_KEY.to_owned()),
+    }
+}
+
+/// This PC's layout: one tab `t1` holding `grid`.
+fn one_tab(grid: &protocol::GridNode) -> Fixture {
+    Fixture {
+        tabs: vec![tab("t1", grid)],
         ..Fixture::default()
-    };
-    let mut h = Harness::with(cx, &dir, &fixture);
+    }
+}
+
+/// A rehost of `ids` from host `from` to host `to`.
+fn rehost(from: &str, to: Option<&str>, ids: &[&str]) -> Rehost {
+    (
+        from.to_owned(),
+        to.map(str::to_owned),
+        ids.iter().map(|id| (*id).to_owned()).collect(),
+    )
+}
+
+/// The rehosts This PC was sent since the last look.
+fn this_pc_rehosts(h: &mut Harness<'_>) -> Vec<Rehost> {
+    rehosts(&h.sent())
+}
+
+/// Over `fixture`, with [`REMOTE`] saved first and the SSH host second:
+/// [`REMOTE`] welcomes naming [`DAEMON`] and lists `listed`, then the SSH
+/// host welcomes naming it too and is dropped as [`REMOTE`]'s duplicate.
+/// What [`REMOTE`]'s list and the dedupe sent is left unread.
+fn ssh_dropped_over<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    fixture: &Fixture,
+    listed: &[&str],
+) -> Harness<'a> {
+    seed_two_paths(dir, false);
+    let mut h = Harness::with(cx, dir, fixture);
     welcome_as(&mut h, &saved_remote(), Some(DAEMON));
-    remote_lists(&mut h, &["b1"]);
+    remote_lists(&mut h, listed);
     welcome_as(&mut h, &ssh_box(), Some(DAEMON));
     assert_eq!(
         duplicate_of(&mut h, &ssh_box()),
         Some(HostKey::of(&saved_remote()))
     );
+    h
+}
 
+/// The SSH host's daemon lists `ids`.
+fn ssh_lists(h: &mut Harness<'_>, ids: &[&str]) {
+    h.host(&ssh_box()).send(DaemonMessage::Sessions {
+        sessions: ids.iter().map(|id| session(id).build()).collect(),
+    });
+}
+
+#[gpui::test]
+fn a_not_approved_path_never_takes_the_daemon_from_an_open_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_two_paths(&dir, false);
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+
+    // The tailnet host, saved first, names the daemon on its way to "device
+    // not approved".
+    let mut host = h.host(&saved_remote());
+    host.event(NetEvent::DaemonId(DAEMON.to_owned()));
+    host.event(NetEvent::State(not_approved(saved_remote())));
+
+    assert_eq!(
+        duplicate_of(&mut h, &saved_remote()),
+        Some(HostKey::of(&ssh_box())),
+        "a pairing connection never owns, whatever its rank"
+    );
+    assert_eq!(
+        h.root(|root, _| root.held_hosts()),
+        [HostKey::Local, HostKey::of(&ssh_box())]
+    );
+    assert_eq!(times_opened(&h, &ssh_box()), 1, "the SSH host stays held");
+}
+
+#[gpui::test]
+fn the_first_saved_path_owns_the_daemon_when_it_welcomes_second(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_two_paths(&dir, true);
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+
+    assert_eq!(
+        duplicate_of(&mut h, &saved_remote()),
+        Some(HostKey::of(&ssh_box())),
+        "the SSH host, saved first, takes the daemon"
+    );
+    assert_eq!(duplicate_of(&mut h, &ssh_box()), None);
+    assert_eq!(
+        h.root(|root, _| root.held_hosts()),
+        [HostKey::Local, HostKey::of(&ssh_box())]
+    );
+}
+
+#[gpui::test]
+fn an_owner_back_from_a_drop_takes_its_daemon_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_paths_to_one_daemon(cx, &dir);
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    assert_eq!(duplicate_of(&mut h, &ssh_box()), None, "SSH holds the gap");
+
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+
+    assert_eq!(
+        duplicate_of(&mut h, &ssh_box()),
+        Some(HostKey::of(&saved_remote())),
+        "the first saved key takes its daemon back"
+    );
+    assert_eq!(
+        h.root(|root, _| root.held_hosts()),
+        [HostKey::Local, HostKey::of(&saved_remote())]
+    );
+    assert_eq!(times_opened(&h, &ssh_box()), 2, "SSH is not dialled again");
+}
+
+#[gpui::test]
+fn a_dropped_duplicates_panes_move_to_its_owner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        remote_pane("p2", "b1"),
+        ssh_pane("p9", "d1"),
+    );
+    let mut h = ssh_dropped_over(cx, &dir, &one_tab(&grid), &["b1", "d1"]);
+
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(SSH_KEY, Some(REMOTE), &["d1"])],
+        "the dropped key's pane moves to the key that owns its daemon"
+    );
+
+    let moved = split(
+        SplitDirection::Horizontal,
+        remote_pane("p2", "b1"),
+        remote_pane("p9", "d1"),
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &moved),
+    });
+    remote_lists(&mut h, &["b1", "d1"]);
+    assert!(this_pc_rehosts(&mut h).is_empty(), "moved once");
+    assert_eq!(
+        h.host(&saved_remote()).scrollback_requests("d1").len(),
+        1,
+        "the moved pane attaches on its owner's connection"
+    );
+    h.host(&saved_remote()).answer_scrollback("d1", b"");
+    let at = h.cell_center("p9", 0, 0);
+    h.click(at, Modifiers::none());
+    h.keys("a");
+    assert_eq!(h.host(&saved_remote()).sent_input("d1"), b"a");
+}
+
+#[gpui::test]
+fn a_duplicate_found_before_this_pcs_tabs_moves_its_panes_once_they_arrive(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    seed_two_paths(&dir, false);
+    let mut h = Harness::open(cx, &dir);
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+    remote_lists(&mut h, &["d1"]);
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    assert!(this_pc_rehosts(&mut h).is_empty(), "no layout yet");
+
+    let tabs = one_tab(&ssh_pane("p9", "d1")).tabs;
+    h.send(DaemonMessage::Tabs { tabs: tabs.clone() });
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(SSH_KEY, Some(REMOTE), &["d1"])]
+    );
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tabs[0].clone(),
+    });
+    assert!(this_pc_rehosts(&mut h).is_empty(), "already in flight");
+}
+
+#[gpui::test]
+fn a_reconnecting_owners_panes_stay_on_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&remote_pane("p2", "d1"));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["d1"]);
+    h.sent();
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    ssh_lists(&mut h, &["d1"]);
     h.send(DaemonMessage::Tabs {
         tabs: fixture.tabs.clone(),
     });
 
     assert!(
-        this_pc_forgets(&mut h).is_empty(),
-        "the dropped key's pane stays for the daemon its owner serves"
+        this_pc_rehosts(&mut h).is_empty(),
+        "a held key's panes wait for it"
     );
+}
+
+#[gpui::test]
+fn switching_off_the_owner_moves_its_panes_to_its_duplicate_and_back(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&remote_pane("p2", "d1"));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["d1"]);
+    h.sent();
+
+    flip_remote_switch(&mut h);
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    ssh_lists(&mut h, &["d1"]);
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(REMOTE, Some(SSH_KEY), &["d1"])],
+        "the let-go key's pane moves to the duplicate it freed"
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &ssh_pane("p2", "d1")),
+    });
+
+    flip_remote_switch(&mut h);
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+    remote_lists(&mut h, &["d1"]);
+    assert_eq!(
+        duplicate_of(&mut h, &ssh_box()),
+        Some(HostKey::of(&saved_remote()))
+    );
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(SSH_KEY, Some(REMOTE), &["d1"])],
+        "switched back on, the first key takes the pane back"
+    );
+}
+
+/// Forgets [`REMOTE`] while it owns the daemon the SSH host reaches, with
+/// This PC offline across the forget when `offline`, and asserts its pane
+/// moves to the SSH host instead of being forgotten.
+fn assert_forgotten_owner_moves_its_pane(cx: &mut TestAppContext, offline: bool) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&remote_pane("p2", "d1"));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["d1"]);
+    h.sent();
+    open_connections(&mut h);
+    if offline {
+        h.set_connection(dropped(Target::Local));
+    }
+
+    h.click_on(&format!("connections-forget-{REMOTE}"));
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    ssh_lists(&mut h, &["d1"]);
+    let mut sent = h.sent();
+    if offline {
+        assert!(rehosts(&sent).is_empty(), "This PC is offline");
+        h.set_connection(this_pc_open());
+        h.send_welcome(PROTOCOL);
+        h.load(&fixture);
+        sent.extend(h.sent());
+    }
+
+    assert!(
+        forgets(&sent).iter().all(|(_, _, all)| !all),
+        "the forgotten key's panes are not forgotten (offline: {offline})"
+    );
+    assert_eq!(
+        rehosts(&sent),
+        [rehost(REMOTE, Some(SSH_KEY), &["d1"])],
+        "offline: {offline}"
+    );
+}
+
+#[gpui::test]
+fn forgetting_the_owner_moves_its_panes_instead_of_forgetting_them(cx: &mut TestAppContext) {
+    assert_forgotten_owner_moves_its_pane(cx, false);
+    assert_forgotten_owner_moves_its_pane(cx, true);
+}
+
+#[gpui::test]
+fn a_remote_alias_of_this_pc_hands_its_panes_to_this_pc(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut fixture = one_tab(&remote_pane("p2", "d1"));
+    fixture.sessions = vec![session("d1").build()];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.send(support::welcome_with_id(PROTOCOL, DAEMON));
+    h.load(&fixture);
+    h.sent();
+
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+
+    assert_eq!(duplicate_of(&mut h, &saved_remote()), Some(HostKey::Local));
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(REMOTE, None, &["d1"])],
+        "the alias's pane moves to This PC"
+    );
+}
+
+#[gpui::test]
+fn this_pcs_drop_does_not_redial_its_remote_alias(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.send(support::welcome_with_id(PROTOCOL, DAEMON));
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+    assert_eq!(duplicate_of(&mut h, &saved_remote()), Some(HostKey::Local));
+
+    h.set_connection(dropped(Target::Local));
+
+    assert_eq!(
+        times_opened(&h, &saved_remote()),
+        1,
+        "This PC's drop leaves its alias dropped"
+    );
+    assert_eq!(duplicate_of(&mut h, &saved_remote()), Some(HostKey::Local));
+}
+
+#[gpui::test]
+fn a_rehost_lost_with_this_pcs_connection_is_sent_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&ssh_pane("p9", "d1"));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["d1"]);
+    let moved = [rehost(SSH_KEY, Some(REMOTE), &["d1"])];
+    assert_eq!(this_pc_rehosts(&mut h), moved);
+
+    h.set_connection(dropped(Target::Local));
+    h.set_connection(this_pc_open());
+    h.send_welcome(PROTOCOL);
+    h.load(&fixture);
+
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        moved,
+        "sent once more on This PC's new connection"
+    );
+}
+
+#[gpui::test]
+fn a_pane_of_an_ended_session_stays_on_its_old_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&split(
+        SplitDirection::Horizontal,
+        ssh_pane("p8", "d2"),
+        ssh_pane("p9", "d1"),
+    ));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["d1"]);
+
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(SSH_KEY, Some(REMOTE), &["d1"])],
+        "only the session the owner lists moves"
+    );
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+    assert!(this_pc_rehosts(&mut h).is_empty(), "d2 never moves");
 }
 
 #[gpui::test]

@@ -272,8 +272,8 @@ impl RootView {
         self.hosts.keys()
     }
 
-    /// The host whose connection reached the same daemon before `host`'s
-    /// did, when `host`'s was dropped as its duplicate.
+    /// The host that owns the daemon `host`'s connection reached, by
+    /// [`Self::rank`], when `host`'s was dropped as its duplicate.
     #[must_use]
     pub fn duplicate_of(&self, host: &HostKey) -> Option<&HostKey> {
         self.duplicate_of.get(host)
@@ -342,9 +342,10 @@ impl RootView {
         self.settings_host_closed(host, window, cx);
     }
 
-    /// `host`'s connection reported `state`: once it has ended (closed,
-    /// refused or stopped) its duplicates are freed and dialled again; while
-    /// it is still on its way, its own retry included, they stay dropped.
+    /// `host`'s connection reported `state`: once a remote host's has ended
+    /// (closed, refused or stopped) its duplicates are freed and dialled
+    /// again; while it is still on its way, its own retry included, they
+    /// stay dropped. This PC's duplicates stay dropped whatever its state.
     pub(crate) fn release_duplicates_if_ended(
         &mut self,
         host: &HostKey,
@@ -352,7 +353,9 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(state, State::Init | State::Connecting | State::Open { .. }) {
+        if *host != HostKey::Local
+            && !matches!(state, State::Init | State::Connecting | State::Open { .. })
+        {
             self.reconnect_duplicates_of(host, window, cx);
         }
     }
@@ -404,11 +407,14 @@ impl RootView {
         }
     }
 
-    /// Records the daemon id `host`'s `Welcome` named and, when another
-    /// held host already named it, drops the duplicate connection with its
-    /// slice and records which host it duplicates. The duplicate is `host`,
-    /// unless `host` is This PC, which always owns its own daemon. Returns
-    /// whether `host` itself was dropped.
+    /// Records the daemon id `host` named, in its `Welcome` or on its way to
+    /// "not approved", and, when another held host whose connection is open
+    /// already named it, drops the duplicate connection with its slice,
+    /// records which host it duplicates and moves the duplicate's panes to
+    /// the owner. The lower [`Self::rank`] owns, This PC always; `host` is
+    /// the duplicate while its own connection is not open. A `host` that
+    /// takes the daemon from its holder takes the holder's duplicates too,
+    /// so none is dialled again. Returns whether `host` itself was dropped.
     pub(crate) fn drop_if_duplicate(
         &mut self,
         host: &HostKey,
@@ -422,31 +428,60 @@ impl RootView {
         let Some(id) = daemon_id else {
             return false;
         };
-        let holder = self.hosts.keys().into_iter().find(|other| {
-            other != host
-                && self
-                    .hosts
-                    .get(other)
-                    .is_some_and(|entry| entry.daemon_id.as_deref() == Some(id))
-        });
-        let Some(holder) = holder else {
+        self.daemon_of.insert(host.clone(), id.to_owned());
+        let Some(holder) = self.open_holder_of(id, host) else {
             return false;
         };
-        let (duplicate, owner) = if *host == HostKey::Local {
-            (holder, HostKey::Local)
+        let host_open = self.conn_of(host).is_some_and(Connection::is_open);
+        let host_owns =
+            *host == HostKey::Local || (host_open && self.rank(host) < self.rank(&holder));
+        let (duplicate, owner) = if host_owns {
+            for held_by in self.duplicate_of.values_mut() {
+                if *held_by == holder {
+                    *held_by = host.clone();
+                }
+            }
+            (holder, host.clone())
         } else {
             (host.clone(), holder)
         };
         tracing::info!(
-            ?duplicate,
             ?owner,
-            "two connections reach one daemon; dropping the later one"
+            ?duplicate,
+            "two connections reach one daemon; keeping the first by saved order"
         );
         self.disconnect_host(&duplicate, window, cx);
         self.clear_remote_slice(&duplicate, window, cx);
         let dropped_self = duplicate == *host;
         self.duplicate_of.insert(duplicate, owner);
+        self.rehost_stranded_panes();
         dropped_self
+    }
+
+    /// The held host other than `except` whose connection is open and whose
+    /// daemon named itself `id`.
+    fn open_holder_of(&self, id: &str, except: &HostKey) -> Option<HostKey> {
+        self.hosts.keys().into_iter().find(|other| {
+            other != except
+                && self.hosts.get(other).is_some_and(|entry| {
+                    entry.conn.is_open() && entry.daemon_id.as_deref() == Some(id)
+                })
+        })
+    }
+
+    /// Which of two keys reaching one daemon owns it: the lower rank. This
+    /// PC first, then a saved host by its place in the saved list, switched
+    /// on or off, then any other key; ties by the key's text.
+    pub(crate) fn rank(&self, host: &HostKey) -> (usize, String) {
+        let saved: Vec<HostKey> = self
+            .sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .filter_map(|saved| saved.target().ok())
+            .map(|target| HostKey::of(&target))
+            .collect();
+        host_rank(&saved, host)
     }
 
     /// `host`'s connection; `None` when the window has none to it.
@@ -615,6 +650,7 @@ impl RootView {
         }
         let (tx, events) = (self.open_host)(&target);
         self.duplicate_of.remove(&HostKey::Remote(name.clone()));
+        self.forgotten_rehost.remove(&HostKey::Remote(name.clone()));
         if let Some(generation) = self.hosts.insert(name.clone(), HostConn::new(tx, target)) {
             Self::forward_net_events(HostKey::Remote(name), generation, events, window, cx);
         }
@@ -814,6 +850,10 @@ pub(crate) struct PaneForgets {
     /// successor, with the request that carried it, kept while a pane still
     /// shows that session and until This PC refuses the request.
     rebinds: HashMap<(SessionRef, String), String>,
+    /// The rehosts that went out, each a session of the host its panes move
+    /// from, with the request that carried it, kept while a pane still shows
+    /// that session and until This PC refuses the request.
+    rehosts: HashMap<SessionRef, String>,
     /// The hosts a forget of every pane went out for, kept while a pane
     /// still names one.
     hosts: HashSet<HostKey>,
@@ -833,6 +873,7 @@ impl PaneForgets {
     pub(crate) fn reset_connection(&mut self) {
         self.sessions.clear();
         self.rebinds.clear();
+        self.rehosts.clear();
         self.hosts.clear();
         self.tabs_in = false;
         self.swept = false;
@@ -843,17 +884,45 @@ impl PaneForgets {
     pub(crate) fn rebind_refused(&mut self, request_id: &str) {
         self.rebinds.retain(|_, sent_as| sent_as != request_id);
     }
+
+    /// This PC refused `request_id`: its rehosts no longer count as in
+    /// flight, so the next pass asks again.
+    pub(crate) fn rehost_refused(&mut self, request_id: &str) {
+        self.rehosts.retain(|_, sent_as| sent_as != request_id);
+    }
+
+    /// Whether a rehost of a pane of `host` is on its way to This PC.
+    fn rehost_in_flight(&self, host: &HostKey) -> bool {
+        self.rehosts.keys().any(|session| session.host == *host)
+    }
+}
+
+/// `host`'s rank among keys reaching one daemon, `saved` being the saved
+/// hosts' keys in saved order: This PC `0`, a saved host its place plus
+/// one, any other key `usize::MAX`; then the key's text.
+fn host_rank(saved: &[HostKey], host: &HostKey) -> (usize, String) {
+    let place = match host {
+        HostKey::Local => 0,
+        HostKey::Remote(_) => saved
+            .iter()
+            .position(|key| key == host)
+            .map_or(usize::MAX, |index| index + 1),
+    };
+    (place, host.wire().unwrap_or_default().to_owned())
 }
 
 impl RootView {
     /// This PC's tab list arrived: the host forgets queued while it was
-    /// offline go out, then, once per connection, each host a pane names
-    /// that is no longer saved has every pane forgotten.
+    /// offline go out, the panes of hosts with a rehost target move, then,
+    /// once per connection, each host a pane names that is no longer saved,
+    /// has no rehost target and no rehost in flight has every pane
+    /// forgotten.
     pub(crate) fn after_this_pc_tabs(&mut self) {
         self.pane_forgets.tabs_in = true;
         for host in std::mem::take(&mut self.pane_forgets.queued) {
             self.send_host_forget(host);
         }
+        self.rehost_stranded_panes();
         if std::mem::replace(&mut self.pane_forgets.swept, true) {
             return;
         }
@@ -864,6 +933,8 @@ impl RootView {
                 && !self.is_saved_host(&host)
                 && !self.pane_forgets.hosts.contains(&host)
                 && !stale.contains(&host)
+                && self.rehost_target(&host).is_none()
+                && !self.pane_forgets.rehost_in_flight(&host)
             {
                 stale.push(host);
             }
@@ -871,6 +942,129 @@ impl RootView {
         for host in stale {
             self.send_host_forget(host);
         }
+    }
+
+    /// Forget in Connections on remote host `host`, once the window let it
+    /// go: with a rehost target its panes move there, and the daemon it
+    /// reached and the host it duplicated are forgotten; with none, every
+    /// pane of it on This PC is forgotten ([`Self::forget_host_panes`]).
+    pub(crate) fn forget_or_rehost_host_panes(&mut self, host: HostKey) {
+        let Some(target) = self.rehost_target(&host) else {
+            self.forget_host_panes(host);
+            return;
+        };
+        tracing::info!(
+            ?host,
+            ?target,
+            "the forgotten host's panes move to the host that reaches its daemon"
+        );
+        self.forgotten_rehost.insert(host.clone(), target);
+        self.rehost_stranded_panes();
+        self.duplicate_of.remove(&host);
+        self.daemon_of.remove(&host);
+    }
+
+    /// Where the panes of `host` move: nowhere for This PC or a host the
+    /// window holds. Else the host it was forgotten in favour of, else the
+    /// held host whose open connection reaches the daemon `host` last
+    /// reached, else the lowest-ranked of This PC and the saved, switched-on
+    /// hosts known to reach that daemon.
+    pub(crate) fn rehost_target(&self, host: &HostKey) -> Option<HostKey> {
+        if *host == HostKey::Local || self.hosts.get(host).is_some() {
+            return None;
+        }
+        if let Some(target) = self.forgotten_rehost.get(host) {
+            return Some(target.clone());
+        }
+        let id = self.daemon_of.get(host)?;
+        if let Some(holder) = self.open_holder_of(id, host) {
+            return Some(holder);
+        }
+        std::iter::once(HostKey::Local)
+            .chain(self.enabled_saved_hosts())
+            .filter(|key| key != host && self.daemon_of.get(key) == Some(id))
+            .min_by_key(|key| self.rank(key))
+    }
+
+    /// Asks This PC to move each pane of a host the window does not hold
+    /// to that host's rehost target, one message per host, once the target
+    /// has listed its sessions since its `Welcome`: only panes whose session
+    /// the target lists move, and a session whose rehost is in flight is not
+    /// asked again. Nothing moves until This PC is open with its tab list
+    /// in.
+    pub(crate) fn rehost_stranded_panes(&mut self) {
+        if !self.pane_forgets.tabs_in || !self.conn().is_open() {
+            return;
+        }
+        let bindings = self.tabs.bindings();
+        self.pane_forgets
+            .rehosts
+            .retain(|session, _| bindings.iter().any(|binding| binding.shows(session)));
+        self.forgotten_rehost
+            .retain(|host, _| bindings.iter().any(|binding| binding.host == *host));
+        let mut hosts: Vec<HostKey> = Vec::new();
+        for binding in &bindings {
+            if binding.host != HostKey::Local && !hosts.contains(&binding.host) {
+                hosts.push(binding.host.clone());
+            }
+        }
+        for host in hosts {
+            if let Some(target) = self.rehost_target(&host) {
+                self.send_rehost(&host, &target, &bindings);
+            }
+        }
+    }
+
+    /// Asks This PC to move the panes of `host` in `bindings` whose session
+    /// `target` lists to `target`, ids sorted, unless their rehost is in
+    /// flight; nothing until `target` has listed since its `Welcome`.
+    fn send_rehost(&mut self, host: &HostKey, target: &HostKey, bindings: &[PaneBinding]) {
+        let Some(from) = host.wire().map(str::to_owned) else {
+            return;
+        };
+        if !self.listed_since_welcome(target) {
+            return;
+        }
+        let listed = self.sidebar.sessions_of(target);
+        let mut ids: Vec<String> = bindings
+            .iter()
+            .filter(|binding| binding.host == *host)
+            .filter_map(|binding| binding.session_id.clone())
+            .filter(|id| listed.iter().any(|session| session.id == *id))
+            .filter(|id| {
+                !self
+                    .pane_forgets
+                    .rehosts
+                    .contains_key(&SessionRef::new(host.clone(), id.clone()))
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            return;
+        }
+        let request_id = crate::new_request_id();
+        for id in &ids {
+            self.pane_forgets.rehosts.insert(
+                SessionRef::new(host.clone(), id.clone()),
+                request_id.clone(),
+            );
+        }
+        tracing::info!(
+            ?host,
+            ?target,
+            ?ids,
+            "moving the panes of a host the window let go to the host that reaches its daemon"
+        );
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::RehostPanes {
+                from,
+                to: target.wire().map(str::to_owned),
+                session_ids: ids,
+                request_id: Some(request_id),
+            },
+        );
     }
 
     /// Forget in Connections on remote host `host`: every pane of it on
@@ -1085,7 +1279,7 @@ pub(crate) fn content_dimmed(host: &HostKey, conn: Option<&Connection>) -> bool 
 mod tests {
     use futures::channel::mpsc::unbounded;
 
-    use super::{HostConn, Hosts, content_dimmed};
+    use super::{HostConn, Hosts, content_dimmed, host_rank};
     use crate::connection::Connection;
     use crate::target::{HostKey, Target};
 
@@ -1093,6 +1287,34 @@ mod tests {
 
     fn conn(target: Target) -> HostConn {
         HostConn::new(unbounded().0, target)
+    }
+
+    #[test]
+    fn rank_puts_this_pc_first_then_saved_order_then_key_text() {
+        let remote = |key: &str| HostKey::Remote(key.to_owned());
+        let saved = [remote("ssh:me@devbox"), remote(BOX)];
+        let mut keys = [
+            remote("zeta"),
+            remote(BOX),
+            remote("alpha"),
+            HostKey::Local,
+            remote("ssh:me@devbox"),
+        ];
+        keys.sort_by_key(|key| host_rank(&saved, key));
+        assert_eq!(
+            keys,
+            [
+                HostKey::Local,
+                remote("ssh:me@devbox"),
+                remote(BOX),
+                remote("alpha"),
+                remote("zeta"),
+            ],
+            "This PC, then saved order, then unsaved keys by their text"
+        );
+        assert_eq!(host_rank(&saved, &HostKey::Local), (0, String::new()));
+        assert_eq!(host_rank(&saved, &remote(BOX)), (2, BOX.to_owned()));
+        assert_eq!(host_rank(&[], &remote(BOX)), (usize::MAX, BOX.to_owned()));
     }
 
     #[test]

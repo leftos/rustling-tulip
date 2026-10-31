@@ -822,9 +822,15 @@ pub struct RootView {
     /// The forgets of remote hosts' panes sent to This PC, and those
     /// waiting for it.
     pane_forgets: PaneForgets,
-    /// Each host whose connection was dropped because another host's had
-    /// reached the same daemon first, with that other host.
+    /// Each host whose connection was dropped because another host's, of
+    /// lower rank, reaches the same daemon, with that other host.
     duplicate_of: HashMap<HostKey, HostKey>,
+    /// The daemon id each host named this launch, kept after its connection
+    /// closes; only Forget clears a host's.
+    daemon_of: HashMap<HostKey, String>,
+    /// Each host forgotten in Connections whose panes move to another host,
+    /// with that host, kept while a pane still names it.
+    forgotten_rehost: HashMap<HostKey, HostKey>,
     /// Whether moving a window records its place for the next launch: only
     /// real, visible windows do, since gpui's test windows panic when asked
     /// for their handle and a cloaked window's place means nothing.
@@ -1377,6 +1383,8 @@ impl RootView {
             lists_since_welcome: HashSet::new(),
             pane_forgets: PaneForgets::default(),
             duplicate_of: HashMap::new(),
+            daemon_of: HashMap::new(),
+            forgotten_rehost: HashMap::new(),
             remembers_window_places: false,
             root_focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
@@ -3700,6 +3708,7 @@ impl RootView {
             if matches!(msg, DaemonMessage::Tabs { .. }) {
                 self.after_this_pc_tabs();
             }
+            self.rehost_stranded_panes();
             self.prune_remote_panes();
         }
         self.end_dead_pane_drag(window, cx);
@@ -4069,6 +4078,7 @@ impl RootView {
             } => {
                 if let Some(request_id) = &id {
                     self.pane_forgets.rebind_refused(request_id);
+                    self.pane_forgets.rehost_refused(request_id);
                 }
                 let failure = DaemonFailure {
                     message,
@@ -4154,6 +4164,7 @@ impl RootView {
             // list, so a pane still showing it is pruned.
             msg @ DaemonMessage::SessionRemoved { .. } if *host != HostKey::Local => {
                 self.fold_chat_or_agents(host, msg, cx);
+                self.rehost_stranded_panes();
                 self.prune_remote_panes();
             }
             other => self.fold_chat_or_agents(host, other, cx),
@@ -4607,6 +4618,7 @@ impl RootView {
         // The prune first, so a restore never opens a pane its forget
         // closes again.
         if *host != HostKey::Local {
+            self.rehost_stranded_panes();
             self.prune_remote_panes();
         }
         self.try_restore_popouts(window, cx);

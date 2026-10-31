@@ -989,7 +989,7 @@ impl RootView {
         if host != HostKey::Local {
             self.disconnect_host(&host, window, cx);
             self.clear_remote_slice(&host, window, cx);
-            self.forget_host_panes(host);
+            self.forget_or_rehost_host_panes(host);
         }
         self.save_ui();
         if let Target::Tailnet(tailnet) = &row.target {

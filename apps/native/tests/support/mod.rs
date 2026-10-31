@@ -1848,6 +1848,25 @@ pub fn forgets(sent: &[ClientMessage]) -> Vec<Forget> {
         .collect()
 }
 
+/// A `RehostPanes` the client sent: the host it moves panes from, the host
+/// it moves them to (`None` for This PC) and the session ids it names.
+pub type Rehost = (String, Option<String>, Vec<String>);
+
+/// The `RehostPanes` messages among `sent`, in order.
+pub fn rehosts(sent: &[ClientMessage]) -> Vec<Rehost> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RehostPanes {
+                from,
+                to,
+                session_ids,
+                ..
+            } => Some((from.clone(), to.clone(), session_ids.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The input bytes `sent` carries to `session`, in order.
 fn input_to(sent: &[ClientMessage], session: &str) -> Vec<u8> {
     sent.iter()
