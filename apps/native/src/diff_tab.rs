@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use protocol::{ClientMessage, SnapshotUnavailable};
 
 use crate::source_control::ScKey;
+use crate::target::HostKey;
 
 /// The toast an `OpenDiffTab` the daemon refused raises.
 pub const OPEN_FAILED_TITLE: &str = "Couldn't open the diff";
@@ -127,6 +128,8 @@ pub(crate) struct DiffTarget {
     /// against HEAD, a sha for that commit against its parent.
     pub against: Option<String>,
     pub worktree_path: Option<String>,
+    /// The host the file is on: This PC for a repo it registered.
+    pub host: HostKey,
 }
 
 impl DiffTarget {
@@ -231,6 +234,9 @@ pub(crate) struct DiffTabState {
     fetching: Option<String>,
     /// A refresh arrived while a fetch was out.
     dirty: bool,
+    /// The label of the host whose connection is gone, while its file
+    /// cannot be read: the tab says it is offline.
+    offline: Option<String>,
     /// Numbers the builds; only the latest one's result is taken.
     generation: u64,
     built: Option<Built>,
@@ -244,9 +250,15 @@ impl DiffTabState {
             language: None,
             fetching: None,
             dirty: false,
+            offline: None,
             generation: 0,
             built: None,
         }
+    }
+
+    /// The host the tab's file is on, which its snapshot comes from.
+    pub(crate) fn host(&self) -> &HostKey {
+        &self.target.host
     }
 
     /// The snapshot's language hint, once one landed.
@@ -271,6 +283,7 @@ impl DiffTabState {
     pub(crate) fn start_fetch(&mut self, id: String) -> ClientMessage {
         self.fetching = Some(id.clone());
         self.dirty = false;
+        self.offline = None;
         ClientMessage::GetFileSnapshot {
             id,
             repo_id: self.target.repo_id.clone(),
@@ -362,16 +375,29 @@ impl DiffTabState {
         true
     }
 
+    /// The host's connection closed: the fetch out will not be answered,
+    /// and the tab says `label` is offline until the host is back.
+    pub(crate) fn host_closed(&mut self, label: String) {
+        self.fetching = None;
+        self.dirty = false;
+        self.offline = Some(label);
+    }
+
     /// A new connection: a fetch out will not be answered. Returns whether
-    /// to fetch again: when one was out, or when the sides can have changed.
+    /// to fetch again: when one was out, when the tab was offline, or when
+    /// the sides can have changed.
     pub(crate) fn reset_connection(&mut self) -> bool {
         let was_fetching = self.fetching.take().is_some();
+        let was_offline = self.offline.take().is_some();
         self.dirty = false;
-        was_fetching || self.target.is_live()
+        was_fetching || was_offline || self.target.is_live()
     }
 
     pub(crate) fn body(&self) -> DiffTabBody {
         let text = |text: String| DiffTabBody::Text { text, note: None };
+        if let Some(label) = &self.offline {
+            return text(format!("{label} is offline"));
+        }
         match &self.content {
             Content::Loading => text(LOADING_TEXT.to_owned()),
             Content::Failed(error) => text(format!("{ERROR_PREFIX}{error}")),
@@ -390,6 +416,7 @@ impl DiffTabState {
     pub(crate) fn header(&self, include_whitespace: bool, highlight: bool) -> DiffTabHeader {
         let (mode, mode_tip) = mode_label(self.target.against.as_deref());
         let count = match self.content {
+            _ if self.offline.is_some() => String::new(),
             Content::Failed(_) | Content::Unavailable(_) => String::new(),
             Content::Loading | Content::Texts { .. } => {
                 count_text(self.built.map(|built| built.changes))
@@ -402,7 +429,8 @@ impl DiffTabState {
             include_whitespace,
             highlight,
             count,
-            nav_enabled: self.built.is_some_and(|built| built.changes > 0),
+            nav_enabled: self.offline.is_none()
+                && self.built.is_some_and(|built| built.changes > 0),
         }
     }
 }
@@ -484,6 +512,7 @@ mod tests {
             path: "src/a.rs".to_owned(),
             against: against.map(str::to_owned),
             worktree_path: Some("C:/wt/r1".to_owned()),
+            host: HostKey::Local,
         }
     }
 
@@ -594,6 +623,48 @@ mod tests {
         let mut opens = DiffOpens::default();
         assert_eq!(opens.snapshot_id(), "diff-snap-1");
         assert_eq!(opens.snapshot_id(), "diff-snap-2");
+    }
+
+    #[test]
+    fn an_offline_tab_says_so_and_reads_again_on_reconnect() {
+        let mut state = DiffTabState::new(target(None));
+        state.start_fetch("s1".to_owned());
+        state.on_snapshot("s1", texts("a", "b"));
+        state.host_closed("box".to_owned());
+        assert_eq!(
+            state.body(),
+            DiffTabBody::Text {
+                text: "box is offline".to_owned(),
+                note: None,
+            }
+        );
+        assert_eq!(
+            state.header(true, true).count,
+            "",
+            "no count while it cannot show"
+        );
+        assert!(state.reset_connection(), "an offline tab reads again");
+        assert_eq!(text(&state.body()).0, LOADING_TEXT);
+
+        let mut commit = DiffTabState::new(target(Some("0a1b2c3")));
+        commit.host_closed("box".to_owned());
+        assert!(
+            commit.reset_connection(),
+            "a commit's diff reads again too, though its sides cannot change"
+        );
+    }
+
+    #[test]
+    fn a_tabs_state_names_the_host_its_file_is_on() {
+        let local = DiffTabState::new(target(None));
+        assert_eq!(local.host(), &HostKey::Local);
+        let mut on_a_host = target(None);
+        on_a_host.host = HostKey::Remote("box.tail1234.ts.net".to_owned());
+        let remote = DiffTabState::new(on_a_host);
+        assert_eq!(
+            remote.host(),
+            &HostKey::Remote("box.tail1234.ts.net".to_owned())
+        );
     }
 
     #[test]

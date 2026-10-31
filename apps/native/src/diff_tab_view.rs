@@ -685,10 +685,13 @@ pub(crate) struct DiffSlot {
 }
 
 impl RootView {
-    /// Asks the daemon to open, or focus, the diff of `path` in the tree
-    /// `key`; the tab it names is activated when it answers.
+    /// Asks This PC's daemon to open, or focus, the diff of `path` in the
+    /// tree `key`; the tab it names is activated when it answers. The
+    /// layout stays here, so the request goes here; it names the host the
+    /// file is on, which the tab reads its snapshot from.
     pub(crate) fn open_diff(&mut self, key: &ScKey, path: &str, against: Option<String>) {
         let id = self.diff_opens.open_id();
+        let host = self.host_of_repo(&key.repo_id);
         self.send_to(
             &HostKey::Local,
             ClientMessage::OpenDiffTab {
@@ -697,7 +700,7 @@ impl RootView {
                 path: path.to_owned(),
                 against,
                 worktree_path: key.worktree.clone(),
-                host: None,
+                host: host.wire().map(str::to_owned),
             },
         );
     }
@@ -715,7 +718,7 @@ impl RootView {
                     path,
                     against,
                     worktree_path,
-                    ..
+                    host,
                 } => Some((
                     tab.id.clone(),
                     DiffTarget {
@@ -723,6 +726,7 @@ impl RootView {
                         path: path.clone(),
                         against: against.clone(),
                         worktree_path: worktree_path.clone(),
+                        host: crate::tabs::host_of_wire(host.as_deref()),
                     },
                 )),
                 TabContent::Grid { .. }
@@ -759,11 +763,38 @@ impl RootView {
         }
     }
 
-    /// Sends `view`'s tab a fresh `GetFileSnapshot`.
+    /// Sends `view`'s tab a fresh `GetFileSnapshot`, to the host its file is
+    /// on. A host that is not connected leaves the tab saying it is offline,
+    /// and its next `Welcome` reads again.
     fn fetch_diff(&mut self, view: &Entity<DiffTabView>, cx: &mut Context<Self>) {
         let id = self.diff_opens.snapshot_id();
+        let host = view.read(cx).state.host().clone();
+        if self.is_remote_offline(&host) {
+            let label = crate::sidebar::host_label(&host);
+            view.update(cx, |tab, cx| {
+                tab.state.host_closed(label);
+                cx.notify();
+            });
+            return;
+        }
         let msg = view.update(cx, |tab, _| tab.state.start_fetch(id));
-        self.send_to(&HostKey::Local, msg);
+        self.send_to(&host, msg);
+    }
+
+    /// `host`'s connection closed: its diff tabs say it is offline until its
+    /// next `Welcome`, which reads their files again.
+    pub(crate) fn close_diff_tabs_of(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let label = crate::sidebar::host_label(host);
+        for view in self.diff_views() {
+            if view.read(cx).state.host() != host {
+                continue;
+            }
+            let label = label.clone();
+            view.update(cx, |tab, cx| {
+                tab.state.host_closed(label);
+                cx.notify();
+            });
+        }
     }
 
     fn diff_views(&self) -> Vec<Entity<DiffTabView>> {
@@ -774,30 +805,34 @@ impl RootView {
     }
 
     /// Folds a diff message in; returns whether nothing else is owed it.
-    /// Diff tabs live in This PC's layout and ask only This PC, so only its
-    /// messages fold here: a remote host's open answer, snapshot, error or
-    /// repo status names nothing of theirs.
+    /// Diff tabs live in This PC's layout, so the answer to an open — the
+    /// tab it names, or its error — comes only from This PC. A tab's
+    /// snapshot comes from the host its file is on and lands only in the
+    /// tab waiting for that id on that host.
     pub(crate) fn on_diff_message(
         &mut self,
-        host: &crate::target::HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if *host != crate::target::HostKey::Local {
-            return false;
-        }
+        let local = *host == HostKey::Local;
         match msg {
             DaemonMessage::Welcome { .. } => {
-                self.diff_opens.reset();
+                if local {
+                    self.diff_opens.reset();
+                }
                 for view in self.diff_views() {
+                    if view.read(cx).state.host() != host {
+                        continue;
+                    }
                     if view.update(cx, |tab, _| tab.state.reset_connection()) {
                         self.fetch_diff(&view, cx);
                     }
                 }
                 false
             }
-            DaemonMessage::DiffTabOpened { id, tab_id } => {
+            DaemonMessage::DiffTabOpened { id, tab_id } if local => {
                 let known = self.tabs.tab(tab_id).is_some();
                 if let Some(tab_id) = self.diff_opens.opened(id, tab_id, known, (self.now)()) {
                     if self.is_tab_popped(&tab_id) {
@@ -827,19 +862,19 @@ impl RootView {
                     language: language.clone(),
                     unavailable: unavailable.clone(),
                 };
-                self.land_snapshot(id, cx, |state| state.on_snapshot(id, snapshot));
+                self.land_snapshot(host, id, cx, |state| state.on_snapshot(id, snapshot));
                 true
             }
             DaemonMessage::FileSnapshotError { id, error, .. } => {
                 let error = error.clone();
-                self.land_snapshot(id, cx, |state| state.on_snapshot_error(id, error));
+                self.land_snapshot(host, id, cx, |state| state.on_snapshot_error(id, error));
                 true
             }
             DaemonMessage::Error {
                 message,
                 request_id: Some(id),
                 ..
-            } if self.diff_opens.failed(id) => {
+            } if local && self.diff_opens.failed(id) => {
                 tracing::warn!("the daemon could not open a diff tab: {message}");
                 self.push_toast(
                     ToastKind::Error,
@@ -859,6 +894,9 @@ impl RootView {
                     worktree: worktree_path.clone(),
                 };
                 for view in self.diff_views() {
+                    if view.read(cx).state.host() != host {
+                        continue;
+                    }
                     if view.update(cx, |tab, _| tab.state.on_repo_status(&key)) {
                         self.fetch_diff(&view, cx);
                     }
@@ -869,10 +907,12 @@ impl RootView {
         }
     }
 
-    /// Hands the reply to fetch `id` to the tab waiting for it, and fetches
-    /// again when a refresh came in meanwhile. A stale id reaches no tab.
+    /// Hands the reply to fetch `id` to the tab of `host` waiting for it,
+    /// and fetches again when a refresh came in meanwhile. A stale id, or
+    /// one from another host, reaches no tab.
     fn land_snapshot(
         &mut self,
+        host: &HostKey,
         id: &str,
         cx: &mut Context<Self>,
         reply: impl FnOnce(&mut DiffTabState) -> Option<Landed>,
@@ -880,7 +920,10 @@ impl RootView {
         let waiting = self
             .diff_tabs
             .values()
-            .find(|slot| slot.view.read(cx).state.awaits(id))
+            .find(|slot| {
+                let view = slot.view.read(cx);
+                view.state.awaits(id) && view.state.host() == host
+            })
             .map(|slot| slot.view.clone());
         let Some(view) = waiting else {
             return;
@@ -1011,6 +1054,7 @@ mod tests {
             path: "src/main.rs".to_owned(),
             against: None,
             worktree_path: None,
+            host: HostKey::Local,
         }
     }
 
