@@ -8,12 +8,11 @@
 - [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette
 - [ ] RT-607 Add a font weight setting for the UI font and the terminal font · release vNext
 - [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons
-- [ ] RT-608 Add a relative UI text size setting that shifts every UI font size · release vNext
+- [/] RT-608 Add a relative UI text size setting that shifts every UI font size · release vNext
 
 ## Wave 16 — Several hosts in one window
 
 - [ ] RT-118 Connect to several daemons at once, grouped by host · release vNext
-  - [/] RT-568 Let one tab mix panes from several hosts (MH.6) · release vNext
   - [ ] RT-569 Spawn, settings and recover across hosts (MH.7) · release vNext
   - [ ] RT-570 Prove several hosts in one window live, and document it (MH.8) · release vNext
   - [ ] RT-573 Merge feat/multi-host to main (#204) · release vNext
