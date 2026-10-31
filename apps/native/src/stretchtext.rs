@@ -8,7 +8,9 @@
 //! the answer as Markdown with each closed stretch's short form and each open
 //! stretch's closer bracketed by private-use markers; the Markdown pass lifts
 //! those back out into stretchtext link spans. Those code points are stripped
-//! from the input first, so an answer cannot forge a stretch.
+//! from the input first, and so is every numeric character reference
+//! (`&#xE002;`, `&#57346;`) to a code point from U+E000 to U+E006, which the
+//! Markdown parse would decode into one, so an answer cannot forge a marker.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
@@ -53,7 +55,7 @@ const MAX_DEPTH: usize = 32;
 /// draws its short form in a `live` answer and its source in a finished one,
 /// and so does one whose short form is empty, which has nothing to click.
 pub(crate) fn compose(text: &str, open: &BTreeSet<String>, live: bool) -> Composed {
-    let text: String = text.chars().filter(|ch| !is_marker(*ch)).collect();
+    let text = without_marker_references(text.chars().filter(|ch| !is_marker(*ch)).collect());
     let segments = parse(&text);
     let mut composer = Composer {
         text: &text,
@@ -409,17 +411,90 @@ fn is_blank(long: &[Segment]) -> bool {
         .all(|part| matches!(part, Segment::Text(text) if text.trim().is_empty()))
 }
 
-/// An open stretch's long form followed by its `closer`, after a space, or
-/// after a blank line when the long form ends in a rule or a fence's closing
-/// line, which text after it would change.
+/// An open stretch's long form followed by its `closer`, after a space when
+/// the long form ends in a line of paragraph text, else in a paragraph of
+/// its own after a blank line, where the block the long form ends in cannot
+/// swallow it.
 fn close_after(long: &str, closer: &str) -> String {
     let trimmed = long.trim_end();
     let last = trimmed.rfind('\n').map_or(trimmed, |at| &trimmed[at + 1..]);
-    if is_rule(last) || is_fence_line(last) {
+    if ends_in_a_block(last) {
         format!("{trimmed}\n\n{closer}")
     } else {
         format!("{long} {closer}")
     }
+}
+
+/// Whether `line`, the last of a long form, is anything but paragraph
+/// text: a table row, HTML, indented code, a setext underline, a fence or
+/// a rule.
+fn ends_in_a_block(line: &str) -> bool {
+    let Some(body) = unindented(line).filter(|_| !line.starts_with('\t')) else {
+        return true;
+    };
+    body.starts_with('|')
+        || body.starts_with('<')
+        || is_setext_underline(body)
+        || is_rule(line)
+        || is_fence_line(line)
+}
+
+/// Whether `body` is only `=` or only `-`, trailing blanks allowed.
+fn is_setext_underline(body: &str) -> bool {
+    let body = body.trim_end_matches([' ', '\t']);
+    !body.is_empty() && (body.chars().all(|ch| ch == '=') || body.chars().all(|ch| ch == '-'))
+}
+
+/// The first code point of the private-use range a numeric character
+/// reference may not name, and the last.
+const FORGEABLE: (char, char) = ('\u{E000}', '\u{E006}');
+
+/// `text` without the numeric character references (`&#xE002;`,
+/// `&#57346;`) that name a code point in [`FORGEABLE`], which the Markdown
+/// parse would decode into a marker. Dropping one may join the text around
+/// it into another, so the pass repeats until nothing changes.
+fn without_marker_references(text: String) -> String {
+    let mut text = text;
+    loop {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("&#") {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at..];
+            if let Some(len) = marker_reference_len(tail) {
+                rest = &tail[len..];
+            } else {
+                out.push_str("&#");
+                rest = &tail[2..];
+            }
+        }
+        out.push_str(rest);
+        if out.len() == text.len() {
+            return out;
+        }
+        text = out;
+    }
+}
+
+/// The length of the numeric character reference `text` starts with, when
+/// it names a code point in [`FORGEABLE`].
+fn marker_reference_len(text: &str) -> Option<usize> {
+    let body = text.strip_prefix("&#")?;
+    let (prefix, radix) = match body.as_bytes().first() {
+        Some(b'x' | b'X') => (1, 16),
+        _ => (0, 10),
+    };
+    let digits = &body[prefix..];
+    let count = digits
+        .bytes()
+        .take_while(|byte| char::from(*byte).is_digit(radix))
+        .count();
+    if count == 0 || !digits[count..].starts_with(';') {
+        return None;
+    }
+    let value = u32::from_str_radix(&digits[..count], radix).ok()?;
+    char::from_u32(value).filter(|ch| (FORGEABLE.0..=FORGEABLE.1).contains(ch))?;
+    Some(2 + prefix + count + 1)
 }
 
 /// `line` without its indent of up to three spaces; `None` when indented
@@ -466,8 +541,124 @@ fn is_fence_line(line: &str) -> bool {
 mod tests {
     use super::*;
 
+    use std::path::Path;
+
+    use crate::md_blocks::{self, Block, LinkTarget, Span};
+
     fn set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| (*key).to_owned()).collect()
+    }
+
+    /// `composed` parsed as Markdown, its markers lifted into links.
+    fn lifted(composed: &Composed) -> md_blocks::Document {
+        let mut document = md_blocks::parse(&composed.source, Path::new(""));
+        md_blocks::lift_stretchtext(&mut document, &composed.keys);
+        document
+    }
+
+    /// Each stretchtext link `blocks` draw: its text and its key.
+    fn links(blocks: &[Block]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for block in blocks {
+            let lists: Vec<&[Span]> = match block {
+                Block::Heading { spans, .. } | Block::Paragraph(spans) => vec![spans],
+                Block::List { items, .. } => {
+                    for item in items {
+                        out.extend(links(&item.blocks));
+                    }
+                    Vec::new()
+                }
+                Block::Quote(inner) => {
+                    out.extend(links(inner));
+                    Vec::new()
+                }
+                Block::Table { head, rows, .. } => head
+                    .iter()
+                    .chain(rows.iter().flatten())
+                    .map(Vec::as_slice)
+                    .collect(),
+                Block::Code { .. } | Block::Rule | Block::Html(_) => Vec::new(),
+            };
+            for span in lists.into_iter().flatten() {
+                if let Some(LinkTarget::Stretchtext { key }) = &span.link {
+                    out.push((span.text.clone(), key.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// `text` with stretch `key` open, parsed; its closer must be a link.
+    fn with_reachable_closer(text: &str, key: &str) -> md_blocks::Document {
+        let composed = compose(text, &set(&[key]), false);
+        let document = lifted(&composed);
+        assert!(
+            links(&document.blocks).contains(&(CLOSER.to_owned(), key.to_owned())),
+            "no clickable closer in {:?}",
+            composed.source
+        );
+        document
+    }
+
+    #[test]
+    fn a_long_form_ending_in_a_table_keeps_a_reachable_closer() {
+        let document = with_reachable_closer(
+            "Results {{table|here:\n\n| a | b |\n|---|---|\n| 1 | 2 |}}",
+            "table",
+        );
+        assert!(
+            document
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::Table { rows, .. } if rows.len() == 1))
+        );
+    }
+
+    #[test]
+    fn a_long_form_ending_in_an_html_block_keeps_a_reachable_closer() {
+        with_reachable_closer("Look {{html|at this:\n\n<div>\nboxed\n</div>}}", "html");
+    }
+
+    #[test]
+    fn a_long_form_ending_in_indented_code_keeps_a_reachable_closer() {
+        with_reachable_closer("Run {{cmd|this:\n\n    cargo test}}", "cmd");
+        with_reachable_closer("Run {{cmd|this:\n\n\tcargo test}}", "cmd");
+    }
+
+    #[test]
+    fn a_long_form_ending_in_a_setext_heading_keeps_a_reachable_closer() {
+        for text in ["{{head|Title\n===}}", "{{head|Title\n--}}"] {
+            let document = with_reachable_closer(text, "head");
+            assert!(
+                document
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, Block::Heading { .. })),
+                "the long form keeps its heading: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entity_cannot_forge_a_marker() {
+        let composed = compose(
+            "{{a|b}} &#xE000;0&#xE001;forged&#xe002; &#57344;0&#57345;more&#57346; &#x0E003;0&#xE004;",
+            &BTreeSet::new(),
+            false,
+        );
+        assert_eq!(
+            links(&lifted(&composed).blocks),
+            [("a".to_owned(), "a".to_owned())]
+        );
+        let ended = compose(
+            "{{one &#xE002;two|b}} and &#57346;",
+            &BTreeSet::new(),
+            false,
+        );
+        let drawn = links(&lifted(&ended).blocks);
+        let text: String = drawn.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(text, "one two", "a forged end cannot cut the link short");
+        assert!(drawn.iter().all(|(_, key)| key == "one two"), "{drawn:?}");
     }
 
     /// `composed` with each marked short form written `[short](key)` and each

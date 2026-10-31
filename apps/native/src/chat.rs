@@ -150,18 +150,21 @@ impl ChatLog {
     /// Applies one append: the `removed` ids leave first, then `entries` are
     /// upserted, so an id both removed and carried comes back at the bottom.
     /// A removed live answer's open stretches move to the new finished
-    /// answer that replaces it, the first removed to the first new.
+    /// answer that replaces it: the removed live answers and the new finished
+    /// answers the append takes pair up in order, each live answer by its own
+    /// slot whether or not it had stretches open.
     pub fn append(&mut self, entries: Vec<ChatEntry>, removed: &[String]) {
-        let moved: Vec<BTreeSet<String>> = removed
+        let moved: Vec<Option<BTreeSet<String>>> = removed
             .iter()
             .filter(|id| matches!(self.get(id), Some(ChatEntry::Answer { live: true, .. })))
-            .filter_map(|id| self.stretchtext.get(id).cloned())
+            .map(|id| self.stretchtext.get(id).cloned())
             .collect();
         let finals: Vec<String> = entries
             .iter()
             .filter(|entry| matches!(entry, ChatEntry::Answer { live: false, .. }))
             .filter_map(entry_id)
             .filter(|id| self.get(id).is_none())
+            .filter(|id| !self.gone.contains(id) || removed.iter().any(|gone| gone == id))
             .map(ToOwned::to_owned)
             .collect();
         self.remove(removed);
@@ -174,7 +177,9 @@ impl ChatLog {
         }
         self.upsert(entries);
         for (id, open) in finals.into_iter().zip(moved) {
-            if self.get(&id).is_some() {
+            if let Some(open) = open
+                && self.get(&id).is_some()
+            {
                 self.stretchtext.insert(id, open);
             }
         }
@@ -1104,6 +1109,41 @@ mod tests {
             text: format!("answer {id}"),
             live,
         }
+    }
+
+    #[test]
+    fn only_the_live_answer_with_open_stretches_passes_them_on() {
+        let mut log = ChatLog::default();
+        log.load(
+            vec![
+                answer("a0", false),
+                user("u1"),
+                answer("live:m1", true),
+                answer("live:m2", true),
+            ],
+            0,
+        );
+        log.remove(&["a0".to_owned()]);
+        assert!(log.toggle_stretchtext("live:m2", "k"));
+        log.append(
+            vec![
+                answer("a0", false),
+                answer("a1", false),
+                answer("a2", false),
+            ],
+            &["live:m1".to_owned(), "live:m2".to_owned()],
+        );
+        assert_eq!(log.open_stretchtext("a0"), None, "a gone id stays gone");
+        assert_eq!(
+            log.open_stretchtext("a1"),
+            None,
+            "the first live answer had nothing open"
+        );
+        assert_eq!(
+            log.open_stretchtext("a2"),
+            Some(&BTreeSet::from(["k".to_owned()])),
+            "the second final takes the second live answer's stretches"
+        );
     }
 
     /// One tool-call row, with what the call returned once it has.
