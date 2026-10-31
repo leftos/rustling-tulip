@@ -13,8 +13,10 @@ use crate::remote_mode::Capabilities;
 use crate::sidebar::{LeafState, can_attach, runtime_label};
 use crate::spawn_form::{OpenChoice, Target};
 use crate::tabs::{
-    PaneBinding, PaneTarget, Placement, TabsModel, collect_panes, find_tab_containing_session,
+    HostSessions, HostedSession, PaneBinding, PaneTarget, Placement, SessionRef, TabsModel,
+    collect_panes, find_tab_containing_session,
 };
+use crate::target::HostKey;
 
 /// Which set of actions a session offers. Parked, stopped and running
 /// follow `SessionContextMenu.tsx`'s state buckets. An abandoned session
@@ -212,6 +214,8 @@ impl DuplicateTarget {
 struct PendingDuplicate {
     original: String,
     target: DuplicateTarget,
+    /// The host the request went to, the original's.
+    host: HostKey,
 }
 
 /// A Shift-duplicate waiting for its source's stored spawn config: the
@@ -311,6 +315,9 @@ pub(crate) struct Placed {
     /// discard.
     pub(crate) messages: Vec<ClientMessage>,
     pub(crate) focus: PlacedFocus,
+    /// The host the session-level messages among `messages` go to (the
+    /// original's discard); see [`crate::tabs::destination`].
+    pub(crate) session_host: HostKey,
 }
 
 pub(crate) fn action_state(session: &SessionSnapshot) -> ActionState {
@@ -525,12 +532,13 @@ pub(crate) fn menu_entries(session: &SessionSnapshot, mode: MenuMode) -> Vec<Men
 /// Reveal worktree when it has a worktree of its own, dimmed where `caps`
 /// opens no local files.
 pub(crate) fn session_rows(
-    session: &SessionSnapshot,
+    hosted: HostedSession<'_>,
     tabs: &TabsModel,
-    sessions: &[SessionSnapshot],
+    sessions: &HostSessions<'_>,
     popouts: &Popouts,
     caps: Capabilities,
 ) -> Vec<OfferedRow> {
+    let session = hosted.session;
     let offered = |row| OfferedRow {
         row,
         disabled: None,
@@ -539,13 +547,14 @@ pub(crate) fn session_rows(
         row: SessionRow::Duplicate,
         disabled: (session.mode == SessionMode::Headless).then_some(HEADLESS_UNSUPPORTED_TIP),
     }];
-    if find_tab_containing_session(tabs.tabs(), &session.id).is_some() {
+    let shown = SessionRef::new(hosted.host.clone(), &session.id);
+    if find_tab_containing_session(tabs.tabs(), &shown).is_some() {
         rows.push(offered(SessionRow::MoveTo));
         if can_attach(session) {
             rows.push(pop_out_row(&session.id, tabs, popouts));
         }
     } else if can_attach(session) {
-        let new_tab = matches!(tabs.place(session, sessions), Placement::NewTab);
+        let new_tab = matches!(tabs.place(hosted, sessions), Placement::NewTab);
         rows.push(offered(SessionRow::AddToCurrentTab { new_tab }));
         if !new_tab {
             rows.push(offered(SessionRow::AddToNewTab));
@@ -595,14 +604,18 @@ pub(crate) fn worktree_to_reveal(session: &SessionSnapshot) -> Option<&str> {
 }
 
 /// Whether pane `pane_id` of tab `tab_id` shows `session_id`.
-fn pane_shows(tabs: &[TabEntry], (tab_id, pane_id): &(String, String), session_id: &str) -> bool {
+fn pane_shows(
+    tabs: &[TabEntry],
+    (tab_id, pane_id): &(String, String),
+    session: &SessionRef,
+) -> bool {
     tabs.iter()
         .find(|tab| tab.id == *tab_id)
         .and_then(TabEntry::grid)
         .is_some_and(|grid| {
             collect_panes(grid)
                 .iter()
-                .any(|pane| pane.id == pane_id.as_str() && pane.session == Some(session_id))
+                .any(|pane| pane.id == pane_id.as_str() && pane.shows(session))
         })
 }
 
@@ -670,17 +683,17 @@ pub(crate) fn move_lines(tabs: &[TabEntry], session_id: &str) -> Vec<SubmenuLine
 }
 
 /// The pane Move to ▸ moves: `clicked`, the `(tab, pane)` whose header
-/// opened the menu, while it still shows `session_id`; else the first pane
+/// opened the menu, while it still shows `session`; else the first pane
 /// that does.
 pub(crate) fn move_source(
     tabs: &[TabEntry],
-    session_id: &str,
+    session: &SessionRef,
     clicked: Option<&(String, String)>,
 ) -> Option<(String, String)> {
     clicked
-        .filter(|clicked| pane_shows(tabs, clicked, session_id))
+        .filter(|clicked| pane_shows(tabs, clicked, session))
         .cloned()
-        .or_else(|| find_tab_containing_session(tabs, session_id))
+        .or_else(|| find_tab_containing_session(tabs, session))
 }
 
 impl SessionRow {
@@ -876,13 +889,14 @@ impl HeaderStopConfirm {
 }
 
 impl Duplicates {
-    /// Records a duplicate of `session_id` to `target` under `request_id`
-    /// and returns the request to send; `None` for a restart while one of
-    /// the session is on the way. A restart or resume keeps the session's
-    /// "Don't count as busy" and its checkout; a copy starts counted, on a
-    /// fresh branch.
+    /// Records a duplicate of `session_id` of `host` to `target` under
+    /// `request_id` and returns the request to send to `host`; `None` for a
+    /// restart while one of the session is on the way. A restart or resume
+    /// keeps the session's "Don't count as busy" and its checkout; a copy
+    /// starts counted, on a fresh branch.
     pub(crate) fn request(
         &mut self,
+        host: &HostKey,
         session_id: &str,
         request_id: String,
         target: DuplicateTarget,
@@ -896,6 +910,7 @@ impl Duplicates {
             PendingDuplicate {
                 original: session_id.to_owned(),
                 target,
+                host: host.clone(),
             },
         );
         Some(ClientMessage::DuplicateSession {
@@ -928,31 +943,41 @@ impl Duplicates {
         self.pending.clear();
     }
 
+    /// Forgets the duplicates sent to `host`, whose connection closed;
+    /// returns whether any was pending.
+    pub(crate) fn drop_host(&mut self, host: &HostKey) -> bool {
+        let before = self.pending.len();
+        self.pending.retain(|_, dup| dup.host != *host);
+        self.pending.len() != before
+    }
+
     /// When `request_id` names a pending duplicate: the messages that place
     /// `copy` by its target, and where the view turns. A restart takes the
     /// original's place ([`restart_placement`]); a copy goes to a new tab,
-    /// or into its tab by pane target, and keeps the original.
+    /// or into its tab by pane target, and keeps the original. `copy`
+    /// carries the host that replied, the original's.
     pub(crate) fn place(
         &mut self,
         request_id: &str,
-        copy: &SessionSnapshot,
+        copy: HostedSession<'_>,
         tabs: &TabsModel,
-        sessions: &[SessionSnapshot],
+        sessions: &HostSessions<'_>,
     ) -> Option<Placed> {
         let pending = self.pending.remove(request_id)?;
+        let original = SessionRef::new(copy.host.clone(), pending.original);
         let placement = match pending.target {
             DuplicateTarget::Restart => {
                 return Some(restart_placement(
-                    pending.original,
-                    &copy.id,
+                    original,
+                    &copy.session.id,
                     &tabs.bindings(),
                     false,
                 ));
             }
             DuplicateTarget::RestartInPopout => {
                 return Some(restart_placement(
-                    pending.original,
-                    &copy.id,
+                    original,
+                    &copy.session.id,
                     &tabs.bindings(),
                     true,
                 ));
@@ -972,26 +997,29 @@ impl Duplicates {
             Placement::Pane { tab_id, .. } => PlacedFocus::Tab(tab_id.clone()),
         };
         Some(Placed {
-            messages: vec![placement.message(&copy.id, None)],
+            messages: vec![placement.message(copy.host, &copy.session.id, None)],
             focus,
+            session_host: copy.host.clone(),
         })
     }
 }
 
-/// The messages that put `new_id` where `original` was (every pane that
-/// showed it, focusing the first, or a new tab when none did; `in_popout`,
-/// the original's pop-out window, which takes the copy in place of a new
-/// tab) and then discard the original. The discard goes last so the daemon has rebound
-/// the panes before it closes the original's.
+/// The messages that put `new_id`, on `original`'s host, where `original`
+/// was (every pane that showed it, focusing the first, or a new tab when
+/// none did; `in_popout`, the original's pop-out window, which takes the
+/// copy in place of a new tab) and then discard the original on its host.
+/// The discard goes last so the daemon has rebound the panes before it
+/// closes the original's.
 fn restart_placement(
-    original: String,
+    original: SessionRef,
     new_id: &str,
     bindings: &[PaneBinding],
     in_popout: bool,
 ) -> Placed {
+    let host = original.host.wire().map(str::to_owned);
     let panes: Vec<&PaneBinding> = bindings
         .iter()
-        .filter(|binding| binding.session_id.as_deref() == Some(original.as_str()))
+        .filter(|binding| binding.shows(&original))
         .collect();
     let mut messages: Vec<ClientMessage> = panes
         .iter()
@@ -999,21 +1027,23 @@ fn restart_placement(
             tab_id: binding.tab_id.clone(),
             pane_id: binding.pane_id.clone(),
             session_id: Some(new_id.to_owned()),
-            host: None,
+            host: host.clone(),
         })
         .collect();
     if panes.is_empty() && !in_popout {
         messages.push(ClientMessage::CreateTab {
             name: None,
             initial_session_id: Some(new_id.to_owned()),
-            host: None,
+            host,
             request_id: None,
         });
     }
     messages.push(ClientMessage::DiscardSession {
-        session_id: original.clone(),
+        session_id: original.id.clone(),
         cleanup: Vec::new(),
     });
+    let session_host = original.host;
+    let original = original.id;
     let focus = if in_popout {
         PlacedFocus::Popout { original }
     } else {
@@ -1024,7 +1054,11 @@ fn restart_placement(
                 pane_id: binding.pane_id.clone(),
             })
     };
-    Placed { messages, focus }
+    Placed {
+        messages,
+        focus,
+        session_host,
+    }
 }
 
 #[cfg(test)]
@@ -1045,8 +1079,9 @@ mod tests {
     use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, Popouts};
     use crate::remote_mode::Capabilities;
     use crate::spawn_form::{OpenChoice, Target};
-    use crate::tabs::TabsModel;
-    use crate::tabs::tests::{model_with, pane, tab};
+    use crate::tabs::tests::{model_with, pane, pane_on, tab};
+    use crate::tabs::{HostedSession, SessionRef, TabsModel, destination};
+    use crate::target::HostKey;
     use protocol::{
         CleanupAction, ClientMessage, GridNode, SessionMode, SessionSnapshot, SessionStatus,
         SplitDirection,
@@ -1114,7 +1149,7 @@ mod tests {
     /// Whether a duplicate of `s1` to `target` carries the busy exclusion.
     fn carries_busy_exclusion(target: DuplicateTarget) -> bool {
         let mut dups = Duplicates::default();
-        match dups.request("s1", "req-1".to_owned(), target) {
+        match dups.request(&HostKey::Local, "s1", "req-1".to_owned(), target) {
             Some(ClientMessage::DuplicateSession {
                 carry_busy_excluded,
                 ..
@@ -1138,7 +1173,7 @@ mod tests {
     fn restart_request_keeps_the_checkout() {
         let same_checkout = |target: DuplicateTarget| {
             let mut dups = Duplicates::default();
-            match dups.request("s1", "req-1".to_owned(), target) {
+            match dups.request(&HostKey::Local, "s1", "req-1".to_owned(), target) {
                 Some(ClientMessage::DuplicateSession { same_checkout, .. }) => same_checkout,
                 other => panic!("expected a DuplicateSession, got {other:?}"),
             }
@@ -1607,15 +1642,21 @@ mod tests {
     }
 
     fn rows_of(s: &SessionSnapshot, tabs: &TabsModel) -> Vec<SessionRow> {
-        session_rows(s, tabs, &[], &Popouts::default(), local())
-            .into_iter()
-            .map(|offered| offered.row)
-            .collect()
+        session_rows(
+            HostedSession::local(s),
+            tabs,
+            &[],
+            &Popouts::default(),
+            local(),
+        )
+        .into_iter()
+        .map(|offered| offered.row)
+        .collect()
     }
 
     /// The Pop out row `s` offers with `popouts` open, if any.
     fn pop_out_row(s: &SessionSnapshot, tabs: &TabsModel, popouts: &Popouts) -> Option<OfferedRow> {
-        session_rows(s, tabs, &[], popouts, local())
+        session_rows(HostedSession::local(s), tabs, &[], popouts, local())
             .into_iter()
             .find(|offered| offered.row == SessionRow::PopOut)
     }
@@ -1759,7 +1800,14 @@ mod tests {
             abandoned(),
         ] {
             assert_eq!(
-                session_rows(&s, &tabs, &[], &Popouts::default(), local()).first(),
+                session_rows(
+                    HostedSession::local(&s),
+                    &tabs,
+                    &[],
+                    &Popouts::default(),
+                    local()
+                )
+                .first(),
                 Some(&offered),
                 "{:?}",
                 action_state(&s)
@@ -1775,7 +1823,14 @@ mod tests {
             let mut s = session(status);
             s.mode = SessionMode::Headless;
             assert_eq!(
-                session_rows(&s, &tabs, &[], &Popouts::default(), local()).first(),
+                session_rows(
+                    HostedSession::local(&s),
+                    &tabs,
+                    &[],
+                    &Popouts::default(),
+                    local()
+                )
+                .first(),
                 Some(&OfferedRow {
                     row: SessionRow::Duplicate,
                     disabled: Some(HEADLESS_UNSUPPORTED_TIP),
@@ -1951,34 +2006,51 @@ mod tests {
         ];
         let ids = |t: &str, p: &str| (t.to_owned(), p.to_owned());
         assert_eq!(
-            move_source(&tabs, "s1", Some(&ids("t3", "c"))),
+            move_source(
+                &tabs,
+                &SessionRef::new(HostKey::Local, "s1"),
+                Some(&ids("t3", "c"))
+            ),
             Some(ids("t3", "c")),
             "the right-clicked pane"
         );
         assert_eq!(
-            move_source(&tabs, "s1", Some(&ids("t2", "b"))),
+            move_source(
+                &tabs,
+                &SessionRef::new(HostKey::Local, "s1"),
+                Some(&ids("t2", "b"))
+            ),
             Some(ids("t2", "b"))
         );
         assert_eq!(
-            move_source(&tabs, "s1", None),
+            move_source(&tabs, &SessionRef::new(HostKey::Local, "s1"), None),
             Some(ids("t2", "a")),
             "else the first binding"
         );
         for stale in [ids("t1", "p1"), ids("gone", "x")] {
             assert_eq!(
-                move_source(&tabs, "s1", Some(&stale)),
+                move_source(&tabs, &SessionRef::new(HostKey::Local, "s1"), Some(&stale)),
                 Some(ids("t2", "a")),
                 "{stale:?} no longer shows s1"
             );
         }
-        assert_eq!(move_source(&tabs, "s7", None), None, "no pane shows it");
+        assert_eq!(
+            move_source(&tabs, &SessionRef::new(HostKey::Local, "s7"), None),
+            None,
+            "no pane shows it"
+        );
     }
 
     #[test]
     fn actions_duplicate_to_new_tab_creates_a_tab_and_keeps_the_original() {
         let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
         let mut dups = Duplicates::default();
-        let request = dups.request("s1", "req-1".to_owned(), DuplicateTarget::NewTab);
+        let request = dups.request(
+            &HostKey::Local,
+            "s1",
+            "req-1".to_owned(),
+            DuplicateTarget::NewTab,
+        );
         assert!(matches!(
             request,
             Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id), .. }) if session_id == "s1" && id == "req-1"
@@ -1986,7 +2058,7 @@ mod tests {
         assert!(!dups.is_pending("s1"), "a copy is no restart on the way");
         assert!(dups.has_request("req-1"));
         let placed = dups
-            .place("req-1", &named("s2"), &tabs, &[])
+            .place("req-1", HostedSession::local(&named("s2")), &tabs, &[])
             .expect("placed");
         assert_eq!(placed.focus, PlacedFocus::NewTab);
         assert!(
@@ -2008,8 +2080,9 @@ mod tests {
         ]);
         let place = |target: DuplicateTarget| {
             let mut dups = Duplicates::default();
-            dups.request("s1", "req".to_owned(), target);
-            dups.place("req", &named("s2"), &tabs, &[]).expect("placed")
+            dups.request(&HostKey::Local, "s1", "req".to_owned(), target);
+            dups.place("req", HostedSession::local(&named("s2")), &tabs, &[])
+                .expect("placed")
         };
 
         let empty = place(DuplicateTarget::Tab("t2".to_owned()));
@@ -2055,12 +2128,15 @@ mod tests {
         tabs.mark_closing("t2");
         let mut dups = Duplicates::default();
         dups.request(
+            &HostKey::Local,
             "s1",
             "req".to_owned(),
             DuplicateTarget::Tab("t2".to_owned()),
         );
 
-        let placed = dups.place("req", &named("s2"), &tabs, &[]).expect("placed");
+        let placed = dups
+            .place("req", HostedSession::local(&named("s2")), &tabs, &[])
+            .expect("placed");
         assert_eq!(placed.focus, PlacedFocus::NewTab);
         assert!(
             matches!(
@@ -2076,25 +2152,45 @@ mod tests {
     fn actions_restart_still_replaces_and_discards() {
         let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
         let mut dups = Duplicates::default();
-        dups.request("s1", "copy".to_owned(), DuplicateTarget::NewTab);
+        dups.request(
+            &HostKey::Local,
+            "s1",
+            "copy".to_owned(),
+            DuplicateTarget::NewTab,
+        );
         assert!(
-            dups.request("s1", "restart".to_owned(), DuplicateTarget::Restart)
-                .is_some(),
+            dups.request(
+                &HostKey::Local,
+                "s1",
+                "restart".to_owned(),
+                DuplicateTarget::Restart
+            )
+            .is_some(),
             "a copy on the way does not hold up a restart"
         );
         assert!(dups.is_pending("s1"));
         assert!(
-            dups.request("s1", "again".to_owned(), DuplicateTarget::Restart)
-                .is_none()
+            dups.request(
+                &HostKey::Local,
+                "s1",
+                "again".to_owned(),
+                DuplicateTarget::Restart
+            )
+            .is_none()
         );
         assert!(
-            dups.request("s1", "copy-2".to_owned(), DuplicateTarget::NewTab)
-                .is_some(),
+            dups.request(
+                &HostKey::Local,
+                "s1",
+                "copy-2".to_owned(),
+                DuplicateTarget::NewTab
+            )
+            .is_some(),
             "copies are not held up by the restart"
         );
 
         let restarted = dups
-            .place("restart", &named("s3"), &tabs, &[])
+            .place("restart", HostedSession::local(&named("s3")), &tabs, &[])
             .expect("placed");
         assert_eq!(restarted.focus, pane_focus("t1", "p1"));
         assert!(
@@ -2107,7 +2203,7 @@ mod tests {
         );
         assert!(!dups.is_pending("s1"));
         let copied = dups
-            .place("copy", &named("s2"), &tabs, &[])
+            .place("copy", HostedSession::local(&named("s2")), &tabs, &[])
             .expect("placed");
         assert!(!has_discard(&copied.messages), "{:?}", copied.messages);
     }
@@ -2115,7 +2211,12 @@ mod tests {
     #[test]
     fn actions_duplicate_replaces_every_pane_of_the_original_then_discards_it() {
         let mut dups = Duplicates::default();
-        let request = dups.request("s1", "req-1".to_owned(), DuplicateTarget::Restart);
+        let request = dups.request(
+            &HostKey::Local,
+            "s1",
+            "req-1".to_owned(),
+            DuplicateTarget::Restart,
+        );
         assert!(matches!(
             request,
             Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id), .. }) if session_id == "s1" && id == "req-1"
@@ -2127,9 +2228,12 @@ mod tests {
             ),
             tab("t2", &pane("p3", Some("s1"))),
         ]);
-        assert!(dups.place("other", &named("s2"), &tabs, &[]).is_none());
+        assert!(
+            dups.place("other", HostedSession::local(&named("s2")), &tabs, &[])
+                .is_none()
+        );
         let placed = dups
-            .place("req-1", &named("s2"), &tabs, &[])
+            .place("req-1", HostedSession::local(&named("s2")), &tabs, &[])
             .expect("the matching reply places the duplicate");
         assert_eq!(placed.focus, pane_focus("t1", "p1"));
         let replaced: Vec<(&str, &str)> = placed
@@ -2154,7 +2258,8 @@ mod tests {
             placed.messages
         );
         assert!(
-            dups.place("req-1", &named("s3"), &tabs, &[]).is_none(),
+            dups.place("req-1", HostedSession::local(&named("s3")), &tabs, &[])
+                .is_none(),
             "each request is placed once"
         );
     }
@@ -2162,10 +2267,15 @@ mod tests {
     #[test]
     fn actions_duplicate_of_a_session_no_pane_shows_opens_a_tab() {
         let mut dups = Duplicates::default();
-        dups.request("s1", "req-1".to_owned(), DuplicateTarget::Restart);
+        dups.request(
+            &HostKey::Local,
+            "s1",
+            "req-1".to_owned(),
+            DuplicateTarget::Restart,
+        );
         let tabs = model_with(&[tab("t1", &pane("p1", None))]);
         let placed = dups
-            .place("req-1", &named("s2"), &tabs, &[])
+            .place("req-1", HostedSession::local(&named("s2")), &tabs, &[])
             .expect("placed");
         assert_eq!(placed.focus, PlacedFocus::NewTab);
         assert!(
@@ -2179,21 +2289,69 @@ mod tests {
     }
 
     #[test]
+    fn restart_placement_keeps_the_original_host() {
+        let box_host = HostKey::Remote("box".to_owned());
+        let mut dups = Duplicates::default();
+        dups.request(
+            &box_host,
+            "s1",
+            "req-1".to_owned(),
+            DuplicateTarget::Restart,
+        );
+        let tabs = model_with(&[tab(
+            "t1",
+            &hsplit(pane("p1", Some("s1")), pane_on("p2", Some("s1"), "box")),
+        )]);
+        let copy = named("s2");
+        let placed = dups
+            .place("req-1", HostedSession::new(&box_host, &copy), &tabs, &[])
+            .expect("placed");
+        assert!(
+            matches!(placed.messages.as_slice(), [
+                ClientMessage::ReplacePaneSession { pane_id, session_id: Some(id), host: Some(host), .. },
+                discard,
+            ] if pane_id == "p2" && id == "s2" && host == "box" && is_discard(discard, &[])),
+            "only the remote original's pane is rebound, naming its host: {:?}",
+            placed.messages
+        );
+        let hosts: Vec<HostKey> = placed
+            .messages
+            .iter()
+            .map(|msg| destination(msg, &placed.session_host))
+            .collect();
+        assert_eq!(
+            hosts,
+            [HostKey::Local, box_host],
+            "the layout goes to This PC, the discard to the original's host"
+        );
+    }
+
+    #[test]
     fn actions_duplicate_is_one_at_a_time_until_answered_or_cleared() {
         let restart = || DuplicateTarget::Restart;
         let mut dups = Duplicates::default();
-        assert!(dups.request("s1", "req-1".to_owned(), restart()).is_some());
+        assert!(
+            dups.request(&HostKey::Local, "s1", "req-1".to_owned(), restart())
+                .is_some()
+        );
         assert!(dups.is_pending("s1"));
         assert!(dups.has_request("req-1"));
         assert!(
-            dups.request("s1", "req-2".to_owned(), restart()).is_none(),
+            dups.request(&HostKey::Local, "s1", "req-2".to_owned(), restart())
+                .is_none(),
             "a second restart of s1 while the first is on the way"
         );
-        assert!(dups.request("s2", "req-3".to_owned(), restart()).is_some());
+        assert!(
+            dups.request(&HostKey::Local, "s2", "req-3".to_owned(), restart())
+                .is_some()
+        );
         assert!(!dups.fail("unknown"));
         assert!(dups.fail("req-1"));
         assert!(!dups.is_pending("s1"));
-        assert!(dups.request("s1", "req-4".to_owned(), restart()).is_some());
+        assert!(
+            dups.request(&HostKey::Local, "s1", "req-4".to_owned(), restart())
+                .is_some()
+        );
         dups.clear();
         assert!(!dups.is_pending("s1") && !dups.is_pending("s2"));
     }

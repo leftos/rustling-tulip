@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke,
     SharedString, Stateful, Window, WindowId, div, point, prelude::*, px, relative,
 };
-use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
+use protocol::{ClientMessage, SpawnRequest, SpawnTarget};
 
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::notices::{
@@ -17,6 +17,7 @@ use crate::notices::{
 use crate::preset_launch::job_id_of;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawns::OpenIn;
+use crate::tabs::{HostedSession, destination};
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
 use crate::{FOOTER_HEIGHT, RootView, UI_TEXT_SIZE};
@@ -33,6 +34,7 @@ const SPAWNING_TITLE: &str = "Spawning session…";
 const SPAWNING_DETAIL: &str = "Worktree creation may take a few seconds.";
 const SHELL_SPAWNING_DETAIL: &str = "Shell startup may take a few seconds.";
 const DAEMON_ERROR_TITLE: &str = "Daemon error";
+const OFFLINE_TITLE: &str = "Couldn't start the session";
 
 impl RootView {
     /// Asks the daemon for a new session and places it by `open_in` when
@@ -46,12 +48,68 @@ impl RootView {
         open_in: OpenIn,
         cx: &mut Context<Self>,
     ) -> String {
+        let host = self.host_of_target(&request.target);
+        self.spawn_on(&host, request, open_in, cx)
+    }
+
+    /// [`Self::spawn`] sent to `host`, whatever the request's target names.
+    pub(crate) fn spawn_on(
+        &mut self,
+        host: &HostKey,
+        request: SpawnRequest,
+        open_in: OpenIn,
+        cx: &mut Context<Self>,
+    ) -> String {
         let request_id = crate::new_request_id();
         let detail = spawning_detail(&request);
-        let msg = self.spawns.start(request, request_id.clone(), open_in);
-        self.send_to(&self.host_of_request(&msg), msg);
+        let msg = self
+            .spawns
+            .start(host.clone(), request, request_id.clone(), open_in);
+        if self.is_remote_offline(host) {
+            self.spawns.fail(&request_id);
+            self.push_offline_toast(host, cx);
+            return request_id;
+        }
+        self.send_to(host, msg);
         self.push_spawning_toast(detail, &request_id, cx);
         request_id
+    }
+
+    /// Whether `host` is a remote host whose connection is not open, so a
+    /// request sent to it would be dropped unanswered.
+    pub(crate) fn is_remote_offline(&self, host: &HostKey) -> bool {
+        *host != HostKey::Local
+            && !self
+                .conn_of(host)
+                .is_some_and(crate::connection::Connection::is_open)
+    }
+
+    /// The failure toast of a spawn or duplicate asked of `host` while it
+    /// is offline.
+    pub(crate) fn push_offline_toast(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let name = host.wire().unwrap_or("This PC");
+        tracing::warn!(
+            ?host,
+            "a spawn or duplicate asked of an offline host; dropped"
+        );
+        self.push_toast(
+            ToastKind::Error,
+            OFFLINE_TITLE,
+            Some(format!("{name} is offline")),
+            cx,
+        );
+    }
+
+    /// `host`'s connection closed: its spawns in flight end, with their
+    /// spawning toasts, and its duplicates are forgotten.
+    pub(crate) fn drop_pending_of(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        for request_id in self.spawns.drop_host(host) {
+            tracing::info!(?host, request_id, "the host closed; its pending spawn ends");
+            self.clear_spawning_toast(&request_id, cx);
+        }
+        if self.duplicates.drop_host(host) {
+            tracing::info!(?host, "the host closed; its pending duplicates end");
+        }
     }
 
     /// The toasts on screen, oldest first.
@@ -386,11 +444,13 @@ impl RootView {
     }
 
     /// A session that answers one of this client's spawns clears its
-    /// spawning toast and goes where the spawn asked for it.
+    /// spawning toast and goes where the spawn asked for it. `session`
+    /// carries the host that replied: the layout names it and goes to This
+    /// PC, and a replaced session's discard goes to that session's host.
     pub(crate) fn place_spawn(
         &mut self,
         request_id: Option<&str>,
-        session: &SessionSnapshot,
+        session: HostedSession<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -398,10 +458,10 @@ impl RootView {
             return;
         };
         self.clear_spawning_toast(request_id, cx);
-        let sessions = self.sidebar.local_sessions();
+        let sessions = self.sidebar.sessions_by_host();
         let Some(placed) = self
             .spawns
-            .place(request_id, session, &mut self.tabs, sessions)
+            .place(request_id, session, &mut self.tabs, &sessions)
         else {
             return;
         };
@@ -409,7 +469,7 @@ impl RootView {
         self.confirm.disarm();
         for msg in placed.messages {
             self.tabs.note_layout_request(&msg);
-            self.send_to(&HostKey::Local, msg);
+            self.send_to(&destination(&msg, &placed.session_host), msg);
         }
         self.settle_checkout(request_id, window, cx);
         if placed.relayout {

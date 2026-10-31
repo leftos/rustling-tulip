@@ -157,7 +157,7 @@ impl RootView {
     #[must_use]
     pub fn tab_badge(&self, tab_id: &str) -> Option<TabBadge> {
         let tab = self.tabs.tab(tab_id)?;
-        tab_session_counts(tab, self.sidebar.local_sessions())?
+        tab_session_counts(tab, &self.sidebar.sessions_by_host())?
             .badge(self.sidebar.ui_state().title.count)
     }
 

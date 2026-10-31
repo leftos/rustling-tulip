@@ -240,7 +240,9 @@ impl RootView {
 
     /// `host`'s connection closed or the window let it go: its agents,
     /// daemon settings, daemon id, fetches and remote access status go with
-    /// it, and each host dropped as its duplicate is dialled again. Once
+    /// it, a remote host's spawns and duplicates in flight end with their
+    /// spawning toasts, and each host dropped as its duplicate is dialled
+    /// again. Once
     /// the window holds no connection to it, a Pair armed for it is
     /// forgotten and its pairing dialog closes.
     pub(crate) fn on_host_closed(
@@ -254,6 +256,11 @@ impl RootView {
         self.forget_daemon_id(host);
         self.end_fetches_on_disconnect(host, window, cx);
         self.set_remote_status(host, None, cx);
+        // A remote host's spawns and duplicates in flight end with its
+        // connection; This PC's end with its reset.
+        if *host != HostKey::Local {
+            self.drop_pending_of(host, cx);
+        }
         if self.hosts.get(host).is_none() {
             self.forget_device_pairing(host, window, cx);
         }

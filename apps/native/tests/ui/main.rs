@@ -39,6 +39,7 @@ mod ui_keys;
 mod ui_launch_last;
 mod ui_layout_chooser;
 mod ui_links;
+mod ui_mixed_tabs;
 mod ui_multi_host;
 mod ui_needs_you;
 mod ui_notifications;

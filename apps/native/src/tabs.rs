@@ -44,23 +44,99 @@ impl Rect {
     }
 }
 
+/// A session as a pane names it: the host that lists it and its id there.
+/// Two hosts may list one id, so a pane's session is always the pair.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionRef {
+    pub host: HostKey,
+    pub id: String,
+}
+
+impl SessionRef {
+    pub fn new(host: HostKey, id: impl Into<String>) -> Self {
+        Self {
+            host,
+            id: id.into(),
+        }
+    }
+}
+
+/// A session snapshot with the host that lists it, as placement reads it.
+#[derive(Debug, Clone, Copy)]
+pub struct HostedSession<'a> {
+    pub host: &'a HostKey,
+    pub session: &'a SessionSnapshot,
+}
+
+static LOCAL_HOST: HostKey = HostKey::Local;
+
+impl<'a> HostedSession<'a> {
+    pub fn new(host: &'a HostKey, session: &'a SessionSnapshot) -> Self {
+        Self { host, session }
+    }
+
+    /// `session` of This PC.
+    pub fn local(session: &'a SessionSnapshot) -> Self {
+        Self::new(&LOCAL_HOST, session)
+    }
+}
+
+/// Every host's session list, each with its host, as placement and the
+/// tab counts read them.
+pub type HostSessions<'a> = [(HostKey, &'a [SessionSnapshot])];
+
+/// The host a wire `host` value names: This PC for none.
+#[must_use]
+pub fn host_of_wire(host: Option<&str>) -> HostKey {
+    host.map_or(HostKey::Local, |key| HostKey::Remote(key.to_owned()))
+}
+
+/// Session `id` of `host` in `sessions`.
+fn find_hosted<'a>(
+    sessions: &'a HostSessions<'_>,
+    host: &HostKey,
+    id: &str,
+) -> Option<&'a SessionSnapshot> {
+    sessions
+        .iter()
+        .filter(|(listed_by, _)| listed_by == host)
+        .find_map(|(_, list)| list.iter().find(|s| s.id == id))
+}
+
 /// A leaf of a split tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pane<'a> {
     pub id: &'a str,
     pub session: Option<&'a str>,
+    /// The host the pane's session belongs to; This PC for an empty pane
+    /// that names none.
+    pub host: HostKey,
+}
+
+impl Pane<'_> {
+    /// Whether the pane shows `session`, host and id both.
+    #[must_use]
+    pub fn shows(&self, session: &SessionRef) -> bool {
+        self.session == Some(session.id.as_str()) && self.host == session.host
+    }
 }
 
 /// A pane of any tab, with the tab it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(
-    clippy::struct_field_names,
-    reason = "the names of the protocol fields they carry"
-)]
 pub struct PaneBinding {
     pub tab_id: String,
     pub pane_id: String,
     pub session_id: Option<String>,
+    /// The host of the pane's session, from the pane itself.
+    pub host: HostKey,
+}
+
+impl PaneBinding {
+    /// Whether the pane shows `session`, host and id both.
+    #[must_use]
+    pub fn shows(&self, session: &SessionRef) -> bool {
+        self.session_id.as_deref() == Some(session.id.as_str()) && self.host == session.host
+    }
 }
 
 /// The line between a split's two children.
@@ -206,10 +282,11 @@ fn walk_panes<'a>(node: &'a GridNode, out: &mut Vec<Pane<'a>>) {
         GridNode::Pane {
             pane_id,
             session_id,
-            ..
+            host,
         } => out.push(Pane {
             id: pane_id,
             session: session_id.as_deref(),
+            host: host_of_wire(host.as_deref()),
         }),
         GridNode::Split { first, second, .. } => {
             walk_panes(first, out);
@@ -513,16 +590,16 @@ pub fn pick_balanced_drop_target(grid: &GridNode) -> Option<(String, PaneDropEdg
     Some((target.pane_id, edge))
 }
 
-/// The first tab, and its pane, that shows `session_id`.
+/// The first tab, and its pane, that shows `session`.
 pub fn find_tab_containing_session(
     tabs: &[TabEntry],
-    session_id: &str,
+    session: &SessionRef,
 ) -> Option<(String, String)> {
     tabs.iter().find_map(|tab| {
         let grid = tab.grid()?;
         collect_panes(grid)
             .into_iter()
-            .find(|p| p.session == Some(session_id))
+            .find(|p| p.shows(session))
             .map(|p| (tab.id.clone(), p.id.to_owned()))
     })
 }
@@ -574,13 +651,16 @@ pub fn sole_remote_host(hosts: impl IntoIterator<Item = HostKey>) -> Option<Host
 }
 
 /// Every session a pane shows, with its pill, counting every pane that
-/// shows it; a session missing from the map is unbound.
-pub fn tab_pills(tabs: &[TabEntry]) -> HashMap<String, TabPill> {
-    let mut shown: HashMap<&str, Vec<&TabEntry>> = HashMap::new();
+/// shows it, by host and id; a session missing from the map is unbound.
+pub fn tab_pills(tabs: &[TabEntry]) -> HashMap<SessionRef, TabPill> {
+    let mut shown: HashMap<SessionRef, Vec<&TabEntry>> = HashMap::new();
     for tab in tabs {
         for pane in tab.grid().map(collect_panes).unwrap_or_default() {
             if let Some(session) = pane.session {
-                shown.entry(session).or_default().push(tab);
+                shown
+                    .entry(SessionRef::new(pane.host, session))
+                    .or_default()
+                    .push(tab);
             }
         }
     }
@@ -594,7 +674,7 @@ pub fn tab_pills(tabs: &[TabEntry]) -> HashMap<String, TabPill> {
                 },
                 many => TabPill::Many(many.iter().map(|tab| tab.name.clone()).collect()),
             };
-            (session.to_owned(), pill)
+            (session, pill)
         })
         .collect()
 }
@@ -609,28 +689,30 @@ pub fn resolve_tab_focus(tab: Option<&TabEntry>, remembered: Option<&str>) -> Op
         .map(str::to_owned)
 }
 
-/// What a session belongs to for placement: its workspace, else its first
-/// repo.
-pub fn session_parent_key(session: &SessionSnapshot) -> Option<String> {
+/// What a session of `host` belongs to for placement: its workspace, else
+/// its first repo, qualified by the host, so two hosts' repos with one id
+/// are never the same parent.
+pub fn session_parent_key(host: &HostKey, session: &SessionSnapshot) -> Option<String> {
+    let host = host.wire().unwrap_or("local");
     if let Some(workspace) = &session.workspace_id {
-        return Some(format!("workspace:{workspace}"));
+        return Some(format!("{host}/workspace:{workspace}"));
     }
     session
         .members
         .first()
-        .map(|member| format!("repo:{}", member.repo_id))
+        .map(|member| format!("{host}/repo:{}", member.repo_id))
 }
 
 /// Where `session` goes in `grid`: beside a pane of the same repo or
-/// workspace (an empty neighbour, else a split of the last such pane), else
-/// the first empty pane, else a split of the largest pane.
+/// workspace on the same host (an empty neighbour, else a split of the last
+/// such pane), else the first empty pane, else a split of the largest pane.
 pub fn pane_target_for_session(
     grid: &GridNode,
-    sessions: &[SessionSnapshot],
-    session: &SessionSnapshot,
+    sessions: &HostSessions<'_>,
+    session: HostedSession<'_>,
 ) -> Option<PaneTarget> {
     let panes = collect_panes(grid);
-    if let Some(key) = session_parent_key(session)
+    if let Some(key) = session_parent_key(session.host, session.session)
         && let Some(target) = same_parent_target(grid, &panes, sessions, &key)
     {
         return Some(target);
@@ -646,19 +728,17 @@ pub fn pane_target_for_session(
 fn same_parent_target(
     grid: &GridNode,
     panes: &[Pane<'_>],
-    sessions: &[SessionSnapshot],
+    sessions: &HostSessions<'_>,
     key: &str,
 ) -> Option<PaneTarget> {
-    let parent_of = |id: &str| {
-        sessions
-            .iter()
-            .find(|s| s.id == id)
-            .and_then(session_parent_key)
+    let parent_of = |pane: &Pane<'_>| {
+        let session = find_hosted(sessions, &pane.host, pane.session?)?;
+        session_parent_key(&pane.host, session)
     };
     let matching: Vec<usize> = panes
         .iter()
         .enumerate()
-        .filter(|(_, p)| p.session.and_then(parent_of).as_deref() == Some(key))
+        .filter(|(_, p)| parent_of(p).as_deref() == Some(key))
         .map(|(index, _)| index)
         .collect();
     let empty_at = |index: usize| panes.get(index).filter(|p| p.session.is_none());
@@ -781,7 +861,7 @@ impl TabCounts {
 /// idle and needs you but never in busy. `None` for a tab that is not a
 /// pane grid (a diff tab).
 #[must_use]
-pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Option<TabCounts> {
+pub fn tab_session_counts(tab: &TabEntry, sessions: &HostSessions<'_>) -> Option<TabCounts> {
     let grid = tab.grid()?;
     let mut counts = TabCounts::default();
     let mut asking = HashSet::new();
@@ -789,7 +869,7 @@ pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Optio
         let Some(id) = pane.session else {
             continue;
         };
-        let Some(session) = sessions.iter().find(|s| s.id == id) else {
+        let Some(session) = find_hosted(sessions, &pane.host, id) else {
             continue;
         };
         if session.is_inactive {
@@ -876,14 +956,21 @@ impl Placement {
     /// The request that puts `session_id` there. A new tab's `CreateTab`
     /// carries `request_id`, the id its arrival was armed with; a split
     /// carries a fresh id of its own, which the `Error` refusing it echoes;
-    /// a pane replacement carries none.
-    pub fn message(&self, session_id: &str, request_id: Option<String>) -> ClientMessage {
+    /// a pane replacement carries none. Each names `host`, the session's
+    /// host, and goes to This PC, the layout home.
+    pub fn message(
+        &self,
+        host: &HostKey,
+        session_id: &str,
+        request_id: Option<String>,
+    ) -> ClientMessage {
         let session_id = Some(session_id.to_owned());
+        let host = host.wire().map(str::to_owned);
         match self {
             Self::NewTab => ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: session_id,
-                host: None,
+                host,
                 request_id,
             },
             Self::Pane {
@@ -893,7 +980,7 @@ impl Placement {
                 tab_id: tab_id.clone(),
                 pane_id: pane_id.clone(),
                 session_id,
-                host: None,
+                host,
             },
             Self::Pane {
                 tab_id,
@@ -904,10 +991,21 @@ impl Placement {
                 direction: split.direction,
                 place: split.place,
                 new_session_id: session_id,
-                host: None,
+                host,
                 request_id: Some(crate::new_request_id()),
             },
         }
+    }
+}
+
+/// The host a placement's `msg` goes to: a session-level message (the
+/// discard of a replaced session) to `session_host`, the session's own
+/// host; every layout message to This PC, the layout home.
+#[must_use]
+pub fn destination(msg: &ClientMessage, session_host: &HostKey) -> HostKey {
+    match msg {
+        ClientMessage::DiscardSession { .. } => session_host.clone(),
+        _ => HostKey::Local,
     }
 }
 
@@ -1509,7 +1607,7 @@ impl TabsModel {
     /// Where `session` goes: into the active tab by
     /// [`pane_target_for_session`], or a new tab when there is no active
     /// grid tab.
-    pub fn place(&self, session: &SessionSnapshot, sessions: &[SessionSnapshot]) -> Placement {
+    pub fn place(&self, session: HostedSession<'_>, sessions: &HostSessions<'_>) -> Placement {
         self.active.as_deref().map_or(Placement::NewTab, |tab_id| {
             self.place_in(tab_id, session, sessions)
         })
@@ -1520,8 +1618,8 @@ impl TabsModel {
     pub fn place_in(
         &self,
         tab_id: &str,
-        session: &SessionSnapshot,
-        sessions: &[SessionSnapshot],
+        session: HostedSession<'_>,
+        sessions: &HostSessions<'_>,
     ) -> Placement {
         if self.closing.contains(tab_id) {
             return Placement::NewTab;
@@ -1547,9 +1645,20 @@ impl TabsModel {
                     tab_id: tab.id.clone(),
                     pane_id: p.id.to_owned(),
                     session_id: p.session.map(str::to_owned),
+                    host: p.host,
                 })
             })
             .collect()
+    }
+
+    /// The host of the session pane `pane_id` of `tab_id` shows; This PC for
+    /// a pane that names none or is gone.
+    #[must_use]
+    pub fn pane_host(&self, tab_id: &str, pane_id: &str) -> HostKey {
+        self.tab(tab_id)
+            .and_then(TabEntry::grid)
+            .and_then(|grid| collect_panes(grid).into_iter().find(|p| p.id == pane_id))
+            .map_or(HostKey::Local, |pane| pane.host)
     }
 
     /// How many panes, across every tab, show each session.
@@ -1588,6 +1697,20 @@ pub(crate) mod tests {
             session_id: session.map(str::to_owned),
             host: None,
         }
+    }
+
+    /// A pane showing `session` of remote host `host`.
+    pub(crate) fn pane_on(id: &str, session: Option<&str>, host: &str) -> GridNode {
+        GridNode::Pane {
+            pane_id: id.to_owned(),
+            session_id: session.map(str::to_owned),
+            host: Some(host.to_owned()),
+        }
+    }
+
+    /// `sessions` as This PC's list, the only host's.
+    pub(crate) fn on_local(sessions: &[SessionSnapshot]) -> [(HostKey, &[SessionSnapshot]); 1] {
+        [(HostKey::Local, sessions)]
     }
 
     pub(crate) fn split(
@@ -1940,6 +2063,7 @@ pub(crate) mod tests {
             tab_id: tab.to_owned(),
             pane_id: pane.to_owned(),
             session_id: session.map(str::to_owned),
+            host: HostKey::Local,
         };
         let bindings = [
             binding("t1", "a", Some("s1")),
@@ -1977,6 +2101,7 @@ pub(crate) mod tests {
             tab_id: tab.to_owned(),
             pane_id: pane.to_owned(),
             session_id: session.map(str::to_owned),
+            host: HostKey::Local,
         };
         let bindings = [
             binding("t1", "a", Some("s1")),
@@ -2018,6 +2143,7 @@ pub(crate) mod tests {
             tab_id: tab.to_owned(),
             pane_id: pane.to_owned(),
             session_id: session.map(str::to_owned),
+            host: HostKey::Local,
         };
         let bindings = [
             binding("t1", "a", Some("s1")),
@@ -2138,7 +2264,7 @@ pub(crate) mod tests {
         );
         let new = session("new", Some("r"), None);
         assert_eq!(
-            pane_target_for_session(&after, &sessions, &new),
+            pane_target_for_session(&after, &on_local(&sessions), HostedSession::local(&new)),
             Some(replace("e2"))
         );
         let before = split(
@@ -2148,7 +2274,7 @@ pub(crate) mod tests {
             split(H, 0.5, pane("e2", None), pane("a", Some("s1"))),
         );
         assert_eq!(
-            pane_target_for_session(&before, &sessions, &new),
+            pane_target_for_session(&before, &on_local(&sessions), HostedSession::local(&new)),
             Some(replace("e2"))
         );
         let in_workspace = [session("w1", Some("r"), Some("ws"))];
@@ -2160,7 +2286,7 @@ pub(crate) mod tests {
         );
         let new = session("new", Some("other"), Some("ws"));
         assert_eq!(
-            pane_target_for_session(&grid, &in_workspace, &new),
+            pane_target_for_session(&grid, &on_local(&in_workspace), HostedSession::local(&new)),
             Some(replace("e2")),
             "a workspace session sits beside its workspace, whatever its repo"
         );
@@ -2181,7 +2307,7 @@ pub(crate) mod tests {
         );
         let new = session("new", Some("r"), None);
         assert_eq!(
-            pane_target_for_session(&grid, &sessions, &new),
+            pane_target_for_session(&grid, &on_local(&sessions), HostedSession::local(&new)),
             Some(split_target("b", V))
         );
     }
@@ -2197,12 +2323,16 @@ pub(crate) mod tests {
         );
         let new = session("new", Some("q"), None);
         assert_eq!(
-            pane_target_for_session(&grid, &sessions, &new),
+            pane_target_for_session(&grid, &on_local(&sessions), HostedSession::local(&new)),
             Some(replace("e1"))
         );
         let no_parent = session("loose", None, None);
         assert_eq!(
-            pane_target_for_session(&grid, &sessions, &no_parent),
+            pane_target_for_session(
+                &grid,
+                &on_local(&sessions),
+                HostedSession::local(&no_parent)
+            ),
             Some(replace("e1"))
         );
     }
@@ -2216,7 +2346,7 @@ pub(crate) mod tests {
         let grid = split(V, 0.3, pane("a", Some("s1")), pane("b", Some("s2")));
         let new = session("new", Some("q"), None);
         assert_eq!(
-            pane_target_for_session(&grid, &sessions, &new),
+            pane_target_for_session(&grid, &on_local(&sessions), HostedSession::local(&new)),
             Some(split_target("b", H))
         );
     }
@@ -2225,9 +2355,12 @@ pub(crate) mod tests {
     fn tabs_placement_goes_to_the_active_tab_or_a_new_one() {
         let new = session("new", Some("q"), None);
         let empty = TabsModel::new(None);
-        assert_eq!(empty.place(&new, &[]), Placement::NewTab);
         assert_eq!(
-            wire(&Placement::NewTab.message("new", Some("r1".to_owned()))),
+            empty.place(HostedSession::local(&new), &[]),
+            Placement::NewTab
+        );
+        assert_eq!(
+            wire(&Placement::NewTab.message(&HostKey::Local, "new", Some("r1".to_owned()))),
             wire(&ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some("new".to_owned()),
@@ -2237,7 +2370,7 @@ pub(crate) mod tests {
         );
 
         let model = model_with(&[tab("t1", &pane("e", None))]);
-        let placement = model.place(&new, &[]);
+        let placement = model.place(HostedSession::local(&new), &[]);
         assert_eq!(
             placement,
             Placement::Pane {
@@ -2246,7 +2379,7 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(
-            wire(&placement.message("new", None)),
+            wire(&placement.message(&HostKey::Local, "new", None)),
             wire(&ClientMessage::ReplacePaneSession {
                 tab_id: "t1".to_owned(),
                 pane_id: "e".to_owned(),
@@ -2258,7 +2391,7 @@ pub(crate) mod tests {
             tab_id: "t1".to_owned(),
             target: split_target("e", V),
         };
-        let mut split_msg = split.message("new", None);
+        let mut split_msg = split.message(&HostKey::Local, "new", None);
         if let ClientMessage::SplitPane { request_id, .. } = &mut split_msg {
             assert!(
                 request_id.take().is_some(),
@@ -2279,7 +2412,10 @@ pub(crate) mod tests {
         );
 
         let diff = model_with(&[diff_tab("d")]);
-        assert_eq!(diff.place(&new, &[]), Placement::NewTab);
+        assert_eq!(
+            diff.place(HostedSession::local(&new), &[]),
+            Placement::NewTab
+        );
     }
 
     #[test]
@@ -2291,14 +2427,18 @@ pub(crate) mod tests {
         ]);
         assert_eq!(model.active_id(), Some("t1"));
         assert_eq!(
-            model.place_in("t2", &new, &[session("s1", Some("r"), None)]),
+            model.place_in(
+                "t2",
+                HostedSession::local(&new),
+                &on_local(&[session("s1", Some("r"), None)])
+            ),
             Placement::Pane {
                 tab_id: "t2".to_owned(),
                 target: split_target("b", H),
             }
         );
         assert_eq!(
-            model.place_in("t1", &new, &[]),
+            model.place_in("t1", HostedSession::local(&new), &[]),
             Placement::Pane {
                 tab_id: "t1".to_owned(),
                 target: replace("a"),
@@ -2310,8 +2450,14 @@ pub(crate) mod tests {
     fn tabs_placement_in_a_missing_or_diff_tab_is_a_new_tab() {
         let new = session("new", Some("q"), None);
         let model = model_with(&[tab("t1", &pane("a", None)), diff_tab("d")]);
-        assert_eq!(model.place_in("gone", &new, &[]), Placement::NewTab);
-        assert_eq!(model.place_in("d", &new, &[]), Placement::NewTab);
+        assert_eq!(
+            model.place_in("gone", HostedSession::local(&new), &[]),
+            Placement::NewTab
+        );
+        assert_eq!(
+            model.place_in("d", HostedSession::local(&new), &[]),
+            Placement::NewTab
+        );
     }
 
     #[test]
@@ -2319,14 +2465,17 @@ pub(crate) mod tests {
         let new = session("new", Some("q"), None);
         let mut model = model_with(&[tab("t1", &pane("a", None))]);
         assert_eq!(
-            model.place_in("t1", &new, &[]),
+            model.place_in("t1", HostedSession::local(&new), &[]),
             Placement::Pane {
                 tab_id: "t1".to_owned(),
                 target: replace("a"),
             }
         );
         model.mark_closing("t1");
-        assert_eq!(model.place_in("t1", &new, &[]), Placement::NewTab);
+        assert_eq!(
+            model.place_in("t1", HostedSession::local(&new), &[]),
+            Placement::NewTab
+        );
     }
 
     #[test]
@@ -2335,7 +2484,10 @@ pub(crate) mod tests {
         let mut model = model_with(&[tab("t1", &pane("a", None))]);
         assert_eq!(model.active_id(), Some("t1"));
         model.mark_closing("t1");
-        assert_eq!(model.place(&new, &[]), Placement::NewTab);
+        assert_eq!(
+            model.place(HostedSession::local(&new), &[]),
+            Placement::NewTab
+        );
     }
 
     #[test]
@@ -2349,10 +2501,13 @@ pub(crate) mod tests {
             ),
         ];
         assert_eq!(
-            find_tab_containing_session(&tabs, "s3"),
+            find_tab_containing_session(&tabs, &SessionRef::new(HostKey::Local, "s3")),
             Some(("t2".to_owned(), "c".to_owned()))
         );
-        assert_eq!(find_tab_containing_session(&tabs, "s9"), None);
+        assert_eq!(
+            find_tab_containing_session(&tabs, &SessionRef::new(HostKey::Local, "s9")),
+            None
+        );
     }
 
     #[test]
@@ -2962,6 +3117,7 @@ pub(crate) mod tests {
                 tab_id: "t2".to_owned(),
                 pane_id: "c".to_owned(),
                 session_id: Some("s2".to_owned()),
+                host: HostKey::Local,
             }]
         );
     }
@@ -3014,7 +3170,7 @@ pub(crate) mod tests {
 
     /// `tab`'s busy and total counts.
     fn busy_total(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Option<(usize, usize)> {
-        tab_session_counts(tab, sessions).map(|counts| (counts.busy, counts.total))
+        tab_session_counts(tab, &on_local(sessions)).map(|counts| (counts.busy, counts.total))
     }
 
     #[test]
@@ -3129,7 +3285,8 @@ pub(crate) mod tests {
             left,
             with_status("work", SessionStatus::Working),
         ];
-        let counts = tab_session_counts(&tab("t", &grid), &sessions).expect("a grid tab");
+        let counts =
+            tab_session_counts(&tab("t", &grid), &on_local(&sessions)).expect("a grid tab");
         assert_eq!(
             counts.needs_you, 2,
             "an excluded asking session still needs you; an abandoned one does not"
@@ -3139,7 +3296,7 @@ pub(crate) mod tests {
             Some(TabBadge::NeedsYou(2))
         );
         let none = [with_status("work", SessionStatus::Working)];
-        let calm = tab_session_counts(&tab("t", &pane("a", Some("work"))), &none);
+        let calm = tab_session_counts(&tab("t", &pane("a", Some("work"))), &on_local(&none));
         assert_eq!(
             calm.and_then(|counts| counts.badge(CountMode::NeedsYou)),
             None,
@@ -3165,7 +3322,8 @@ pub(crate) mod tests {
             server,
             with_status("ask", SessionStatus::AwaitingInput),
         ];
-        let counts = tab_session_counts(&tab("t", &grid), &sessions).expect("a grid tab");
+        let counts =
+            tab_session_counts(&tab("t", &grid), &on_local(&sessions)).expect("a grid tab");
         assert_eq!(counts.idle, 2, "background work is not idle");
         assert_eq!(
             counts.badge(CountMode::Idle),
@@ -3176,7 +3334,7 @@ pub(crate) mod tests {
             Some(TabBadge::Busy { busy: 2, total: 4 })
         );
         let working = [with_status("w", SessionStatus::Working)];
-        let none_idle = tab_session_counts(&tab("t", &pane("a", Some("w"))), &working);
+        let none_idle = tab_session_counts(&tab("t", &pane("a", Some("w"))), &on_local(&working));
         assert_eq!(
             none_idle.and_then(|counts| counts.badge(CountMode::Idle)),
             Some(TabBadge::Idle { idle: 0, total: 1 }),
@@ -3191,7 +3349,8 @@ pub(crate) mod tests {
         ask.is_inactive = true;
         let mut idle = with_status("idle", SessionStatus::Idle);
         idle.is_inactive = true;
-        let counts = tab_session_counts(&tab("t", &grid), &[ask, idle]).expect("a grid tab");
+        let counts =
+            tab_session_counts(&tab("t", &grid), &on_local(&[ask, idle])).expect("a grid tab");
         assert_eq!(counts, TabCounts::default());
         for mode in [CountMode::NeedsYou, CountMode::Busy, CountMode::Idle] {
             assert_eq!(counts.badge(mode), None, "{mode:?}");
@@ -3210,7 +3369,8 @@ pub(crate) mod tests {
             with_status("ask", SessionStatus::AwaitingInput),
             with_status("idle", SessionStatus::Idle),
         ];
-        let counts = tab_session_counts(&tab("t", &grid), &sessions).expect("a grid tab");
+        let counts =
+            tab_session_counts(&tab("t", &grid), &on_local(&sessions)).expect("a grid tab");
         assert_eq!(
             counts,
             TabCounts {
@@ -3335,16 +3495,20 @@ pub(crate) mod tests {
         let also = tab("t3", &pane("p4", Some("s2")));
         let tabs = [work, other, also, diff_tab("d")];
         let pills = tab_pills(&tabs);
-        assert_eq!(pills.get("s9"), None, "unbound");
         assert_eq!(
-            pills.get("s1"),
+            pills.get(&SessionRef::new(HostKey::Local, "s9")),
+            None,
+            "unbound"
+        );
+        assert_eq!(
+            pills.get(&SessionRef::new(HostKey::Local, "s1")),
             Some(&TabPill::One {
                 tab_id: "t1".to_owned(),
                 name: "work".to_owned(),
             })
         );
         assert_eq!(
-            pills.get("s2"),
+            pills.get(&SessionRef::new(HostKey::Local, "s2")),
             Some(&TabPill::Many(vec!["t2".to_owned(), "t3".to_owned()]))
         );
         assert_eq!(pills.len(), 2, "empty panes add nothing");
@@ -3354,7 +3518,7 @@ pub(crate) mod tests {
     fn tab_pill_counts_two_panes_of_one_tab_as_two() {
         let grid = split(H, 0.5, pane("a", Some("s")), pane("b", Some("s")));
         assert_eq!(
-            tab_pills(&[tab("t", &grid)]).get("s"),
+            tab_pills(&[tab("t", &grid)]).get(&SessionRef::new(HostKey::Local, "s")),
             Some(&TabPill::Many(vec!["t".to_owned(), "t".to_owned()]))
         );
     }
@@ -3556,6 +3720,164 @@ pub(crate) mod tests {
         assert_eq!(
             sole_remote_host([remote("box"), remote("box")]),
             Some(remote("box"))
+        );
+    }
+
+    #[test]
+    fn collect_panes_yields_each_panes_host() {
+        let grid = split(
+            H,
+            0.5,
+            pane("a", Some("s1")),
+            split(V, 0.5, pane_on("b", Some("s1"), "box"), pane("c", None)),
+        );
+        let hosts: Vec<(&str, HostKey)> = collect_panes(&grid)
+            .into_iter()
+            .map(|p| (p.id, p.host))
+            .collect();
+        assert_eq!(
+            hosts,
+            [
+                ("a", HostKey::Local),
+                ("b", remote("box")),
+                ("c", HostKey::Local)
+            ]
+        );
+        let model = model_with(&[tab("t", &grid)]);
+        let bound: Vec<(String, HostKey)> = model
+            .bindings()
+            .into_iter()
+            .map(|b| (b.pane_id, b.host))
+            .collect();
+        assert_eq!(
+            bound,
+            [
+                ("a".to_owned(), HostKey::Local),
+                ("b".to_owned(), remote("box")),
+                ("c".to_owned(), HostKey::Local)
+            ]
+        );
+    }
+
+    #[test]
+    fn placement_message_carries_the_session_host() {
+        let box_host = remote("box");
+        let host_of = |msg: &ClientMessage| wire(msg)["host"].clone();
+        let new_tab = Placement::NewTab;
+        let replace = Placement::Pane {
+            tab_id: "t1".to_owned(),
+            target: replace("e"),
+        };
+        let split = Placement::Pane {
+            tab_id: "t1".to_owned(),
+            target: split_target("e", V),
+        };
+        for placement in [&new_tab, &replace, &split] {
+            assert_eq!(
+                host_of(&placement.message(&box_host, "new", None)),
+                json!("box"),
+                "{placement:?} names the remote host"
+            );
+            assert_eq!(
+                host_of(&placement.message(&HostKey::Local, "new", None)),
+                serde_json::Value::Null,
+                "{placement:?} names no host for This PC"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_pills_tell_two_hosts_same_id_apart() {
+        let tabs = [
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane_on("p2", Some("s1"), "box")),
+        ];
+        let pills = tab_pills(&tabs);
+        assert_eq!(
+            pills.get(&SessionRef::new(HostKey::Local, "s1")),
+            Some(&TabPill::One {
+                tab_id: "t1".to_owned(),
+                name: "t1".to_owned(),
+            })
+        );
+        assert_eq!(
+            pills.get(&SessionRef::new(remote("box"), "s1")),
+            Some(&TabPill::One {
+                tab_id: "t2".to_owned(),
+                name: "t2".to_owned(),
+            })
+        );
+        assert_eq!(pills.len(), 2);
+    }
+
+    #[test]
+    fn same_repo_placement_needs_the_same_host() {
+        let local = [session("s1", Some("r"), None)];
+        let on_box = [session("b1", Some("r"), None)];
+        let sessions = [(HostKey::Local, &local[..]), (remote("box"), &on_box[..])];
+        let grid = split(
+            H,
+            0.5,
+            split(H, 0.5, pane("e1", None), pane("a", Some("s1"))),
+            split(H, 0.5, pane_on("b", Some("b1"), "box"), pane("e2", None)),
+        );
+        let new = session("new", Some("r"), None);
+        let box_host = remote("box");
+        assert_eq!(
+            pane_target_for_session(&grid, &sessions, HostedSession::new(&box_host, &new)),
+            Some(replace("e2")),
+            "beside the remote pane of the same repo on the same host"
+        );
+        assert_eq!(
+            pane_target_for_session(&grid, &sessions, HostedSession::local(&new)),
+            Some(replace("e1")),
+            "beside This PC's pane of the repo, not the remote one with the same repo id"
+        );
+    }
+
+    #[test]
+    fn tab_session_counts_count_remote_panes() {
+        let local = [with_status("s1", SessionStatus::Idle)];
+        let on_box = [
+            with_status("s1", SessionStatus::Working),
+            with_status("b2", SessionStatus::AwaitingInput),
+        ];
+        let sessions = [(HostKey::Local, &local[..]), (remote("box"), &on_box[..])];
+        let grid = split(
+            H,
+            0.5,
+            pane("a", Some("s1")),
+            split(
+                V,
+                0.5,
+                pane_on("b", Some("s1"), "box"),
+                pane_on("c", Some("b2"), "box"),
+            ),
+        );
+        assert_eq!(
+            tab_session_counts(&tab("t", &grid), &sessions),
+            Some((2, 3)),
+            "the remote panes count with their own host's status"
+        );
+    }
+
+    #[test]
+    fn find_tab_containing_session_matches_the_pair() {
+        let tabs = [
+            tab("t1", &pane("a", Some("s1"))),
+            tab("t2", &pane_on("b", Some("s1"), "box")),
+        ];
+        assert_eq!(
+            find_tab_containing_session(&tabs, &SessionRef::new(remote("box"), "s1")),
+            Some(("t2".to_owned(), "b".to_owned()))
+        );
+        assert_eq!(
+            find_tab_containing_session(&tabs, &SessionRef::new(HostKey::Local, "s1")),
+            Some(("t1".to_owned(), "a".to_owned()))
+        );
+        assert_eq!(
+            find_tab_containing_session(&tabs, &SessionRef::new(remote("lab"), "s1")),
+            None
         );
     }
 }

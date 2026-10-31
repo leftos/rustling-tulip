@@ -9,9 +9,10 @@ use protocol::{
 };
 
 use crate::tabs::{
-    PaneTarget, Placement, SplitTarget, TabsModel, collect_panes, find_tab_containing_session,
-    pane_target_for_session,
+    HostSessions, HostedSession, PaneTarget, Placement, SessionRef, SplitTarget, TabsModel,
+    collect_panes, find_tab_containing_session, pane_target_for_session,
 };
+use crate::target::HostKey;
 
 /// Where a spawned session opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,12 +33,13 @@ pub struct PaneAim {
     pub tab_id: String,
     pub pane_id: String,
     /// What the pane showed: nothing for an empty pane, the stopped session
-    /// under the overlay. The reply takes the pane only while it still
-    /// shows exactly this.
-    pub expected: Option<String>,
+    /// under the overlay, with its host. The reply takes the pane only
+    /// while it still shows exactly this.
+    pub expected: Option<SessionRef>,
     /// A stopped session the new one takes the place of: every pane that
-    /// shows it is rebound, then it is discarded, worktree kept.
-    pub discard: Option<String>,
+    /// shows it is rebound, then it is discarded on its own host, worktree
+    /// kept.
+    pub discard: Option<SessionRef>,
 }
 
 impl PaneAim {
@@ -60,12 +62,17 @@ pub(crate) struct SpawnPlaced {
     /// The tab model changed (a tab activated, a pane focused), so the view
     /// must follow it.
     pub relayout: bool,
+    /// The host the session-level messages among `messages` go to (the
+    /// discard of the session replaced); see [`crate::tabs::destination`].
+    pub session_host: HostKey,
 }
 
 /// A spawn waiting for its reply.
 #[derive(Debug)]
 struct Pending {
     open_in: OpenIn,
+    /// The host the request went to.
+    host: HostKey,
     /// Start order, so the oldest of alike spawns answers an id-less prompt
     /// first.
     seq: u64,
@@ -86,9 +93,11 @@ pub(crate) struct PendingSpawns {
 }
 
 impl PendingSpawns {
-    /// Records `request` under `request_id` and returns the message to send.
+    /// Records `request` under `request_id`, going to `host`, and returns
+    /// the message to send.
     pub(crate) fn start(
         &mut self,
+        host: HostKey,
         mut request: SpawnRequest,
         request_id: String,
         open_in: OpenIn,
@@ -97,6 +106,7 @@ impl PendingSpawns {
         self.next_seq += 1;
         let pending = Pending {
             open_in,
+            host,
             seq: self.next_seq,
             in_place: is_in_place(&request).then(|| request.clone()),
             prompted: false,
@@ -127,13 +137,14 @@ impl PendingSpawns {
     /// it replaces, and that session is discarded last. Otherwise the
     /// session goes to the aimed tab (else the active one) and nothing is
     /// discarded. A closing tab is never activated and never takes the
-    /// session: it opens a tab of its own, like one that is gone.
+    /// session: it opens a tab of its own, like one that is gone. `session`
+    /// carries the host that replied, which every placement names.
     pub(crate) fn place(
         &mut self,
         request_id: &str,
-        session: &SessionSnapshot,
+        session: HostedSession<'_>,
         tabs: &mut TabsModel,
-        sessions: &[SessionSnapshot],
+        sessions: &HostSessions<'_>,
     ) -> Option<SpawnPlaced> {
         let open_in = self.pending.remove(request_id)?.open_in;
         if let OpenIn::Pane(aim) = &open_in
@@ -174,8 +185,9 @@ impl PendingSpawns {
             Placement::Pane { .. } => None,
         };
         Some(SpawnPlaced {
-            messages: vec![placement.message(&session.id, create_request)],
+            messages: vec![placement.message(session.host, &session.session.id, create_request)],
             relayout: open_in != OpenIn::NewTab,
+            session_host: session.host.clone(),
         })
     }
 
@@ -188,6 +200,21 @@ impl PendingSpawns {
     /// Forgets every spawn, as a new connection must.
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
+    }
+
+    /// Forgets the spawns sent to `host`, whose connection closed; returns
+    /// their request ids.
+    pub(crate) fn drop_host(&mut self, host: &HostKey) -> Vec<String> {
+        let dropped: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.host == *host)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &dropped {
+            self.pending.remove(id);
+        }
+        dropped
     }
 
     /// The pending spawn a `CheckoutConfirmRequired` for `branch` of
@@ -273,33 +300,47 @@ impl PendingSpawns {
 /// pane, else a split of its largest pane, else a new tab. Each placement is
 /// applied to a copy of the active tab's grid before the next is chosen, so
 /// no two take the same pane. A session a pane already shows, or one listed
-/// twice, is placed once at most.
+/// twice, is placed once at most. The recovered sessions are This PC's;
+/// `sessions` holds every host's list.
 pub(crate) fn place_several(
     recovered: &[SessionSnapshot],
     tabs: &TabsModel,
-    sessions: &[SessionSnapshot],
+    sessions: &HostSessions<'_>,
 ) -> Vec<ClientMessage> {
+    let host = HostKey::Local;
     let mut active: Option<(String, GridNode)> = tabs
         .active_id()
         .and_then(|id| tabs.tab(id))
         .and_then(|tab| tab.grid().map(|grid| (tab.id.clone(), grid.clone())));
-    let mut known = sessions.to_vec();
+    let mut known: Vec<SessionSnapshot> = sessions
+        .iter()
+        .filter(|(listed_by, _)| *listed_by == host)
+        .flat_map(|(_, list)| list.iter().cloned())
+        .collect();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut shadows = ShadowPanes::default();
     let mut messages = Vec::new();
     for session in recovered {
+        let shown = SessionRef::new(host.clone(), &session.id);
         if !seen.insert(session.id.as_str())
-            || find_tab_containing_session(tabs.tabs(), &session.id).is_some()
+            || find_tab_containing_session(tabs.tabs(), &shown).is_some()
         {
             continue;
         }
         if !known.iter().any(|s| s.id == session.id) {
             known.push(session.clone());
         }
+        let lists: Vec<(HostKey, &[SessionSnapshot])> = sessions
+            .iter()
+            .filter(|(listed_by, _)| *listed_by != host)
+            .cloned()
+            .chain(std::iter::once((host.clone(), known.as_slice())))
+            .collect();
+        let hosted = HostedSession::new(&host, session);
         let placement = active
             .as_mut()
             .and_then(|(tab_id, grid)| {
-                let target = pane_target_for_session(grid, &known, session)?;
+                let target = pane_target_for_session(grid, &lists, hosted)?;
                 let target = shadows.take(grid, target, &session.id);
                 Some(Placement::Pane {
                     tab_id: tab_id.clone(),
@@ -307,7 +348,7 @@ pub(crate) fn place_several(
                 })
             })
             .unwrap_or(Placement::NewTab);
-        messages.push(placement.message(&session.id, None));
+        messages.push(placement.message(&host, &session.id, None));
     }
     messages
 }
@@ -406,9 +447,13 @@ fn pane_shows(tabs: &TabsModel, aim: &PaneAim) -> bool {
     tabs.tab(&aim.tab_id)
         .and_then(protocol::TabEntry::grid)
         .is_some_and(|grid| {
-            collect_panes(grid)
-                .iter()
-                .any(|pane| pane.id == aim.pane_id && pane.session == aim.expected.as_deref())
+            collect_panes(grid).iter().any(|pane| {
+                pane.id == aim.pane_id
+                    && match &aim.expected {
+                        Some(expected) => pane.shows(expected),
+                        None => pane.session.is_none(),
+                    }
+            })
         })
 }
 
@@ -416,14 +461,15 @@ fn pane_shows(tabs: &TabsModel, aim: &PaneAim) -> bool {
 /// other pane of any tab that shows the session it replaces; then the
 /// discard of that session, sent last so the daemon has rebound the panes
 /// before it closes the replaced session's, as
-/// [`crate::session_actions::Duplicates::place`] orders it.
-fn into_pane(aim: &PaneAim, session: &SessionSnapshot, tabs: &mut TabsModel) -> SpawnPlaced {
+/// [`crate::session_actions::Duplicates::place`] orders it. The discard
+/// goes to the replaced session's own host.
+fn into_pane(aim: &PaneAim, session: HostedSession<'_>, tabs: &mut TabsModel) -> SpawnPlaced {
     let mut panes = vec![(aim.tab_id.clone(), aim.pane_id.clone())];
     if let Some(discard) = &aim.discard {
         panes.extend(
             tabs.bindings()
                 .into_iter()
-                .filter(|binding| binding.session_id.as_ref() == Some(discard))
+                .filter(|binding| binding.shows(discard))
                 .filter(|binding| binding.tab_id != aim.tab_id || binding.pane_id != aim.pane_id)
                 .map(|binding| (binding.tab_id, binding.pane_id)),
         );
@@ -436,20 +482,24 @@ fn into_pane(aim: &PaneAim, session: &SessionSnapshot, tabs: &mut TabsModel) -> 
                 tab_id,
                 target: PaneTarget::Replace { pane_id },
             }
-            .message(&session.id, None)
+            .message(session.host, &session.session.id, None)
         })
         .collect();
     messages.extend(
         aim.discard
             .as_ref()
-            .map(|id| ClientMessage::DiscardSession {
-                session_id: id.to_owned(),
+            .map(|discard| ClientMessage::DiscardSession {
+                session_id: discard.id.clone(),
                 cleanup: Vec::new(),
             }),
     );
     SpawnPlaced {
         messages,
         relayout: true,
+        session_host: aim
+            .discard
+            .as_ref()
+            .map_or_else(|| session.host.clone(), |discard| discard.host.clone()),
     }
 }
 
@@ -488,8 +538,11 @@ fn is_in_place(request: &SpawnRequest) -> bool {
 )]
 mod tests {
     use super::*;
-    use crate::tabs::tests::{model_with, pane, session, tab, updated, wire};
-    use protocol::{SessionMode, WorktreeReusePolicy};
+    use crate::tabs::tests::{
+        model_with, on_local, pane, pane_on, session, split, tab, updated, wire,
+    };
+    use crate::tabs::{SessionRef, destination};
+    use protocol::{SessionMode, SplitDirection, WorktreeReusePolicy};
 
     fn request(use_worktree: bool) -> SpawnRequest {
         SpawnRequest {
@@ -536,8 +589,8 @@ mod tests {
         OpenIn::Pane(PaneAim {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
-            expected: stopped.map(str::to_owned),
-            discard: stopped.map(str::to_owned),
+            expected: stopped.map(|id| SessionRef::new(HostKey::Local, id)),
+            discard: stopped.map(|id| SessionRef::new(HostKey::Local, id)),
         })
     }
 
@@ -558,6 +611,87 @@ mod tests {
     }
 
     #[test]
+    fn place_with_a_remote_host_sends_the_host_to_this_pc() {
+        let box_host = HostKey::Remote("box".to_owned());
+        let mut tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            box_host.clone(),
+            request(true),
+            "q1".to_owned(),
+            OpenIn::CurrentTab("t1".to_owned()),
+        );
+        let new = session("new", None, None);
+        let placed = spawns
+            .place("q1", HostedSession::new(&box_host, &new), &mut tabs, &[])
+            .expect("placed");
+        let msg = only(&placed);
+        let sent = wire(msg);
+        assert_eq!(sent["type"], serde_json::json!("split_pane"), "{sent}");
+        assert_eq!(sent["new_session_id"], serde_json::json!("new"));
+        assert_eq!(
+            sent["host"],
+            serde_json::json!("box"),
+            "the pane names its host"
+        );
+        assert_eq!(
+            destination(msg, &placed.session_host),
+            HostKey::Local,
+            "the layout message goes to This PC"
+        );
+    }
+
+    #[test]
+    fn into_pane_discards_on_the_sessions_host() {
+        let box_host = HostKey::Remote("box".to_owned());
+        let grid = split(
+            SplitDirection::Horizontal,
+            0.5,
+            pane_on("a", Some("old"), "box"),
+            pane("b", Some("old")),
+        );
+        let mut tabs = model_with(&[tab("t1", &grid)]);
+        let stopped = SessionRef::new(box_host.clone(), "old");
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            box_host.clone(),
+            request(true),
+            "q1".to_owned(),
+            OpenIn::Pane(PaneAim {
+                tab_id: "t1".to_owned(),
+                pane_id: "a".to_owned(),
+                expected: Some(stopped.clone()),
+                discard: Some(stopped),
+            }),
+        );
+        let new = session("new", None, None);
+        let placed = spawns
+            .place("q1", HostedSession::new(&box_host, &new), &mut tabs, &[])
+            .expect("placed");
+        let sent: Vec<(HostKey, serde_json::Value)> = placed
+            .messages
+            .iter()
+            .map(|msg| (destination(msg, &placed.session_host), wire(msg)))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                (
+                    HostKey::Local,
+                    wire(&ClientMessage::ReplacePaneSession {
+                        tab_id: "t1".to_owned(),
+                        pane_id: "a".to_owned(),
+                        session_id: Some("new".to_owned()),
+                        host: Some("box".to_owned()),
+                    })
+                ),
+                (box_host, discard_msg("old")),
+            ],
+            "only the remote pane of `old` is rebound, and its discard goes to its host"
+        );
+    }
+
+    #[test]
     fn pane_spawn_replaces_its_pane_and_focuses_it() {
         let grid = protocol::GridNode::Split {
             direction: protocol::SplitDirection::Horizontal,
@@ -569,10 +703,17 @@ mod tests {
         assert_eq!(tabs.active_id(), Some("t1"));
         tabs.take_focus_request();
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "q1".to_owned(), aim_at("t2", "b", None));
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            aim_at("t2", "b", None),
+        );
 
         let new = session("new", Some("r1"), None);
-        let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
+        let placed = spawns
+            .place("q1", HostedSession::local(&new), &mut tabs, &[])
+            .expect("placed");
         assert_eq!(wire(only(&placed)), replace_msg("t2", "b", "new"));
         assert!(placed.relayout);
         assert_eq!(
@@ -589,13 +730,19 @@ mod tests {
         let mut tabs = model_with(&[tab("t1", &pane("a", Some("old")))]);
         let mut spawns = PendingSpawns::default();
         spawns.start(
+            HostKey::Local,
             request(true),
             "q1".to_owned(),
             aim_at("t1", "a", Some("old")),
         );
 
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         let sent: Vec<serde_json::Value> = placed.messages.iter().map(wire).collect();
         assert_eq!(
@@ -618,13 +765,19 @@ mod tests {
         tabs.take_focus_request();
         let mut spawns = PendingSpawns::default();
         spawns.start(
+            HostKey::Local,
             request(true),
             "q1".to_owned(),
             aim_at("t1", "a", Some("old")),
         );
 
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         let sent: Vec<serde_json::Value> = placed.messages.iter().map(wire).collect();
         assert_eq!(
@@ -649,13 +802,19 @@ mod tests {
         assert_eq!(tabs.active_id(), Some("t1"));
         let mut spawns = PendingSpawns::default();
         spawns.start(
+            HostKey::Local,
             request(true),
             "q1".to_owned(),
             aim_at("t2", "gone", Some("old")),
         );
 
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         assert!(
             matches!(only(&placed), ClientMessage::SplitPane { tab_id, pane_id, .. } if tab_id == "t2" && pane_id == "a"),
@@ -678,13 +837,19 @@ mod tests {
         ]);
         let mut spawns = PendingSpawns::default();
         spawns.start(
+            HostKey::Local,
             request(true),
             "q1".to_owned(),
             aim_at("t2", "b", Some("old")),
         );
 
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         assert!(
             matches!(only(&placed), ClientMessage::SplitPane { tab_id, pane_id, .. } if tab_id == "t2" && pane_id == "b"),
@@ -698,10 +863,20 @@ mod tests {
     fn empty_pane_spawn_whose_pane_filled_meanwhile_evicts_nothing() {
         let mut tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "q1".to_owned(), aim_at("t1", "a", None));
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            aim_at("t1", "a", None),
+        );
 
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         assert!(
             matches!(only(&placed), ClientMessage::SplitPane { tab_id, pane_id, .. } if tab_id == "t1" && pane_id == "a"),
@@ -714,17 +889,37 @@ mod tests {
     fn aims_at_names_the_panes_a_spawn_waits_for() {
         let mut tabs = model_with(&[tab("t1", &pane("a", None))]);
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "q0".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q0".to_owned(),
+            OpenIn::NewTab,
+        );
         assert!(!spawns.aims_at("t1", "a"));
 
-        spawns.start(request(true), "q1".to_owned(), aim_at("t1", "a", None));
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            aim_at("t1", "a", None),
+        );
         assert!(spawns.aims_at("t1", "a"));
         assert!(!spawns.aims_at("t1", "b"), "another pane");
         assert!(!spawns.aims_at("t2", "a"), "another tab");
-        spawns.place("q1", &session("new", None, None), &mut tabs, &[]);
+        spawns.place(
+            "q1",
+            HostedSession::local(&session("new", None, None)),
+            &mut tabs,
+            &[],
+        );
         assert!(!spawns.aims_at("t1", "a"), "placed");
 
-        spawns.start(request(true), "q2".to_owned(), aim_at("t1", "a", None));
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q2".to_owned(),
+            aim_at("t1", "a", None),
+        );
         assert!(spawns.fail("q2"));
         assert!(!spawns.aims_at("t1", "a"), "failed");
     }
@@ -734,23 +929,35 @@ mod tests {
         let mut tabs = model_with(&[tab("t1", &pane("a", None))]);
         let mut spawns = PendingSpawns::default();
         spawns.start(
+            HostKey::Local,
             request(true),
             "q1".to_owned(),
             aim_at("gone", "b", Some("old")),
         );
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         assert_eq!(wire(only(&placed)), replace_msg("t1", "a", "new"));
 
         let mut empty = TabsModel::new(None);
         spawns.start(
+            HostKey::Local,
             request(true),
             "q2".to_owned(),
             aim_at("gone", "b", Some("old")),
         );
         let placed = spawns
-            .place("q2", &session("new", None, None), &mut empty, &[])
+            .place(
+                "q2",
+                HostedSession::local(&session("new", None, None)),
+                &mut empty,
+                &[],
+            )
             .expect("placed");
         assert!(matches!(only(&placed), ClientMessage::CreateTab { .. }));
     }
@@ -758,7 +965,12 @@ mod tests {
     #[test]
     fn start_stamps_the_request_id() {
         let mut spawns = PendingSpawns::default();
-        let msg = spawns.start(request(true), "q1".to_owned(), OpenIn::NewTab);
+        let msg = spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            OpenIn::NewTab,
+        );
         assert_eq!(sent_request(&msg).request_id.as_deref(), Some("q1"));
         assert!(spawns.has_request("q1"));
     }
@@ -771,10 +983,17 @@ mod tests {
         ]);
         assert_eq!(tabs.active_id(), Some("t1"));
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "q1".to_owned(), OpenIn::Tab("t2".to_owned()));
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            OpenIn::Tab("t2".to_owned()),
+        );
 
         let new = session("new", Some("r1"), None);
-        let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
+        let placed = spawns
+            .place("q1", HostedSession::local(&new), &mut tabs, &[])
+            .expect("placed");
         assert_eq!(
             wire(only(&placed)),
             wire(&ClientMessage::ReplacePaneSession {
@@ -788,7 +1007,11 @@ mod tests {
         assert_eq!(tabs.active_id(), Some("t2"), "its tab comes to the front");
         assert_eq!(tabs.take_focus_request().as_deref(), Some("b"));
         assert!(!spawns.has_request("q1"), "placed once");
-        assert!(spawns.place("q1", &new, &mut tabs, &[]).is_none());
+        assert!(
+            spawns
+                .place("q1", HostedSession::local(&new), &mut tabs, &[])
+                .is_none()
+        );
     }
 
     #[test]
@@ -796,12 +1019,15 @@ mod tests {
         let mut tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
         let mut spawns = PendingSpawns::default();
         spawns.start(
+            HostKey::Local,
             request(true),
             "q1".to_owned(),
             OpenIn::CurrentTab("t1".to_owned()),
         );
         let new = session("new", None, None);
-        let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
+        let placed = spawns
+            .place("q1", HostedSession::local(&new), &mut tabs, &[])
+            .expect("placed");
         assert!(
             matches!(only(&placed), ClientMessage::SplitPane { pane_id, .. } if pane_id == "a")
         );
@@ -822,9 +1048,16 @@ mod tests {
     fn new_tab_spawn_arms_create() {
         let mut tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "q1".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            OpenIn::NewTab,
+        );
         let new = session("new", None, None);
-        let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
+        let placed = spawns
+            .place("q1", HostedSession::local(&new), &mut tabs, &[])
+            .expect("placed");
         assert!(
             matches!(
                 only(&placed),
@@ -844,12 +1077,18 @@ mod tests {
         let mut tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
         let mut spawns = PendingSpawns::default();
         spawns.start(
+            HostKey::Local,
             request(true),
             "q1".to_owned(),
             OpenIn::Tab("gone".to_owned()),
         );
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         assert!(matches!(only(&placed), ClientMessage::CreateTab { .. }));
         assert!(tabs.apply(&updated(&tab("t9", &pane("n", Some("new"))))));
@@ -863,11 +1102,21 @@ mod tests {
             tab("t1", &pane("a", Some("s1"))),
         ]);
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "q1".to_owned(), OpenIn::Tab("t1".to_owned()));
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            OpenIn::Tab("t1".to_owned()),
+        );
         tabs.mark_closing("t1");
 
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         assert!(
             matches!(only(&placed), ClientMessage::CreateTab { .. }),
@@ -891,6 +1140,7 @@ mod tests {
         ]);
         let mut spawns = PendingSpawns::default();
         spawns.start(
+            HostKey::Local,
             request(true),
             "q1".to_owned(),
             aim_at("t1", "a", Some("s1")),
@@ -898,7 +1148,12 @@ mod tests {
         tabs.mark_closing("t1");
 
         let placed = spawns
-            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .place(
+                "q1",
+                HostedSession::local(&session("new", None, None)),
+                &mut tabs,
+                &[],
+            )
             .expect("placed");
         assert!(
             matches!(only(&placed), ClientMessage::CreateTab { .. }),
@@ -916,10 +1171,20 @@ mod tests {
     fn unknown_request_id_is_ignored() {
         let mut tabs = model_with(&[tab("t1", &pane("a", None))]);
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "q1".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q1".to_owned(),
+            OpenIn::NewTab,
+        );
         assert!(
             spawns
-                .place("other", &session("new", None, None), &mut tabs, &[])
+                .place(
+                    "other",
+                    HostedSession::local(&session("new", None, None)),
+                    &mut tabs,
+                    &[]
+                )
                 .is_none()
         );
         assert!(
@@ -965,12 +1230,22 @@ mod tests {
     fn failed_spawn_is_forgotten() {
         let mut tabs = model_with(&[tab("t1", &pane("a", None))]);
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(false), "q1".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            request(false),
+            "q1".to_owned(),
+            OpenIn::NewTab,
+        );
         assert!(spawns.fail("q1"));
         assert!(!spawns.fail("q1"));
         assert!(
             spawns
-                .place("q1", &session("new", None, None), &mut tabs, &[])
+                .place(
+                    "q1",
+                    HostedSession::local(&session("new", None, None)),
+                    &mut tabs,
+                    &[]
+                )
                 .is_none()
         );
         assert_eq!(
@@ -985,13 +1260,28 @@ mod tests {
     fn reconnect_clears_pending_spawns() {
         let mut tabs = model_with(&[tab("t1", &pane("a", None))]);
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(false), "q1".to_owned(), OpenIn::NewTab);
-        spawns.start(request(true), "q2".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            request(false),
+            "q1".to_owned(),
+            OpenIn::NewTab,
+        );
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q2".to_owned(),
+            OpenIn::NewTab,
+        );
         spawns.clear();
         assert!(!spawns.has_request("q1"));
         assert!(
             spawns
-                .place("q2", &session("new", None, None), &mut tabs, &[])
+                .place(
+                    "q2",
+                    HostedSession::local(&session("new", None, None)),
+                    &mut tabs,
+                    &[]
+                )
                 .is_none()
         );
         assert_eq!(spawns.resolve_checkout(None, "r1", "feature"), None);
@@ -1000,8 +1290,18 @@ mod tests {
     #[test]
     fn checkout_retry_keeps_request_id() {
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(false), "q1".to_owned(), OpenIn::NewTab);
-        spawns.start(request(true), "q2".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            request(false),
+            "q1".to_owned(),
+            OpenIn::NewTab,
+        );
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "q2".to_owned(),
+            OpenIn::NewTab,
+        );
 
         let id = spawns
             .resolve_checkout(None, "r1", "feature")
@@ -1036,8 +1336,18 @@ mod tests {
     #[test]
     fn checkout_prompt_resolves_to_the_spawn_it_names() {
         let mut spawns = PendingSpawns::default();
-        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
-        spawns.start(in_place("R2", "y"), "b".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "a".to_owned(),
+            OpenIn::NewTab,
+        );
+        spawns.start(
+            HostKey::Local,
+            in_place("R2", "y"),
+            "b".to_owned(),
+            OpenIn::NewTab,
+        );
 
         let id = spawns
             .resolve_checkout(None, "R1", "x")
@@ -1058,8 +1368,18 @@ mod tests {
             Some("b")
         );
 
-        spawns.start(in_place("R3", "z"), "c".to_owned(), OpenIn::NewTab);
-        spawns.start(in_place("R3", "z"), "d".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            in_place("R3", "z"),
+            "c".to_owned(),
+            OpenIn::NewTab,
+        );
+        spawns.start(
+            HostKey::Local,
+            in_place("R3", "z"),
+            "d".to_owned(),
+            OpenIn::NewTab,
+        );
         assert_eq!(
             spawns.resolve_checkout(None, "R3", "z").as_deref(),
             Some("c"),
@@ -1075,7 +1395,12 @@ mod tests {
     #[test]
     fn checkout_prompt_without_matching_spawn_resends_nothing() {
         let mut spawns = PendingSpawns::default();
-        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "a".to_owned(),
+            OpenIn::NewTab,
+        );
         assert_eq!(spawns.resolve_checkout(None, "R1", "other"), None);
         assert_eq!(spawns.resolve_checkout(None, "R9", "x"), None);
         assert!(
@@ -1090,8 +1415,18 @@ mod tests {
     #[test]
     fn resolve_checkout_claims_each_spawn_once() {
         let mut spawns = PendingSpawns::default();
-        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
-        spawns.start(in_place("R1", "x"), "b".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "a".to_owned(),
+            OpenIn::NewTab,
+        );
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "b".to_owned(),
+            OpenIn::NewTab,
+        );
 
         assert_eq!(
             spawns.resolve_checkout(None, "R1", "x").as_deref(),
@@ -1118,7 +1453,12 @@ mod tests {
     #[test]
     fn resend_without_strategy_clears_the_claim() {
         let mut spawns = PendingSpawns::default();
-        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "a".to_owned(),
+            OpenIn::NewTab,
+        );
         assert_eq!(
             spawns.resolve_checkout(None, "R1", "x").as_deref(),
             Some("a")
@@ -1146,8 +1486,18 @@ mod tests {
     #[test]
     fn prompt_with_an_id_resolves_to_that_spawn() {
         let mut spawns = PendingSpawns::default();
-        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
-        spawns.start(in_place("R1", "x"), "b".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "a".to_owned(),
+            OpenIn::NewTab,
+        );
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "b".to_owned(),
+            OpenIn::NewTab,
+        );
 
         assert_eq!(
             spawns.resolve_checkout(Some("b"), "R1", "x").as_deref(),
@@ -1190,8 +1540,18 @@ mod tests {
     #[test]
     fn prompt_id_resolves_only_to_an_in_place_spawn_awaiting_a_strategy() {
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "wt".to_owned(), OpenIn::NewTab);
-        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "wt".to_owned(),
+            OpenIn::NewTab,
+        );
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "a".to_owned(),
+            OpenIn::NewTab,
+        );
 
         assert_eq!(
             spawns.resolve_checkout(Some("wt"), "r1", "feature"),
@@ -1257,7 +1617,7 @@ mod tests {
         let new = session("new", None, None);
         let shown = session("shown", None, None);
         let sessions = [new.clone(), shown.clone()];
-        let messages = place_several(&[new.clone(), new, shown], &tabs, &sessions);
+        let messages = place_several(&[new.clone(), new, shown], &tabs, &on_local(&sessions));
         assert_eq!(
             aimed(&messages),
             [("split", "a".to_owned(), "new".to_owned())],
@@ -1299,7 +1659,7 @@ mod tests {
             session("n2", None, None),
             session("n3", None, None),
         ];
-        let messages = place_several(&recovered, &tabs, &[session("s1", None, None)]);
+        let messages = place_several(&recovered, &tabs, &on_local(&[session("s1", None, None)]));
         assert_eq!(
             aimed(&messages),
             [
@@ -1316,7 +1676,11 @@ mod tests {
             session("r2", Some("repo"), None),
             session("r3", Some("repo"), None),
         ];
-        let messages = place_several(&recovered, &tabs, &[session("s1", Some("repo"), None)]);
+        let messages = place_several(
+            &recovered,
+            &tabs,
+            &on_local(&[session("s1", Some("repo"), None)]),
+        );
         assert_eq!(
             aimed(&messages),
             [
@@ -1331,8 +1695,18 @@ mod tests {
     #[test]
     fn reask_forgets_a_spawn_it_cannot_resend() {
         let mut spawns = PendingSpawns::default();
-        spawns.start(request(true), "wt".to_owned(), OpenIn::NewTab);
-        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+        spawns.start(
+            HostKey::Local,
+            request(true),
+            "wt".to_owned(),
+            OpenIn::NewTab,
+        );
+        spawns.start(
+            HostKey::Local,
+            in_place("R1", "x"),
+            "a".to_owned(),
+            OpenIn::NewTab,
+        );
 
         let again = spawns.reask("a").expect("an in-place spawn is asked again");
         assert_eq!(sent_request(&again).request_id.as_deref(), Some("a"));
