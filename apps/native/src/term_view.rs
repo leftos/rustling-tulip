@@ -2294,7 +2294,7 @@ mod tests {
         );
         assert_eq!(
             dot_color(ShellStatus::Unknown, &UiTheme::CONTRAST),
-            gpui::rgb(crate::MUTED)
+            gpui::rgb(crate::palette::MUTED)
         );
     }
 

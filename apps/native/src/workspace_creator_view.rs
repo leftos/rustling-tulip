@@ -15,13 +15,13 @@ use crate::repo_add::host_workspace_file;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::checkbox_row;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::ui_theme::theme;
+use crate::ui_theme::{UiTheme, theme};
 use crate::workspace_creator::{
     CreatorControl, CreatorMode, FILE_LABEL, MEMBERS_LABEL, NAME_PLACEHOLDER, NO_FILE, PARSING,
     Settled, TITLE, WORKSPACE_NAME_LABEL, WorkspaceCreator, file_field_label,
     file_field_placeholder, no_repos_note,
 };
-use crate::{BORDER, DANGER, MUTED, Pick, RootView, TEXT, tagged_text};
+use crate::{Pick, RootView, tagged_text};
 
 /// The open creator: its model, the name field's input entity and, on a
 /// remote host, the typed `.code-workspace` field with the host's name.
@@ -462,6 +462,7 @@ impl RootView {
     /// The creator over a backdrop that takes every click beneath it; a click
     /// on the backdrop itself does nothing.
     pub(crate) fn workspace_creator_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.workspace_creator.as_ref()?;
         let creator = &dialog.creator;
         let focus = creator.focus();
@@ -479,7 +480,7 @@ impl RootView {
         let error = creator.error().map(|message| {
             div()
                 .debug_selector(|| "workspace-creator-error".to_owned())
-                .text_color(gpui::rgb(DANGER))
+                .text_color(gpui::rgb(t.danger))
                 .child(message.to_owned())
         });
         let cancel = dialog_button(
@@ -692,6 +693,7 @@ fn workspace_tab(
     active: CreatorMode,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let control = match mode {
         CreatorMode::FromRepos => CreatorControl::FromRepos,
         CreatorMode::FromVscode => CreatorControl::FromVscode,
@@ -704,8 +706,8 @@ fn workspace_tab(
         .py(px(3.0))
         .rounded(px(4.0))
         .cursor_pointer()
-        .text_color(gpui::rgb(if lit { TEXT } else { MUTED }))
-        .when(lit, |tab| tab.bg(gpui::rgb(crate::HOVER_BG)))
+        .text_color(gpui::rgb(if lit { t.text } else { t.muted }))
+        .when(lit, |tab| tab.bg(gpui::rgb(t.hover_bg)))
         .child(mode.label())
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.press_workspace_control(control, window, cx);
@@ -720,17 +722,18 @@ fn repos_body(
     no_repos: String,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let rows = dialog.creator.member_rows(repos);
     div()
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .child(div().text_color(gpui::rgb(MUTED)).child("Name"))
-        .child(name_box(dialog, focus))
-        .child(div().text_color(gpui::rgb(MUTED)).child(MEMBERS_LABEL))
+        .child(div().text_color(gpui::rgb(t.muted)).child("Name"))
+        .child(name_box(dialog, focus, &t))
+        .child(div().text_color(gpui::rgb(t.muted)).child(MEMBERS_LABEL))
         .when(rows.is_empty(), |body| {
             body.child(
-                tagged_text("workspace-creator-no-repos", no_repos).text_color(gpui::rgb(MUTED)),
+                tagged_text("workspace-creator-no-repos", no_repos).text_color(gpui::rgb(t.muted)),
             )
         })
         .children(rows.into_iter().map(|(selector, name, checked)| {
@@ -752,6 +755,7 @@ fn vscode_body(
     focus: CreatorControl,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let creator = &dialog.creator;
     let chooser = match &dialog.file_field {
         Some(field) => file_field(field, focus, cx),
@@ -765,13 +769,13 @@ fn vscode_body(
             .gap(px(6.0))
             .child(
                 div()
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(WORKSPACE_NAME_LABEL),
             )
-            .child(name_box(dialog, focus))
+            .child(name_box(dialog, focus, &t))
             .child(
                 div()
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(format!("Folders ({})", rows.len())),
             )
             .children(rows.into_iter().enumerate().map(|(index, row)| {
@@ -782,7 +786,7 @@ fn vscode_body(
                     .items_center()
                     .gap(px(6.0))
                     .child(row.label)
-                    .child(div().text_color(gpui::rgb(MUTED)).child(badge))
+                    .child(div().text_color(gpui::rgb(t.muted)).child(badge))
             }))
     });
     div()
@@ -794,7 +798,7 @@ fn vscode_body(
             body.child(
                 div()
                     .debug_selector(|| "workspace-creator-parsing".to_owned())
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(PARSING),
             )
         })
@@ -807,6 +811,7 @@ fn browse_row(
     focus: CreatorControl,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let file = creator.file().unwrap_or(NO_FILE);
     let browse_enabled = !creator.parsing();
     let browse = dialog_button(
@@ -824,7 +829,7 @@ fn browse_row(
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .child(div().text_color(gpui::rgb(MUTED)).child(FILE_LABEL))
+        .child(div().text_color(gpui::rgb(t.muted)).child(FILE_LABEL))
         .child(
             div()
                 .flex()
@@ -843,6 +848,7 @@ fn browse_row(
 /// On a remote host: the typed `.code-workspace` path, labelled with the
 /// host; Enter parses it.
 fn file_field(field: &FileField, focus: CreatorControl, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let input = div()
         .id(CreatorControl::File.selector())
         .debug_selector(|| CreatorControl::File.selector().to_owned())
@@ -852,9 +858,9 @@ fn file_field(field: &FileField, focus: CreatorControl, cx: &mut Context<RootVie
         .rounded(px(4.0))
         .border_1()
         .border_color(gpui::rgb(if focus == CreatorControl::File {
-            TEXT
+            t.text
         } else {
-            BORDER
+            t.border
         }))
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.press_workspace_control(CreatorControl::File, window, cx);
@@ -869,13 +875,13 @@ fn file_field(field: &FileField, focus: CreatorControl, cx: &mut Context<RootVie
                 "workspace-creator-file-label",
                 file_field_label(&field.host),
             )
-            .text_color(gpui::rgb(MUTED)),
+            .text_color(gpui::rgb(t.muted)),
         )
         .child(input)
 }
 
 /// The name field in its box.
-fn name_box(dialog: &WorkspaceCreatorDialog, focus: CreatorControl) -> Div {
+fn name_box(dialog: &WorkspaceCreatorDialog, focus: CreatorControl, t: &UiTheme) -> Div {
     div()
         .debug_selector(|| CreatorControl::Name.selector().to_owned())
         .flex()
@@ -885,9 +891,9 @@ fn name_box(dialog: &WorkspaceCreatorDialog, focus: CreatorControl) -> Div {
         .rounded(px(4.0))
         .border_1()
         .border_color(gpui::rgb(if focus == CreatorControl::Name {
-            TEXT
+            t.text
         } else {
-            BORDER
+            t.border
         }))
         .child(dialog.name_input.clone())
 }

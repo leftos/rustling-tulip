@@ -1020,14 +1020,15 @@ impl RootView {
                 section.child(swatch_line(recent))
             })
             .child(hex_line(editor, row, ready, focus, cx))
-            .child(hint_line(
-                match row {
-                    ColorRow::Accent => "appearance-accent-hint",
-                    ColorRow::Background => "appearance-background-hint",
-                },
-                view.color_hint(row),
-                &t,
-            ))
+            .child(hint_line(hint_selector(row), view.color_hint(row), &t))
+    }
+}
+
+/// The debug selector of colour row `row`'s hint.
+fn hint_selector(row: ColorRow) -> &'static str {
+    match row {
+        ColorRow::Accent => "appearance-accent-hint",
+        ColorRow::Background => "appearance-background-hint",
     }
 }
 

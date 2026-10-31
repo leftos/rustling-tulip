@@ -19,10 +19,6 @@ use gpui::{
 
 use crate::diff_model::{DiffModel, Row, RowKind, Side};
 use crate::fonts::{self, FontSettings};
-use crate::palette::{
-    ACCENT, DIFF_DELETE, DIFF_DELETE_WASH_ALPHA, DIFF_FILLER, DIFF_FILLER_ALPHA,
-    DIFF_INSERT_WASH_ALPHA, DIFF_WORD_WASH_ALPHA, LINE, SUBTLE, TERMINAL_GROUND, TEXT, WAITING,
-};
 use crate::syntax::{Highlighted, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
 
@@ -220,8 +216,16 @@ pub struct DiffView {
     /// Each side's syntax classes by line, when they have landed.
     old_syntax: Option<Arc<Highlighted>>,
     new_syntax: Option<Arc<Highlighted>>,
-    /// Each token class's colour, in [`TokenClass::ALL`] order.
+    /// The theme the rows draw in, read again at each render.
+    theme: UiTheme,
+    /// Each token class's colour under `theme`, in [`TokenClass::ALL`]
+    /// order.
     class_colors: [Hsla; 6],
+}
+
+/// Each token class's colour under `t`, in [`TokenClass::ALL`] order.
+fn class_colors(t: &UiTheme) -> [Hsla; 6] {
+    TokenClass::ALL.map(|class| Hsla::from(rgb(class.color(t))))
 }
 
 impl DiffView {
@@ -229,7 +233,6 @@ impl DiffView {
     pub fn new(model: DiffModel, font: FontSettings, cx: &mut Context<Self>) -> Self {
         let (gutter_digits, longest_line) = measure(&model);
         let t = theme(cx);
-        let class_colors = TokenClass::ALL.map(|class| Hsla::from(rgb(class.color(&t))));
         Self {
             model,
             font: font.normalized(),
@@ -246,7 +249,8 @@ impl DiffView {
             longest_line,
             old_syntax: None,
             new_syntax: None,
-            class_colors,
+            theme: t,
+            class_colors: class_colors(&t),
         }
     }
 
@@ -543,7 +547,7 @@ impl DiffView {
             .w(px(RULER_WIDTH))
             .h_full()
             .border_l_1()
-            .border_color(rgb(LINE))
+            .border_color(rgb(t.line))
             .children(marks.into_iter().enumerate().map(|(index, mark)| {
                 div()
                     .debug_selector(move || format!("diff-ruler-mark-{index}"))
@@ -588,6 +592,7 @@ impl DiffView {
     /// The rows `range` in a window `viewport_width` pixels wide, which no
     /// text column is wider than.
     fn render_rows(&mut self, range: Range<usize>, viewport_width: f32) -> Vec<Div> {
+        let t = self.theme;
         self.rendered = range.clone();
         let Some(metrics) = self.metrics.clone() else {
             self.shown.clear();
@@ -615,7 +620,7 @@ impl DiffView {
                             .w(px(CURRENT_BAR_WIDTH))
                             .h_full()
                             .flex_none()
-                            .when(current, |bar| bar.bg(rgb(ACCENT))),
+                            .when(current, |bar| bar.bg(rgb(t.accent))),
                     )
                     .child(old)
                     .child(
@@ -623,7 +628,7 @@ impl DiffView {
                             .w(px(DIVIDER_WIDTH))
                             .h_full()
                             .flex_none()
-                            .bg(rgb(LINE)),
+                            .bg(rgb(t.line)),
                     )
                     .child(new)
             })
@@ -642,18 +647,23 @@ impl DiffView {
         columns: Columns,
         metrics: &Metrics,
     ) -> (Div, Option<SharedString>) {
+        let t = &self.theme;
         let cell = div().flex_1().min_w(px(0.0)).h_full().flex().flex_row();
         let Some(side) = side_of(row, half) else {
-            return (cell.bg(wash(DIFF_FILLER, DIFF_FILLER_ALPHA)), None);
+            return (cell.bg(wash(t.diff_filler, t.diff_filler_alpha)), None);
         };
         let changed = row.kind != RowKind::Equal;
         let (line_text, hue, line_alpha) = match half {
             Half::Old => (
                 self.model.old_text(side),
-                DIFF_DELETE,
-                DIFF_DELETE_WASH_ALPHA,
+                t.diff_delete,
+                t.diff_delete_wash_alpha,
             ),
-            Half::New => (self.model.new_text(side), WAITING, DIFF_INSERT_WASH_ALPHA),
+            Half::New => (
+                self.model.new_text(side),
+                t.waiting,
+                t.diff_insert_wash_alpha,
+            ),
         };
         let words = self.model.inline(index).map(|spans| match half {
             Half::Old => spans.left.as_slice(),
@@ -661,7 +671,7 @@ impl DiffView {
         });
         let shown = visible_range(line_text, columns.start, columns.len);
         let word_style = HighlightStyle {
-            background_color: Some(Hsla::from(wash(hue, DIFF_WORD_WASH_ALPHA))),
+            background_color: Some(Hsla::from(wash(hue, t.diff_word_wash_alpha))),
             ..HighlightStyle::default()
         };
         let words = words
@@ -693,7 +703,7 @@ impl DiffView {
                     .pr(px(GUTTER_PAD))
                     .text_right()
                     .text_size(px(GUTTER_TEXT_SIZE))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(t.subtle))
                     .child(side.line_no.to_string()),
             )
             .child(
@@ -790,6 +800,11 @@ fn wash(color: u32, alpha: f32) -> gpui::Rgba {
 
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        if t != self.theme {
+            self.theme = t;
+            self.class_colors = class_colors(&t);
+        }
         let metrics = self.metrics(window);
         // A wider window since the last wheel may leave less to scroll.
         self.h_offset = self.h_offset.min(self.max_h_offset());
@@ -847,8 +862,8 @@ impl Render for DiffView {
             .size_full()
             .flex()
             .flex_row()
-            .bg(rgb(TERMINAL_GROUND))
-            .text_color(rgb(TEXT))
+            .bg(rgb(t.terminal_ground))
+            .text_color(rgb(t.text))
             .font_family(metrics.family)
             .text_size(px(self.font.size))
             .line_height(px(metrics.line_height))

@@ -13,10 +13,9 @@ use crate::fetch_dialog::{FetchControl, FetchForm, PLACEHOLDER, progress_fractio
 use crate::fetch_link;
 use crate::file_fetch::FetchEntry;
 use crate::notice_view::modal_panel;
-use crate::palette::{ACCENT, BORDER, DANGER, DANGER_BG, MUTED, SELECTED_BG, TEXT};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::ui_theme::theme;
+use crate::ui_theme::{UiTheme, theme};
 
 const TITLE: &str = "Fetch file";
 
@@ -360,6 +359,7 @@ impl RootView {
     /// The dialog over a backdrop that takes every click beneath it; a click
     /// on the backdrop itself does nothing.
     pub(crate) fn fetch_dialog_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.fetch_dialog.as_ref()?;
         let form = &dialog.form;
         let text = fetch_path(dialog, cx).to_owned();
@@ -386,11 +386,11 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(path_box(dialog, focus))
+            .child(path_box(dialog, focus, &t))
             .children(form.hint().map(|hint| {
                 div()
                     .debug_selector(|| "fetch-hint".to_owned())
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(hint)
             }))
             .children(form.error().map(|error| {
@@ -399,8 +399,8 @@ impl RootView {
                     .px(px(6.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
-                    .bg(gpui::rgb(DANGER_BG))
-                    .text_color(gpui::rgb(DANGER))
+                    .bg(gpui::rgb(t.danger_bg))
+                    .text_color(gpui::rgb(t.danger))
                     .child(error.to_owned())
             }));
         let panel = modal_panel("fetch-panel", &theme(cx))
@@ -408,7 +408,10 @@ impl RootView {
             .child(header)
             .child(scope_row(form, focus, cx))
             .child(field)
-            .children(self.fetch_dialog_progress().map(progress_row))
+            .children(
+                self.fetch_dialog_progress()
+                    .map(|progress| progress_row(progress, &t)),
+            )
             .child(footer(form.can_submit(&text), dismissable, focus, cx));
         Some(backdrop("fetch-dialog", panel, &theme(cx)))
     }
@@ -422,12 +425,13 @@ fn fetch_path<'a>(dialog: &'a FetchDialog, cx: &'a App) -> &'a str {
 /// The root the path is read against: a muted caption for no root or one,
 /// else a button per root, the chosen one filled.
 fn scope_row(form: &FetchForm, focus: FetchControl, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let row = div().flex().flex_wrap().items_center().gap(px(6.0));
     if let Some(caption) = form.caption() {
         return row.child(
             div()
                 .debug_selector(|| "fetch-caption".to_owned())
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(caption),
         );
     }
@@ -442,7 +446,7 @@ fn scope_row(form: &FetchForm, focus: FetchControl, cx: &mut Context<RootView>) 
             focus == control,
         )
         .when(chosen.as_deref() == Some(root.repo_id.as_str()), |button| {
-            button.bg(gpui::rgb(SELECTED_BG))
+            button.bg(gpui::rgb(t.selected_bg))
         })
         .when(enabled, |button| {
             button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -453,7 +457,7 @@ fn scope_row(form: &FetchForm, focus: FetchControl, cx: &mut Context<RootView>) 
 }
 
 /// The path field in its box.
-fn path_box(dialog: &FetchDialog, focus: FetchControl) -> Div {
+fn path_box(dialog: &FetchDialog, focus: FetchControl, t: &UiTheme) -> Div {
     div()
         .debug_selector(|| FetchControl::Path.selector())
         .flex()
@@ -462,32 +466,32 @@ fn path_box(dialog: &FetchDialog, focus: FetchControl) -> Div {
         .rounded(px(4.0))
         .border_1()
         .border_color(gpui::rgb(if focus == FetchControl::Path {
-            TEXT
+            t.text
         } else {
-            BORDER
+            t.border
         }))
         .child(dialog.path_input.clone())
 }
 
 /// The fetch's bar and the line saying how far it is.
-fn progress_row((text, fraction): (String, f32)) -> Div {
+fn progress_row((text, fraction): (String, f32), t: &UiTheme) -> Div {
     let fill = div()
         .debug_selector(|| "fetch-progress-fill".to_owned())
         .h_full()
         .w(relative(fraction))
         .rounded(px(3.0))
-        .bg(gpui::rgb(ACCENT));
+        .bg(gpui::rgb(t.accent));
     let track = div()
         .debug_selector(|| "fetch-progress".to_owned())
         .w_full()
         .h(px(6.0))
         .rounded(px(3.0))
-        .bg(gpui::rgb(BORDER))
+        .bg(gpui::rgb(t.border))
         .child(fill);
     div().flex().flex_col().gap(px(4.0)).child(track).child(
         div()
             .debug_selector(|| "fetch-progress-text".to_owned())
-            .text_color(gpui::rgb(MUTED))
+            .text_color(gpui::rgb(t.muted))
             .child(text),
     )
 }

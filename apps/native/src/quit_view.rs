@@ -9,6 +9,7 @@ use gpui::{
 use protocol::{BranchCleanup, ClientMessage};
 use std::collections::HashMap;
 
+use crate::RootView;
 use crate::connection::State;
 use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
@@ -16,7 +17,6 @@ use crate::quit::{BODY, Counts, ExitButton, ExitDialog, TITLE, Walk, covered, re
 use crate::session_menu::backdrop;
 use crate::session_menu::{ConfirmOwner, dialog_button, dialog_look};
 use crate::ui_theme::theme;
-use crate::{DANGER, MUTED, RootView};
 
 /// Quits the app: `cx.quit()` in the binary, a recorder in the specs.
 pub type QuitFn = Box<dyn Fn(&mut App)>;
@@ -497,6 +497,7 @@ impl RootView {
 
     /// The exit dialog over a backdrop that takes every click beneath it.
     pub(crate) fn exit_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let model = &self.exit.as_ref()?.model;
         let counts = self.exit_counts();
         let connected = self.conn.is_open();
@@ -531,7 +532,7 @@ impl RootView {
             .children(
                 counts
                     .orphan_note()
-                    .map(|note| div().text_color(gpui::rgb(MUTED)).child(note)),
+                    .map(|note| div().text_color(gpui::rgb(t.muted)).child(note)),
             );
         let panel = modal_panel("exit-confirm-panel", &theme(cx))
             .track_focus(&self.quit_focus)
@@ -541,12 +542,12 @@ impl RootView {
             .children(
                 counts
                     .worktree_note()
-                    .map(|note| div().text_color(gpui::rgb(MUTED)).child(note)),
+                    .map(|note| div().text_color(gpui::rgb(t.muted)).child(note)),
             )
             .children(
                 model
                     .warning()
-                    .map(|warning| div().text_color(gpui::rgb(DANGER)).child(warning)),
+                    .map(|warning| div().text_color(gpui::rgb(t.danger)).child(warning)),
             )
             .child(
                 div()

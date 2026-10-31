@@ -25,10 +25,9 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use protocol::{ClientMessage, InitLayoutKind};
-use rustling_tulip_native::palette::{ACCENT, SUNKEN};
+use rustling_tulip_native::palette::{ACCENT, PANEL_BG, SUNKEN};
 use rustling_tulip_native::{
-    DIVIDER_WIDTH, FOOTER_HEIGHT, NATIVE_PROTOCOL_VERSIONS, PANEL_BG, RAIL_WIDTH,
-    SIDEBAR_DEFAULT_WIDTH,
+    DIVIDER_WIDTH, FOOTER_HEIGHT, NATIVE_PROTOCOL_VERSIONS, RAIL_WIDTH, SIDEBAR_DEFAULT_WIDTH,
 };
 use serde_json::Value;
 use support::live::{LiveDaemon, kill_tree, spawn_shell};

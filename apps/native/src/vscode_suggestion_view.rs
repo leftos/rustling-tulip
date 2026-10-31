@@ -15,7 +15,7 @@ use crate::ui_theme::theme;
 use crate::vscode_suggestion::{
     BodyStyle, DISMISS_LABEL, SuggestionButton, TITLE, VscodeSuggestions, WATCH_TIP,
 };
-use crate::{MUTED, RootView, tooltip};
+use crate::{RootView, tooltip};
 
 impl RootView {
     /// The two VS Code messages: a suggestion queues and shows, a parsed
@@ -141,6 +141,7 @@ impl RootView {
     /// The prompt over a backdrop that takes every click beneath it; a click
     /// on the backdrop itself does nothing.
     pub(crate) fn vscode_prompt_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         if self.vscode_suggestions.is_empty() {
             return None;
         }
@@ -200,7 +201,7 @@ impl RootView {
                             .items_center()
                             .gap(px(6.0))
                             .child(row.label)
-                            .child(div().text_color(gpui::rgb(MUTED)).child(badge))
+                            .child(div().text_color(gpui::rgb(t.muted)).child(badge))
                     }),
             );
         let buttons: Vec<AnyElement> = SuggestionButton::ALL

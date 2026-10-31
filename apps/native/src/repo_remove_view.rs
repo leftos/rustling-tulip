@@ -4,6 +4,7 @@
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, Keystroke, Window, div, prelude::*, px};
 
+use crate::RootView;
 use crate::appearance_view::Level;
 use crate::notice_view::modal_panel;
 use crate::repo_remove::{
@@ -12,7 +13,6 @@ use crate::repo_remove::{
 };
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::ui_theme::theme;
-use crate::{MUTED, RootView};
 
 impl RootView {
     /// The name `level`'s container shows.
@@ -130,6 +130,7 @@ impl RootView {
     /// The Remove dialog over a backdrop that takes every click beneath it; a
     /// click on the backdrop itself does nothing.
     pub(crate) fn repo_remove_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.repo_remove.dialog()?;
         let header = div()
             .flex()
@@ -141,7 +142,7 @@ impl RootView {
             )
             .child(
                 div()
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(dialog.name().to_owned()),
             );
         let body = div()

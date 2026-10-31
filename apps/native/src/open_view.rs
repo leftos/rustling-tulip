@@ -17,7 +17,7 @@ use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::ui_theme::theme;
 use crate::viewer_text::{self, NotText, Verdict};
-use crate::{MUTED, RootView, file_fetch};
+use crate::{RootView, file_fetch};
 
 /// The title of every toast about a link that did not open.
 pub(crate) const COULD_NOT_OPEN: &str = "Couldn't open";
@@ -576,6 +576,7 @@ impl RootView {
 
     /// The run confirm over a backdrop that takes every click beneath it.
     pub(crate) fn run_confirm_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let confirm = self.run_confirm.as_ref()?;
         let buttons: Vec<AnyElement> = RunButton::ALL
             .into_iter()
@@ -599,7 +600,7 @@ impl RootView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(confirm.title()),
             )
-            .child(div().text_color(gpui::rgb(MUTED)).child(confirm.detail()))
+            .child(div().text_color(gpui::rgb(t.muted)).child(confirm.detail()))
             .child(
                 div()
                     .flex()

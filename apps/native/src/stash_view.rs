@@ -17,14 +17,13 @@ use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
-use crate::palette::{SUBTLE, SURFACE, TEXT_2};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::source_control::{Part, ScKey};
 use crate::source_control_view::ScSectionRow;
 use crate::stashes::{DropButton, DropConfirm, StashModel, StashOp, stash_date};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::theme;
-use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, tooltip};
+use crate::{RootView, tooltip};
 
 /// The part's title.
 pub const STASHES_TITLE: &str = "Stashes";
@@ -546,6 +545,7 @@ impl RootView {
 
     /// The drop confirm over a backdrop that takes every click beneath it.
     pub(crate) fn stash_drop_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let confirm = self.stash.drop.as_ref()?;
         let buttons: Vec<AnyElement> = DropButton::ALL
             .into_iter()
@@ -588,7 +588,7 @@ impl RootView {
         let panel = modal_panel("stash-drop-confirm-panel", &theme(cx))
             .track_focus(&self.stash.drop_focus)
             .child(header)
-            .child(div().text_color(gpui::rgb(MUTED)).child(confirm.body()))
+            .child(div().text_color(gpui::rgb(t.muted)).child(confirm.body()))
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         Some(backdrop("stash-drop-confirm-dialog", panel, &theme(cx)))
     }
@@ -602,6 +602,7 @@ pub(crate) fn stashes_part(
     input: Option<Entity<TextInput>>,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
+    let t = theme(cx);
     let Some(part) = &row.stashes else {
         return Vec::new();
     };
@@ -615,7 +616,7 @@ pub(crate) fn stashes_part(
             div()
                 .pl(px(ROW_PADDING * 2.0))
                 .pr(px(ROW_PADDING))
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(text.clone())
                 .into_any_element(),
         );
@@ -627,6 +628,7 @@ pub(crate) fn stashes_part(
 }
 
 fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let name = part.selector.clone();
     let title_id = format!("{name}-title");
     let key = key.clone();
@@ -639,10 +641,12 @@ fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> 
         .h(px(HEAD_HEIGHT))
         .px(px(ROW_PADDING))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(caret(part.collapsed))
-        .child(head_title(&title_id, STASHES_TITLE).flex_1())
-        .when_some(part.count, |header, count| header.child(count_pill(count)))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
+        .child(caret(part.collapsed, &t))
+        .child(head_title(&title_id, STASHES_TITLE, &t).flex_1())
+        .when_some(part.count, |header, count| {
+            header.child(count_pill(count, &t))
+        })
         .on_mouse_down(MouseButton::Left, {
             let key = key.clone();
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -664,6 +668,7 @@ fn push_row(
     input: Option<Entity<TextInput>>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let input_name = push.input_selector.clone();
     let field = div()
         .debug_selector(|| input_name)
@@ -673,7 +678,7 @@ fn push_row(
         .py(px(2.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
+        .border_color(gpui::rgb(t.border))
         .when(!push.enabled, |field| field.opacity(0.5))
         .children(input);
     let key = key.clone();
@@ -703,6 +708,7 @@ fn push_row(
 }
 
 fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let name = stash.selector.clone();
     let subject_id = format!("{name}-subject");
     let shown = GitStash {
@@ -726,16 +732,16 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
         .h(px(ROW_HEIGHT))
         .pl(px(ROW_PADDING * 2.0))
         .pr(px(ROW_PADDING))
-        .bg(gpui::rgb(SURFACE))
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .bg(gpui::rgb(t.surface))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .tooltip(tooltip(stash.tooltip.clone()))
         .child(
             div()
                 .flex_none()
                 .font_family(DEFAULT_FAMILY)
                 .text_size(px(ID_TEXT_SIZE))
-                .text_color(gpui::rgb(SUBTLE))
-                .group_hover(group, |style| style.text_color(gpui::rgb(TEXT_2)))
+                .text_color(gpui::rgb(t.subtle))
+                .group_hover(group, |style| style.text_color(gpui::rgb(t.text_2)))
                 .child(stash.id.clone()),
         )
         .child(truncating(&subject_id, StyledText::new(stash.subject.clone())).flex_1())
@@ -750,6 +756,7 @@ fn stash_button(
     button: &StashButton,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let name = button.selector.clone();
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -757,7 +764,7 @@ fn stash_button(
         .flex_none()
         .px(px(4.0))
         .rounded(px(3.0))
-        .text_color(gpui::rgb(if button.danger { DANGER } else { TEXT }))
+        .text_color(gpui::rgb(if button.danger { t.danger } else { t.text }))
         .child(button.label);
     if !button.enabled {
         return base.opacity(0.5);
@@ -766,7 +773,7 @@ fn stash_button(
     let stash = stash.clone();
     let action = button.action;
     base.cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             cx.stop_propagation();
             this.run_stash_action(&key, action, stash.clone(), window, cx);

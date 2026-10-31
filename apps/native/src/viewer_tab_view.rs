@@ -24,7 +24,6 @@ use crate::fonts;
 use crate::notices::ToastKind;
 use crate::open::OpenJob;
 use crate::open_view::{Origin, Route, Then};
-use crate::palette::{ACCENT, INPUT_SELECTION, LINE, LINE_STRONG, SUBTLE, SURFACE};
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::{self, Highlighted, TokenClass};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
@@ -35,7 +34,7 @@ use crate::viewer_tab::{
     self, Activation, FindBar, MarkdownMode, OPEN_FAILED_TITLE, ReadFailure, ViewerOrigin,
     ViewerTab, ViewerText,
 };
-use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// The header's height, the diff tab's.
 const HEADER_HEIGHT: f32 = 42.0;
@@ -58,10 +57,14 @@ const TEXT_PAD_LEFT: f32 = 8.0;
 const PATH_NAME: &str = "viewer-path-name";
 const PATH_FOLDER: &str = "viewer-path-folder";
 /// A find match's tint: the accent, lighter than a selected row's
-/// [`INPUT_SELECTION`], so a match on a selected row still shows.
-const FIND_MATCH_BG: u32 = (ACCENT << 8) | 0x40;
+/// [`UiTheme::input_selection`], so a match on a selected row still shows.
+fn find_match_bg(t: &UiTheme) -> u32 {
+    (t.accent << 8) | 0x40
+}
 /// The tint of the match the find bar is on: the accent, stronger.
-const FIND_CURRENT_BG: u32 = (ACCENT << 8) | 0xa6;
+fn find_current_bg(t: &UiTheme) -> u32 {
+    (t.accent << 8) | 0xa6
+}
 /// The find bar's height, its query field's width and the room its count
 /// keeps, in px.
 const FIND_BAR_HEIGHT: f32 = 38.0;
@@ -159,6 +162,8 @@ struct Rows {
     line_height: f32,
     gutter_width: f32,
     colors: [Hsla; 6],
+    /// The theme the rows draw in.
+    theme: UiTheme,
     /// The root view, which a press or a drag on a row updates.
     root: WeakEntity<RootView>,
     /// The viewer body's focus, which a press on a row takes.
@@ -175,6 +180,7 @@ impl Rows {
     }
 
     fn row(&self, index: usize) -> Div {
+        let t = &self.theme;
         let number = index + 1;
         let selector = format!("viewer-line-{}-{number}", self.tab_id);
         let text_selector = format!("viewer-text-{}-{number}", self.tab_id);
@@ -244,8 +250,8 @@ impl Rows {
             .flex()
             .flex_row()
             .items_center()
-            .when(hovered, |row| row.bg(gpui::rgb(HOVER_BG)))
-            .when(selected, |row| row.bg(gpui::rgba(INPUT_SELECTION)))
+            .when(hovered, |row| row.bg(gpui::rgb(t.hover_bg)))
+            .when(selected, |row| row.bg(gpui::rgba(t.input_selection)))
             .on_mouse_down(MouseButton::Left, self.on_press(index))
             .child(
                 div()
@@ -255,7 +261,7 @@ impl Rows {
                     .pr(px(GUTTER_PAD))
                     .text_right()
                     .text_size(px(GUTTER_TEXT_SIZE))
-                    .text_color(gpui::rgb(if hovered { MUTED } else { SUBTLE }))
+                    .text_color(gpui::rgb(if hovered { t.muted } else { t.subtle }))
                     .child(number.to_string()),
             )
             .child(
@@ -292,8 +298,8 @@ impl Rows {
     ) -> Option<(Range<usize>, HighlightStyle)> {
         let background = match segment.tint {
             Tint::None => None,
-            Tint::Match => Some(FIND_MATCH_BG),
-            Tint::Current => Some(FIND_CURRENT_BG),
+            Tint::Match => Some(find_match_bg(&self.theme)),
+            Tint::Current => Some(find_current_bg(&self.theme)),
         };
         if segment.syntax.is_none() && background.is_none() {
             return None;
@@ -895,6 +901,7 @@ impl RootView {
         tab_id: &str,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let t = theme(cx);
         let tab = self.viewer_tabs.get(tab_id)?;
         let body = format!("viewer-{tab_id}");
         let banner = tab.note().map(|note| {
@@ -904,7 +911,7 @@ impl RootView {
                 .flex_none()
                 .px(px(HEADER_PAD_LEFT))
                 .py(px(10.0))
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(note)
         });
         let root = cx.entity().downgrade();
@@ -948,7 +955,7 @@ impl RootView {
                 .flex_1()
                 .size_full()
                 .text_size(px(UI_TEXT_SIZE))
-                .text_color(gpui::rgb(TEXT))
+                .text_color(gpui::rgb(t.text))
                 .child(viewer_header(tab_id, tab, cx))
                 .children(viewer_find_bar(tab_id, tab, cx))
                 .children(banner)
@@ -992,6 +999,7 @@ impl RootView {
             line_height: self.viewer_line_height(),
             gutter_width,
             colors: TokenClass::ALL.map(|class| Hsla::from(gpui::rgb(class.color(t)))),
+            theme: *t,
             root,
             focus: self.viewer_focus.clone(),
         };
@@ -1087,6 +1095,7 @@ fn row_in_view(scroll: &UniformListScrollHandle, row_height: f32, line: usize) -
 /// The find bar under the header while it shows: the query field, the
 /// count, the previous and next buttons and the case toggle.
 fn viewer_find_bar(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) -> Option<Div> {
+    let t = theme(cx);
     if !tab.find_shows() {
         return None;
     }
@@ -1108,9 +1117,9 @@ fn viewer_find_bar(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) ->
             .h(px(FIND_BAR_HEIGHT))
             .pl(px(HEADER_PAD_LEFT))
             .pr(px(HEADER_PAD_RIGHT))
-            .bg(gpui::rgb(SURFACE))
+            .bg(gpui::rgb(t.surface))
             .border_b_1()
-            .border_color(gpui::rgb(LINE))
+            .border_color(gpui::rgb(t.line))
             .child(
                 div()
                     .flex_none()
@@ -1119,7 +1128,7 @@ fn viewer_find_bar(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) ->
                     .py(px(3.0))
                     .rounded(px(4.0))
                     .border_1()
-                    .border_color(gpui::rgb(LINE_STRONG))
+                    .border_color(gpui::rgb(t.line_strong))
                     .child(input),
             )
             .child(
@@ -1127,7 +1136,7 @@ fn viewer_find_bar(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) ->
                     .debug_selector(move || count)
                     .flex_none()
                     .min_w(px(FIND_COUNT_WIDTH))
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(find.label()),
             )
             .children(buttons),
@@ -1172,6 +1181,7 @@ fn find_button(
 /// The header: the file's name whole and its folder dimmed, then the open
 /// and copy buttons.
 fn viewer_header(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let opens = tab.origin() != ViewerOrigin::NotAvailable;
     let loaded = tab.text().is_some();
     let buttons = HeaderAction::ALL.map(|action| {
@@ -1190,10 +1200,10 @@ fn viewer_header(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) -> D
         .h(px(HEADER_HEIGHT))
         .pl(px(HEADER_PAD_LEFT))
         .pr(px(HEADER_PAD_RIGHT))
-        .bg(gpui::rgb(SURFACE))
+        .bg(gpui::rgb(t.surface))
         .border_b_1()
-        .border_color(gpui::rgb(LINE))
-        .child(path_box(tab.path()))
+        .border_color(gpui::rgb(t.line))
+        .child(path_box(tab.path(), &t))
         .child(div().flex_1())
         .children(markdown_toggle(tab_id, tab, cx))
         .children(buttons)
@@ -1227,7 +1237,7 @@ fn header_button(
 
 /// The file name whole, then its folder, which gives up its end to an
 /// ellipsis as room runs out; the full path is the tooltip.
-fn path_box(path: &str) -> Stateful<Div> {
+fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
     let (name, folder) = split_path(path);
     let ellipsis_box = || {
         div()
@@ -1239,7 +1249,7 @@ fn path_box(path: &str) -> Stateful<Div> {
     let name = ellipsis_box()
         .flex_none()
         .max_w(relative(1.0))
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
         .children(ellipsized(
             PATH_NAME,
             SharedString::from(name.to_owned()),
@@ -1256,7 +1266,7 @@ fn path_box(path: &str) -> Stateful<Div> {
         .when(!folder.is_empty(), |path| {
             path.child(
                 ellipsis_box()
-                    .text_color(gpui::rgb(SUBTLE))
+                    .text_color(gpui::rgb(t.subtle))
                     .children(ellipsized(
                         PATH_FOLDER,
                         SharedString::from(folder.to_owned()),

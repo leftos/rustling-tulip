@@ -9,17 +9,16 @@ use gpui::{
 };
 use protocol::{ClientMessage, ClonableLayout, DaemonMessage, TabEntry};
 
+use crate::RootView;
 use crate::layout_chooser::{
     Control, FALLBACK_ASPECT, ImportChooser, ImportControl, ImportOffer, ImportOutcome,
     LayoutChooser, Mode, arrangement_messages, import_intro, import_offer,
 };
 use crate::notice_view::modal_panel;
-use crate::palette::SELECTED_BG;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::close_button;
 use crate::tabs::collect_panes;
-use crate::ui_theme::theme;
-use crate::{BORDER, MUTED, RootView, TEXT};
+use crate::ui_theme::{UiTheme, theme};
 
 const TITLE: &str = "Set up this window";
 const INTRO: &str = "This is a new client. Sessions are shared with every connected window, but each curates its own tabs. How should this window start?";
@@ -180,6 +179,7 @@ impl RootView {
 
     /// The chooser over a backdrop that takes every click beneath it.
     pub(crate) fn layout_chooser_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let chooser = self.layout_chooser.as_ref()?;
         let aspect = self.pane_area_aspect();
         let focused = chooser.focused();
@@ -202,7 +202,7 @@ impl RootView {
         let panel = modal_panel("layout-chooser-panel", &theme(cx))
             .track_focus(&self.chooser_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
-            .child(div().text_color(gpui::rgb(MUTED)).child(INTRO))
+            .child(div().text_color(gpui::rgb(t.muted)).child(INTRO))
             .child(div().flex().flex_col().gap(px(6.0)).children(options));
         Some(backdrop("layout-chooser", panel, &theme(cx)))
     }
@@ -400,6 +400,7 @@ impl RootView {
 
     /// The import modal over a backdrop that takes every click beneath it.
     pub(crate) fn import_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let import = self.import_modal.as_ref()?;
         let aspect = self.pane_area_aspect();
         let focused = import.focused();
@@ -418,8 +419,11 @@ impl RootView {
                 control.selector(),
                 import.label(&control, aspect),
                 control.detail(),
-                control == focused,
-                import.is_selected(&control),
+                RowMarks {
+                    focused: control == focused,
+                    selected: import.is_selected(&control),
+                },
+                &t,
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.press_import_control(&pressed, window, cx);
@@ -447,10 +451,10 @@ impl RootView {
             .child(header)
             .child(
                 div()
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(import_intro(import.offer())),
             )
-            .child(div().text_color(gpui::rgb(MUTED)).child(IMPORT_REPLACES))
+            .child(div().text_color(gpui::rgb(t.muted)).child(IMPORT_REPLACES))
             .child(div().flex().flex_col().gap(px(6.0)).children(options));
         Some(backdrop("import-modal", panel, &theme(cx)))
     }
@@ -470,8 +474,11 @@ fn option_row(
         control.selector(),
         chooser.label(control, aspect),
         chooser.detail(control),
-        control == focused,
-        chooser.is_selected(control),
+        RowMarks {
+            focused: control == focused,
+            selected: chooser.is_selected(control),
+        },
+        &theme(cx),
     )
     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         this.press_layout_control(&pressed, window, cx);
@@ -482,12 +489,19 @@ fn option_row(
 /// An option row tagged `selector`: `label` over its muted `detail`,
 /// filled while `selected` and outlined while `focused`; the caller adds
 /// the click.
+/// How an option row is marked: outlined while focused, filled while
+/// selected.
+struct RowMarks {
+    focused: bool,
+    selected: bool,
+}
+
 fn option_row_element(
     selector: String,
     label: String,
     detail: Option<String>,
-    focused: bool,
-    selected: bool,
+    RowMarks { focused, selected }: RowMarks,
+    t: &UiTheme,
 ) -> Stateful<Div> {
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
@@ -499,12 +513,12 @@ fn option_row_element(
         .py(px(6.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(gpui::rgb(if focused { TEXT } else { BORDER }))
-        .when(selected, |row| row.bg(gpui::rgb(SELECTED_BG)))
+        .border_color(gpui::rgb(if focused { t.text } else { t.border }))
+        .when(selected, |row| row.bg(gpui::rgb(t.selected_bg)))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(crate::palette::POPOVER_HOVER)))
+        .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
         .child(div().font_weight(FontWeight::SEMIBOLD).child(label))
-        .children(detail.map(|detail| div().text_color(gpui::rgb(MUTED)).child(detail)))
+        .children(detail.map(|detail| div().text_color(gpui::rgb(t.muted)).child(detail)))
 }
 
 /// A small button of the picker: filled when chosen, ringed when focused.
@@ -515,6 +529,7 @@ fn picker_button(
     aspect: f32,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let pressed = control.clone();
     dialog_button(
         &control.selector(),
@@ -523,7 +538,7 @@ fn picker_button(
         focused == Some(control),
     )
     .when(chooser.is_selected(control), |button| {
-        button.bg(gpui::rgb(SELECTED_BG))
+        button.bg(gpui::rgb(t.selected_bg))
     })
     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         this.press_picker_control(&pressed, window, cx);
@@ -538,6 +553,7 @@ fn picker(
     aspect: f32,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let mut button = |control: &Control| picker_button(chooser, control, focused, aspect, cx);
     let grid = button(&Control::Mode(Mode::Grid));
     let shapes: Vec<Stateful<Div>> = chooser
@@ -556,7 +572,7 @@ fn picker(
         .flex_col()
         .items_start()
         .gap(px(4.0))
-        .child(div().text_color(gpui::rgb(MUTED)).child(LAYOUT_LABEL))
+        .child(div().text_color(gpui::rgb(t.muted)).child(LAYOUT_LABEL))
         .child(grid)
         .when(!shapes.is_empty(), |modes| {
             modes.child(
@@ -574,7 +590,7 @@ fn picker(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .child(div().text_color(gpui::rgb(MUTED)).child(MAX_LABEL))
+        .child(div().text_color(gpui::rgb(t.muted)).child(MAX_LABEL))
         .child(down)
         .child(
             div()

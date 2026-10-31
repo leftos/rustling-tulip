@@ -17,7 +17,6 @@ use protocol::{
 };
 
 use crate::notice_view::modal_panel;
-use crate::palette::DANGER_BG;
 use crate::preset_launch::{
     JobAction, LAUNCH_CAVEAT, MAX_PER_TAB_LABEL, MAX_PER_TAB_PLACEHOLDER, PREVIEW_EMPTY, Preview,
     PreviewRow, SCRIPT_UNRESOLVED, SCRIPTS_LEGEND, SCRIPTS_NOTE, ScriptFailure, ScriptLine,
@@ -34,8 +33,8 @@ use crate::repo_remove::{is_live, stop_message};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::checkbox_row;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::ui_theme::theme;
-use crate::{BORDER, DANGER, MUTED, RootView, TEXT, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, tooltip};
 
 /// The open wizard: its model and the entities of its text fields.
 pub(crate) struct PresetWizardDialog {
@@ -535,19 +534,20 @@ impl RootView {
 
     /// The wizard over a backdrop that takes every click beneath it.
     pub(crate) fn preset_wizard_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.preset_wizard.as_ref()?;
         let wizard = &dialog.wizard;
         let description = wizard.entry().description.clone().map(|text| {
             div()
                 .debug_selector(|| "preset-wizard-description".to_owned())
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(text)
         });
         let pick_refusal = self.capabilities().local_files_refusal();
         let body = match wizard.stage() {
             Stage::Source => source_body(dialog, pick_refusal, cx),
             Stage::Variables => variables_body(dialog, pick_refusal, cx),
-            Stage::Preview => preview_body(dialog),
+            Stage::Preview => preview_body(dialog, &t),
         };
         let panel = modal_panel("preset-wizard-panel", &theme(cx))
             .track_focus(&self.preset_wizard_focus)
@@ -737,15 +737,15 @@ fn preview_line_of(wizard: &PresetWizard) -> String {
 
 /// The Preview stage: the summary or the reason it failed, the script
 /// commands, the max-panes field, the caveat and the prompts by tab.
-fn preview_body(dialog: &PresetWizardDialog) -> Div {
+fn preview_body(dialog: &PresetWizardDialog, t: &UiTheme) -> Div {
     let wizard = &dialog.wizard;
     let line = match wizard.preview() {
         Preview::Failed(_) => div()
             .debug_selector(|| "preset-preview-error".to_owned())
-            .text_color(gpui::rgb(DANGER))
+            .text_color(gpui::rgb(t.danger))
             .child(preview_line_of(wizard)),
         Preview::Loading { .. } | Preview::Ready(_) => {
-            muted(preview_line_of(wizard)).debug_selector(|| "preset-preview-summary".to_owned())
+            muted(preview_line_of(wizard), t).debug_selector(|| "preset-preview-summary".to_owned())
         }
     };
     let max_per_tab = wizard.shows_max_per_tab().then(|| {
@@ -756,10 +756,12 @@ fn preview_body(dialog: &PresetWizardDialog) -> Div {
             .child(field_label(
                 MAX_PER_TAB_LABEL.to_owned(),
                 Some(max_per_tab_note(wizard.entry())),
+                t,
             ))
             .child(input_box(
                 "preset-max-per-tab".to_owned(),
                 &dialog.max_per_tab_input,
+                t,
             ))
     });
     let prompts = match wizard.preview() {
@@ -768,10 +770,10 @@ fn preview_body(dialog: &PresetWizardDialog) -> Div {
     };
     let caveat = prompts
         .filter(|count| *count > 0)
-        .map(|_| muted(LAUNCH_CAVEAT));
+        .map(|_| muted(LAUNCH_CAVEAT, t));
     let list = match prompts {
-        Some(0) => Some(muted(PREVIEW_EMPTY)),
-        Some(_) => Some(preview_list(wizard)),
+        Some(0) => Some(muted(PREVIEW_EMPTY, t)),
+        Some(_) => Some(preview_list(wizard, t)),
         None => None,
     };
     div()
@@ -779,7 +781,7 @@ fn preview_body(dialog: &PresetWizardDialog) -> Div {
         .flex_col()
         .gap(px(8.0))
         .child(line)
-        .children(scripts_section(wizard))
+        .children(scripts_section(wizard, t))
         .children(max_per_tab)
         .children(caveat)
         .children(list)
@@ -787,11 +789,11 @@ fn preview_body(dialog: &PresetWizardDialog) -> Div {
 
 /// The prompts, under a `Tab n of m` header each when they fill several
 /// tabs.
-fn preview_list(wizard: &PresetWizard) -> Div {
+fn preview_list(wizard: &PresetWizard, t: &UiTheme) -> Div {
     let groups = wizard.preview_groups();
     let count = groups.len();
     let groups = groups.into_iter().enumerate().map(|(at, group)| {
-        let header = (count > 1).then(|| muted(tab_header(at, count)));
+        let header = (count > 1).then(|| muted(tab_header(at, count), t));
         let rows = group.into_iter().map(|row| {
             let selector = format!("preset-preview-row-{}", row.index);
             div().debug_selector(move || selector).child(row.text())
@@ -807,7 +809,7 @@ fn preview_list(wizard: &PresetWizard) -> Div {
 }
 
 /// The script commands that run before the launch, as they would run.
-fn scripts_section(wizard: &PresetWizard) -> Option<Div> {
+fn scripts_section(wizard: &PresetWizard, t: &UiTheme) -> Option<Div> {
     let commands = wizard.script_commands();
     if commands.is_empty() {
         return None;
@@ -820,16 +822,18 @@ fn scripts_section(wizard: &PresetWizard) -> Option<Div> {
         let marked = failed == Some(command.name.as_str());
         let line = match &command.line {
             ScriptLine::Ready(line) => Some(div().child(line.clone())),
-            ScriptLine::Unresolved => {
-                Some(div().text_color(gpui::rgb(DANGER)).child(SCRIPT_UNRESOLVED))
-            }
+            ScriptLine::Unresolved => Some(
+                div()
+                    .text_color(gpui::rgb(t.danger))
+                    .child(SCRIPT_UNRESOLVED),
+            ),
             ScriptLine::Skipped(_) => None,
         };
-        let label = field_label(command.label.clone(), command.line.note());
+        let label = field_label(command.label.clone(), command.line.note(), t);
         let label = if marked {
             label
                 .debug_selector(move || mark)
-                .text_color(gpui::rgb(DANGER))
+                .text_color(gpui::rgb(t.danger))
         } else {
             label
         };
@@ -843,7 +847,7 @@ fn scripts_section(wizard: &PresetWizard) -> Option<Div> {
     let failure = stage.failure().map(|text| {
         div()
             .debug_selector(|| "preset-script-error".to_owned())
-            .text_color(gpui::rgb(DANGER))
+            .text_color(gpui::rgb(t.danger))
             .child(text)
     });
     Some(
@@ -855,28 +859,29 @@ fn scripts_section(wizard: &PresetWizard) -> Option<Div> {
             .child(field_label(
                 SCRIPTS_LEGEND.to_owned(),
                 stage.legend_note().map(str::to_owned),
+                t,
             ))
-            .child(muted(SCRIPTS_NOTE))
+            .child(muted(SCRIPTS_NOTE, t))
             .children(rows)
             .children(failure),
     )
 }
 
 /// A muted label line.
-fn muted(text: impl Into<gpui::SharedString>) -> Div {
-    div().text_color(gpui::rgb(MUTED)).child(text.into())
+fn muted(text: impl Into<gpui::SharedString>, t: &UiTheme) -> Div {
+    div().text_color(gpui::rgb(t.muted)).child(text.into())
 }
 
 /// A field's label with an optional muted note after it.
-fn field_label(label: String, note: Option<String>) -> Div {
+fn field_label(label: String, note: Option<String>, t: &UiTheme) -> Div {
     div()
         .flex()
         .child(label)
-        .children(note.map(|note| div().text_color(gpui::rgb(MUTED)).child(note)))
+        .children(note.map(|note| div().text_color(gpui::rgb(t.muted)).child(note)))
 }
 
 /// A text input in its box, tagged `selector`.
-fn input_box(selector: String, input: &Entity<TextInput>) -> Div {
+fn input_box(selector: String, input: &Entity<TextInput>, t: &UiTheme) -> Div {
     div()
         .debug_selector(move || selector)
         .flex()
@@ -885,7 +890,7 @@ fn input_box(selector: String, input: &Entity<TextInput>) -> Div {
         .py(px(3.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
+        .border_color(gpui::rgb(t.border))
         .child(input.clone())
 }
 
@@ -953,6 +958,7 @@ fn path_row(
     button: PickButton,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     match cell {
         PathCell::Picked {
             path,
@@ -964,7 +970,7 @@ fn path_row(
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .child(input_box(selector.to_owned(), input))
+                .child(input_box(selector.to_owned(), input, &t))
                 .child(pick_button(selector, button, cx));
             let error = refusal.map(|refusal| {
                 let tag = format!("{selector}-error");
@@ -973,8 +979,8 @@ fn path_row(
                     .px(px(6.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
-                    .bg(gpui::rgb(DANGER_BG))
-                    .text_color(gpui::rgb(DANGER))
+                    .bg(gpui::rgb(t.danger_bg))
+                    .text_color(gpui::rgb(t.danger))
                     .child(refusal)
             });
             div()
@@ -1016,6 +1022,7 @@ fn picked_path_row(
     on_clear: Option<ViewAction>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let shown = div()
         .debug_selector({
             let selector = selector.to_owned();
@@ -1026,8 +1033,8 @@ fn picked_path_row(
         .py(px(3.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_color(gpui::rgb(if path.is_some() { TEXT } else { MUTED }))
+        .border_color(gpui::rgb(t.border))
+        .text_color(gpui::rgb(if path.is_some() { t.text } else { t.muted }))
         .child(path.unwrap_or(placeholder).to_owned());
     let pick_button = pick_button(selector, button, cx);
     let clear = on_clear.filter(|_| path.is_some()).map(|on_clear| {
@@ -1055,6 +1062,7 @@ fn source_body(
     pick_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let wizard = &dialog.wizard;
     let picked = wizard.source_kind();
     let radios: Vec<Stateful<Div>> = wizard
@@ -1083,14 +1091,15 @@ fn source_body(
             .child(input_box(
                 "preset-source-inline-text".to_owned(),
                 &dialog.inline_input,
+                &t,
             )),
-        SourceKind::GithubIssues => issues_field(dialog),
+        SourceKind::GithubIssues => issues_field(dialog, &t),
     };
     div()
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .child(muted(SOURCE_LEGEND))
+        .child(muted(SOURCE_LEGEND, &t))
         .children(radios)
         .child(field)
 }
@@ -1127,6 +1136,7 @@ fn folder_field(
     pick_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let wizard = &dialog.wizard;
     let note = wizard
         .entry()
@@ -1156,19 +1166,19 @@ fn folder_field(
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .child(field_label(FOLDER_LABEL.to_owned(), note))
+        .child(field_label(FOLDER_LABEL.to_owned(), note, &t))
         .child(row)
 }
 
-fn issues_field(dialog: &PresetWizardDialog) -> Div {
+fn issues_field(dialog: &PresetWizardDialog, t: &UiTheme) -> Div {
     let line = match dialog.wizard.issues_feedback() {
-        IssuesFeedback::Hint => muted(ISSUES_HINT),
+        IssuesFeedback::Hint => muted(ISSUES_HINT, t),
         IssuesFeedback::Ok(summary) => {
-            muted(summary).debug_selector(|| "preset-source-github-issues-ok".to_owned())
+            muted(summary, t).debug_selector(|| "preset-source-github-issues-ok".to_owned())
         }
         IssuesFeedback::Error(err) => div()
             .debug_selector(|| "preset-source-github-issues-error".to_owned())
-            .text_color(gpui::rgb(DANGER))
+            .text_color(gpui::rgb(t.danger))
             .child(err),
     };
     div()
@@ -1178,10 +1188,12 @@ fn issues_field(dialog: &PresetWizardDialog) -> Div {
         .child(field_label(
             ISSUES_LABEL.to_owned(),
             Some(ISSUES_NOTE.to_owned()),
+            t,
         ))
         .child(input_box(
             "preset-source-github-issues-spec".to_owned(),
             &dialog.issues_input,
+            t,
         ))
         .child(line)
 }
@@ -1208,6 +1220,7 @@ fn variable_field(
     pick_refusal: Option<&'static str>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let wizard = &dialog.wizard;
     let selector = variable_selector(&variable.name);
     let name = variable.name.clone();
@@ -1241,7 +1254,7 @@ fn variable_field(
             .into_any_element()
     } else {
         match dialog.text_inputs.iter().find(|(n, _)| *n == variable.name) {
-            Some((_, input)) => input_box(selector.clone(), input).into_any_element(),
+            Some((_, input)) => input_box(selector.clone(), input, &t).into_any_element(),
             None => div().into_any_element(),
         }
     };
@@ -1250,14 +1263,14 @@ fn variable_field(
         let hint = format!("{selector}-required");
         div()
             .debug_selector(move || hint)
-            .text_color(gpui::rgb(DANGER))
+            .text_color(gpui::rgb(t.danger))
             .child(REQUIRED_HINT)
     });
     div()
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .child(field_label(variable.label.clone(), note))
+        .child(field_label(variable.label.clone(), note, &t))
         .child(input)
         .children(missing)
 }

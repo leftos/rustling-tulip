@@ -30,10 +30,6 @@ use crate::fonts::DEFAULT_FAMILY;
 use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
-use crate::palette::{
-    ASK_BORDER, ASK_WASH, ASKING, CARD_EDGE, DANGER, DANGER_BG, FAINT, LINE, MODAL_INSET, OK_WASH,
-    POPOVER_HOVER, RAISED, SELECTION, STATUS_IDLE, STATUS_OK, SUBTLE, TEXT, TEXT_2,
-};
 use crate::session_menu::backdrop;
 use crate::ssh::DEFAULT_REMOTE_COMMAND;
 use crate::target::{DEFAULT_TAILNET_PORT, SshHost, TailnetHost, Target};
@@ -908,6 +904,7 @@ impl RootView {
     /// list that scrolls once the panel reaches the window's height less
     /// its margins, the add form while it shows, and the footer.
     pub(crate) fn connection_picker_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.connection_picker.as_ref()?;
         let rows = dialog.picker.rows();
         let draw = Draw {
@@ -926,7 +923,7 @@ impl RootView {
             .flex_col()
             .gap(px(2.0));
         for (n, section) in dialog.picker.sections().iter().enumerate() {
-            list = list.child(section_header(section, n == 0, scan_failed));
+            list = list.child(section_header(section, n == 0, scan_failed, &t));
             for &index in &section.rows {
                 if let Some(row) = rows.get(index) {
                     let facts = self.row_facts(dialog, row);
@@ -992,6 +989,7 @@ fn control_button(
 
 /// The title and the mouse-only close X.
 fn header(cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let close = div()
         .id("connections-close-x")
         .debug_selector(|| "connections-close-x".to_owned())
@@ -1001,12 +999,12 @@ fn header(cx: &mut Context<RootView>) -> Div {
         .size(px(26.0))
         .rounded(px(6.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(POPOVER_HOVER)))
+        .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
         .child(
             svg()
                 .path(TAB_CLOSE_ICON)
                 .size(px(14.0))
-                .text_color(gpui::rgb(TEXT_2)),
+                .text_color(gpui::rgb(t.text_2)),
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.close_connection_picker(window, cx);
@@ -1040,14 +1038,14 @@ const fn section_slug(section: Section) -> &'static str {
 
 /// A section's header: its title and, at the right, its note; the tailnet
 /// note is the scan's wait, its count, or its error in the danger colour.
-fn section_header(section: &PickerSection, first: bool, scan_failed: bool) -> Div {
+fn section_header(section: &PickerSection, first: bool, scan_failed: bool, t: &UiTheme) -> Div {
     let selector = format!("connections-section-{}", section_slug(section.section));
     let tailnet = section.section == Section::Tailnet;
     let note = section.note.clone().map(|note| {
         let color = if tailnet && scan_failed {
-            DANGER
+            t.danger
         } else {
-            SUBTLE
+            t.subtle
         };
         div()
             .when(tailnet, |note| {
@@ -1068,7 +1066,7 @@ fn section_header(section: &PickerSection, first: bool, scan_failed: bool) -> Di
         .pb(px(4.0))
         .text_size(px(11.5))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .child(section.section.title())
         .children(note)
 }
@@ -1084,6 +1082,7 @@ fn host_row(
     draw: &Draw<'_>,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let control = PickerControl::Row(index);
     let selector = control.selector(draw.rows);
     let group = SharedString::from(format!("connections-row-group-{index}"));
@@ -1095,8 +1094,13 @@ fn host_row(
         .items_center()
         .gap(px(8.0))
         .text_size(px(11.5))
-        .text_color(gpui::rgb(TEXT_2))
-        .children(detail.state.as_ref().map(|state| state_chip(row, state)))
+        .text_color(gpui::rgb(t.text_2))
+        .children(
+            detail
+                .state
+                .as_ref()
+                .map(|state| state_chip(row, state, &t)),
+        )
         .when(saved && forget_shown, |trail| trail.opacity(0.0))
         .when(saved && !forget_shown, |trail| {
             trail.group_hover(group.clone(), |style| style.opacity(0.0))
@@ -1106,12 +1110,13 @@ fn host_row(
         .min_w_0()
         .flex()
         .flex_col()
-        .child(name_line(row))
+        .child(name_line(row, &t))
         .child(detail_line(
             &row.key(),
             facts.host,
             &detail.line,
             group.clone(),
+            &t,
         ));
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
@@ -1126,9 +1131,9 @@ fn host_row(
         .py(px(7.0))
         .rounded(px(ROW_RADIUS))
         .cursor_pointer()
-        .when(facts.current, |row| row.bg(gpui::rgb(SELECTION)))
-        .hover(|style| style.bg(gpui::rgb(POPOVER_HOVER)))
-        .child(kind_tile(facts.host))
+        .when(facts.current, |row| row.bg(gpui::rgb(t.selection)))
+        .hover(|style| style.bg(gpui::rgb(t.popover_hover)))
+        .child(kind_tile(facts.host, &t))
         .child(text)
         .child(trail)
         .when(saved, |line| {
@@ -1184,7 +1189,7 @@ fn forget_button(
 }
 
 /// The 28 px tile with the row's kind of host.
-fn kind_tile(host: RowHost) -> Div {
+fn kind_tile(host: RowHost, t: &UiTheme) -> Div {
     let icon = match host {
         RowHost::ThisPc => HOST_PC_ICON,
         RowHost::Tailnet | RowHost::Peer => HOST_TAILNET_ICON,
@@ -1194,9 +1199,9 @@ fn kind_tile(host: RowHost) -> Div {
         .flex_none()
         .size(px(28.0))
         .rounded(px(7.0))
-        .bg(gpui::rgb(RAISED))
+        .bg(gpui::rgb(t.raised))
         .border_1()
-        .border_color(gpui::rgb(CARD_EDGE))
+        .border_color(gpui::rgb(t.card_edge))
         .flex()
         .items_center()
         .justify_center()
@@ -1204,12 +1209,12 @@ fn kind_tile(host: RowHost) -> Div {
             svg()
                 .path(icon)
                 .size(px(16.0))
-                .text_color(gpui::rgb(TEXT_2)),
+                .text_color(gpui::rgb(t.text_2)),
         )
 }
 
 /// The row's name, a tailnet host's suffix greyed.
-fn name_line(row: &Row) -> Div {
+fn name_line(row: &Row, t: &UiTheme) -> Div {
     let (name, suffix) = row.name_parts();
     div()
         .flex()
@@ -1222,7 +1227,7 @@ fn name_line(row: &Row) -> Div {
         .children(suffix.map(|suffix| {
             div()
                 .font_weight(FontWeight::NORMAL)
-                .text_color(gpui::rgb(FAINT))
+                .text_color(gpui::rgb(t.faint))
                 .child(suffix)
         }))
 }
@@ -1271,7 +1276,7 @@ fn detail_pieces(host: RowHost, line: &str) -> Vec<DetailPiece> {
 
 /// A row's second line, its pieces split by faint dots, lifted from quiet to
 /// secondary text while its row, the hover `group`, is hovered.
-fn detail_line(key: &str, host: RowHost, line: &str, group: SharedString) -> Div {
+fn detail_line(key: &str, host: RowHost, line: &str, group: SharedString, t: &UiTheme) -> Div {
     let selector = format!("connections-detail-{key}");
     let mut drawn = div()
         .debug_selector(move || selector)
@@ -1282,25 +1287,25 @@ fn detail_line(key: &str, host: RowHost, line: &str, group: SharedString) -> Div
         .overflow_hidden()
         .whitespace_nowrap()
         .text_size(px(11.0))
-        .text_color(gpui::rgb(SUBTLE))
-        .group_hover(group, |style| style.text_color(gpui::rgb(TEXT_2)));
+        .text_color(gpui::rgb(t.subtle))
+        .group_hover(group, |style| style.text_color(gpui::rgb(t.text_2)));
     for (index, piece) in detail_pieces(host, line).into_iter().enumerate() {
         if index > 0 {
-            drawn = drawn.child(div().text_color(gpui::rgb(FAINT)).child("·"));
+            drawn = drawn.child(div().text_color(gpui::rgb(t.faint)).child("·"));
         }
-        drawn = drawn.child(detail_piece(piece));
+        drawn = drawn.child(detail_piece(piece, t));
     }
     drawn
 }
 
-fn detail_piece(piece: DetailPiece) -> Div {
+fn detail_piece(piece: DetailPiece, t: &UiTheme) -> Div {
     match piece {
         DetailPiece::Text(text) => div().child(text),
         DetailPiece::Online(text) => div()
             .flex()
             .items_center()
             .gap(px(5.0))
-            .child(dot(6.0, STATUS_OK))
+            .child(dot(6.0, t.status_ok))
             .child(text),
         DetailPiece::Mono { lead, value } => div()
             .flex()
@@ -1327,14 +1332,14 @@ fn dot(size: f32, color: u32) -> Div {
 
 /// The chip at a row's trail: a dot and the state for the current row, an
 /// amber tag for one that needs pairing.
-fn state_chip(row: &Row, state: &RowState) -> Div {
+fn state_chip(row: &Row, state: &RowState, t: &UiTheme) -> Div {
     let label = state.label();
     let selector = format!("connections-state-{}", row.key());
     match state {
-        RowState::NotPaired => tag(format!("connections-not-paired-{}", row.label), label),
-        RowState::NeedsPairing => tag(selector, label),
-        RowState::Connected => dotted(selector, STATUS_OK, label),
-        RowState::Disconnected { .. } => dotted(selector, STATUS_IDLE, label),
+        RowState::NotPaired => tag(format!("connections-not-paired-{}", row.label), label, t),
+        RowState::NeedsPairing => tag(selector, label, t),
+        RowState::Connected => dotted(selector, t.status_ok, label),
+        RowState::Disconnected { .. } => dotted(selector, t.status_idle, label),
         RowState::Connecting => div().debug_selector(move || selector).child(label),
     }
 }
@@ -1351,7 +1356,7 @@ fn dotted(selector: String, color: u32, label: &'static str) -> Div {
 }
 
 /// An amber tag reading `label`.
-fn tag(selector: String, label: &'static str) -> Div {
+fn tag(selector: String, label: &'static str, t: &UiTheme) -> Div {
     div()
         .debug_selector(move || selector)
         .flex()
@@ -1361,16 +1366,17 @@ fn tag(selector: String, label: &'static str) -> Div {
         .rounded(px(5.0))
         .text_size(px(10.5))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(gpui::rgb(ASKING))
-        .bg(gpui::rgba(ASK_WASH))
+        .text_color(gpui::rgb(t.asking))
+        .bg(gpui::rgba(t.ask_wash))
         .border_1()
-        .border_color(gpui::rgba(ASK_BORDER))
+        .border_color(gpui::rgba(t.ask_border))
         .child(label)
 }
 
 /// The footer: `+ Add host` and Close, ruled off from the list; Close alone
 /// while the add form shows.
 fn footer(form_open: bool, draw: &Draw<'_>, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let close = control_button(
         PickerControl::Close,
         ButtonKind::Outlined,
@@ -1400,7 +1406,7 @@ fn footer(form_open: bool, draw: &Draw<'_>, cx: &mut Context<RootView>) -> Div {
     .child(
         div()
             .text_size(px(15.0))
-            .text_color(gpui::rgb(TEXT_2))
+            .text_color(gpui::rgb(t.text_2))
             .child("+"),
     )
     .child("Add host");
@@ -1414,7 +1420,7 @@ fn footer(form_open: bool, draw: &Draw<'_>, cx: &mut Context<RootView>) -> Div {
         .px(px(14.0))
         .pb(px(14.0))
         .border_t_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
         .child(add)
         .child(close)
 }
@@ -1428,6 +1434,7 @@ fn add_form(
     draw: &Draw<'_>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let [first, second] = form.mode.fields();
     let [first_control, second_control] = PickerControl::fields(form.mode);
     let field = |field: AddField, control: PickerControl| {
@@ -1437,11 +1444,12 @@ fn add_form(
     let result = (form.mode == AddMode::Ssh)
         .then(|| form.test.text())
         .flatten()
-        .map(|text| aligned(test_result(&form.test, text)));
+        .map(|text| aligned(test_result(&form.test, text, &t)));
     let error = error.map(|error| {
         aligned(error_box(
             div().debug_selector(|| "connections-error".to_owned()),
             error.to_owned(),
+            &t,
         ))
     });
     let fields: Vec<Div> = [field(first, first_control), field(second, second_control)]
@@ -1461,9 +1469,9 @@ fn add_form(
         .mx(px(14.0))
         .p(px(12.0))
         .border_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
         .rounded(px(10.0))
-        .bg(gpui::rgb(RAISED))
+        .bg(gpui::rgb(t.raised))
         .flex()
         .flex_col()
         .gap(px(8.0))
@@ -1476,13 +1484,14 @@ fn add_form(
 
 /// The form's title and its Tailnet | SSH switch.
 fn form_top(mode: AddMode, draw: &Draw<'_>, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let switch = div()
         .flex()
         .p(px(3.0))
         .gap(px(2.0))
-        .bg(gpui::rgb(MODAL_INSET))
+        .bg(gpui::rgb(t.modal_inset))
         .border_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
         .rounded(px(8.0))
         .child(segment(AddMode::Tailnet, mode, draw, cx))
         .child(segment(AddMode::Ssh, mode, draw, cx));
@@ -1506,6 +1515,7 @@ fn segment(
     draw: &Draw<'_>,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let control = PickerControl::of_mode(this);
     let selector = control.selector(draw.rows);
     let on = this == mode;
@@ -1520,14 +1530,14 @@ fn segment(
         .cursor_pointer()
         .when(on, |segment| {
             segment
-                .bg(gpui::rgb(POPOVER_HOVER))
-                .text_color(gpui::rgb(TEXT))
+                .bg(gpui::rgb(t.popover_hover))
+                .text_color(gpui::rgb(t.text))
                 .font_weight(FontWeight::SEMIBOLD)
         })
         .when(!on, |segment| {
             segment
-                .text_color(gpui::rgb(TEXT_2))
-                .hover(|style| style.text_color(gpui::rgb(TEXT)))
+                .text_color(gpui::rgb(t.text_2))
+                .hover(|style| style.text_color(gpui::rgb(t.text)))
         })
         .when(draw.focus == control, |segment| {
             segment.child(focus_ring(6.0, &theme(cx)))
@@ -1587,7 +1597,7 @@ fn field_row(
             div()
                 .flex_none()
                 .w(px(FIELD_LABEL_WIDTH))
-                .text_color(gpui::rgb(TEXT_2))
+                .text_color(gpui::rgb(t.text_2))
                 .child(field.label),
         )
         .child(frame)
@@ -1605,28 +1615,28 @@ fn aligned(content: Div) -> Div {
 
 /// Test connection's line: a green check and the host's name once it
 /// passed, the failure in the error box, the wait muted.
-fn test_result(test: &SshTest, text: String) -> Div {
+fn test_result(test: &SshTest, text: String, t: &UiTheme) -> Div {
     let line = div().debug_selector(|| "connections-ssh-form-result".to_owned());
     match test {
-        SshTest::Failed(_) => error_box(line, text),
+        SshTest::Failed(_) => error_box(line, text, t),
         SshTest::Passed(_) => line
             .flex()
             .items_center()
             .gap(px(7.0))
-            .text_color(gpui::rgb(TEXT))
-            .child(check_disc())
+            .text_color(gpui::rgb(t.text))
+            .child(check_disc(t))
             .child(text),
-        SshTest::Idle | SshTest::Testing => line.text_color(gpui::rgb(TEXT_2)).child(text),
+        SshTest::Idle | SshTest::Testing => line.text_color(gpui::rgb(t.text_2)).child(text),
     }
 }
 
 /// A green check on its 16 px disc.
-fn check_disc() -> Div {
+fn check_disc(t: &UiTheme) -> Div {
     div()
         .flex_none()
         .size(px(16.0))
         .rounded_full()
-        .bg(gpui::rgba(OK_WASH))
+        .bg(gpui::rgba(t.ok_wash))
         .flex()
         .items_center()
         .justify_center()
@@ -1634,16 +1644,16 @@ fn check_disc() -> Div {
             svg()
                 .path(CHECK_ICON)
                 .size(px(11.0))
-                .text_color(gpui::rgb(STATUS_OK)),
+                .text_color(gpui::rgb(t.status_ok)),
         )
 }
 
 /// `line` styled as the picker's error box, showing `text`.
-fn error_box(line: Div, text: String) -> Div {
+fn error_box(line: Div, text: String, t: &UiTheme) -> Div {
     line.px(px(6.0))
         .py(px(3.0))
         .rounded(px(4.0))
-        .bg(gpui::rgb(DANGER_BG))
-        .text_color(gpui::rgb(DANGER))
+        .bg(gpui::rgb(t.danger_bg))
+        .text_color(gpui::rgb(t.danger))
         .child(text)
 }

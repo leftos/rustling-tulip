@@ -23,13 +23,9 @@ use crate::dashboard_rows::{
 };
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
-use crate::palette::{
-    ASK_BORDER, ASK_WASH, ASKING, CHIP, CONTEXT_HOT, DANGER, DANGER_WASH, FAINT, GROUND, LILAC,
-    LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2, WAITING, WORKING,
-};
 use crate::status_glyph::{GlyphSize, Shape, glyph, glyph_view};
 use crate::ui_theme::{UiTheme, theme};
-use crate::{RootView, TEXT, UI_TEXT_SIZE};
+use crate::{RootView, UI_TEXT_SIZE};
 
 /// The grid's columns, as the mock sizes them; Now and Summary share what is
 /// left.
@@ -122,19 +118,20 @@ impl RootView {
 
     /// The Dashboard tab's body.
     pub(crate) fn dashboard_tab_element(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
         let columns = self.dashboard_columns();
         let counts = dashboard::model(&self.sidebar, self.dashboard_facts.facts()).counts();
         let accents = self.sidebar.session_accents();
         let mut body: Vec<AnyElement> = Vec::new();
         let mut row_at: HashMap<String, usize> = HashMap::new();
         for (heading, rows) in self.dashboard_view_rows() {
-            body.push(group_heading(heading, rows.len()));
+            body.push(group_heading(heading, rows.len(), &t));
             for cells in &rows {
                 row_at.insert(cells.session_id.clone(), body.len());
                 let accent = accents
                     .get(cells.session_id.as_str())
                     .copied()
-                    .unwrap_or(TEXT_2);
+                    .unwrap_or(t.text_2);
                 body.push(self.dashboard_row(cells, columns, accent, cx));
                 body.extend(
                     cells
@@ -152,16 +149,16 @@ impl RootView {
             .flex_1()
             .size_full()
             .min_w(px(0.0))
-            .bg(gpui::rgb(GROUND))
+            .bg(gpui::rgb(t.ground))
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
+            .text_color(gpui::rgb(t.text))
             .debug_selector(|| "dashboard-view".to_owned())
             .child(width_probe(cx))
             .child(header_strip(counts, self.dashboard_figures(), &theme(cx)))
             .when(!chips.is_empty(), |view| {
                 view.child(queue_strip(&chips, &row_at, cx))
             })
-            .child(column_header(columns))
+            .child(column_header(columns, &t))
             .child(
                 div()
                     .id("dashboard-body")
@@ -186,6 +183,7 @@ impl RootView {
         accent: u32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let t = theme(cx);
         let id = cells.session_id.clone();
         let name = format!("dashboard-row-{id}");
         let mark = self.sidebar.session(&id).map_or_else(
@@ -217,18 +215,18 @@ impl RootView {
             .min_h(px(ROW_MIN_H))
             .py(px(5.0))
             .border_t_1()
-            .border_color(gpui::rgb(LINE))
+            .border_color(gpui::rgb(t.line))
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(SURFACE)))
+            .hover(|style| style.bg(gpui::rgb(t.surface)))
             .when(cells.asking, |row| {
-                row.bg(gpui::rgba(ASK_WASH)).child(
+                row.bg(gpui::rgba(t.ask_wash)).child(
                     div()
                         .absolute()
                         .left_0()
                         .top_0()
                         .bottom_0()
                         .w(px(2.0))
-                        .bg(gpui::rgb(ASKING))
+                        .bg(gpui::rgb(t.asking))
                         .debug_selector(move || asking),
                 )
             })
@@ -238,7 +236,7 @@ impl RootView {
                 &format!("{name}-glyph"),
                 &theme(cx),
             )))
-            .child(fixed(SESSION_W).child(session_cell(cells, accent, &name)))
+            .child(fixed(SESSION_W).child(session_cell(cells, accent, &name, &t)))
             .when(columns.linear, |row| {
                 row.child(
                     fixed(LINEAR_W).child(
@@ -248,23 +246,23 @@ impl RootView {
                     ),
                 )
             })
-            .child(flexible().child(now_cell(cells, mark.shape, &name)))
+            .child(flexible().child(now_cell(cells, mark.shape, &name, &t)))
             .when(columns.summary, |row| {
-                row.child(flexible().child(summary_cell(cells, &name)))
+                row.child(flexible().child(summary_cell(cells, &name, &t)))
             })
             .when(columns.agents, |row| {
                 row.child(
                     fixed(AGENTS_W)
-                        .text_color(gpui::rgb(TEXT_2))
+                        .text_color(gpui::rgb(t.text_2))
                         .child(line_text(&format!("{name}-agents"), &cells.agents)),
                 )
             })
-            .child(fixed(CONTEXT_W).child(context_cell(cells)))
+            .child(fixed(CONTEXT_W).child(context_cell(cells, &t)))
             .when(columns.activity, |row| {
-                row.child(fixed(ACTIVITY_W).child(activity_cell(cells)))
+                row.child(fixed(ACTIVITY_W).child(activity_cell(cells, &t)))
             })
-            .child(fixed(RUN_W).child(numbers(&cells.run, &cells.last)))
-            .child(fixed(COST_W).child(numbers(&cells.cost, &cells.tokens)))
+            .child(fixed(RUN_W).child(numbers(&cells.run, &cells.last, &t)))
+            .child(fixed(COST_W).child(numbers(&cells.cost, &cells.tokens, &t)))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.select_session(&id, window, cx);
             }))
@@ -386,7 +384,7 @@ fn two_lines(first: impl IntoElement, second: Option<Div>) -> Div {
         })
 }
 
-fn session_cell(cells: &RowCells, accent: u32, name: &str) -> Div {
+fn session_cell(cells: &RowCells, accent: u32, name: &str, t: &UiTheme) -> Div {
     let second = div()
         .flex()
         .items_center()
@@ -402,14 +400,14 @@ fn session_cell(cells: &RowCells, accent: u32, name: &str) -> Div {
         .child(
             div()
                 .flex_none()
-                .text_color(gpui::rgb(TEXT_2))
+                .text_color(gpui::rgb(t.text_2))
                 .child(cells.container.clone()),
         )
         .child(
             line_text(&format!("{name}-branch"), &cells.branch)
                 .flex_1()
                 .font_family(DEFAULT_FAMILY)
-                .text_color(gpui::rgb(SUBTLE)),
+                .text_color(gpui::rgb(t.subtle)),
         );
     two_lines(
         line_text(&format!("{name}-label"), &cells.label).font_weight(FontWeight::SEMIBOLD),
@@ -419,18 +417,18 @@ fn session_cell(cells: &RowCells, accent: u32, name: &str) -> Div {
 
 /// The state word's colour: the glyph's hue, quieter for an idle, starting
 /// or ended session.
-fn state_colour(shape: Shape) -> u32 {
+fn state_colour(shape: Shape, t: &UiTheme) -> u32 {
     match shape {
-        Shape::Working | Shape::Background => WORKING,
-        Shape::Asking => ASKING,
-        Shape::Waiting => WAITING,
-        Shape::Error => DANGER,
-        Shape::Idle => TEXT_2,
-        Shape::Spawning | Shape::Stopped => SUBTLE,
+        Shape::Working | Shape::Background => t.working,
+        Shape::Asking => t.asking,
+        Shape::Waiting => t.waiting,
+        Shape::Error => t.danger,
+        Shape::Idle => t.text_2,
+        Shape::Spawning | Shape::Stopped => t.subtle,
     }
 }
 
-fn now_cell(cells: &RowCells, shape: Shape, name: &str) -> Div {
+fn now_cell(cells: &RowCells, shape: Shape, name: &str, t: &UiTheme) -> Div {
     let first = div()
         .flex()
         .items_center()
@@ -441,14 +439,14 @@ fn now_cell(cells: &RowCells, shape: Shape, name: &str) -> Div {
             div()
                 .flex_none()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(gpui::rgb(state_colour(shape)))
+                .text_color(gpui::rgb(state_colour(shape, t)))
                 .child(cells.state_word.clone()),
         )
         .when_some(cells.age.clone(), |line, age| {
             line.child(
                 div()
                     .flex_none()
-                    .text_color(gpui::rgb(SUBTLE))
+                    .text_color(gpui::rgb(t.subtle))
                     .child(format!("· {age}")),
             )
         })
@@ -457,26 +455,26 @@ fn now_cell(cells: &RowCells, shape: Shape, name: &str) -> Div {
                 .stuck
                 .iter()
                 .enumerate()
-                .map(|(index, flag)| stuck_flag(&format!("{name}-flag-{index}"), flag)),
+                .map(|(index, flag)| stuck_flag(&format!("{name}-flag-{index}"), flag, t)),
         );
     two_lines(
         first,
-        Some(line_text(&format!("{name}-now"), &cells.now).text_color(gpui::rgb(TEXT_2))),
+        Some(line_text(&format!("{name}-now"), &cells.now).text_color(gpui::rgb(t.text_2))),
     )
 }
 
-fn summary_cell(cells: &RowCells, name: &str) -> Div {
+fn summary_cell(cells: &RowCells, name: &str, t: &UiTheme) -> Div {
     two_lines(
         line_text(&format!("{name}-summary"), &cells.summary),
         cells.summary_older.as_ref().map(|older| {
-            line_text(&format!("{name}-summary-older"), older).text_color(gpui::rgb(SUBTLE))
+            line_text(&format!("{name}-summary-older"), older).text_color(gpui::rgb(t.subtle))
         }),
     )
 }
 
 /// One stuck flag: a tag that shrinks with its line and ends in `…` rather
 /// than spilling into the next column.
-fn stuck_flag(id: &str, text: &str) -> Div {
+fn stuck_flag(id: &str, text: &str, t: &UiTheme) -> Div {
     let selector = id.to_owned();
     truncating(id, StyledText::new(text.to_owned()))
         .debug_selector(move || selector.clone())
@@ -484,21 +482,21 @@ fn stuck_flag(id: &str, text: &str) -> Div {
         .min_w(px(0.0))
         .px(px(5.0))
         .rounded(px(3.0))
-        .bg(gpui::rgba(DANGER_WASH))
+        .bg(gpui::rgba(t.danger_wash))
         .text_size(px(11.0))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(gpui::rgb(DANGER))
+        .text_color(gpui::rgb(t.danger))
 }
 
 /// The context bar and its figure, tagged `dashboard-ctx-{id}`, and
 /// `dashboard-ctx-{id}-hot` on the bar's fill past 80%.
-fn context_cell(cells: &RowCells) -> Div {
+fn context_cell(cells: &RowCells, t: &UiTheme) -> Div {
     let base = format!("dashboard-ctx-{}", cells.session_id);
     let hot = format!("{base}-hot");
     let colour = if cells.context_hot {
-        CONTEXT_HOT
+        t.context_hot
     } else {
-        TEXT_2
+        t.text_2
     };
     let fill = cells
         .context_percent
@@ -517,7 +515,7 @@ fn context_cell(cells: &RowCells) -> Div {
                 .h(px(BAR_H))
                 .rounded(px(3.0))
                 .overflow_hidden()
-                .bg(gpui::rgb(CHIP))
+                .bg(gpui::rgb(t.chip))
                 .when_some(fill, |bar, fill| {
                     bar.child(
                         div()
@@ -532,12 +530,12 @@ fn context_cell(cells: &RowCells) -> Div {
 }
 
 /// The ten one-minute bars, faint while the window is quiet.
-fn activity_cell(cells: &RowCells) -> Div {
+fn activity_cell(cells: &RowCells, t: &UiTheme) -> Div {
     let name = format!("dashboard-spark-{}", cells.session_id);
     let (colour, opacity) = if cells.activity_quiet {
-        (FAINT, 1.0)
+        (t.faint, 1.0)
     } else {
-        (WORKING, 0.75)
+        (t.working, 0.75)
     };
     div()
         .flex()
@@ -556,7 +554,7 @@ fn activity_cell(cells: &RowCells) -> Div {
 }
 
 /// A right-aligned pair of figures, the second smaller and quieter.
-fn numbers(first: &str, second: &str) -> Div {
+fn numbers(first: &str, second: &str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
@@ -567,7 +565,7 @@ fn numbers(first: &str, second: &str) -> Div {
         .child(
             div()
                 .text_size(px(SMALL_TEXT))
-                .text_color(gpui::rgb(SUBTLE))
+                .text_color(gpui::rgb(t.subtle))
                 .child(second.to_owned()),
         )
 }
@@ -586,7 +584,7 @@ fn nested_row(session_id: &str, nested: &NestedRow, columns: Columns, t: &UiThem
             0.0
         };
     let indent = 12.0 + if nested.depth > 0 { 18.0 } else { 0.0 };
-    let task = line_text(&format!("{name}-task"), &nested.task).text_color(gpui::rgb(TEXT_2));
+    let task = line_text(&format!("{name}-task"), &nested.task).text_color(gpui::rgb(t.text_2));
     let task = if nested.mono {
         task.font_family(DEFAULT_FAMILY).text_size(px(SMALL_TEXT))
     } else {
@@ -613,7 +611,7 @@ fn nested_row(session_id: &str, nested: &NestedRow, columns: Columns, t: &UiThem
                             .flex_none()
                             .w(px(14.0))
                             .font_family(DEFAULT_FAMILY)
-                            .text_color(gpui::rgb(LINE_STRONG))
+                            .text_color(gpui::rgb(t.line_strong))
                             .child("└"),
                     )
                     .child(glyph_view(
@@ -628,7 +626,7 @@ fn nested_row(session_id: &str, nested: &NestedRow, columns: Columns, t: &UiThem
         .child(flexible().child(task))
         .child(
             fixed(stuck_w).when_some(nested.stuck.as_deref(), |cell, flag| {
-                cell.child(stuck_flag(&format!("{name}-flag"), flag))
+                cell.child(stuck_flag(&format!("{name}-flag"), flag, t))
             }),
         )
         .child(
@@ -636,7 +634,7 @@ fn nested_row(session_id: &str, nested: &NestedRow, columns: Columns, t: &UiThem
                 .flex()
                 .justify_end()
                 .text_size(px(SMALL_TEXT))
-                .text_color(gpui::rgb(SUBTLE))
+                .text_color(gpui::rgb(t.subtle))
                 .child(nested.age.clone()),
         )
         .child(fixed(COST_W))
@@ -644,11 +642,11 @@ fn nested_row(session_id: &str, nested: &NestedRow, columns: Columns, t: &UiThem
 }
 
 /// A group's heading and its row count; the Needs you heading in amber.
-fn group_heading(heading: &'static str, count: usize) -> AnyElement {
+fn group_heading(heading: &'static str, count: usize, t: &UiTheme) -> AnyElement {
     let colour = if heading == GroupKind::NeedsYou.heading() {
-        ASKING
+        t.asking
     } else {
-        TEXT_2
+        t.text_2
     };
     let name = format!(
         "dashboard-group-{}",
@@ -674,26 +672,26 @@ fn group_heading(heading: &'static str, count: usize) -> AnyElement {
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(gpui::rgb(SUBTLE))
+                .text_color(gpui::rgb(t.subtle))
                 .child(count.to_string()),
         )
         .into_any_element()
 }
 
 /// The column names over the rows, outside the scrolled body so they stay.
-fn column_header(columns: Columns) -> Div {
+fn column_header(columns: Columns, t: &UiTheme) -> Div {
     let caps = |text: &'static str| {
         div()
             .text_size(px(CAPS_TEXT))
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(gpui::rgb(SUBTLE))
+            .text_color(gpui::rgb(t.subtle))
             .child(text)
     };
     grid_line(div())
         .flex_none()
         .h(px(COLUMNS_H))
         .border_b_1()
-        .border_color(gpui::rgb(LINE))
+        .border_color(gpui::rgb(t.line))
         .debug_selector(|| "dashboard-columns".to_owned())
         .child(fixed(GLYPH_W))
         .child(fixed(SESSION_W).child(caps("SESSION")))
@@ -762,13 +760,13 @@ fn header_strip(counts: HeaderCounts, figures: Option<HeaderFigures>, t: &UiThem
                     .px(px(9.0))
                     .py(px(3.0))
                     .rounded(px(5.0))
-                    .text_color(gpui::rgb(if asking { ASKING } else { TEXT_2 }))
+                    .text_color(gpui::rgb(if asking { t.asking } else { t.text_2 }))
                     .when(asking, |pill| {
-                        pill.bg(gpui::rgba(ASK_WASH))
+                        pill.bg(gpui::rgba(t.ask_wash))
                             .border_1()
-                            .border_color(gpui::rgba(ASK_BORDER))
+                            .border_color(gpui::rgba(t.ask_border))
                     })
-                    .when(!asking, |pill| pill.bg(gpui::rgb(CHIP)))
+                    .when(!asking, |pill| pill.bg(gpui::rgb(t.chip)))
                     .child(glyph_view(
                         mark,
                         GlyphSize::Footer,
@@ -778,7 +776,7 @@ fn header_strip(counts: HeaderCounts, figures: Option<HeaderFigures>, t: &UiThem
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(gpui::rgb(if asking { ASKING } else { TEXT }))
+                            .text_color(gpui::rgb(if asking { t.asking } else { t.text }))
                             .child(pill.count.to_string()),
                     )
                     .child(pill.label)
@@ -792,8 +790,8 @@ fn header_strip(counts: HeaderCounts, figures: Option<HeaderFigures>, t: &UiThem
         .px(px(18.0))
         .py(px(10.0))
         .border_b_1()
-        .border_color(gpui::rgb(LINE))
-        .bg(gpui::rgb(SURFACE))
+        .border_color(gpui::rgb(t.line))
+        .bg(gpui::rgb(t.surface))
         .debug_selector(|| "dashboard-header".to_owned())
         .child(
             div()
@@ -809,23 +807,25 @@ fn header_strip(counts: HeaderCounts, figures: Option<HeaderFigures>, t: &UiThem
                 .children(pills),
         )
         .child(div().flex_1())
-        .when_some(figures, |strip, figures| strip.child(figures_view(figures)))
+        .when_some(figures, |strip, figures| {
+            strip.child(figures_view(figures, t))
+        })
 }
 
-fn figure(value: String, after: &'static str) -> Div {
+fn figure(value: String, after: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .gap(px(4.0))
         .child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(gpui::rgb(TEXT))
+                .text_color(gpui::rgb(t.text))
                 .child(value),
         )
         .child(after)
 }
 
-fn figures_view(figures: HeaderFigures) -> Div {
+fn figures_view(figures: HeaderFigures, t: &UiTheme) -> Div {
     let releases = figures.releases.into_iter().map(|release| {
         #[expect(
             clippy::cast_possible_truncation,
@@ -844,8 +844,8 @@ fn figures_view(figures: HeaderFigures) -> Div {
                     .h(px(4.0))
                     .rounded(px(2.0))
                     .overflow_hidden()
-                    .bg(gpui::rgb(CHIP))
-                    .child(div().h_full().w(px(fill)).bg(gpui::rgb(LILAC))),
+                    .bg(gpui::rgb(t.chip))
+                    .child(div().h_full().w(px(fill)).bg(gpui::rgb(t.lilac))),
             )
             .child(format!("{}/{}", release.done, release.total))
     });
@@ -854,24 +854,24 @@ fn figures_view(figures: HeaderFigures) -> Div {
         .items_center()
         .gap(px(16.0))
         .text_size(px(12.0))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .debug_selector(|| "dashboard-figures".to_owned())
         .child(
             div()
                 .flex()
                 .gap(px(4.0))
                 .child("Today")
-                .child(figure(figures.cost, "API-equiv")),
+                .child(figure(figures.cost, "API-equiv", t)),
         )
-        .child(figure(figures.tokens, "tokens"))
-        .child(figure(figures.commits.to_string(), "commits"))
-        .child(figure(figures.issues_done.to_string(), "issues Done"))
+        .child(figure(figures.tokens, "tokens", t))
+        .child(figure(figures.commits.to_string(), "commits", t))
+        .child(figure(figures.issues_done.to_string(), "issues Done", t))
         .children(releases)
         .when_some(figures.synced, |strip, synced| {
             strip.child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(gpui::rgb(SUBTLE))
+                    .text_color(gpui::rgb(t.subtle))
                     .child(synced),
             )
         })
@@ -884,6 +884,7 @@ fn queue_strip(
     row_at: &HashMap<String, usize>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let mark = glyph(
         SessionStatus::AwaitingInput,
         false,
@@ -909,8 +910,8 @@ fn queue_strip(
             .py(px(3.0))
             .rounded(px(5.0))
             .border_1()
-            .border_color(gpui::rgba(ASK_BORDER))
-            .bg(gpui::rgb(RAISED))
+            .border_color(gpui::rgba(t.ask_border))
+            .bg(gpui::rgb(t.raised))
             .text_size(px(12.0))
             .cursor_pointer()
             .child(glyph_view(
@@ -931,7 +932,7 @@ fn queue_strip(
                 div()
                     .flex_none()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(gpui::rgb(ASKING))
+                    .text_color(gpui::rgb(t.asking))
                     .child(chip.age.clone()),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -949,15 +950,15 @@ fn queue_strip(
         .px(px(18.0))
         .py(px(7.0))
         .border_b_1()
-        .border_color(gpui::rgb(LINE))
-        .bg(gpui::rgba(ASK_WASH))
+        .border_color(gpui::rgb(t.line))
+        .bg(gpui::rgba(t.ask_wash))
         .debug_selector(|| "dashboard-queue-strip".to_owned())
         .child(
             div()
                 .flex_none()
                 .text_size(px(CAPS_TEXT))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(gpui::rgb(ASKING))
+                .text_color(gpui::rgb(t.asking))
                 .child("QUEUE"),
         )
         .children(chips)
@@ -966,7 +967,7 @@ fn queue_strip(
             div()
                 .flex_none()
                 .text_size(px(SMALL_TEXT))
-                .text_color(gpui::rgb(SUBTLE))
+                .text_color(gpui::rgb(t.subtle))
                 .child(QUEUE_HINT),
         )
 }

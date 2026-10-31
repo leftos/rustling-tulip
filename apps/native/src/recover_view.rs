@@ -16,14 +16,13 @@ use protocol::{ClientMessage, DaemonMessage, RecoverItemResult, SessionSnapshot}
 use crate::activity_bar::badge_text;
 use crate::buttons::RING_ROOM;
 use crate::notice_view::modal_panel;
-use crate::palette::TRANSPARENT;
 use crate::recover::{
     Activation, Control, FocusMove, Group, GroupKind, Names, RECOVER_TIMEOUT, RecoverDialog, Row,
     other_toggle_label,
 };
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
-use crate::ui_theme::theme;
-use crate::{BORDER, MUTED, RootView, TEXT, WARNING, new_request_id, spawns};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, new_request_id, spawns};
 
 const TITLE: &str = "Recover sessions";
 /// The most of the window's height the rows take before they scroll.
@@ -458,6 +457,7 @@ impl RootView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.recover.as_ref()?;
         let groups: Vec<Div> = dialog
             .groups()
@@ -472,7 +472,7 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .children(dialog.empty_text().map(muted))
+            .children(dialog.empty_text().map(|text| muted(text, &t)))
             .children(groups);
         let footer = div()
             .flex()
@@ -485,7 +485,7 @@ impl RootView {
             .track_focus(&self.recover_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(list)
-            .children(dialog.error().map(|error| warning(error.to_owned())))
+            .children(dialog.error().map(|error| warning(error.to_owned(), &t)))
             .child(footer);
         Some(backdrop("recover", panel, &theme(cx)))
     }
@@ -635,6 +635,7 @@ fn group_block(dialog: &RecoverDialog, group: &Group, cx: &mut Context<RootView>
 /// One row: its checkbox, label and end over where it ran and its choices,
 /// then why it cannot be recovered or why it failed.
 fn row_block(dialog: &RecoverDialog, id: &str, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let Some(row) = dialog.row(id) else {
         return div();
     };
@@ -644,14 +645,14 @@ fn row_block(dialog: &RecoverDialog, id: &str, cx: &mut Context<RootView>) -> Di
         .gap(px(8.0))
         .child(control_button(dialog, Control::Row(id.to_owned()), cx))
         .child(div().flex_1().min_w_0().child(row.label.clone()))
-        .child(muted(row.ended.clone()));
+        .child(muted(row.ended.clone(), &t));
     let mut details = div()
         .flex()
         .flex_wrap()
         .items_center()
         .gap(px(8.0))
         .pl(px(28.0))
-        .child(muted(row.place.clone()));
+        .child(muted(row.place.clone(), &t));
     if row.disabled.is_none() {
         if resumes(row) {
             details = details.child(conversation_choice(dialog, row, cx));
@@ -670,16 +671,20 @@ fn row_block(dialog: &RecoverDialog, id: &str, cx: &mut Context<RootView>) -> Di
         .gap(px(2.0))
         .p(px(6.0))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
+        .border_color(gpui::rgb(t.border))
         .rounded(px(4.0))
         .child(heading)
         .child(details)
         .children(
             row.disabled
                 .clone()
-                .map(|reason| muted(reason).pl(px(28.0))),
+                .map(|reason| muted(reason, &t).pl(px(28.0))),
         )
-        .children(row.error.clone().map(|error| warning(error).pl(px(28.0))))
+        .children(
+            row.error
+                .clone()
+                .map(|error| warning(error, &t).pl(px(28.0))),
+        )
 }
 
 /// The conversation a row resumes: a chip that cycles through several, or
@@ -689,6 +694,7 @@ fn conversation_choice(
     row: &Row,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let control = Control::Conversation(row.id.clone());
     if row.conversations.len() > 1 {
         return control_button(dialog, control, cx).into_any_element();
@@ -702,18 +708,18 @@ fn conversation_choice(
         .rounded(px(4.0))
         .border_1()
         .border_color(if focused {
-            gpui::rgb(TEXT)
+            gpui::rgb(t.text)
         } else {
-            gpui::rgba(TRANSPARENT)
+            gpui::rgba(t.transparent)
         })
-        .child(muted(chosen_conversation(row).unwrap_or_default()))
+        .child(muted(chosen_conversation(row).unwrap_or_default(), &t))
         .into_any_element()
 }
 
-fn muted(text: impl Into<gpui::SharedString>) -> Div {
-    div().text_color(gpui::rgb(MUTED)).child(text.into())
+fn muted(text: impl Into<gpui::SharedString>, t: &UiTheme) -> Div {
+    div().text_color(gpui::rgb(t.muted)).child(text.into())
 }
 
-fn warning(text: impl Into<gpui::SharedString>) -> Div {
-    div().text_color(gpui::rgb(WARNING)).child(text.into())
+fn warning(text: impl Into<gpui::SharedString>, t: &UiTheme) -> Div {
+    div().text_color(gpui::rgb(t.warning)).child(text.into())
 }

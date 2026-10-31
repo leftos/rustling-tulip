@@ -11,10 +11,9 @@ use gpui::{
 use crate::RootView;
 use crate::host_path_prompt::{HostPathPrompt, PromptControl};
 use crate::notice_view::modal_panel;
-use crate::palette::{BORDER, DANGER, DANGER_BG, MUTED, TEXT};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::ui_theme::theme;
+use crate::ui_theme::{UiTheme, theme};
 
 /// The open prompt: its state and its path field.
 pub(crate) struct HostPathDialog {
@@ -265,6 +264,7 @@ impl RootView {
     /// The prompt over a backdrop that takes every click beneath it; a click
     /// on the backdrop itself does nothing.
     pub(crate) fn host_path_prompt_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.host_path_prompt.as_ref()?;
         let prompt = &dialog.prompt;
         let focus = prompt.focus();
@@ -272,11 +272,11 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(path_box(dialog, focus))
+            .child(path_box(dialog, focus, &t))
             .child(
                 div()
                     .debug_selector(|| "host-path-hint".to_owned())
-                    .text_color(gpui::rgb(MUTED))
+                    .text_color(gpui::rgb(t.muted))
                     .child(prompt.hint()),
             )
             .children(prompt.error().map(|error| {
@@ -285,8 +285,8 @@ impl RootView {
                     .px(px(6.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
-                    .bg(gpui::rgb(DANGER_BG))
-                    .text_color(gpui::rgb(DANGER))
+                    .bg(gpui::rgb(t.danger_bg))
+                    .text_color(gpui::rgb(t.danger))
                     .child(error.to_owned())
             }));
         let panel = modal_panel("host-path-panel", &theme(cx))
@@ -303,7 +303,7 @@ impl RootView {
 }
 
 /// The path field in its box.
-fn path_box(dialog: &HostPathDialog, focus: PromptControl) -> Div {
+fn path_box(dialog: &HostPathDialog, focus: PromptControl, t: &UiTheme) -> Div {
     div()
         .debug_selector(|| PromptControl::Path.selector().to_owned())
         .flex()
@@ -312,9 +312,9 @@ fn path_box(dialog: &HostPathDialog, focus: PromptControl) -> Div {
         .rounded(px(4.0))
         .border_1()
         .border_color(gpui::rgb(if focus == PromptControl::Path {
-            TEXT
+            t.text
         } else {
-            BORDER
+            t.border
         }))
         .child(dialog.path_input.clone())
 }

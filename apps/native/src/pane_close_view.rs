@@ -6,12 +6,12 @@ use gpui::{
 };
 use protocol::ClientMessage;
 
+use crate::RootView;
 use crate::notice_view::modal_panel;
 use crate::overlay_owner::Overlay;
 use crate::pane_close::{Control, NOTE, PaneClose, TITLE};
 use crate::session_menu::{ConfirmOwner, backdrop, dialog_button, dialog_look};
 use crate::ui_theme::theme;
-use crate::{MUTED, RootView};
 
 impl RootView {
     /// Whether the pane-close dialog is open.
@@ -161,6 +161,7 @@ impl RootView {
         here: WindowId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let t = theme(cx);
         if !self.overlays.shows(Overlay::PaneClose, here) {
             return None;
         }
@@ -192,7 +193,7 @@ impl RootView {
             .track_focus(&self.pane_ui.dialog_focus)
             .child(header)
             .child(div().child(dialog.body()))
-            .child(div().text_color(gpui::rgb(MUTED)).child(NOTE))
+            .child(div().text_color(gpui::rgb(t.muted)).child(NOTE))
             .child(
                 div()
                     .flex()

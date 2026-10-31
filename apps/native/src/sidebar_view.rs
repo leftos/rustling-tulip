@@ -203,6 +203,19 @@ impl RootView {
                 .collect();
             body.children(groups)
         };
+        self.sidebar_frame(width, body, window, cx)
+    }
+
+    /// The panel `width` wide around `body`: its fill, the header and the
+    /// toolbar above the body.
+    fn sidebar_frame(
+        &self,
+        width: f32,
+        body: Stateful<Div>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme(cx);
         div()
             .flex()
             .flex_col()
@@ -274,32 +287,7 @@ impl RootView {
             );
             let fetch_file = self.more_fetch_file_row(cx);
             let add_repo = self.more_add_repo_row(cx);
-            let add_workspace = if self.sidebar.repos().len() < 2 {
-                div()
-                    .id(MORE_ADD_WORKSPACE_ROW)
-                    .debug_selector(|| MORE_ADD_WORKSPACE_ROW.to_owned())
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(8.0))
-                    .py(px(3.0))
-                    .rounded(px(4.0))
-                    .text_color(gpui::rgb(t.muted))
-                    .child("Add workspace…")
-                    .child(
-                        div()
-                            .debug_selector(|| "sidebar-more-add-workspace-hint".to_owned())
-                            .text_size(px(11.0))
-                            .child(NEEDS_TWO_REPOS),
-                    )
-            } else {
-                menu_item(MORE_ADD_WORKSPACE_ROW, "Add workspace…", false, &theme(cx)).on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.close_more_menu(window, cx);
-                        this.open_workspace_creator(window, cx);
-                    }),
-                )
-            };
+            let add_workspace = self.more_add_workspace_row(cx);
             let resume =
                 crate::sidebar::resume_all_label(self.sidebar.abandoned_count()).map(|label| {
                     menu_item(MORE_RESUME_ALL_ROW, label, false, &theme(cx)).on_click(cx.listener(
@@ -342,6 +330,37 @@ impl RootView {
             deferred(panel).with_priority(1)
         });
         div().relative().flex_none().child(button).children(menu)
+    }
+
+    /// The ⋯ menu's Add workspace row: muted, with why, below two repos.
+    fn more_add_workspace_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
+        if self.sidebar.repos().len() < 2 {
+            div()
+                .id(MORE_ADD_WORKSPACE_ROW)
+                .debug_selector(|| MORE_ADD_WORKSPACE_ROW.to_owned())
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(4.0))
+                .text_color(gpui::rgb(t.muted))
+                .child("Add workspace…")
+                .child(
+                    div()
+                        .debug_selector(|| "sidebar-more-add-workspace-hint".to_owned())
+                        .text_size(px(11.0))
+                        .child(NEEDS_TWO_REPOS),
+                )
+        } else {
+            menu_item(MORE_ADD_WORKSPACE_ROW, "Add workspace…", false, &t).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| {
+                    this.close_more_menu(window, cx);
+                    this.open_workspace_creator(window, cx);
+                },
+            ))
+        }
     }
 
     /// Whether the toolbar's ⋯ menu is open.
@@ -1956,7 +1975,7 @@ impl RootView {
     }
 }
 
-/// A leaf's fill: the chip while `selected`, else the launched tint while
+/// A leaf's fill: the selection while `selected`, else the launched tint while
 /// `highlighted` by Select launched; None leaves the ground, lit on hover.
 fn leaf_ground(selected: bool, highlighted: bool, t: &UiTheme) -> Option<u32> {
     if selected {

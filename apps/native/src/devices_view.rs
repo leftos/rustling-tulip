@@ -9,6 +9,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_BLOCK};
 
+use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::devices::{
     BLOCKED_TAG, BlockConfirm, CONFIRM_BODY, ConfirmButton, DeviceRow, DevicesState, NO_DEVICES,
@@ -18,7 +19,6 @@ use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_view::SettingsTab;
 use crate::ui_theme::theme;
-use crate::{DANGER, MUTED, RootView};
 
 /// The devices model with the block confirm's keyboard focus.
 pub(crate) struct DevicesView {
@@ -204,6 +204,7 @@ impl RootView {
     /// The Remote access page's Devices section, while this client may
     /// block devices.
     pub(crate) fn devices_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         if !self.devices_offered() {
             return None;
         }
@@ -211,7 +212,7 @@ impl RootView {
         let empty = rows.is_empty().then(|| {
             div()
                 .debug_selector(|| "settings-devices-empty".to_owned())
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(NO_DEVICES)
         });
         let section = div()
@@ -227,6 +228,7 @@ impl RootView {
 
     /// The block confirm over a backdrop that takes every click beneath it.
     pub(crate) fn device_block_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let confirm = self.block_confirm()?;
         let buttons = ConfirmButton::ALL.into_iter().map(|pressed| {
             dialog_button(
@@ -246,7 +248,7 @@ impl RootView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(confirm.title()),
             )
-            .child(div().text_color(gpui::rgb(MUTED)).child(CONFIRM_BODY))
+            .child(div().text_color(gpui::rgb(t.muted)).child(CONFIRM_BODY))
             .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
         Some(backdrop("device-block-confirm", panel, &theme(cx)))
     }
@@ -255,6 +257,7 @@ impl RootView {
 /// One approved device: its name and login, its status or the Blocked tag,
 /// then Block, or Forget once blocked.
 fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let id = row.device_id.clone();
     let action = row.action();
     let pressed_id = id.clone();
@@ -285,11 +288,13 @@ fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
             .px(px(6.0))
             .rounded(px(4.0))
             .border_1()
-            .border_color(gpui::rgb(DANGER))
-            .text_color(gpui::rgb(DANGER))
+            .border_color(gpui::rgb(t.danger))
+            .text_color(gpui::rgb(t.danger))
             .child(BLOCKED_TAG)
     } else {
-        div().text_color(gpui::rgb(MUTED)).child(row.status.clone())
+        div()
+            .text_color(gpui::rgb(t.muted))
+            .child(row.status.clone())
     };
     let selector = format!("settings-device-{id}");
     div()
@@ -304,7 +309,11 @@ fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
                 .min_w_0()
                 .gap(px(8.0))
                 .child(row.name.clone())
-                .child(div().text_color(gpui::rgb(MUTED)).child(row.login.clone())),
+                .child(
+                    div()
+                        .text_color(gpui::rgb(t.muted))
+                        .child(row.login.clone()),
+                ),
         )
         .child(state)
         .child(press)

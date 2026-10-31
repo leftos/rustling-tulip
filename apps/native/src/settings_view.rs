@@ -28,9 +28,6 @@ use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
-use crate::palette::{
-    CARD_EDGE, CHIP, MODAL_INSET, POPOVER_HOVER, SELECTION, SUBTLE, TEXT_2, TRANSPARENT,
-};
 use crate::remote_access::{
     PortError, RemoteStatusView, address, apply_port_message, autostart_failure_line,
     autostart_read_failure_line, cert_line, controls_enabled, parse_port, state_line,
@@ -50,7 +47,7 @@ use crate::tabs::{TabCounts, tab_session_counts};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::window_title::compute_title;
-use crate::{Pick, RootView, TEXT, tooltip};
+use crate::{Pick, RootView, tooltip};
 
 /// The tab list's width, its padding and edge included.
 const TAB_LIST_WIDTH: f32 = 150.0;
@@ -2744,12 +2741,13 @@ impl RootView {
     /// and ringed while the list has the keyboard. A group row is a label
     /// only: no id, no click, no hover and no ring.
     fn settings_tab_list(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
         let list_focused = self.settings_tabs_focus.is_focused(window);
         let tabs: Vec<AnyElement> = self
             .settings_rows()
             .into_iter()
             .map(|row| match row {
-                SettingsRow::Group(label) => group_row(label).into_any_element(),
+                SettingsRow::Group(label) => group_row(label, &t).into_any_element(),
                 SettingsRow::Tab(tab) => self
                     .settings_tab_row(tab, list_focused, cx)
                     .into_any_element(),
@@ -2765,9 +2763,9 @@ impl RootView {
             .w(px(TAB_LIST_WIDTH))
             .px(px(10.0))
             .py(px(12.0))
-            .bg(gpui::rgb(MODAL_INSET))
+            .bg(gpui::rgb(t.modal_inset))
             .border_r_1()
-            .border_color(gpui::rgb(CARD_EDGE))
+            .border_color(gpui::rgb(t.card_edge))
             .children(tabs)
     }
 
@@ -2779,13 +2777,14 @@ impl RootView {
         list_focused: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let t = theme(cx);
         let shown = tab == self.settings_tab;
         let selector = tab.selector(self.agents());
         let label = tab.label(self.agents());
         let (text, weight) = if shown {
-            (TEXT, FontWeight::SEMIBOLD)
+            (t.text, FontWeight::SEMIBOLD)
         } else {
-            (TEXT_2, FontWeight::MEDIUM)
+            (t.text_2, FontWeight::MEDIUM)
         };
         div()
             .id(selector)
@@ -2797,16 +2796,16 @@ impl RootView {
             .px(px(12.0))
             .rounded(px(TAB_ROW_RADIUS))
             .border_1()
-            .border_color(gpui::rgba(TRANSPARENT))
+            .border_color(gpui::rgba(t.transparent))
             .font_weight(weight)
             .text_color(gpui::rgb(text))
             .cursor_pointer()
-            .when(shown, |row| row.bg(gpui::rgb(SELECTION)))
+            .when(shown, |row| row.bg(gpui::rgb(t.selection)))
             .when(!shown, |row| {
                 row.hover(|style| {
                     style
-                        .bg(gpui::rgb(POPOVER_HOVER))
-                        .text_color(gpui::rgb(TEXT))
+                        .bg(gpui::rgb(t.popover_hover))
+                        .text_color(gpui::rgb(t.text))
                 })
             })
             .when(shown && list_focused, |row| {
@@ -2817,7 +2816,7 @@ impl RootView {
             }))
             .child(label)
             .children(if tab == SettingsTab::RemoteAccess {
-                self.remote_access_tab_badge()
+                self.remote_access_tab_badge(&t)
             } else {
                 None
             })
@@ -2848,6 +2847,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let t = theme(cx);
         let Some(tab) = &self.worktrees_tab else {
             return Vec::new();
         };
@@ -2881,7 +2881,7 @@ impl RootView {
             .child(browse);
         let active = div()
             .debug_selector(|| "settings-worktrees-active".to_owned())
-            .text_color(gpui::rgb(TEXT_2))
+            .text_color(gpui::rgb(t.text_2))
             .child(self.worktrees_active_line());
         let (save_label, save_enabled) = self.worktrees_save_button();
         let buttons = div()
@@ -2915,10 +2915,10 @@ impl RootView {
                 format!("Created on {host} if it does not exist."),
             )
             .text_size(px(HINT_SIZE))
-            .text_color(gpui::rgb(SUBTLE))
+            .text_color(gpui::rgb(t.subtle))
         });
         let section = section("Worktrees root")
-            .child(hint(WORKTREES_HINT))
+            .child(hint(WORKTREES_HINT, &t))
             .child(path_row)
             .children(host_hint)
             .child(active)
@@ -2933,6 +2933,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let t = theme(cx);
         let Some(tab) = &self.remote_access_tab else {
             return Vec::new();
         };
@@ -2946,7 +2947,7 @@ impl RootView {
         );
         let status = div()
             .debug_selector(|| "settings-remote-status".to_owned())
-            .text_color(gpui::rgb(TEXT_2))
+            .text_color(gpui::rgb(t.text_2))
             .child(self.remote_status_line());
         let address = self.remote_address().map(|url| {
             div()
@@ -2955,12 +2956,12 @@ impl RootView {
         });
         let cert = self
             .remote_cert_line()
-            .map(|line| hint(line).debug_selector(|| "settings-remote-cert".to_owned()));
-        let port_error = self
-            .remote_port_error()
-            .map(|error| hint(error).debug_selector(|| "settings-remote-port-error".to_owned()));
+            .map(|line| hint(line, &t).debug_selector(|| "settings-remote-cert".to_owned()));
+        let port_error = self.remote_port_error().map(|error| {
+            hint(error, &t).debug_selector(|| "settings-remote-port-error".to_owned())
+        });
         let section = section("Remote access (Tailscale)")
-            .child(hint(REMOTE_INTRO))
+            .child(hint(REMOTE_INTRO, &t))
             .child(switch)
             .child(status)
             .children(address)
@@ -2969,8 +2970,8 @@ impl RootView {
             .children(self.devices_section(cx))
             .child(self.remote_port_row(tab, enabled, focused, cx))
             .children(port_error)
-            .child(hint(REMOTE_PORT_HINT))
-            .child(hint(REMOTE_RUN_HINT))
+            .child(hint(REMOTE_PORT_HINT, &t))
+            .child(hint(REMOTE_RUN_HINT, &t))
             .children(self.autostart_rows(tab, focused, cx));
         vec![section.into_any_element()]
     }
@@ -2984,6 +2985,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Div {
+        let t = theme(cx);
         let port = SettingsControl::RemotePort;
         let frame = field_frame(focused == Some(port), &theme(cx))
             .debug_selector(|| port.selector().to_owned())
@@ -3000,7 +3002,7 @@ impl RootView {
         } else {
             frame
                 .opacity(DISABLED_OPACITY)
-                .text_color(gpui::rgb(SUBTLE))
+                .text_color(gpui::rgb(t.subtle))
                 .child(DEFAULT_PORT_TEXT)
         };
         let apply = settings_button(
@@ -3027,6 +3029,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<Div> {
+        let t = theme(cx);
         let state = ToggleState {
             checked: tab.autostart.as_ref().is_ok_and(|on| *on),
             enabled: tab.autostart.is_ok(),
@@ -3038,10 +3041,10 @@ impl RootView {
             focused,
             cx,
         );
-        let error = self
-            .remote_autostart_line()
-            .map(|line| hint(line).debug_selector(|| "settings-remote-autostart-error".to_owned()));
-        [launch, hint(AUTOSTART_HINT)]
+        let error = self.remote_autostart_line().map(|line| {
+            hint(line, &t).debug_selector(|| "settings-remote-autostart-error".to_owned())
+        });
+        [launch, hint(AUTOSTART_HINT, &t)]
             .into_iter()
             .chain(error)
             .collect()
@@ -3054,6 +3057,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let t = theme(cx);
         let trusted = toggle(
             SettingsControl::SpawnTrusted,
             ToggleState {
@@ -3067,10 +3071,12 @@ impl RootView {
         let section = section("Spawn defaults")
             .child(hint(
                 "Pre-fill these in the spawn dialog. You can override on every spawn.",
+                &t,
             ))
             .child(trusted)
             .child(hint(
                 "When enabled, new agent sessions skip their approval prompts.",
+                &t,
             ));
         vec![section.into_any_element()]
     }
@@ -3121,6 +3127,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let t = theme(cx);
         let live = self.launch_rows_live(&page.id);
         if !live && !self.launch_command_unsupported() {
             return None;
@@ -3135,13 +3142,14 @@ impl RootView {
                     .map(|(_, text)| text.clone())
             };
             let program_error = refusal(LaunchCommandRow::Program).map(|text| {
-                hint(text).debug_selector(|| "settings-agent-program-error".to_owned())
+                hint(text, &t).debug_selector(|| "settings-agent-program-error".to_owned())
             });
-            let args_error = refusal(LaunchCommandRow::Args)
-                .map(|text| hint(text).debug_selector(|| "settings-agent-args-error".to_owned()));
-            let env_note = self
-                .program_env_note(&page.id)
-                .map(|note| hint(note).debug_selector(|| "settings-agent-program-env".to_owned()));
+            let args_error = refusal(LaunchCommandRow::Args).map(|text| {
+                hint(text, &t).debug_selector(|| "settings-agent-args-error".to_owned())
+            });
+            let env_note = self.program_env_note(&page.id).map(|note| {
+                hint(note, &t).debug_selector(|| "settings-agent-program-env".to_owned())
+            });
             let program = input_frame(
                 SettingsControl::AgentProgram,
                 &tab.program,
@@ -3152,7 +3160,7 @@ impl RootView {
             let args = input_frame(SettingsControl::AgentArgs, &tab.args, true, focused, cx);
             let saved = self
                 .shows_saved(&page.id, tab)
-                .then(|| hint("Saved").debug_selector(|| "settings-agent-saved".to_owned()));
+                .then(|| hint("Saved", &t).debug_selector(|| "settings-agent-saved".to_owned()));
             section
                 .child(
                     field("Program", &theme(cx))
@@ -3182,8 +3190,8 @@ impl RootView {
                 ))
         };
         let section = section
-            .child(hint(LAUNCH_USE_HINT))
-            .child(hint(LAUNCH_QUOTING_HINT));
+            .child(hint(LAUNCH_USE_HINT, &t))
+            .child(hint(LAUNCH_QUOTING_HINT, &t));
         Some(section.into_any_element())
     }
 
@@ -3192,6 +3200,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let t = theme(cx);
         let link = SettingsControl::NotifySettingsLink;
         let selector = link.selector();
         let open = div()
@@ -3200,13 +3209,13 @@ impl RootView {
             .px(px(4.0))
             .rounded(px(LINK_RADIUS))
             .border_1()
-            .border_color(gpui::rgba(TRANSPARENT))
+            .border_color(gpui::rgba(t.transparent))
             .text_color(gpui::rgb(appearance::BUILTIN_ACCENT))
             .cursor_pointer()
             .hover(|style| {
                 style
-                    .bg(gpui::rgb(POPOVER_HOVER))
-                    .text_color(gpui::rgb(crate::palette::TEXT))
+                    .bg(gpui::rgb(t.popover_hover))
+                    .text_color(gpui::rgb(t.text))
             })
             .on_click(press(link, cx))
             .when(focused == Some(link), |open| {
@@ -3269,6 +3278,7 @@ impl RootView {
                 "Fire an OS notification when a session needs you (a question, \
                  a permission prompt or a plan approval) or finishes its turn \
                  with no background work left.",
+                &t,
             ))
             .child(needs_you)
             .child(finished)
@@ -3281,6 +3291,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let t = theme(cx);
         let selected = self.keep_awake_mode();
         let modes = KEEP_AWAKE_CHOICES.map(|choice| {
             (
@@ -3299,8 +3310,8 @@ impl RootView {
         } else {
             RowLock::Live
         };
-        let status =
-            selected.map(|_| hint(status_text).debug_selector(move || status_selector.to_owned()));
+        let status = selected
+            .map(|_| hint(status_text, &t).debug_selector(move || status_selector.to_owned()));
         let power = section("Power")
             .child(choice_row(
                 "Keep this PC awake",
@@ -3324,6 +3335,7 @@ impl RootView {
         let terminal = section("Terminal behavior").child(copy).child(hint(
             "Off: select to highlight, copy explicitly with Ctrl+C \
              (when there's a selection) or Ctrl+Shift+C.",
+            &t,
         ));
         let open_text = toggle(
             SettingsControl::OpenTextExternally,
@@ -3348,6 +3360,7 @@ impl RootView {
     /// The Updates section: the automatic-check toggle, the client's version
     /// and the last check's result, and Check now.
     fn updates_section(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let check = toggle(
             SettingsControl::CheckUpdates,
             ToggleState {
@@ -3368,8 +3381,8 @@ impl RootView {
         );
         section("Updates")
             .child(check)
-            .child(hint(version).debug_selector(|| "settings-update-version".to_owned()))
-            .child(hint(last).debug_selector(|| "settings-update-last-check".to_owned()))
+            .child(hint(version, &t).debug_selector(|| "settings-update-version".to_owned()))
+            .child(hint(last, &t).debug_selector(|| "settings-update-last-check".to_owned()))
             .child(div().flex().child(check_now))
     }
 
@@ -3434,6 +3447,7 @@ impl RootView {
         focused: Option<SettingsControl>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let t = theme(cx);
         let title = &self.sidebar.ui_state().title;
         let modes = count_mode_choices(title.count);
         let count = toggle(
@@ -3462,12 +3476,13 @@ impl RootView {
                 .px(px(8.0))
                 .py(px(2.0))
                 .rounded(px(CHIP_RADIUS))
-                .bg(gpui::rgb(CHIP))
+                .bg(gpui::rgb(t.chip))
                 .child(self.title_preview()),
         );
         let section = section("App title")
             .child(hint(
                 "Controls what the OS window title bar shows for the main window.",
+                &t,
             ))
             .child(choice_row(
                 "Tab and title count",
@@ -3480,16 +3495,19 @@ impl RootView {
                 "What the tab pills and the window title count. Needs you counts the \
                  terminals waiting on you and shows nothing at 0; Busy / total and Idle / \
                  total count the busy or idle terminals out of all of them.",
+                &t,
             ))
             .child(count)
             .child(hint(
                 "Renders the count in parentheses before the active tab's name. Hidden \
                  when the tab has nothing to count.",
+                &t,
             ))
             .child(suffix)
             .child(hint(
                 "Keeps OS taskbars grouping rustling-tulip windows together. Turn off \
                  for a tighter title.",
+                &t,
             ))
             .child(preview);
         vec![section.into_any_element()]
@@ -3497,7 +3515,7 @@ impl RootView {
 }
 
 /// A group label in the tab list: painted, never a tab stop.
-fn group_row(label: &'static str) -> Div {
+fn group_row(label: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_none()
@@ -3505,15 +3523,15 @@ fn group_row(label: &'static str) -> Div {
         .h(px(TAB_ROW_HEIGHT))
         .px(px(12.0))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(gpui::rgb(SUBTLE))
+        .text_color(gpui::rgb(t.subtle))
         .child(label)
 }
 
 /// A quiet line under or beside a control.
-fn hint(text: impl Into<SharedString>) -> Div {
+fn hint(text: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .text_size(px(HINT_SIZE))
-        .text_color(gpui::rgb(SUBTLE))
+        .text_color(gpui::rgb(t.subtle))
         .child(text.into())
 }
 
@@ -3786,6 +3804,7 @@ fn agent_field_row(
     view: &FieldView,
     cx: &mut Context<RootView>,
 ) -> Option<AnyElement> {
+    let t = theme(cx);
     let tag = page.tag;
     let focused = page.focused;
     let controls = field_controls(tag, index, view);
@@ -3851,10 +3870,10 @@ fn agent_field_row(
     let locked = view.disabled && view.editor != FieldEditor::Unknown;
     let note = locked.then(|| {
         let selector = format!("settings-{tag}-{}-locked", field_part(&view.id));
-        hint(LOCKED).debug_selector(move || selector)
+        hint(LOCKED, &t).debug_selector(move || selector)
     });
     Some(
-        row.children(view.help.clone().map(hint))
+        row.children(view.help.clone().map(|help| hint(help, &t)))
             .children(note)
             .into_any_element(),
     )
@@ -3898,7 +3917,7 @@ fn disabled_launch_row(
         .id(selector)
         .debug_selector(|| selector.to_owned())
         .opacity(DISABLED_OPACITY)
-        .text_color(gpui::rgb(SUBTLE))
+        .text_color(gpui::rgb(t.subtle))
         .tooltip(tooltip(LAUNCH_COMMAND_UNSUPPORTED_TIP))
         .child(placeholder);
     field(label, t).child(frame)
@@ -3968,6 +3987,7 @@ fn choice_row(
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let enabled = matches!(lock, RowLock::Live);
     let buttons = choices
         .iter()
@@ -3989,7 +4009,7 @@ fn choice_row(
         .collect();
     let note = match lock {
         RowLock::Locked { note, selector } => {
-            Some(hint(note).debug_selector(move || selector.to_owned()))
+            Some(hint(note, &t).debug_selector(move || selector.to_owned()))
         }
         RowLock::Live => None,
     };

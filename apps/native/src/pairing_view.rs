@@ -15,6 +15,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_PAIRING, PendingDevice, Secret};
 
+use crate::RootView;
 use crate::activity_bar::badge_text;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, focus_ring};
 use crate::fonts::DEFAULT_FAMILY;
@@ -24,11 +25,9 @@ use crate::pairing::{
     Arrival, DialogPhase, DialogView, PairingAction, PairingState, PairingToast, QrMatrix,
     ToastActionQueue, WaitingRow, approve_message, deny_message,
 };
-use crate::palette::{ASKING, ON_ASKING};
 use crate::session_menu::backdrop;
 use crate::settings_view::SettingsTab;
-use crate::ui_theme::theme;
-use crate::{MUTED, RootView};
+use crate::ui_theme::{UiTheme, theme};
 
 /// What the Confirm phase says approving does.
 const CONFIRM_SENTENCE: &str = "Approving shows a one-time code for this device.";
@@ -658,7 +657,7 @@ impl RootView {
     }
 
     /// The Remote access tab's count of waiting requests, when there is one.
-    pub(crate) fn remote_access_tab_badge(&self) -> Option<AnyElement> {
+    pub(crate) fn remote_access_tab_badge(&self, t: &UiTheme) -> Option<AnyElement> {
         let text = self.pairing_badge()?;
         let badge = div()
             .debug_selector(|| "settings-tab-remote-access-badge".to_owned())
@@ -671,8 +670,8 @@ impl RootView {
             .h(px(BADGE_SIZE))
             .px(px(4.0))
             .rounded_full()
-            .bg(gpui::rgb(ASKING))
-            .text_color(gpui::rgb(ON_ASKING))
+            .bg(gpui::rgb(t.asking))
+            .text_color(gpui::rgb(t.on_asking))
             .text_size(px(BADGE_TEXT_SIZE))
             .font_weight(FontWeight::BOLD)
             .child(text);
@@ -682,11 +681,12 @@ impl RootView {
     /// The approval dialog over a backdrop that takes every click beneath
     /// it.
     pub(crate) fn pairing_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.pairing_dialog()?;
         let focused = self.pairing_focused_button();
         let body = match dialog.phase {
-            DialogPhase::Confirm => confirm_body(&dialog),
-            DialogPhase::Code { .. } => code_body(&dialog, (self.now)()),
+            DialogPhase::Confirm => confirm_body(&dialog, &t),
+            DialogPhase::Code { .. } => code_body(&dialog, (self.now)(), &t),
         };
         let footer = div().flex().justify_end().gap(px(8.0)).children(
             dialog
@@ -834,18 +834,18 @@ fn paint_qr(bounds: Bounds<Pixels>, cells: &[(usize, usize)], window: &mut Windo
 }
 
 /// The Confirm phase: who asks, and what approving does.
-fn confirm_body(dialog: &DialogView) -> AnyElement {
+fn confirm_body(dialog: &DialogView, t: &UiTheme) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .child(muted(dialog.device_line()))
+        .child(muted(dialog.device_line(), t))
         .child(CONFIRM_SENTENCE)
         .into_any_element()
 }
 
 /// The code phase: the QR code beside the code and its countdown.
-fn code_body(dialog: &DialogView, now: std::time::Instant) -> AnyElement {
+fn code_body(dialog: &DialogView, now: std::time::Instant, t: &UiTheme) -> AnyElement {
     let code = dialog.code_groups().map(|code| {
         div()
             .debug_selector(|| "pairing-code".to_owned())
@@ -858,12 +858,12 @@ fn code_body(dialog: &DialogView, now: std::time::Instant) -> AnyElement {
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .children(dialog.qr().map(|_| muted(OR_TYPE)))
+        .children(dialog.qr().map(|_| muted(OR_TYPE, t)))
         .children(code)
         .children(
             dialog
                 .timer_text(now)
-                .map(|timer| muted(timer).debug_selector(|| "pairing-timer".to_owned())),
+                .map(|timer| muted(timer, t).debug_selector(|| "pairing-timer".to_owned())),
         );
     div()
         .flex()
@@ -877,6 +877,7 @@ fn code_body(dialog: &DialogView, now: std::time::Instant) -> AnyElement {
 /// One waiting request: who asks and its countdown or state, then
 /// Approve… (which only opens the dialog) unless approved, and Deny.
 fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
     let id = row.request_id.clone();
     let deny_id = id.clone();
     let deny = button(
@@ -916,8 +917,8 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
         .flex()
         .items_center()
         .gap(px(8.0))
-        .child(div().flex_1().min_w_0().child(muted(row_line(row))))
-        .child(muted(row_status(row)))
+        .child(div().flex_1().min_w_0().child(muted(row_line(row), &t)))
+        .child(muted(row_status(row), &t))
         .children(approve)
         .child(deny)
 }
@@ -948,8 +949,8 @@ fn dialog_button(
     }))
 }
 
-fn muted(text: impl Into<SharedString>) -> Div {
-    div().text_color(gpui::rgb(MUTED)).child(text.into())
+fn muted(text: impl Into<SharedString>, t: &UiTheme) -> Div {
+    div().text_color(gpui::rgb(t.muted)).child(text.into())
 }
 
 #[cfg(test)]

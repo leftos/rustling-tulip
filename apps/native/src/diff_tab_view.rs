@@ -31,12 +31,11 @@ use crate::diff_view::{DiffView, Nav};
 use crate::ellipsis::ellipsized;
 use crate::fonts::FontSettings;
 use crate::notices::ToastKind;
-use crate::palette::{LINE, SUBTLE, SURFACE};
 use crate::popouts::PopoutKey;
 use crate::source_control::ScKey;
 use crate::syntax::{self, Highlighted};
-use crate::ui_theme::theme;
-use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// The header's height: room for the compact change buttons.
 const HEADER_HEIGHT: f32 = 42.0;
@@ -438,10 +437,11 @@ impl DiffTabView {
     }
 
     fn header_bar(header: &DiffTabHeader, narrow: bool, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let mode = div()
             .id("diff-mode")
             .flex_none()
-            .text_color(gpui::rgb(MUTED))
+            .text_color(gpui::rgb(t.muted))
             .child(header.mode.clone())
             .when_some(header.mode_tip.clone(), |mode, tip| {
                 mode.tooltip(tooltip(tip))
@@ -455,7 +455,7 @@ impl DiffTabView {
         let highlight = toggle(DiffTabEvent::ToggleHighlight, header.highlight, narrow, cx);
         let count = div()
             .flex_none()
-            .text_color(gpui::rgb(MUTED))
+            .text_color(gpui::rgb(t.muted))
             .child(header.count.clone());
         let buttons = div()
             .flex()
@@ -473,11 +473,11 @@ impl DiffTabView {
             .h(px(HEADER_HEIGHT))
             .pl(px(HEADER_PAD_LEFT))
             .pr(px(HEADER_PAD_RIGHT))
-            .bg(gpui::rgb(SURFACE))
+            .bg(gpui::rgb(t.surface))
             .border_b_1()
-            .border_color(gpui::rgb(LINE))
+            .border_color(gpui::rgb(t.line))
             .child(Self::width_probe(cx))
-            .child(path_box(&header.path))
+            .child(path_box(&header.path, &t))
             .child(mode)
             .child(div().flex_1())
             .child(whitespace)
@@ -496,7 +496,7 @@ const PATH_FOLDER: &str = "diff-path-folder";
 /// room runs out; the full path is the tooltip. The name keeps its width
 /// until the folder is gone, then is cut at its end the same way, as it
 /// never grows past the box.
-fn path_box(path: &str) -> Stateful<Div> {
+fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
     let (name, folder) = split_path(path);
     let ellipsis_box = || {
         div()
@@ -509,7 +509,7 @@ fn path_box(path: &str) -> Stateful<Div> {
         .debug_selector(|| PATH_NAME.to_owned())
         .flex_none()
         .max_w(relative(1.0))
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
         .children(ellipsized(
             PATH_NAME,
             SharedString::from(name.to_owned()),
@@ -528,7 +528,7 @@ fn path_box(path: &str) -> Stateful<Div> {
             path.child(
                 ellipsis_box()
                     .debug_selector(|| PATH_FOLDER.to_owned())
-                    .text_color(gpui::rgb(SUBTLE))
+                    .text_color(gpui::rgb(t.subtle))
                     .children(ellipsized(
                         PATH_FOLDER,
                         SharedString::from(folder.to_owned()),
@@ -547,6 +547,7 @@ fn toggle(
     narrow: bool,
     cx: &mut Context<DiffTabView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let (selector, label, tip, icon) = match event {
         DiffTabEvent::ToggleWhitespace => (
             "diff-whitespace",
@@ -572,7 +573,7 @@ fn toggle(
         .px(px(4.0))
         .rounded(px(3.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .child(glyph);
     let toggle = if narrow {
         toggle
@@ -581,7 +582,7 @@ fn toggle(
                     .path(icon)
                     .flex_none()
                     .size(px(TOGGLE_ICON_SIZE))
-                    .text_color(gpui::rgb(TEXT)),
+                    .text_color(gpui::rgb(t.text)),
             )
             .tooltip(tooltip(format!("{label}: {tip}")))
     } else {
@@ -600,6 +601,7 @@ fn nav_button(
     enabled: bool,
     cx: &mut Context<DiffTabView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     outlined_button(
         selector,
         ButtonSize::Compact,
@@ -616,7 +618,7 @@ fn nav_button(
             .path(icon)
             .flex_none()
             .size(px(NAV_ICON_SIZE))
-            .text_color(gpui::rgb(TEXT)),
+            .text_color(gpui::rgb(t.text)),
     )
     .tooltip(tooltip(tip))
     .when(enabled, |button| {
@@ -625,7 +627,7 @@ fn nav_button(
 }
 
 /// The text standing in for the diff, centred, with a muted line under it.
-fn message(text: String, note: Option<&'static str>) -> AnyElement {
+fn message(text: String, note: Option<&'static str>, t: &UiTheme) -> AnyElement {
     div()
         .flex_1()
         .flex()
@@ -635,13 +637,14 @@ fn message(text: String, note: Option<&'static str>) -> AnyElement {
         .gap(px(4.0))
         .child(text)
         .when_some(note, |body, note| {
-            body.child(div().text_color(gpui::rgb(MUTED)).child(note))
+            body.child(div().text_color(gpui::rgb(t.muted)).child(note))
         })
         .into_any_element()
 }
 
 impl Render for DiffTabView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
         let header = self.header();
         let narrow = self.narrow_header();
         let body = match (self.state.body(), &self.view) {
@@ -651,8 +654,8 @@ impl Render for DiffTabView {
                 .w_full()
                 .child(view.clone())
                 .into_any_element(),
-            (DiffTabBody::Diff, None) => message(LOADING_TEXT.to_owned(), None),
-            (DiffTabBody::Text { text, note }, _) => message(text, note),
+            (DiffTabBody::Diff, None) => message(LOADING_TEXT.to_owned(), None, &t),
+            (DiffTabBody::Text { text, note }, _) => message(text, note, &t),
         };
         div()
             .id("diff-tab")
@@ -665,7 +668,7 @@ impl Render for DiffTabView {
             .min_h(px(0.0))
             .h_full()
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
+            .text_color(gpui::rgb(t.text))
             .child(Self::header_bar(&header, narrow, cx))
             .child(body)
     }

@@ -25,7 +25,6 @@ use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
 use crate::open::OpenJob;
 use crate::open_view::{COULD_NOT_OPEN, Origin, Then};
-use crate::palette::{ACCENT, CHIP, LINE, LINE_STRONG, PERIWINKLE, SUBTLE, SUNKEN, SURFACE};
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_tab::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
@@ -376,11 +375,11 @@ fn steps(count: usize, step: f32) -> f32 {
 
 /// A span's look: bold, italic, struck through, a code chip, muted, or a
 /// link's colour and underline.
-fn span_style(span: &Span) -> HighlightStyle {
+fn span_style(span: &Span, t: &UiTheme) -> HighlightStyle {
     let color = if span.link.is_some() {
-        Some(hsla(PERIWINKLE))
+        Some(hsla(t.periwinkle))
     } else if span.muted {
-        Some(hsla(SUBTLE))
+        Some(hsla(t.subtle))
     } else {
         None
     };
@@ -388,7 +387,7 @@ fn span_style(span: &Span) -> HighlightStyle {
         color,
         font_weight: span.strong.then_some(FontWeight::BOLD),
         font_style: span.emphasis.then_some(FontStyle::Italic),
-        background_color: span.code.then(|| hsla(CHIP)),
+        background_color: span.code.then(|| hsla(t.chip)),
         underline: span.link.is_some().then_some(UnderlineStyle {
             thickness: px(DECORATION),
             color: None,
@@ -427,15 +426,15 @@ fn line_highlights(
 }
 
 /// A task item's box, filled when it is checked.
-fn task_box(checked: bool) -> Div {
-    let color = if checked { ACCENT } else { LINE_STRONG };
+fn task_box(checked: bool, t: &UiTheme) -> Div {
+    let color = if checked { t.accent } else { t.line_strong };
     div()
         .mt(px(TASK_BOX_TOP))
         .size(px(TASK_BOX))
         .rounded(px(2.0))
         .border_1()
         .border_color(gpui::rgb(color))
-        .when(checked, |boxed| boxed.bg(gpui::rgb(ACCENT)))
+        .when(checked, |boxed| boxed.bg(gpui::rgb(t.accent)))
 }
 
 /// What every row of one rendered tab is drawn with.
@@ -444,11 +443,13 @@ struct Painter {
     mono: SharedString,
     mono_size: f32,
     colors: [Hsla; 6],
+    theme: UiTheme,
 }
 
 impl Painter {
     /// Row `ix`'s content, before its indent and quote borders.
     fn row(&self, row: &Row, ix: usize) -> Div {
+        let t = &self.theme;
         match &row.kind {
             RowKind::Heading { level, spans } => div()
                 .text_size(px(heading_size(*level)))
@@ -468,11 +469,11 @@ impl Painter {
                 head,
                 last,
             } => self.table_row(aligns, cells, *head, *last, ix),
-            RowKind::Rule => div().w_full().h(px(1.0)).bg(gpui::rgb(LINE)),
+            RowKind::Rule => div().w_full().h(px(1.0)).bg(gpui::rgb(t.line)),
             RowKind::Html(text) => div()
                 .font_family(self.mono.clone())
                 .text_size(px(self.mono_size))
-                .text_color(gpui::rgb(SUBTLE))
+                .text_color(gpui::rgb(t.subtle))
                 .child(text.clone()),
         }
     }
@@ -480,13 +481,14 @@ impl Painter {
     /// Inline spans as one text with a highlight per span; `part` tells the
     /// cells of one table row apart.
     fn inline(&self, spans: &[Span], ix: usize, part: usize) -> AnyElement {
+        let t = &self.theme;
         let (text, ranges) = inline_text(spans);
         let links = link_ranges(spans);
         let highlights: Vec<(Range<usize>, HighlightStyle)> = ranges
             .into_iter()
             .zip(spans)
             .filter(|(range, _)| !range.is_empty())
-            .map(|(range, span)| (range, span_style(span)))
+            .map(|(range, span)| (range, span_style(span, t)))
             .collect();
         let id = ElementId::Name(SharedString::from(format!(
             "md-text-{}-{ix}-{part}",
@@ -515,8 +517,9 @@ impl Painter {
     }
 
     fn item(&self, marker: &Marker, spans: &[Span], ix: usize) -> Div {
+        let t = &self.theme;
         let marker = match marker {
-            Marker::Task(checked) => task_box(*checked),
+            Marker::Task(checked) => task_box(*checked, t),
             Marker::Text(text) => div().child(text.clone()),
         };
         div()
@@ -529,7 +532,7 @@ impl Painter {
                     .pr(px(MARKER_PAD))
                     .flex()
                     .justify_end()
-                    .text_color(gpui::rgb(SUBTLE))
+                    .text_color(gpui::rgb(t.subtle))
                     .child(marker),
             )
             .child(
@@ -544,13 +547,14 @@ impl Painter {
     /// colours a file; the block's first and last lines carry its padding
     /// and corners.
     fn code_line(&self, text: &str, spans: Option<&LineSpans>, first: bool, last: bool) -> Div {
+        let t = &self.theme;
         let line_height = (self.mono_size * LINE_HEIGHT_RATIO).round();
         let highlights = spans
             .map(|spans| line_highlights(text, spans, &self.colors))
             .unwrap_or_default();
         div()
             .px(px(CODE_PAD))
-            .bg(gpui::rgb(SUNKEN))
+            .bg(gpui::rgb(t.sunken))
             .overflow_hidden()
             .font_family(self.mono.clone())
             .text_size(px(self.mono_size))
@@ -576,6 +580,7 @@ impl Painter {
         last: bool,
         ix: usize,
     ) -> Div {
+        let t = &self.theme;
         let cells: Vec<Div> = cells
             .iter()
             .enumerate()
@@ -599,10 +604,10 @@ impl Painter {
             .border_l_1()
             .border_r_1()
             .border_t_1()
-            .border_color(gpui::rgb(LINE))
+            .border_color(gpui::rgb(t.line))
             .when(head, |row| {
                 row.font_weight(FontWeight::BOLD)
-                    .bg(gpui::rgb(SURFACE))
+                    .bg(gpui::rgb(t.surface))
                     .rounded_t(px(CODE_RADIUS))
             })
             .when(last, |row| row.border_b_1().rounded_b(px(CODE_RADIUS)))
@@ -613,6 +618,7 @@ impl Painter {
 /// Row `ix` of `doc` as its list item: indented, inside its quotes' borders,
 /// tagged with its top-level block when it is the block's first row.
 fn render_row(doc: &MdDoc, painter: &Painter, ix: usize) -> AnyElement {
+    let t = &painter.theme;
     let Some(row) = doc.rows.get(ix) else {
         return div().into_any_element();
     };
@@ -624,8 +630,8 @@ fn render_row(doc: &MdDoc, painter: &Painter, ix: usize) -> AnyElement {
         framed = div()
             .pl(px(QUOTE_PAD))
             .border_l_2()
-            .border_color(gpui::rgb(LINE_STRONG))
-            .text_color(gpui::rgb(SUBTLE))
+            .border_color(gpui::rgb(t.line_strong))
+            .text_color(gpui::rgb(t.subtle))
             .child(framed);
     }
     let selector = match doc.first_row_of_block.binary_search(&ix) {
@@ -817,6 +823,7 @@ impl RootView {
             ),
             mono_size: font.size,
             colors: TokenClass::ALL.map(|class| hsla(class.color(t))),
+            theme: *t,
         };
         let doc = Arc::clone(doc);
         let selector = format!("viewer-md-{tab_id}");

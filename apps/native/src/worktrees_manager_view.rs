@@ -15,11 +15,11 @@ use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_view::SettingsControl;
 use crate::spawn_form::Lock;
 use crate::spawn_view::{SpawnEntry, now_unix};
-use crate::ui_theme::theme;
+use crate::ui_theme::{UiTheme, theme};
 use crate::worktrees_manager::{
     Action, Confirm, ConfirmButton, Control, EMPTY, SCANNING, TITLE, WorktreesManager,
 };
-use crate::{BORDER, MUTED, RootView, tooltip};
+use crate::{RootView, tooltip};
 
 /// The most of the window's height the rows take before they scroll.
 const LIST_MAX_SHARE: f32 = 0.6;
@@ -348,6 +348,7 @@ impl RootView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let t = theme(cx);
         let manager = self.worktrees_manager.as_ref()?;
         let focused = manager.confirm().is_none().then(|| manager.focused());
         let focused = focused.as_ref();
@@ -395,7 +396,7 @@ impl RootView {
         let panel = modal_panel("worktrees-manager-panel", &theme(cx))
             .track_focus(&self.worktrees_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
-            .child(muted(root))
+            .child(muted(root, &t))
             .child(toolbar)
             .children(lines.map(|line| div().child(line)))
             .child(list)
@@ -423,6 +424,7 @@ fn manager_row(
     focused: Option<&Control>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let row = manager.row(entry, now);
     let mut lines = row.lines.into_iter();
     let status = lines.next().unwrap_or_default();
@@ -440,7 +442,7 @@ fn manager_row(
         .members
         .unwrap_or_default()
         .into_iter()
-        .map(|line| muted(line).pl(px(12.0)));
+        .map(|line| muted(line, &t).pl(px(12.0)));
     let actions = div()
         .flex()
         .gap(px(8.0))
@@ -464,11 +466,11 @@ fn manager_row(
         .gap(px(2.0))
         .p(px(6.0))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
+        .border_color(gpui::rgb(t.border))
         .rounded(px(4.0))
         .child(div().font_weight(FontWeight::SEMIBOLD).child(row.title))
         .child(div().child(status))
-        .children(meta.into_iter().map(muted))
+        .children(meta.into_iter().map(|text| muted(text, &t)))
         .children(members)
         .children(member_lines)
         .child(actions)
@@ -504,6 +506,7 @@ fn manager_button(
 /// A confirm over the manager: its title, body and hint over Cancel and
 /// the button that goes ahead.
 fn confirm_layer(confirm: &Confirm, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let buttons = [ConfirmButton::Cancel, ConfirmButton::Ok].map(|button| {
         dialog_button(
             confirm.selector(button),
@@ -522,11 +525,11 @@ fn confirm_layer(confirm: &Confirm, cx: &mut Context<RootView>) -> AnyElement {
                 .child(confirm.title()),
         )
         .child(div().child(confirm.body()))
-        .child(muted(confirm.hint()))
+        .child(muted(confirm.hint(), &t))
         .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
     backdrop("worktrees-manager-confirm", panel, &theme(cx))
 }
 
-fn muted(text: impl Into<gpui::SharedString>) -> Div {
-    div().text_color(gpui::rgb(MUTED)).child(text.into())
+fn muted(text: impl Into<gpui::SharedString>, t: &UiTheme) -> Div {
+    div().text_color(gpui::rgb(t.muted)).child(text.into())
 }

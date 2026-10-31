@@ -13,8 +13,8 @@ use crate::notice_view::modal_panel;
 use crate::open::OpenJob;
 use crate::open_view::Then;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
-use crate::ui_theme::theme;
-use crate::{MUTED, RootView, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, tooltip};
 
 const TITLE: &str = "Worktree didn't clean up";
 /// The most of the window's height the folder and process list takes.
@@ -207,6 +207,7 @@ impl RootView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.cleanup_failed.head()?;
         let refusal = self.capabilities().local_files_refusal();
         let mut button =
@@ -221,7 +222,9 @@ impl RootView {
             .failures()
             .iter()
             .enumerate()
-            .map(|(index, failure)| failure_row(failure, button(Control::OpenFolder(index), false)))
+            .map(|(index, failure)| {
+                failure_row(failure, button(Control::OpenFolder(index), false), &t)
+            })
             .collect();
         let processes: Vec<Div> = dialog
             .processes()
@@ -232,7 +235,7 @@ impl RootView {
                     .cmdline
                     .as_deref()
                     .filter(|cmdline| !cmdline.is_empty())
-                    .map(|cmdline| muted(truncate_cmdline(cmdline)));
+                    .map(|cmdline| muted(truncate_cmdline(cmdline), &t));
                 div()
                     .flex()
                     .flex_col()
@@ -243,7 +246,7 @@ impl RootView {
                             .items_center()
                             .gap(px(8.0))
                             .child(check)
-                            .child(muted(format!("pid {}", process.pid))),
+                            .child(muted(format!("pid {}", process.pid), &t)),
                     )
                     .children(cmdline)
             })
@@ -273,7 +276,7 @@ impl RootView {
             .child(header)
             .child(div().child(dialog.body()))
             .child(list)
-            .children(dialog.no_lockers_note().map(muted))
+            .children(dialog.no_lockers_note().map(|note| muted(note, &t)))
             .child(footer);
         Some(backdrop("cleanup-failed", panel, &theme(cx)))
     }
@@ -312,7 +315,7 @@ fn cleanup_button(
 }
 
 /// A folder still on disk: its path and Open folder over the reason.
-fn failure_row(failure: &WorktreeCleanupFailure, open: Stateful<Div>) -> Div {
+fn failure_row(failure: &WorktreeCleanupFailure, open: Stateful<Div>, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
@@ -326,9 +329,9 @@ fn failure_row(failure: &WorktreeCleanupFailure, open: Stateful<Div>) -> Div {
                 .child(div().flex_1().min_w_0().child(failure.member_path.clone()))
                 .child(open),
         )
-        .child(muted(failure.reason.clone()))
+        .child(muted(failure.reason.clone(), t))
 }
 
-fn muted(text: impl Into<gpui::SharedString>) -> Div {
-    div().text_color(gpui::rgb(MUTED)).child(text.into())
+fn muted(text: impl Into<gpui::SharedString>, t: &UiTheme) -> Div {
+    div().text_color(gpui::rgb(t.muted)).child(text.into())
 }

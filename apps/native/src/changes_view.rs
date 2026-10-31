@@ -19,7 +19,6 @@ use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
-use crate::palette::{CHANGE_DELETED, CHIP, LILAC, OCHRE, SUBTLE, TEXT_2, WAITING, WORKING};
 use crate::sc_writes::{
     ScWrites, WriteOp, bucket_paths, commit_box_shown, commit_enabled, row_paths,
 };
@@ -29,8 +28,8 @@ use crate::session_menu::{
 use crate::source_control::{Bucket, Folder, Part, ScKey, ScModel, Status, build_tree};
 use crate::source_control_view::ScSectionRow;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::ui_theme::theme;
-use crate::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, RootView, TEXT, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, tooltip};
 
 /// A section body before its status arrives.
 pub const LOADING_TEXT: &str = "loading…";
@@ -372,30 +371,30 @@ fn push_tree_rows(ctx: &TreeCtx<'_>, folder: &Folder, depth: usize, rows: &mut V
 }
 
 /// The colour of a file's change letter.
-fn status_color(status: &str) -> u32 {
+fn status_color(status: &str, t: &UiTheme) -> u32 {
     match status {
-        "M" => OCHRE,
-        "A" => WAITING,
-        "D" => CHANGE_DELETED,
-        "U" => WORKING,
-        "R" => LILAC,
-        "?" => SUBTLE,
-        _ => TEXT,
+        "M" => t.ochre,
+        "A" => t.waiting,
+        "D" => t.change_deleted,
+        "U" => t.working,
+        "R" => t.lilac,
+        "?" => t.subtle,
+        _ => t.text,
     }
 }
 
 /// A section head's title, uppercased: 11 px bold in the secondary text
 /// colour, ending in `…` when its head narrows it. The caller sizes it in
 /// its head; `id` names it for the ellipsis probe.
-pub(crate) fn head_title(id: &str, title: &str) -> Div {
+pub(crate) fn head_title(id: &str, title: &str, t: &UiTheme) -> Div {
     truncating(id, StyledText::new(title.to_uppercase()))
         .text_size(px(HEAD_TEXT_SIZE))
         .font_weight(FontWeight::BOLD)
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
 }
 
 /// A section head's count, in a pill.
-pub(crate) fn count_pill(count: usize) -> Div {
+pub(crate) fn count_pill(count: usize, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_none()
@@ -405,9 +404,9 @@ pub(crate) fn count_pill(count: usize) -> Div {
         .h(px(PILL_SIZE))
         .px(px(PILL_PAD))
         .rounded(px(PILL_SIZE / 2.0))
-        .bg(gpui::rgb(CHIP))
+        .bg(gpui::rgb(t.chip))
         .text_size(px(PILL_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .child(count.to_string())
 }
 
@@ -418,11 +417,11 @@ fn indent(depth: usize) -> Pixels {
 }
 
 /// `▸` when folded, `▾` when open.
-pub(crate) fn caret(collapsed: bool) -> Div {
+pub(crate) fn caret(collapsed: bool, t: &UiTheme) -> Div {
     div()
         .flex_none()
         .w(px(CARET_WIDTH))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(if collapsed { "▸" } else { "▾" })
 }
 
@@ -833,6 +832,7 @@ impl RootView {
     /// The discard confirm over a backdrop that takes every click beneath
     /// it.
     pub(crate) fn discard_confirm_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let confirm = self.changes.discard.as_ref()?;
         let title = confirm.title();
         let buttons: Vec<AnyElement> = DiscardButton::ALL
@@ -878,13 +878,13 @@ impl RootView {
             .overflow_y_scroll()
             .p(px(6.0))
             .border_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(t.border))
             .rounded(px(4.0))
             .children(confirm.paths().iter().map(|path| div().child(path.clone())));
         let panel = modal_panel("discard-confirm-panel", &theme(cx))
             .track_focus(&self.changes.discard_focus)
             .child(header)
-            .child(div().text_color(gpui::rgb(MUTED)).child(DISCARD_BODY))
+            .child(div().text_color(gpui::rgb(t.muted)).child(DISCARD_BODY))
             .child(paths)
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         Some(backdrop("discard-confirm-dialog", panel, &theme(cx)))
@@ -925,11 +925,12 @@ fn action_button(
     head: bool,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let name = button.selector.clone();
     let (pad, radius, color) = match (head, button.danger) {
-        (true, _) => (6.0, 4.0, SUBTLE),
-        (false, true) => (4.0, 3.0, DANGER),
-        (false, false) => (4.0, 3.0, TEXT),
+        (true, _) => (6.0, 4.0, t.subtle),
+        (false, true) => (4.0, 3.0, t.danger),
+        (false, false) => (4.0, 3.0, t.text),
     };
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -953,11 +954,11 @@ fn action_button(
     let action = button.action;
     // Quiet text lifts to secondary on the hover fill, where it would fall
     // below 4.5:1.
-    let hover_text = if color == SUBTLE { TEXT_2 } else { color };
+    let hover_text = if color == t.subtle { t.text_2 } else { color };
     base.cursor_pointer()
         .hover(move |style| {
             style
-                .bg(gpui::rgb(HOVER_BG))
+                .bg(gpui::rgb(t.hover_bg))
                 .text_color(gpui::rgb(hover_text))
         })
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1154,6 +1155,7 @@ fn commit_box(
     input: Option<Entity<TextInput>>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let t = theme(cx);
     let input_name = commit.input_selector.clone();
     let field = div()
         .debug_selector(|| input_name)
@@ -1161,7 +1163,7 @@ fn commit_box(
         .py(px(3.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
+        .border_color(gpui::rgb(t.border))
         .when(commit.committing, |field| field.opacity(0.5))
         .children(input);
     let key = key.clone();
@@ -1198,6 +1200,7 @@ pub(crate) fn changes_body(
     commit_input: Option<Entity<TextInput>>,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
+    let t = theme(cx);
     let key = &row.key;
     let id = &row.id;
     let mut out = Vec::new();
@@ -1212,7 +1215,7 @@ pub(crate) fn changes_body(
             div()
                 .pl(px(ROW_PADDING * 2.0))
                 .pr(px(ROW_PADDING))
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(text.clone())
                 .into_any_element(),
         );
@@ -1227,6 +1230,7 @@ pub(crate) fn changes_body(
 }
 
 fn banner_view(key: &ScKey, id: &str, text: String, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let name = format!("sc-banner-{id}");
     let close_name = format!("sc-banner-close-{id}");
     let key = key.clone();
@@ -1237,7 +1241,7 @@ fn banner_view(key: &ScKey, id: &str, text: String, cx: &mut Context<RootView>) 
         .px(px(4.0))
         .rounded(px(3.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .tooltip(tooltip(DISMISS_TIP))
         .child("✕")
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1256,13 +1260,14 @@ fn banner_view(key: &ScKey, id: &str, text: String, cx: &mut Context<RootView>) 
         .px(px(6.0))
         .py(px(3.0))
         .rounded(px(4.0))
-        .bg(gpui::rgb(DANGER_BG))
-        .text_color(gpui::rgb(DANGER))
+        .bg(gpui::rgb(t.danger_bg))
+        .text_color(gpui::rgb(t.danger))
         .child(div().flex_1().min_w(px(0.0)).child(text))
         .child(close)
 }
 
 fn bucket_header(key: &ScKey, bucket: &ScBucketRow, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     let name = bucket.selector.clone();
     let title_id = format!("{name}-title");
     let actions: Vec<Stateful<Div>> = bucket
@@ -1278,9 +1283,9 @@ fn bucket_header(key: &ScKey, bucket: &ScBucketRow, cx: &mut Context<RootView>) 
         .gap(px(6.0))
         .h(px(HEAD_HEIGHT))
         .px(px(ROW_PADDING))
-        .child(head_title(&title_id, bucket.title).flex_1())
+        .child(head_title(&title_id, bucket.title, &t).flex_1())
         .children(actions)
-        .child(count_pill(bucket.count))
+        .child(count_pill(bucket.count, &t))
 }
 
 fn tree_row(
@@ -1301,6 +1306,7 @@ fn folder_row(
     folder: &ScFolderRow,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let name = folder.selector.clone();
     let key = key.clone();
     let full_path = folder.full_path.clone();
@@ -1315,13 +1321,13 @@ fn folder_row(
         .pl(indent(folder.depth))
         .pr(px(ROW_PADDING))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(caret(folder.collapsed))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
+        .child(caret(folder.collapsed, &t))
         .child(truncating(&label_id, StyledText::new(folder.label.clone())).flex_1())
         .child(
             div()
                 .flex_none()
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child(folder.files.to_string()),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1336,6 +1342,7 @@ fn file_row_view(
     file: &ScFileRow,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let name = file.selector.clone();
     let name_id = format!("{name}-name");
     let group = SharedString::from(file.selector.clone());
@@ -1359,7 +1366,7 @@ fn file_row_view(
         .pl(indent(file.depth))
         .pr(px(ROW_PADDING))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.open_file_diff(&open_key, bucket, &open_path);
             cx.notify();
@@ -1374,7 +1381,7 @@ fn file_row_view(
                 .font_family(DEFAULT_FAMILY)
                 .text_size(px(STATUS_TEXT_SIZE))
                 .font_weight(FontWeight::BOLD)
-                .text_color(gpui::rgb(status_color(&file.status)))
+                .text_color(gpui::rgb(status_color(&file.status, &t)))
                 .child(file.status.clone()),
         )
         .child(

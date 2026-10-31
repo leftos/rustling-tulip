@@ -22,8 +22,8 @@ use crate::sidebar::{Activity, display_label};
 use crate::source_control::{Part, ScKey, Section, sections};
 use crate::stash_view::{ScStashes, stashes_part};
 use crate::text_input::TextInput;
-use crate::ui_theme::theme;
-use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// The panel's title.
 pub const SC_TITLE: &str = "Source control";
@@ -457,6 +457,7 @@ impl RootView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let t = theme(cx);
         let panel = self.source_control_panel();
         let body = match panel.empty_hint {
             Some(hint) => div()
@@ -470,7 +471,7 @@ impl RootView {
                     div()
                         .px(px(ROW_PADDING))
                         .py(px(6.0))
-                        .text_color(gpui::rgb(MUTED))
+                        .text_color(gpui::rgb(t.muted))
                         .child(hint),
                 ),
             None => self.sc_split_body(
@@ -496,17 +497,18 @@ impl RootView {
             .h_full()
             .debug_selector(|| "sc-panel".to_owned())
             .track_focus(&self.sidebar_focus)
-            .bg(gpui::rgb(PANEL_BG))
+            .bg(gpui::rgb(t.panel_bg))
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
+            .text_color(gpui::rgb(t.text))
             .child(self.sc_header(&panel, window, cx))
             .when_some(panel.context.clone(), |view, context| {
-                view.child(context_line(context))
+                view.child(context_line(context, &t))
             })
             .child(body)
     }
 
     fn sc_header(&self, panel: &ScPanel, window: &Window, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let actions = div()
             .flex()
             .min_w(px(0.0))
@@ -526,14 +528,14 @@ impl RootView {
             .pl(px(HEADER_PAD_LEFT))
             .pr(px(ROW_PADDING))
             .border_b_1()
-            .border_color(gpui::rgb(BORDER))
-            .text_color(gpui::rgb(MUTED))
+            .border_color(gpui::rgb(t.border))
+            .text_color(gpui::rgb(t.muted))
             .child(
                 div()
                     .flex_none()
                     .text_size(px(HEADER_TEXT_SIZE))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(gpui::rgb(TEXT))
+                    .text_color(gpui::rgb(t.text))
                     .child(SC_TITLE),
             )
             .child(actions)
@@ -541,6 +543,7 @@ impl RootView {
 
     /// The picker's button, with its menu under it while open.
     fn picker(&self, label: String, window: &Window, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let button = div()
             .id("sc-picker")
             .debug_selector(|| "sc-picker".to_owned())
@@ -551,9 +554,13 @@ impl RootView {
             .px(px(6.0))
             .rounded(px(4.0))
             .border_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(t.border))
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+            .hover(|style| {
+                style
+                    .bg(gpui::rgb(t.hover_bg))
+                    .text_color(gpui::rgb(t.text))
+            })
             .child(truncating("sc-picker-label", StyledText::new(label)))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_sc_picker(window, cx);
@@ -604,6 +611,7 @@ fn picker_row(row: ScPickerRow, cx: &mut Context<RootView>) -> Stateful<Div> {
 }
 
 fn refresh_button(cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     div()
         .id("sc-refresh")
         .debug_selector(|| "sc-refresh".to_owned())
@@ -613,12 +621,12 @@ fn refresh_button(cx: &mut Context<RootView>) -> Stateful<Div> {
         .size(px(PICKER_HEIGHT))
         .rounded(px(4.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .child(
             svg()
                 .path(REFRESH_ICON)
                 .size(px(REFRESH_ICON_SIZE))
-                .text_color(gpui::rgb(MUTED)),
+                .text_color(gpui::rgb(t.muted)),
         )
         .tooltip(tooltip(REFRESH_TIP))
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -627,7 +635,7 @@ fn refresh_button(cx: &mut Context<RootView>) -> Stateful<Div> {
         }))
 }
 
-fn context_line(context: ScContext) -> Stateful<Div> {
+fn context_line(context: ScContext, t: &UiTheme) -> Stateful<Div> {
     div()
         .id("sc-context")
         .debug_selector(|| "sc-context".to_owned())
@@ -635,8 +643,8 @@ fn context_line(context: ScContext) -> Stateful<Div> {
         .px(px(ROW_PADDING))
         .py(px(4.0))
         .border_b_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_color(gpui::rgb(MUTED))
+        .border_color(gpui::rgb(t.border))
+        .text_color(gpui::rgb(t.muted))
         .child(truncating("sc-context", StyledText::new(context.text)))
         .when_some(context.tooltip, |line, tip| line.tooltip(tooltip(tip)))
 }
@@ -654,6 +662,7 @@ fn section_view(
     inputs: SectionInputs,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let name = format!("sc-section-{}", row.id);
     let body_name = format!("sc-section-body-{}", row.id);
     let title = div()
@@ -661,11 +670,11 @@ fn section_view(
         .flex_col()
         .flex_1()
         .min_w(px(0.0))
-        .child(head_title(&format!("{name}-repo"), &row.repo))
+        .child(head_title(&format!("{name}-repo"), &row.repo, &t))
         .children(
             row.branch
                 .as_deref()
-                .map(|branch| head_title(&format!("{name}-branch"), branch)),
+                .map(|branch| head_title(&format!("{name}-branch"), branch, &t)),
         );
     let key = row.key.clone();
     let header = div()
@@ -678,7 +687,7 @@ fn section_view(
         .py(px(HEAD_PAD_Y))
         .px(px(ROW_PADDING))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .on_mouse_down(MouseButton::Left, {
             let key = key.clone();
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -694,9 +703,11 @@ fn section_view(
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.toggle_sc_changes(&key, window, cx);
         }))
-        .child(caret(row.collapsed))
+        .child(caret(row.collapsed, &t))
         .child(title)
-        .when_some(row.count, |header, count| header.child(count_pill(count)));
+        .when_some(row.count, |header, count| {
+            header.child(count_pill(count, &t))
+        });
     let body = (!row.collapsed || row.stashes.is_some()).then(|| {
         div()
             .id(SharedString::from(body_name.clone()))

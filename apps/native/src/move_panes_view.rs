@@ -8,13 +8,13 @@ use gpui::{
 
 use protocol::ClientMessage;
 
+use crate::RootView;
 use crate::move_panes::{Control, LayoutChoice, MovePanes, NAME_LABEL, NAME_PLACEHOLDER, TITLE};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::tabs::collect_panes;
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::ui_theme::theme;
-use crate::{BORDER, MUTED, RootView};
+use crate::ui_theme::{UiTheme, theme};
 
 /// The open dialog: its model and its name field.
 pub(crate) struct MovePanesDialog {
@@ -239,6 +239,7 @@ impl RootView {
 
     /// The dialog over a backdrop that takes every click beneath it.
     pub(crate) fn move_panes_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
         let dialog = self.pane_ui.move_panes.as_ref()?;
         let model = &dialog.model;
         let aspect = self.pane_area_aspect();
@@ -284,14 +285,14 @@ impl RootView {
         let panel = modal_panel("move-panes-panel", &theme(cx))
             .track_focus(&self.pane_ui.dialog_focus)
             .child(header)
-            .child(muted(model.hint()))
+            .child(muted(model.hint(), &t))
             .child(div().flex().flex_col().gap(px(4.0)).children(checks))
-            .child(muted("Layout"))
+            .child(muted("Layout", &t))
             .child(row().children(layouts))
             .when(!shapes.is_empty(), |panel| {
                 panel.child(row().children(shapes))
             })
-            .child(muted(NAME_LABEL))
+            .child(muted(NAME_LABEL, &t))
             .child(Self::move_panes_name_field(dialog, cx))
             .child(footer);
         Some(backdrop("move-panes", panel, &theme(cx)))
@@ -299,6 +300,7 @@ impl RootView {
 
     /// The name field, outlined while focused; a press gives it the focus.
     fn move_panes_name_field(dialog: &MovePanesDialog, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
         let focused = dialog.model.focused() == Control::Name;
         div()
             .debug_selector(|| "move-panes-name".to_owned())
@@ -306,7 +308,7 @@ impl RootView {
             .py(px(2.0))
             .rounded(px(4.0))
             .border_1()
-            .border_color(gpui::rgb(if focused { crate::TEXT } else { BORDER }))
+            .border_color(gpui::rgb(if focused { t.text } else { t.border }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -326,6 +328,7 @@ fn move_panes_button(
     selected: bool,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let t = theme(cx);
     let enabled = control != Control::Confirm || model.confirm_enabled();
     let button = dialog_button(
         &model.selector(control),
@@ -333,9 +336,7 @@ fn move_panes_button(
         dialog_look(false, enabled, &theme(cx)),
         control == model.focused(),
     )
-    .when(selected, |button| {
-        button.bg(gpui::rgb(crate::palette::POPOVER_HOVER))
-    });
+    .when(selected, |button| button.bg(gpui::rgb(t.popover_hover)));
     button.when(enabled, |button| {
         button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.press_move_panes(control, window, cx);
@@ -343,6 +344,6 @@ fn move_panes_button(
     })
 }
 
-fn muted(text: impl Into<gpui::SharedString>) -> Div {
-    div().text_color(gpui::rgb(MUTED)).child(text.into())
+fn muted(text: impl Into<gpui::SharedString>, t: &UiTheme) -> Div {
+    div().text_color(gpui::rgb(t.muted)).child(text.into())
 }

@@ -380,7 +380,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
                 .text_color(gpui::rgb(t.muted))
                 .child(caret),
         )
-        .child(head_title(&label_id, HISTORY_LABEL).flex_none())
+        .child(head_title(&label_id, HISTORY_LABEL, &t).flex_none())
         .when_some(block.title.clone(), |toggle, title| {
             toggle.child(
                 div()
@@ -396,7 +396,9 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
                     )),
             )
         })
-        .when_some(block.count, |toggle, count| toggle.child(count_pill(count)))
+        .when_some(block.count, |toggle, count| {
+            toggle.child(count_pill(count, &t))
+        })
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.toggle_history(&toggle_key);
             cx.notify();

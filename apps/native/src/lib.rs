@@ -651,8 +651,6 @@ const FOOTER_PILL_TEXT_SIZE: f32 = 11.0;
 /// Space between the footer's pill and its counts, and between two counts.
 const FOOTER_GAP: f32 = 14.0;
 pub use activity_bar::{ITEM_HEIGHT as RAIL_ITEM_HEIGHT, RAIL_WIDTH};
-pub use palette::{BAR_BG, PANEL_BG};
-pub(crate) use palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, TEXT, WARNING};
 
 /// What a press on a drag handle is resizing.
 enum Drag {
