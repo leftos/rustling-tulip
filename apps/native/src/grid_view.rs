@@ -1244,8 +1244,11 @@ impl RootView {
         cx.notify();
     }
 
-    /// An empty pane's "Shell here": the quick shell, into this pane.
-    /// Nothing while a spawn aimed at the pane is on its way.
+    /// An empty pane's "Shell here": the quick shell, into this pane, on
+    /// the pane's own host; a pane that shows no session takes the host of
+    /// the focused session, else This PC (an empty pane focused is no
+    /// focused session). Nothing while a spawn aimed at the pane is on its
+    /// way.
     fn shell_in_pane(
         &mut self,
         tab_id: &str,
@@ -1256,15 +1259,30 @@ impl RootView {
         if self.spawns.aims_at(tab_id, pane_id) {
             return;
         }
+        let shows_session = self
+            .tabs
+            .tab(tab_id)
+            .and_then(TabEntry::grid)
+            .and_then(|grid| {
+                tabs::collect_panes(grid)
+                    .into_iter()
+                    .find(|pane| pane.id == pane_id)
+            })
+            .is_some_and(|pane| pane.session.is_some());
+        let host = if shows_session {
+            self.tabs.pane_host(tab_id, pane_id)
+        } else {
+            self.focused_host()
+        };
         self.focus_pane_in(tab_id, pane_id, window, cx);
-        let cwd = self.quick_shell_default().map(str::to_owned);
+        let cwd = self.quick_shell_default(&host).map(str::to_owned);
         let open_in = OpenIn::Pane(PaneAim {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
             expected: None,
             discard: None,
         });
-        self.spawn(standalone_shell_request(cwd), open_in, cx);
+        self.spawn_on(&host, standalone_shell_request(cwd), open_in, cx);
         cx.notify();
     }
 

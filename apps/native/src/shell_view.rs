@@ -13,7 +13,7 @@ use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::shell_dialog::{
     FOLDER_PLACEHOLDER, ShellControl, ShellForm, host_placeholder, standalone_shell_request,
 };
-use crate::spawn_view::checkbox_row;
+use crate::spawn_view::{Look, checkbox_row, choice_button, segmented};
 use crate::spawns::OpenIn;
 use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
@@ -24,8 +24,10 @@ const TITLE: &str = "Open a shell";
 const SAVE_DEFAULT_LABEL: &str = "Use as quick shell default";
 const CLEAR_DEFAULT_LABEL: &str = "Use home folder for + Shell";
 
-/// The open Shell… dialog: its form and its folder field.
+/// The open Shell… dialog: the host the shell opens on, its form and its
+/// folder field.
 pub(crate) struct ShellDialog {
+    host: HostKey,
     form: ShellForm,
     folder_input: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
@@ -88,32 +90,43 @@ impl RootView {
             .is_some_and(|dialog| dialog.form.remembered())
     }
 
-    /// The remembered quick-shell folder, a folder of this PC: only the
-    /// local daemon is offered it.
-    pub(crate) fn quick_shell_default(&self) -> Option<&str> {
+    /// The remembered quick-shell folder, a folder of this PC: only This
+    /// PC's daemon is offered it.
+    pub(crate) fn quick_shell_default(&self, host: &HostKey) -> Option<&str> {
         self.sidebar
             .quick_shell_dir()
-            .filter(|_| self.capabilities().opens_local_files())
+            .filter(|_| *host == HostKey::Local)
     }
 
-    /// "+ Shell": a plain shell in the remembered folder, else (and always
-    /// on a remote host) in the daemon's own default, in the tab on screen.
-    pub(crate) fn quick_shell(&mut self, cx: &mut Context<Self>) {
-        let cwd = self.quick_shell_default().map(str::to_owned);
-        let open_in = self.open_in_active_tab();
-        self.spawn(standalone_shell_request(cwd), open_in, cx);
-    }
-
-    /// `+ Shell` on `host`'s sidebar header: This PC's is [`Self::quick_shell`];
-    /// a remote host's spawns a plain shell with no folder, so its daemon
-    /// picks its own default, on that host, with the spawning toast.
-    pub(crate) fn quick_shell_on(&mut self, host: &HostKey, cx: &mut Context<Self>) {
-        if *host == HostKey::Local {
-            self.quick_shell(cx);
-            return;
+    /// The toolbar's "+ Shell" tip: where the quick shell opens on the
+    /// focused session's host, else on This PC.
+    pub(crate) fn quick_shell_tip(&self) -> String {
+        let host = self.focused_host();
+        if host != HostKey::Local {
+            let name = self.host_name(&host);
+            return format!("Open a standalone shell in {name}'s home folder");
         }
+        match self.quick_shell_default(&host) {
+            Some(dir) => format!("Open a standalone shell in {dir}"),
+            None => "Open a standalone shell in your home folder".to_owned(),
+        }
+    }
+
+    /// "+ Shell": the quick shell on the focused session's host, else on
+    /// This PC.
+    pub(crate) fn quick_shell(&mut self, cx: &mut Context<Self>) {
+        let host = self.focused_host();
+        self.quick_shell_on(&host, cx);
+    }
+
+    /// The quick shell on `host`, in the tab on screen: This PC's opens in
+    /// the remembered folder, else in the daemon's own default; a remote
+    /// host's sends no folder, so its daemon picks its own default. An
+    /// offline host refuses with the offline toast.
+    pub(crate) fn quick_shell_on(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let cwd = self.quick_shell_default(host).map(str::to_owned);
         let open_in = self.open_in_active_tab();
-        self.spawn_on(host, standalone_shell_request(None), open_in, cx);
+        self.spawn_on(host, standalone_shell_request(cwd), open_in, cx);
         cx.notify();
     }
 
@@ -139,32 +152,68 @@ impl RootView {
         if blocked {
             return;
         }
-        let remembered = self.quick_shell_default().map(str::to_owned);
-        let folder = remembered.clone().unwrap_or_default();
+        let host = self.focused_host();
         self.shell_generation += 1;
-        let host = (!self.capabilities().opens_local_files())
-            .then(|| self.conn().target().short_name().map(str::to_owned))
-            .flatten();
-        let (form, placeholder) = match host {
-            None => (
-                ShellForm::new(self.shell_generation, remembered.as_deref()),
-                FOLDER_PLACEHOLDER.to_owned(),
-            ),
-            Some(host) => (
-                ShellForm::without_default(self.shell_generation, &host),
-                host_placeholder(&host),
-            ),
-        };
+        let (form, placeholder) = self.shell_form(&host);
+        let folder = self
+            .quick_shell_default(&host)
+            .filter(|_| form.offers_default())
+            .map(str::to_owned)
+            .unwrap_or_default();
         let folder_input = cx.new(|cx| TextInput::new(folder, placeholder, cx));
         let subscriptions = Self::watch_shell_field(&folder_input, window, cx);
         self.renaming = None;
         self.close_flyout();
         self.close_tab_menu(window, cx);
         self.shell_dialog = Some(ShellDialog {
+            host,
             form,
             folder_input,
             _subscriptions: subscriptions,
         });
+        self.apply_shell_focus(window, cx);
+    }
+
+    /// The form numbered [`Self::shell_generation`] for a shell on `host`,
+    /// and its folder field's placeholder: on a host whose files this PC
+    /// opens, the quick-shell default and this PC's path rules; elsewhere
+    /// the host's path rules and no default.
+    fn shell_form(&self, host: &HostKey) -> (ShellForm, String) {
+        if self.capabilities_of(host).opens_local_files() {
+            let remembered = self.quick_shell_default(host);
+            (
+                ShellForm::new(self.shell_generation, remembered),
+                FOLDER_PLACEHOLDER.to_owned(),
+            )
+        } else {
+            let name = self.host_name(host);
+            (
+                ShellForm::without_default(self.shell_generation, &name),
+                host_placeholder(&name),
+            )
+        }
+    }
+
+    /// The host row's choice: the dialog's form is rebuilt for `host` under
+    /// a new number, so a folder picker still open answers nothing, and
+    /// the typed folder stays.
+    fn set_shell_host(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .shell_dialog
+            .as_ref()
+            .is_none_or(|dialog| dialog.host == host)
+        {
+            return;
+        }
+        self.shell_generation += 1;
+        let (mut form, placeholder) = self.shell_form(&host);
+        if let Some(dialog) = &mut self.shell_dialog {
+            form.keep_save_default(&dialog.form);
+            dialog.host = host;
+            dialog.form = form;
+            let input = dialog.folder_input.clone();
+            input.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+        }
         self.apply_shell_focus(window, cx);
     }
 
@@ -205,27 +254,37 @@ impl RootView {
         vec![keys, edits, focus]
     }
 
-    /// Open one: the shell goes out under a request id, and the folder is
-    /// remembered only once that spawn lands.
+    /// Open one: the shell goes out to the dialog's host under a request
+    /// id, and the folder is remembered, for This PC alone, only once that
+    /// spawn lands. An offline host refuses with the offline toast.
     fn submit_shell_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(folder) = self.shell_dialog_folder(cx) else {
             return;
         };
-        let Some(submission) = self
-            .shell_dialog
-            .as_mut()
-            .and_then(|dialog| dialog.form.submit(&folder))
-        else {
+        if let Some(host) = self.shell_dialog.as_ref().map(|dialog| dialog.host.clone())
+            && self.is_remote_offline(&host)
+        {
+            self.push_offline_toast(&host, cx);
+            return;
+        }
+        let Some((host, submission)) = self.shell_dialog.as_mut().and_then(|dialog| {
+            let host = dialog.host.clone();
+            dialog
+                .form
+                .submit(&folder)
+                .map(|submission| (host, submission))
+        }) else {
             return;
         };
         self.close_shell_dialog(window, cx);
         let open_in = self.open_in_active_tab();
-        let request_id = self.spawn(
+        let request_id = self.spawn_on(
+            &host,
             standalone_shell_request(Some(submission.folder.clone())),
             open_in,
             cx,
         );
-        if submission.save_default {
+        if submission.save_default && host == HostKey::Local {
             self.quick_shell_saves.arm(&request_id, &submission.folder);
         }
     }
@@ -326,7 +385,7 @@ impl RootView {
         let Some(dialog) = &self.shell_dialog else {
             return;
         };
-        if dialog.form.browsing() {
+        if dialog.form.browsing() || !self.shell_browse_offered() {
             return;
         }
         let generation = dialog.form.generation();
@@ -380,9 +439,11 @@ impl RootView {
     }
 
     /// Whether Browse is offered: this PC's folder picker answers only for
-    /// the local daemon.
+    /// a dialog on a host whose files this PC opens.
     fn shell_browse_offered(&self) -> bool {
-        self.capabilities().opens_local_files()
+        self.shell_dialog
+            .as_ref()
+            .is_some_and(|dialog| self.capabilities_of(&dialog.host).opens_local_files())
     }
 
     /// Whether the folder field holds the keyboard.
@@ -429,7 +490,7 @@ impl RootView {
                     .child(TITLE),
             )
             .child(close);
-        let refusal = self.capabilities().local_files_refusal();
+        let refusal = self.capabilities_of(&dialog.host).local_files_refusal();
         let browse_enabled = !form.browsing() && refusal.is_none();
         let browse = dialog_button(
             ShellControl::Browse.selector(),
@@ -474,9 +535,12 @@ impl RootView {
                 this.press_shell_control(ShellControl::ClearDefault, window, cx);
             }))
         });
+        let hosts = self.connected_hosts();
+        let host_row = (hosts.len() > 1).then(|| shell_host_row(&dialog.host, hosts, cx));
         let panel = modal_panel(crate::fonts::ui_text_size(cx), "shell-panel", &theme(cx))
             .track_focus(&self.shell_focus)
             .child(header)
+            .children(host_row)
             .child(field)
             .children(
                 form.offers_default()
@@ -486,6 +550,43 @@ impl RootView {
             .child(footer(form.can_submit(&folder), focus, cx));
         Some(backdrop("shell-dialog", panel, &theme(cx)))
     }
+}
+
+/// The Host row: one segment per held host, `selected` lit; a click moves
+/// the dialog to that host. It is not a keyboard stop.
+fn shell_host_row(selected: &HostKey, hosts: Vec<HostKey>, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
+    let offset = crate::fonts::ui_text_size(cx);
+    let buttons = hosts
+        .into_iter()
+        .map(|host| {
+            let look = Look {
+                selected: host == *selected,
+                focused: false,
+                enabled: true,
+            };
+            let selector = format!("shell-host-{}", host.wire().unwrap_or("local"));
+            let label = crate::sidebar::host_label(&host);
+            choice_button(
+                offset,
+                selector,
+                label,
+                look,
+                cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.set_shell_host(host.clone(), window, cx);
+                }),
+                &t,
+            )
+            .into_any_element()
+        })
+        .collect();
+    div()
+        .debug_selector(|| "shell-host-row".to_owned())
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(div().text_color(gpui::rgb(t.muted)).child("Host"))
+        .child(div().flex().child(segmented(buttons, &t)))
 }
 
 /// The folder field's text, while the dialog is open.

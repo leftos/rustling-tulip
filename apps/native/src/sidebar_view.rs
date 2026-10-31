@@ -203,7 +203,7 @@ impl RootView {
         let body = body
             .when(no_repos, |body| {
                 body.child(no_repos_note(
-                    self.add_repo_gate(),
+                    AddRepoGate::for_caps(self.capabilities_of(&HostKey::Local)),
                     self.conn().target(),
                     cx,
                 ))
@@ -353,7 +353,7 @@ impl RootView {
             .pb(px(8.0))
             .child(add_session(self.has_repos(), cx))
             .when(with_shell, |row| {
-                row.child(add_shell(self.quick_shell_default(), cx))
+                row.child(add_shell(self.quick_shell_tip(), cx))
             })
             .child(self.more_button(window, cx))
     }
@@ -538,19 +538,32 @@ impl RootView {
         ))
     }
 
-    /// How every Add repo control is drawn on the daemon connected to now.
+    /// How every Add repo control but a host header's is drawn: for the
+    /// focused session's host, else This PC.
     pub(crate) fn add_repo_gate(&self) -> AddRepoGate {
-        AddRepoGate::for_caps(self.capabilities())
+        AddRepoGate::for_caps(self.capabilities_of(&self.focused_host()))
     }
 
-    /// Add repo: the picker opens at the folder the last added repo sits
-    /// in, and the folder picked is registered with the daemon. On a remote
-    /// host, whose folders this PC's picker cannot show, the prompt for a
-    /// typed host path opens instead. A cancel sends nothing; a refusal
-    /// comes back as the daemon's error toast.
+    /// Add repo outside a host header: on the focused session's host, else
+    /// on This PC.
     pub(crate) fn add_repo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.capabilities().opens_local_files() {
-            self.open_host_path_prompt(window, cx);
+        let host = self.focused_host();
+        self.add_repo_on(host, window, cx);
+    }
+
+    /// Add repo on `host`: the picker opens at the folder the last added
+    /// repo sits in, and the folder picked is registered with the daemon.
+    /// On a remote host, whose folders this PC's picker cannot show, the
+    /// prompt for a typed host path opens instead. A cancel sends nothing;
+    /// a refusal comes back as the daemon's error toast.
+    pub(crate) fn add_repo_on(
+        &mut self,
+        host: HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.capabilities_of(&host).opens_local_files() {
+            self.open_host_path_prompt(host, window, cx);
             return;
         }
         let start = self.sidebar.last_repo_dir().map(PathBuf::from);
@@ -689,7 +702,7 @@ fn no_repos_note(gate: AddRepoGate, target: &Target, cx: &mut Context<RootView>)
                 .text_color(gpui::rgb(t.muted)),
         )
         .child(bordered_button(add, cx, |this, window, cx| {
-            this.add_repo(window, cx);
+            this.add_repo_on(HostKey::Local, window, cx);
         }))
 }
 /// The ⋯ button's side, in px.
@@ -742,14 +755,10 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     })
 }
 
-/// Shell, a standalone shell in the remembered folder; enabled even with no
-/// repo.
-fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> Stateful<Div> {
+/// Shell, the quick shell, its `tip` saying where it opens; enabled even
+/// with no repo.
+fn add_shell(tip: String, cx: &mut Context<RootView>) -> Stateful<Div> {
     let t = theme(cx);
-    let tip = match quick_shell_dir {
-        Some(dir) => format!("Open a standalone shell in {dir}"),
-        None => "Open a standalone shell in your home folder".to_owned(),
-    };
     outlined_button(
         crate::fonts::ui_text_size(cx),
         crate::fonts::ui_weight_shift(cx),
@@ -804,7 +813,7 @@ const HOST_HEADER_HEIGHT: f32 = 26.0;
 const HOST_DOT_SIZE: f32 = 6.0;
 
 /// `group`'s header: its fold (chevron, state dot, name and, unless online,
-/// its state), then `+ Shell`, or `Pair` on a host that has not approved
+/// its state), then `+ Repo` and `+ Shell`, or `Pair` on a host that has not approved
 /// this device. Every header but the `first` has a rule above it. It is not
 /// a keyboard stop, has no menu and takes no drop.
 fn host_header(
@@ -863,13 +872,14 @@ fn host_header(
     let action = if state == HostHeaderState::NotPaired {
         host_pair(key, &group.host, &group.label, cx)
     } else {
-        host_shell(
-            key,
-            &group.host,
-            &group.label,
-            state == HostHeaderState::Online,
-            cx,
-        )
+        let online = state == HostHeaderState::Online;
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .child(host_add_repo(key, &group.host, &group.label, online, cx))
+            .child(host_shell(key, &group.host, &group.label, online, cx))
+            .into_any_element()
     };
     div()
         .debug_selector({
@@ -947,6 +957,40 @@ fn host_shell(
         .tooltip(tooltip(format!("Open a shell on {name}")))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.quick_shell_on(&host, cx);
+        }))
+        .into_any_element()
+}
+
+/// `+ Repo` on `host`'s header: Add repo on that host; disabled, with
+/// "{name} is offline" as its tip, unless the host is `online`.
+fn host_add_repo(
+    key: &str,
+    host: &HostKey,
+    name: &str,
+    online: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let button = host_header_button(
+        crate::fonts::ui_text_size(cx),
+        format!("host-add-repo-{key}"),
+        Some(SIDEBAR_PLUS_ICON),
+        "Repo",
+        &t,
+    );
+    if !online {
+        return button
+            .opacity(DISABLED_HEADER_BUTTON_OPACITY)
+            .tooltip(tooltip(format!("{name} is offline")))
+            .into_any_element();
+    }
+    let host = host.clone();
+    button
+        .cursor_pointer()
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
+        .tooltip(tooltip(format!("Add a repo on {name}")))
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.add_repo_on(host.clone(), window, cx);
         }))
         .into_any_element()
 }

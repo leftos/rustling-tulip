@@ -183,6 +183,12 @@ impl ShellForm {
         self.offers_default() && self.save_default
     }
 
+    /// Carries `previous`'s checkbox into this form, built for another host,
+    /// so a trip to a host that offers no default and back keeps it.
+    pub(crate) fn keep_save_default(&mut self, previous: &Self) {
+        self.save_default = previous.save_default;
+    }
+
     pub(crate) fn toggle_save_default(&mut self) {
         self.save_default = !self.save_default;
     }
