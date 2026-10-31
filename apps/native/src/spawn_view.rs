@@ -562,14 +562,15 @@ impl RootView {
                 .get(host)
                 .map(|conn| conn.mirrors.agent_settings.clone())
                 .unwrap_or_default(),
+            offline: self.is_remote_offline(host),
         }
     }
 
-    /// Every connected host as the spawn dialog lists them, This PC first.
+    /// Every host the window holds as the spawn dialog lists them, This PC
+    /// first; an offline host is listed with its targets disabled.
     fn spawn_hosts(&self) -> Vec<HostInputs> {
         self.held_hosts()
             .iter()
-            .filter(|host| !self.is_remote_offline(host))
             .map(|host| self.spawn_host_inputs(host))
             .collect()
     }
@@ -2009,24 +2010,75 @@ fn choice(
     option_button(control, label, look, cx).into_any_element()
 }
 
+/// The Target field: one segmented row of every target, or, with two or
+/// more hosts listed, a header row per host over its own targets (an
+/// offline host's dimmed and disabled, an empty host's no-repos line).
 fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
     let t = theme(cx);
-    let buttons = form
-        .shown_targets()
+    let offset = crate::fonts::ui_text_size(cx);
+    let label = field(offset, "Target", &t);
+    if !form.grouped() {
+        let buttons = target_buttons(form, form.shown_targets(), focus, cx);
+        return label.child(segmented(buttons, &t));
+    }
+    let groups = form.target_groups().into_iter().map(|group| {
+        let key = group.host.wire().unwrap_or("local").to_owned();
+        let header = labelled_text(format!("spawn-target-host-{key}"), group.label.clone())
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(gpui::rgb(t.text_2))
+            .when(group.offline, |header| header.opacity(DISABLED_OPACITY));
+        let body = if group.targets.is_empty() {
+            labelled_text(
+                format!("spawn-target-no-repos-{key}"),
+                group.no_repos_note(),
+            )
+            .text_color(gpui::rgb(t.muted))
+            .when(group.offline, |note| note.opacity(DISABLED_OPACITY))
+            .into_any_element()
+        } else {
+            segmented(target_buttons(form, group.targets, focus, cx), &t).into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(header)
+            .child(body)
+    });
+    label.child(div().flex().flex_col().gap(px(8.0)).children(groups))
+}
+
+/// `text` tagged `selector`, with its text tagged `<selector>=<text>`.
+fn labelled_text(selector: String, text: String) -> Div {
+    let tag = format!("{selector}={text}");
+    div()
+        .debug_selector(move || selector)
+        .child(div().debug_selector(move || tag).child(text))
+}
+
+/// One picker button per target in `targets`, each enabled only where the
+/// form lets it be picked.
+fn target_buttons(
+    form: &SpawnForm,
+    targets: Vec<Target>,
+    focus: &Control,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
+    targets
         .into_iter()
         .map(|target| {
             let label = form.target_label(&target);
             let selected = &target == form.target();
+            let enabled = form.target_enabled(&target);
             let control = Control::Target(target);
             let look = Look {
                 selected,
                 focused: focus == &control,
-                enabled: !form.target_locked(),
+                enabled,
             };
             option_button(&control, label, look, cx).into_any_element()
         })
-        .collect();
-    field(crate::fonts::ui_text_size(cx), "Target", &t).child(segmented(buttons, &t))
+        .collect()
 }
 
 fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {

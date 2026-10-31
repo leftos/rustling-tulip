@@ -22,7 +22,7 @@ use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, RootView};
 use serde_json::json;
 use support::{
-    Fixture, Harness, Opened, TestDir, pane, remote_in_pane, remote_pane, session, split, tab,
+    Fixture, Harness, Opened, TestDir, pane, remote_in_pane, remote_pane, repo, session, split, tab,
 };
 
 const HOST: &str = "box.tail1234.ts.net";
@@ -1277,4 +1277,191 @@ fn the_shell_dialog_shows_no_host_row_with_one_host(cx: &mut TestAppContext) {
         drawn(&mut h, "shell-host-row"),
         "a second host adds the row"
     );
+}
+
+#[gpui::test]
+fn no_repos_note_names_the_remote_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut local = Fixture::single(session("s1").build());
+    local.repos = vec![repo("r1", "C:/r1")];
+    let mut h = support::saved_remote_over(cx, &dir, &local, &[]);
+    h.host(&support::saved_remote())
+        .send(DaemonMessage::Repos { repos: Vec::new() });
+
+    assert!(
+        shows(
+            &mut h,
+            &format!("sidebar-host-no-repos-{HOST}"),
+            "No repos or workspaces on box yet."
+        ),
+        "the empty host's group says whose registry is empty"
+    );
+    assert!(
+        !drawn(&mut h, "sidebar-host-no-repos-local"),
+        "This PC holds a repo"
+    );
+    assert!(
+        !drawn(&mut h, "sidebar-no-repos"),
+        "the window-wide note is This PC's alone"
+    );
+}
+
+/// The focused pane shows [`HOST`]'s `b1`, the host holding `r1` and `r2`
+/// and This PC none; `native-ui.json` starts as `ui`.
+fn creator_on_remote<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    ui: &serde_json::Value,
+) -> Harness<'a> {
+    remote_in_pane(cx, dir, ui, &["r1", "r2"], session("b1").build())
+}
+
+/// The workspace creator open on its From VS Code tab.
+fn vscode_creator(h: &mut Harness<'_>) {
+    h.click_on("sidebar-more");
+    h.click_on("sidebar-more-add-workspace");
+    h.click_on("workspace-creator-tab-vscode");
+}
+
+fn parses(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ParseVscodeWorkspace { path } => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn workspace_file_browse_not_drawn_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = creator_on_remote(cx, &dir, &json!({}));
+    h.set_picked_file(Some("D:/work/team.code-workspace"));
+    vscode_creator(&mut h);
+    assert!(
+        !drawn(&mut h, "workspace-creator-browse"),
+        "the typed field takes Browse's place"
+    );
+    assert!(drawn(&mut h, "workspace-creator-file-input"));
+    assert_eq!(h.file_asks(), 0, "no file picker opens on this PC");
+}
+
+#[gpui::test]
+fn workspace_creator_on_remote_takes_a_typed_workspace_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = creator_on_remote(cx, &dir, &json!({ "last_vscode_dir": "D:/vs" }));
+    vscode_creator(&mut h);
+    assert!(shows(
+        &mut h,
+        "workspace-creator-file-label",
+        "Workspace file on box"
+    ));
+    assert_eq!(
+        h.root(RootView::workspace_creator_file_text).as_deref(),
+        Some(""),
+        "this PC's remembered folder is not offered on the host"
+    );
+    h.keys("tab");
+    type_text(&mut h, "/srv/team.code-workspace");
+    h.keys("enter");
+
+    assert_eq!(
+        parses(&h.host(&saved_target()).sent()),
+        ["/srv/team.code-workspace".to_owned()],
+        "the typed file is parsed on the host"
+    );
+    assert!(parses(&h.sent()).is_empty(), "This PC parses nothing");
+    assert!(h.root(|root, _| root.workspace_creator_parsing()));
+    assert_eq!(
+        saved_ui(&dir).get("last_vscode_dir"),
+        Some(&json!("D:/vs")),
+        "a host path is never remembered"
+    );
+}
+
+#[gpui::test]
+fn workspace_creator_refuses_a_path_without_code_workspace(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = creator_on_remote(cx, &dir, &json!({}));
+    vscode_creator(&mut h);
+    h.keys("tab");
+    type_text(&mut h, "/srv/team.json");
+    h.keys("enter");
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_error()).as_deref(),
+        Some("Type the path of a .code-workspace file.")
+    );
+    assert!(
+        parses(&h.host(&saved_target()).sent()).is_empty(),
+        "nothing is parsed"
+    );
+    assert!(!h.root(|root, _| root.workspace_creator_parsing()));
+
+    type_text(&mut h, "x");
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_error()),
+        None,
+        "an edit clears the refusal"
+    );
+}
+
+#[gpui::test]
+fn workspace_file_browse_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = creator_on_remote(cx, &dir, &json!({}));
+    vscode_creator(&mut h);
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_focus()).as_deref(),
+        Some("workspace-creator-tab-vscode")
+    );
+    h.keys("tab");
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_focus()).as_deref(),
+        Some("workspace-creator-file-input"),
+        "Tab reaches the typed file field in Browse's place on a remote host"
+    );
+    h.keys("shift-tab");
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_focus()).as_deref(),
+        Some("workspace-creator-tab-vscode"),
+        "and Shift+Tab goes back to the tab"
+    );
+}
+
+#[gpui::test]
+fn workspace_creator_no_repos_note_names_the_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = creator_on_remote(cx, &dir, &json!({}));
+    h.click_on("sidebar-more");
+    h.click_on("sidebar-more-add-workspace");
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_members())
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect::<Vec<_>>(),
+        ["r1", "r2"],
+        "the members are the host's repos"
+    );
+    h.host(&saved_target())
+        .send(DaemonMessage::Repos { repos: Vec::new() });
+    assert!(shows(
+        &mut h,
+        "workspace-creator-no-repos",
+        "No repos on box yet."
+    ));
+}
+
+#[gpui::test]
+fn this_pcs_no_repos_note_keeps_its_wording_beside_a_remote_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::saved_remote_over(cx, &dir, &Fixture::default(), &[]);
+    h.host(&support::saved_remote()).send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "D:/r2")],
+    });
+
+    assert!(shows(
+        &mut h,
+        "sidebar-no-repos-note",
+        "No repos or workspaces yet."
+    ));
 }

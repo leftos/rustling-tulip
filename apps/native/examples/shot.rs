@@ -15,7 +15,8 @@
 //! `connections-ssh` (its add form switched to SSH, filled in, after a
 //! passing Test connection), `multi-host` (the main window with the
 //! tailnet host "box" online, one of its sessions in a pane of the first
-//! tab, and the tailnet host "lab" offline), `menu` (the sessions panel's ⋯
+//! tab, and the tailnet host "lab" offline), `spawn-hosts` (the spawn
+//! dialog over those hosts, its picker grouped by host), `menu` (the sessions panel's ⋯
 //! menu open over the repo rows, with a toast over the panes), `chat` (the
 //! Petal pane switched to its chat, a row of each kind, an answer with one
 //! stretch open and two closed, and a live answer) and `summary` (the Petal
@@ -76,6 +77,9 @@ const SUMMARY_WINDOW_SIZE: (u16, u16) = (1000, 1000);
 /// The `chat` shot's window: tall enough for the split's top pane to hold
 /// the finished answer with its stretches above the newest rows.
 const CHAT_WINDOW_SIZE: (u16, u16) = (1000, 1100);
+/// The `spawn-hosts` shot's window: tall enough for the dialog to show its
+/// grouped picker above the branch field the keyboard opens on.
+const SPAWN_HOSTS_WINDOW_SIZE: (u16, u16) = (1000, 1300);
 /// How long the window gets to draw the fixture before the view is driven.
 const LOAD_WAIT: Duration = Duration::from_millis(1500);
 /// How long the view gets to answer the input that reaches it.
@@ -164,10 +168,11 @@ enum View {
     Chat,
     Summary,
     MultiHost,
+    SpawnHosts,
 }
 
 impl View {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -185,6 +190,7 @@ impl View {
         Self::Chat,
         Self::Summary,
         Self::MultiHost,
+        Self::SpawnHosts,
     ];
 
     fn name(self) -> &'static str {
@@ -206,6 +212,7 @@ impl View {
             Self::Chat => "chat",
             Self::Summary => "summary",
             Self::MultiHost => "multi-host",
+            Self::SpawnHosts => "spawn-hosts",
         }
     }
 
@@ -229,6 +236,7 @@ impl View {
             Self::Dashboard => DASHBOARD_WINDOW_SIZE,
             Self::Summary => SUMMARY_WINDOW_SIZE,
             Self::Chat => CHAT_WINDOW_SIZE,
+            Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
     }
@@ -241,6 +249,12 @@ impl View {
                 let names: Vec<&str> = Self::ALL.iter().map(|view| view.name()).collect();
                 anyhow!("unknown view {name:?}; the views are {}", names.join(", "))
             })
+    }
+
+    /// Whether the view opens over the `multi-host` shot's hosts: "box"
+    /// online, "lab" offline.
+    fn on_hosts(self) -> bool {
+        matches!(self, Self::MultiHost | Self::SpawnHosts)
     }
 
     /// Whether `root` shows this view.
@@ -292,6 +306,7 @@ impl View {
             }
             Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
             Self::Update => root.settings_open() && root.update_footer_text().is_some(),
+            Self::SpawnHosts => root.spawn_dialog_open() && Self::MultiHost.reached(root),
             Self::MultiHost => {
                 !root.tab_ids().is_empty()
                     && root
@@ -360,7 +375,8 @@ impl Shot {
             | View::Update
             | View::Chat
             | View::Summary
-            | View::MultiHost => None,
+            | View::MultiHost
+            | View::SpawnHosts => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -375,7 +391,7 @@ impl Shot {
         let state = match self.view {
             View::MainCompact => compact_ui_state(),
             View::Connections | View::ConnectionsSsh => connections_ui_state(),
-            View::MultiHost => multi_host_ui_state(),
+            View::MultiHost | View::SpawnHosts => multi_host_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -530,7 +546,7 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     let now = Utc::now();
     let fixture = Fixture::build(shot.view, now)?;
     let failure = Arc::new(Mutex::new(None));
-    let remote = if shot.view == View::MultiHost {
+    let remote = if shot.view.on_hosts() {
         Some(start_box_daemon(now, &failure)?)
     } else {
         None
@@ -597,7 +613,7 @@ fn later_host_state(view: View, target: &Target) -> Option<Connection> {
     let mut conn = Connection::for_target(target.clone());
     conn.on_connecting();
     conn.on_socket_open(8787);
-    if view == View::MultiHost {
+    if view.on_hosts() {
         let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
         conn.on_welcome(version, Vec::new());
         let _ = conn.on_closed("socket closed".to_owned());
@@ -767,7 +783,7 @@ fn drive(
             }
             Ok(())
         }
-        View::Spawn => press("ctrl-shift-n", window, cx),
+        View::Spawn | View::SpawnHosts => press("ctrl-shift-n", window, cx),
         View::Dashboard => {
             let y = (DASHBOARD_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(
@@ -1096,7 +1112,7 @@ fn pane(id: &str, session: &str) -> GridNode {
 /// The Petal session above its shell; the `multi-host` shot shows "box"'s
 /// session in the shell's place.
 fn tulip_grid(view: View) -> GridNode {
-    let second = if view == View::MultiHost {
+    let second = if view.on_hosts() {
         GridNode::Pane {
             pane_id: "p2".to_owned(),
             session_id: Some(BOX_SESSION.to_owned()),

@@ -942,11 +942,14 @@ pub(crate) struct HostInputs {
     /// Each agent's Settings page values on the host, its options' first
     /// seed.
     pub agent_settings: BTreeMap<AgentId, OptionValues>,
+    /// Whether the host is a remote host whose connection is not open: its
+    /// targets are listed but cannot be picked.
+    pub offline: bool,
 }
 
 impl HostInputs {
-    /// The host's targets, repos then workspaces.
-    fn targets(&self) -> impl Iterator<Item = Target> + '_ {
+    /// The host's targets, repos then workspaces, offline or not.
+    fn all_targets(&self) -> impl Iterator<Item = Target> + '_ {
         let repos = self.repos.iter().map(|r| Target::repo(&self.host, &r.id));
         let workspaces = self
             .workspaces
@@ -955,8 +958,17 @@ impl HostInputs {
         repos.chain(workspaces)
     }
 
-    /// The host's first target: its first workspace, else its first repo.
+    /// The targets a spawn can go to: none while the host is offline.
+    fn targets(&self) -> impl Iterator<Item = Target> + '_ {
+        self.all_targets().filter(|_| !self.offline)
+    }
+
+    /// The host's first target: its first workspace, else its first repo;
+    /// none while it is offline.
     fn first_target(&self) -> Option<Target> {
+        if self.offline {
+            return None;
+        }
         self.workspaces
             .first()
             .map(|w| Target::workspace(&self.host, &w.id))
@@ -967,6 +979,30 @@ impl HostInputs {
 /// The host `host` among `hosts`.
 fn host_in<'a>(hosts: &'a [HostInputs], host: &HostKey) -> Option<&'a HostInputs> {
     hosts.iter().find(|inputs| &inputs.host == host)
+}
+
+/// The host `host` among `hosts` while it is online.
+fn online_host_in<'a>(hosts: &'a [HostInputs], host: &HostKey) -> Option<&'a HostInputs> {
+    host_in(hosts, host).filter(|inputs| !inputs.offline)
+}
+
+/// One host's part of the grouped picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TargetGroup {
+    pub host: HostKey,
+    /// The host's name, which its header row shows.
+    pub label: String,
+    /// Whether its targets are drawn dimmed and cannot be picked.
+    pub offline: bool,
+    /// Its repos then its workspaces.
+    pub targets: Vec<Target>,
+}
+
+impl TargetGroup {
+    /// The muted line a group with no target shows in its place.
+    pub(crate) fn no_repos_note(&self) -> String {
+        format!("No repos on {} yet.", self.label)
+    }
 }
 
 /// What the dialog opens over.
@@ -997,7 +1033,7 @@ fn opening_lock(
         return Some((initial_target(focused, hosts)?, None, false, false, None));
     };
     if let Some(target) = lock.target() {
-        let (repos, workspaces) = host_in(hosts, target.host())
+        let (repos, workspaces) = online_host_in(hosts, target.host())
             .map_or((&[][..], &[][..]), |h| (&h.repos[..], &h.workspaces[..]));
         if lock.unregistered(repos, workspaces).is_some() {
             return None;
@@ -1108,6 +1144,7 @@ impl SpawnForm {
     }
 
     /// Whether the target cannot be changed.
+    #[cfg(test)]
     pub(crate) fn target_locked(&self) -> bool {
         self.locked
     }
@@ -2035,6 +2072,7 @@ impl SpawnForm {
             Some(slot) => {
                 slot.repos = inputs.repos;
                 slot.workspaces = inputs.workspaces;
+                slot.offline = inputs.offline;
             }
             None => self.hosts.push(inputs),
         }
@@ -2079,10 +2117,36 @@ impl SpawnForm {
         }
     }
 
-    /// Every target as the picker lists them: each host's repos then its
+    /// Every target that can be picked: each online host's repos then its
     /// workspaces, This PC's first.
     pub(crate) fn targets(&self) -> Vec<Target> {
         self.hosts.iter().flat_map(HostInputs::targets).collect()
+    }
+
+    /// Whether the picker draws a header row per host: while it lists two
+    /// or more hosts and is not held on one target.
+    pub(crate) fn grouped(&self) -> bool {
+        !self.locked && self.hosts.len() > 1
+    }
+
+    /// The picker's groups, one per host in the dialog's order, offline
+    /// hosts included.
+    pub(crate) fn target_groups(&self) -> Vec<TargetGroup> {
+        self.hosts
+            .iter()
+            .map(|inputs| TargetGroup {
+                host: inputs.host.clone(),
+                label: inputs.label.clone(),
+                offline: inputs.offline,
+                targets: inputs.all_targets().collect(),
+            })
+            .collect()
+    }
+
+    /// Whether `target` can be picked: not while the target is locked, nor
+    /// on an offline host.
+    pub(crate) fn target_enabled(&self, target: &Target) -> bool {
+        !self.locked && self.targets().contains(target)
     }
 
     /// The host the dialog spawns on: its target's.
@@ -2103,8 +2167,9 @@ impl SpawnForm {
         &self.target
     }
 
-    /// A target's picker label; a remote host's target ends in ` · ` and
-    /// the host's name.
+    /// A target's picker label; outside a grouped picker, whose header
+    /// names the host, a remote host's target ends in ` · ` and the host's
+    /// name.
     pub(crate) fn target_label(&self, target: &Target) -> String {
         let host = host_in(&self.hosts, target.host());
         let label = match target {
@@ -2121,7 +2186,9 @@ impl SpawnForm {
             }
         };
         match (target.host(), host) {
-            (HostKey::Remote(_), Some(host)) => format!("{label} · {}", host.label),
+            (HostKey::Remote(_), Some(host)) if !self.grouped() => {
+                format!("{label} · {}", host.label)
+            }
             _ => label,
         }
     }
@@ -2792,7 +2859,7 @@ impl SpawnForm {
         let messages = match control {
             Control::Close | Control::Cancel => return Outcome::Close,
             Control::Submit => return self.submit(cache),
-            Control::Target(target) if *target != self.target && !self.locked => {
+            Control::Target(target) if *target != self.target && self.target_enabled(target) => {
                 self.load_target(target.clone(), cache, now)
             }
             Control::Runtime(runtime) => {
@@ -3103,7 +3170,7 @@ pub(crate) fn initial_target(
     hosts: &[HostInputs],
 ) -> Option<Target> {
     let from_session = focused.and_then(|(host, session)| {
-        let inputs = host_in(hosts, host)?;
+        let inputs = online_host_in(hosts, host)?;
         if let Some(id) = session
             .workspace_id
             .as_deref()
@@ -3366,6 +3433,7 @@ mod tests {
             workspaces,
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
+            offline: false,
         }
     }
 
@@ -3393,6 +3461,7 @@ mod tests {
                 workspaces: self.workspaces.clone(),
                 agents: self.agents.clone(),
                 agent_settings: self.agent_settings.clone(),
+                offline: false,
             };
             std::iter::once(local)
                 .chain(self.others.iter().cloned())
@@ -3532,6 +3601,7 @@ mod tests {
             workspaces: Vec::new(),
             agents,
             agent_settings: settings,
+            offline: false,
         }
     }
 
@@ -3582,7 +3652,11 @@ mod tests {
             "each picker button has its own selector"
         );
         assert_eq!(form.target_label(&local), "[REPO]  r1");
-        assert_eq!(form.target_label(&remote), "[REPO]  r1 · box");
+        assert_eq!(
+            form.target_label(&remote),
+            "[REPO]  r1",
+            "the group's header names the host"
+        );
         let mut cache = BranchCache::default();
         cache.insert(local.clone(), "here".to_owned());
         cache.insert(remote.clone(), "there".to_owned());

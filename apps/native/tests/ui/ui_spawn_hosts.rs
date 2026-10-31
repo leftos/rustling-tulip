@@ -6,6 +6,7 @@ use crate::support;
 use gpui::{TestAppContext, px};
 use protocol::{AgentId, ClientMessage, DaemonMessage, SpawnRequest, SpawnTarget, SuggestTarget};
 use rustling_tulip_native::target::Target;
+use rustling_tulip_native::{Connection, NetEvent};
 use support::{Fixture, Harness, TestDir, repo, session};
 
 /// The tailnet host the specs connect beside This PC.
@@ -193,4 +194,129 @@ fn picking_the_remote_target_of_a_shared_repo_id_spawns_on_that_host(cx: &mut Te
         "the remote host's r1 spawns there"
     );
     assert!(spawns(&h.sent()).is_empty(), "This PC's r1 is left alone");
+}
+
+/// Whether `selector` was drawn on screen; asked before it ever was, as
+/// gpui keeps an element's bounds after it leaves.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).origin.x >= px(0.0)
+}
+
+/// Whether an element showing `text` was drawn under `selector`'s text tag.
+fn shows(h: &mut Harness<'_>, selector: &str, text: &str) -> bool {
+    drawn(h, &format!("{selector}={text}"))
+}
+
+/// The remote host's connection drops back to its first state: offline.
+fn take_remote_offline(h: &mut Harness<'_>) {
+    h.host(&remote())
+        .event(NetEvent::State(Connection::for_target(remote())));
+}
+
+#[gpui::test]
+fn the_picker_lists_this_pc_then_the_remote_host_each_under_its_header(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    h.click_on("sidebar-add-session");
+
+    assert!(shows(&mut h, "spawn-target-host-local", "This PC"));
+    assert!(shows(&mut h, &format!("spawn-target-host-{REMOTE}"), "box"));
+    let local = h.bounds("spawn-target-host-local").origin.y;
+    let remote_header = h.bounds(&format!("spawn-target-host-{REMOTE}")).origin.y;
+    let r1 = h.bounds("spawn-target-repo-r1").origin.y;
+    let r2 = h.bounds(&format!("spawn-target-repo-r2@{REMOTE}")).origin.y;
+    assert!(
+        local < r1 && r1 < remote_header && remote_header < r2,
+        "This PC's header, its repo, the remote header, its repo: {local:?} {r1:?} {remote_header:?} {r2:?}"
+    );
+
+    h.click_on(&format!("spawn-target-repo-r2@{REMOTE}"));
+    assert_eq!(
+        selected_targets(&mut h),
+        [format!("spawn-target-repo-r2@{REMOTE}")]
+    );
+    remote_suggests(&mut h, "r2", "feat-box");
+    h.click_on("spawn-submit");
+    assert_eq!(
+        the_spawn(&h.host(&remote()).sent()),
+        ("r2".to_owned(), Some(BOX_AGENT.to_owned())),
+        "picking the remote repo fixes the host"
+    );
+    assert!(spawns(&h.sent()).is_empty(), "nothing spawns on This PC");
+}
+
+#[gpui::test]
+fn with_this_pc_alone_the_picker_draws_no_host_header(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.repos = vec![repo("r1", "C:/r1"), repo("r2", "C:/r2")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("sidebar-add-session");
+
+    assert!(drawn(&mut h, "spawn-target-repo-r1"), "the picker is drawn");
+    assert!(
+        !drawn(&mut h, "spawn-target-host-local"),
+        "no header row with one host"
+    );
+}
+
+#[gpui::test]
+fn an_offline_hosts_targets_are_drawn_but_cannot_be_picked(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    take_remote_offline(&mut h);
+    h.click_on("sidebar-add-session");
+    let offline = format!("spawn-target-repo-r2@{REMOTE}");
+
+    assert!(drawn(&mut h, &offline), "the offline host's repo is listed");
+    h.click_on(&offline);
+    assert_eq!(
+        selected_targets(&mut h),
+        ["spawn-target-repo-r1".to_owned()],
+        "a click on the offline host's repo does nothing"
+    );
+
+    let mut reached = Vec::new();
+    for _ in 0..60 {
+        h.keys("tab");
+        reached.extend(h.root(|root, _| root.spawn_dialog_focus()));
+    }
+    assert!(
+        reached.iter().any(|focus| focus == "spawn-target-repo-r1"),
+        "Tab reaches This PC's repo: {reached:?}"
+    );
+    assert!(
+        !reached.contains(&offline),
+        "Tab skips the offline host's repo: {reached:?}"
+    );
+}
+
+#[gpui::test]
+fn spawn_dialog_no_repos_note_names_the_remote_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &[]);
+    h.click_on("sidebar-add-session");
+
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_no_repos()),
+        "This PC's repo keeps the form"
+    );
+    assert!(
+        shows(
+            &mut h,
+            &format!("spawn-target-no-repos-{REMOTE}"),
+            "No repos on box yet."
+        ),
+        "the empty host's group says so"
+    );
+}
+
+#[gpui::test]
+fn with_no_repo_on_any_host_the_dialog_is_in_its_no_repos_state(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &[], &[]);
+    h.keys("ctrl-shift-n");
+
+    assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
+    assert!(shows(&mut h, "spawn-no-repos-note", "No repos yet."));
 }
