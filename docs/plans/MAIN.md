@@ -6,27 +6,25 @@
 
 - [/] RT-583 Theme selector and editor for the UI and the terminal, with built-in and custom themes · release vNext
 - [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette
-- [ ] RT-607 Add a font weight setting for the UI font and the terminal font · release vNext
+- [/] RT-607 Add a font weight setting for the UI font and the terminal font · release vNext
 - [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons
-- [/] RT-608 Add a relative UI text size setting that shifts every UI font size · release vNext
 
 ## Wave 16 — Several hosts in one window
 
 - [ ] RT-118 Connect to several daemons at once, grouped by host · release vNext
-  - [ ] RT-569 Spawn, settings and recover across hosts (MH.7) · release vNext
+  - [/] RT-569 Spawn, settings and recover across hosts (MH.7) · release vNext
   - [ ] RT-570 Prove several hosts in one window live, and document it (MH.8) · release vNext
   - [ ] RT-573 Merge feat/multi-host to main (#204) · release vNext
   - [ ] RT-578 Register a workspace or repo from a remote folder's banner on that host
   - [ ] RT-579 Fix remote-host labels, Recover names, creator routing and IPv6 SSH keys left by MH.3
   - [ ] RT-580 Drop only the reset host's cleanup-failed entries, and re-arm Recover's timer
   - [ ] RT-584 Give a remote repo's container menu the remote-host refusal, not 'no folder'
-  - [ ] RT-591 Resolve a remote pane's agents against its own host in pane headers
-  - [ ] RT-598 Verify and fix eight candidate multi-host defects before the feature merges
-  - [ ] RT-599 Open diff and viewer tabs from a remote pane on its own host
-  - [ ] RT-600 Keep a fixed owner when two remote host keys reach one daemon
-  - [ ] RT-601 Keep a remote session's pane when it is resumed in place · release vNext
-  - [ ] RT-603 Keep remote hosts' pending spawns when This PC reconnects
-  - [ ] RT-610 Decide whether an offline host's sidebar leaf can be dragged into a tab
+  - [ ] RT-591 Resolve a remote pane's agents against its own host in pane headers · release vNext
+  - [ ] RT-598 Verify and fix eight candidate multi-host defects before the feature merges · release vNext
+  - [ ] RT-599 Open diff and viewer tabs from a remote pane on its own host · release vNext
+  - [ ] RT-600 Keep a fixed owner when two remote host keys reach one daemon · release vNext
+  - [ ] RT-603 Keep remote hosts' pending spawns when This PC reconnects · release vNext
+  - [ ] RT-610 Decide whether an offline host's sidebar leaf can be dragged into a tab · release vNext
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -87,13 +85,9 @@
 
 ## Wave 8 — Chat mirror and phone session views
 
-- [ ] RT-51 Chat mirror: a Claude session as a chat over its live terminal, with interactive cards · release vNext
-  - [ ] RT-107 Running-work strip: subagents, background shells and wakeups over the chat · release vNext
-  - [ ] RT-111 Summary view: one line per stretch of work, expandable into the chat · release vNext
-  - [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
-  - [ ] RT-527 Merge feat/chat-mirror to main (#203)
-  - [ ] RT-549 Check an older Claude Code still runs the status hooks beside MessageDisplay
-  - [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
+- [ ] RT-555 Let Ctrl+Shift+M switch a popped-out chat pane back to its terminal
+- [ ] RT-549 Check an older Claude Code still runs the status hooks beside MessageDisplay
+- [ ] RT-525 Answer the terminal-only dialogs from the chat: previews, Rewind, /model, /btw
 - [ ] RT-106 PW.12: Phone files: viewer with Share and Save, worktree tree, send photos and files into a session
 - [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
 - [ ] RT-108 PW.9: Phone terminal: xterm.js with collie's key bar
@@ -317,3 +311,7 @@
 - [ ] RT-595 Relaunch the client and record the result when an update fails before apply-update writes it
 - [ ] RT-596 Hold the update lock across the installer's staging steps
 - [ ] RT-604 Bring the native client's oversized functions within the parameter and length limits
+- [ ] RT-611 Carry the theme and the UI text offset as one draw context
+- [ ] RT-612 Keep a session pop-out on its session after a resume
+- [ ] RT-613 Close a parked remote session's pane in This PC's layout
+- [ ] RT-615 Keep a weight difference between chosen and unchosen at UI weight SemiBold
