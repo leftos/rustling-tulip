@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
-    AgentId, AttentionReason, ClientMessage, ContainerRef, DaemonMessage, DeviceInfo,
-    KeepAwakeMode, OptionValue, RecoverItemResult, RemoteState, SessionSnapshot, SplitDirection,
-    TabEntry, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion, WorktreeCleanupFailure,
+    AgentId, AttentionReason, ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen,
+    ClientMessage, ComposerState, ContainerRef, DaemonMessage, DeviceInfo, KeepAwakeMode,
+    OptionValue, RecoverItemResult, RemoteState, SessionSnapshot, SplitDirection, TabEntry,
+    VscodeWorkspaceFolder, VscodeWorkspaceSuggestion, WorktreeCleanupFailure,
     WorktreeLockingProcess,
 };
 use rustling_tulip_native::ScKey;
@@ -23,8 +24,8 @@ use rustling_tulip_native::{
 };
 use support::{
     Fixture, Forget, Harness, PROTOCOL, TestDir, facts, facts_message, forgets, history_item, pane,
-    remote_lists, remote_pane, repo, saved_remote, saved_remote_over, saved_ui, seed_ui, session,
-    split, tab, two_tab_fixture, two_tabs, welcome,
+    remote_in_pane, remote_lists, remote_pane, repo, saved_remote, saved_remote_over, saved_ui,
+    seed_ui, session, split, tab, two_tab_fixture, two_tabs, welcome,
 };
 
 #[gpui::test]
@@ -2708,5 +2709,407 @@ fn a_path_link_in_a_remote_pane_fetches_from_that_host_when_both_hosts_hold_the_
             .iter()
             .any(|msg| matches!(msg, ClientMessage::FetchFile { .. })),
         "nothing is fetched from This PC"
+    );
+}
+
+// A chat pane on a host.
+
+/// This PC's `a1` in pane `p1` beside the saved host's `b1` in pane `p2`,
+/// the host connected and listing `b1`, with nothing unread on either host.
+fn remote_chat_beside_local<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    remote_in_pane(cx, dir, &serde_json::json!({}), &[], session("b1").build())
+}
+
+/// One entry per `LoadChat` for `session` in `sent`, its request id when it
+/// carries one: a request a negative check must still count.
+fn load_chats(sent: &[ClientMessage], session: &str) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } if session_id == session => Some(request_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// One entry per `LoadSummary` for `session` in `sent`, its request id when
+/// it carries one: a request a negative check must still count.
+fn load_summaries(sent: &[ClientMessage], session: &str) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::LoadSummary {
+                session_id,
+                request_id,
+            } if session_id == session => Some(request_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many `UnloadChat` requests for `session` `sent` holds.
+fn unload_chats(sent: &[ClientMessage], session: &str) -> usize {
+    sent.iter()
+        .filter(
+            |msg| matches!(msg, ClientMessage::UnloadChat { session_id } if session_id == session),
+        )
+        .count()
+}
+
+/// The texts of `sent`'s `ChatSend`s for `session`.
+fn chat_sends_of(sent: &[ClientMessage], session: &str) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatSend {
+                session_id, text, ..
+            } if session_id == session => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The prompt ids and answers of `sent`'s `ChatAnswer`s for `session`.
+fn chat_answers_of(sent: &[ClientMessage], session: &str) -> Vec<(String, ChatAnswerKind)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ChatAnswer {
+                session_id,
+                prompt_id,
+                answer,
+                ..
+            } if session_id == session => Some((prompt_id.clone(), answer.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `session`'s chat loaded with no rows, the reply echoing `request_id`.
+fn chat_reply(session: &str, request_id: &str) -> DaemonMessage {
+    DaemonMessage::Chat {
+        session_id: session.to_owned(),
+        entries: Vec::new(),
+        hidden: 0,
+        screen: ChatScreen {
+            composer: ComposerState::Ready,
+            prompt: None,
+        },
+        request_id: Some(request_id.to_owned()),
+    }
+}
+
+/// `session`'s screen now shows `prompt`, or no dialog with the composer
+/// ready.
+fn chat_screen(session: &str, prompt: Option<ChatPrompt>) -> DaemonMessage {
+    DaemonMessage::ChatScreenChanged {
+        session_id: session.to_owned(),
+        screen: ChatScreen {
+            composer: if prompt.is_some() {
+                ComposerState::Dialog
+            } else {
+                ComposerState::Ready
+            },
+            prompt,
+        },
+    }
+}
+
+/// A permission prompt `id` with its Yes, don't ask again and No buttons.
+fn permission_prompt(id: &str) -> ChatPrompt {
+    let options = [
+        (1, "Yes"),
+        (2, "Yes, and don't ask again for: python *"),
+        (3, "No"),
+    ]
+    .into_iter()
+    .map(|(number, label)| ChatOption {
+        number,
+        label: label.to_owned(),
+        description: None,
+        selected: false,
+    })
+    .collect();
+    ChatPrompt {
+        id: id.to_owned(),
+        kind: ChatPromptKind::Permission,
+        subject: "calc.py".to_owned(),
+        body: "Do you want to make this edit?".to_owned(),
+        options,
+        questions: Vec::new(),
+        can_amend: true,
+        always_allow_tip: None,
+        multi: false,
+        cursor: None,
+    }
+}
+
+/// The answer that picks the card button `number`.
+fn pick(number: u32) -> ChatAnswerKind {
+    ChatAnswerKind::Option { number }
+}
+
+/// Types `text` into the focused composer, one key at a time.
+fn chat_type(h: &mut Harness<'_>, text: &str) {
+    let keys: Vec<String> = text
+        .chars()
+        .map(|c| {
+            if c == ' ' {
+                "space".to_owned()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    h.keys(&keys.join(" "));
+}
+
+#[gpui::test]
+fn a_remote_chat_pane_loads_from_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat_beside_local(cx, &dir);
+
+    h.click_on("pane-view-chat-p2");
+
+    let remote_sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        load_chats(&remote_sent, "b1").len(),
+        1,
+        "the pane asks its own host for the chat: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        load_chats(&local_sent, "b1").is_empty(),
+        "nothing about b1 goes to This PC: {local_sent:?}"
+    );
+    assert!(
+        h.root(|root, _| root.pane_shows_chat("p2")),
+        "the pane is on its chat"
+    );
+}
+
+#[gpui::test]
+fn a_remote_summary_pane_loads_from_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat_beside_local(cx, &dir);
+
+    h.click_on("pane-view-summary-p2");
+
+    let remote_sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        load_summaries(&remote_sent, "b1").len(),
+        1,
+        "the pane asks its own host for the summary: {remote_sent:?}"
+    );
+    assert_eq!(
+        load_chats(&remote_sent, "b1").len(),
+        1,
+        "and for the chat under it: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        load_summaries(&local_sent, "b1").is_empty() && load_chats(&local_sent, "b1").is_empty(),
+        "nothing about b1 goes to This PC: {local_sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_remote_chat_message_goes_to_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat_beside_local(cx, &dir);
+    h.click_on("pane-view-chat-p2");
+    let request = load_chats(&h.host(&saved_remote()).sent(), "b1")
+        .pop()
+        .flatten()
+        .expect("the pane asked its host for the chat");
+    h.host(&saved_remote()).send(chat_reply("b1", &request));
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    h.click_on("chat-composer");
+    chat_type(&mut h, "hello there");
+    h.keys("ctrl-enter");
+
+    let remote_sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        chat_sends_of(&remote_sent, "b1"),
+        ["hello there"],
+        "the send goes to the host that owns the session: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        chat_sends_of(&local_sent, "b1").is_empty(),
+        "This PC gets no send for b1: {local_sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_remote_card_answer_goes_to_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat_beside_local(cx, &dir);
+    h.click_on("pane-view-chat-p2");
+    let request = load_chats(&h.host(&saved_remote()).sent(), "b1")
+        .pop()
+        .flatten()
+        .expect("the pane asked its host for the chat");
+    h.host(&saved_remote()).send(chat_reply("b1", &request));
+    h.host(&saved_remote())
+        .send(chat_screen("b1", Some(permission_prompt("p7"))));
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    h.click_on("chat-card-1");
+
+    let remote_sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        chat_answers_of(&remote_sent, "b1"),
+        [("p7".to_owned(), pick(1))],
+        "the answer goes to the host that owns the session: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        chat_answers_of(&local_sent, "b1").is_empty(),
+        "This PC gets no answer for b1: {local_sent:?}"
+    );
+}
+
+#[gpui::test]
+fn unloading_a_remote_chat_after_its_session_left_the_list_reaches_the_host(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = remote_chat_beside_local(cx, &dir);
+    h.click_on("pane-view-chat-p2");
+    let request = load_chats(&h.host(&saved_remote()).sent(), "b1")
+        .pop()
+        .flatten()
+        .expect("the pane asked its host for the chat");
+    h.host(&saved_remote()).send(chat_reply("b1", &request));
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: Vec::new(),
+    });
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &pane("p1", Some("a1")))],
+    });
+
+    let remote_sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        unload_chats(&remote_sent, "b1"),
+        1,
+        "the chat unloads on the host that served it, which no longer lists it: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert_eq!(
+        unload_chats(&local_sent, "b1"),
+        0,
+        "This PC is told nothing of b1's chat: {local_sent:?}"
+    );
+}
+
+#[gpui::test]
+fn a_remote_reconnect_reloads_its_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat_beside_local(cx, &dir);
+    h.click_on("pane-view-chat-p1");
+    let local = load_chats(&h.sent(), "a1")
+        .pop()
+        .flatten()
+        .expect("This PC's pane asked This PC for the chat");
+    h.click_on("pane-view-chat-p2");
+    let remote = load_chats(&h.host(&saved_remote()).sent(), "b1")
+        .pop()
+        .flatten()
+        .expect("the host's pane asked its host for the chat");
+    h.send(chat_reply("a1", &local));
+    h.host(&saved_remote()).send(chat_reply("b1", &remote));
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, &["b1"]);
+
+    let remote_sent = h.host(&saved_remote()).sent();
+    assert_eq!(
+        load_chats(&remote_sent, "b1").len(),
+        1,
+        "the new connection asks for the chat again: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        load_chats(&local_sent, "a1").is_empty(),
+        "This PC's chat is on a connection that did not change: {local_sent:?}"
+    );
+    assert!(
+        h.root(|root, _| root.pane_shows_chat("p2")),
+        "the pane stays on its chat"
+    );
+}
+
+#[gpui::test]
+fn a_chat_refusal_from_a_host_reaches_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat_beside_local(cx, &dir);
+    h.click_on("pane-view-chat-p1");
+    // This PC's load stays unanswered, so its pane is still waiting when the
+    // host's refusal lands: a note on p1 would be one a wrong route left
+    // there, not a reply that never matched a pending request.
+    let _local = load_chats(&h.sent(), "a1")
+        .pop()
+        .flatten()
+        .expect("This PC's pane asked This PC for the chat");
+    h.click_on("pane-view-chat-p2");
+    let remote = load_chats(&h.host(&saved_remote()).sent(), "b1")
+        .pop()
+        .flatten()
+        .expect("the host's pane asked its host for the chat");
+
+    h.host(&saved_remote()).send(DaemonMessage::Error {
+        message: "session `b1` not found".to_owned(),
+        request_id: Some(remote),
+        code: Some("not_found".to_owned()),
+    });
+
+    assert_eq!(
+        h.root(|root, _| root.pane_chat_note("p2").map(str::to_owned))
+            .as_deref(),
+        Some("Could not load the chat: session `b1` not found"),
+        "the host's refusal lands on the pane that asked"
+    );
+    assert!(
+        !h.root(|root, _| root.pane_shows_chat("p2")),
+        "that pane is back on its terminal"
+    );
+    assert!(
+        h.root(|root, _| root.pane_chat_note("p1").map(str::to_owned))
+            .is_none(),
+        "This PC's pane takes no note"
+    );
+    assert!(
+        h.root(|root, _| root.pane_shows_chat("p1")),
+        "and stays on its chat"
+    );
+}
+
+#[gpui::test]
+fn a_this_pc_chat_pane_stays_on_this_pc(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_chat_beside_local(cx, &dir);
+
+    h.click_on("pane-view-chat-p1");
+
+    let local_sent = h.sent();
+    assert_eq!(
+        load_chats(&local_sent, "a1").len(),
+        1,
+        "This PC's pane asks This PC: {local_sent:?}"
+    );
+    let remote_sent = h.host(&saved_remote()).sent();
+    assert!(
+        load_chats(&remote_sent, "a1").is_empty(),
+        "the connected host is asked nothing about a1: {remote_sent:?}"
     );
 }
