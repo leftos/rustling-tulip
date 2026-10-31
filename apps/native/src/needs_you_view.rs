@@ -262,6 +262,7 @@ fn needs_you_row(
     let t = theme(cx);
     let id = row.session_id.clone();
     let menu_id = row.session_id.clone();
+    let menu_host = row.host.clone();
     let name = format!("needs-you-row-{}", row.session_id);
     let waited = row.since.map(|since| needs_you::waited(now, since));
     let first = div()
@@ -329,7 +330,7 @@ fn needs_you_row(
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                this.open_session_menu(&menu_id, None, event.position, window, cx);
+                this.open_session_menu(&menu_host, &menu_id, None, event.position, window, cx);
                 cx.stop_propagation();
             }),
         )

@@ -243,9 +243,9 @@ impl RootView {
         let Some(key) = key else {
             return;
         };
-        if let Some(session_id) = agent_exit_session_of(&key) {
+        if let Some((host, session_id)) = agent_exit_session_of(&key) {
             if action == CLOSE_SESSION.id {
-                self.close_session_after_agent_exit(session_id);
+                self.close_session_after_agent_exit(&host, session_id);
                 self.dismiss_toast(id, cx);
             }
             return;

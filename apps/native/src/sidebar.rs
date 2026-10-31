@@ -1396,6 +1396,12 @@ impl SidebarModel {
         self.find_session(id).map(|(_, session)| session)
     }
 
+    /// Session `id` as `host` lists it; `None` when that host does not.
+    #[must_use]
+    pub fn session_on(&self, host: &HostKey, id: &str) -> Option<&SessionSnapshot> {
+        self.slice(host).and_then(|slice| slice.session(id))
+    }
+
     /// Session `id` and the host that lists it.
     #[must_use]
     pub fn find_session(&self, id: &str) -> Option<(HostKey, &SessionSnapshot)> {

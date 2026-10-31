@@ -22,7 +22,7 @@ use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
 use rustling_tulip_native::file_fetch::FetchRequest;
-use rustling_tulip_native::target::Target;
+use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent, RootView};
 use support::{
     Fixture, Harness, HostHandle, Opened, TestDir, remote_in_pane, saved_remote, saved_remote_over,
@@ -583,6 +583,7 @@ fn already_fetching_shows_inline(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, _) = on_remote(cx, &dir);
     let request = FetchRequest {
+        host: HostKey::of(&Target::tailnet(HOST, None)),
         repo_id: "r1".to_owned(),
         repo_name: "r1".to_owned(),
         worktree_path: Some("C:/wt/x".to_owned()),

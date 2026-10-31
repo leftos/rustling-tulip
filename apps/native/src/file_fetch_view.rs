@@ -72,7 +72,12 @@ impl RootView {
         let mut readings = session
             .and_then(|id| self.sidebar.sessions_of(host).iter().find(|s| s.id == id))
             .map(|session| {
-                fetch_link::session_readings(&link.candidates, session, self.sidebar.repos_of(host))
+                fetch_link::session_readings(
+                    host,
+                    &link.candidates,
+                    session,
+                    self.sidebar.repos_of(host),
+                )
             })
             .unwrap_or_default();
         if readings.is_empty() {
@@ -175,7 +180,7 @@ impl RootView {
         Ok(id)
     }
 
-    /// The host that registered `request`'s repo, its download folder and
+    /// The host `request` names, its download folder and
     /// where `request`'s file lands in it.
     ///
     /// # Errors
@@ -183,7 +188,7 @@ impl RootView {
     /// download folder.
     fn fetch_target(&self, request: &FetchRequest) -> Result<(HostKey, String, PathBuf), Refusal> {
         let name = file_fetch::file_name(&request.rel_path);
-        let host_key = self.host_of_repo(&request.repo_id);
+        let host_key = request.host.clone();
         let conn = self.conn_of(&host_key).unwrap_or_else(|| self.conn());
         let Some(host) = file_fetch::host_folder(conn.target()) else {
             tracing::warn!(rel = %request.rel_path, "refusing a file fetch from the local daemon");

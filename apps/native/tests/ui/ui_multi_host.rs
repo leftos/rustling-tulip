@@ -752,9 +752,10 @@ fn the_source_control_panel_follows_the_focused_sessions_host(cx: &mut TestAppCo
     );
 }
 
-/// A fetch of `rel` from repo `repo_id`.
-fn fetch_request(repo_id: &str, rel: &str) -> FetchRequest {
+/// A fetch of `rel` from repo `repo_id` of the host `target`.
+fn fetch_request(target: &Target, repo_id: &str, rel: &str) -> FetchRequest {
     FetchRequest {
+        host: HostKey::of(target),
         repo_id: repo_id.to_owned(),
         repo_name: "repo".to_owned(),
         worktree_path: None,
@@ -795,8 +796,10 @@ fn a_remote_hosts_disconnect_ends_only_its_fetches(cx: &mut TestAppContext) {
         repos: vec![repo("r2", "C:/r2")],
     });
     h.sent();
-    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r1", "a.txt"), cx));
-    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r2", "b.txt"), cx));
+    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request(&home, "r1", "a.txt"), cx));
+    h.root_update(|view, _, cx| {
+        view.fetch_remote_file(fetch_request(&remote(), "r2", "b.txt"), cx)
+    });
     let home_fetch = fetch_ids(h.host(&home).sent());
     let remote_fetch = fetch_ids(h.host(&remote()).sent());
     assert_eq!(
@@ -820,7 +823,7 @@ fn a_remote_hosts_disconnect_ends_only_its_fetches(cx: &mut TestAppContext) {
         ["Couldn't fetch b.txt"],
         "only the remote host's fetch ends"
     );
-    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r1", "a.txt"), cx));
+    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request(&home, "r1", "a.txt"), cx));
     assert!(
         h.root(|root, _| root
             .toasts()
@@ -2051,7 +2054,9 @@ fn switching_a_host_off_mid_fetch_ends_its_fetch(cx: &mut TestAppContext) {
     let root = dir.path().join("remote-files");
     let set = root.clone();
     h.root_update(move |view, _, _| view.set_remote_files_root(set));
-    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r2", "b.txt"), cx));
+    h.root_update(|view, _, cx| {
+        view.fetch_remote_file(fetch_request(&remote(), "r2", "b.txt"), cx)
+    });
     let ids = fetch_ids(h.host(&saved_remote()).sent());
     assert_eq!(ids.len(), 1, "one fetch is sent: {ids:?}");
     let id = &ids[0];
@@ -2083,7 +2088,9 @@ fn switching_a_host_off_mid_fetch_ends_its_fetch(cx: &mut TestAppContext) {
     assert_eq!(files_in(&folder), 0, "the part file is deleted");
     h.click_on(&remote_switch());
     h.host(&saved_remote()).connect();
-    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r2", "b.txt"), cx));
+    h.root_update(|view, _, cx| {
+        view.fetch_remote_file(fetch_request(&remote(), "r2", "b.txt"), cx)
+    });
     assert_eq!(
         fetch_ids(h.host(&saved_remote()).sent()).len(),
         1,

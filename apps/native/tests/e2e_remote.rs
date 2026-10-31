@@ -18,7 +18,7 @@ use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
 use gpui::TestAppContext;
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, RemoteState};
 use rustling_tulip_native::file_fetch::FetchRequest;
-use rustling_tulip_native::target::Target;
+use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetCommand};
 use support::live::{LiveClient, LiveDaemon, REMOTE_HOST, commit_all, free_port, spawn_shell};
 use support::{Harness, Opened};
@@ -504,6 +504,7 @@ fn remote_html_fetch_brings_its_relative_media(
     device.root_update(move |view, _, _| view.set_remote_files_root(set));
 
     let request = FetchRequest {
+        host: HostKey::of(&Target::tailnet(REMOTE_HOST, None)),
         repo_id: repo_id.expect("the wait just found it"),
         repo_name: repo_name.clone(),
         worktree_path: None,

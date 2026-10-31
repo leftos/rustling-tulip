@@ -19,7 +19,7 @@ use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
 use rustling_tulip_native::file_fetch::FetchRequest;
-use rustling_tulip_native::target::Target;
+use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use support::{
     Fixture, Harness, HostHandle, Opened, TestDir, remote_in_pane, repo, saved_remote, session,
@@ -45,6 +45,7 @@ fn remote_target() -> Target {
 /// A request for `rel` in the repo `r1`'s worktree.
 fn request(rel: &str, line: Option<u32>, column: Option<u32>) -> FetchRequest {
     FetchRequest {
+        host: HostKey::of(&remote_target()),
         repo_id: "r1".to_owned(),
         repo_name: "repo".to_owned(),
         worktree_path: Some("C:/wt/r1".to_owned()),
@@ -136,7 +137,8 @@ fn start(h: &mut Harness<'_>, request: FetchRequest) -> String {
 }
 
 /// [`start`] on the host `target`.
-fn start_on(h: &mut Harness<'_>, target: &Target, request: FetchRequest) -> String {
+fn start_on(h: &mut Harness<'_>, target: &Target, mut request: FetchRequest) -> String {
+    request.host = HostKey::of(target);
     let rel = request.rel_path.clone();
     let returned = h
         .root_update(move |view, _, cx| view.fetch_remote_file(request, cx))

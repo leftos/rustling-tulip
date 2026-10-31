@@ -114,15 +114,28 @@ impl RootView {
         let Some(session_id) = self.focused_session() else {
             return;
         };
-        let session = self.sidebar.session(&session_id);
+        // The focused pane's host, whose repos the path is read under and
+        // which the file is fetched from.
+        let host = self
+            .tabs
+            .active_id()
+            .and_then(|tab_id| {
+                let pane_id = self.tabs.focused_pane(tab_id)?;
+                Some(self.tabs.pane_host(tab_id, &pane_id))
+            })
+            .unwrap_or(HostKey::Local);
+        let session = self.sidebar.session_on(&host, &session_id);
         let cwd = session.and_then(|session| session.current_cwd.clone());
         let roots = session
             .map(|session| {
-                fetch_link::roots(&session.members, cwd.as_deref(), self.sidebar.repos())
+                fetch_link::roots(
+                    &session.members,
+                    cwd.as_deref(),
+                    self.sidebar.repos_of(&host),
+                )
             })
             .unwrap_or_default();
         let form = FetchForm::new(roots, cwd.as_deref());
-        let host = self.host_of_session(&session_id);
         let path_input = cx.new(|cx| TextInput::new(String::new(), PLACEHOLDER, cx));
         let subscriptions = Self::watch_fetch_field(&path_input, window, cx);
         self.renaming = None;
@@ -251,7 +264,7 @@ impl RootView {
         let request = self
             .fetch_dialog
             .as_mut()
-            .and_then(|dialog| dialog.form.submit(&text));
+            .and_then(|dialog| dialog.form.submit(&dialog.host, &text));
         if let Some(request) = request {
             let started = self.try_start_fetch(request, None, true, cx);
             if let Some(dialog) = &mut self.fetch_dialog {

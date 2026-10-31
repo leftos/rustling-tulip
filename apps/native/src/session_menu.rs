@@ -156,6 +156,9 @@ pub(crate) struct DeleteDialog {
 
 /// The open context menu.
 pub(crate) struct SessionMenu {
+    /// The host whose session the menu was opened for: every row acts on
+    /// that host's session, whichever other host lists the same id.
+    host: HostKey,
     session_id: String,
     /// Where the right-click was, in window coordinates.
     at: Point<Pixels>,
@@ -812,7 +815,11 @@ impl RootView {
         self.menu
             .as_ref()
             .filter(|menu| menu.rename.is_none() && menu.mode == MenuMode::Actions)
-            .filter(|menu| self.sidebar.session(&menu.session_id).is_some())
+            .filter(|menu| {
+                self.sidebar
+                    .session_on(&menu.host, &menu.session_id)
+                    .is_some()
+            })
     }
 
     /// The open menu when it shows accent rows: its actions list or its
@@ -827,16 +834,15 @@ impl RootView {
     fn offered_rows(&self) -> Vec<OfferedRow> {
         self.actions_menu()
             .filter(|menu| menu.submenu == Submenu::None)
-            .and_then(|menu| self.sidebar.session(&menu.session_id))
-            .map(|session| {
-                let host = self.host_of_session(&session.id);
-                session_rows(
-                    HostedSession::new(&host, session),
+            .and_then(|menu| {
+                let session = self.sidebar.session_on(&menu.host, &menu.session_id)?;
+                Some(session_rows(
+                    HostedSession::new(&menu.host, session),
                     &self.tabs,
                     &self.sidebar.sessions_by_host(),
                     &self.popouts,
-                    self.capabilities_of(&host),
-                )
+                    self.capabilities_of(&menu.host),
+                ))
             })
             .unwrap_or_default()
     }
@@ -889,7 +895,7 @@ impl RootView {
         let session = self
             .menu
             .as_ref()
-            .and_then(|menu| self.sidebar.session(&menu.session_id));
+            .and_then(|menu| self.sidebar.session_on(&menu.host, &menu.session_id));
         let action_tip = self
             .rows()
             .into_iter()
@@ -924,7 +930,7 @@ impl RootView {
     fn busy_menu_row(&self) -> Option<SessionRow> {
         self.accent_menu()
             .filter(|menu| menu.submenu == Submenu::None)
-            .and_then(|menu| self.sidebar.session(&menu.session_id))
+            .and_then(|menu| self.sidebar.session_on(&menu.host, &menu.session_id))
             .map(busy_row)
     }
 
@@ -977,19 +983,20 @@ impl RootView {
         self.tabs.focused_pane(self.tabs.active_id()?)
     }
 
-    /// Opens the menu of `session_id` at `at`, taking the keyboard so Esc
-    /// reaches it. `pane` is the `(tab, pane)` whose header was
-    /// right-clicked, `None` when the menu opens elsewhere. The menu draws in
-    /// `window`, the window that asked for it.
+    /// Opens the menu of `host`'s session `session_id` at `at`, taking the
+    /// keyboard so Esc reaches it. `pane` is the `(tab, pane)` whose header
+    /// was right-clicked, `None` when the menu opens elsewhere. The menu
+    /// draws in `window`, the window that asked for it.
     pub fn open_session_menu(
         &mut self,
+        host: &HostKey,
         session_id: &str,
         pane: Option<&(String, String)>,
         at: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar.session(session_id).is_none() {
+        if self.sidebar.session_on(host, session_id).is_none() {
             return;
         }
         self.close_more_menu(window, cx);
@@ -1003,6 +1010,7 @@ impl RootView {
         self.overlays
             .opened(Overlay::SessionMenu, window.window_handle().window_id());
         self.menu = Some(SessionMenu {
+            host: host.clone(),
             session_id: session_id.to_owned(),
             at,
             mode: MenuMode::Actions,
@@ -1014,6 +1022,14 @@ impl RootView {
         self.confirm.disarm();
         self.menu_focus.focus(window);
         cx.notify();
+    }
+
+    /// The host the open menu was opened for; its rows act only while it is
+    /// open, so with none open there is no host to name and This PC stands.
+    fn menu_host(&self) -> HostKey {
+        self.menu
+            .as_ref()
+            .map_or(HostKey::Local, |menu| menu.host.clone())
     }
 
     /// Closes the menu and hands the keyboard back to the terminal of the
@@ -1034,11 +1050,11 @@ impl RootView {
         let sidebar = &self.sidebar;
         self.pending_appearance
             .retain_sessions(|session_id| sidebar.session(session_id).is_some());
-        if self
-            .menu
-            .as_ref()
-            .is_some_and(|menu| self.sidebar.session(&menu.session_id).is_none())
-        {
+        if self.menu.as_ref().is_some_and(|menu| {
+            self.sidebar
+                .session_on(&menu.host, &menu.session_id)
+                .is_none()
+        }) {
             self.close_session_menu(window, cx);
         }
         if self.delete_dialog.as_ref().is_some_and(|dialog| {
@@ -1978,13 +1994,13 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let host = self.menu_host();
         let prefill = self
             .sidebar
-            .session(session_id)
+            .session_on(&host, session_id)
             .filter(|_| shift)
             .map(|session| PendingPrefill::of(session, target.clone()))
             .filter(|pending| pending.source.is_some());
-        let host = self.host_of_session(session_id);
         let request = if let Some(pending) = prefill {
             Some(self.prefills.request(pending))
         } else {
@@ -2052,7 +2068,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let clicked = self.menu.as_ref().and_then(|menu| menu.pane.as_ref());
-        let shown = SessionRef::new(self.host_of_session(session_id), session_id);
+        let shown = SessionRef::new(self.menu_host(), session_id);
         let source = move_source(self.tabs.tabs(), &shown, clicked);
         self.close_session_menu(window, cx);
         let Some((tab_id, pane_id)) = source else {
@@ -2077,17 +2093,18 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let host = self.menu_host();
         match row {
             SessionRow::Duplicate => self.show_submenu(Submenu::Duplicate, window, cx),
             SessionRow::MoveTo => self.show_submenu(Submenu::MoveTo, window, cx),
             SessionRow::AddToCurrentTab { .. } => {
                 let session = self
                     .sidebar
-                    .find_session(session_id)
-                    .filter(|(_, s)| can_attach(s))
-                    .map(|(host, s)| (host, s.clone()));
+                    .session_on(&host, session_id)
+                    .filter(|s| can_attach(s))
+                    .cloned();
                 self.close_session_menu(window, cx);
-                if let Some((host, session)) = session {
+                if let Some(session) = session {
                     self.place_session(&host, &session, window, cx);
                 }
             }
@@ -2096,7 +2113,7 @@ impl RootView {
                 self.open_in_new_tab(session_id);
             }
             SessionRow::PopOut => {
-                let shown = SessionRef::new(self.host_of_session(session_id), session_id);
+                let shown = SessionRef::new(host, session_id);
                 let key = match pane_to_pop(&shown, self.tabs.tabs(), self.tabs.active_id()) {
                     Some((tab_id, pane_id)) => PopoutKey::Pane { tab_id, pane_id },
                     None => PopoutKey::session(&shown.host, &shown.id),
@@ -2107,10 +2124,9 @@ impl RootView {
             SessionRow::RevealWorktree => {
                 let path = self
                     .sidebar
-                    .session(session_id)
+                    .session_on(&host, session_id)
                     .and_then(worktree_to_reveal)
                     .map(PathBuf::from);
-                let host = self.host_of_session(session_id);
                 self.close_session_menu(window, cx);
                 if let Some(path) = path {
                     let job = OpenJob::DefaultApp {
@@ -2121,10 +2137,7 @@ impl RootView {
                 }
             }
             SessionRow::BusyExcluded { excluded } => {
-                self.send_to(
-                    &self.host_of_session(session_id),
-                    busy_exclusion_message(session_id, excluded),
-                );
+                self.send_to(&host, busy_exclusion_message(session_id, excluded));
                 self.close_session_menu(window, cx);
             }
         }
@@ -2164,12 +2177,13 @@ impl RootView {
     /// place. A restart already on the way does nothing.
     pub(crate) fn choose_action(
         &mut self,
+        host: &HostKey,
         session_id: &str,
         action: SessionAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.sidebar.session(session_id).cloned() else {
+        let Some(session) = self.sidebar.session_on(host, session_id).cloned() else {
             return;
         };
         if action_disabled_tip(action, &session).is_some() {
@@ -2177,21 +2191,21 @@ impl RootView {
         }
         cx.notify();
         self.confirm.disarm();
-        match plan(action, &session, self.is_shown(session_id)) {
+        match plan(action, &session, self.is_shown(host, session_id)) {
             Step::ConfirmWorktreeDelete => {
                 self.close_session_menu(window, cx);
                 self.open_delete_dialog(session_id, ConfirmOwner::Menu, window, cx);
             }
             Step::Send(messages) => {
                 for msg in messages {
-                    self.send_to(&self.host_of_session(session_id), msg);
+                    self.send_to(host, msg);
                 }
                 self.close_session_menu(window, cx);
             }
-            Step::EditName => self.start_session_rename(&session, window, cx),
+            Step::EditName => self.start_session_rename(host, &session, window, cx),
             Step::Duplicate => {
                 let request_id = crate::new_request_id();
-                let host = self.host_of_session(session_id);
+                let host = host.clone();
                 let target = if self.has_session_popout(&SessionRef::new(host.clone(), session_id))
                 {
                     DuplicateTarget::RestartInPopout
@@ -2211,8 +2225,8 @@ impl RootView {
 
     /// Whether a tab pane or the session's own pop-out shows `session_id`,
     /// so a stop keeps it listed.
-    fn is_shown(&self, session_id: &str) -> bool {
-        let shown = SessionRef::new(self.host_of_session(session_id), session_id);
+    fn is_shown(&self, host: &HostKey, session_id: &str) -> bool {
+        let shown = SessionRef::new(host.clone(), session_id);
         find_tab_containing_session(self.tabs.tabs(), &shown).is_some()
             || self.popouts.session_key(&shown).is_some()
     }
@@ -2221,10 +2235,12 @@ impl RootView {
     /// sidebar shows. Enter sends the rename; Esc goes back to the rows.
     fn start_session_rename(
         &mut self,
+        host: &HostKey,
         session: &SessionSnapshot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let host = host.clone();
         let name = session
             .user_label
             .clone()
@@ -2237,10 +2253,7 @@ impl RootView {
             move |this, input, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Submit => {
                     let text = input.read(cx).text().to_owned();
-                    this.send_to(
-                        &this.host_of_session(&session_id),
-                        rename_message(&session_id, &text),
-                    );
+                    this.send_to(&host, rename_message(&session_id, &text));
                     this.close_session_menu(window, cx);
                 }
                 TextInputEvent::Cancel => this.set_menu_mode(MenuMode::Actions, window, cx),
@@ -2337,7 +2350,7 @@ impl RootView {
             return None;
         }
         let menu = self.menu.as_ref()?;
-        self.sidebar.session(&menu.session_id)?;
+        self.sidebar.session_on(&menu.host, &menu.session_id)?;
         let backdrop = div().absolute().top_0().left_0().size_full().occlude();
         let panel = anchored()
             .position(menu.at)
@@ -2586,11 +2599,11 @@ impl RootView {
         else {
             return Vec::new();
         };
-        let Some(session) = self.sidebar.session(&menu.session_id) else {
+        let Some(session) = self.sidebar.session_on(&menu.host, &menu.session_id) else {
             return Vec::new();
         };
         // The labels name a tab pane; a session pop-out alone is none.
-        let shown = SessionRef::new(self.host_of_session(&session.id), &session.id);
+        let shown = SessionRef::new(menu.host.clone(), &session.id);
         let in_pane = find_tab_containing_session(self.tabs.tabs(), &shown).is_some();
         menu_entries(session, menu.mode)
             .into_iter()
@@ -2656,9 +2669,10 @@ impl RootView {
         label: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let host = self.menu_host();
         if let Some(tip) = self
             .sidebar
-            .session(session_id)
+            .session_on(&host, session_id)
             .and_then(|session| action_disabled_tip(action, session))
         {
             return disabled_row(selector, label, tip, &theme(cx));
@@ -2667,7 +2681,7 @@ impl RootView {
         if !self.action_ready(session_id, action) {
             return button.opacity(0.6).cursor_default();
         }
-        on_action_press(button, session_id, action, cx)
+        on_action_press(button, host, session_id, action, cx)
     }
 
     /// A compact button of a pane overlay for `action` on `session_id`,
@@ -2675,7 +2689,7 @@ impl RootView {
     /// press.
     fn overlay_action_button(
         &self,
-        session_id: &str,
+        session: &SessionRef,
         action: SessionAction,
         selector: &str,
         label: &'static str,
@@ -2686,7 +2700,7 @@ impl RootView {
         } else {
             ButtonKind::Outlined
         };
-        let ready = self.action_ready(session_id, action);
+        let ready = self.action_ready(&session.id, action);
         let button = button(
             selector,
             button_look(
@@ -2700,7 +2714,7 @@ impl RootView {
         )
         .child(label);
         if ready {
-            on_action_press(button, session_id, action, cx)
+            on_action_press(button, session.host.clone(), &session.id, action, cx)
         } else {
             button
         }
@@ -2916,7 +2930,7 @@ impl RootView {
         vec![
             on_press(confirm, cx, move |this, window, cx| {
                 if this.confirm.click(place, &id) {
-                    this.choose_action(&id, stop, window, cx);
+                    this.choose_action(&this.host_of_session(&id), &id, stop, window, cx);
                 }
             })
             .into_any_element(),
@@ -2975,7 +2989,7 @@ impl RootView {
         for pane in collect_panes(grid) {
             let Some(session) = pane
                 .session
-                .and_then(|id| self.sidebar.session(id))
+                .and_then(|id| self.sidebar.session_on(&pane.host, id))
                 .filter(|session| pane_shows_exit(session))
             else {
                 continue;
@@ -2995,16 +3009,19 @@ impl RootView {
     /// The layer over an exited session's terminal: the exit code and what
     /// to do with the pane of `tab_id` it draws in, or, for a terminal in no
     /// tab (a session pop-out's), with the session, with no New session for
-    /// a pane to fill.
+    /// a pane to fill. `session` is the pane's host and session, read on
+    /// that host alone.
     pub(crate) fn exited_overlay(
         &self,
         tab_id: Option<&str>,
         pane_id: &str,
-        session_id: Option<&str>,
+        session: Option<SessionRef>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let session = session_id
-            .and_then(|id| self.sidebar.session(id))
+        let shown = session?;
+        let session = self
+            .sidebar
+            .session_on(&shown.host, &shown.id)
             .filter(|session| pane_shows_exit(session))?;
         let in_pane = tab_id.is_some();
         let mut buttons: Vec<AnyElement> = overlay_actions(session)
@@ -3012,7 +3029,7 @@ impl RootView {
             .map(|action| {
                 let selector = format!("exited-{}-{pane_id}", action.key());
                 let label = self.action_label(session, action, in_pane);
-                self.overlay_action_button(&session.id, action, &selector, label, cx)
+                self.overlay_action_button(&shown, action, &selector, label, cx)
                     .into_any_element()
             })
             .collect();
@@ -3053,7 +3070,8 @@ impl RootView {
             .map(|inline| {
                 let selector = format!("abandoned-{}-{pane_id}", inline.key);
                 let label = self.action_label(session, inline.action, true);
-                self.overlay_action_button(&session.id, inline.action, &selector, label, cx)
+                let shown = SessionRef::new(self.host_of_session(&session.id), &session.id);
+                self.overlay_action_button(&shown, inline.action, &selector, label, cx)
                     .tooltip(tooltip(inline.tip))
                     .into_any_element()
             })
@@ -3553,10 +3571,11 @@ pub(crate) fn dialog_look(offset: i8, danger: bool, enabled: bool, t: &UiTheme) 
     }
 }
 
-/// `button`, which runs `action` on `session_id` on a left press and keeps
-/// the press from the root.
+/// `button`, which runs `action` on `host`'s session `session_id` on a left
+/// press and keeps the press from the root.
 fn on_action_press(
     button: Stateful<Div>,
+    host: HostKey,
     session_id: &str,
     action: SessionAction,
     cx: &mut Context<RootView>,
@@ -3568,12 +3587,12 @@ fn on_action_press(
             cx.stop_propagation();
             if action == SessionAction::RemovePaneDeleteWorktree {
                 // Its confirm is a main-window dialog.
-                let session_id = session_id.clone();
+                let (host, session_id) = (host.clone(), session_id.clone());
                 this.in_main_window(window, cx, move |this, window, cx| {
-                    this.choose_action(&session_id, action, window, cx);
+                    this.choose_action(&host, &session_id, action, window, cx);
                 });
             } else {
-                this.choose_action(&session_id, action, window, cx);
+                this.choose_action(&host, &session_id, action, window, cx);
             }
         }),
     )
