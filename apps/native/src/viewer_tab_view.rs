@@ -502,9 +502,9 @@ impl RootView {
     }
 
     /// Folds a viewer message in; returns whether nothing else is owed it.
-    /// Viewer tabs live in This PC's layout and ask only This PC, so only
-    /// its messages fold here: a remote host's open answer or error names
-    /// nothing of theirs.
+    /// A viewer tab holds a file on this PC — a remote file reaches it as a
+    /// fetched copy — so it lives in This PC's layout and asks only This PC:
+    /// a remote host's open answer or error names nothing of theirs.
     pub(crate) fn on_viewer_message(
         &mut self,
         host: &crate::target::HostKey,

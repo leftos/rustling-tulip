@@ -23,10 +23,11 @@ use rustling_tulip_native::diff_view::{DiffView, Half};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{
-    BINARY_TEXT, DIFF_OPEN_FAILED_TITLE, DiffTabBody, DiffTabHeader, EMPTY_TEXT, ToastKind,
+    BINARY_TEXT, Connection, DIFF_OPEN_FAILED_TITLE, DiffTabBody, DiffTabHeader, EMPTY_TEXT,
+    NetEvent, ToastKind,
 };
 use serde_json::{Value, json};
-use support::{Fixture, Harness, TestDir, repo, session};
+use support::{Fixture, Harness, TestDir, remote_in_pane, repo, session};
 
 /// The focused session's member tree of `r1`, and its section's key id.
 const TREE: &str = "C:/wt/r1";
@@ -48,6 +49,18 @@ fn diff_tab(id: &str, path: &str, against: Option<&str>) -> TabEntry {
 
 /// A diff tab of `path` in the tree `worktree`; `None` is the main tree.
 fn diff_tab_in(id: &str, path: &str, against: Option<&str>, worktree: Option<&str>) -> TabEntry {
+    diff_tab_on_host(id, path, against, worktree, None)
+}
+
+/// A diff tab of `path` in the tree `worktree` on `host`; `None` is This
+/// PC.
+fn diff_tab_on_host(
+    id: &str,
+    path: &str,
+    against: Option<&str>,
+    worktree: Option<&str>,
+    host: Option<&str>,
+) -> TabEntry {
     serde_json::from_value(json!({
         "id": id,
         "name": path,
@@ -57,6 +70,7 @@ fn diff_tab_in(id: &str, path: &str, against: Option<&str>, worktree: Option<&st
             "path": path,
             "against": against,
             "worktree_path": worktree,
+            "host": host,
         },
         "created_at": "2026-01-01T00:00:00Z",
     }))
@@ -74,8 +88,15 @@ fn opened(id: &str, tab_id: &str) -> DaemonMessage {
     }
 }
 
-/// An `OpenDiffTab` the client sent: (id, path, against, worktree).
-type Open = (String, String, Option<String>, Option<String>);
+/// An `OpenDiffTab` or `GetFileSnapshot` the client sent: (id, path,
+/// against, worktree, the host it names).
+type Open = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 fn opens(h: &mut Harness<'_>) -> Vec<Open> {
     h.sent()
@@ -87,10 +108,10 @@ fn opens(h: &mut Harness<'_>) -> Vec<Open> {
                 path,
                 against,
                 worktree_path,
-                host: None,
+                host,
             } => {
                 assert_eq!(repo_id, "r1");
-                Some((id, path, against, worktree_path))
+                Some((id, path, against, worktree_path, host))
             }
             _ => None,
         })
@@ -103,10 +124,9 @@ fn one_open(h: &mut Harness<'_>) -> Open {
     sent.remove(0)
 }
 
-/// The `GetFileSnapshot`s the client sent: (id, path, against, worktree).
-fn snapshot_requests(h: &mut Harness<'_>) -> Vec<Open> {
-    h.sent()
-        .into_iter()
+/// The `GetFileSnapshot`s in `sent`.
+fn snapshots(sent: Vec<ClientMessage>) -> Vec<Open> {
+    sent.into_iter()
         .filter_map(|msg| match msg {
             ClientMessage::GetFileSnapshot {
                 id,
@@ -116,11 +136,21 @@ fn snapshot_requests(h: &mut Harness<'_>) -> Vec<Open> {
                 worktree_path,
             } => {
                 assert_eq!(repo_id, "r1");
-                Some((id, path, against, worktree_path))
+                Some((id, path, against, worktree_path, None))
             }
             _ => None,
         })
         .collect()
+}
+
+/// The `GetFileSnapshot`s the client sent to This PC.
+fn snapshot_requests(h: &mut Harness<'_>) -> Vec<Open> {
+    snapshots(h.sent())
+}
+
+/// The `GetFileSnapshot`s the client sent to `target`'s daemon.
+fn host_snapshots(h: &mut Harness<'_>, target: &Target) -> Vec<Open> {
+    snapshots(h.host(target).sent())
 }
 
 fn one_snapshot_id(h: &mut Harness<'_>) -> String {
@@ -343,6 +373,301 @@ fn a_remote_welcome_keeps_this_pcs_pending_diff_and_viewer_opens(cx: &mut TestAp
     );
 }
 
+// --- A remote host -------------------------------------------------------
+
+/// [`support::REMOTE`] as the specs dial it beside This PC.
+fn remote() -> Target {
+    Target::tailnet(support::REMOTE, None)
+}
+
+/// The remote session's tree `r1`, and its section's key id.
+const REMOTE_TREE: &str = "C:/wt/x";
+const REMOTE_MEMBER: &str = "r1::C:/wt/x";
+
+/// This PC with `r1` registered; [`support::REMOTE`] connected beside it.
+fn two_hosts<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &focused());
+    h.host(&remote()).connect();
+    h
+}
+
+/// The panel on [`support::REMOTE`]'s session `s1`, whose tree `r1` holds
+/// `s.rs` staged and `c.rs` changed.
+fn remote_changes_panel<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let s1 = session("s1").worktree("r1").build();
+    let mut h = remote_in_pane(cx, dir, &json!({}), &["r1"], s1);
+    h.click_on("activity-source-control");
+    h.host(&remote())
+        .send(status(&["s.rs"], &["c.rs"], Some(REMOTE_TREE)));
+    h.sent();
+    h.host(&remote()).sent();
+    h
+}
+
+/// `target`'s daemon answers `id` with `old` and `new`.
+fn answer_from(h: &mut Harness<'_>, target: &Target, id: &str, old: &str, new: &str) {
+    h.host(target).send(snapshot(id, old, new, None));
+}
+
+/// Reports [`support::REMOTE`]'s connection closed.
+fn close_remote(h: &mut Harness<'_>) {
+    let mut closed = Connection::for_target(remote());
+    closed.on_connecting();
+    let _ = closed.on_closed("socket closed".to_owned());
+    h.host(&remote()).event(NetEvent::State(closed));
+}
+
+#[gpui::test]
+fn a_remote_repos_diff_opens_here_naming_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_changes_panel(cx, &dir);
+    h.click_on(&format!("sc-row-changes-{REMOTE_MEMBER}|c.rs"));
+    let (_, path, against, worktree, host) = one_open(&mut h);
+    assert_eq!(path, "c.rs");
+    assert_eq!(against, None);
+    assert_eq!(worktree.as_deref(), Some(REMOTE_TREE));
+    assert_eq!(
+        host.as_deref(),
+        Some(support::REMOTE),
+        "the open names the host the file is on"
+    );
+    assert!(
+        h.host(&remote()).sent().is_empty(),
+        "the open is This PC's layout's to answer"
+    );
+}
+
+#[gpui::test]
+fn a_remote_diff_tab_reads_from_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(updated(&diff_tab_on_host(
+        "d1",
+        "src/main.rs",
+        None,
+        Some(REMOTE_TREE),
+        Some(support::REMOTE),
+    )));
+    let read = host_snapshots(&mut h, &remote());
+    assert_eq!(read.len(), 1, "one read of the host: {read:?}");
+    assert_eq!(read[0].1, "src/main.rs");
+    assert_eq!(read[0].3.as_deref(), Some(REMOTE_TREE));
+    assert!(
+        snapshot_requests(&mut h).is_empty(),
+        "This PC is asked for nothing"
+    );
+}
+
+#[gpui::test]
+fn a_snapshot_lands_only_in_the_tab_that_asked_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(updated(&diff_tab_on_host(
+        "d1",
+        "src/main.rs",
+        None,
+        Some(REMOTE_TREE),
+        Some(support::REMOTE),
+    )));
+    let remote_snapshot = host_snapshots(&mut h, &remote())[0].0.clone();
+    h.send(updated(&diff_tab_in("d2", "a.rs", None, Some(TREE))));
+    let local_snapshot = one_snapshot_id(&mut h);
+
+    answer(&mut h, &remote_snapshot, &lines(3, &[]), &lines(3, &[2]));
+    assert_eq!(text(&mut h, "d1"), "loading…", "This PC cannot answer it");
+
+    answer_from(
+        &mut h,
+        &remote(),
+        &remote_snapshot,
+        &lines(3, &[]),
+        &lines(3, &[2]),
+    );
+    assert_eq!(header(&mut h, "d1").count, "1 change");
+
+    answer_from(
+        &mut h,
+        &remote(),
+        &local_snapshot,
+        &lines(3, &[]),
+        &lines(3, &[2]),
+    );
+    assert_eq!(
+        text(&mut h, "d2"),
+        "loading…",
+        "another host's id is not its tab's"
+    );
+
+    answer(&mut h, &local_snapshot, &lines(3, &[]), &lines(3, &[2]));
+    assert_eq!(header(&mut h, "d2").count, "1 change");
+}
+
+#[gpui::test]
+fn a_commits_diff_on_a_remote_repo_reads_from_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(updated(&diff_tab_on_host(
+        "d1",
+        "src/main.rs",
+        Some(SHA),
+        Some(REMOTE_TREE),
+        Some(support::REMOTE),
+    )));
+    let read = host_snapshots(&mut h, &remote());
+    assert_eq!(read.len(), 1, "one read of the host: {read:?}");
+    assert_eq!(read[0].2.as_deref(), Some(SHA));
+    assert!(
+        snapshot_requests(&mut h).is_empty(),
+        "This PC is asked for nothing"
+    );
+}
+
+#[gpui::test]
+fn a_remote_welcome_reads_only_its_own_tabs_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(updated(&diff_tab_on_host(
+        "d1",
+        "src/main.rs",
+        None,
+        Some(REMOTE_TREE),
+        Some(support::REMOTE),
+    )));
+    let remote_read = host_snapshots(&mut h, &remote())[0].0.clone();
+    h.send(updated(&diff_tab_in("d2", "a.rs", None, Some(TREE))));
+    let local_read = one_snapshot_id(&mut h);
+    answer_from(&mut h, &remote(), &remote_read, "a\n", "b\n");
+    answer(&mut h, &local_read, "a\n", "b\n");
+
+    h.host(&remote()).connect_keeping_sent();
+    let again = host_snapshots(&mut h, &remote());
+    assert_eq!(again.len(), 1, "the host's own tab reads again: {again:?}");
+    assert_eq!(again[0].1, "src/main.rs");
+    assert!(
+        snapshot_requests(&mut h).is_empty(),
+        "This PC's tab is not re-read by the host's Welcome"
+    );
+
+    h.send(support::welcome(support::PROTOCOL));
+    assert!(
+        host_snapshots(&mut h, &remote()).is_empty(),
+        "This PC's Welcome leaves the host's tab alone"
+    );
+    assert_eq!(
+        snapshot_requests(&mut h).len(),
+        1,
+        "This PC's own tab reads again"
+    );
+}
+
+#[gpui::test]
+fn a_tab_restored_before_its_host_connects_says_so_and_reads_once_it_does(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    h.send(updated(&diff_tab_on_host(
+        "d1",
+        "src/main.rs",
+        Some(SHA),
+        Some(REMOTE_TREE),
+        Some(support::REMOTE),
+    )));
+    assert_eq!(
+        text(&mut h, "d1"),
+        "box is offline",
+        "the host is not connected"
+    );
+    assert!(
+        snapshot_requests(&mut h).is_empty(),
+        "This PC is asked for nothing"
+    );
+
+    h.host(&remote()).connect_keeping_sent();
+    let read = host_snapshots(&mut h, &remote());
+    assert_eq!(
+        read.len(),
+        1,
+        "the commit's diff reads from the host once it connects: {read:?}"
+    );
+    assert_eq!(read[0].2.as_deref(), Some(SHA));
+    assert_eq!(text(&mut h, "d1"), "loading…");
+}
+
+#[gpui::test]
+fn a_status_refreshes_only_its_own_hosts_tabs(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(updated(&diff_tab_on_host(
+        "d1",
+        "src/main.rs",
+        None,
+        Some(TREE),
+        Some(support::REMOTE),
+    )));
+    let remote_read = host_snapshots(&mut h, &remote())[0].0.clone();
+    h.send(updated(&diff_tab_in("d2", "a.rs", None, Some(TREE))));
+    let local_read = one_snapshot_id(&mut h);
+    answer_from(&mut h, &remote(), &remote_read, "a\n", "b\n");
+    answer(&mut h, &local_read, "a\n", "b\n");
+
+    h.host(&remote())
+        .send(status(&[], &["src/main.rs"], Some(TREE)));
+    assert_eq!(
+        host_snapshots(&mut h, &remote()).len(),
+        1,
+        "the host's own tab reads again"
+    );
+    assert!(
+        snapshot_requests(&mut h).is_empty(),
+        "This PC's tab shares the key but not the host"
+    );
+
+    h.send(status(&[], &["a.rs"], Some(TREE)));
+    assert_eq!(
+        snapshot_requests(&mut h).len(),
+        1,
+        "This PC's own tab reads again"
+    );
+    assert!(
+        host_snapshots(&mut h, &remote()).is_empty(),
+        "the host's tab is left alone"
+    );
+}
+
+#[gpui::test]
+fn a_remote_close_says_the_host_is_offline_and_its_welcome_reads_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(updated(&diff_tab_on_host(
+        "d1",
+        "src/main.rs",
+        None,
+        Some(REMOTE_TREE),
+        Some(support::REMOTE),
+    )));
+    let read = host_snapshots(&mut h, &remote())[0].0.clone();
+    answer_from(&mut h, &remote(), &read, &lines(3, &[]), &lines(3, &[2]));
+    assert_eq!(header(&mut h, "d1").count, "1 change");
+
+    close_remote(&mut h);
+    assert_eq!(
+        text(&mut h, "d1"),
+        "box is offline",
+        "the tab says why it cannot show the diff"
+    );
+
+    h.host(&remote()).connect_keeping_sent();
+    assert_eq!(
+        host_snapshots(&mut h, &remote()).len(),
+        1,
+        "its next Welcome reads again"
+    );
+    assert_eq!(
+        header(&mut h, "d1").count,
+        "1 change",
+        "the diff it held shows again while the fresh read is out"
+    );
+}
+
 // --- The changes tree ----------------------------------------------------
 
 fn file(path: &str) -> Value {
@@ -376,10 +701,11 @@ fn clicking_a_changes_row_opens_its_worktree_diff(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = changes_panel(cx, &dir);
     h.click_on(&format!("sc-row-changes-{MEMBER}|c.rs"));
-    let (_, path, against, worktree) = one_open(&mut h);
+    let (_, path, against, worktree, host) = one_open(&mut h);
     assert_eq!(path, "c.rs");
     assert_eq!(against, None);
     assert_eq!(worktree.as_deref(), Some(TREE));
+    assert_eq!(host, None, "This PC's repo names no host");
 }
 
 #[gpui::test]
@@ -387,7 +713,7 @@ fn clicking_a_staged_row_opens_its_diff_against_head(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = changes_panel(cx, &dir);
     h.click_on(&format!("sc-row-staged-{MEMBER}|s.rs"));
-    let (_, path, against, worktree) = one_open(&mut h);
+    let (_, path, against, worktree, _) = one_open(&mut h);
     assert_eq!(path, "s.rs");
     assert_eq!(against.as_deref(), Some("HEAD"));
     assert_eq!(worktree.as_deref(), Some(TREE));
@@ -416,7 +742,7 @@ fn the_file_menu_opens_the_diff_first(cx: &mut TestAppContext) {
     );
     h.click_on("sc-file-menu-open");
     assert!(!h.root(|root, _| root.sc_file_menu_open()));
-    let (_, path, against, _) = one_open(&mut h);
+    let (_, path, against, _, _) = one_open(&mut h);
     assert_eq!((path.as_str(), against), ("c.rs", None));
 
     h.right_click_on(&format!("sc-row-staged-{MEMBER}|s.rs"));
@@ -439,7 +765,7 @@ fn the_file_menu_opens_the_diff_first(cx: &mut TestAppContext) {
         "a write out disables the writes, not Open"
     );
     h.click_on("sc-file-menu-open");
-    let (_, path, against, _) = one_open(&mut h);
+    let (_, path, against, _, _) = one_open(&mut h);
     assert_eq!((path.as_str(), against.as_deref()), ("s.rs", Some("HEAD")));
 }
 
@@ -530,7 +856,8 @@ fn a_snapshot_fills_the_header_and_the_count(cx: &mut TestAppContext) {
             "diff-snap-1".to_owned(),
             "src/deep/main.rs".to_owned(),
             Some(SHA.to_owned()),
-            Some(TREE.to_owned())
+            Some(TREE.to_owned()),
+            None
         )]
     );
     h.click_on("tab-d1");
@@ -1057,6 +1384,7 @@ fn a_commits_diff_does_not_refetch(cx: &mut TestAppContext) {
         [] as [(
             std::string::String,
             std::string::String,
+            std::option::Option<std::string::String>,
             std::option::Option<std::string::String>,
             std::option::Option<std::string::String>
         ); 0]

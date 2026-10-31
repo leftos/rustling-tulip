@@ -322,6 +322,7 @@ impl RootView {
         self.forget_daemon_settings(host);
         self.forget_daemon_id(host);
         self.end_fetches_on_disconnect(host, window, cx);
+        self.close_diff_tabs_of(host, cx);
         self.close_fetch_dialog_of(host, window, cx);
         // This PC's chooser stays under the connecting overlay until its
         // next `Welcome`; a remote host's question ends with its connection.
