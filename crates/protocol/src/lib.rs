@@ -593,6 +593,14 @@ pub struct SessionMetrics {
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
+/// One session of a remote host replaced by its successor, as
+/// [`ClientMessage::RebindHostSessions`] asks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostRebind {
+    pub old_id: String,
+    pub new_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -735,6 +743,14 @@ pub struct SessionSnapshot {
     /// pending one-shot wakeup. Always false beside any other status.
     #[serde(default)]
     pub background: bool,
+    /// The abandoned sessions this one replaced in place, oldest first: a
+    /// Resume, an auto-resume or a Recover of an abandoned session names its
+    /// predecessor here and keeps that predecessor's own list, the newest few
+    /// ids in all. Set when the session is born and never changed, so every
+    /// snapshot carries it for the life of the session. Empty for a session
+    /// that replaced none, and a Duplicate or Restart inherits none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resumed_from: Vec<String>,
 }
 
 /// What a session is waiting for, as the agent CLI's own hooks last reported
@@ -3820,6 +3836,20 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Show each successor in place of the session it replaced, in every
+    /// client's layout: each pane whose `host` equals `host` and whose
+    /// `session_id` is a rebind's `old_id` takes its `new_id`. Sent only to
+    /// This PC, whose layouts hold the panes of remote hosts. A layout that
+    /// changed gets its usual [`DaemonMessage::TabUpdated`]; no matching pane
+    /// changes nothing and sends nothing. A refusal is an
+    /// [`DaemonMessage::Error`] with code `tab_refused`.
+    RebindHostSessions {
+        host: String,
+        rebinds: Vec<HostRebind>,
+        /// Echoed on a [`DaemonMessage::Error`] answering it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     /// Request the list of presets available for a repo or workspace. The
     /// daemon reads `.rustling-tulip/presets.json` from the target repo (or
     /// from each member repo of a workspace) and replies with
@@ -5802,7 +5832,7 @@ mod tests {
     }
 
     /// The tab-layout requests, each carrying `request_id`.
-    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 8] {
+    fn tab_layout_requests(request_id: Option<&str>) -> [ClientMessage; 9] {
         let request_id = request_id.map(str::to_owned);
         [
             ClientMessage::SplitPane {
@@ -5824,6 +5854,14 @@ mod tests {
                 host: "ssh:devbox".to_owned(),
                 session_ids: vec!["s1".to_owned()],
                 all: false,
+                request_id: request_id.clone(),
+            },
+            ClientMessage::RebindHostSessions {
+                host: "ssh:devbox".to_owned(),
+                rebinds: vec![HostRebind {
+                    old_id: "s1".to_owned(),
+                    new_id: "s2".to_owned(),
+                }],
                 request_id: request_id.clone(),
             },
             ClientMessage::MergeTabs {
@@ -5871,7 +5909,8 @@ mod tests {
             | ClientMessage::SwapPanes { request_id, .. }
             | ClientMessage::ReorderTabs { request_id, .. }
             | ClientMessage::ExtractToNewTab { request_id, .. }
-            | ClientMessage::ForgetHostSessions { request_id, .. } => request_id.as_deref(),
+            | ClientMessage::ForgetHostSessions { request_id, .. }
+            | ClientMessage::RebindHostSessions { request_id, .. } => request_id.as_deref(),
             other => panic!("not a tab-layout request: {other:?}"),
         }
     }
@@ -6080,6 +6119,43 @@ mod tests {
                 &back,
                 ClientMessage::ForgetHostSessions { host, session_ids, all: true, request_id: Some(id) }
                     if host == "tailnet:laptop" && session_ids.is_empty() && id == "req-4"
+            ),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn rebind_host_sessions_round_trips() {
+        let decoded: ClientMessage = serde_json::from_str(
+            r#"{"type":"rebind_host_sessions","host":"ssh:devbox","rebinds":[{"old_id":"a","new_id":"b"}]}"#,
+        )
+        .expect("a rebind without request_id decodes");
+        let rebind = HostRebind {
+            old_id: "a".to_owned(),
+            new_id: "b".to_owned(),
+        };
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::RebindHostSessions { host, rebinds, request_id: None }
+                    if host == "ssh:devbox" && rebinds == std::slice::from_ref(&rebind)
+            ),
+            "{decoded:?}"
+        );
+
+        let msg = ClientMessage::RebindHostSessions {
+            host: "tailnet:laptop".to_owned(),
+            rebinds: vec![rebind.clone()],
+            request_id: Some("req-5".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""type":"rebind_host_sessions""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::RebindHostSessions { host, rebinds, request_id: Some(id) }
+                    if host == "tailnet:laptop" && rebinds == std::slice::from_ref(&rebind) && id == "req-5"
             ),
             "{json}"
         );
@@ -10070,6 +10146,31 @@ mod tests {
         assert_eq!(json.get("background"), Some(&serde_json::json!(true)));
         let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
         assert!(back.background, "the flag round-trips");
+    }
+
+    #[test]
+    fn an_empty_resumed_from_stays_off_the_wire_and_a_list_round_trips() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert!(
+            snapshot.resumed_from.is_empty(),
+            "a snapshot without the field reads as no predecessor"
+        );
+        let json = serde_json::to_value(&snapshot).expect("encode");
+        assert!(json.get("resumed_from").is_none(), "{json}");
+
+        let lineage = vec!["older".to_owned(), "newer".to_owned()];
+        let json = serde_json::to_value(SessionSnapshot {
+            resumed_from: lineage.clone(),
+            ..snapshot
+        })
+        .expect("encode");
+        assert_eq!(
+            json.get("resumed_from"),
+            Some(&serde_json::json!(["older", "newer"]))
+        );
+        let back: SessionSnapshot = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.resumed_from, lineage, "oldest first");
     }
 
     #[test]

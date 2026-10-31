@@ -216,6 +216,11 @@ pub struct OrphanMeta {
     /// other session and for sidecars written before this field existed.
     #[serde(default)]
     pub hook_trusted: bool,
+    /// The abandoned sessions this one replaced in place, oldest first (see
+    /// [`protocol::SessionSnapshot::resumed_from`]), set at spawn. Absent when
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resumed_from: Vec<String>,
     /// Whether the session's exit was seen while the host was shutting down,
     /// so the daemon kept it for the next start rather than ending it. The
     /// next start records such a session lost whatever its tracer log ends
@@ -699,6 +704,7 @@ pub fn meta_from_record(
         hook_agent: None,
         hook_options: protocol::OptionValues::new(),
         hook_trusted: false,
+        resumed_from: Vec::new(),
         ended_during_host_shutdown: false,
     })
 }
@@ -1040,6 +1046,7 @@ mod tests {
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             hook_trusted: false,
+            resumed_from: Vec::new(),
             ended_during_host_shutdown: true,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");

@@ -2650,8 +2650,7 @@ mod tests {
                 .is_some_and(|rec| crate::sync::lock(&rec).is_abandoned)
         };
         wait_until("the session to be abandoned", abandoned).await;
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        discard_abandoned(&hub, "s1", &out_tx);
+        discard_abandoned(&hub, "s1");
         assert!(hub.sessions.get("s1").is_none(), "dismissed");
         let entries = history::read_all(&hub.dirs);
         assert_eq!(entries.len(), 1);
@@ -2957,6 +2956,40 @@ mod tests {
             }
             other => panic!("expected a single target, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_carries_no_lineage() {
+        let (hub, _scratch) = spawnless_test_hub("duplicate-no-lineage");
+        let mut source = idle_record("src");
+        source.spawn_config = Some(protocol::SpawnConfig::from_request(&env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(hub.dirs.config.to_string_lossy().into_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        )));
+        source.resumed_from = vec!["predecessor-of-src".to_owned()];
+        hub.sessions.insert(source);
+
+        for same_checkout in [false, true] {
+            let request = duplicate_request(&hub, "src", same_checkout)
+                .await
+                .expect("a duplicate reruns the source's config");
+            let json = serde_json::to_string(&request).expect("encode the request");
+            assert!(
+                !json.contains("predecessor-of-src"),
+                "same_checkout {same_checkout}: {json}"
+            );
+        }
+        assert!(
+            crate::server::spawn::SpawnExtras::default()
+                .resumed_from
+                .is_empty(),
+            "and the plain spawn path a duplicate takes names no predecessor"
+        );
     }
 
     /// A Restart or Resume of a Claude session continues its conversation

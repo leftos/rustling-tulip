@@ -4,7 +4,7 @@ use super::git::repo_path_or_err;
 use super::{Hub, StateEvent, TabEvent};
 use crate::registry::{reorder_containers, set_session_order};
 use chrono::Utc;
-use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, TabContent, TabEntry};
+use protocol::{ClientMessage, DaemonMessage, HostRebind, InitLayoutKind, TabContent, TabEntry};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -414,6 +414,15 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
                 send_tab_failure(out_tx, &err, request_id);
             }
         }
+        ClientMessage::RebindHostSessions {
+            host,
+            rebinds,
+            request_id,
+        } => {
+            if let Err(err) = rebind_panes(hub, Some(&host), &rebinds) {
+                send_tab_failure(out_tx, &err, request_id);
+            }
+        }
         _ => warn!("tabs::handle: dispatch routed a message this module does not handle"),
     }
     Ok(())
@@ -657,7 +666,7 @@ fn short_rev(rev: &str) -> &str {
 
 /// Answers a failed tab-layout request (`CreateTab`, `SplitPane`, `ClosePane`,
 /// `MergeTabs`, `MovePane`, `SwapPanes`, `ReorderTabs`, `ExtractToNewTab`,
-/// `ForgetHostSessions`) with
+/// `ForgetHostSessions`, `RebindHostSessions`) with
 /// an `Error` to this requester only, carrying the `request_id` it asked with
 /// so the client can drop what it armed for it.
 fn send_tab_failure(
@@ -761,29 +770,57 @@ fn close_panes_in_all_layouts(
     Ok(())
 }
 
-/// Rebind every pane bound to `old_id` to `new_id` across every client's
-/// layout, broadcasting a scoped `TabUpdated` per affected tab. Used by
-/// `resume_abandoned` so a resumed session reattaches to the pane its
-/// abandoned predecessor occupied instead of orphaning into the sidebar.
+/// Rebind every local pane bound to `old_id` to `new_id` across every
+/// client's layout, broadcasting a scoped `TabUpdated` per affected tab. A
+/// resume, an auto-resume or a recovery uses it so the new session reattaches
+/// to the pane its abandoned predecessor occupied instead of orphaning into
+/// the sidebar.
 pub(super) fn rebind_session_panes(hub: &Hub, old_id: &str, new_id: &str) {
-    let outcomes = match hub.state.mutate_all_layouts(|layouts| {
-        let mut out: Vec<(String, TabEntry)> = Vec::new();
-        for (cid, layout) in layouts.iter_mut() {
-            for tab in crate::tabs::rebind_session(&mut layout.tabs, old_id, new_id) {
-                out.push((cid.clone(), tab));
-            }
-        }
-        out
-    }) {
-        Ok(list) => list,
-        Err(err) => {
-            warn!(?err, "rebind_session_panes: state.mutate failed");
-            return;
-        }
+    let rebind = HostRebind {
+        old_id: old_id.to_owned(),
+        new_id: new_id.to_owned(),
     };
+    if let Err(err) = rebind_panes(hub, None, std::slice::from_ref(&rebind)) {
+        warn!(?err, "rebind_session_panes: state.mutate failed");
+    }
+}
+
+/// Apply `rebinds` to the panes of `host` across every client's layout, then
+/// emit one scoped `TabUpdated` for each tab that changed. No matching pane
+/// writes nothing and emits nothing.
+///
+/// [`crate::state::AppState::mutate`] changes the live state before it writes
+/// the file, so a failed write is returned only after the emit: clients must
+/// see the layout the daemon now holds.
+fn rebind_panes(hub: &Hub, host: Option<&str>, rebinds: &[HostRebind]) -> anyhow::Result<()> {
+    let any_pane = hub.state.with_persisted(|state| {
+        state.layouts.values().any(|layout| {
+            rebinds
+                .iter()
+                .any(|rebind| crate::tabs::shows_session(&layout.tabs, host, &rebind.old_id))
+        })
+    });
+    if !any_pane {
+        return Ok(());
+    }
+    let mut outcomes: Vec<(String, TabEntry)> = Vec::new();
+    let written = hub.state.mutate_all_layouts(|layouts| {
+        for (cid, layout) in layouts.iter_mut() {
+            let mut changed: Vec<TabEntry> = Vec::new();
+            for rebind in rebinds {
+                let tabs = &mut layout.tabs;
+                for tab in crate::tabs::rebind_session(tabs, host, &rebind.old_id, &rebind.new_id) {
+                    changed.retain(|earlier| earlier.id != tab.id);
+                    changed.push(tab);
+                }
+            }
+            outcomes.extend(changed.into_iter().map(|tab| (cid.clone(), tab)));
+        }
+    });
     for (cid, tab) in outcomes {
         hub.emit_tab(&cid, TabEvent::Updated(tab));
     }
+    written
 }
 
 #[cfg(test)]
@@ -1747,6 +1784,182 @@ mod tests {
             assert!(
                 again.is_empty(),
                 "forgetting again changes nothing: {again:?}"
+            );
+        }
+
+        /// The panes of a tab where `old` means three different sessions:
+        /// [`REBIND_HOST`]'s, this daemon's own and another host's.
+        fn rebind_panes_fixture() -> Vec<crate::tabs::PaneRef> {
+            let pane = |id: &str, session: &str, host: Option<&str>| crate::tabs::PaneRef {
+                pane_id: id.to_string(),
+                session_id: Some(session.to_string()),
+                host: host.map(str::to_string),
+            };
+            vec![
+                pane("p1", "old", Some(REBIND_HOST)),
+                pane("p2", "old", None),
+                pane("p3", "old", Some("tailnet:other")),
+                pane("p4", "kept", Some(REBIND_HOST)),
+            ]
+        }
+
+        const REBIND_HOST: &str = "ssh:devbox";
+
+        fn seed_rebind_panes(hub: &Hub, client_id: &str) {
+            let grid = crate::tabs::build_balanced(
+                &rebind_panes_fixture(),
+                protocol::SplitDirection::Horizontal,
+            )
+            .expect("four panes build a grid");
+            hub.state
+                .mutate_client_layout(client_id, |tabs| {
+                    tabs.push(TabEntry {
+                        id: "t1".to_string(),
+                        name: "Tab".to_string(),
+                        content: TabContent::Grid { grid },
+                        created_at: Utc::now(),
+                        picked_layout: None,
+                    });
+                })
+                .expect("seed the client layout");
+        }
+
+        fn rebind_old_to_new() -> ClientMessage {
+            ClientMessage::RebindHostSessions {
+                host: REBIND_HOST.to_string(),
+                rebinds: vec![protocol::HostRebind {
+                    old_id: "old".to_string(),
+                    new_id: "new".to_string(),
+                }],
+                request_id: None,
+            }
+        }
+
+        /// [`rebind_panes_fixture`] after the rebind of `old`: the host's own
+        /// pane took the new session.
+        fn rebound_panes() -> Vec<crate::tabs::PaneRef> {
+            let mut panes = rebind_panes_fixture();
+            panes[0].session_id = Some("new".to_string());
+            panes
+        }
+
+        #[tokio::test]
+        async fn rebind_host_sessions_changes_every_layout() {
+            let (hub, _scratch) = test_hub("rebind-every-layout");
+            seed_rebind_panes(&hub, "c1");
+            seed_rebind_panes(&hub, "c2");
+            seed_two_pane_layout(&hub, "c3");
+            let mut events = hub.tab_events.subscribe();
+
+            dispatch_ok(&hub, rebind_old_to_new()).await;
+
+            for cid in ["c1", "c2"] {
+                assert_eq!(
+                    crate::tabs::collect_panes(only_tab(&hub, cid).grid().expect("grid")),
+                    rebound_panes(),
+                    "{cid}"
+                );
+            }
+            let updated = super::take_tab_events(&mut events);
+            assert_eq!(
+                updated.len(),
+                2,
+                "one update per changed layout: {updated:?}"
+            );
+            assert!(
+                updated
+                    .iter()
+                    .all(|event| matches!(event, TabEvent::Updated(tab) if tab.id == "t1")),
+                "{updated:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn rebind_host_sessions_matches_host_and_id() {
+            let (hub, _scratch) = test_hub("rebind-host-and-id");
+            seed_rebind_panes(&hub, "c1");
+
+            dispatch_ok(&hub, rebind_old_to_new()).await;
+
+            let panes = crate::tabs::collect_panes(only_tab(&hub, "c1").grid().expect("grid"));
+            assert_eq!(
+                panes[0].session_id.as_deref(),
+                Some("new"),
+                "the host's pane"
+            );
+            assert_eq!(panes[1], rebind_panes_fixture()[1], "the local pane stays");
+            assert_eq!(panes[2], rebind_panes_fixture()[2], "another host's stays");
+            assert_eq!(panes[3], rebind_panes_fixture()[3], "another session stays");
+        }
+
+        /// Make every later write of `state.json` fail.
+        fn block_state_writes(hub: &Hub) {
+            let file = &hub.dirs.state_file;
+            if file.exists() {
+                std::fs::remove_file(file).expect("remove state.json");
+            }
+            std::fs::create_dir(file).expect("put a folder at state.json");
+        }
+
+        #[tokio::test]
+        #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+        async fn a_failed_persist_still_emits_the_rebound_layouts() {
+            let (hub, _scratch) = test_hub("rebind-failed-persist");
+            seed_rebind_panes(&hub, "c1");
+            block_state_writes(&hub);
+            let mut events = hub.tab_events.subscribe();
+            let request = ClientMessage::RebindHostSessions {
+                host: REBIND_HOST.to_string(),
+                rebinds: vec![protocol::HostRebind {
+                    old_id: "old".to_string(),
+                    new_id: "new".to_string(),
+                }],
+                request_id: Some("r1".to_string()),
+            };
+
+            let sent = dispatch_all(&hub, request).await;
+
+            let updated = super::take_tab_events(&mut events);
+            assert!(
+                matches!(updated.as_slice(), [TabEvent::Updated(tab)] if tab.id == "t1"),
+                "memory changed, so clients hear of it: {updated:?}"
+            );
+            let [
+                DaemonMessage::Error {
+                    request_id, code, ..
+                },
+            ] = sent.as_slice()
+            else {
+                panic!("expected one refusal, got {sent:?}");
+            };
+            assert_eq!(request_id.as_deref(), Some("r1"));
+            assert_eq!(code.as_deref(), Some(protocol::error_codes::TAB_REFUSED));
+            assert_eq!(
+                crate::tabs::collect_panes(only_tab(&hub, "c1").grid().expect("grid")),
+                rebound_panes()
+            );
+        }
+
+        #[tokio::test]
+        async fn a_second_rebind_finds_nothing_and_emits_nothing() {
+            let (hub, _scratch) = test_hub("rebind-second");
+            seed_rebind_panes(&hub, "c1");
+            let mut events = hub.tab_events.subscribe();
+            dispatch_ok(&hub, rebind_old_to_new()).await;
+            assert_eq!(super::take_tab_events(&mut events).len(), 1);
+            block_state_writes(&hub);
+
+            let sent = dispatch_all(&hub, rebind_old_to_new()).await;
+
+            assert!(
+                sent.is_empty(),
+                "a miss is a silent success and writes nothing: {sent:?}"
+            );
+            let again = super::take_tab_events(&mut events);
+            assert!(again.is_empty(), "{again:?}");
+            assert_eq!(
+                crate::tabs::collect_panes(only_tab(&hub, "c1").grid().expect("grid")),
+                rebound_panes()
             );
         }
 

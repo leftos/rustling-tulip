@@ -2444,6 +2444,244 @@ fn a_tab_list_between_a_remote_welcome_and_its_list_forgets_nothing(cx: &mut Tes
     );
 }
 
+/// A [`REMOTE`] session that replaced `lineage`, oldest first.
+fn successor(id: &str, lineage: &[&str]) -> SessionSnapshot {
+    let mut snapshot = session(id).build();
+    snapshot.resumed_from = lineage.iter().map(|old| (*old).to_owned()).collect();
+    snapshot
+}
+
+/// [`REMOTE`]'s daemon lists `sessions`.
+fn remote_lists_sessions(h: &mut Harness<'_>, sessions: Vec<SessionSnapshot>) {
+    h.host(&saved_remote())
+        .send(DaemonMessage::Sessions { sessions });
+}
+
+/// A `RebindHostSessions` the client sent: its host and `(old, new)` pairs.
+type Rebind = (String, Vec<(String, String)>);
+
+/// The `RebindHostSessions` messages among `sent`, in order.
+fn rebinds(sent: &[ClientMessage]) -> Vec<Rebind> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RebindHostSessions { host, rebinds, .. } => Some((
+                host.clone(),
+                rebinds
+                    .iter()
+                    .map(|pair| (pair.old_id.clone(), pair.new_id.clone()))
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A rebind of [`REMOTE`]'s `pairs`.
+fn rebind_of(pairs: &[(&str, &str)]) -> Rebind {
+    (
+        REMOTE.to_owned(),
+        pairs
+            .iter()
+            .map(|(old, new)| ((*old).to_owned(), (*new).to_owned()))
+            .collect(),
+    )
+}
+
+#[gpui::test]
+fn a_link_and_a_removal_send_one_rebind_and_no_forget(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+
+    h.host(&saved_remote()).send(DaemonMessage::SessionUpdated {
+        session: successor("b3", &["b2"]),
+        request_id: None,
+    });
+    h.host(&saved_remote()).send(DaemonMessage::SessionRemoved {
+        session_id: "b2".to_owned(),
+    });
+
+    let sent = h.sent();
+    assert_eq!(rebinds(&sent), [rebind_of(&[("b2", "b3")])]);
+    assert!(forgets(&sent).is_empty(), "the pane has a successor");
+    assert!(
+        rebinds(&h.host(&saved_remote()).sent()).is_empty(),
+        "nothing goes to the remote host"
+    );
+
+    remote_lists_sessions(
+        &mut h,
+        vec![session("b1").build(), successor("b3", &["b2"])],
+    );
+    let sent = h.sent();
+    assert!(
+        rebinds(&sent).is_empty(),
+        "a rebind in flight is not resent"
+    );
+    assert!(forgets(&sent).is_empty(), "a pane with a successor stays");
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t2", &remote_pane("p3", "b3")),
+    });
+    let sent = h.sent();
+    assert!(rebinds(&sent).is_empty(), "the pane shows its successor");
+    assert!(forgets(&sent).is_empty(), "a pane with a successor stays");
+}
+
+#[gpui::test]
+#[expect(clippy::panic, reason = "a wrong message fails the test loudly")]
+fn a_refused_rebind_is_retried_by_the_next_prune(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+    let resumed = vec![session("b1").build(), successor("b3", &["b2"])];
+    remote_lists_sessions(&mut h, resumed.clone());
+    let sent = h.sent();
+    let Some(ClientMessage::RebindHostSessions {
+        request_id: Some(request_id),
+        ..
+    }) = sent
+        .iter()
+        .find(|msg| matches!(msg, ClientMessage::RebindHostSessions { .. }))
+    else {
+        panic!("expected a rebind with a request id, got {sent:?}");
+    };
+
+    remote_lists_sessions(&mut h, resumed.clone());
+    assert!(rebinds(&h.sent()).is_empty(), "the rebind is in flight");
+
+    h.send(DaemonMessage::Error {
+        message: "could not save".to_owned(),
+        request_id: Some(request_id.clone()),
+        code: Some("tab_refused".to_owned()),
+    });
+    remote_lists_sessions(&mut h, resumed);
+
+    let sent = h.sent();
+    assert_eq!(rebinds(&sent), [rebind_of(&[("b2", "b3")])]);
+    assert!(forgets(&sent).is_empty(), "a pane with a successor stays");
+}
+
+#[gpui::test]
+fn a_rebind_is_sent_again_after_this_pc_reconnects(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+    let resumed = vec![session("b1").build(), successor("b3", &["b2"])];
+    remote_lists_sessions(&mut h, resumed.clone());
+    assert_eq!(rebinds(&h.sent()), [rebind_of(&[("b2", "b3")])]);
+
+    h.set_connection(dropped(Target::Local));
+    h.set_connection(this_pc_open());
+    h.send_welcome(PROTOCOL);
+    h.load(&two_tab_fixture());
+
+    let sent = h.sent();
+    assert_eq!(
+        rebinds(&sent),
+        [rebind_of(&[("b2", "b3")])],
+        "what went out on the lost connection goes out again"
+    );
+    assert!(forgets(&sent).is_empty(), "a pane with a successor stays");
+}
+
+#[gpui::test]
+fn a_host_list_after_an_absence_rebinds_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+    h.host(&saved_remote()).connect();
+    remote_lists_sessions(
+        &mut h,
+        vec![session("b1").build(), successor("b3", &["b2"])],
+    );
+
+    let sent = h.sent();
+    assert_eq!(rebinds(&sent), [rebind_of(&[("b2", "b3")])]);
+    assert!(forgets(&sent).is_empty(), "a pane with a successor stays");
+}
+
+#[gpui::test]
+fn a_chain_resolves_from_one_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+
+    remote_lists_sessions(
+        &mut h,
+        vec![session("b1").build(), successor("b4", &["b2", "b3"])],
+    );
+
+    assert_eq!(
+        rebinds(&h.sent()),
+        [rebind_of(&[("b2", "b4")])],
+        "a client away across two resumes finds the last one"
+    );
+}
+
+#[gpui::test]
+fn a_list_before_tabs_waits_for_tabs(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::open(cx, &dir);
+    h.host(&saved_remote()).connect();
+    remote_lists_sessions(
+        &mut h,
+        vec![session("b1").build(), successor("b3", &["b2"])],
+    );
+    assert!(rebinds(&h.sent()).is_empty(), "no layout to rebind yet");
+
+    h.load(&two_tab_fixture());
+
+    let sent = h.sent();
+    assert_eq!(rebinds(&sent), [rebind_of(&[("b2", "b3")])]);
+    assert!(forgets(&sent).is_empty(), "a pane with a successor stays");
+}
+
+#[gpui::test]
+fn the_newest_successor_wins(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+    let at = |seconds| chrono::DateTime::from_timestamp(seconds, 0).expect("a valid time");
+    let stamped = |id: &str, seconds, lineage: &[&str]| {
+        let mut snapshot = session(id).started_at(at(seconds)).build();
+        snapshot.resumed_from = lineage.iter().map(|old| (*old).to_owned()).collect();
+        snapshot
+    };
+
+    remote_lists_sessions(
+        &mut h,
+        vec![
+            stamped("b4", 2_000, &["b1"]),
+            stamped("b3", 1_000, &["b1"]),
+            stamped("b5", 1_000, &["b2"]),
+            stamped("b6", 1_000, &["b2"]),
+        ],
+    );
+
+    assert_eq!(
+        rebinds(&h.sent()),
+        [rebind_of(&[("b1", "b4"), ("b2", "b6")])],
+        "the newest start, then the larger id"
+    );
+}
+
+#[gpui::test]
+fn a_pane_with_no_successor_is_forgotten_as_before(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+
+    remote_lists_sessions(
+        &mut h,
+        vec![session("b1").build(), successor("b3", &["b9"])],
+    );
+
+    let sent = h.sent();
+    assert!(rebinds(&sent).is_empty(), "no pane shows b9");
+    assert_eq!(forgets(&sent), [forget_of(&["b2"])]);
+}
+
 /// This PC's layout with [`REMOTE`]'s `b2` paned beside the rest.
 fn tabs_with_b2() -> DaemonMessage {
     DaemonMessage::Tabs { tabs: two_tabs() }

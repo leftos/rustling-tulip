@@ -2,14 +2,14 @@
 //! host a message goes to.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map};
 use std::rc::Rc;
 
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{Context, Window};
 use protocol::{
-    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, OptionValues, PresetTarget,
-    SpawnTarget, SuggestTarget,
+    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, HostRebind, OptionValues,
+    PresetTarget, SessionSnapshot, SpawnTarget, SuggestTarget,
 };
 
 use crate::RootView;
@@ -728,13 +728,17 @@ impl RootView {
     }
 }
 
-/// The forgets of remote hosts' panes sent to This PC on its current
-/// connection, and the host forgets waiting for it to come back.
+/// The forgets and rebinds of remote hosts' panes sent to This PC on its
+/// current connection, and the host forgets waiting for it to come back.
 #[derive(Default)]
 pub(crate) struct PaneForgets {
     /// The sessions a forget of their panes went out for, kept while a pane
     /// still shows one.
     sessions: HashSet<SessionRef>,
+    /// The rebinds that went out, each a session and the id of its
+    /// successor, with the request that carried it, kept while a pane still
+    /// shows that session and until This PC refuses the request.
+    rebinds: HashMap<(SessionRef, String), String>,
     /// The hosts a forget of every pane went out for, kept while a pane
     /// still names one.
     hosts: HashSet<HostKey>,
@@ -753,9 +757,16 @@ impl PaneForgets {
     /// so nothing counts as in flight; the queued host forgets stay.
     pub(crate) fn reset_connection(&mut self) {
         self.sessions.clear();
+        self.rebinds.clear();
         self.hosts.clear();
         self.tabs_in = false;
         self.swept = false;
+    }
+
+    /// This PC refused `request_id`: its rebinds no longer count as in
+    /// flight, so the next prune asks again.
+    pub(crate) fn rebind_refused(&mut self, request_id: &str) {
+        self.rebinds.retain(|_, sent_as| sent_as != request_id);
     }
 }
 
@@ -817,9 +828,11 @@ impl RootView {
         self.pane_forgets.hosts.insert(host);
     }
 
-    /// Asks This PC to forget each pane whose remote session its host's
-    /// fresh list no longer names, one message per host, ids sorted; a
-    /// session or host whose forget is in flight is not asked again.
+    /// Asks This PC to show each pane's successor in place of a resumed
+    /// session, then to forget each pane whose remote session its host's
+    /// fresh list no longer names and has no successor for, one message of
+    /// each per host, ids sorted; a session or host whose forget is in
+    /// flight, or a rebind in flight, is not asked again.
     /// Nothing is pruned until This PC is open with its tab list in, and
     /// until that list is in on its current connection no forget in flight
     /// is let go against the old layout.
@@ -832,6 +845,9 @@ impl RootView {
             .sessions
             .retain(|session| bindings.iter().any(|binding| binding.shows(session)));
         self.pane_forgets
+            .rebinds
+            .retain(|(session, _), _| bindings.iter().any(|binding| binding.shows(session)));
+        self.pane_forgets
             .hosts
             .retain(|host| bindings.iter().any(|binding| binding.host == *host));
         if !self.conn().is_open() {
@@ -841,6 +857,7 @@ impl RootView {
             if !self.prunable(&host) {
                 continue;
             }
+            self.send_rebinds(&host, &bindings);
             let missing = self.missing_sessions(&host, &bindings);
             let Some(wire) = host
                 .wire()
@@ -871,6 +888,62 @@ impl RootView {
         }
     }
 
+    /// Asks This PC to show the successor of each session of `host` a pane
+    /// in `bindings` shows, old ids sorted, unless that rebind is in flight.
+    fn send_rebinds(&mut self, host: &HostKey, bindings: &[PaneBinding]) {
+        let Some(wire) = host.wire().map(str::to_owned) else {
+            return;
+        };
+        let mut shown: Vec<String> = bindings
+            .iter()
+            .filter(|binding| binding.host == *host)
+            .filter_map(|binding| binding.session_id.clone())
+            .collect();
+        shown.sort();
+        shown.dedup();
+        let request_id = crate::new_request_id();
+        let mut rebinds = Vec::new();
+        for old_id in shown {
+            let Some(new_id) = self.successor_of(host, &old_id).map(|s| s.id.clone()) else {
+                continue;
+            };
+            let pair = (
+                SessionRef::new(host.clone(), old_id.clone()),
+                new_id.clone(),
+            );
+            if let hash_map::Entry::Vacant(slot) = self.pane_forgets.rebinds.entry(pair) {
+                slot.insert(request_id.clone());
+                rebinds.push(HostRebind { old_id, new_id });
+            }
+        }
+        if rebinds.is_empty() {
+            return;
+        }
+        tracing::info!(
+            ?host,
+            ?rebinds,
+            "showing resumed sessions' successors in their panes"
+        );
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::RebindHostSessions {
+                host: wire,
+                rebinds,
+                request_id: Some(request_id),
+            },
+        );
+    }
+
+    /// The session of `host` that replaced `id`, the newest start and then
+    /// the larger id among several.
+    pub(crate) fn successor_of(&self, host: &HostKey, id: &str) -> Option<&SessionSnapshot> {
+        self.sidebar
+            .sessions_of(host)
+            .iter()
+            .filter(|session| session.resumed_from.iter().any(|old| old == id))
+            .max_by(|a, b| (a.started_at, &a.id).cmp(&(b.started_at, &b.id)))
+    }
+
     /// Whether a forget of `session`'s panes, or of every pane of its host,
     /// is on its way to This PC.
     pub(crate) fn forget_in_flight(&self, session: &SessionRef) -> bool {
@@ -889,8 +962,8 @@ impl RootView {
     }
 
     /// The ids, sorted, of `host`'s sessions a pane in `bindings` shows
-    /// that the host's list does not name, and whose forget is not in
-    /// flight.
+    /// that the host's list does not name and names no successor of, and
+    /// whose forget is not in flight.
     fn missing_sessions(&self, host: &HostKey, bindings: &[PaneBinding]) -> Vec<String> {
         let listed = self.sidebar.sessions_of(host);
         let mut missing: Vec<String> = bindings
@@ -898,6 +971,7 @@ impl RootView {
             .filter(|binding| binding.host == *host)
             .filter_map(|binding| binding.session_id.clone())
             .filter(|id| !listed.iter().any(|session| session.id == *id))
+            .filter(|id| self.successor_of(host, id).is_none())
             .filter(|id| {
                 !self
                     .pane_forgets

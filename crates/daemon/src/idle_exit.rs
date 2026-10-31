@@ -290,6 +290,7 @@ mod tests {
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             hook_trusted: false,
+            resumed_from: Vec::new(),
         }
     }
 
