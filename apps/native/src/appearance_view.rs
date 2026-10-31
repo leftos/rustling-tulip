@@ -84,9 +84,9 @@ pub(crate) struct AppearanceEditor {
     ui_family_filter: Entity<TextInput>,
     /// The installed families, loaded when the editor opens.
     system_families: Vec<SharedString>,
-    /// The colour under the focused swatch line's cursor, once an arrow
-    /// moved it off the chosen swatch.
-    swatch_cursor: Option<u32>,
+    /// The place of the focused swatch line's cursor, once an arrow or a
+    /// click moved it off the chosen swatch.
+    swatch_cursor: Option<usize>,
     /// The family list row the highlight is on, once an arrow moved it off
     /// the chosen family.
     family_highlight: Option<FamilyPick>,
@@ -96,6 +96,9 @@ pub(crate) struct AppearanceEditor {
     family_scroll: ScrollHandle,
     /// Where the UI font list is scrolled to.
     ui_family_scroll: ScrollHandle,
+    /// The name the app level's Theme row shows, read as the editor
+    /// opened and on each Use; empty at the other levels.
+    theme_name: String,
     /// The stop Tab walks on from in a session's, repo's or workspace's
     /// editor; Settings keeps its own.
     stop: Option<AppearanceStop>,
@@ -375,6 +378,11 @@ impl RootView {
         let background_hex = cx.new(|cx| TextInput::new("", HEX_PLACEHOLDER, cx));
         let family_filter = cx.new(|cx| TextInput::new("", "Filter fonts", cx));
         let ui_family_filter = cx.new(|cx| TextInput::new("", "Filter fonts", cx));
+        let theme_name = if level == Level::App {
+            self.theme_in_use_name()
+        } else {
+            String::new()
+        };
         let mut subscriptions = Self::watch_hex_field(&accent_hex, ColorRow::Accent, window, cx);
         subscriptions.extend(Self::watch_hex_field(
             &background_hex,
@@ -396,6 +404,7 @@ impl RootView {
             ui_family_highlight: None,
             family_scroll: ScrollHandle::new(),
             ui_family_scroll: ScrollHandle::new(),
+            theme_name,
             stop: None,
             _subscriptions: subscriptions,
         });
@@ -406,6 +415,7 @@ impl RootView {
     /// Closes the editor and hands the keyboard back to the active pane.
     pub(crate) fn close_appearance_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.appearance_editor.take().is_some() {
+            self.themes_modal = None;
             // The Worktrees tab lives with Settings: dropping it here means
             // a picker answer arriving later finds nothing to fill.
             self.worktrees_tab = None;
@@ -776,6 +786,7 @@ impl RootView {
         let view = self.level_view(&editor.level)?;
         let reset = editor.level.reset_label();
         // The interface's font is the app's alone.
+        let theme_row = (editor.level == Level::App).then(|| theme_section(editor, focus, cx));
         let (ui_font, ui_text_size) = if editor.level == Level::App {
             (
                 self.family_section(FontList::Ui, self.ui_font_hint(cx), focus, cx),
@@ -789,6 +800,7 @@ impl RootView {
             .flex_col()
             .gap(px(12.0))
             .w(px(COLUMN_WIDTH))
+            .children(theme_row)
             .child(self.color_section(editor, &view, ColorRow::Accent, focus, cx))
             .child(self.color_section(editor, &view, ColorRow::Background, focus, cx))
             .children(ui_font)
@@ -802,6 +814,22 @@ impl RootView {
             .child(size_section(&view, reset, focus, cx))
             .child(bold_section(&view, reset, focus, cx));
         Some(div().flex().gap(px(16.0)).child(colours).child(font))
+    }
+
+    /// The name the app level's Theme row shows, while it is open.
+    #[must_use]
+    pub fn appearance_theme_name(&self) -> Option<String> {
+        self.appearance_editor
+            .as_ref()
+            .filter(|editor| editor.level == Level::App)
+            .map(|editor| editor.theme_name.clone())
+    }
+
+    /// Sets the name the Theme row shows.
+    pub(crate) fn set_appearance_theme_name(&mut self, name: String) {
+        if let Some(editor) = self.appearance_editor.as_mut() {
+            editor.theme_name = name;
+        }
     }
 
     /// The UI font row's hint: the family the interface draws in, from the
@@ -874,7 +902,7 @@ impl RootView {
     /// › Appearance is open.
     #[must_use]
     pub fn appearance_ui_text_size_label(&self) -> Option<String> {
-        self.ui_font_shown()
+        self.app_level_shown()
             .then(|| ui_text_size_label(self.sidebar.ui_state().ui_text_size))
     }
 
@@ -934,6 +962,43 @@ impl RootView {
                 .child(hint_line(hint_selector, hint, &t)),
         )
     }
+}
+
+/// The app level's Theme row: the theme in use and `Choose…`, which opens the
+/// Themes modal.
+fn theme_section(
+    editor: &AppearanceEditor,
+    focus: Option<AppearanceStop>,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let t = theme(cx);
+    let offset = crate::fonts::ui_text_size(cx);
+    let stop = AppearanceStop::Theme;
+    let choose = dialog_button(
+        stop.selector(),
+        "Choose…".to_owned(),
+        dialog_look(offset, false, true, &t),
+        focus == Some(stop),
+    )
+    .on_click(click_stop(stop, Aim::Stop, cx));
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(field_label(offset, "Theme", &t))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .debug_selector(|| "appearance-theme-name".to_owned())
+                        .child(editor.theme_name.clone()),
+                )
+                .child(choose),
+        )
 }
 
 /// The UI font row's hint for the `stored` family and the `resolved` one
@@ -1039,13 +1104,14 @@ impl RootView {
         let own = row.own(&view.own);
         let key = row.key();
         // The swatch under a focused line's cursor wears the ring.
-        let cursor = |line: SwatchLine, colors: &[u32]| {
+        let cursor = |line: SwatchLine, len: usize| {
+            let chosen = chosen_swatch(row, line, own, &recent);
             (focus == Some(AppearanceStop::Swatches(row, line)))
-                .then(|| swatch_cursor(colors, editor.swatch_cursor, own))
+                .then(|| swatch_cursor(len, editor.swatch_cursor, chosen))
                 .flatten()
         };
         let preset_colors = row.preset_colors(self.sidebar.theme_base());
-        let preset_cursor = cursor(SwatchLine::Presets, &preset_colors);
+        let preset_cursor = cursor(SwatchLine::Presets, preset_colors.len());
         let presets: Vec<AnyElement> = row
             .presets()
             .iter()
@@ -1070,13 +1136,13 @@ impl RootView {
                 )
                 .on_click(click_stop(
                     AppearanceStop::Swatches(row, SwatchLine::Presets),
-                    Aim::Swatch(shown),
+                    Aim::Swatch(at),
                     cx,
                 ))
                 .into_any_element()
             })
             .collect();
-        let recent_cursor = cursor(SwatchLine::Recent, &recent);
+        let recent_cursor = cursor(SwatchLine::Recent, recent.len());
         let recent: Vec<AnyElement> = recent
             .iter()
             .enumerate()
@@ -1094,7 +1160,7 @@ impl RootView {
                 )
                 .on_click(click_stop(
                     AppearanceStop::Swatches(row, SwatchLine::Recent),
-                    Aim::Swatch(value),
+                    Aim::Swatch(at),
                     cx,
                 ))
                 .into_any_element()
@@ -1124,6 +1190,21 @@ impl RootView {
     }
 }
 
+/// The place of the swatch that shows `own`, the colour the level sets in
+/// `row`, on line `line`: a preset's own colour, never the Theme swatch that
+/// happens to show it. `recent` is the recent line.
+fn chosen_swatch(
+    row: ColorRow,
+    line: SwatchLine,
+    own: Option<u32>,
+    recent: &[u32],
+) -> Option<usize> {
+    match line {
+        SwatchLine::Presets => row.presets().iter().position(|p| p.color == own),
+        SwatchLine::Recent => recent.iter().position(|c| Some(*c) == own),
+    }
+}
+
 /// The debug selector of colour row `row`'s hint.
 fn hint_selector(row: ColorRow) -> &'static str {
     match row {
@@ -1142,28 +1223,33 @@ impl RootView {
             .appearance_editor
             .as_ref()
             .and_then(|editor| self.level_view(&editor.level));
-        stops(has_recent, self.ui_font_shown(), close, |stop| match stop {
-            AppearanceStop::Apply(row) => view
-                .as_ref()
-                .is_some_and(|view| self.hex_ready_in(row, view, cx).is_some()),
-            AppearanceStop::Reset(row) => {
-                view.as_ref().is_some_and(|view| can_reset(row, &view.own))
-            }
-            AppearanceStop::UiTextSizeDown => self.ui_text_size_steps(-1).is_some(),
-            AppearanceStop::UiTextSizeUp => self.ui_text_size_steps(1).is_some(),
-            _ => true,
-        })
+        stops(
+            has_recent,
+            self.app_level_shown(),
+            close,
+            |stop| match stop {
+                AppearanceStop::Apply(row) => view
+                    .as_ref()
+                    .is_some_and(|view| self.hex_ready_in(row, view, cx).is_some()),
+                AppearanceStop::Reset(row) => {
+                    view.as_ref().is_some_and(|view| can_reset(row, &view.own))
+                }
+                AppearanceStop::UiTextSizeDown => self.ui_text_size_steps(-1).is_some(),
+                AppearanceStop::UiTextSizeUp => self.ui_text_size_steps(1).is_some(),
+                _ => true,
+            },
+        )
     }
 
     /// Every stop in the order Tab walks them, enabled or not; `close`
     /// adds the editor's Close.
     pub(crate) fn appearance_stop_order(&self, close: bool) -> Vec<AppearanceStop> {
         let has_recent = !self.sidebar.recent_colors().is_empty();
-        stops(has_recent, self.ui_font_shown(), close, |_| true)
+        stops(has_recent, self.app_level_shown(), close, |_| true)
     }
 
     /// Whether the rows show the UI font: the app level's do.
-    fn ui_font_shown(&self) -> bool {
+    fn app_level_shown(&self) -> bool {
         self.appearance_editor
             .as_ref()
             .is_some_and(|editor| editor.level == Level::App)
@@ -1338,6 +1424,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match stop {
+            AppearanceStop::Theme => self.open_themes_modal(window, cx),
             AppearanceStop::Swatches(row, line) => {
                 if let Some((at, color)) = self.swatch_under_cursor(row, line) {
                     let theme_preset = matches!(line, SwatchLine::Presets)
@@ -1349,6 +1436,13 @@ impl RootView {
                         self.change_appearance(&row.change(None), cx);
                     } else {
                         self.pick_swatch(row, &appearance::hex(color), cx);
+                    }
+                    // A pick moves its colour to the front of the recent
+                    // line; the cursor follows it there.
+                    if line == SwatchLine::Recent
+                        && let Some(editor) = self.appearance_editor.as_mut()
+                    {
+                        editor.swatch_cursor = None;
                     }
                 }
             }
@@ -1379,11 +1473,11 @@ impl RootView {
     ) -> bool {
         match (stop, key) {
             (AppearanceStop::Swatches(row, line), "left" | "right") => {
-                let colors = self.swatch_colors(row, line);
-                let chosen = self.chosen_color(row);
+                let len = self.swatch_colors(row, line).len();
+                let chosen = self.chosen_place(row, line);
                 if let Some(editor) = self.appearance_editor.as_mut() {
                     editor.swatch_cursor =
-                        step_swatch(&colors, editor.swatch_cursor, chosen, key == "right");
+                        step_swatch(len, editor.swatch_cursor, chosen, key == "right");
                 }
             }
             (AppearanceStop::FamilyList | AppearanceStop::UiFamilyList, "up" | "down") => {
@@ -1416,17 +1510,19 @@ impl RootView {
         }
     }
 
-    /// The colour the editor's level sets in `row`.
-    fn chosen_color(&self, row: ColorRow) -> Option<u32> {
+    /// The place on `row`'s `line` of the colour the editor's level sets.
+    fn chosen_place(&self, row: ColorRow, line: SwatchLine) -> Option<usize> {
         let editor = self.appearance_editor.as_ref()?;
-        row.own(&self.level_view(&editor.level)?.own)
+        let own = row.own(&self.level_view(&editor.level)?.own);
+        chosen_swatch(row, line, own, &self.sidebar.recent_colors())
     }
 
     /// The place and colour of the swatch under `row`'s `line` cursor.
     fn swatch_under_cursor(&self, row: ColorRow, line: SwatchLine) -> Option<(usize, u32)> {
         let editor = self.appearance_editor.as_ref()?;
         let colors = self.swatch_colors(row, line);
-        let at = swatch_cursor(&colors, editor.swatch_cursor, self.chosen_color(row))?;
+        let chosen = self.chosen_place(row, line);
+        let at = swatch_cursor(colors.len(), editor.swatch_cursor, chosen)?;
         colors.get(at).map(|&color| (at, color))
     }
 
@@ -1533,7 +1629,7 @@ impl RootView {
         if let Some(editor) = self.appearance_editor.as_mut() {
             match aim {
                 Aim::Stop => {}
-                Aim::Swatch(color) => editor.swatch_cursor = Some(color),
+                Aim::Swatch(at) => editor.swatch_cursor = Some(at),
                 Aim::Family(pick) => {
                     if let Some(list) = stop.font_list() {
                         editor.set_highlight(list, Some(pick));
@@ -1575,7 +1671,8 @@ impl RootView {
 #[derive(Debug, Clone)]
 enum Aim {
     Stop,
-    Swatch(u32),
+    /// The place of the swatch on its line.
+    Swatch(usize),
     Family(FamilyPick),
 }
 

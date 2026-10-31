@@ -44,6 +44,8 @@ pub(crate) enum ResetRow {
 /// A control of the Appearance rows that Tab reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppearanceStop {
+    /// The app level's `Choose…`, which opens the Themes modal.
+    Theme,
     /// A whole swatch line is one stop; Left and Right move along it.
     Swatches(ColorRow, SwatchLine),
     Hex(ColorRow),
@@ -71,6 +73,7 @@ impl AppearanceStop {
     /// The stop's selector, as the focus probe reports it.
     pub(crate) const fn selector(self) -> &'static str {
         match self {
+            Self::Theme => "appearance-theme",
             Self::Swatches(ColorRow::Accent, SwatchLine::Presets) => "appearance-accent-presets",
             Self::Swatches(ColorRow::Accent, SwatchLine::Recent) => "appearance-accent-recents",
             Self::Swatches(ColorRow::Background, SwatchLine::Presets) => {
@@ -160,20 +163,24 @@ impl FontList {
     }
 }
 
-/// The stops Tab walks, in reading order: per colour row its preset line,
+/// The stops Tab walks, in reading order: the Theme row (`app_level`);
+/// per colour row its preset line,
 /// its recent line (`has_recent`), its hex field, Apply and its reset link;
-/// the UI font filter and list and the UI text size − and + (`ui_font`);
+/// the UI font filter and list and the UI text size − and + (`app_level`);
 /// then the font filter and list, size − and + and the size reset, the bold
 /// checkbox and its reset, and Close (`close`). Apply, the reset links and
 /// the UI text size buttons are left out while `enabled` says they do
 /// nothing.
 pub(crate) fn stops(
     has_recent: bool,
-    ui_font: bool,
+    app_level: bool,
     close: bool,
     enabled: impl Fn(AppearanceStop) -> bool,
 ) -> Vec<AppearanceStop> {
     let mut ring = Vec::new();
+    if app_level {
+        ring.push(AppearanceStop::Theme);
+    }
     for row in ColorRow::ALL {
         ring.push(AppearanceStop::Swatches(row, SwatchLine::Presets));
         if has_recent {
@@ -185,7 +192,7 @@ pub(crate) fn stops(
             AppearanceStop::Reset(ResetRow::Color(row)),
         ]);
     }
-    if ui_font {
+    if app_level {
         ring.extend([
             AppearanceStop::UiFamilyFilter,
             AppearanceStop::UiFamilyList,
@@ -242,35 +249,35 @@ pub(crate) fn after_lost<T: Copy + PartialEq>(order: &[T], ring: &[T], stop: T) 
         .copied()
 }
 
-/// Where a swatch line's cursor stands among `colors`: on `cursor` while
-/// the line holds it, else on the `chosen` colour, else on the first.
+/// Where the cursor of a swatch line of `len` swatches stands: at `cursor`
+/// while the line reaches it, else at the `chosen` swatch, else on the first.
+/// Two swatches of one colour stay apart: both are places, not colours.
 pub(crate) fn swatch_cursor(
-    colors: &[u32],
-    cursor: Option<u32>,
-    chosen: Option<u32>,
+    len: usize,
+    cursor: Option<usize>,
+    chosen: Option<usize>,
 ) -> Option<usize> {
-    if colors.is_empty() {
+    if len == 0 {
         return None;
     }
-    let find = |color: Option<u32>| color.and_then(|color| colors.iter().position(|c| *c == color));
-    Some(find(cursor).or_else(|| find(chosen)).unwrap_or(0))
+    let held = |place: Option<usize>| place.filter(|at| *at < len);
+    Some(held(cursor).or_else(|| held(chosen)).unwrap_or(0))
 }
 
-/// The colour the cursor moves to, one swatch right (`forward`) or left,
+/// The place the cursor moves to, one swatch right (`forward`) or left,
 /// staying put at the line's ends.
 pub(crate) fn step_swatch(
-    colors: &[u32],
-    cursor: Option<u32>,
-    chosen: Option<u32>,
+    len: usize,
+    cursor: Option<usize>,
+    chosen: Option<usize>,
     forward: bool,
-) -> Option<u32> {
-    let at = swatch_cursor(colors, cursor, chosen)?;
-    let next = if forward {
-        (at + 1).min(colors.len() - 1)
+) -> Option<usize> {
+    let at = swatch_cursor(len, cursor, chosen)?;
+    Some(if forward {
+        (at + 1).min(len - 1)
     } else {
         at.saturating_sub(1)
-    };
-    colors.get(next).copied()
+    })
 }
 
 /// One line of the font family list.
@@ -686,43 +693,33 @@ mod tests {
 
     #[test]
     fn a_swatch_line_lands_on_the_chosen_swatch_else_the_first() {
-        let colors = [0x10, 0x20, 0x30];
-        assert_eq!(swatch_cursor(&colors, None, Some(0x20)), Some(1));
+        assert_eq!(swatch_cursor(3, None, Some(1)), Some(1));
+        assert_eq!(swatch_cursor(3, None, None), Some(0), "a custom colour");
         assert_eq!(
-            swatch_cursor(&colors, None, Some(0x99)),
-            Some(0),
-            "a custom colour"
-        );
-        assert_eq!(swatch_cursor(&colors, None, None), Some(0));
-        assert_eq!(
-            swatch_cursor(&colors, Some(0x30), Some(0x20)),
+            swatch_cursor(3, Some(2), Some(1)),
             Some(2),
             "the cursor wins"
         );
-        assert_eq!(
-            swatch_cursor(&colors, Some(0x99), Some(0x20)),
-            Some(1),
-            "a gone cursor"
-        );
-        assert_eq!(swatch_cursor(&[], None, None), None);
+        assert_eq!(swatch_cursor(3, Some(9), Some(1)), Some(1), "a gone cursor");
+        assert_eq!(swatch_cursor(3, Some(9), Some(9)), Some(0), "a gone choice");
+        assert_eq!(swatch_cursor(0, None, None), None);
     }
 
     #[test]
     fn the_swatch_cursor_stops_at_the_ends() {
-        let colors = [0x10, 0x20, 0x30];
-        assert_eq!(step_swatch(&colors, None, Some(0x20), true), Some(0x30));
-        assert_eq!(step_swatch(&colors, None, Some(0x20), false), Some(0x10));
+        assert_eq!(step_swatch(3, None, Some(1), true), Some(2));
+        assert_eq!(step_swatch(3, None, Some(1), false), Some(0));
         assert_eq!(
-            step_swatch(&colors, Some(0x10), None, false),
-            Some(0x10),
+            step_swatch(3, Some(0), None, false),
+            Some(0),
             "Left at the first"
         );
         assert_eq!(
-            step_swatch(&colors, Some(0x30), None, true),
-            Some(0x30),
+            step_swatch(3, Some(2), None, true),
+            Some(2),
             "Right at the last"
         );
-        assert_eq!(step_swatch(&[], None, None, true), None);
+        assert_eq!(step_swatch(0, None, None, true), None);
     }
 
     #[test]

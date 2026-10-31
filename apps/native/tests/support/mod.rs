@@ -2312,6 +2312,15 @@ impl<'a> Harness<'a> {
         self.cx.run_until_parked();
     }
 
+    /// Dispatches `key` as the repeat of a key held down.
+    pub fn held(&mut self, key: &str) {
+        self.cx.simulate_event(KeyDownEvent {
+            keystroke: Keystroke::parse(key).expect("a keystroke"),
+            is_held: true,
+        });
+        self.cx.run_until_parked();
+    }
+
     /// Runs `drive` against pane `pane`'s text input the way the platform
     /// does, then lets the view settle.
     fn input<R>(

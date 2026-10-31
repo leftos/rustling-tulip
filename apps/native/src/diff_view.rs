@@ -791,7 +791,7 @@ fn clip(text: &str, shown: &Range<usize>, span: &Range<usize>) -> Option<Range<u
 }
 
 /// The `0xRRGGBB` `color` at `alpha`, as a gpui colour.
-fn wash(color: u32, alpha: f32) -> gpui::Rgba {
+pub(crate) fn wash(color: u32, alpha: f32) -> gpui::Rgba {
     gpui::Rgba {
         a: alpha,
         ..rgb(color)

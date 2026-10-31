@@ -27,6 +27,13 @@
   "rows": [
     {
       "paths": [
+        "apps/native/src/themes_view.rs",
+        "apps/native/tests/ui/ui_themes.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_themes)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/dashboard_tab.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^dashboard_tab::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_tabs::/))"

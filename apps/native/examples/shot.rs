@@ -18,7 +18,9 @@
 //! pane switched to its chat, a row of each kind, an answer with one stretch
 //! open and two closed, and a live answer) and `summary` (the Petal pane
 //! switched to its summary: three lines, the second one open, under a
-//! pinned Permission card). The PNG goes to
+//! pinned Permission card) and `themes` (the Themes modal over Settings,
+//! over a user theme, a broken file and a file named after a built-in).
+//! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
 //! run.
@@ -47,11 +49,13 @@ use protocol::{
     ClientMessage, ComposerState, DaemonMessage, GridNode, SessionSnapshot, SplitDirection,
     StretchLine, SummarySource, ToolOutcome, WorkShell, WorkSubagent,
 };
+use rustling_tulip_native::builtin_themes::DRACULA;
 use rustling_tulip_native::chat::PaneView;
 use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::target::SshHost;
+use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::update::{LastResult, Ready, Updater};
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
@@ -161,10 +165,11 @@ enum View {
     Update,
     Chat,
     Summary,
+    Themes,
 }
 
 impl View {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -181,6 +186,7 @@ impl View {
         Self::Update,
         Self::Chat,
         Self::Summary,
+        Self::Themes,
     ];
 
     fn name(self) -> &'static str {
@@ -201,6 +207,7 @@ impl View {
             Self::Update => "update",
             Self::Chat => "chat",
             Self::Summary => "summary",
+            Self::Themes => "themes",
         }
     }
 
@@ -209,10 +216,12 @@ impl View {
     /// segment is pressed once drawn, and its Host field takes typing only
     /// once drawn; the update shot checks and opens Settings, then moves the
     /// keyboard to Check now, which scrolls the update rows into view; a
-    /// summary line opens only once the lines have arrived.
+    /// summary line opens only once the lines have arrived; the Themes
+    /// modal opens over Settings once drawn, and takes its Down once drawn.
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
+            Self::Themes => 3,
             Self::Update | Self::Summary | Self::Chat => 2,
             _ => 1,
         }
@@ -287,6 +296,7 @@ impl View {
             }
             Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
             Self::Update => root.settings_open() && root.update_footer_text().is_some(),
+            Self::Themes => root.themes_modal_open(),
         }
     }
 }
@@ -346,7 +356,8 @@ impl Shot {
             | View::Menu
             | View::Update
             | View::Chat
-            | View::Summary => None,
+            | View::Summary
+            | View::Themes => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -358,6 +369,9 @@ impl Shot {
             return std::fs::write(&installer, b"stand-in installer")
                 .with_context(|| format!("writing {}", installer.display()));
         }
+        if self.view == View::Themes {
+            return self.seed_themes();
+        }
         let state = match self.view {
             View::MainCompact => compact_ui_state(),
             View::Connections | View::ConnectionsSsh => connections_ui_state(),
@@ -366,6 +380,24 @@ impl Shot {
         let layout = serde_json::to_vec_pretty(&state)
             .with_context(|| format!("serializing the layout for {}", saved.display()))?;
         std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))
+    }
+
+    /// Writes the `themes` shot's user themes: one good, one that does not
+    /// parse, and one named after a built-in. A run starts from none.
+    fn seed_themes(&self) -> Result<()> {
+        let dir = self.ui_dir.join(THEMES_DIR);
+        if let Err(err) = std::fs::remove_dir_all(&dir)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err).with_context(|| format!("clearing {}", dir.display()));
+        }
+        let id = ThemeStore::new(dir.clone())
+            .save("Harbour", &DRACULA, Some("dracula"), Some("dracula"))
+            .map_err(|err| anyhow!("saving the shot's theme: {err}"))?;
+        std::fs::copy(dir.join(format!("{id}.json")), dir.join("nord.json"))
+            .with_context(|| format!("writing the shadow file in {}", dir.display()))?;
+        std::fs::write(dir.join("broken.json"), "{")
+            .with_context(|| format!("writing the broken file in {}", dir.display()))
     }
 
     /// The file the `viewer` or `viewer-md` shot's tab views, beside the
@@ -438,6 +470,23 @@ impl SshTester for ShotSsh {
         _cancel: SshTestCancel,
     ) -> BoxFuture<'static, Result<(), String>> {
         futures::future::ready(Ok(())).boxed()
+    }
+}
+
+/// Step `step` of the `themes` shot: Settings, then the modal over it, then
+/// Down, so the preview shows the theme after the one in use.
+fn drive_themes(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    match step {
+        0 => press("ctrl-,", window, cx),
+        1 => {
+            let root = window
+                .root::<RootView>()
+                .flatten()
+                .context("the window has no root view")?;
+            root.update(cx, |root, cx| root.open_themes_modal(window, cx));
+            Ok(())
+        }
+        _ => press("down", window, cx),
     }
 }
 
@@ -691,6 +740,7 @@ fn drive(
             Ok(())
         }
         View::Connections => open_picker(window, cx),
+        View::Themes => drive_themes(step, window, cx),
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
         View::Menu => open_menu(window, cx),
         View::Update => drive_update(step, address, window, cx),

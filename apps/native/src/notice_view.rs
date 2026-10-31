@@ -507,8 +507,9 @@ impl RootView {
     }
 
     /// The keyboard goes to the modal still open, else back to the spawn
-    /// dialog's focused control, the delete-worktree confirm, the layout
-    /// chooser or the import modal, or the active pane.
+    /// dialog's focused control, the Themes modal, Settings, the
+    /// delete-worktree confirm, the layout chooser or the import modal, or
+    /// the active pane.
     pub(crate) fn after_notice_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.notices.has_modal() {
             self.notice_focus.focus(window);
@@ -518,6 +519,8 @@ impl RootView {
             self.apply_shell_focus(window, cx);
         } else if self.fetch_dialog.is_some() {
             self.apply_fetch_focus(window, cx);
+        } else if self.themes_modal.is_some() {
+            self.themes_focus.focus(window);
         } else if self.appearance_editor.is_some() {
             self.appearance_focus.focus(window);
         } else if self.delete_dialog.is_some() {

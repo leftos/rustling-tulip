@@ -16,12 +16,16 @@ use protocol::{
 };
 use rustling_tulip_native::appearance::{BUILTIN_ACCENT, BUILTIN_BACKGROUND, PaneFrame};
 use rustling_tulip_native::palette::{BORDER, RAISED, SURFACE};
+use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
+use rustling_tulip_native::ui_theme::UiTheme;
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
 /// The version the harness's handshake speaks.
 const HARNESS_PROTOCOL: u32 = 1;
 /// The Paper background preset.
 const PAPER: u32 = 0xf6f4ef;
+/// The Rose accent preset's colour.
+const ROSE: u32 = 0xe7849b;
 /// The default text colour the contrast-adjusted theme gives Paper.
 const PAPER_FOREGROUND: u32 = 0x1a1c22;
 /// The harness on `fixture`, with every session's scrollback answered and
@@ -648,5 +652,54 @@ fn background_survives_a_reattach(cx: &mut TestAppContext) {
         terminal_colors(&mut h, "p1"),
         (PAPER, PAPER_FOREGROUND),
         "and so does the reattach's"
+    );
+}
+
+/// Opens Settings › Appearance over a saved theme whose accent is Rose's.
+fn settings_over_a_rose_theme<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut mine = UiTheme::CONTRAST;
+    mine.accent = ROSE;
+    let id = ThemeStore::new(dir.path().join(THEMES_DIR))
+        .save("Mine", &mine, Some("contrast"), None)
+        .expect("save the user theme");
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::json!({ "theme": id }).to_string(),
+    )
+    .expect("write native-ui.json");
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        ..Fixture::single(session("s1").in_repo("r1").build())
+    };
+    let mut h = Harness::with_saved_theme(cx, dir, &fixture);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-appearance");
+    h
+}
+
+#[gpui::test]
+fn a_preset_equal_to_the_theme_colour_keeps_its_own_swatch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = settings_over_a_rose_theme(cx, &dir);
+
+    h.click_on("appearance-accent-preset-rose");
+    assert!(
+        h.root(|root, _| root.appearance_can_reset("accent")),
+        "a click on Rose stores it, it does not clear the level"
+    );
+    assert_eq!(
+        h.root(|root, _| root.appearance_hint("accent")).as_deref(),
+        Some("Resolved: #e7849b from current")
+    );
+
+    h.click_on("appearance-accent-preset-theme");
+    assert!(
+        !h.root(|root, _| root.appearance_can_reset("accent")),
+        "the Theme swatch clears the level"
+    );
+    h.keys("right enter");
+    assert!(
+        h.root(|root, _| root.appearance_can_reset("accent")),
+        "Right from the Theme swatch lands on Rose, and Enter stores it"
     );
 }

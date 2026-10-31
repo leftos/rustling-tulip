@@ -2698,6 +2698,7 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);
     let ring = [
+        "appearance-theme",
         "appearance-accent-presets",
         "appearance-accent-hex",
         "appearance-background-presets",
@@ -2734,7 +2735,7 @@ fn appearance_swatch_line_lands_on_the_chosen_swatch_and_arrows_move_and_enter_p
     let mut h = appearance_tab(cx, &dir);
     h.click_on("appearance-accent-preset-sky");
     h.click_on("settings-tab-appearance");
-    h.keys("tab");
+    h.keys("tab tab");
     assert_eq!(settings_focus(&mut h), Some("appearance-accent-presets"));
     h.keys("tab");
     assert_eq!(
@@ -3272,4 +3273,24 @@ fn a_refused_worktrees_save_stops_waiting(cx: &mut TestAppContext) {
         "Active: D:/other — user override",
         "another client's root still lands"
     );
+}
+
+#[gpui::test]
+fn holding_enter_on_choose_opens_nothing_twice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-theme"));
+
+    h.held("enter");
+    assert!(
+        !h.root(|root, _| root.themes_modal_open()),
+        "a held key opens nothing"
+    );
+
+    h.keys("enter");
+    assert!(h.root(|root, _| root.themes_modal_open()));
+    h.keys("escape");
+    h.held("enter");
+    assert!(!h.root(|root, _| root.themes_modal_open()));
 }

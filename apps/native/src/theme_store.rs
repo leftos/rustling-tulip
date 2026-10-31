@@ -232,6 +232,14 @@ impl ThemeStore {
         }
     }
 
+    /// The name in the user theme `id`'s file, reading that one file;
+    /// `None` when it does not load.
+    #[must_use]
+    pub fn name_of(&self, id: &str) -> Option<String> {
+        let path = self.path_of(id).ok()?;
+        read_file(&path).ok().map(|file| file.name)
+    }
+
     /// Saves `theme` as a new user theme called `name`, returning its id:
     /// the name's slug, with `-2`, `-3`, … when a built-in or a file has it.
     pub fn save(
@@ -948,5 +956,20 @@ mod tests {
             assert_eq!(entry.base, None, "{}", entry.id);
             assert_eq!(entry.terminal_source, None, "{}", entry.id);
         }
+    }
+
+    #[test]
+    fn name_of_reads_one_file() {
+        let dir = TestDir::new("name-of");
+        let store = dir.store();
+        let id = store
+            .save("Harbour", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        std::fs::write(dir.file("broken"), "{").expect("write");
+
+        assert_eq!(store.name_of(&id).as_deref(), Some("Harbour"));
+        assert_eq!(store.name_of("broken"), None, "a file that does not load");
+        assert_eq!(store.name_of("missing"), None, "no file");
+        assert_eq!(store.name_of("../escape"), None, "not an id");
     }
 }

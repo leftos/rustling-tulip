@@ -136,6 +136,7 @@ mod text_input;
 mod theme;
 pub mod theme_store;
 pub mod themes;
+mod themes_view;
 pub mod toast_activation;
 pub mod ui_theme;
 mod undo;
@@ -231,6 +232,7 @@ use crate::tabs::{
 };
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
+use crate::themes_view::ThemesModal;
 use crate::ui_theme::{UiTheme, theme};
 use crate::undo::UndoShelf;
 use crate::vscode_suggestion::VscodeSuggestions;
@@ -966,6 +968,9 @@ pub struct RootView {
     connection_picker: Option<ConnectionPickerDialog>,
     /// The Connections picker's keyboard focus when its fields have it not.
     connection_picker_focus: FocusHandle,
+    /// The Themes modal, over Settings.
+    themes_modal: Option<ThemesModal>,
+    themes_focus: FocusHandle,
     /// The Tailscale the Connections picker scans for peers.
     peer_source: Arc<dyn PeerSource + Send + Sync>,
     /// Where the Connections picker's Test connection runs `ssh`.
@@ -1397,6 +1402,8 @@ impl RootView {
             fetch_focus: cx.focus_handle(),
             connection_picker: None,
             connection_picker_focus: cx.focus_handle(),
+            themes_modal: None,
+            themes_focus: cx.focus_handle(),
             peer_source: Arc::new(SystemPeers),
             ssh_tester: Arc::new(SystemSsh),
             host_path_prompt: None,
@@ -2279,6 +2286,7 @@ impl RootView {
             || self.pane_ui.move_panes.is_some()
             || self.open_in_main(Overlay::EmptyPaneMenu)
             || self.connection_picker.is_some()
+            || self.themes_modal.is_some()
     }
 
     /// Whether a pane of the tab on screen shows `session_id` with nothing
@@ -4276,14 +4284,7 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
-        if self.appearance_editor.is_some() {
-            let typing = self.settings_typing(window, cx);
-            if self.on_settings_key(ks, window, cx)
-                || self.on_editor_key(ks, window, cx)
-                || (!typing && self.on_appearance_key(ks, window, cx))
-            {
-                cx.stop_propagation();
-            }
+        if self.on_settings_layer_key(event, window, cx) {
             return;
         }
         if self.on_container_menu_key(ks, window, cx) || self.on_container_row_key(ks, window, cx) {
@@ -4708,6 +4709,7 @@ impl Render for RootView {
             .children(self.host_path_prompt_layer(cx))
             .children(self.appearance_editor_layer(window, cx))
             .children(self.settings_layer(window, cx))
+            .children(self.themes_layer(cx))
             .children(self.worktrees_manager_layer(window, cx))
             .children(self.recover_layer(window, cx))
             .children(self.pairing_layer(cx))
