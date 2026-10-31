@@ -276,7 +276,7 @@ fn accent_preset_from_the_session_menu_sends_both_fields(cx: &mut TestAppContext
     let mut h = focused(cx, &dir, &fixture);
 
     open_accent_menu(&mut h, "s1");
-    for name in ["coral", "rose", "ochre", "periwinkle", "sky", "lilac"] {
+    for name in ["theme", "rose", "ochre", "periwinkle", "sky", "lilac"] {
         assert!(h.in_model(&format!("accent-preset-{name}")), "{name}");
     }
     assert!(

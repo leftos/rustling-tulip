@@ -152,6 +152,23 @@ impl ColorRow {
         }
     }
 
+    /// The active theme's colour for this row, which a level that sets
+    /// nothing gets.
+    const fn theme_color(self, base: appearance::ThemeBase) -> u32 {
+        match self {
+            Self::Accent => base.accent,
+            Self::Background => base.background,
+        }
+    }
+
+    /// The colours this row's preset swatches show over `base`, in order.
+    fn preset_colors(self, base: appearance::ThemeBase) -> Vec<u32> {
+        self.presets()
+            .iter()
+            .map(|preset| preset.shown(self.theme_color(base)))
+            .collect()
+    }
+
     fn change(self, color: Option<String>) -> AppearanceChange {
         match self {
             Self::Accent => AppearanceChange::accent_and_frame(color),
@@ -948,30 +965,33 @@ impl RootView {
                 .then(|| swatch_cursor(colors, editor.swatch_cursor, own))
                 .flatten()
         };
-        let preset_colors: Vec<u32> = row.presets().iter().map(|preset| preset.color).collect();
+        let preset_colors = row.preset_colors(self.sidebar.theme_base());
         let preset_cursor = cursor(SwatchLine::Presets, &preset_colors);
         let presets: Vec<AnyElement> = row
             .presets()
             .iter()
+            .zip(&preset_colors)
             .enumerate()
-            .map(|(at, preset)| {
-                let color = appearance::hex(preset.color);
+            .map(|(at, (preset, &shown))| {
+                let color = appearance::hex(shown);
+                // A theme preset is chosen while the level sets nothing.
+                let chosen = preset.color.map_or(own.is_none(), |c| own == Some(c));
                 swatch(
                     format!(
                         "appearance-{key}-preset-{}",
                         preset.name.to_ascii_lowercase()
                     ),
-                    preset.color,
+                    shown,
                     format!("{} ({color})", preset.name),
                     Mark {
-                        chosen: own == Some(preset.color),
+                        chosen,
                         focused: preset_cursor == Some(at),
                     },
                     &theme(cx),
                 )
                 .on_click(click_stop(
                     AppearanceStop::Swatches(row, SwatchLine::Presets),
-                    Aim::Swatch(preset.color),
+                    Aim::Swatch(shown),
                     cx,
                 ))
                 .into_any_element()
@@ -1238,8 +1258,17 @@ impl RootView {
     ) {
         match stop {
             AppearanceStop::Swatches(row, line) => {
-                if let Some(color) = self.swatch_under_cursor(row, line) {
-                    self.pick_swatch(row, &appearance::hex(color), cx);
+                if let Some((at, color)) = self.swatch_under_cursor(row, line) {
+                    let theme_preset = matches!(line, SwatchLine::Presets)
+                        && row
+                            .presets()
+                            .get(at)
+                            .is_some_and(|preset| preset.color.is_none());
+                    if theme_preset {
+                        self.change_appearance(&row.change(None), cx);
+                    } else {
+                        self.pick_swatch(row, &appearance::hex(color), cx);
+                    }
                 }
             }
             AppearanceStop::Hex(_)
@@ -1299,7 +1328,7 @@ impl RootView {
     /// The colours of `row`'s swatch line `line`, in order.
     fn swatch_colors(&self, row: ColorRow, line: SwatchLine) -> Vec<u32> {
         match line {
-            SwatchLine::Presets => row.presets().iter().map(|preset| preset.color).collect(),
+            SwatchLine::Presets => row.preset_colors(self.sidebar.theme_base()),
             SwatchLine::Recent => self.sidebar.recent_colors(),
         }
     }
@@ -1310,11 +1339,12 @@ impl RootView {
         row.own(&self.level_view(&editor.level)?.own)
     }
 
-    fn swatch_under_cursor(&self, row: ColorRow, line: SwatchLine) -> Option<u32> {
+    /// The place and colour of the swatch under `row`'s `line` cursor.
+    fn swatch_under_cursor(&self, row: ColorRow, line: SwatchLine) -> Option<(usize, u32)> {
         let editor = self.appearance_editor.as_ref()?;
         let colors = self.swatch_colors(row, line);
         let at = swatch_cursor(&colors, editor.swatch_cursor, self.chosen_color(row))?;
-        colors.get(at).copied()
+        colors.get(at).map(|&color| (at, color))
     }
 
     fn reset_appearance_row(&mut self, row: ResetRow, cx: &mut Context<Self>) {

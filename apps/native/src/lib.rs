@@ -21,6 +21,7 @@ mod combobox;
 mod connection;
 pub mod connection_picker;
 mod connection_picker_view;
+pub mod contrast;
 mod copied;
 mod copy_text;
 mod dashboard;
@@ -126,6 +127,7 @@ mod term_input;
 mod term_view;
 mod text_input;
 mod theme;
+pub mod theme_store;
 pub mod toast_activation;
 pub mod ui_theme;
 mod undo;
@@ -1266,14 +1268,22 @@ impl RootView {
             .map_or_else(UiState::default, load_ui_state);
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
         fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
-        ui_theme::set_theme(ui_theme::UiTheme::CONTRAST, cx);
+        let themes_dir = ui_dir
+            .as_deref()
+            .map(|dir| dir.join(theme_store::THEMES_DIR));
+        let theme = theme_store::resolve_selection(themes_dir.as_deref(), ui.theme.as_deref());
+        ui_theme::set_theme(theme, cx);
         let mut view = Self {
             tx,
             now,
             conn: Connection::for_target(connection_picker::resolve_boot_target(&ui)),
             handshake: None,
             tabs: TabsModel::new(ui.active_tab_id.clone()),
-            sidebar: SidebarModel::new(ui),
+            sidebar: {
+                let mut sidebar = SidebarModel::new(ui);
+                sidebar.set_theme_base(appearance::ThemeBase::of(&theme));
+                sidebar
+            },
             panes: HashMap::new(),
             retries: RetryGate::default(),
             layouts: WindowLayouts::new(window.window_handle().window_id()),
@@ -2366,6 +2376,13 @@ impl RootView {
     pub fn set_app_colors(&mut self, colors: appearance::AppColors, cx: &mut Context<Self>) {
         self.sidebar.set_app_colors(colors);
         self.after_font_change(cx);
+    }
+
+    /// The active theme's accent and terminal background, the bottom of
+    /// every session's appearance cascade.
+    #[must_use]
+    pub fn theme_base(&self) -> appearance::ThemeBase {
+        self.sidebar.theme_base()
     }
 
     /// The accent session `session_id` resolves to, `0xRRGGBB`.

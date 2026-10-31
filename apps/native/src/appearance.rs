@@ -32,62 +32,82 @@ pub const RECENT_LIMIT: usize = 12;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Preset {
     pub name: &'static str,
-    pub color: u32,
+    /// `0xRRGGBB`; `None` is the active theme's own colour, which a level
+    /// gets by setting nothing.
+    pub color: Option<u32>,
+}
+
+impl Preset {
+    /// What applying this preset stores at a level: its `#rrggbb`, or
+    /// nothing, which clears the level's override.
+    #[must_use]
+    pub fn stored(&self) -> Option<String> {
+        self.color.map(hex)
+    }
+
+    /// The colour its swatch shows while `theme_color` is the active
+    /// theme's colour for the row.
+    #[must_use]
+    pub fn shown(&self, theme_color: u32) -> u32 {
+        self.color.unwrap_or(theme_color)
+    }
 }
 
 /// The accent choices, which the quick menu applies to the frame as well.
+/// The first is the active theme's accent.
 pub const ACCENT_PRESETS: [Preset; 6] = [
     Preset {
-        name: "Coral",
-        color: BUILTIN_ACCENT,
+        name: "Theme",
+        color: None,
     },
     Preset {
         name: "Rose",
-        color: 0xe7849b,
+        color: Some(0xe7849b),
     },
     Preset {
         name: "Ochre",
-        color: 0xd9a15c,
+        color: Some(0xd9a15c),
     },
     Preset {
         name: "Periwinkle",
-        color: 0x8fb3f0,
+        color: Some(0x8fb3f0),
     },
     Preset {
         name: "Sky",
-        color: 0x8fd3e8,
+        color: Some(0x8fd3e8),
     },
     Preset {
         name: "Lilac",
-        color: 0xc9b8ff,
+        color: Some(0xc9b8ff),
     },
 ];
 
-/// The terminal background choices.
+/// The terminal background choices. The first is the active theme's
+/// terminal background.
 pub const BACKGROUND_PRESETS: [Preset; 6] = [
     Preset {
         name: "Default",
-        color: BUILTIN_BACKGROUND,
+        color: None,
     },
     Preset {
         name: "Slate",
-        color: 0x111318,
+        color: Some(0x111318),
     },
     Preset {
         name: "Ink",
-        color: 0x0b1020,
+        color: Some(0x0b1020),
     },
     Preset {
         name: "Evergreen",
-        color: 0x07150f,
+        color: Some(0x07150f),
     },
     Preset {
         name: "Aubergine",
-        color: 0x1a1024,
+        color: Some(0x1a1024),
     },
     Preset {
         name: "Paper",
-        color: 0xf6f4ef,
+        color: Some(0xf6f4ef),
     },
 ];
 
@@ -1199,25 +1219,102 @@ mod tests {
                 b: 0xef
             }
         );
-        for preset in ACCENT_PRESETS.iter().chain(&BACKGROUND_PRESETS) {
-            assert_eq!(parse_color(&hex(preset.color)), Some(preset.color));
+        for color in ACCENT_PRESETS
+            .iter()
+            .chain(&BACKGROUND_PRESETS)
+            .filter_map(|preset| preset.color)
+        {
+            assert_eq!(parse_color(&hex(color)), Some(color));
         }
     }
 
     #[test]
-    fn the_accent_presets_are_the_six_petal_colours() {
+    fn the_accent_presets_are_the_theme_and_five_petal_colours() {
         let names: Vec<&str> = ACCENT_PRESETS.iter().map(|preset| preset.name).collect();
         assert_eq!(
             names,
-            ["Coral", "Rose", "Ochre", "Periwinkle", "Sky", "Lilac"]
+            ["Theme", "Rose", "Ochre", "Periwinkle", "Sky", "Lilac"]
         );
         assert_eq!(
             ACCENT_PRESETS.map(|preset| preset.color),
-            [0xf07a62, 0xe7849b, 0xd9a15c, 0x8fb3f0, 0x8fd3e8, 0xc9b8ff]
+            [
+                None,
+                Some(0xe7849b),
+                Some(0xd9a15c),
+                Some(0x8fb3f0),
+                Some(0x8fd3e8),
+                Some(0xc9b8ff)
+            ]
         );
         assert_eq!(
-            ACCENT_PRESETS[0].color, BUILTIN_ACCENT,
-            "the built-in accent is the first preset"
+            ACCENT_PRESETS[0].stored(),
+            None,
+            "the first preset is the theme's accent: it sets nothing"
+        );
+        assert_eq!(ACCENT_PRESETS[1].stored().as_deref(), Some("#e7849b"));
+    }
+
+    /// A level whose overrides are `own`, resolved over the app level with
+    /// no colours and the theme base `theme`.
+    fn resolved_over(own: &AppearanceOverrides, theme: ThemeBase) -> Resolved {
+        let colors = AppColors::default();
+        let font = FontSettings::default();
+        resolve_container(
+            own,
+            AppLevel {
+                colors: &colors,
+                font: &font,
+                theme,
+            },
+        )
+    }
+
+    /// A theme base that is not the built-in theme's.
+    const OTHER_THEME: ThemeBase = ThemeBase {
+        accent: 0x40c080,
+        background: 0x102030,
+    };
+
+    #[test]
+    fn the_default_background_preset_clears_the_override_under_any_theme() {
+        let default = BACKGROUND_PRESETS[0];
+        assert_eq!((default.name, default.color), ("Default", None));
+        let own = AppearanceOverrides {
+            terminal_background_color: Some("#111318".to_owned()),
+            ..AppearanceOverrides::default()
+        };
+        assert_eq!(
+            resolved_over(&own, OTHER_THEME).background,
+            Field::new(0x111318, Source::Container),
+            "the level's override before the preset"
+        );
+        let applied = AppearanceChange::background(default.stored()).apply_to(&own);
+        assert_eq!(applied.terminal_background_color, None);
+        assert_eq!(
+            resolved_over(&applied, OTHER_THEME).background,
+            Field::new(OTHER_THEME.background, Source::BuiltIn),
+            "the level falls through to the theme's background"
+        );
+    }
+
+    #[test]
+    fn the_theme_accent_preset_clears_the_override_under_any_theme() {
+        let accent = ACCENT_PRESETS[0];
+        let own = AppearanceOverrides {
+            accent_color: Some("#e7849b".to_owned()),
+            terminal_frame_color: Some("#e7849b".to_owned()),
+            ..AppearanceOverrides::default()
+        };
+        let applied = AppearanceChange::accent_and_frame(accent.stored()).apply_to(&own);
+        assert_eq!(
+            (&applied.accent_color, &applied.terminal_frame_color),
+            (&None, &None)
+        );
+        let resolved = resolved_over(&applied, OTHER_THEME);
+        assert_eq!(
+            resolved.accent,
+            Field::new(OTHER_THEME.accent, Source::BuiltIn),
+            "the level falls through to the theme's accent"
         );
     }
 
@@ -1233,7 +1330,7 @@ mod tests {
             .iter()
             .find(|preset| preset.name == "Slate")
             .expect("Slate is one of the presets");
-        assert_eq!(slate.color, 0x111318);
+        assert_eq!(slate.color, Some(0x111318));
     }
 
     #[test]

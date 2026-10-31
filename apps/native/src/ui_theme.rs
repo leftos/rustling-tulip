@@ -10,6 +10,7 @@
 #![expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
 
 use gpui::{App, Global};
+use serde::{Deserialize, Serialize};
 
 use crate::palette;
 use crate::theme::{TerminalPalette, rgb};
@@ -17,105 +18,151 @@ use crate::theme::{TerminalPalette, rgb};
 /// Every UI colour of one look. Each field is the token of the same name
 /// in [`crate::palette`]: a `u32` as `0xRRGGBB` or `0xRRGGBBAA` as that
 /// token is, or an `f32` share for the diff washes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UiTheme {
     /// [`palette::GROUND`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub ground: u32,
     /// [`palette::SUNKEN`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub sunken: u32,
     /// [`palette::SURFACE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub surface: u32,
     /// [`palette::RAISED`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub raised: u32,
     /// [`palette::CHIP`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub chip: u32,
     /// [`palette::HOVER`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub hover: u32,
     /// [`palette::PRESSED`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub pressed: u32,
     /// [`palette::POPOVER_HOVER`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub popover_hover: u32,
     /// [`palette::POPOVER_PRESSED`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub popover_pressed: u32,
     /// [`palette::LAUNCHED_TINT`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub launched_tint: u32,
-    /// [`palette::TERMINAL_GROUND`].
-    pub terminal_ground: u32,
     /// [`palette::ROW_CARD`].
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub row_card: u32,
     /// [`palette::ROW_HOVER`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub row_hover: u32,
     /// [`palette::POPOVER`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub popover: u32,
     /// [`palette::POPOVER_EDGE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub popover_edge: u32,
     /// [`palette::POPOVER_SHADOW`].
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub popover_shadow: u32,
     /// [`palette::MODAL`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub modal: u32,
     /// [`palette::MODAL_EDGE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub modal_edge: u32,
     /// [`palette::MODAL_INSET`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub modal_inset: u32,
     /// [`palette::MENU_RULE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub menu_rule: u32,
     /// [`palette::CARD_EDGE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub card_edge: u32,
     /// [`palette::LINE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub line: u32,
     /// [`palette::LINE_STRONG`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub line_strong: u32,
     /// [`palette::TEXT`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub text: u32,
     /// [`palette::TEXT_2`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub text_2: u32,
     /// [`palette::SUBTLE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub subtle: u32,
     /// [`palette::FAINT`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub faint: u32,
     /// [`palette::ACCENT`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub accent: u32,
     /// [`palette::ON_ACCENT`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub on_accent: u32,
     /// [`palette::PRIMARY`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub primary: u32,
     /// [`palette::PRIMARY_HOVER`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub primary_hover: u32,
     /// [`palette::PRIMARY_PRESSED`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub primary_pressed: u32,
     /// [`palette::SELECTION`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub selection: u32,
     /// [`palette::SCRIM`].
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub scrim: u32,
     /// [`palette::DIALOG_SHADOW`].
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub dialog_shadow: u32,
     /// [`palette::TOAST_SHADOW`].
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub toast_shadow: u32,
     /// [`palette::WORKING`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub working: u32,
     /// [`palette::ASKING`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub asking: u32,
     /// [`palette::ON_ASKING`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub on_asking: u32,
     /// [`palette::WAITING`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub waiting: u32,
     /// [`palette::DANGER`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub danger: u32,
     /// [`palette::DANGER_TEXT`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub danger_text: u32,
     /// [`palette::LILAC`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub lilac: u32,
     /// [`palette::OCHRE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub ochre: u32,
     /// [`palette::ROSE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub rose: u32,
     /// [`palette::PERIWINKLE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub periwinkle: u32,
     /// [`palette::CHANGE_DELETED`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub change_deleted: u32,
     /// [`palette::DIFF_DELETE`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub diff_delete: u32,
     /// [`palette::DIFF_FILLER`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub diff_filler: u32,
     /// [`palette::DIFF_DELETE_WASH_ALPHA`].
     pub diff_delete_wash_alpha: f32,
@@ -126,52 +173,77 @@ pub struct UiTheme {
     /// [`palette::DIFF_WORD_WASH_ALPHA`].
     pub diff_word_wash_alpha: f32,
     /// [`palette::PANEL_BG`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub panel_bg: u32,
     /// [`palette::BAR_BG`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub bar_bg: u32,
     /// `palette::HOVER_BG`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub hover_bg: u32,
     /// [`palette::BORDER`].
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub border: u32,
     /// `palette::MUTED`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub muted: u32,
     /// `palette::WARNING`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub warning: u32,
     /// `palette::SELECTED_BG`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub selected_bg: u32,
     /// `palette::INPUT_TEXT`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub input_text: u32,
     /// `palette::INPUT_PLACEHOLDER`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub input_placeholder: u32,
     /// `palette::INPUT_CURSOR`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub input_cursor: u32,
     /// `palette::INPUT_SELECTION`.
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub input_selection: u32,
     /// `palette::ASK_WASH`.
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub ask_wash: u32,
     /// `palette::ASK_BORDER`.
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub ask_border: u32,
     /// `palette::DANGER_WASH`.
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub danger_wash: u32,
     /// `palette::CONTEXT_HOT`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub context_hot: u32,
     /// `palette::DANGER_BG`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub danger_bg: u32,
     /// `palette::STATUS_OK`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub status_ok: u32,
     /// `palette::OK_WASH`.
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub ok_wash: u32,
     /// `palette::STATUS_IDLE`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub status_idle: u32,
     /// `palette::STATUS_ERR`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub status_err: u32,
     /// `palette::SPAWN_BADGE_OK`.
+    #[serde(with = "crate::theme_store::hex::rgb")]
     pub spawn_badge_ok: u32,
     /// `palette::SHELL_MARK_BORDER`.
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub shell_mark_border: u32,
     /// `palette::TRANSPARENT`.
+    #[serde(with = "crate::theme_store::hex::rgba")]
     pub transparent: u32,
     /// The terminal's colours, drawn as given: no contrast nudge.
+    /// Stored apart from the UI tokens, so a serialized `UiTheme` leaves it out.
+    #[serde(skip)]
     pub terminal: TerminalPalette,
 }
 
@@ -188,7 +260,6 @@ impl UiTheme {
         popover_hover: palette::POPOVER_HOVER,
         popover_pressed: palette::POPOVER_PRESSED,
         launched_tint: palette::LAUNCHED_TINT,
-        terminal_ground: palette::TERMINAL_GROUND,
         row_card: palette::ROW_CARD,
         row_hover: palette::ROW_HOVER,
         popover: palette::POPOVER,
@@ -323,11 +394,6 @@ mod tests {
                 palette::POPOVER_PRESSED,
             ),
             ("launched_tint", t.launched_tint, palette::LAUNCHED_TINT),
-            (
-                "terminal_ground",
-                t.terminal_ground,
-                palette::TERMINAL_GROUND,
-            ),
             ("row_card", t.row_card, palette::ROW_CARD),
             ("row_hover", t.row_hover, palette::ROW_HOVER),
             ("popover", t.popover, palette::POPOVER),
@@ -424,6 +490,11 @@ mod tests {
         for (name, field, token) in colour_pairs(&t) {
             assert_eq!(field, token, "{name}");
         }
+        assert_eq!(
+            crate::appearance::packed(t.terminal.bg),
+            palette::TERMINAL_GROUND,
+            "the terminal's background is the terminal ground"
+        );
         let shares = [
             (
                 "diff_delete_wash_alpha",

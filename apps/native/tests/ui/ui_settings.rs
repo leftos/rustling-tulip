@@ -2766,8 +2766,8 @@ fn appearance_swatch_line_lands_on_the_chosen_swatch_and_arrows_move_and_enter_p
     h.keys("left left left left space");
     assert_eq!(
         appearance_hint(&mut h, "accent"),
-        "Resolved: #f07a62 from current",
-        "Left stops at the first swatch; Space picks too"
+        "Resolved: #f07a62 from built-in",
+        "Left stops at the first swatch, the theme's accent; Space picks it, clearing the override"
     );
 }
 

@@ -429,6 +429,10 @@ pub struct UiState {
     /// [`crate::fonts::DEFAULT_UI_FAMILY`].
     #[serde(default)]
     pub ui_font_family: Option<String>,
+    /// The theme the interface draws in: a built-in's id or a user theme's
+    /// file slug; `None` is the built-in theme.
+    #[serde(default)]
+    pub theme: Option<String>,
     /// Terminal font sizes overridden per tab, by tab id; a tab's size wins
     /// over its session's, its container's and the app's.
     #[serde(default)]
@@ -768,6 +772,7 @@ impl Default for UiState {
             last_vscode_dir: None,
             terminal_font: FontSettings::default(),
             ui_font_family: None,
+            theme: None,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
             app_appearance: AppColors::default(),
@@ -3939,6 +3944,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ui_state_without_a_theme_key_loads_none() {
+        assert_eq!(UiState::default().theme, None);
+        let older: UiState = serde_json::from_value(json!({ "sidebar_width": 300.0 }))
+            .expect("a file without a theme key");
+        assert_eq!(older.theme, None, "absent: the built-in theme");
+    }
+
+    #[test]
+    fn ui_state_round_trips_its_theme_key() {
+        let dir = TestDir::new("theme-key");
+        let state = UiState {
+            theme: Some("late-night".to_owned()),
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0).theme.as_deref(), Some("late-night"));
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("the saved layout");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["theme"], "late-night");
+    }
+
+    #[test]
     fn ui_state_round_trips() {
         let dir = TestDir::new("round-trip");
         let state = UiState {
@@ -3958,6 +3985,7 @@ pub(crate) mod tests {
                 bold: true,
             },
             ui_font_family: Some("Inter".to_owned()),
+            theme: Some("my-theme".to_owned()),
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {
                 pinned_repo: Some("r1".to_owned()),

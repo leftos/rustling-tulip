@@ -416,7 +416,7 @@ fn editor_swatch_enter_sends_session_appearance(cx: &mut TestAppContext) {
     assert_eq!(
         session_appearances(&sent, "s1"),
         [colored(Some("#e7849b"), None)],
-        "Rose, right of Coral; sent {sent:?}"
+        "Rose, right of Theme; sent {sent:?}"
     );
     assert_eq!(
         h.root(|root, _| root.appearance_recent_rows("accent")),
@@ -1032,7 +1032,7 @@ fn settings_appearance_shows_the_six_petal_accent_swatches(cx: &mut TestAppConte
     h.keys("ctrl-,");
     h.click_on("settings-tab-appearance");
 
-    let presets = ["coral", "rose", "ochre", "periwinkle", "sky", "lilac"];
+    let presets = ["theme", "rose", "ochre", "periwinkle", "sky", "lilac"];
     let lefts: Vec<Pixels> = presets
         .iter()
         .map(|name| {

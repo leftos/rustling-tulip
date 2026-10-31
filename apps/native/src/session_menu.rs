@@ -2429,14 +2429,15 @@ impl RootView {
             back.into_any_element(),
             menu_separator(&t).into_any_element(),
         ];
+        let theme_accent = self.sidebar.theme_base().accent;
         rows.extend(ACCENT_PRESETS.iter().map(|preset| {
             swatch_row(
                 &preset_selector(preset.name),
                 preset.name,
-                Some(preset.color),
+                Some(preset.shown(theme_accent)),
                 &t,
             )
-            .on_click(Self::accent_choice(session_id, Some(preset.color), cx))
+            .on_click(Self::accent_choice(session_id, preset.color, cx))
             .into_any_element()
         }));
         let recent = self.sidebar.recent_colors();

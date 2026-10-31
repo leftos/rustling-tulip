@@ -70,6 +70,7 @@ mod ui_tab_drag;
 mod ui_tabs;
 mod ui_target_switch;
 mod ui_terminal;
+mod ui_theme;
 mod ui_update;
 mod ui_viewer;
 mod ui_viewer_md;

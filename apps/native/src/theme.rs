@@ -8,6 +8,7 @@
 #![expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
 
 use alacritty_terminal::vte::ansi::Rgb;
+use serde::{Deserialize, Serialize};
 
 use crate::palette;
 
@@ -58,20 +59,26 @@ const BASE_ANSI: [Rgb; 16] = [
 
 /// Every colour a grid cell resolves against: a theme's terminal part, or
 /// the palette [`build_theme`] makes for a background override.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalPalette {
     /// The default text colour.
+    #[serde(with = "crate::theme_store::hex::term")]
     pub fg: Rgb,
+    #[serde(with = "crate::theme_store::hex::term")]
     pub bg: Rgb,
+    #[serde(with = "crate::theme_store::hex::term")]
     pub caret: Rgb,
     /// The selection tint, laid over a selected cell's background at
     /// [`Self::selection_alpha`].
+    #[serde(with = "crate::theme_store::hex::term")]
     pub selection: Rgb,
     pub selection_alpha: f64,
     /// The colour selected text is drawn in.
+    #[serde(with = "crate::theme_store::hex::term")]
     pub selection_fg: Rgb,
     /// The 16 ANSI colours, base colours then bright ones. The 256-colour
     /// cube above index 15 stays the standard xterm one.
+    #[serde(with = "crate::theme_store::hex::term_ansi")]
     pub ansi: [Rgb; 16],
 }
 
