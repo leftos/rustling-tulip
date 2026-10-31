@@ -605,27 +605,34 @@ impl RootView {
             .child(new_tab_button(cx))
     }
 
+    /// What `tab`'s pill shows around its name: its count badge, and a
+    /// Dashboard tab's icon and needs-you badge.
+    fn pill_marks(
+        &self,
+        tab: &TabEntry,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> [Option<AnyElement>; 3] {
+        let offset = crate::fonts::ui_text_size(cx);
+        let dashboard = matches!(tab.content, TabContent::Dashboard);
+        [
+            self.tab_badge(&tab.id)
+                .map(|badge| count_badge(offset, &tab.id, badge, t).into_any_element()),
+            dashboard.then(|| dashboard_icon(&tab.id, t).into_any_element()),
+            dashboard
+                .then(|| need_you_badge(offset, &tab.id, self.needs_you_count(), t))
+                .flatten()
+                .map(IntoElement::into_any_element),
+        ]
+    }
+
     /// `tab`'s pill; selection shows in `accent`, `0xRRGGBB`.
     fn tab_pill(&self, tab: &TabEntry, accent: u32, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let active = self.tabs.active_id() == Some(tab.id.as_str());
         let look = PillLook::of(active, self.tabs.selection.contains(&tab.id));
         let armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
-        let badge = self
-            .tab_badge(&tab.id)
-            .map(|badge| count_badge(crate::fonts::ui_text_size(cx), &tab.id, badge, &theme(cx)));
-        let dashboard = matches!(tab.content, TabContent::Dashboard);
-        let icon = dashboard.then(|| dashboard_icon(&tab.id, &t));
-        let need_badge = dashboard
-            .then(|| {
-                need_you_badge(
-                    crate::fonts::ui_text_size(cx),
-                    &tab.id,
-                    self.needs_you_count(),
-                    &t,
-                )
-            })
-            .flatten();
+        let [badge, icon, need_badge] = self.pill_marks(tab, &t, cx);
         let rename = self.renaming.as_ref().filter(|r| r.tab_id == tab.id);
         let label = match rename {
             Some(rename) => div().w(px(RENAME_WIDTH)).child(rename.input.clone()),
@@ -652,7 +659,9 @@ impl RootView {
         let popped = self
             .is_tab_popped(&tab.id)
             .then(|| popped_mark(&tab.id, &t));
-        let host = self.tab_host(tab).map(|host| host_chip(&tab.id, host));
+        let host = self
+            .tab_host(tab)
+            .map(|host| host_chip(fonts::ui_text_size(cx), &tab.id, host, &t));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
@@ -1307,7 +1316,7 @@ fn count_badge(offset: i8, tab_id: &str, badge: TabBadge, t: &UiTheme) -> Statef
 
 /// The remote host's short name after a tab's name, tagged
 /// `tab-host-<id>`; its full name on hover.
-fn host_chip(tab_id: &str, host: HostLabel) -> Stateful<Div> {
+fn host_chip(offset: i8, tab_id: &str, host: HostLabel, t: &UiTheme) -> Stateful<Div> {
     let name = format!("tab-host-{tab_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -1315,13 +1324,13 @@ fn host_chip(tab_id: &str, host: HostLabel) -> Stateful<Div> {
         .flex()
         .flex_none()
         .items_center()
-        .h(px(BUSY_PILL_HEIGHT))
+        .h(ui_px_at(offset, BUSY_PILL_HEIGHT))
         .px(px(6.0))
-        .rounded(px(BUSY_PILL_HEIGHT / 2.0))
-        .bg(gpui::rgb(CHIP))
+        .rounded(ui_px_at(offset, BUSY_PILL_HEIGHT) / 2.0)
+        .bg(gpui::rgb(t.chip))
         .font_family(fonts::DEFAULT_FAMILY)
-        .text_size(px(BUSY_PILL_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_size(ui_px_at(offset, BUSY_PILL_TEXT_SIZE))
+        .text_color(gpui::rgb(t.text_2))
         .whitespace_nowrap()
         .tooltip(tooltip(host.full))
         .child(host.short)

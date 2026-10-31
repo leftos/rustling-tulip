@@ -730,7 +730,7 @@ fn group_block(
         .flex()
         .flex_col()
         .gap(px(6.0))
-        .children(group.header.clone().map(muted));
+        .children(group.header.clone().map(|text| muted(text, &theme(cx))));
     if group.kind == GroupKind::Other {
         let block = if with_toggle {
             block.child(

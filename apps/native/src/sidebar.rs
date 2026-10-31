@@ -533,6 +533,12 @@ fn view_of_name(name: &str) -> Option<PaneView> {
 /// uses [`crate::target::Target::session_count_key`].
 pub const LOCAL_HOST_KEY: &str = "local";
 
+/// The key `session_views` files `host`'s sessions under.
+#[must_use]
+pub fn session_view_key(host: &HostKey) -> String {
+    host.wire().unwrap_or(LOCAL_HOST_KEY).to_owned()
+}
+
 /// The view each session was last switched to, saved under `session_views`
 /// as `{"<host key>": {"<session id>": "chat" | "summary"}}`, so each host's
 /// sessions are kept apart. A terminal is not written: a session not named
@@ -1942,11 +1948,17 @@ impl SidebarModel {
     /// Forgets the view of every session of host `host`, the one whose
     /// list this is, that the list no longer holds; another host's views
     /// stay. Returns whether one went.
-    pub fn drop_ended_session_views(&mut self, host: &str) -> bool {
-        let live: HashSet<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
+    pub fn drop_ended_session_views(&mut self, host: &HostKey) -> bool {
+        let live: HashSet<String> = self
+            .sessions_of(host)
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
         self.ui
             .session_views
-            .retain(host, |session_id| live.contains(session_id))
+            .retain(&session_view_key(host), |session_id| {
+                live.contains(session_id)
+            })
     }
 
     /// Hands over the saved pop-outs, leaving none saved.
@@ -5201,9 +5213,9 @@ pub(crate) mod tests {
         model.remember_session_view("local", "s1", PaneView::Chat);
         model.remember_session_view("local", "gone", PaneView::Chat);
         model.remember_session_view("ssh:dev", "gone", PaneView::Chat);
-        assert!(model.drop_ended_session_views("local"));
+        assert!(model.drop_ended_session_views(&HostKey::Local));
         assert!(
-            !model.drop_ended_session_views("local"),
+            !model.drop_ended_session_views(&HostKey::Local),
             "nothing more to drop"
         );
         assert_eq!(model.session_view("local", "s1"), PaneView::Chat);
@@ -5224,17 +5236,24 @@ pub(crate) mod tests {
         let dir = TestDir::new("session-views-hosts");
         let mut model = model_with(vec![session("a1")]);
         model.remember_session_view("local", "a1", PaneView::Chat);
-        model.apply(&DaemonMessage::Sessions {
-            sessions: vec![session("b1")],
-        });
+        let remote = HostKey::Remote("ssh:dev".to_owned());
+        model.apply(
+            &remote,
+            &DaemonMessage::Sessions {
+                sessions: vec![session("b1")],
+            },
+        );
         model.remember_session_view("ssh:dev", "b1", PaneView::Chat);
-        model.drop_ended_session_views("ssh:dev");
+        model.drop_ended_session_views(&remote);
         save_ui_state(&dir.0, model.ui_state()).expect("save on host B");
         let mut back = SidebarModel::new(load_ui_state(&dir.0));
-        back.apply(&DaemonMessage::Sessions {
-            sessions: vec![session("a1")],
-        });
-        back.drop_ended_session_views("local");
+        back.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![session("a1")],
+            },
+        );
+        back.drop_ended_session_views(&HostKey::Local);
         assert_eq!(back.session_view("local", "a1"), PaneView::Chat);
         assert_eq!(back.session_view("ssh:dev", "b1"), PaneView::Chat);
     }

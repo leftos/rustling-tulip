@@ -19,7 +19,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A pane can show a session as a summary, one line per stretch of work that opens into its messages, through the header's Summary switch or Ctrl+Shift+U.
 - Chat and summary panes draw stretchtext replies as expandable text: a click opens a short phrase into its longer form, one level at a time, and `‹` closes it.
 - When Claude asks for you while a subagent's view is open in the terminal, the session switches back to the main conversation, setting any draft aside and restoring it afterwards.
-- The app connects to this PC and every saved host you switch on at once, keeping each host's sessions, alerts and panels; an offline host dims.
+- The app connects to this PC and every saved host you switch on at once, keeping each host's sessions, alerts and panels; the sidebar groups them by host, each with its own + Shell, remote panes and tabs name their host, and an offline host dims.
 
 ### Fixed
 

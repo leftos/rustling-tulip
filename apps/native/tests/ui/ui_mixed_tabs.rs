@@ -19,7 +19,9 @@ use protocol::{
 };
 use rustling_tulip_native::connection_picker::PeerSource;
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, NetEvent, OpenIn, OpenOutcome, PaneAim, PopoutKey};
+use rustling_tulip_native::{
+    Connection, NetEvent, OpenIn, OpenOutcome, PaneAim, PopoutKey, TabBadge,
+};
 use support::{
     Fixture, Harness, PROTOCOL, REMOTE, TestDir, mixed_tabs, pane, remote_pane, repo, session,
     split, tab,
@@ -393,20 +395,20 @@ fn a_tab_of_remote_panes_counts_its_busy_sessions(cx: &mut TestAppContext) {
 
     h.host(&remote()).send(DaemonMessage::Sessions {
         sessions: vec![
-            session("b1").status("working").build(),
-            session("b2").status("working").build(),
+            session("b1").status("awaiting_input").build(),
+            session("b2").status("awaiting_input").build(),
         ],
     });
 
     assert_eq!(
         h.root(|root, _| root.tab_badge("t2")),
-        Some((1, 1)),
-        "t2's one pane shows box's working b2"
+        Some(TabBadge::NeedsYou(1)),
+        "t2's one pane shows box's asking b2"
     );
     assert_eq!(
         h.root(|root, _| root.tab_badge("t1")),
-        Some((1, 2)),
-        "t1 counts This PC's idle a1 and box's working b1"
+        Some(TabBadge::NeedsYou(1)),
+        "t1 counts box's asking b1 beside This PC's idle a1"
     );
 }
 

@@ -12,6 +12,7 @@ use crate::assets::{
     SIDEBAR_SHELL_ICON, SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
 use crate::buttons::{ButtonSize, Layer, focus_ring, outlined_button, primary_button};
+use crate::connection::{Connection, State};
 use crate::drag::{self, DragPayload, Side, SidebarRow};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
@@ -788,11 +789,11 @@ impl HostHeaderState {
     }
 
     /// The state dot's colour, as the Connections picker colours its rows.
-    fn dot(self) -> u32 {
+    fn dot(self, t: &UiTheme) -> u32 {
         match self {
-            Self::Online => STATUS_OK,
-            Self::Connecting | Self::Offline => STATUS_IDLE,
-            Self::NotPaired => ASKING,
+            Self::Online => t.status_ok,
+            Self::Connecting | Self::Offline => t.status_idle,
+            Self::NotPaired => t.asking,
         }
     }
 }
@@ -812,6 +813,7 @@ fn host_header(
     first: bool,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let key = group.host.wire().unwrap_or("local");
     let fold_host = group.host.clone();
     let chevron = if group.collapsed {
@@ -832,23 +834,28 @@ fn host_header(
         .items_center()
         .gap(px(6.0))
         .cursor_pointer()
-        .child(icon(chevron, 13.0, SUBTLE))
+        .child(icon(chevron, 13.0, t.subtle))
         .child(
             div()
                 .flex_none()
                 .size(px(HOST_DOT_SIZE))
                 .rounded_full()
-                .bg(gpui::rgb(state.dot())),
+                .bg(gpui::rgb(state.dot(&t))),
         )
         .child(
             div()
                 .flex_none()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(gpui::rgb(TEXT))
+                .text_color(gpui::rgb(t.text))
                 .child(group.label.clone()),
         )
         .when_some(state.label(), |fold, text| {
-            fold.child(div().flex_none().text_color(gpui::rgb(SUBTLE)).child(text))
+            fold.child(
+                div()
+                    .flex_none()
+                    .text_color(gpui::rgb(t.subtle))
+                    .child(text),
+            )
         })
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.toggle_host(&fold_host, cx);
@@ -873,10 +880,12 @@ fn host_header(
         .flex_none()
         .items_center()
         .gap(px(6.0))
-        .h(px(HOST_HEADER_HEIGHT))
+        .h(ui_px(cx, HOST_HEADER_HEIGHT))
         .pl(px(4.0))
         .pr(px(4.0))
-        .when(!first, |row| row.border_t_1().border_color(gpui::rgb(LINE)))
+        .when(!first, |row| {
+            row.border_t_1().border_color(gpui::rgb(t.line))
+        })
         .child(fold)
         .child(action)
         .into_any_element()
@@ -885,9 +894,11 @@ fn host_header(
 /// A host header's small text button, `selector`, reading `label` after
 /// `glyph` when there is one.
 fn host_header_button(
+    offset: i8,
     selector: String,
     glyph: Option<&'static str>,
     label: &'static str,
+    t: &UiTheme,
 ) -> Stateful<Div> {
     div()
         .id(SharedString::from(selector.clone()))
@@ -896,12 +907,12 @@ fn host_header_button(
         .flex_none()
         .items_center()
         .gap(px(4.0))
-        .h(px(20.0))
+        .h(ui_px_at(offset, 20.0))
         .px(px(6.0))
         .rounded(px(5.0))
-        .text_color(gpui::rgb(TEXT_2))
+        .text_color(gpui::rgb(t.text_2))
         .when_some(glyph, |button, glyph| {
-            button.child(icon(glyph, 12.0, TEXT_2))
+            button.child(icon(glyph, 12.0, t.text_2))
         })
         .child(label)
 }
@@ -915,10 +926,13 @@ fn host_shell(
     online: bool,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let t = theme(cx);
     let button = host_header_button(
+        crate::fonts::ui_text_size(cx),
         format!("host-shell-{key}"),
         Some(SIDEBAR_PLUS_ICON),
         "Shell",
+        &t,
     );
     if !online {
         return button
@@ -929,7 +943,7 @@ fn host_shell(
     let host = host.clone();
     button
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         .tooltip(tooltip(format!("Open a shell on {name}")))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.quick_shell_on(&host, cx);
@@ -941,9 +955,11 @@ fn host_shell(
 /// its Connections row's `Pair` does.
 fn host_pair(key: &str, host: &HostKey, name: &str, cx: &mut Context<RootView>) -> AnyElement {
     let host = host.clone();
-    host_header_button(format!("host-pair-{key}"), None, "Pair")
+    let t = theme(cx);
+    let offset = crate::fonts::ui_text_size(cx);
+    host_header_button(offset, format!("host-pair-{key}"), None, "Pair", &t)
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))
         .tooltip(tooltip(format!("Pair this PC with {name}")))
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.pair_with_host(&host, window, cx);

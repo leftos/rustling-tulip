@@ -108,6 +108,11 @@ impl PaneSlot {
         &self.view
     }
 
+    /// The host of the session the pane shows.
+    pub(crate) fn host(&self) -> &HostKey {
+        &self.host
+    }
+
     /// The session the pane shows.
     pub(crate) fn session(&self) -> Option<&str> {
         self.session.as_deref()
@@ -557,8 +562,9 @@ impl RootView {
         let mut popped = self.popouts.popped_panes();
         popped.extend(tab_panes.iter().map(String::as_str));
         let mut popped_sessions = self.popouts.popped_sessions();
-        popped_sessions.retain(|session_id| {
-            !self.terminal_hidden(&popouts::session_slot_id(session_id), Some(session_id))
+        popped_sessions.retain(|session| {
+            let slot_id = popouts::session_slot_id(&session.host, &session.id);
+            !self.terminal_hidden(&slot_id, Some(&session.id))
         });
         let drivers = tabs::size_drivers(
             &bindings,
@@ -862,7 +868,7 @@ impl RootView {
     /// each chat pane keeps its view and asks again once bound. A remote
     /// host's terminals stay as they are: their connection did not change.
     pub(crate) fn reset_panes(&mut self, cx: &mut Context<Self>) {
-        self.chat.reset_connection();
+        self.chat.reset_connection(&HostKey::Local);
         let local = self
             .panes
             .iter_mut()
@@ -881,7 +887,8 @@ impl RootView {
 
     /// `host`'s first session list on a new connection: every terminal
     /// showing one of its sessions, panes and session pop-outs alike,
-    /// keeps its session and attaches again, on that connection.
+    /// keeps its session and attaches again, on that connection, and its
+    /// chats load afresh there.
     pub(crate) fn reset_host_panes(&mut self, host: &HostKey, cx: &mut Context<Self>) {
         for slot in self.panes.values_mut().filter(|slot| slot.host == *host) {
             slot.view.update(cx, |pane, cx| {
@@ -890,6 +897,8 @@ impl RootView {
             });
             slot.attached = false;
         }
+        self.chat.reset_connection(host);
+        self.sync_chat_loads();
     }
 
     /// Gives `session`'s pop-out a terminal of its own, outside every grid,

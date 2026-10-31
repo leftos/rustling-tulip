@@ -666,6 +666,7 @@ fn start_box_daemon(
     let (event_tx, event_rx) = unbounded();
     let daemon = FakeDaemon {
         events: event_tx,
+        view: View::MultiHost,
         now,
         failure: Arc::clone(failure),
     };

@@ -656,7 +656,13 @@ impl Painter {
                 }
                 (LinkRoute::ViewerTab, target) => root.follow_md_link(&tab_id, target, window, cx),
                 (LinkRoute::WebOnly, LinkTarget::Url(url)) => {
-                    root.dispatch_open(OpenJob::Url(url), Then::Nothing, window, cx);
+                    root.dispatch_open(
+                        &crate::target::HostKey::Local,
+                        OpenJob::Url(url),
+                        Then::Nothing,
+                        window,
+                        cx,
+                    );
                 }
                 (LinkRoute::WebOnly, _) => {
                     tracing::debug!("a chat answer follows only web links");
