@@ -4,6 +4,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.5.2-alpha
+
 ### Added
 
 - The app checks for new releases, downloads and verifies them, and offers Restart to update; your sessions keep running through the update.
