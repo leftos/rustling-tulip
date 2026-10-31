@@ -562,6 +562,25 @@ impl FakeSsh {
         }
     }
 
+    /// Makes every later run refuse the login with `fail`'s exit code and
+    /// stderr, or, with `None`, run the bridge again. The shim reads its
+    /// state on every run, so the next run already answers so.
+    pub fn set_fail(&self, fail: Option<(i32, &str)>) {
+        let text = std::fs::read_to_string(&self.state)
+            .map_err(|err| format!("{}: {err}", self.state.display()))
+            .expect("read the fake ssh's state");
+        let mut state: Value = serde_json::from_str(&text).expect("the fake ssh's state is JSON");
+        state["fail"] = fail.map_or(
+            Value::Null,
+            |(code, stderr)| json!({ "code": code, "stderr": stderr }),
+        );
+        // Written beside it and renamed over, so a shim run mid-write never
+        // reads a truncated file.
+        let staged = self.state.with_extension("json.tmp");
+        std::fs::write(&staged, state.to_string()).expect("write the fake ssh's new state");
+        std::fs::rename(&staged, &self.state).expect("replace the fake ssh's state");
+    }
+
     /// Every run of the shim so far, oldest first; empty before the first.
     pub fn runs(&self) -> Vec<SshRun> {
         let text = match std::fs::read_to_string(&self.log) {
@@ -1129,18 +1148,31 @@ impl<'a> Harness<'a> {
     /// (the fake tailnet's bare [`REMOTE_HOST`]) is dialled once the window
     /// is open, as the Connections picker dials one, since the window drops
     /// such a saved host unconnected.
-    #[expect(
-        clippy::panic,
-        reason = "a window opening a host the spec did not list is a bug in the spec"
-    )]
     pub fn open_hosts(
         cx: &'a mut TestAppContext,
         home: &LiveDaemon,
         remotes: Vec<LiveHostSpec>,
         tokens: Arc<MemoryTokens>,
     ) -> (Self, LiveHosts) {
+        Self::open_hosts_switched(cx, home, remotes, &[], tokens)
+    }
+
+    /// [`Self::open_hosts`], with each host of `remotes` whose key is in
+    /// `off` saved switched off: the window does not dial it at start, and
+    /// a spec switches it on through Connections.
+    #[expect(
+        clippy::panic,
+        reason = "a window opening a host the spec did not list is a bug in the spec"
+    )]
+    pub fn open_hosts_switched(
+        cx: &'a mut TestAppContext,
+        home: &LiveDaemon,
+        remotes: Vec<LiveHostSpec>,
+        off: &[HostKey],
+        tokens: Arc<MemoryTokens>,
+    ) -> (Self, LiveHosts) {
         let ui_dir = home.dir().join("ui");
-        seed_saved_hosts(&ui_dir, &remotes);
+        seed_saved_hosts(&ui_dir, &remotes, off);
         let dialled: Vec<Target> = remotes
             .iter()
             .filter(|spec| !can_be_saved(spec))
@@ -1151,7 +1183,8 @@ impl<'a> Harness<'a> {
                 remotes
                     .iter()
                     .filter(|spec| spec.connects)
-                    .map(|spec| HostKey::of(&spec.target)),
+                    .map(|spec| HostKey::of(&spec.target))
+                    .filter(|key| !off.contains(key)),
             )
             .collect();
         let hosts = LiveHosts::default();
@@ -1363,9 +1396,9 @@ fn can_be_saved(spec: &LiveHostSpec) -> bool {
 }
 
 /// Writes those of `remotes` the window accepts as saved hosts into the
-/// `native-ui.json` in `ui_dir`, keeping every other key a spec seeded there
-/// first.
-fn seed_saved_hosts(ui_dir: &Path, remotes: &[LiveHostSpec]) {
+/// `native-ui.json` in `ui_dir`, those whose key is in `off` switched off,
+/// keeping every other key a spec seeded there first.
+fn seed_saved_hosts(ui_dir: &Path, remotes: &[LiveHostSpec], off: &[HostKey]) {
     let path = ui_dir.join("native-ui.json");
     let mut state = match std::fs::read_to_string(&path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => json!({}),
@@ -1380,7 +1413,9 @@ fn seed_saved_hosts(ui_dir: &Path, remotes: &[LiveHostSpec]) {
         .iter()
         .filter(|spec| can_be_saved(spec))
         .map(|spec| {
-            let host = SavedHost::from_target(&spec.target).expect("a remote host is not This PC");
+            let mut host =
+                SavedHost::from_target(&spec.target).expect("a remote host is not This PC");
+            host.enabled = !off.contains(&HostKey::of(&spec.target));
             serde_json::to_value(host).expect("a saved host serializes")
         })
         .collect();

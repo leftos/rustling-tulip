@@ -43,7 +43,8 @@
                  to focus, or to place in the active tab).
       native-e2e Build the daemon (with the `e2e-loopback-peers` feature)
                  and tracer, then run the native client's end-to-end specs
-                 (`e2e_live`, `e2e_recover`, `e2e_remote`, `e2e_ssh`, under
+                 (`e2e_live`, `e2e_recover`, `e2e_remote`, `e2e_ssh`,
+                 `e2e_multi_host`, under
                  nextest `--run-ignored only`, test-release profile) against
                  a real daemon isolated under `.tmp\native-e2e\`. The agents'
                  fake CLIs (crates\agents\claude\fake), fake-tailscale and
@@ -1020,7 +1021,7 @@ function Invoke-NativeE2e {
         return
     }
     if (Test-UnderGate) {
-        Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh') -Slot heavy -Name e2e -DaemonFeatures @('e2e-loopback-peers')
+        Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh', 'e2e_multi_host') -Slot heavy -Name e2e -DaemonFeatures @('e2e-loopback-peers')
         return
     }
     Assert-Nextest
@@ -1122,7 +1123,8 @@ Commands:
              optional session id to focus, or to place in the active tab).
   native-e2e Build daemon (with e2e-loopback-peers) + tracer, then run
              the native client's end-to-end specs (e2e_live, e2e_recover,
-             e2e_remote, e2e_ssh) against an isolated daemon (needs `node`).
+             e2e_remote, e2e_ssh, e2e_multi_host) against an isolated daemon
+             (needs `node`).
              Test-release only: refuses -Release. Then runs the sealed-secret
              spec again on this PC in its own gate call (it needs Credential
              Manager and skips in a routed run); -SealedSecretOnly is that
