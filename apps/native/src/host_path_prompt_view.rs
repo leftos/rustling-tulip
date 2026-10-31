@@ -12,8 +12,9 @@ use crate::RootView;
 use crate::host_path_prompt::{HostPathPrompt, PromptControl};
 use crate::notice_view::modal_panel;
 use crate::palette::{BORDER, DANGER, DANGER_BG, MUTED, TEXT};
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 
 /// The open prompt: its state and its path field.
 pub(crate) struct HostPathDialog {
@@ -288,7 +289,7 @@ impl RootView {
                     .text_color(gpui::rgb(DANGER))
                     .child(error.to_owned())
             }));
-        let panel = modal_panel("host-path-panel")
+        let panel = modal_panel("host-path-panel", &theme(cx))
             .track_focus(&self.host_path_focus)
             .child(
                 div()
@@ -297,7 +298,7 @@ impl RootView {
             )
             .child(field)
             .child(footer(focus, cx));
-        Some(backdrop("host-path-prompt", panel))
+        Some(backdrop("host-path-prompt", panel, &theme(cx)))
     }
 }
 
@@ -325,9 +326,8 @@ fn footer(focus: PromptControl, cx: &mut Context<RootView>) -> Div {
         dialog_button(
             control.selector(),
             label.to_owned(),
-            false,
+            dialog_look(false, true, &theme(cx)),
             focus == control,
-            true,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.press_host_path_control(control, window, cx);

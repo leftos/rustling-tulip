@@ -9,13 +9,14 @@ use gpui::{
 };
 
 use crate::notice_view::modal_panel;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::shell_dialog::{
     FOLDER_PLACEHOLDER, ShellControl, ShellForm, host_placeholder, standalone_shell_request,
 };
 use crate::spawn_view::checkbox_row;
 use crate::spawns::OpenIn;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 use crate::{BORDER, MUTED, Pick, RootView, TEXT, tooltip};
 
 const TITLE: &str = "Open a shell";
@@ -391,9 +392,8 @@ impl RootView {
         let close = dialog_button(
             ShellControl::Close.selector(),
             "✕".to_owned(),
-            false,
+            dialog_look(false, true, &theme(cx)),
             focus == ShellControl::Close,
-            true,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.close_shell_dialog(window, cx);
@@ -409,9 +409,8 @@ impl RootView {
         let browse = dialog_button(
             ShellControl::Browse.selector(),
             "Browse…".to_owned(),
-            false,
+            dialog_look(false, browse_enabled, &theme(cx)),
             focus == ShellControl::Browse,
-            browse_enabled,
         )
         .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)))
         .when(browse_enabled, |button| {
@@ -443,7 +442,7 @@ impl RootView {
                 this.press_shell_control(ShellControl::ClearDefault, window, cx);
             }))
         });
-        let panel = modal_panel("shell-panel")
+        let panel = modal_panel("shell-panel", &theme(cx))
             .track_focus(&self.shell_focus)
             .child(header)
             .child(field)
@@ -453,7 +452,7 @@ impl RootView {
             )
             .children(clear)
             .child(footer(form.can_submit(&folder), focus, cx));
-        Some(backdrop("shell-dialog", panel))
+        Some(backdrop("shell-dialog", panel, &theme(cx)))
     }
 }
 
@@ -501,6 +500,7 @@ fn save_default_row(
         form.save_default(),
         focus == ShellControl::SaveDefault,
         SAVE_DEFAULT_LABEL,
+        &theme(cx),
     )
     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
         this.press_shell_control(ShellControl::SaveDefault, window, cx);
@@ -530,9 +530,8 @@ fn footer(can_submit: bool, focus: ShellControl, cx: &mut Context<RootView>) -> 
     let cancel = dialog_button(
         ShellControl::Cancel.selector(),
         "Cancel".to_owned(),
-        false,
+        dialog_look(false, true, &theme(cx)),
         focus == ShellControl::Cancel,
-        true,
     )
     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
         this.press_shell_control(ShellControl::Cancel, window, cx);
@@ -540,9 +539,8 @@ fn footer(can_submit: bool, focus: ShellControl, cx: &mut Context<RootView>) -> 
     let submit = dialog_button(
         ShellControl::Submit.selector(),
         "Open shell".to_owned(),
-        false,
+        dialog_look(false, can_submit, &theme(cx)),
         focus == ShellControl::Submit,
-        can_submit,
     )
     .when(can_submit, |button| {
         button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {

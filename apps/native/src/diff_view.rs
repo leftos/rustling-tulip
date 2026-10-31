@@ -21,10 +21,10 @@ use crate::diff_model::{DiffModel, Row, RowKind, Side};
 use crate::fonts::{self, FontSettings};
 use crate::palette::{
     ACCENT, DIFF_DELETE, DIFF_DELETE_WASH_ALPHA, DIFF_FILLER, DIFF_FILLER_ALPHA,
-    DIFF_INSERT_WASH_ALPHA, DIFF_WORD_WASH_ALPHA, LINE, OCHRE, SUBTLE, TERMINAL_GROUND, TEXT,
-    WAITING,
+    DIFF_INSERT_WASH_ALPHA, DIFF_WORD_WASH_ALPHA, LINE, SUBTLE, TERMINAL_GROUND, TEXT, WAITING,
 };
 use crate::syntax::{Highlighted, TokenClass};
+use crate::ui_theme::{UiTheme, theme};
 
 const CURRENT_BAR_WIDTH: f32 = 2.0;
 /// The least width of a half's line-number gutter.
@@ -70,12 +70,12 @@ impl HunkKind {
         }
     }
 
-    /// The marker's colour, as `0xRRGGBB`.
-    const fn color(self) -> u32 {
+    /// The marker's colour under `t`, as `0xRRGGBB`.
+    fn color(self, t: &UiTheme) -> u32 {
         match self {
-            Self::Mixed => OCHRE,
-            Self::Insert => WAITING,
-            Self::Delete => DIFF_DELETE,
+            Self::Mixed => t.ochre,
+            Self::Insert => t.waiting,
+            Self::Delete => t.diff_delete,
         }
     }
 }
@@ -228,7 +228,8 @@ impl DiffView {
     /// A view of `model` in `font`, the app's terminal font.
     pub fn new(model: DiffModel, font: FontSettings, cx: &mut Context<Self>) -> Self {
         let (gutter_digits, longest_line) = measure(&model);
-        let class_colors = TokenClass::ALL.map(|class| Hsla::from(rgb(class.color())));
+        let t = theme(cx);
+        let class_colors = TokenClass::ALL.map(|class| Hsla::from(rgb(class.color(&t))));
         Self {
             model,
             font: font.normalized(),
@@ -533,7 +534,7 @@ impl DiffView {
     }
 
     /// The overview ruler down the right edge, a marker for each hunk.
-    fn ruler(&self) -> Div {
+    fn ruler(&self, t: &UiTheme) -> Div {
         let marks = ruler_marks(&self.model, self.ruler_height.get());
         div()
             .debug_selector(|| "diff-ruler".to_owned())
@@ -552,7 +553,7 @@ impl DiffView {
                     .top(px(mark.top))
                     .h(px(mark.height))
                     .rounded(px(RULER_MARK_RADIUS))
-                    .bg(rgb(mark.kind.color()))
+                    .bg(rgb(mark.kind.color(t)))
             }))
     }
 
@@ -852,7 +853,7 @@ impl Render for DiffView {
             .text_size(px(self.font.size))
             .line_height(px(metrics.line_height))
             .child(div().flex_1().min_w(px(0.0)).h_full().child(list))
-            .child(self.ruler())
+            .child(self.ruler(&theme(cx)))
             .child(wheel)
     }
 }

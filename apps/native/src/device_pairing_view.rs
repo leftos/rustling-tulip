@@ -13,7 +13,7 @@ use gpui::{
 use protocol::DaemonMessage;
 
 use crate::RootView;
-use crate::buttons::{ButtonKind, ButtonSize, Layer, button, focus_ring};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, focus_ring};
 use crate::connection::State;
 use crate::device_pairing::{DeviceButton, DevicePairing};
 use crate::net::{NetCommand, NetEvent};
@@ -21,6 +21,7 @@ use crate::notice_view::modal_panel;
 use crate::palette::{BORDER, DANGER, DANGER_BG, MUTED, TEXT};
 use crate::session_menu::backdrop;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 
 /// How often the countdown redraws.
 const TICK: Duration = Duration::from_secs(1);
@@ -622,12 +623,12 @@ impl RootView {
                 let enabled = button_enabled(model, *pressed);
                 device_button(*pressed, focused, enabled, cx)
             }));
-        let panel = modal_panel("device-pairing-panel")
+        let panel = modal_panel("device-pairing-panel", &theme(cx))
             .track_focus(&self.device_pairing.focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(model.title()))
             .child(body)
             .child(footer);
-        Some(backdrop("device-pairing", panel))
+        Some(backdrop("device-pairing", panel, &theme(cx)))
     }
 }
 
@@ -656,7 +657,9 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
                 .bg(gpui::rgb(crate::palette::POPOVER_HOVER))
                 .text_color(gpui::rgb(TEXT))
         })
-        .when(focused, |link| link.child(focus_ring(LINK_RADIUS)))
+        .when(focused, |link| {
+            link.child(focus_ring(LINK_RADIUS, &theme(cx)))
+        })
         .child(CODE_LINK_LABEL)
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.reveal_device_code(window, cx);
@@ -691,9 +694,14 @@ fn device_button(
     } else {
         ButtonKind::Outlined
     };
-    let drawn = button(pressed.selector(), kind, size, enabled, Layer::Floating)
-        .when(focused, |button| button.child(focus_ring(size.radius())))
-        .child(pressed.label());
+    let drawn = button(
+        pressed.selector(),
+        button_look(kind, size, enabled, Layer::Floating, &theme(cx)),
+    )
+    .when(focused, |button| {
+        button.child(focus_ring(size.radius(), &theme(cx)))
+    })
+    .child(pressed.label());
     if !enabled {
         return drawn;
     }

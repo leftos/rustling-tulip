@@ -9,7 +9,8 @@ use protocol::ClientMessage;
 use crate::notice_view::modal_panel;
 use crate::overlay_owner::Overlay;
 use crate::pane_close::{Control, NOTE, PaneClose, TITLE};
-use crate::session_menu::{ConfirmOwner, backdrop, dialog_button};
+use crate::session_menu::{ConfirmOwner, backdrop, dialog_button, dialog_look};
+use crate::ui_theme::theme;
 use crate::{MUTED, RootView};
 
 impl RootView {
@@ -168,9 +169,8 @@ impl RootView {
             dialog_button(
                 control.selector(),
                 dialog.label(control),
-                control.danger(),
+                dialog_look(control.danger(), true, &theme(cx)),
                 control == dialog.focused(),
-                true,
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.press_pane_close(control, window, cx);
@@ -188,7 +188,7 @@ impl RootView {
             .filter(|control| *control != Control::Dismiss)
             .map(&mut button)
             .collect();
-        let panel = modal_panel("pane-close-panel")
+        let panel = modal_panel("pane-close-panel", &theme(cx))
             .track_focus(&self.pane_ui.dialog_focus)
             .child(header)
             .child(div().child(dialog.body()))
@@ -201,6 +201,6 @@ impl RootView {
                     .gap(px(8.0))
                     .children(footer),
             );
-        Some(backdrop("pane-close", panel))
+        Some(backdrop("pane-close", panel, &theme(cx)))
     }
 }

@@ -38,7 +38,7 @@ use crate::remote_access::{
 };
 use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::sidebar::{
     CountMode, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView,
 };
@@ -48,6 +48,7 @@ use crate::spawn_view::{
 };
 use crate::tabs::{TabCounts, tab_session_counts};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::{UiTheme, theme};
 use crate::window_title::compute_title;
 use crate::{Pick, RootView, TEXT, tooltip};
 
@@ -2696,7 +2697,7 @@ impl RootView {
         if !self.settings_open() {
             return None;
         }
-        let close = close_button("settings-close", false).on_click(cx.listener(
+        let close = close_button("settings-close", false, &theme(cx)).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
                 this.close_appearance_editor(window, cx);
             },
@@ -2730,13 +2731,13 @@ impl RootView {
                     .child(self.settings_scroll.overlay()),
             );
         let cap = window.viewport_size().height / px(1.0) - 2.0 * PANEL_MARGIN_Y;
-        let panel = dialog_card("settings-panel", PANEL_WIDTH)
+        let panel = dialog_card("settings-panel", PANEL_WIDTH, &theme(cx))
             .h(px(PANEL_HEIGHT.min(cap)))
             .track_focus(&self.appearance_focus)
             .child(dialog_title_bar("Settings", close))
             .child(body)
             .child(close_footer("settings-footer-close", false, cx));
-        Some(backdrop("settings", panel))
+        Some(backdrop("settings", panel, &theme(cx)))
     }
 
     /// The tab list on the raised ground; the shown tab is filled and bold,
@@ -2809,7 +2810,7 @@ impl RootView {
                 })
             })
             .when(shown && list_focused, |row| {
-                row.child(focus_ring(TAB_ROW_RADIUS))
+                row.child(focus_ring(TAB_ROW_RADIUS, &theme(cx)))
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.select_settings_tab(tab, window, cx);
@@ -2851,7 +2852,7 @@ impl RootView {
             return Vec::new();
         };
         let path = SettingsControl::WorktreesPath;
-        let field = field_frame(focused == Some(path))
+        let field = field_frame(focused == Some(path), &theme(cx))
             .debug_selector(|| path.selector().to_owned())
             .flex_1()
             .min_w(px(0.0))
@@ -2984,7 +2985,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Div {
         let port = SettingsControl::RemotePort;
-        let frame = field_frame(focused == Some(port))
+        let frame = field_frame(focused == Some(port), &theme(cx))
             .debug_selector(|| port.selector().to_owned())
             .w(px(PORT_FIELD_WIDTH));
         let field = if enabled {
@@ -3167,11 +3168,13 @@ impl RootView {
                     "Program",
                     SettingsControl::AgentProgram,
                     page.tag.clone(),
+                    &theme(cx),
                 ))
                 .child(disabled_launch_row(
                     "Extra arguments",
                     SettingsControl::AgentArgs,
                     LAUNCH_ARGS_PLACEHOLDER.to_owned(),
+                    &theme(cx),
                 ))
         };
         let section = section
@@ -3203,7 +3206,7 @@ impl RootView {
             })
             .on_click(press(link, cx))
             .when(focused == Some(link), |open| {
-                open.child(focus_ring(LINK_RADIUS))
+                open.child(focus_ring(LINK_RADIUS, &theme(cx)))
             })
             .child("Open Windows notification settings");
         let state = div()
@@ -3532,9 +3535,8 @@ fn settings_button(
     let button = dialog_button(
         control.selector(),
         label.to_owned(),
-        false,
+        dialog_look(false, enabled, &theme(cx)),
         focused == Some(control),
-        enabled,
     );
     if enabled {
         button.on_click(press(control, cx))
@@ -3565,6 +3567,7 @@ fn toggle(
         state.checked,
         focused == Some(control),
         label.into(),
+        &theme(cx),
     );
     if state.enabled {
         div().flex().child(row.on_click(press(control, cx)))
@@ -3799,6 +3802,7 @@ fn agent_field_row(
                         SharedString::from(choice.label.clone()),
                         look,
                         press(*control, cx),
+                        &theme(cx),
                     )
                     .into_any_element()
                 })
@@ -3860,7 +3864,7 @@ fn input_frame(
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> Div {
-    let frame = field_frame(focused == Some(control))
+    let frame = field_frame(focused == Some(control), &theme(cx))
         .debug_selector(|| control.selector().to_owned())
         .child(input.clone());
     if editable {
@@ -3878,9 +3882,14 @@ fn input_frame(
 /// A launch-command row on a daemon that stores no launch command: a dimmed
 /// field showing `placeholder` that takes no keys, and a tooltip saying how
 /// to get it.
-fn disabled_launch_row(label: &'static str, control: SettingsControl, placeholder: String) -> Div {
+fn disabled_launch_row(
+    label: &'static str,
+    control: SettingsControl,
+    placeholder: String,
+    t: &UiTheme,
+) -> Div {
     let selector = control.selector();
-    let frame = field_frame(false)
+    let frame = field_frame(false, t)
         .id(selector)
         .debug_selector(|| selector.to_owned())
         .opacity(DISABLED_OPACITY)
@@ -3968,6 +3977,7 @@ fn choice_row(
                 *text,
                 look,
                 press(*control, cx),
+                &theme(cx),
             )
             .into_any_element()
         })

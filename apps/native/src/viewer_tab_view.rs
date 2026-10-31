@@ -28,6 +28,7 @@ use crate::palette::{ACCENT, INPUT_SELECTION, LINE, LINE_STRONG, SUBTLE, SURFACE
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::{self, Highlighted, TokenClass};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_find::{self, Match, Segment, Tint};
 use crate::viewer_md_view::markdown_toggle;
 use crate::viewer_tab::{
@@ -909,11 +910,13 @@ impl RootView {
         let root = cx.entity().downgrade();
         let lines = tab.text().map(|text| match tab.markdown() {
             Some(MarkdownMode::Rendered) => match tab.markdown_doc() {
-                Some((doc, blocks)) => self.viewer_markdown(tab_id, doc, blocks),
+                Some((doc, blocks)) => self.viewer_markdown(tab_id, doc, blocks, &theme(cx)),
                 // The document is being parsed.
                 None => div().flex_1(),
             },
-            Some(MarkdownMode::Source) | None => self.viewer_lines(tab_id, tab, text, root),
+            Some(MarkdownMode::Source) | None => {
+                self.viewer_lines(tab_id, tab, text, root, &theme(cx))
+            }
         });
         let (key_tab, move_tab) = (tab_id.to_owned(), tab_id.to_owned());
         let (up_tab, up_out_tab) = (tab_id.to_owned(), tab_id.to_owned());
@@ -963,6 +966,7 @@ impl RootView {
         tab: &ViewerTab,
         text: &Arc<ViewerText>,
         root: WeakEntity<RootView>,
+        t: &UiTheme,
     ) -> Div {
         let font = &self.sidebar.ui_state().terminal_font;
         let family = SharedString::from(
@@ -987,7 +991,7 @@ impl RootView {
             current: find.and_then(|find| find.current_match().cloned()),
             line_height: self.viewer_line_height(),
             gutter_width,
-            colors: TokenClass::ALL.map(|class| Hsla::from(gpui::rgb(class.color()))),
+            colors: TokenClass::ALL.map(|class| Hsla::from(gpui::rgb(class.color(t)))),
             root,
             focus: self.viewer_focus.clone(),
         };
@@ -1139,9 +1143,21 @@ fn find_button(
 ) -> Stateful<Div> {
     let selector = action.selector(tab_id);
     let button = if action == FindAction::MatchCase && case_on {
-        primary_button(&selector, ButtonSize::Compact, true, Layer::Base)
+        primary_button(
+            &selector,
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            &theme(cx),
+        )
     } else {
-        outlined_button(&selector, ButtonSize::Compact, true, Layer::Base)
+        outlined_button(
+            &selector,
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            &theme(cx),
+        )
     };
     let tab_id = tab_id.to_owned();
     button
@@ -1195,6 +1211,7 @@ fn header_button(
         ButtonSize::Compact,
         enabled,
         Layer::Base,
+        &theme(cx),
     )
     .flex_none()
     .child(action.label());

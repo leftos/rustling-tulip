@@ -10,7 +10,8 @@ use protocol::{DaemonMessage, VscodeWorkspaceSuggestion};
 use crate::fonts;
 use crate::notice_view::modal_panel;
 use crate::scan_key;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::ui_theme::theme;
 use crate::vscode_suggestion::{
     BodyStyle, DISMISS_LABEL, SuggestionButton, TITLE, VscodeSuggestions, WATCH_TIP,
 };
@@ -144,12 +145,17 @@ impl RootView {
             return None;
         }
         let focus = self.vscode_suggestions.focus();
-        let dismiss = dialog_button("vscode-prompt-dismiss", "✕".to_owned(), false, false, true)
-            .tooltip(tooltip(DISMISS_LABEL))
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.vscode_suggestions.dismiss();
-                this.after_vscode_prompt(window, cx);
-            }));
+        let dismiss = dialog_button(
+            "vscode-prompt-dismiss",
+            "✕".to_owned(),
+            dialog_look(false, true, &theme(cx)),
+            false,
+        )
+        .tooltip(tooltip(DISMISS_LABEL))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.vscode_suggestions.dismiss();
+            this.after_vscode_prompt(window, cx);
+        }));
         let header = div()
             .flex()
             .items_center()
@@ -204,9 +210,8 @@ impl RootView {
                 let element = dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    false,
+                    dialog_look(false, true, &theme(cx)),
                     focus == button,
-                    true,
                 )
                 .when_some(tip, |element, tip| element.tooltip(tooltip(tip)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -215,12 +220,12 @@ impl RootView {
                 element.into_any_element()
             })
             .collect();
-        let panel = modal_panel("vscode-prompt-panel")
+        let panel = modal_panel("vscode-prompt-panel", &theme(cx))
             .track_focus(&self.vscode_prompt_focus)
             .child(header)
             .child(body)
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
-        Some(backdrop("vscode-prompt", panel))
+        Some(backdrop("vscode-prompt", panel, &theme(cx)))
     }
 
     /// Whether a suggestion is on screen.

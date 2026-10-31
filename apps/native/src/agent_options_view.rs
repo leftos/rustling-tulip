@@ -12,6 +12,7 @@ use crate::spawn_view::{
     DISABLED_OPACITY, Look, OptionInput, check_label, checkbox_row, field, input_box, muted, note,
     option_button, press_control, reveal_when_focused, segmented,
 };
+use crate::ui_theme::theme;
 
 /// The note under a field a trusted launch locks, in the spawn dialog and on
 /// an agent's Settings page.
@@ -91,7 +92,7 @@ fn toggle_row(view: &FieldView, focus: &Control, cx: &mut Context<RootView>) -> 
     let focused = focus == &control;
     let checked = view.value == OptionValue::Bool(true);
     let label = check_label(view.label.clone(), view.help.clone().map(note));
-    let row = checkbox_row(&control.selector(), checked, focused, label);
+    let row = checkbox_row(&control.selector(), checked, focused, label, &theme(cx));
     let row = if view.disabled {
         row.opacity(DISABLED_OPACITY)
     } else {

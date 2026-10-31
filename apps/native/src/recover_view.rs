@@ -21,7 +21,8 @@ use crate::recover::{
     Activation, Control, FocusMove, Group, GroupKind, Names, RECOVER_TIMEOUT, RecoverDialog, Row,
     other_toggle_label,
 };
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::ui_theme::theme;
 use crate::{BORDER, MUTED, RootView, TEXT, WARNING, new_request_id, spawns};
 
 const TITLE: &str = "Recover sessions";
@@ -480,13 +481,13 @@ impl RootView {
             .child(control_button(dialog, Control::SelectAll, cx))
             .child(control_button(dialog, Control::Cancel, cx))
             .child(control_button(dialog, Control::Recover, cx));
-        let panel = modal_panel("recover-panel")
+        let panel = modal_panel("recover-panel", &theme(cx))
             .track_focus(&self.recover_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(list)
             .children(dialog.error().map(|error| warning(error.to_owned())))
             .child(footer);
-        Some(backdrop("recover", panel))
+        Some(backdrop("recover", panel, &theme(cx)))
     }
 }
 
@@ -602,9 +603,8 @@ fn control_button(
     let button = dialog_button(
         &selector(&control),
         control_label(dialog, &control),
-        false,
+        dialog_look(false, enabled(dialog, &control), &theme(cx)),
         dialog.focus() == Some(&control),
-        enabled(dialog, &control),
     );
     if !enabled(dialog, &control) {
         return button;

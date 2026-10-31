@@ -11,6 +11,7 @@ use gpui::{
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::ellipsis::truncating;
 use crate::notice_view::{CLOSE_SIZE, toast_frame};
+use crate::ui_theme::theme;
 use crate::undo::{self, TabSnapshot, UndoEntry};
 use crate::{FOOTER_HEIGHT, RootView, tooltip};
 
@@ -208,6 +209,7 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
         ButtonSize::Compact,
         true,
         Layer::Floating,
+        &theme(cx),
     )
     .flex_none()
     .child(undo::UNDO_LABEL)
@@ -219,6 +221,7 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
         ButtonSize::Compact,
         true,
         Layer::Floating,
+        &theme(cx),
     )
     .flex_none()
     .w(px(CLOSE_SIZE))
@@ -234,14 +237,17 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
     )
     .flex_1();
     let name = format!("undo-entry-{id}");
-    toast_frame(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .occlude()
-        .child(message)
-        .child(action)
-        .child(dismiss)
-        .into_any_element()
+    toast_frame(
+        ElementId::Name(SharedString::from(name.clone())),
+        &theme(cx),
+    )
+    .debug_selector(|| name)
+    .flex()
+    .items_center()
+    .gap(px(8.0))
+    .occlude()
+    .child(message)
+    .child(action)
+    .child(dismiss)
+    .into_any_element()
 }

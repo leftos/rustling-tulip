@@ -27,6 +27,7 @@ use crate::open::OpenJob;
 use crate::open_view::{COULD_NOT_OPEN, Origin, Then};
 use crate::palette::{ACCENT, CHIP, LINE, LINE_STRONG, PERIWINKLE, SUBTLE, SUNKEN, SURFACE};
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
+use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_tab::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
 use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
@@ -799,7 +800,13 @@ impl RootView {
     }
 
     /// The rendered document `doc` of tab `tab_id`, a list item per row.
-    pub(crate) fn viewer_markdown(&self, tab_id: &str, doc: &Arc<MdDoc>, rows: &ListState) -> Div {
+    pub(crate) fn viewer_markdown(
+        &self,
+        tab_id: &str,
+        doc: &Arc<MdDoc>,
+        rows: &ListState,
+        t: &UiTheme,
+    ) -> Div {
         let font = &self.sidebar.ui_state().terminal_font;
         let painter = Painter {
             tab_id: tab_id.to_owned(),
@@ -809,7 +816,7 @@ impl RootView {
                     .unwrap_or_else(|| fonts::DEFAULT_FAMILY.to_owned()),
             ),
             mono_size: font.size,
-            colors: TokenClass::ALL.map(|class| hsla(class.color())),
+            colors: TokenClass::ALL.map(|class| hsla(class.color(t))),
         };
         let doc = Arc::clone(doc);
         let selector = format!("viewer-md-{tab_id}");
@@ -842,9 +849,21 @@ pub(crate) fn markdown_toggle(
     .map(|(mode, name, label)| {
         let selector = format!("viewer-md-{name}-{tab_id}");
         let button = if mode == shown {
-            primary_button(&selector, ButtonSize::Compact, enabled, Layer::Base)
+            primary_button(
+                &selector,
+                ButtonSize::Compact,
+                enabled,
+                Layer::Base,
+                &theme(cx),
+            )
         } else {
-            outlined_button(&selector, ButtonSize::Compact, enabled, Layer::Base)
+            outlined_button(
+                &selector,
+                ButtonSize::Compact,
+                enabled,
+                Layer::Base,
+                &theme(cx),
+            )
         }
         .flex_none()
         .child(label);

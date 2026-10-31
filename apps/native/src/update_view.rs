@@ -11,6 +11,7 @@ use gpui::{AnyElement, ClickEvent, Context, Task, div, prelude::*, px};
 
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::notices::ToastKind;
+use crate::ui_theme::theme;
 use crate::update::{AlreadyRunning, LastResult, Ready, Updater};
 use crate::{FOOTER_PILL_HEIGHT, FOOTER_PILL_TEXT_SIZE, RootView, tagged_text};
 
@@ -213,14 +214,20 @@ impl RootView {
     /// edge, once an update is ready.
     pub(crate) fn update_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let text = self.update_footer_text()?;
-        let button = outlined_button("footer-update", ButtonSize::Compact, true, Layer::Base)
-            .min_h(px(FOOTER_PILL_HEIGHT))
-            .py(px(0.0))
-            .text_size(px(FOOTER_PILL_TEXT_SIZE))
-            .child(RESTART_LABEL)
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.restart_to_update(cx);
-            }));
+        let button = outlined_button(
+            "footer-update",
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            &theme(cx),
+        )
+        .min_h(px(FOOTER_PILL_HEIGHT))
+        .py(px(0.0))
+        .text_size(px(FOOTER_PILL_TEXT_SIZE))
+        .child(RESTART_LABEL)
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.restart_to_update(cx);
+        }));
         Some(
             div()
                 .flex()

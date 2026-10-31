@@ -10,6 +10,7 @@ use crate::LOG_FILE;
 use crate::connection::Connection;
 use crate::net::HandshakeInfo;
 use crate::status_glyph::{Glyph, Shape, glyph};
+use crate::ui_theme::UiTheme;
 
 /// How many sessions show each of the glyphs the footer counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -46,16 +47,16 @@ impl CountKind {
     }
 
     /// The glyph the span draws before its text: the one a session it
-    /// counts shows in its leaf.
+    /// counts shows in its leaf, in `t`.
     #[must_use]
-    pub fn glyph(self) -> Glyph {
+    pub fn glyph(self, t: &UiTheme) -> Glyph {
         let (status, background, unseen) = match self {
             Self::NeedYou => (SessionStatus::AwaitingInput, false, false),
             Self::Working => (SessionStatus::Working, false, false),
             Self::Background => (SessionStatus::Idle, true, false),
             Self::Waiting => (SessionStatus::Idle, false, true),
         };
-        glyph(status, background, SessionMode::Interactive, unseen)
+        glyph(status, background, SessionMode::Interactive, unseen, t)
     }
 }
 
@@ -100,7 +101,15 @@ pub fn status_counts(
     let mut counts = StatusCounts::default();
     for session in sessions {
         let unseen = is_unseen(&session.id);
-        match glyph(session.status, session.background, session.mode, unseen).shape {
+        match glyph(
+            session.status,
+            session.background,
+            session.mode,
+            unseen,
+            &UiTheme::CONTRAST,
+        )
+        .shape
+        {
             Shape::Asking => counts.need_you += 1,
             Shape::Working | Shape::Background if session.busy_excluded => {}
             Shape::Working => counts.working += 1,
@@ -209,6 +218,7 @@ mod tests {
     use crate::connection::Connection;
     use crate::net::HandshakeInfo;
     use crate::target::Target;
+    use crate::ui_theme::UiTheme;
     use protocol::{SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
     use std::collections::HashSet;
@@ -409,7 +419,10 @@ mod tests {
             ]
         );
         assert_eq!(CountKind::Background.name(), "background");
-        assert_eq!(CountKind::Background.glyph().shape.name(), "background");
+        assert_eq!(
+            CountKind::Background.glyph(&UiTheme::CONTRAST).shape.name(),
+            "background"
+        );
     }
 
     #[test]
@@ -429,9 +442,18 @@ mod tests {
 
     #[test]
     fn each_span_draws_the_glyph_its_sessions_show() {
-        assert_eq!(CountKind::NeedYou.glyph().shape.name(), "asking");
-        assert_eq!(CountKind::Working.glyph().shape.name(), "working");
-        assert_eq!(CountKind::Waiting.glyph().shape.name(), "waiting");
+        assert_eq!(
+            CountKind::NeedYou.glyph(&UiTheme::CONTRAST).shape.name(),
+            "asking"
+        );
+        assert_eq!(
+            CountKind::Working.glyph(&UiTheme::CONTRAST).shape.name(),
+            "working"
+        );
+        assert_eq!(
+            CountKind::Waiting.glyph(&UiTheme::CONTRAST).shape.name(),
+            "waiting"
+        );
     }
 
     const HANDSHAKE: HandshakeInfo = HandshakeInfo {

@@ -5,7 +5,7 @@
 use gpui::{Div, FontWeight, SharedString, div, prelude::*, px};
 
 use crate::spawn_view::field_label;
-use crate::{BORDER, MUTED};
+use crate::ui_theme::UiTheme;
 
 /// The size of a Settings page's section head.
 const SECTION_HEAD_SIZE: f32 = 14.0;
@@ -29,14 +29,14 @@ pub(crate) fn field_column(label: &'static str) -> Div {
         .child(field_label(label))
 }
 
-/// A flyout section: a top border and a muted heading.
-pub(crate) fn flyout_section(label: &'static str) -> Div {
+/// A flyout section in `t`: a top border and a muted heading.
+pub(crate) fn flyout_section(label: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
         .gap(px(2.0))
         .pt(px(6.0))
         .border_t_1()
-        .border_color(gpui::rgb(BORDER))
-        .child(div().text_color(gpui::rgb(MUTED)).child(label))
+        .border_color(gpui::rgb(t.border))
+        .child(div().text_color(gpui::rgb(t.muted)).child(label))
 }

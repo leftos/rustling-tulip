@@ -13,13 +13,11 @@ use crate::notices::{
     ActionFailedNotice, CLOSE_SESSION, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast,
     ToastKind, ToastSpec, agent_exit_session_of, spawning_key, toast_action_selector,
 };
-use crate::palette::{
-    ACCENT, DIALOG_SHADOW, LINE_STRONG, MODAL, MODAL_EDGE, POPOVER, POPOVER_EDGE, TOAST_SHADOW,
-};
 use crate::preset_launch::job_id_of;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawns::OpenIn;
-use crate::{DANGER, FOOTER_HEIGHT, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{FOOTER_HEIGHT, RootView, UI_TEXT_SIZE};
 
 const TOAST_WIDTH: f32 = 320.0;
 const MODAL_WIDTH: f32 = 440.0;
@@ -590,10 +588,16 @@ impl RootView {
         notice: &ActionFailedNotice,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let ok = dialog_button("action-failed-dismiss", "OK".to_owned(), false, true, true)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.close_action_failed(window, cx);
-            }));
+        let t = theme(cx);
+        let ok = dialog_button(
+            "action-failed-dismiss",
+            "OK".to_owned(),
+            dialog_look(false, true, &theme(cx)),
+            true,
+        )
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.close_action_failed(window, cx);
+        }));
         let detail = notice.detail.split('\n').map(|line| {
             // An empty line keeps its height.
             div().child(if line.is_empty() { " " } else { line }.to_owned())
@@ -601,8 +605,8 @@ impl RootView {
         let hint = notice
             .hint
             .clone()
-            .map(|hint| div().text_color(gpui::rgb(MUTED)).child(hint));
-        let panel = modal_panel("action-failed-panel")
+            .map(|hint| div().text_color(gpui::rgb(t.muted)).child(hint));
+        let panel = modal_panel("action-failed-panel", &t)
             .track_focus(&self.notice_focus)
             .child(
                 div()
@@ -612,7 +616,7 @@ impl RootView {
             .child(div().flex().flex_col().children(detail))
             .children(hint)
             .child(div().flex().justify_end().child(ok));
-        backdrop("action-failed-modal", panel)
+        backdrop("action-failed-modal", panel, &theme(cx))
     }
 
     fn checkout_layer(
@@ -622,11 +626,16 @@ impl RootView {
         focused_layer: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let close = dialog_button("checkout-close", "✕".to_owned(), false, false, true).on_click(
-            cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.answer_checkout(CheckoutChoice::Cancel, window, cx);
-            }),
-        );
+        let t = theme(cx);
+        let close = dialog_button(
+            "checkout-close",
+            "✕".to_owned(),
+            dialog_look(false, true, &theme(cx)),
+            false,
+        )
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.answer_checkout(CheckoutChoice::Cancel, window, cx);
+        }));
         let header = div()
             .flex()
             .items_center()
@@ -639,16 +648,15 @@ impl RootView {
             .child(close);
         let notes = prompt
             .choice_notes()
-            .map(|note| div().text_color(gpui::rgb(MUTED)).child(note));
+            .map(|note| div().text_color(gpui::rgb(t.muted)).child(note));
         let buttons: Vec<AnyElement> = CheckoutChoice::ALL
             .into_iter()
             .map(|choice| {
                 dialog_button(
                     choice.selector(),
                     choice.label().to_owned(),
-                    false,
+                    dialog_look(false, true, &theme(cx)),
                     prompt.focused() == choice,
-                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.answer_checkout(choice, window, cx);
@@ -656,13 +664,13 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("checkout-panel")
+        let panel = modal_panel("checkout-panel", &t)
             .when(focused_layer, |panel| panel.track_focus(&self.notice_focus))
             .child(header)
             .child(div().child(prompt.message()))
             .children(notes)
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
-        backdrop("checkout-confirm", panel)
+        backdrop("checkout-confirm", panel, &theme(cx))
     }
 }
 
@@ -670,12 +678,14 @@ impl RootView {
 /// reports `progress` (0 to 1), its action buttons, and its dismiss button;
 /// an error's border is red.
 fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
     let id = toast.id;
     let close = outlined_button(
         &format!("toast-close-{id}"),
         ButtonSize::Compact,
         true,
         Layer::Floating,
+        &t,
     )
     .flex_none()
     .w(px(CLOSE_SIZE))
@@ -685,14 +695,14 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
         this.dismiss_toast(id, cx);
     }));
     let accent = match toast.kind {
-        ToastKind::Error => Some(DANGER),
-        ToastKind::Warning => Some(WARNING),
+        ToastKind::Error => Some(t.danger),
+        ToastKind::Warning => Some(t.warning),
         ToastKind::Info => None,
     };
     let detail = toast
         .detail
         .clone()
-        .map(|detail| div().text_color(gpui::rgb(MUTED)).child(detail));
+        .map(|detail| div().text_color(gpui::rgb(t.muted)).child(detail));
     let body = div()
         .flex()
         .flex_col()
@@ -704,10 +714,10 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
                 .child(toast.title.clone()),
         )
         .children(detail)
-        .children(progress.map(|fraction| progress_bar(id, fraction)))
+        .children(progress.map(|fraction| progress_bar(id, fraction, &t)))
         .children(toast_actions(toast, cx));
     let name = format!("toast-{id}");
-    toast_frame(ElementId::Name(SharedString::from(name.clone())))
+    toast_frame(ElementId::Name(SharedString::from(name.clone())), &t)
         .debug_selector(|| name)
         .flex()
         .items_start()
@@ -719,9 +729,9 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
         .into_any_element()
 }
 
-/// A thin bar filled `fraction` (0 to 1) of its width, under toast `id`'s
-/// detail.
-fn progress_bar(id: u64, fraction: f32) -> Div {
+/// A thin bar in `t` filled `fraction` (0 to 1) of its width, under toast
+/// `id`'s detail.
+fn progress_bar(id: u64, fraction: f32, t: &UiTheme) -> Div {
     let selector = format!("toast-progress-{id}");
     div()
         .debug_selector(move || selector)
@@ -729,13 +739,13 @@ fn progress_bar(id: u64, fraction: f32) -> Div {
         .h(px(3.0))
         .w_full()
         .rounded(px(2.0))
-        .bg(gpui::rgb(LINE_STRONG))
+        .bg(gpui::rgb(t.line_strong))
         .child(
             div()
                 .debug_selector(move || format!("toast-progress-fill-{id}"))
                 .h_full()
                 .rounded(px(2.0))
-                .bg(gpui::rgb(ACCENT))
+                .bg(gpui::rgb(t.accent))
                 .w(relative(fraction.clamp(0.0, 1.0))),
         )
 }
@@ -746,6 +756,7 @@ fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
     if toast.actions.is_empty() {
         return None;
     }
+    let t = theme(cx);
     let id = toast.id;
     let buttons = toast.actions.iter().map(|action| {
         let action_id = action.id;
@@ -754,9 +765,10 @@ fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
             ButtonSize::Compact,
             true,
             Layer::Floating,
+            &t,
         )
         .when(action.danger, |button| {
-            button.text_color(gpui::rgb(crate::palette::DANGER_TEXT))
+            button.text_color(gpui::rgb(t.danger_text))
         })
         .child(action.label)
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -767,19 +779,20 @@ fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
 }
 
 /// The card a toast, an undo entry and the copied chip sit in, tagged `id`:
-/// the popover fill with its edge, which an error or a warning recolours.
-pub(crate) fn toast_frame(id: impl Into<ElementId>) -> Stateful<Div> {
+/// the popover fill with its edge in `t`, which an error or a warning
+/// recolours.
+pub(crate) fn toast_frame(id: impl Into<ElementId>, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(id)
         .px(px(14.0))
         .py(px(12.0))
-        .bg(gpui::rgb(POPOVER))
+        .bg(gpui::rgb(t.popover))
         .border_1()
-        .border_color(gpui::rgb(POPOVER_EDGE))
+        .border_color(gpui::rgb(t.popover_edge))
         .rounded(px(TOAST_RADIUS))
-        .shadow(vec![drop_shadow(TOAST_SHADOW, 18.0, 40.0)])
+        .shadow(vec![drop_shadow(t.toast_shadow, 18.0, 40.0)])
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
 }
 
 /// A soft shadow of `color` (`0xRRGGBBAA`) cast `drop` px down and blurred
@@ -793,8 +806,8 @@ pub(crate) fn drop_shadow(color: u32, drop: f32, blur: f32) -> BoxShadow {
     }
 }
 
-/// A modal's card.
-pub(crate) fn modal_panel(id: &'static str) -> Stateful<Div> {
+/// A modal's card in `t`.
+pub(crate) fn modal_panel(id: &'static str, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -802,13 +815,13 @@ pub(crate) fn modal_panel(id: &'static str) -> Stateful<Div> {
         .gap(px(10.0))
         .w(px(MODAL_WIDTH))
         .p(px(14.0))
-        .bg(gpui::rgb(MODAL))
+        .bg(gpui::rgb(t.modal))
         .border_1()
-        .border_color(gpui::rgb(MODAL_EDGE))
+        .border_color(gpui::rgb(t.modal_edge))
         .rounded(px(MODAL_RADIUS))
-        .shadow(vec![drop_shadow(DIALOG_SHADOW, 30.0, 80.0)])
+        .shadow(vec![drop_shadow(t.dialog_shadow, 30.0, 80.0)])
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
 }
 
 /// What the "Spawning session…" toast says under its title, which is what

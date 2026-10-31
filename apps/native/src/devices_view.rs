@@ -9,14 +9,15 @@ use gpui::{
 };
 use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_BLOCK};
 
-use crate::buttons::{ButtonKind, ButtonSize, Layer, button};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look};
 use crate::devices::{
     BLOCKED_TAG, BlockConfirm, CONFIRM_BODY, ConfirmButton, DeviceRow, DevicesState, NO_DEVICES,
     RowAction, forget_message,
 };
 use crate::notice_view::modal_panel;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_view::SettingsTab;
+use crate::ui_theme::theme;
 use crate::{DANGER, MUTED, RootView};
 
 /// The devices model with the block confirm's keyboard focus.
@@ -231,15 +232,14 @@ impl RootView {
             dialog_button(
                 pressed.selector(),
                 pressed.label().to_owned(),
-                pressed == ConfirmButton::Block,
+                dialog_look(pressed == ConfirmButton::Block, true, &theme(cx)),
                 confirm.focused() == pressed,
-                true,
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.press_device_block_button(pressed, window, cx);
             }))
         });
-        let panel = modal_panel("device-block-panel")
+        let panel = modal_panel("device-block-panel", &theme(cx))
             .track_focus(&self.devices.focus)
             .child(
                 div()
@@ -248,7 +248,7 @@ impl RootView {
             )
             .child(div().text_color(gpui::rgb(MUTED)).child(CONFIRM_BODY))
             .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
-        Some(backdrop("device-block-confirm", panel))
+        Some(backdrop("device-block-confirm", panel, &theme(cx)))
     }
 }
 
@@ -260,13 +260,16 @@ fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
     let pressed_id = id.clone();
     let press = button(
         &action.selector(&id),
-        match action {
-            RowAction::Block => ButtonKind::Danger,
-            RowAction::Forget => ButtonKind::Outlined,
-        },
-        ButtonSize::Compact,
-        true,
-        Layer::Floating,
+        button_look(
+            match action {
+                RowAction::Block => ButtonKind::Danger,
+                RowAction::Forget => ButtonKind::Outlined,
+            },
+            ButtonSize::Compact,
+            true,
+            Layer::Floating,
+            &theme(cx),
+        ),
     )
     .child(action.label())
     .on_click(

@@ -24,11 +24,12 @@ use crate::sc_writes::{
     ScWrites, WriteOp, bucket_paths, commit_box_shown, commit_enabled, row_paths,
 };
 use crate::session_menu::{
-    MENU_MAX_SHARE, backdrop, dialog_button, menu_frame, menu_item, menu_separator,
+    MENU_MAX_SHARE, backdrop, dialog_button, dialog_look, menu_frame, menu_item, menu_separator,
 };
 use crate::source_control::{Bucket, Folder, Part, ScKey, ScModel, Status, build_tree};
 use crate::source_control_view::ScSectionRow;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 use crate::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, RootView, TEXT, tooltip};
 
 /// A section body before its status arrives.
@@ -740,10 +741,11 @@ impl RootView {
                 this.close_sc_file_menu(window, cx);
                 cx.stop_propagation();
             }),
+            &theme(cx),
         );
         for item in items {
             if item.separated {
-                frame = frame.child(menu_separator());
+                frame = frame.child(menu_separator(&theme(cx)));
             }
             frame = frame.child(file_menu_item(&item, menu, cx));
         }
@@ -843,9 +845,8 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     label,
-                    danger,
+                    dialog_look(danger, true, &theme(cx)),
                     confirm.focused() == button,
-                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.press_discard_button(button, window, cx);
@@ -853,10 +854,15 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let close = dialog_button("discard-confirm-close", "✕".to_owned(), false, false, true)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.press_discard_button(DiscardButton::Cancel, window, cx);
-            }));
+        let close = dialog_button(
+            "discard-confirm-close",
+            "✕".to_owned(),
+            dialog_look(false, true, &theme(cx)),
+            false,
+        )
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.press_discard_button(DiscardButton::Cancel, window, cx);
+        }));
         let header = div()
             .flex()
             .items_center()
@@ -875,20 +881,20 @@ impl RootView {
             .border_color(gpui::rgb(BORDER))
             .rounded(px(4.0))
             .children(confirm.paths().iter().map(|path| div().child(path.clone())));
-        let panel = modal_panel("discard-confirm-panel")
+        let panel = modal_panel("discard-confirm-panel", &theme(cx))
             .track_focus(&self.changes.discard_focus)
             .child(header)
             .child(div().text_color(gpui::rgb(MUTED)).child(DISCARD_BODY))
             .child(paths)
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
-        Some(backdrop("discard-confirm-dialog", panel))
+        Some(backdrop("discard-confirm-dialog", panel, &theme(cx)))
     }
 }
 
 /// A file menu item: closes the menu, then opens the row's diff or runs its
 /// action on the row's paths. A disabled one is dimmed and takes no click.
 fn file_menu_item(item: &ScButton, menu: &ScFileMenu, cx: &mut Context<RootView>) -> Stateful<Div> {
-    let row = menu_item(&item.selector, item.label, item.danger);
+    let row = menu_item(&item.selector, item.label, item.danger, &theme(cx));
     if !item.enabled {
         return row.opacity(0.5).cursor_default();
     }
@@ -1164,6 +1170,7 @@ fn commit_box(
         ButtonSize::Regular,
         commit.enabled,
         Layer::Base,
+        &theme(cx),
     )
     .w_full()
     .child(commit.label)

@@ -15,7 +15,7 @@ use gpui::{
     size,
 };
 
-use crate::palette::LINE_STRONG;
+use crate::ui_theme::theme;
 
 /// The shortest thumb drawn, however long the content.
 pub const MIN_THUMB_HEIGHT: f32 = 24.0;
@@ -147,8 +147,8 @@ impl Scrollbar {
         let paint_handle = self.handle.clone();
         let drag = self.drag.clone();
         canvas(
-            move |bounds, window, _| prepaint(&handle, bounds, window),
-            move |bounds, laid: Option<(Thumb, Hitbox)>, window, _| {
+            move |bounds, window, cx| prepaint(&handle, bounds, window, cx),
+            move |bounds, laid: Option<(Thumb, Hitbox, u32)>, window, _| {
                 paint(&paint_handle, &drag, bounds, laid, window);
             },
         )
@@ -177,15 +177,17 @@ fn scroll_to(handle: &ScrollHandle, scrolled: f32) {
 }
 
 /// Lays the thumb out and, while there is one, claims the strip so the
-/// content beneath it takes no presses; the wheel still reaches it.
+/// content beneath it takes no presses; the wheel still reaches it. The
+/// thumb comes with its fill, as `0xRRGGBB`.
 fn prepaint(
     handle: &ScrollHandle,
     bounds: Bounds<Pixels>,
     window: &mut Window,
-) -> Option<(Thumb, Hitbox)> {
+    cx: &App,
+) -> Option<(Thumb, Hitbox, u32)> {
     let thumb = track(handle).thumb()?;
     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
-    Some((thumb, hitbox))
+    Some((thumb, hitbox, theme(cx).line_strong))
 }
 
 /// Paints the thumb and listens for presses on the strip and for the drag.
@@ -193,10 +195,10 @@ fn paint(
     handle: &ScrollHandle,
     drag: &Rc<Cell<Option<Drag>>>,
     bounds: Bounds<Pixels>,
-    laid: Option<(Thumb, Hitbox)>,
+    laid: Option<(Thumb, Hitbox, u32)>,
     window: &mut Window,
 ) {
-    let Some((thumb, hitbox)) = laid else {
+    let Some((thumb, hitbox, thumb_fill)) = laid else {
         drag.set(None);
         return;
     };
@@ -208,7 +210,7 @@ fn paint(
         size(px(THUMB_WIDTH), px(thumb.height)),
     );
     window.paint_quad(
-        gpui::fill(thumb_bounds, gpui::rgb(LINE_STRONG)).corner_radii(px(THUMB_WIDTH / 2.0)),
+        gpui::fill(thumb_bounds, gpui::rgb(thumb_fill)).corner_radii(px(THUMB_WIDTH / 2.0)),
     );
     let view = window.current_view();
     let top = bounds.top();

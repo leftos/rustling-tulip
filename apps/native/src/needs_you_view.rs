@@ -19,6 +19,7 @@ use crate::needs_you::{self, NeedsYouRow, Reason};
 use crate::sidebar::Activity;
 use crate::sidebar_view::{ROW_HEIGHT, ROW_PADDING};
 use crate::status_glyph::{Glyph, GlyphSize, glyph, glyph_view};
+use crate::ui_theme::theme;
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
 const HEADER_HEIGHT: f32 = 26.0;
@@ -141,6 +142,7 @@ impl RootView {
                             false,
                             SessionMode::Interactive,
                             false,
+                            &theme(cx),
                         )
                     },
                     |s| {
@@ -149,6 +151,7 @@ impl RootView {
                             s.background,
                             s.mode,
                             self.sidebar.is_unseen(&s.id),
+                            &theme(cx),
                         )
                     },
                 );
@@ -263,6 +266,7 @@ fn needs_you_row(
             mark,
             GlyphSize::Leaf,
             &format!("needs-you-glyph-{}", row.session_id),
+            &theme(cx),
         ))
         .child(
             div()

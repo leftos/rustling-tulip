@@ -35,6 +35,7 @@ use crate::palette::{LINE, SUBTLE, SURFACE};
 use crate::popouts::PopoutKey;
 use crate::source_control::ScKey;
 use crate::syntax::{self, Highlighted};
+use crate::ui_theme::theme;
 use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
 /// The header's height: room for the compact change buttons.
@@ -599,22 +600,28 @@ fn nav_button(
     enabled: bool,
     cx: &mut Context<DiffTabView>,
 ) -> Stateful<Div> {
-    outlined_button(selector, ButtonSize::Compact, enabled, Layer::Base)
-        .flex_none()
-        .size(px(NAV_BUTTON_SIZE))
-        .min_h(px(NAV_BUTTON_SIZE))
-        .p(px(0.0))
-        .child(
-            svg()
-                .path(icon)
-                .flex_none()
-                .size(px(NAV_ICON_SIZE))
-                .text_color(gpui::rgb(TEXT)),
-        )
-        .tooltip(tooltip(tip))
-        .when(enabled, |button| {
-            button.on_click(cx.listener(move |tab, _: &ClickEvent, _, cx| tab.go(nav, cx)))
-        })
+    outlined_button(
+        selector,
+        ButtonSize::Compact,
+        enabled,
+        Layer::Base,
+        &theme(cx),
+    )
+    .flex_none()
+    .size(px(NAV_BUTTON_SIZE))
+    .min_h(px(NAV_BUTTON_SIZE))
+    .p(px(0.0))
+    .child(
+        svg()
+            .path(icon)
+            .flex_none()
+            .size(px(NAV_ICON_SIZE))
+            .text_color(gpui::rgb(TEXT)),
+    )
+    .tooltip(tooltip(tip))
+    .when(enabled, |button| {
+        button.on_click(cx.listener(move |tab, _: &ClickEvent, _, cx| tab.go(nav, cx)))
+    })
 }
 
 /// The text standing in for the diff, centred, with a muted line under it.

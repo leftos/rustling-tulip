@@ -16,7 +16,7 @@ use gpui::{
 use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_PAIRING, PendingDevice, Secret};
 
 use crate::activity_bar::badge_text;
-use crate::buttons::{ButtonKind, ButtonSize, Layer, button, focus_ring};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, focus_ring};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notify::PairingActionSink;
@@ -27,6 +27,7 @@ use crate::pairing::{
 use crate::palette::{ASKING, ON_ASKING};
 use crate::session_menu::backdrop;
 use crate::settings_view::SettingsTab;
+use crate::ui_theme::theme;
 use crate::{MUTED, RootView};
 
 /// What the Confirm phase says approving does.
@@ -697,7 +698,7 @@ impl RootView {
                     dialog_button(pressed, &dialog.request_id, focused, enabled, cx)
                 }),
         );
-        let panel = modal_panel("pairing-panel")
+        let panel = modal_panel("pairing-panel", &theme(cx))
             .track_focus(&self.pairing.focus)
             .child(
                 div()
@@ -706,7 +707,7 @@ impl RootView {
             )
             .child(body)
             .child(footer);
-        Some(backdrop("pairing", panel))
+        Some(backdrop("pairing", panel, &theme(cx)))
     }
 }
 
@@ -880,10 +881,13 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
     let deny_id = id.clone();
     let deny = button(
         &format!("settings-waiting-deny-{id}"),
-        ButtonKind::Danger,
-        ButtonSize::Compact,
-        true,
-        Layer::Floating,
+        button_look(
+            ButtonKind::Danger,
+            ButtonSize::Compact,
+            true,
+            Layer::Floating,
+            &theme(cx),
+        ),
     )
     .child("Deny")
     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -893,10 +897,13 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
         let approve_id = id.clone();
         button(
             &format!("settings-waiting-approve-{id}"),
-            ButtonKind::Primary,
-            ButtonSize::Compact,
-            true,
-            Layer::Floating,
+            button_look(
+                ButtonKind::Primary,
+                ButtonSize::Compact,
+                true,
+                Layer::Floating,
+                &theme(cx),
+            ),
         )
         .child("Approve…")
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -927,13 +934,10 @@ fn dialog_button(
     let request_id = request_id.to_owned();
     let drawn = button(
         pressed.selector(),
-        pressed.kind(),
-        size,
-        enabled,
-        Layer::Floating,
+        button_look(pressed.kind(), size, enabled, Layer::Floating, &theme(cx)),
     )
     .when(focused == Some(pressed.label()), |button| {
-        button.child(focus_ring(size.radius()))
+        button.child(focus_ring(size.radius(), &theme(cx)))
     })
     .child(pressed.label());
     if !enabled {

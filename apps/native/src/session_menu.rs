@@ -20,7 +20,8 @@ use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
 use crate::appearance_view::Level;
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::buttons::{
-    ButtonKind, ButtonSize, Layer, button, field_frame, focus_ring, outlined_button,
+    ButtonKind, ButtonLook, ButtonSize, Layer, button, button_look, field_frame, focus_ring,
+    outlined_button,
 };
 use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP, TAB_DOCK_BACK_TIP};
 use crate::launch_last;
@@ -29,9 +30,6 @@ use crate::notices::ToastKind;
 use crate::open::{OpenJob, VsCodeTarget, copy_path, repo_folder, workspace_vscode_target};
 use crate::open_view::Then;
 use crate::overlay_owner::Overlay;
-use crate::palette::{
-    DIALOG_SHADOW, MENU_RULE, MODAL, MODAL_EDGE, POPOVER, POPOVER_EDGE, POPOVER_SHADOW, SCRIM,
-};
 use crate::popouts::{POP_OUT_ALREADY_TIP, PopoutKey, pane_to_pop};
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, HEADLESS_UNSUPPORTED_TIP, MenuEntry, MenuMode,
@@ -46,7 +44,8 @@ use crate::spawn_form::{Lock, Prefill, Target};
 use crate::spawn_view::SpawnEntry;
 use crate::tabs::{collect_panes, find_tab_containing_session};
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip};
+use crate::ui_theme::{UiTheme, theme};
+use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// What the pane header's Pop out does.
 const POP_OUT_TIP: &str = "Open this pane in a window of its own";
@@ -62,7 +61,7 @@ const DIALOG_WIDTH: f32 = 440.0;
 
 /// `panel` centred over a tinted layer that takes every click beneath it, and
 /// tags it `selector`; a click on the layer itself does nothing.
-pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyElement {
+pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>, t: &UiTheme) -> AnyElement {
     div()
         .id(selector)
         .debug_selector(|| selector.to_owned())
@@ -73,7 +72,7 @@ pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyEleme
         .flex()
         .items_center()
         .justify_center()
-        .bg(gpui::rgba(SCRIM))
+        .bg(gpui::rgba(t.scrim))
         .occlude()
         .child(panel)
         .into_any_element()
@@ -84,17 +83,17 @@ const POPOVER_RADIUS: f32 = 10.0;
 
 /// The card a popover sits in, tagged `id`: the popover fill with its edge
 /// and shadow, taking the pointer from whatever is under it.
-pub(crate) fn popover_frame(id: &'static str) -> Stateful<Div> {
+pub(crate) fn popover_frame(id: &'static str, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
-        .bg(gpui::rgb(POPOVER))
+        .bg(gpui::rgb(t.popover))
         .border_1()
-        .border_color(gpui::rgb(POPOVER_EDGE))
+        .border_color(gpui::rgb(t.popover_edge))
         .rounded(px(POPOVER_RADIUS))
-        .shadow(vec![drop_shadow(POPOVER_SHADOW, 8.0, 24.0)])
+        .shadow(vec![drop_shadow(t.popover_shadow, 8.0, 24.0)])
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
         .occlude()
 }
 
@@ -107,8 +106,9 @@ pub(crate) fn menu_frame(
     focus: &FocusHandle,
     max_height: Pixels,
     on_out: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    t: &UiTheme,
 ) -> Stateful<Div> {
-    popover_frame(id)
+    popover_frame(id, t)
         .track_focus(focus)
         .flex()
         .flex_col()
@@ -1815,7 +1815,7 @@ impl RootView {
         let mut frame = frame;
         for (index, group) in self.container_menu_rows().into_iter().enumerate() {
             if index > 0 {
-                frame = frame.child(menu_separator());
+                frame = frame.child(menu_separator(&theme(cx)));
             }
             for row in group {
                 let highlighted = highlight.as_deref() == Some(row.selector.as_str());
@@ -1835,16 +1835,16 @@ impl RootView {
     ) -> AnyElement {
         match row.state.clone() {
             RowState::Disabled(tip) => {
-                disabled_row(&row.selector, row.label, tip).into_any_element()
+                disabled_row(&row.selector, row.label, tip, &theme(cx)).into_any_element()
             }
-            RowState::Inert => inert_row(&row.selector, row.label).into_any_element(),
+            RowState::Inert => inert_row(&row.selector, row.label, &theme(cx)).into_any_element(),
             RowState::Enabled => {
                 // Remove stays open to arm, so its press must not reach the
                 // frame's press-outside.
                 let remove = row.action == ContainerAction::Remove;
-                let item = menu_item(&row.selector, row.label.clone(), remove)
+                let item = menu_item(&row.selector, row.label.clone(), remove, &theme(cx))
                     .when(highlighted, |item| {
-                        item.bg(gpui::rgb(crate::palette::POPOVER_HOVER))
+                        item.bg(gpui::rgb(theme(cx).popover_hover))
                     });
                 let item = if remove {
                     item.on_mouse_down(
@@ -1880,6 +1880,7 @@ impl RootView {
                 this.close_container_menu(window, cx);
                 cx.stop_propagation();
             }),
+            &theme(cx),
         );
         let frame = self.container_menu_frame(frame, cx);
         let panel = anchored().position(at).snap_to_window().child(frame);
@@ -2264,7 +2265,7 @@ impl RootView {
 
     fn menu_panel(&self, menu: &SessionMenu, cx: &mut Context<Self>) -> Stateful<Div> {
         let rows: Vec<AnyElement> = match &menu.rename {
-            Some((input, _)) => vec![rename_row(input)],
+            Some((input, _)) => vec![rename_row(input, &theme(cx))],
             None => self
                 .rows()
                 .into_iter()
@@ -2281,9 +2282,10 @@ impl RootView {
                 this.close_session_menu(window, cx);
                 cx.stop_propagation();
             }),
+            &theme(cx),
         )
         .when(choosing_stop, |panel| {
-            panel.child(muted_row("Stop session?"))
+            panel.child(muted_row("Stop session?", &theme(cx)))
         })
         .children(rows)
         .children(self.session_group(&menu.session_id, cx))
@@ -2318,7 +2320,7 @@ impl RootView {
         if offered.is_empty() {
             return Vec::new();
         }
-        let mut rows = vec![menu_separator().into_any_element()];
+        let mut rows = vec![menu_separator(&theme(cx)).into_any_element()];
         rows.extend(
             offered
                 .into_iter()
@@ -2332,7 +2334,7 @@ impl RootView {
     /// tooltip.
     fn offered_row(session_id: &str, offered: OfferedRow, cx: &mut Context<Self>) -> AnyElement {
         let row = offered.row;
-        let item = menu_item(row.selector(), row.label(), false);
+        let item = menu_item(row.selector(), row.label(), false, &theme(cx));
         if let Some(tip) = offered.disabled {
             return item
                 .opacity(0.6)
@@ -2352,7 +2354,7 @@ impl RootView {
     fn busy_exclusion_row(session_id: &str, row: SessionRow, cx: &mut Context<Self>) -> AnyElement {
         let checked = matches!(row, SessionRow::BusyExcluded { excluded: true });
         let session_id = session_id.to_owned();
-        check_row(row.selector(), row.label(), checked)
+        check_row(row.selector(), row.label(), checked, &theme(cx))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.choose_row(&session_id, row, window, cx);
             }))
@@ -2368,19 +2370,19 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match line {
-            SubmenuLine::Back { selector } => menu_item(selector, SUBMENU_BACK, false)
+            SubmenuLine::Back { selector } => menu_item(selector, SUBMENU_BACK, false, &theme(cx))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.show_submenu(Submenu::None, window, cx);
                 }))
                 .into_any_element(),
-            SubmenuLine::Separator => menu_separator().into_any_element(),
+            SubmenuLine::Separator => menu_separator(&theme(cx)).into_any_element(),
             SubmenuLine::Choice {
                 selector,
                 label,
                 choice,
             } => {
                 let session_id = session_id.to_owned();
-                menu_item(&selector, label, false)
+                menu_item(&selector, label, false, &theme(cx))
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         let shift = event.modifiers().shift;
                         pick(this, &session_id, choice.clone(), shift, window, cx);
@@ -2393,6 +2395,7 @@ impl RootView {
     /// The Accent row under the actions, or, once it is chosen, the
     /// submenu: Back, the presets, the recent colours and Inherit.
     fn accent_rows(&self, menu: &SessionMenu, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = theme(cx);
         if self.accent_menu().is_none() {
             return Vec::new();
         }
@@ -2400,16 +2403,16 @@ impl RootView {
         if menu.submenu != Submenu::Accent {
             let current = self.sidebar.appearance(Some(session_id)).accent.value;
             let level = Level::Session(session_id.to_owned());
-            let editor = swatch_row(APPEARANCE_ROW, "Appearance…", None).on_click(cx.listener(
+            let editor = swatch_row(APPEARANCE_ROW, "Appearance…", None, &t).on_click(cx.listener(
                 move |this, _: &ClickEvent, window, cx| {
                     this.open_appearance_editor(level.clone(), window, cx);
                 },
             ));
-            let row = swatch_row(ACCENT_ROW, "Accent ▸", Some(current)).on_click(cx.listener(
+            let row = swatch_row(ACCENT_ROW, "Accent ▸", Some(current), &t).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| this.show_submenu(Submenu::Accent, window, cx),
             ));
             let mut rows = vec![
-                menu_separator().into_any_element(),
+                menu_separator(&t).into_any_element(),
                 editor.into_any_element(),
                 row.into_any_element(),
             ];
@@ -2419,15 +2422,19 @@ impl RootView {
             );
             return rows;
         }
-        let back = swatch_row(BACK_ROW, SUBMENU_BACK, None).on_click(cx.listener(
+        let back = swatch_row(BACK_ROW, SUBMENU_BACK, None, &t).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| this.show_submenu(Submenu::None, window, cx),
         ));
-        let mut rows = vec![back.into_any_element(), menu_separator().into_any_element()];
+        let mut rows = vec![
+            back.into_any_element(),
+            menu_separator(&t).into_any_element(),
+        ];
         rows.extend(ACCENT_PRESETS.iter().map(|preset| {
             swatch_row(
                 &preset_selector(preset.name),
                 preset.name,
                 Some(preset.color),
+                &t,
             )
             .on_click(Self::accent_choice(session_id, Some(preset.color), cx))
             .into_any_element()
@@ -2442,12 +2449,12 @@ impl RootView {
                     .size(px(16.0))
                     .rounded(px(3.0))
                     .border_1()
-                    .border_color(gpui::rgb(BORDER))
+                    .border_color(gpui::rgb(t.border))
                     .bg(gpui::rgb(color))
                     .cursor_pointer()
                     .on_click(Self::accent_choice(session_id, Some(color), cx))
             });
-            rows.push(muted_row("Recent").into_any_element());
+            rows.push(muted_row("Recent", &t).into_any_element());
             rows.push(
                 div()
                     .flex()
@@ -2459,9 +2466,9 @@ impl RootView {
                     .into_any_element(),
             );
         }
-        rows.push(menu_separator().into_any_element());
+        rows.push(menu_separator(&t).into_any_element());
         rows.push(
-            swatch_row(INHERIT_ROW, "Inherit", None)
+            swatch_row(INHERIT_ROW, "Inherit", None, &t)
                 .on_click(Self::accent_choice(session_id, None, cx))
                 .into_any_element(),
         );
@@ -2535,12 +2542,12 @@ impl RootView {
             MenuEntry::Action(action) => self
                 .action_button(session_id, action, &row.selector, row.label, cx)
                 .into_any_element(),
-            MenuEntry::StopChoice => menu_item(&row.selector, row.label, true)
+            MenuEntry::StopChoice => menu_item(&row.selector, row.label, true, &theme(cx))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.set_menu_mode(MenuMode::StopChoice, window, cx);
                 }))
                 .into_any_element(),
-            MenuEntry::Cancel => menu_item(&row.selector, row.label, false)
+            MenuEntry::Cancel => menu_item(&row.selector, row.label, false, &theme(cx))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.set_menu_mode(MenuMode::Actions, window, cx);
                 }))
@@ -2564,9 +2571,9 @@ impl RootView {
             .session(session_id)
             .and_then(|session| action_disabled_tip(action, session))
         {
-            return disabled_row(selector, label, tip);
+            return disabled_row(selector, label, tip, &theme(cx));
         }
-        let button = menu_item(selector, label, is_danger(action));
+        let button = menu_item(selector, label, is_danger(action), &theme(cx));
         if !self.action_ready(session_id, action) {
             return button.opacity(0.6).cursor_default();
         }
@@ -2590,8 +2597,17 @@ impl RootView {
             ButtonKind::Outlined
         };
         let ready = self.action_ready(session_id, action);
-        let button =
-            button(selector, kind, ButtonSize::Compact, ready, Layer::Floating).child(label);
+        let button = button(
+            selector,
+            button_look(
+                kind,
+                ButtonSize::Compact,
+                ready,
+                Layer::Floating,
+                &theme(cx),
+            ),
+        )
+        .child(label);
         if ready {
             on_action_press(button, session_id, action, cx)
         } else {
@@ -2622,7 +2638,12 @@ impl RootView {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
         };
-        let button = header_text_button(&format!("pane-popout-{pane_id}"), "Pop out", MUTED);
+        let button = header_text_button(
+            &format!("pane-popout-{pane_id}"),
+            "Pop out",
+            theme(cx).muted,
+            &theme(cx),
+        );
         if self.popouts.blocking(&key, self.tabs.tabs()).is_some() {
             return Some(
                 button
@@ -2645,8 +2666,13 @@ impl RootView {
     /// A pane pop-out's Dock back, which docks it back as the main grid's
     /// card's Dock back does.
     pub(crate) fn popout_dock_back(pane_id: &str, cx: &mut Context<Self>) -> AnyElement {
-        let button = header_text_button(&format!("popout-dock-{pane_id}"), "Dock back", MUTED)
-            .tooltip(tooltip(DOCK_BACK_TIP));
+        let button = header_text_button(
+            &format!("popout-dock-{pane_id}"),
+            "Dock back",
+            theme(cx).muted,
+            &theme(cx),
+        )
+        .tooltip(tooltip(DOCK_BACK_TIP));
         on_press(button, cx, |this, window, cx| {
             this.dock_back_from_popout(window, cx);
         })
@@ -2656,8 +2682,13 @@ impl RootView {
     /// A tab pop-out's Dock back: the window closes and the tab draws in
     /// the main window again.
     pub(crate) fn popout_tab_dock_back(tab_id: &str, cx: &mut Context<Self>) -> AnyElement {
-        let button = header_text_button(&format!("popout-tab-dock-{tab_id}"), "Dock back", MUTED)
-            .tooltip(tooltip(TAB_DOCK_BACK_TIP));
+        let button = header_text_button(
+            &format!("popout-tab-dock-{tab_id}"),
+            "Dock back",
+            theme(cx).muted,
+            &theme(cx),
+        )
+        .tooltip(tooltip(TAB_DOCK_BACK_TIP));
         on_press(button, cx, |this, window, cx| {
             this.dock_back_from_popout(window, cx);
         })
@@ -2667,8 +2698,13 @@ impl RootView {
     /// A session pop-out's Close window, in place of Dock back: the window
     /// closes and the session is left as it is.
     pub(crate) fn popout_close_window(slot_id: &str, cx: &mut Context<Self>) -> AnyElement {
-        let button = header_text_button(&format!("popout-close-{slot_id}"), "Close window", MUTED)
-            .tooltip(tooltip(CLOSE_WINDOW_TIP));
+        let button = header_text_button(
+            &format!("popout-close-{slot_id}"),
+            "Close window",
+            theme(cx).muted,
+            &theme(cx),
+        )
+        .tooltip(tooltip(CLOSE_WINDOW_TIP));
         on_press(button, cx, |this, window, cx| {
             this.dock_back_from_popout(window, cx);
         })
@@ -2761,7 +2797,12 @@ impl RootView {
         let stop = SessionAction::StopKeepWorktree;
         let prefix = place.selector_prefix();
         if !self.confirm.is_armed(place, &id) {
-            let button = header_text_button(&format!("{prefix}-{pane_id}"), "Stop", MUTED);
+            let button = header_text_button(
+                &format!("{prefix}-{pane_id}"),
+                "Stop",
+                theme(cx).muted,
+                &theme(cx),
+            );
             return vec![
                 on_press(button, cx, move |this, _, _| {
                     this.confirm.click(place, &id);
@@ -2772,9 +2813,15 @@ impl RootView {
         let confirm = header_text_button(
             &format!("{prefix}-confirm-{pane_id}"),
             "Confirm stop",
-            DANGER,
+            theme(cx).danger,
+            &theme(cx),
         );
-        let cancel = header_text_button(&format!("{prefix}-cancel-{pane_id}"), "Cancel", TEXT);
+        let cancel = header_text_button(
+            &format!("{prefix}-cancel-{pane_id}"),
+            "Cancel",
+            theme(cx).text,
+            &theme(cx),
+        );
         vec![
             on_press(confirm, cx, move |this, window, cx| {
                 if this.confirm.click(place, &id) {
@@ -2885,9 +2932,9 @@ impl RootView {
             );
         }
         Some(
-            overlay_layer(format!("exited-{pane_id}"))
+            overlay_layer(format!("exited-{pane_id}"), &theme(cx))
                 .child(
-                    overlay_card(format!("exited-card-{pane_id}"))
+                    overlay_card(format!("exited-card-{pane_id}"), &theme(cx))
                         .child(exited_message(session))
                         .child(overlay_buttons(buttons)),
                 )
@@ -2918,14 +2965,14 @@ impl RootView {
             .collect();
         let mut lines = abandoned_lines(session).into_iter();
         Some(
-            overlay_layer(format!("abandoned-{pane_id}"))
+            overlay_layer(format!("abandoned-{pane_id}"), &theme(cx))
                 .child(
-                    overlay_card(format!("abandoned-card-{pane_id}"))
+                    overlay_card(format!("abandoned-card-{pane_id}"), &theme(cx))
                         .children(lines.next())
                         .children(lines.map(|line| {
                             div()
                                 .max_w(px(DIALOG_WIDTH))
-                                .text_color(gpui::rgb(MUTED))
+                                .text_color(gpui::rgb(theme(cx).muted))
                                 .child(line)
                         }))
                         .child(overlay_buttons(buttons)),
@@ -2936,7 +2983,12 @@ impl RootView {
 
     /// The banner atop an orphan's pane: its live stream is gone though its
     /// process still runs.
-    pub(crate) fn orphan_banner(&self, pane_id: &str, session_id: Option<&str>) -> Option<Div> {
+    pub(crate) fn orphan_banner(
+        &self,
+        pane_id: &str,
+        session_id: Option<&str>,
+        t: &UiTheme,
+    ) -> Option<Div> {
         let session = session_id
             .and_then(|id| self.sidebar.session(id))
             .filter(|session| session.is_orphan)?;
@@ -2947,9 +2999,9 @@ impl RootView {
                 .flex_none()
                 .px(px(8.0))
                 .py(px(4.0))
-                .bg(gpui::rgba((WARNING << 8) | 0x24))
+                .bg(gpui::rgba((t.warning << 8) | 0x24))
                 .text_size(px(UI_TEXT_SIZE))
-                .text_color(gpui::rgb(TEXT))
+                .text_color(gpui::rgb(t.text))
                 .child(orphan_banner_text(session, &self.agents)),
         )
     }
@@ -3003,7 +3055,7 @@ impl RootView {
 
 /// A tinted layer over a whole pane, its content centred, that takes the
 /// pointer from the terminal under it.
-fn overlay_layer(name: String) -> Stateful<Div> {
+fn overlay_layer(name: String, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -3016,15 +3068,15 @@ fn overlay_layer(name: String) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .gap(px(10.0))
-        .bg(gpui::rgba(SCRIM))
+        .bg(gpui::rgba(t.scrim))
         .occlude()
         .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+        .text_color(gpui::rgb(t.text))
 }
 
 /// The card an overlay's message and buttons sit on, centred over the
 /// dimmed terminal: the dialog's surface, edge and shadow.
-fn overlay_card(id: String) -> Div {
+fn overlay_card(id: String, t: &UiTheme) -> Div {
     div()
         .debug_selector(|| id)
         .flex()
@@ -3033,11 +3085,11 @@ fn overlay_card(id: String) -> Div {
         .gap(px(10.0))
         .px(px(24.0))
         .py(px(16.0))
-        .bg(gpui::rgb(MODAL))
+        .bg(gpui::rgb(t.modal))
         .border_1()
-        .border_color(gpui::rgb(MODAL_EDGE))
+        .border_color(gpui::rgb(t.modal_edge))
         .rounded(px(MODAL_RADIUS))
-        .shadow(vec![drop_shadow(DIALOG_SHADOW, 30.0, 80.0)])
+        .shadow(vec![drop_shadow(t.dialog_shadow, 30.0, 80.0)])
 }
 
 fn overlay_buttons(buttons: Vec<AnyElement>) -> Div {
@@ -3260,9 +3312,8 @@ impl RootView {
         let close = dialog_button(
             "delete-worktree-dialog-close",
             "✕".to_owned(),
+            dialog_look(false, true, &theme(cx)),
             false,
-            false,
-            true,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.close_delete_dialog(window, cx);
@@ -3270,7 +3321,7 @@ impl RootView {
         let progress = dialog
             .owner
             .progress()
-            .map(|line| div().text_color(gpui::rgb(MUTED)).child(line));
+            .map(|line| div().text_color(gpui::rgb(theme(cx).muted)).child(line));
         let header = div()
             .flex()
             .items_center()
@@ -3295,9 +3346,8 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     confirm.label(button),
-                    button.is_danger(),
+                    dialog_look(button.is_danger(), true, &theme(cx)),
                     focused,
-                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.answer_delete_dialog(button, window, cx);
@@ -3305,17 +3355,17 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("delete-worktree-panel")
+        let panel = modal_panel("delete-worktree-panel", &theme(cx))
             .track_focus(&self.dialog_focus)
             .child(header)
-            .child(self.delete_dialog_body(confirm))
+            .child(self.delete_dialog_body(confirm, &theme(cx)))
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
-        Some(backdrop("delete-worktree-dialog", panel))
+        Some(backdrop("delete-worktree-dialog", panel, &theme(cx)))
     }
 
     /// Whose worktree goes, the wait or its failure, and each member's
     /// branch with its fate.
-    fn delete_dialog_body(&self, confirm: &DeleteWorktreeConfirm) -> Div {
+    fn delete_dialog_body(&self, confirm: &DeleteWorktreeConfirm, t: &UiTheme) -> Div {
         let intro = div()
             .flex()
             .flex_wrap()
@@ -3328,14 +3378,14 @@ impl RootView {
             .child(".");
         let note = confirm
             .status_note()
-            .map(|note| div().text_color(gpui::rgb(MUTED)).child(note));
+            .map(|note| div().text_color(gpui::rgb(t.muted)).child(note));
         let members = confirm.member_rows().into_iter().map(|row| {
             div()
                 .flex()
                 .flex_wrap()
                 .gap(px(8.0))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(row.repo))
-                .child(div().text_color(gpui::rgb(MUTED)).child(row.branch))
+                .child(div().text_color(gpui::rgb(t.muted)).child(row.branch))
                 .child(row.fate)
         });
         div()
@@ -3348,25 +3398,41 @@ impl RootView {
     }
 }
 
-/// A dialog's button: outlined, or outlined with the danger colour's text;
-/// the focused one wears the focus ring. A disabled one is dimmed and its
-/// press stops at it; its caller attaches no handler to it.
+/// A dialog's button drawn as `look` (see [`dialog_look`]); the focused
+/// one wears the focus ring in `look`'s accent. A disabled one is dimmed and
+/// its press stops at it; its caller attaches no handler to it.
 pub(crate) fn dialog_button(
     selector: &str,
     label: String,
-    danger: bool,
+    look: DialogLook,
     focused: bool,
-    enabled: bool,
 ) -> Stateful<Div> {
+    let DialogLook { button: look, ring } = look;
+    button(selector, look)
+        .when(focused, |button| button.child(ring))
+        .child(label)
+}
+
+/// How a dialog's button is drawn: the button, and the focus ring it wears
+/// while focused.
+pub(crate) struct DialogLook {
+    button: ButtonLook,
+    ring: Div,
+}
+
+/// The look of a dialog's button in `t`: outlined, or outlined with the
+/// danger colour's text, on the floating layer; dimmed unless `enabled`.
+pub(crate) fn dialog_look(danger: bool, enabled: bool, t: &UiTheme) -> DialogLook {
     let kind = if danger {
         ButtonKind::Danger
     } else {
         ButtonKind::Outlined
     };
     let size = ButtonSize::Regular;
-    button(selector, kind, size, enabled, Layer::Floating)
-        .when(focused, |button| button.child(focus_ring(size.radius())))
-        .child(label)
+    DialogLook {
+        button: button_look(kind, size, enabled, Layer::Floating, t),
+        ring: focus_ring(size.radius(), t),
+    }
 }
 
 /// `button`, which runs `action` on `session_id` on a left press and keeps
@@ -3434,9 +3500,15 @@ pub(crate) fn bordered_button(
         tip,
         enabled,
     } = button;
-    let base = outlined_button(&selector, ButtonSize::Compact, enabled, Layer::Floating)
-        .tooltip(tooltip(tip))
-        .child(label);
+    let base = outlined_button(
+        &selector,
+        ButtonSize::Compact,
+        enabled,
+        Layer::Floating,
+        &theme(cx),
+    )
+    .tooltip(tooltip(tip))
+    .child(label);
     if enabled {
         on_press(base, cx, act)
     } else {
@@ -3460,9 +3532,11 @@ pub(crate) fn menu_item(
     selector: &str,
     label: impl Into<SharedString>,
     danger: bool,
+    t: &UiTheme,
 ) -> Stateful<Div> {
     let name = selector.to_owned();
     let label: SharedString = label.into();
+    let hover = t.popover_hover;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -3470,12 +3544,8 @@ pub(crate) fn menu_item(
         .py(px(3.0))
         .rounded(px(4.0))
         .cursor_pointer()
-        .text_color(gpui::rgb(if danger {
-            crate::palette::DANGER_TEXT
-        } else {
-            TEXT
-        }))
-        .hover(|style| style.bg(gpui::rgb(crate::palette::POPOVER_HOVER)))
+        .text_color(gpui::rgb(if danger { t.danger_text } else { t.text }))
+        .hover(move |style| style.bg(gpui::rgb(hover)))
         .child(label)
 }
 
@@ -3485,12 +3555,13 @@ pub(crate) fn disabled_row(
     selector: &str,
     label: impl Into<SharedString>,
     tip: impl Into<SharedString>,
+    t: &UiTheme,
 ) -> Stateful<Div> {
-    inert_row(selector, label).tooltip(tooltip(tip))
+    inert_row(selector, label, t).tooltip(tooltip(tip))
 }
 
 /// A menu row that is drawn muted and cannot be pressed, with no tooltip.
-fn inert_row(selector: &str, label: impl Into<SharedString>) -> Stateful<Div> {
+fn inert_row(selector: &str, label: impl Into<SharedString>, t: &UiTheme) -> Stateful<Div> {
     let name = selector.to_owned();
     let label: SharedString = label.into();
     div()
@@ -3501,25 +3572,31 @@ fn inert_row(selector: &str, label: impl Into<SharedString>) -> Stateful<Div> {
         .px(px(8.0))
         .py(px(3.0))
         .rounded(px(4.0))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .cursor_default()
         .child(label)
 }
 
 /// A clickable menu row with a colour swatch before its label; no swatch
 /// leaves the space empty so the labels line up.
-fn swatch_row(selector: &str, label: &'static str, color: Option<u32>) -> Stateful<Div> {
+fn swatch_row(
+    selector: &str,
+    label: &'static str,
+    color: Option<u32>,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let swatch = div().flex_none().size(px(12.0)).rounded(px(3.0));
     slot_row(
         selector,
         swatch.when_some(color, |swatch, color| swatch.bg(gpui::rgb(color))),
         label,
+        t,
     )
 }
 
 /// A clickable menu row with a ✓ in the swatch's slot while `checked`,
 /// tagged `<selector>-check`; unchecked leaves the slot empty.
-fn check_row(selector: &str, label: &'static str, checked: bool) -> Stateful<Div> {
+fn check_row(selector: &str, label: &'static str, checked: bool, t: &UiTheme) -> Stateful<Div> {
     let check = format!("{selector}-check");
     let slot = div()
         .flex()
@@ -3534,12 +3611,13 @@ fn check_row(selector: &str, label: &'static str, checked: bool) -> Stateful<Div
     } else {
         slot
     };
-    slot_row(selector, slot, label)
+    slot_row(selector, slot, label, t)
 }
 
 /// A clickable menu row with `slot` before its label, tagged `selector`.
-fn slot_row(selector: &str, slot: Div, label: &'static str) -> Stateful<Div> {
+fn slot_row(selector: &str, slot: Div, label: &'static str, t: &UiTheme) -> Stateful<Div> {
     let name = selector.to_owned();
+    let hover = t.popover_hover;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -3550,19 +3628,25 @@ fn slot_row(selector: &str, slot: Div, label: &'static str) -> Stateful<Div> {
         .py(px(3.0))
         .rounded(px(4.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(crate::palette::POPOVER_HOVER)))
+        .hover(move |style| style.bg(gpui::rgb(hover)))
         .child(slot)
         .child(label)
 }
 
 /// A thin line between groups of menu rows.
-pub(crate) fn menu_separator() -> Div {
-    div().h(px(1.0)).my(px(4.0)).bg(gpui::rgb(MENU_RULE))
+pub(crate) fn menu_separator(t: &UiTheme) -> Div {
+    div().h(px(1.0)).my(px(4.0)).bg(gpui::rgb(t.menu_rule))
 }
 
 /// A small text button in a pane header.
-fn header_text_button(selector: &str, label: &'static str, color: u32) -> Stateful<Div> {
+fn header_text_button(
+    selector: &str,
+    label: &'static str,
+    color: u32,
+    t: &UiTheme,
+) -> Stateful<Div> {
     let name = selector.to_owned();
+    let hover = t.hover_bg;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -3571,22 +3655,22 @@ fn header_text_button(selector: &str, label: &'static str, color: u32) -> Statef
         .rounded(px(3.0))
         .cursor_pointer()
         .text_color(gpui::rgb(color))
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(move |style| style.bg(gpui::rgb(hover)))
         .child(label)
 }
 
 /// A non-clickable line of the menu or the overlay, in the muted color.
-pub(crate) fn muted_row(text: impl Into<SharedString>) -> Div {
+pub(crate) fn muted_row(text: impl Into<SharedString>, t: &UiTheme) -> Div {
     let text: SharedString = text.into();
     div()
         .px(px(8.0))
         .py(px(3.0))
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .child(text)
 }
 
 /// The name editor with its hint.
-fn rename_row(input: &Entity<TextInput>) -> AnyElement {
+fn rename_row(input: &Entity<TextInput>, t: &UiTheme) -> AnyElement {
     div()
         .debug_selector(|| "menu-rename-input".to_owned())
         .flex()
@@ -3595,10 +3679,10 @@ fn rename_row(input: &Entity<TextInput>) -> AnyElement {
         .p(px(4.0))
         .child(
             div()
-                .text_color(gpui::rgb(MUTED))
+                .text_color(gpui::rgb(t.muted))
                 .child("Rename session (blank restores the default)"),
         )
-        .child(field_frame(true).child(input.clone()))
+        .child(field_frame(true, t).child(input.clone()))
         .into_any_element()
 }
 
@@ -3737,8 +3821,9 @@ impl RootView {
                 this.close_shell_menu(window, cx);
                 cx.stop_propagation();
             }),
+            &theme(cx),
         )
-        .child(muted_row(menu.header.clone()))
+        .child(muted_row(menu.header.clone(), &theme(cx)))
         .child(Self::shell_copy_row(
             SHELL_MENU_ROWS[0],
             "Copy command",
@@ -3768,7 +3853,7 @@ impl RootView {
         text: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        menu_item(selector, label, false)
+        menu_item(selector, label, false, &theme(cx))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -3783,7 +3868,7 @@ impl RootView {
     /// The re-run row: inert and dimmed while its session is stopped, its
     /// command empty, or its session gone.
     fn shell_rerun_row(&self, menu: &ShellMenu, cx: &mut Context<Self>) -> AnyElement {
-        let row = menu_item(SHELL_MENU_ROWS[3], "Re-run command", false);
+        let row = menu_item(SHELL_MENU_ROWS[3], "Re-run command", false, &theme(cx));
         if !self.can_rerun(menu, cx) {
             return row.opacity(0.6).cursor_default().into_any_element();
         }

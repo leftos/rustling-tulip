@@ -10,7 +10,8 @@ use crate::repo_remove::{
     DIALOG_BODY, RepoRemoveButton, RepoRemoveDialog, RepoRemoveSession, container_key,
     live_owned_sessions, remove_message, row_label, stop_message,
 };
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::ui_theme::theme;
 use crate::{MUTED, RootView};
 
 impl RootView {
@@ -160,9 +161,8 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    button.is_danger(),
+                    dialog_look(button.is_danger(), true, &theme(cx)),
                     dialog.focused() == button,
-                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.answer_repo_remove(button, window, cx);
@@ -170,12 +170,12 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("repo-remove-panel")
+        let panel = modal_panel("repo-remove-panel", &theme(cx))
             .track_focus(&self.repo_remove_focus)
             .child(header)
             .child(body)
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
-        Some(backdrop("repo-remove-dialog", panel))
+        Some(backdrop("repo-remove-dialog", panel, &theme(cx)))
     }
 
     /// Whether the Remove dialog is open.

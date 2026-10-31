@@ -19,7 +19,7 @@ use gpui::{
 
 use crate::RootView;
 use crate::assets::{CHECK_ICON, HOST_PC_ICON, HOST_SSH_ICON, HOST_TAILNET_ICON, TAB_CLOSE_ICON};
-use crate::buttons::{ButtonKind, ButtonSize, Layer, button, field_frame, focus_ring};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame, focus_ring};
 use crate::connection_picker::{
     AddButton, AddField, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, PickerSection,
     Row, RowDetail, RowFacts, RowHost, RowKind, RowState, SCAN_PENDING, SavedHost, Section,
@@ -38,6 +38,7 @@ use crate::session_menu::backdrop;
 use crate::ssh::DEFAULT_REMOTE_COMMAND;
 use crate::target::{DEFAULT_TAILNET_PORT, SshHost, TailnetHost, Target};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::{UiTheme, theme};
 
 const TITLE: &str = "Connections";
 const NAME_PLACEHOLDER: &str = "box.tail1234.ts.net";
@@ -938,7 +939,7 @@ impl RootView {
             .as_ref()
             .map(|form| add_form(form, dialog.error.as_deref(), &draw, cx));
         let footer = footer(dialog.add.is_some(), &draw, cx);
-        let panel = modal_panel("connections-panel")
+        let panel = modal_panel("connections-panel", &theme(cx))
             .p_0()
             .gap_0()
             .max_h(relative(1.0))
@@ -956,7 +957,7 @@ impl RootView {
             .items_center()
             .justify_center()
             .child(panel);
-        Some(backdrop("connections-picker", frame))
+        Some(backdrop("connections-picker", frame, &theme(cx)))
     }
 }
 
@@ -977,14 +978,11 @@ fn control_button(
 ) -> Stateful<Div> {
     button(
         &control.selector(draw.rows),
-        kind,
-        size,
-        true,
-        Layer::Floating,
+        button_look(kind, size, true, Layer::Floating, &theme(cx)),
     )
     .relative()
     .when(draw.focus == control, |button| {
-        button.child(focus_ring(size.radius()))
+        button.child(focus_ring(size.radius(), &theme(cx)))
     })
     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         cx.stop_propagation();
@@ -1137,7 +1135,7 @@ fn host_row(
             line.child(forget_button(index, forget_shown, group, draw, cx))
         })
         .when(draw.focus == control, |row| {
-            row.child(focus_ring(ROW_RADIUS))
+            row.child(focus_ring(ROW_RADIUS, &theme(cx)))
         })
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.press_connection_control(control, window, cx);
@@ -1434,7 +1432,7 @@ fn add_form(
     let [first_control, second_control] = PickerControl::fields(form.mode);
     let field = |field: AddField, control: PickerControl| {
         form.input(control)
-            .map(|input| field_row(field, input, control, draw.focus))
+            .map(|input| field_row(field, input, control, draw.focus, &theme(cx)))
     };
     let result = (form.mode == AddMode::Ssh)
         .then(|| form.test.text())
@@ -1532,7 +1530,7 @@ fn segment(
                 .hover(|style| style.text_color(gpui::rgb(TEXT)))
         })
         .when(draw.focus == control, |segment| {
-            segment.child(focus_ring(6.0))
+            segment.child(focus_ring(6.0, &theme(cx)))
         })
         .child(this.label())
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1569,9 +1567,10 @@ fn field_row(
     input: &Entity<TextInput>,
     control: PickerControl,
     focus: PickerControl,
+    t: &UiTheme,
 ) -> Div {
     let selector = control.selector(&[]);
-    let frame = field_frame(focus == control)
+    let frame = field_frame(focus == control, t)
         .debug_selector(move || selector)
         .flex_1()
         .min_w_0()

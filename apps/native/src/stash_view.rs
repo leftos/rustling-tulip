@@ -18,11 +18,12 @@ use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::palette::{SUBTLE, SURFACE, TEXT_2};
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::source_control::{Part, ScKey};
 use crate::source_control_view::ScSectionRow;
 use crate::stashes::{DropButton, DropConfirm, StashModel, StashOp, stash_date};
 use crate::text_input::{TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, tooltip};
 
 /// The part's title.
@@ -556,9 +557,8 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     label.to_owned(),
-                    danger,
+                    dialog_look(danger, true, &theme(cx)),
                     confirm.focused() == button,
-                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.press_drop_button(button, window, cx);
@@ -569,9 +569,8 @@ impl RootView {
         let close = dialog_button(
             "stash-drop-confirm-close",
             "✕".to_owned(),
+            dialog_look(false, true, &theme(cx)),
             false,
-            false,
-            true,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.press_drop_button(DropButton::Cancel, window, cx);
@@ -586,12 +585,12 @@ impl RootView {
                     .child(confirm.title()),
             )
             .child(close);
-        let panel = modal_panel("stash-drop-confirm-panel")
+        let panel = modal_panel("stash-drop-confirm-panel", &theme(cx))
             .track_focus(&self.stash.drop_focus)
             .child(header)
             .child(div().text_color(gpui::rgb(MUTED)).child(confirm.body()))
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
-        Some(backdrop("stash-drop-confirm-dialog", panel))
+        Some(backdrop("stash-drop-confirm-dialog", panel, &theme(cx)))
     }
 }
 
@@ -683,6 +682,7 @@ fn push_row(
         ButtonSize::Compact,
         push.enabled,
         Layer::Base,
+        &theme(cx),
     )
     .flex_none()
     .child(push.label)

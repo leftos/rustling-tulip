@@ -14,7 +14,8 @@ use crate::notice_view::modal_panel;
 use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{self, JobOutcome, OpenAction, OpenFailure, OpenJob, Resolution};
 use crate::run_confirm::{RunButton, RunConfirm};
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::ui_theme::theme;
 use crate::viewer_text::{self, NotText, Verdict};
 use crate::{MUTED, RootView, file_fetch};
 
@@ -582,9 +583,8 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    button == RunButton::Run,
+                    dialog_look(button == RunButton::Run, true, &theme(cx)),
                     confirm.focused() == button,
-                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.press_run_button(button, window, cx);
@@ -592,7 +592,7 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("run-confirm-panel")
+        let panel = modal_panel("run-confirm-panel", &theme(cx))
             .track_focus(&self.run_focus)
             .child(
                 div()
@@ -608,7 +608,7 @@ impl RootView {
                     .gap(px(6.0))
                     .children(buttons),
             );
-        Some(backdrop("run-confirm-dialog", panel))
+        Some(backdrop("run-confirm-dialog", panel, &theme(cx)))
     }
 }
 

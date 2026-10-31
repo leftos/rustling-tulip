@@ -25,6 +25,7 @@ use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, head_lines, merge_lines, rearrange_lines};
 use crate::tabs::{PillClick, TabBadge, bound_pane_count, collect_panes, tab_session_counts};
 use crate::text_input::{TextInput, TextInputEvent};
+use crate::ui_theme::{UiTheme, theme};
 use crate::undo;
 use crate::viewer_tab::display_name;
 use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
@@ -353,6 +354,7 @@ impl RootView {
                 this.close_tab_menu(window, cx);
                 cx.stop_propagation();
             }),
+            &theme(cx),
         )
         .children(lines)
     }
@@ -515,8 +517,8 @@ fn close_others_line(others: usize, armed: bool) -> MenuLine {
 /// it.
 fn tab_menu_line(line: MenuLine, tab_id: &str, cx: &mut Context<RootView>) -> AnyElement {
     let (selector, label, action, danger) = match line {
-        MenuLine::Label(text) => return muted_row(text).into_any_element(),
-        MenuLine::Separator => return menu_separator().into_any_element(),
+        MenuLine::Label(text) => return muted_row(text, &theme(cx)).into_any_element(),
+        MenuLine::Separator => return menu_separator(&theme(cx)).into_any_element(),
         MenuLine::Row {
             selector,
             label,
@@ -524,7 +526,7 @@ fn tab_menu_line(line: MenuLine, tab_id: &str, cx: &mut Context<RootView>) -> An
             danger,
         } => (selector, label, action, danger),
     };
-    let row = menu_item(&selector, label, danger);
+    let row = menu_item(&selector, label, danger, &theme(cx));
     let Some(action) = action else {
         return row.opacity(0.6).cursor_default().into_any_element();
     };
@@ -598,7 +600,7 @@ impl RootView {
         let armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
         let badge = self
             .tab_badge(&tab.id)
-            .map(|badge| count_badge(&tab.id, badge));
+            .map(|badge| count_badge(&tab.id, badge, &theme(cx)));
         let dashboard = matches!(tab.content, TabContent::Dashboard);
         let icon = dashboard.then(|| dashboard_icon(&tab.id));
         let need_badge = dashboard
@@ -1204,7 +1206,7 @@ impl CountPill {
 
 /// The count pill after a grid tab's name, tagged `tab-badge-<id>`; its
 /// working glyph is tagged `tab-badge-glyph-<id>-working`.
-fn count_badge(tab_id: &str, badge: TabBadge) -> Stateful<Div> {
+fn count_badge(tab_id: &str, badge: TabBadge, t: &UiTheme) -> Stateful<Div> {
     let pill = CountPill::of(badge);
     let name = format!("tab-badge-{tab_id}");
     let glyph_id = format!("tab-badge-glyph-{tab_id}");
@@ -1230,9 +1232,11 @@ fn count_badge(tab_id: &str, badge: TabBadge) -> Stateful<Div> {
                     false,
                     SessionMode::Interactive,
                     false,
+                    t,
                 ),
                 GlyphSize::Pill,
                 &glyph_id,
+                t,
             ))
         })
         .child(pill.text)
@@ -1348,9 +1352,11 @@ impl Render for PillGhost {
                             false,
                             SessionMode::Interactive,
                             false,
+                            &theme(cx),
                         ),
                         GlyphSize::Pill,
                         &glyph_id,
+                        &theme(cx),
                     ))
                 })
                 .child(pill.text)

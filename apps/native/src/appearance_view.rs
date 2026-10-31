@@ -26,12 +26,13 @@ use crate::fonts;
 use crate::notices::ToastKind;
 use crate::palette::{GROUND, LINE_STRONG, POPOVER_HOVER};
 use crate::section::field_column;
-use crate::session_menu::{backdrop, dialog_button, muted_row};
+use crate::session_menu::{backdrop, dialog_button, dialog_look, muted_row};
 use crate::settings_view::SettingsControl;
 use crate::spawn_view::{
     checkbox_row, close_button, dialog_card, dialog_footer, dialog_title_bar, field_label,
 };
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::{UiTheme, theme};
 use crate::{APPEARANCE_FAILED_TITLE, MUTED, RootView, TEXT, font_size_to_u16, tooltip};
 
 const EDITOR_WIDTH: f32 = 700.0;
@@ -714,7 +715,7 @@ impl RootView {
             return None;
         }
         let title = self.appearance_editor_title()?;
-        let close = close_button("appearance-close", false).on_click(cx.listener(
+        let close = close_button("appearance-close", false, &theme(cx)).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
                 this.close_appearance_editor(window, cx);
             },
@@ -724,7 +725,7 @@ impl RootView {
             .px(px(BODY_PAD_X))
             .py(px(BODY_PAD_Y))
             .children(self.appearance_body(focus, cx));
-        let panel = dialog_card("appearance-panel", EDITOR_WIDTH)
+        let panel = dialog_card("appearance-panel", EDITOR_WIDTH, &theme(cx))
             .track_focus(&self.appearance_focus)
             .child(dialog_title_bar(title, close))
             .child(body)
@@ -733,7 +734,7 @@ impl RootView {
                 focus == Some(AppearanceStop::Close),
                 cx,
             ));
-        Some(backdrop("appearance-editor", panel))
+        Some(backdrop("appearance-editor", panel, &theme(cx)))
     }
 
     /// The editor's rows in two columns: the colours, then the font; stop
@@ -892,8 +893,9 @@ fn header_with_reset(
 ) -> Div {
     let stop = AppearanceStop::Reset(reset.row);
     let enabled = can_reset(reset.row, own);
-    let link = link(stop.selector(), reset.label, enabled)
-        .when(reset.focused, |link| link.child(focus_ring(LINK_RADIUS)));
+    let link = link(stop.selector(), reset.label, enabled).when(reset.focused, |link| {
+        link.child(focus_ring(LINK_RADIUS, &theme(cx)))
+    });
     let link = if enabled {
         link.on_click(click_stop(stop, Aim::Stop, cx))
     } else {
@@ -961,6 +963,7 @@ impl RootView {
                         chosen: own == Some(preset.color),
                         focused: preset_cursor == Some(at),
                     },
+                    &theme(cx),
                 )
                 .on_click(click_stop(
                     AppearanceStop::Swatches(row, SwatchLine::Presets),
@@ -984,6 +987,7 @@ impl RootView {
                         chosen: own == Some(value),
                         focused: recent_cursor == Some(at),
                     },
+                    &theme(cx),
                 )
                 .on_click(click_stop(
                     AppearanceStop::Swatches(row, SwatchLine::Recent),
@@ -1493,9 +1497,9 @@ fn hex_line(
             |swatch, color| swatch.bg(gpui::rgb(color)),
         );
     let apply_stop = AppearanceStop::Apply(row);
-    let apply = apply_button(apply_stop.selector(), ready)
+    let apply = apply_button(apply_stop.selector(), ready, &theme(cx))
         .when(focus == Some(apply_stop), |apply| {
-            apply.child(focus_ring(ButtonSize::Regular.radius()))
+            apply.child(focus_ring(ButtonSize::Regular.radius(), &theme(cx)))
         });
     let apply = if ready {
         apply.on_click(click_stop(apply_stop, Aim::Stop, cx))
@@ -1524,8 +1528,8 @@ fn hex_line(
 
 /// Apply, an outlined dialog button; a disabled one is dimmed, with the
 /// default cursor and no hover.
-fn apply_button(selector: &str, enabled: bool) -> Stateful<Div> {
-    outlined_button(selector, ButtonSize::Regular, enabled, Layer::Floating)
+fn apply_button(selector: &str, enabled: bool, t: &UiTheme) -> Stateful<Div> {
+    outlined_button(selector, ButtonSize::Regular, enabled, Layer::Floating, t)
         .flex_none()
         .child("Apply")
 }
@@ -1546,7 +1550,7 @@ struct Mark {
 /// A clickable colour swatch with its tooltip; the level's own colour is
 /// outlined in the text colour, two pixels wide, and the one under a
 /// focused line's cursor wears the focus ring.
-fn swatch(selector: String, color: u32, tip: String, mark: Mark) -> Stateful<Div> {
+fn swatch(selector: String, color: u32, tip: String, mark: Mark, t: &UiTheme) -> Stateful<Div> {
     let swatch = div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
         .debug_selector(|| selector)
@@ -1557,7 +1561,7 @@ fn swatch(selector: String, color: u32, tip: String, mark: Mark) -> Stateful<Div
         .cursor_pointer()
         .tooltip(tooltip(tip))
         .when(mark.focused, |swatch| {
-            swatch.child(focus_ring(SWATCH_RADIUS))
+            swatch.child(focus_ring(SWATCH_RADIUS, t))
         });
     if mark.chosen {
         swatch.border_2().border_color(gpui::rgb(TEXT))
@@ -1585,9 +1589,13 @@ fn family_row(
 ) -> AnyElement {
     let RowsOf { list, own, reset } = rows_of;
     let prefix = list.prefix();
-    let ring = |row: Stateful<Div>| row.when(highlighted, |row| row.child(focus_ring(ROW_RADIUS)));
+    let ring = |row: Stateful<Div>| {
+        row.when(highlighted, |row| {
+            row.child(focus_ring(ROW_RADIUS, &theme(cx)))
+        })
+    };
     match entry {
-        FamilyEntry::Header(header) => muted_row(*header).into_any_element(),
+        FamilyEntry::Header(header) => muted_row(*header, &theme(cx)).into_any_element(),
         FamilyEntry::Reset => ring(list_row(&format!("{prefix}-reset"), reset, own.is_none()))
             .on_click(click_stop(list.stop(), Aim::Family(FamilyPick::Reset), cx))
             .into_any_element(),
@@ -1643,17 +1651,15 @@ fn size_section(
     let down = dialog_button(
         AppearanceStop::SizeDown.selector(),
         "−".to_owned(),
-        false,
+        dialog_look(false, true, &theme(cx)),
         focused(AppearanceStop::SizeDown),
-        true,
     )
     .on_click(click_stop(AppearanceStop::SizeDown, Aim::Stop, cx));
     let up = dialog_button(
         AppearanceStop::SizeUp.selector(),
         "+".to_owned(),
-        false,
+        dialog_look(false, true, &theme(cx)),
         focused(AppearanceStop::SizeUp),
-        true,
     )
     .on_click(click_stop(AppearanceStop::SizeUp, Aim::Stop, cx));
     let value = format!("{}px", view.resolved.font_size.value);
@@ -1699,6 +1705,7 @@ fn bold_section(
         view.resolved.font_bold.value,
         focus == Some(AppearanceStop::Bold),
         BOLD_LABEL,
+        &theme(cx),
     )
     .on_click(click_stop(AppearanceStop::Bold, Aim::Stop, cx));
     div()
@@ -1731,7 +1738,7 @@ fn input_box(
 ) -> Div {
     let selector = stop.selector();
     let focused = focus == Some(stop);
-    field_frame_with_ring(focused, format!("{selector}-ring"))
+    field_frame_with_ring(focused, format!("{selector}-ring"), &theme(cx))
         .debug_selector(move || selector.to_owned())
         .flex_1()
         .min_w(px(0.0))
@@ -1782,14 +1789,19 @@ pub(crate) fn close_footer(
     focused: bool,
     cx: &mut Context<RootView>,
 ) -> Div {
-    let ring =
-        focus_ring(ButtonSize::Regular.radius()).debug_selector(move || format!("{selector}-ring"));
+    let ring = focus_ring(ButtonSize::Regular.radius(), &theme(cx))
+        .debug_selector(move || format!("{selector}-ring"));
     dialog_footer().child(
-        dialog_button(selector, "Close".to_owned(), false, false, true)
-            .when(focused, |close| close.child(ring))
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.close_appearance_editor(window, cx);
-            })),
+        dialog_button(
+            selector,
+            "Close".to_owned(),
+            dialog_look(false, true, &theme(cx)),
+            false,
+        )
+        .when(focused, |close| close.child(ring))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.close_appearance_editor(window, cx);
+        })),
     )
 }
 

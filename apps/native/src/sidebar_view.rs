@@ -39,6 +39,7 @@ use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
 use crate::target::Target;
+use crate::ui_theme::{UiTheme, theme};
 use crate::{
     DANGER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle,
     tagged_text, tooltip,
@@ -268,12 +269,12 @@ impl RootView {
                 this.open_more_menu(window, cx);
             }));
         let menu = self.sidebar_more_open().then(|| {
-            let shell = menu_item(MORE_SHELL_ROW, "Shell…", false).on_click(cx.listener(
-                |this, _: &ClickEvent, window, cx| {
+            let shell = menu_item(MORE_SHELL_ROW, "Shell…", false, &theme(cx)).on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_more_menu(window, cx);
                     this.open_shell_dialog(window, cx);
-                },
-            ));
+                }),
+            );
             let fetch_file = self.more_fetch_file_row(cx);
             let add_repo = self.more_add_repo_row(cx);
             let add_workspace = if self.sidebar.repos().len() < 2 {
@@ -295,16 +296,16 @@ impl RootView {
                             .child(NEEDS_TWO_REPOS),
                     )
             } else {
-                menu_item(MORE_ADD_WORKSPACE_ROW, "Add workspace…", false).on_click(cx.listener(
-                    |this, _: &ClickEvent, window, cx| {
+                menu_item(MORE_ADD_WORKSPACE_ROW, "Add workspace…", false, &theme(cx)).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.close_more_menu(window, cx);
                         this.open_workspace_creator(window, cx);
-                    },
-                ))
+                    }),
+                )
             };
             let resume =
                 crate::sidebar::resume_all_label(self.sidebar.abandoned_count()).map(|label| {
-                    menu_item(MORE_RESUME_ALL_ROW, label, false).on_click(cx.listener(
+                    menu_item(MORE_RESUME_ALL_ROW, label, false, &theme(cx)).on_click(cx.listener(
                         |this, _: &ClickEvent, window, cx| {
                             this.close_more_menu(window, cx);
                             this.send(ClientMessage::ResumeAllAbandoned);
@@ -319,15 +320,19 @@ impl RootView {
                     this.close_more_menu(window, cx);
                     cx.stop_propagation();
                 }),
+                &theme(cx),
             )
             .child(shell)
             .children(fetch_file)
-            .child(menu_separator())
+            .child(menu_separator(&theme(cx)))
             .child(add_repo)
             .child(add_workspace);
             let frame = if let Some(row) = resume {
                 frame
-                    .child(menu_separator().debug_selector(|| MORE_RESUME_ALL_SEPARATOR.to_owned()))
+                    .child(
+                        menu_separator(&theme(cx))
+                            .debug_selector(|| MORE_RESUME_ALL_SEPARATOR.to_owned()),
+                    )
                     .child(row)
             } else {
                 frame
@@ -387,7 +392,7 @@ impl RootView {
             return None;
         }
         Some(
-            menu_item(MORE_FETCH_ROW, "Fetch file…", false).on_click(cx.listener(
+            menu_item(MORE_FETCH_ROW, "Fetch file…", false, &theme(cx)).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| {
                     this.close_more_menu(window, cx);
                     this.open_fetch_dialog(window, cx);
@@ -400,9 +405,9 @@ impl RootView {
     fn more_add_repo_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let gate = self.add_repo_gate();
         if !gate.enabled {
-            return disabled_row(MORE_ADD_REPO_ROW, "Add repo…", gate.tip);
+            return disabled_row(MORE_ADD_REPO_ROW, "Add repo…", gate.tip, &theme(cx));
         }
-        menu_item(MORE_ADD_REPO_ROW, "Add repo…", false).on_click(cx.listener(
+        menu_item(MORE_ADD_REPO_ROW, "Add repo…", false, &theme(cx)).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
                 this.close_more_menu(window, cx);
                 this.add_repo(window, cx);
@@ -589,6 +594,7 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         ButtonSize::Toolbar,
         has_repos,
         Layer::Base,
+        &theme(cx),
     )
     .flex_1()
     .min_w(px(0.0))
@@ -612,13 +618,19 @@ fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> State
         Some(dir) => format!("Open a standalone shell in {dir}"),
         None => "Open a standalone shell in your home folder".to_owned(),
     };
-    outlined_button("sidebar-add-shell", ButtonSize::Toolbar, true, Layer::Base)
-        .flex_none()
-        .gap(px(6.0))
-        .child(icon(SIDEBAR_SHELL_ICON, 14.0, TEXT))
-        .child("Shell")
-        .tooltip(tooltip(tip))
-        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.quick_shell(cx)))
+    outlined_button(
+        "sidebar-add-shell",
+        ButtonSize::Toolbar,
+        true,
+        Layer::Base,
+        &theme(cx),
+    )
+    .flex_none()
+    .gap(px(6.0))
+    .child(icon(SIDEBAR_SHELL_ICON, 14.0, TEXT))
+    .child("Shell")
+    .tooltip(tooltip(tip))
+    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.quick_shell(cx)))
 }
 
 /// A muted line in the sessions body; `selector` tags it for the specs.
@@ -1738,7 +1750,7 @@ fn container_row(
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         .when(focused, |row| {
-            row.child(container_focus_ring(container))
+            row.child(container_focus_ring(container, &theme(cx)))
                 .child(focused_row_marker(key.clone(), cx))
         });
     let row = if summary.is_some() {
@@ -1848,8 +1860,8 @@ fn container_launch(
 }
 
 /// The 2 px accent ring of the container row holding the keyboard.
-fn container_focus_ring(container: &Container) -> Div {
-    focus_ring(4.0).debug_selector(|| format!("container-{}-focus", container.key))
+fn container_focus_ring(container: &Container, t: &UiTheme) -> Div {
+    focus_ring(4.0, t).debug_selector(|| format!("container-{}-focus", container.key))
 }
 
 /// A two-line row's text: the name line over the launch summary.
@@ -1901,7 +1913,7 @@ fn leaf_row(
                 .items_center()
                 .gap(px(8.0))
                 .h(px(COMPACT_LEAF_HEIGHT))
-                .children(label_head(leaf))
+                .children(label_head(leaf, &theme(cx)))
                 .children(inline_buttons(leaf, cx))
                 .children(chips)
         }
@@ -1910,7 +1922,7 @@ fn leaf_row(
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .children(label_head(leaf))
+                .children(label_head(leaf, &theme(cx)))
                 .children(inline_buttons(leaf, cx));
             let lower = comfortable_lower(leaf, ctx, window, cx);
             row.flex_col().py(px(6.0)).child(label_line).children(lower)
@@ -1999,13 +2011,14 @@ fn seen_idle(leaf: &Leaf) -> bool {
 /// The label line's start: the status glyph, the label (dimmed once an
 /// idle session's turn has been seen), the `!` badge or, on a session that
 /// does not count as busy, its marker, and the runtime tag.
-fn label_head(leaf: &Leaf) -> Vec<AnyElement> {
+fn label_head(leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement> {
     let seen_idle = seen_idle(leaf);
     let mut parts = vec![
         glyph_view(
-            glyph(leaf.status, leaf.background, leaf.mode, leaf.unseen),
+            glyph(leaf.status, leaf.background, leaf.mode, leaf.unseen, t),
             GlyphSize::Leaf,
             &format!("leaf-glyph-{}", leaf.id),
+            t,
         ),
         truncating(
             &format!("leaf-{}-label", leaf.id),

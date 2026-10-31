@@ -28,6 +28,7 @@ use crate::palette::{
     LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2, WAITING, WORKING,
 };
 use crate::status_glyph::{GlyphSize, Shape, glyph, glyph_view};
+use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, TEXT, UI_TEXT_SIZE};
 
 /// The grid's columns, as the mock sizes them; Now and Summary share what is
@@ -139,7 +140,7 @@ impl RootView {
                     cells
                         .nested
                         .iter()
-                        .map(|nested| nested_row(&cells.session_id, nested, columns)),
+                        .map(|nested| nested_row(&cells.session_id, nested, columns, &theme(cx))),
                 );
             }
         }
@@ -156,7 +157,7 @@ impl RootView {
             .text_color(gpui::rgb(TEXT))
             .debug_selector(|| "dashboard-view".to_owned())
             .child(width_probe(cx))
-            .child(header_strip(counts, self.dashboard_figures()))
+            .child(header_strip(counts, self.dashboard_figures(), &theme(cx)))
             .when(!chips.is_empty(), |view| {
                 view.child(queue_strip(&chips, &row_at, cx))
             })
@@ -188,13 +189,22 @@ impl RootView {
         let id = cells.session_id.clone();
         let name = format!("dashboard-row-{id}");
         let mark = self.sidebar.session(&id).map_or_else(
-            || glyph(SessionStatus::Idle, false, SessionMode::Interactive, false),
+            || {
+                glyph(
+                    SessionStatus::Idle,
+                    false,
+                    SessionMode::Interactive,
+                    false,
+                    &theme(cx),
+                )
+            },
             |s| {
                 glyph(
                     s.status,
                     s.background,
                     s.mode,
                     self.sidebar.is_unseen(&s.id),
+                    &theme(cx),
                 )
             },
         );
@@ -226,6 +236,7 @@ impl RootView {
                 mark,
                 GlyphSize::Leaf,
                 &format!("{name}-glyph"),
+                &theme(cx),
             )))
             .child(fixed(SESSION_W).child(session_cell(cells, accent, &name)))
             .when(columns.linear, |row| {
@@ -564,7 +575,7 @@ fn numbers(first: &str, second: &str) -> Div {
 /// A node of a Working row's agent tree: its name across the Session and
 /// Linear columns, its task across Now and Summary, its stuck flag, and its
 /// age under Run.
-fn nested_row(session_id: &str, nested: &NestedRow, columns: Columns) -> AnyElement {
+fn nested_row(session_id: &str, nested: &NestedRow, columns: Columns, t: &UiTheme) -> AnyElement {
     let name = format!("dashboard-sub-{session_id}-{}", nested.key);
     let name_w = SESSION_W + if columns.linear { GAP + LINEAR_W } else { 0.0 };
     let stuck_w = CONTEXT_W
@@ -606,9 +617,10 @@ fn nested_row(session_id: &str, nested: &NestedRow, columns: Columns) -> AnyElem
                             .child("└"),
                     )
                     .child(glyph_view(
-                        agent_glyph(nested.state),
+                        agent_glyph(nested.state, t),
                         GlyphSize::Footer,
                         &format!("{name}-glyph"),
+                        t,
                     ))
                     .child(line_text(&format!("{name}-name"), &nested.name).flex_1()),
             ),
@@ -704,22 +716,36 @@ fn column_header(columns: Columns) -> Div {
 }
 
 /// The title, the count pills and, once known, the day's figures.
-fn header_strip(counts: HeaderCounts, figures: Option<HeaderFigures>) -> Div {
+fn header_strip(counts: HeaderCounts, figures: Option<HeaderFigures>, t: &UiTheme) -> Div {
     let marks = [
         glyph(
             SessionStatus::AwaitingInput,
             false,
             SessionMode::Interactive,
             false,
+            t,
         ),
         glyph(
             SessionStatus::Working,
             false,
             SessionMode::Interactive,
             false,
+            t,
         ),
-        glyph(SessionStatus::Idle, false, SessionMode::Interactive, false),
-        glyph(SessionStatus::Idle, false, SessionMode::Interactive, true),
+        glyph(
+            SessionStatus::Idle,
+            false,
+            SessionMode::Interactive,
+            false,
+            t,
+        ),
+        glyph(
+            SessionStatus::Idle,
+            false,
+            SessionMode::Interactive,
+            true,
+            t,
+        ),
     ];
     let pills =
         header_pills(counts)
@@ -747,6 +773,7 @@ fn header_strip(counts: HeaderCounts, figures: Option<HeaderFigures>) -> Div {
                         mark,
                         GlyphSize::Footer,
                         &format!("{name}-glyph"),
+                        t,
                     ))
                     .child(
                         div()
@@ -862,6 +889,7 @@ fn queue_strip(
         false,
         SessionMode::Interactive,
         false,
+        &theme(cx),
     );
     let chips = chips.iter().map(|chip| {
         let name = format!("dashboard-queue-{}", chip.session_id);
@@ -885,7 +913,12 @@ fn queue_strip(
             .bg(gpui::rgb(RAISED))
             .text_size(px(12.0))
             .cursor_pointer()
-            .child(glyph_view(mark, GlyphSize::Leaf, &format!("{name}-glyph")))
+            .child(glyph_view(
+                mark,
+                GlyphSize::Leaf,
+                &format!("{name}-glyph"),
+                &theme(cx),
+            ))
             .child(
                 div()
                     .flex_none()

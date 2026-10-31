@@ -31,9 +31,10 @@ use crate::preset_wizard::{
     variable_placeholder,
 };
 use crate::repo_remove::{is_live, stop_message};
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::checkbox_row;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 use crate::{BORDER, DANGER, MUTED, RootView, TEXT, tooltip};
 
 /// The open wizard: its model and the entities of its text fields.
@@ -548,7 +549,7 @@ impl RootView {
             Stage::Variables => variables_body(dialog, pick_refusal, cx),
             Stage::Preview => preview_body(dialog),
         };
-        let panel = modal_panel("preset-wizard-panel")
+        let panel = modal_panel("preset-wizard-panel", &theme(cx))
             .track_focus(&self.preset_wizard_focus)
             .child(
                 div()
@@ -559,7 +560,7 @@ impl RootView {
             .children(description)
             .child(body)
             .child(wizard_footer(wizard, cx));
-        Some(backdrop("preset-wizard", panel))
+        Some(backdrop("preset-wizard", panel, &theme(cx)))
     }
 
     /// Whether the preset wizard is open.
@@ -994,9 +995,8 @@ fn pick_button(selector: &str, button: PickButton, cx: &mut Context<RootView>) -
     dialog_button(
         &format!("{selector}-pick"),
         PICK_LABEL.to_owned(),
+        dialog_look(false, pick_enabled, &theme(cx)),
         false,
-        false,
-        pick_enabled,
     )
     .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)))
     .when(pick_enabled, |button| {
@@ -1034,9 +1034,8 @@ fn picked_path_row(
         dialog_button(
             &format!("{selector}-clear"),
             CLEAR_LABEL.to_owned(),
+            dialog_look(false, true, &theme(cx)),
             false,
-            false,
-            true,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_clear(this, cx)))
     });
@@ -1235,7 +1234,7 @@ fn variable_field(
         )
         .into_any_element()
     } else if matches!(variable.kind, PresetVariableKind::Toggle { .. }) {
-        checkbox_row(&selector, wizard.toggle_on(&name), false, "")
+        checkbox_row(&selector, wizard.toggle_on(&name), false, "", &theme(cx))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.with_preset_wizard(cx, |wizard| wizard.toggle(&name));
             }))
@@ -1267,16 +1266,25 @@ fn variable_field(
 /// Launch on the preview. Cancel and Back wait while scripts run.
 fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
     let idle = !wizard.scripts_running();
-    let cancel = dialog_button("preset-cancel", "Cancel".to_owned(), false, false, idle).when(
-        idle,
-        |button| {
-            button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.close_preset_wizard(window, cx);
-            }))
-        },
-    );
+    let cancel = dialog_button(
+        "preset-cancel",
+        "Cancel".to_owned(),
+        dialog_look(false, idle, &theme(cx)),
+        false,
+    )
+    .when(idle, |button| {
+        button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.close_preset_wizard(window, cx);
+        }))
+    });
     let back = (wizard.stage() != Stage::Source).then(|| {
-        dialog_button("preset-back", "Back".to_owned(), false, false, idle).when(idle, |button| {
+        dialog_button(
+            "preset-back",
+            "Back".to_owned(),
+            dialog_look(false, idle, &theme(cx)),
+            false,
+        )
+        .when(idle, |button| {
             button.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.with_preset_wizard(cx, |wizard| {
                     wizard.back();
@@ -1286,21 +1294,25 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
     });
     let forward = if wizard.stage() == Stage::Preview {
         let state = wizard.launch_button();
-        dialog_button("preset-launch", state.label, false, false, state.enabled)
-            .when_some(state.tip, |button, tip| button.tooltip(tooltip(tip)))
-            .when(state.enabled, |button| {
-                button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    this.press_preset_launch(window, cx);
-                }))
-            })
+        dialog_button(
+            "preset-launch",
+            state.label,
+            dialog_look(false, state.enabled, &theme(cx)),
+            false,
+        )
+        .when_some(state.tip, |button, tip| button.tooltip(tooltip(tip)))
+        .when(state.enabled, |button| {
+            button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.press_preset_launch(window, cx);
+            }))
+        })
     } else {
         let state = wizard.next_button();
         dialog_button(
             "preset-next",
             "Next".to_owned(),
+            dialog_look(false, state.enabled, &theme(cx)),
             false,
-            false,
-            state.enabled,
         )
         .when_some(state.tip, |button, tip| button.tooltip(tooltip(tip)))
         .when(state.enabled, |button| {

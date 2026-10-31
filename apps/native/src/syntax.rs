@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
-use crate::palette::{LILAC, OCHRE, PERIWINKLE, ROSE, SUBTLE};
+use crate::ui_theme::UiTheme;
 
 /// A text with more lines than this is left uncoloured.
 pub const MAX_LINES: usize = 20_000;
@@ -47,15 +47,15 @@ impl TokenClass {
         Self::Function,
     ];
 
-    /// The colour the class is drawn in, as `0xRRGGBB`.
+    /// The colour the class is drawn in under `t`, as `0xRRGGBB`.
     #[must_use]
-    pub const fn color(self) -> u32 {
+    pub fn color(self, t: &UiTheme) -> u32 {
         match self {
-            Self::Comment => SUBTLE,
-            Self::String => LILAC,
-            Self::Keyword => ROSE,
-            Self::Constant | Self::Type => OCHRE,
-            Self::Function => PERIWINKLE,
+            Self::Comment => t.subtle,
+            Self::String => t.lilac,
+            Self::Keyword => t.rose,
+            Self::Constant | Self::Type => t.ochre,
+            Self::Function => t.periwinkle,
         }
     }
 
@@ -280,8 +280,11 @@ fn push(spans: &mut LineSpans, range: Range<usize>, class: Option<TokenClass>) {
 )]
 mod tests {
     use super::*;
+    use crate::palette::{LILAC, OCHRE, PERIWINKLE, ROSE, SUBTLE};
     use crate::theme;
     use alacritty_terminal::vte::ansi::Rgb;
+
+    const T: &UiTheme = &UiTheme::CONTRAST;
 
     /// Room for a debug build to parse a text at a cutoff's limit.
     const SLOW: Duration = Duration::from_secs(120);
@@ -507,21 +510,21 @@ mod tests {
 
     #[test]
     fn each_class_takes_its_diff_colour() {
-        let colors = TokenClass::ALL.map(TokenClass::color);
+        let colors = TokenClass::ALL.map(|class| class.color(T));
         assert_eq!(colors, [SUBTLE, LILAC, ROSE, OCHRE, OCHRE, PERIWINKLE]);
         assert_ne!(
-            TokenClass::Keyword.color(),
-            TokenClass::Function.color(),
+            TokenClass::Keyword.color(T),
+            TokenClass::Function.color(T),
             "a keyword and a function differ"
         );
-        assert_ne!(TokenClass::String.color(), TokenClass::Comment.color());
+        assert_ne!(TokenClass::String.color(T), TokenClass::Comment.color(T));
     }
 
     #[test]
     fn every_class_colour_clears_the_contrast_minimum() {
         let background = theme::DEFAULT_BACKGROUND;
         for class in TokenClass::ALL {
-            let [_, r, g, b] = class.color().to_be_bytes();
+            let [_, r, g, b] = class.color(T).to_be_bytes();
             let ratio = theme::contrast_ratio(Rgb { r, g, b }, background);
             assert!(ratio >= MIN_CONTRAST, "{class:?}: {ratio}");
         }

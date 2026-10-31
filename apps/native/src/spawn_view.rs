@@ -17,7 +17,7 @@ use protocol::{DaemonMessage, OptionValue, SpawnPlacement};
 use crate::agent_options::{FieldEditor, FieldView};
 use crate::agent_options_view;
 use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
-use crate::buttons::{ButtonKind, ButtonSize, Layer, button, field_frame, focus_ring};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame, focus_ring};
 use crate::combobox::{ComboRow, list_placement};
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::notices;
@@ -27,7 +27,7 @@ use crate::palette::{
     SPAWN_BADGE_OK, SUBTLE, TEXT_2, TRANSPARENT,
 };
 use crate::remote_mode::spawn_no_repos_note;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_form::{
     Control, EnvRow, EnvRowNote, FormInputs, ListField, Lock, OpenChoice, Outcome, Prefill,
     ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
@@ -38,6 +38,7 @@ use crate::spawn_preview::{
 };
 use crate::spawns::PaneAim;
 use crate::text_input::{NavKey, TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::{UiTheme, theme};
 use crate::{DANGER, MUTED, RootView, TEXT, WARNING, tagged_text, tooltip};
 
 /// The spawn dialog's width, as on the Spawn board.
@@ -1309,10 +1310,10 @@ impl RootView {
             .child(placement)
             .child(divided().children(self.worktree_rows(dialog, &focus, cx)))
             .child(run);
-        let close = close_button("spawn-close", focus == Control::Close).on_click(
+        let close = close_button("spawn-close", focus == Control::Close, &theme(cx)).on_click(
             cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
         );
-        let panel = dialog_card("spawn-panel", DIALOG_WIDTH)
+        let panel = dialog_card("spawn-panel", DIALOG_WIDTH, &theme(cx))
             .max_h(relative(PANEL_MAX_HEIGHT))
             .when(form.share_confirm().is_none(), |panel| {
                 panel.track_focus(&self.spawn_focus)
@@ -1321,7 +1322,7 @@ impl RootView {
             .child(body)
             .child(footer(form, &focus, cx))
             .child(measurer(Measured::Panel, cx));
-        let mut layers = vec![backdrop("spawn-dialog", panel)];
+        let mut layers = vec![backdrop("spawn-dialog", panel, &theme(cx))];
         if let Some(button) = form.share_confirm() {
             layers.push(self.share_layer(button, cx));
         }
@@ -1361,16 +1362,19 @@ impl RootView {
     /// The dialog with no repo to spawn into: the target's no-repos note over
     /// Add repo, and Spawn disabled.
     fn no_repos_layer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let close = close_button("spawn-close", false).on_click(
+        let close = close_button("spawn-close", false, &theme(cx)).on_click(
             cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
         );
         let gate = self.add_repo_gate();
         let add = button(
             "spawn-add-repo",
-            OUTLINED.0,
-            OUTLINED.1,
-            gate.enabled,
-            Layer::Floating,
+            button_look(
+                OUTLINED.0,
+                OUTLINED.1,
+                gate.enabled,
+                Layer::Floating,
+                &theme(cx),
+            ),
         )
         .flex_none()
         .child("Add repo")
@@ -1398,10 +1402,13 @@ impl RootView {
             .child(add);
         let cancel = button(
             "spawn-cancel",
-            ButtonKind::Outlined,
-            ButtonSize::Large,
-            true,
-            Layer::Floating,
+            button_look(
+                ButtonKind::Outlined,
+                ButtonSize::Large,
+                true,
+                Layer::Floating,
+                &theme(cx),
+            ),
         )
         .flex_none()
         .child("Cancel")
@@ -1410,19 +1417,22 @@ impl RootView {
         );
         let submit = button(
             "spawn-submit",
-            ButtonKind::Primary,
-            ButtonSize::Large,
-            false,
-            Layer::Floating,
+            button_look(
+                ButtonKind::Primary,
+                ButtonSize::Large,
+                false,
+                Layer::Floating,
+                &theme(cx),
+            ),
         )
         .flex_none()
         .child("Spawn");
-        let panel = dialog_card("spawn-panel", DIALOG_WIDTH)
+        let panel = dialog_card("spawn-panel", DIALOG_WIDTH, &theme(cx))
             .track_focus(&self.spawn_focus)
             .child(dialog_title_bar(DIALOG_TITLE, close))
             .child(body)
             .child(dialog_footer().child(cancel).child(submit));
-        backdrop("spawn-dialog", panel)
+        backdrop("spawn-dialog", panel, &theme(cx))
     }
 
     fn share_layer(&self, focused: ShareButton, cx: &mut Context<Self>) -> AnyElement {
@@ -1432,9 +1442,8 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    false,
+                    dialog_look(false, true, &theme(cx)),
                     focused == button,
-                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.answer_share(button, window, cx);
@@ -1442,12 +1451,12 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("spawn-share-panel")
+        let panel = modal_panel("spawn-share-panel", &theme(cx))
             .track_focus(&self.spawn_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(SHARE_TITLE))
             .child(div().child(SHARE_BODY))
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
-        backdrop("spawn-share-worktree-confirm", panel)
+        backdrop("spawn-share-worktree-confirm", panel, &theme(cx))
     }
 }
 
@@ -1478,8 +1487,8 @@ pub(crate) fn now_unix() -> i64 {
 
 /// A dialog's card, `width` wide and tagged `id`: the modal card, its
 /// header, body and footer bands drawn edge to edge.
-pub(crate) fn dialog_card(id: &'static str, width: f32) -> Stateful<Div> {
-    modal_panel(id)
+pub(crate) fn dialog_card(id: &'static str, width: f32, t: &UiTheme) -> Stateful<Div> {
+    modal_panel(id, t)
         .debug_selector(move || id.to_owned())
         .w(px(width))
         .p(px(0.0))
@@ -1529,7 +1538,7 @@ pub(crate) fn dialog_footer() -> Div {
 
 /// A dialog's close button, tagged `selector`: a borderless 28 px square
 /// holding the ✕, ringed while `focused`; the caller adds the handler.
-pub(crate) fn close_button(selector: &str, focused: bool) -> Stateful<Div> {
+pub(crate) fn close_button(selector: &str, focused: bool, t: &UiTheme) -> Stateful<Div> {
     let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -1550,7 +1559,7 @@ pub(crate) fn close_button(selector: &str, focused: bool) -> Stateful<Div> {
                 .text_color(gpui::rgb(TEXT))
         })
         .child("✕")
-        .when(focused, |close| close.child(focus_ring(CLOSE_RADIUS)))
+        .when(focused, |close| close.child(focus_ring(CLOSE_RADIUS, t)))
 }
 
 /// The dialog's first rows, which stand under no divider.
@@ -1619,6 +1628,7 @@ pub(crate) fn choice_button(
     label: impl IntoElement,
     look: Look,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    t: &UiTheme,
 ) -> Stateful<Div> {
     let (text, weight) = if look.selected {
         (TEXT, FontWeight::SEMIBOLD)
@@ -1654,7 +1664,7 @@ pub(crate) fn choice_button(
             segment.opacity(DISABLED_OPACITY).cursor_default()
         })
         .when(look.focused, |segment| {
-            segment.child(focus_ring(SEGMENT_RADIUS))
+            segment.child(focus_ring(SEGMENT_RADIUS, t))
         })
         .child(label)
 }
@@ -1667,6 +1677,7 @@ pub(crate) fn checkbox_row(
     checked: bool,
     focused: bool,
     label: impl IntoElement,
+    t: &UiTheme,
 ) -> Stateful<Div> {
     let name = selector.to_owned();
     // Each state tags the box itself, building its name only when a spec reads
@@ -1693,7 +1704,7 @@ pub(crate) fn checkbox_row(
             mark.debug_selector(|| format!("{name}-empty"))
                 .border_color(gpui::rgb(LINE_STRONG))
         })
-        .when(focused, |mark| mark.child(focus_ring(CHECK_RADIUS)));
+        .when(focused, |mark| mark.child(focus_ring(CHECK_RADIUS, t)));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -1723,6 +1734,7 @@ fn radio_row(
     chosen: bool,
     focused: bool,
     label: impl IntoElement,
+    t: &UiTheme,
 ) -> Stateful<Div> {
     let name = selector.to_owned();
     let ring = div()
@@ -1743,7 +1755,7 @@ fn radio_row(
                     .bg(gpui::rgb(ACCENT)),
             )
         })
-        .when(focused, |ring| ring.child(focus_ring(CHECK_SIZE / 2.0)));
+        .when(focused, |ring| ring.child(focus_ring(CHECK_SIZE / 2.0, t)));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -1766,10 +1778,15 @@ fn spawn_button(
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let focused = focus == control;
-    let base = button(&control.selector(), kind, size, enabled, Layer::Floating)
-        .flex_none()
-        .child(label)
-        .when(focused, |button| button.child(focus_ring(size.radius())));
+    let base = button(
+        &control.selector(),
+        button_look(kind, size, enabled, Layer::Floating, &theme(cx)),
+    )
+    .flex_none()
+    .child(label)
+    .when(focused, |button| {
+        button.child(focus_ring(size.radius(), &theme(cx)))
+    });
     let base = if enabled {
         base.on_click(press_control(control, cx))
     } else {
@@ -1811,7 +1828,13 @@ pub(crate) fn option_button(
     look: Look,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
-    let button = choice_button(control.selector(), label, look, press_control(control, cx));
+    let button = choice_button(
+        control.selector(),
+        label,
+        look,
+        press_control(control, cx),
+        &theme(cx),
+    );
     reveal_when_focused(button, control, look.focused, cx)
 }
 
@@ -1964,7 +1987,7 @@ fn checkbox(
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let focused = focus == control;
-    let row = checkbox_row(&control.selector(), checked, focused, label)
+    let row = checkbox_row(&control.selector(), checked, focused, label, &theme(cx))
         .on_click(press_control(control, cx));
     div()
         .flex()
@@ -2077,7 +2100,7 @@ pub(crate) fn input_box(
 ) -> Div {
     let selector = control.selector();
     let focused = focus == control;
-    field_frame(focused)
+    field_frame(focused, &theme(cx))
         .debug_selector(move || selector)
         .flex_1()
         .min_w(px(0.0))
@@ -2343,8 +2366,14 @@ fn collision_box(
             .gap(px(6.0))
             .child(label)
             .child(note);
-        let row = radio_row(&control.selector(), choice == chosen, focused, text)
-            .on_click(press_control(&control, cx));
+        let row = radio_row(
+            &control.selector(),
+            choice == chosen,
+            focused,
+            text,
+            &theme(cx),
+        )
+        .on_click(press_control(&control, cx));
         div()
             .flex()
             .child(reveal_when_focused(row, &control, focused, cx))
@@ -2451,7 +2480,9 @@ fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<Root
                 .text_color(gpui::rgb(TEXT_2)),
         )
         .child("Advanced")
-        .when(focused, |toggle| toggle.child(focus_ring(CHECK_RADIUS)));
+        .when(focused, |toggle| {
+            toggle.child(focus_ring(CHECK_RADIUS, &theme(cx)))
+        });
     let section = div().flex().flex_col().gap(px(14.0)).child(
         div()
             .flex()
@@ -2547,7 +2578,7 @@ fn env_value_cells(
         .get(index)
         .is_some_and(EnvRow::is_saved_secret);
     if saved {
-        let text = field_frame(false)
+        let text = field_frame(false, &theme(cx))
             .debug_selector(move || format!("spawn-env-saved-{index}"))
             .flex_1()
             .min_w(px(0.0))

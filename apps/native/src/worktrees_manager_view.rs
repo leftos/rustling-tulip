@@ -11,10 +11,11 @@ use protocol::{ClientMessage, DaemonMessage, RootWorktreeEntry, RootWorktreeStat
 use crate::buttons::RING_ROOM;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_view::SettingsControl;
 use crate::spawn_form::Lock;
 use crate::spawn_view::{SpawnEntry, now_unix};
+use crate::ui_theme::theme;
 use crate::worktrees_manager::{
     Action, Confirm, ConfirmButton, Control, EMPTY, SCANNING, TITLE, WorktreesManager,
 };
@@ -391,7 +392,7 @@ impl RootView {
             focused,
             cx,
         ));
-        let panel = modal_panel("worktrees-manager-panel")
+        let panel = modal_panel("worktrees-manager-panel", &theme(cx))
             .track_focus(&self.worktrees_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(muted(root))
@@ -406,7 +407,7 @@ impl RootView {
                 .top_0()
                 .left_0()
                 .size_full()
-                .child(backdrop("worktrees-manager", panel))
+                .child(backdrop("worktrees-manager", panel, &theme(cx)))
                 .children(confirm)
                 .into_any_element(),
         )
@@ -485,9 +486,8 @@ fn manager_button(
     let button = dialog_button(
         &manager.selector(&control),
         manager.label(&control),
-        danger,
+        dialog_look(danger, manager.enabled(&control), &theme(cx)),
         focused == Some(&control),
-        manager.enabled(&control),
     );
     let button = match manager.tooltip(&control) {
         Some(tip) => button.tooltip(tooltip(tip)),
@@ -508,15 +508,14 @@ fn confirm_layer(confirm: &Confirm, cx: &mut Context<RootView>) -> AnyElement {
         dialog_button(
             confirm.selector(button),
             confirm.label(button).to_owned(),
-            button == ConfirmButton::Ok,
+            dialog_look(button == ConfirmButton::Ok, true, &theme(cx)),
             confirm.focused() == button,
-            true,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.answer_worktrees_confirm(button, window, cx);
         }))
     });
-    let panel = modal_panel("worktrees-manager-confirm-panel")
+    let panel = modal_panel("worktrees-manager-confirm-panel", &theme(cx))
         .child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
@@ -525,7 +524,7 @@ fn confirm_layer(confirm: &Confirm, cx: &mut Context<RootView>) -> AnyElement {
         .child(div().child(confirm.body()))
         .child(muted(confirm.hint()))
         .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
-    backdrop("worktrees-manager-confirm", panel)
+    backdrop("worktrees-manager-confirm", panel, &theme(cx))
 }
 
 fn muted(text: impl Into<gpui::SharedString>) -> Div {

@@ -6,10 +6,7 @@
 
 use gpui::{Div, ElementId, FontWeight, MouseButton, SharedString, Stateful, div, prelude::*, px};
 
-use crate::palette::{
-    ACCENT, DANGER, DANGER_TEXT, GROUND, HOVER, LINE_STRONG, ON_ACCENT, POPOVER_HOVER,
-    POPOVER_PRESSED, PRESSED, PRIMARY, PRIMARY_HOVER, PRIMARY_PRESSED, TEXT, TRANSPARENT,
-};
+use crate::ui_theme::UiTheme;
 
 /// The opacity of a disabled button.
 const DISABLED_OPACITY: f32 = 0.45;
@@ -95,6 +92,8 @@ pub(crate) struct ButtonLook {
     pub weight: FontWeight,
     /// The whole button's opacity.
     pub opacity: f32,
+    /// Whether the button takes a press.
+    pub enabled: bool,
 }
 
 /// The layer a button is drawn on, which picks its hover and press fills
@@ -108,38 +107,40 @@ pub(crate) enum Layer {
 }
 
 impl Layer {
-    /// The fill of a hovered row or button on this layer, as `0xRRGGBB`.
-    pub(crate) const fn hover(self) -> u32 {
+    /// The fill of a hovered row or button on this layer in `t`, as
+    /// `0xRRGGBB`.
+    pub(crate) fn hover(self, t: &UiTheme) -> u32 {
         match self {
-            Self::Base => HOVER,
-            Self::Floating => POPOVER_HOVER,
+            Self::Base => t.hover,
+            Self::Floating => t.popover_hover,
         }
     }
 
-    /// The fill of a pressed button on this layer, as `0xRRGGBB`.
-    pub(crate) const fn pressed(self) -> u32 {
+    /// The fill of a pressed button on this layer in `t`, as `0xRRGGBB`.
+    pub(crate) fn pressed(self, t: &UiTheme) -> u32 {
         match self {
-            Self::Base => PRESSED,
-            Self::Floating => POPOVER_PRESSED,
+            Self::Base => t.pressed,
+            Self::Floating => t.popover_pressed,
         }
     }
 
-    /// Danger text on this layer, as `0xRRGGBB`.
-    pub(crate) const fn danger_text(self) -> u32 {
+    /// Danger text on this layer in `t`, as `0xRRGGBB`.
+    pub(crate) fn danger_text(self, t: &UiTheme) -> u32 {
         match self {
-            Self::Base => DANGER,
-            Self::Floating => DANGER_TEXT,
+            Self::Base => t.danger,
+            Self::Floating => t.danger_text,
         }
     }
 }
 
-/// The look of a `kind` button of `size` drawn on `layer`; a disabled one is
-/// dimmed and neither hover nor press changes it.
+/// The look of a `kind` button of `size` drawn on `layer` in `t`; a disabled
+/// one is dimmed and neither hover nor press changes it.
 pub(crate) fn button_look(
     kind: ButtonKind,
     size: ButtonSize,
     enabled: bool,
     layer: Layer,
+    t: &UiTheme,
 ) -> ButtonLook {
     let (height, pad_x, radius, text_size) = size.metrics();
     // Outlined and danger take their layer's hover and press fills; the
@@ -147,26 +148,26 @@ pub(crate) fn button_look(
     let (fill, hover, pressed, border, text, weight) = match kind {
         ButtonKind::Outlined => (
             None,
-            layer.hover(),
-            layer.pressed(),
-            Some(LINE_STRONG),
-            TEXT,
+            layer.hover(t),
+            layer.pressed(t),
+            Some(t.line_strong),
+            t.text,
             FontWeight::NORMAL,
         ),
         ButtonKind::Danger => (
             None,
-            layer.hover(),
-            layer.pressed(),
-            Some(LINE_STRONG),
-            layer.danger_text(),
+            layer.hover(t),
+            layer.pressed(t),
+            Some(t.line_strong),
+            layer.danger_text(t),
             FontWeight::NORMAL,
         ),
         ButtonKind::Primary => (
-            Some(PRIMARY),
-            PRIMARY_HOVER,
-            PRIMARY_PRESSED,
+            Some(t.primary),
+            t.primary_hover,
+            t.primary_pressed,
             None,
-            ON_ACCENT,
+            t.on_accent,
             FontWeight::BOLD,
         ),
     };
@@ -182,21 +183,15 @@ pub(crate) fn button_look(
         text,
         weight,
         opacity: if enabled { 1.0 } else { DISABLED_OPACITY },
+        enabled,
     }
 }
 
-/// A `kind` button of `size` on `layer`, tagged `selector`, with no label,
-/// tooltip or handler. A disabled one has the default cursor and its left
-/// press stops at it; its caller attaches no handler, so a click reaches
-/// nothing.
-pub(crate) fn button(
-    selector: &str,
-    kind: ButtonKind,
-    size: ButtonSize,
-    enabled: bool,
-    layer: Layer,
-) -> Stateful<Div> {
-    let look = button_look(kind, size, enabled, layer);
+/// A button drawn as `look` (see [`button_look`]), tagged `selector`, with
+/// no label, tooltip or handler. A disabled one has the default cursor and
+/// its left press stops at it; its caller attaches no handler, so a click
+/// reaches nothing.
+pub(crate) fn button(selector: &str, look: ButtonLook) -> Stateful<Div> {
     let name = selector.to_owned();
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -211,7 +206,7 @@ pub(crate) fn button(
         .border_1()
         .border_color(
             look.border
-                .map_or_else(|| gpui::rgba(TRANSPARENT), gpui::rgb),
+                .map_or_else(gpui::transparent_black, |border| gpui::rgb(border).into()),
         )
         .text_size(px(look.text_size))
         .font_weight(look.weight)
@@ -223,7 +218,7 @@ pub(crate) fn button(
         .when_some(look.pressed_fill, |button, fill| {
             button.active(move |style| style.bg(gpui::rgb(fill)))
         });
-    if enabled {
+    if look.enabled {
         base.cursor_pointer()
     } else {
         base.opacity(look.opacity)
@@ -232,30 +227,34 @@ pub(crate) fn button(
     }
 }
 
-/// An [`ButtonKind::Outlined`] button; see [`button`].
+/// An [`ButtonKind::Outlined`] button in `t`; see [`button`].
 pub(crate) fn outlined_button(
     selector: &str,
     size: ButtonSize,
     enabled: bool,
     layer: Layer,
+    t: &UiTheme,
 ) -> Stateful<Div> {
-    button(selector, ButtonKind::Outlined, size, enabled, layer)
+    let look = button_look(ButtonKind::Outlined, size, enabled, layer, t);
+    button(selector, look)
 }
 
-/// A [`ButtonKind::Primary`] button; see [`button`].
+/// A [`ButtonKind::Primary`] button in `t`; see [`button`].
 pub(crate) fn primary_button(
     selector: &str,
     size: ButtonSize,
     enabled: bool,
     layer: Layer,
+    t: &UiTheme,
 ) -> Stateful<Div> {
-    button(selector, ButtonKind::Primary, size, enabled, layer)
+    let look = button_look(ButtonKind::Primary, size, enabled, layer, t);
+    button(selector, look)
 }
 
 /// The keyboard focus ring of a control whose outer corners have `radius`:
-/// a 2 px accent ring just outside its 1 px border. The control adds it as a
-/// child; it takes no room in the control's layout.
-pub(crate) fn focus_ring(radius: f32) -> Div {
+/// a 2 px ring in `t`'s accent just outside its 1 px border. The control
+/// adds it as a child; it takes no room in the control's layout.
+pub(crate) fn focus_ring(radius: f32, t: &UiTheme) -> Div {
     let inset = px(-(CONTROL_BORDER + FOCUS_RING_WIDTH));
     div()
         .absolute()
@@ -264,7 +263,7 @@ pub(crate) fn focus_ring(radius: f32) -> Div {
         .right(inset)
         .bottom(inset)
         .border_2()
-        .border_color(gpui::rgb(ACCENT))
+        .border_color(gpui::rgb(t.accent))
         .rounded(px(radius + FOCUS_RING_WIDTH))
 }
 
@@ -285,32 +284,32 @@ pub(crate) struct FieldLook {
     pub ring: bool,
 }
 
-/// The look of a text field's frame, ringed while `focused`.
-pub(crate) fn field_look(focused: bool) -> FieldLook {
+/// The look of a text field's frame in `t`, ringed while `focused`.
+pub(crate) fn field_look(focused: bool, t: &UiTheme) -> FieldLook {
     FieldLook {
         min_height: 34.0,
         pad_x: 11.0,
         radius: 7.0,
-        fill: GROUND,
-        border: LINE_STRONG,
+        fill: t.ground,
+        border: t.line_strong,
         ring: focused,
     }
 }
 
-/// The frame of a text field, ringed while `focused`; the caller adds the
-/// input as its child.
-pub(crate) fn field_frame(focused: bool) -> Div {
-    framed_field(focused, None)
+/// The frame of a text field in `t`, ringed while `focused`; the caller
+/// adds the input as its child.
+pub(crate) fn field_frame(focused: bool, t: &UiTheme) -> Div {
+    framed_field(focused, None, t)
 }
 
 /// [`field_frame`] whose focus ring, while drawn, is tagged `ring_selector`.
-pub(crate) fn field_frame_with_ring(focused: bool, ring_selector: String) -> Div {
-    framed_field(focused, Some(ring_selector))
+pub(crate) fn field_frame_with_ring(focused: bool, ring_selector: String, t: &UiTheme) -> Div {
+    framed_field(focused, Some(ring_selector), t)
 }
 
-fn framed_field(focused: bool, ring_selector: Option<String>) -> Div {
-    let look = field_look(focused);
-    let ring = focus_ring(look.radius);
+fn framed_field(focused: bool, ring_selector: Option<String>, t: &UiTheme) -> Div {
+    let look = field_look(focused, t);
+    let ring = focus_ring(look.radius, t);
     let ring = match ring_selector {
         Some(selector) => ring.debug_selector(move || selector),
         None => ring,
@@ -330,10 +329,16 @@ fn framed_field(focused: bool, ring_selector: Option<String>) -> Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::{
+        DANGER, DANGER_TEXT, GROUND, HOVER, LINE_STRONG, ON_ACCENT, POPOVER_HOVER, POPOVER_PRESSED,
+        PRESSED, PRIMARY, PRIMARY_HOVER, PRIMARY_PRESSED, TEXT,
+    };
+
+    const T: &UiTheme = &UiTheme::CONTRAST;
 
     #[test]
     fn field_frame_is_ground_with_line_strong_at_34_px() {
-        let look = field_look(false);
+        let look = field_look(false, T);
         assert_eq!(
             (look.min_height, look.pad_x, look.radius),
             (34.0, 11.0, 7.0)
@@ -346,10 +351,10 @@ mod tests {
     #[test]
     fn focused_field_wears_the_ring() {
         assert_eq!(
-            field_look(true),
+            field_look(true, T),
             FieldLook {
                 ring: true,
-                ..field_look(false)
+                ..field_look(false, T)
             }
         );
     }
@@ -358,7 +363,8 @@ mod tests {
     fn size_radius_matches_the_look() {
         for size in SIZES {
             assert!(
-                (size.radius() - button_look(ButtonKind::Outlined, size, true, Layer::Base).radius)
+                (size.radius()
+                    - button_look(ButtonKind::Outlined, size, true, Layer::Base, T).radius)
                     .abs()
                     < f32::EPSILON
             );
@@ -374,7 +380,13 @@ mod tests {
 
     #[test]
     fn outlined_button_is_line_strong_on_transparent() {
-        let look = button_look(ButtonKind::Outlined, ButtonSize::Regular, true, Layer::Base);
+        let look = button_look(
+            ButtonKind::Outlined,
+            ButtonSize::Regular,
+            true,
+            Layer::Base,
+            T,
+        );
         assert_eq!(look.fill, None);
         assert_eq!(look.border, Some(LINE_STRONG));
         assert_eq!(look.text, TEXT);
@@ -386,6 +398,7 @@ mod tests {
             ButtonSize::Regular,
             true,
             Layer::Floating,
+            T,
         );
         assert_eq!(floating.hover_fill, Some(POPOVER_HOVER));
         assert_eq!(floating.pressed_fill, Some(POPOVER_PRESSED));
@@ -393,14 +406,26 @@ mod tests {
 
     #[test]
     fn primary_button_is_light_fill_with_on_accent_bold() {
-        let look = button_look(ButtonKind::Primary, ButtonSize::Compact, true, Layer::Base);
+        let look = button_look(
+            ButtonKind::Primary,
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            T,
+        );
         assert_eq!(look.fill, Some(PRIMARY));
         assert_eq!(look.text, ON_ACCENT);
         assert_eq!(look.weight, FontWeight::BOLD);
         assert_eq!(look.border, None, "no visible border");
         assert_eq!(look.hover_fill, Some(PRIMARY_HOVER));
         assert_eq!(look.pressed_fill, Some(PRIMARY_PRESSED));
-        let outlined = button_look(ButtonKind::Outlined, ButtonSize::Compact, true, Layer::Base);
+        let outlined = button_look(
+            ButtonKind::Outlined,
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            T,
+        );
         assert_eq!(
             (look.height, look.pad_x),
             (outlined.height, outlined.pad_x),
@@ -410,8 +435,20 @@ mod tests {
 
     #[test]
     fn danger_button_is_outlined_with_danger_text() {
-        let look = button_look(ButtonKind::Danger, ButtonSize::Regular, true, Layer::Base);
-        let outlined = button_look(ButtonKind::Outlined, ButtonSize::Regular, true, Layer::Base);
+        let look = button_look(
+            ButtonKind::Danger,
+            ButtonSize::Regular,
+            true,
+            Layer::Base,
+            T,
+        );
+        let outlined = button_look(
+            ButtonKind::Outlined,
+            ButtonSize::Regular,
+            true,
+            Layer::Base,
+            T,
+        );
         assert_eq!(look.text, DANGER);
         assert_eq!(ButtonLook { text: TEXT, ..look }, outlined);
         let floating = button_look(
@@ -419,6 +456,7 @@ mod tests {
             ButtonSize::Regular,
             true,
             Layer::Floating,
+            T,
         );
         assert_eq!(
             floating.text, DANGER_TEXT,
@@ -431,7 +469,7 @@ mod tests {
         let boxes: Vec<(f32, f32, f32, f32)> = SIZES
             .iter()
             .map(|&size| {
-                let look = button_look(ButtonKind::Outlined, size, true, Layer::Base);
+                let look = button_look(ButtonKind::Outlined, size, true, Layer::Base, T);
                 (look.height, look.pad_x, look.radius, look.text_size)
             })
             .collect();
@@ -454,14 +492,14 @@ mod tests {
             ButtonKind::Danger,
         ] {
             for size in SIZES {
-                let look = button_look(kind, size, false, Layer::Base);
+                let look = button_look(kind, size, false, Layer::Base, T);
                 assert!(
                     (look.opacity - 0.45).abs() < f32::EPSILON,
                     "{kind:?} {size:?}"
                 );
                 assert_eq!(look.hover_fill, None, "{kind:?} {size:?} takes no hover");
                 assert_eq!(look.pressed_fill, None, "{kind:?} {size:?} takes no press");
-                let enabled = button_look(kind, size, true, Layer::Base);
+                let enabled = button_look(kind, size, true, Layer::Base, T);
                 assert!((enabled.opacity - 1.0).abs() < f32::EPSILON);
             }
         }

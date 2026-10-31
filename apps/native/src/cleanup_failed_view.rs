@@ -12,7 +12,8 @@ use crate::cleanup_failed::{CleanupFailed, Control, open_folder_target, truncate
 use crate::notice_view::modal_panel;
 use crate::open::OpenJob;
 use crate::open_view::Then;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::ui_theme::theme;
 use crate::{MUTED, RootView, tooltip};
 
 const TITLE: &str = "Worktree didn't clean up";
@@ -267,14 +268,14 @@ impl RootView {
             .when(!processes.is_empty(), |list| {
                 list.child(div().flex().flex_col().gap(px(6.0)).children(processes))
             });
-        let panel = modal_panel("cleanup-failed-panel")
+        let panel = modal_panel("cleanup-failed-panel", &theme(cx))
             .track_focus(&self.cleanup_focus)
             .child(header)
             .child(div().child(dialog.body()))
             .child(list)
             .children(dialog.no_lockers_note().map(muted))
             .child(footer);
-        Some(backdrop("cleanup-failed", panel))
+        Some(backdrop("cleanup-failed", panel, &theme(cx)))
     }
 }
 
@@ -299,9 +300,8 @@ fn cleanup_button(
     let button = dialog_button(
         &control.selector(),
         label,
-        danger,
+        dialog_look(danger, refusal.is_none(), &theme(cx)),
         control == dialog.focused(),
-        refusal.is_none(),
     );
     match refusal {
         Some(tip) => button.tooltip(tooltip(tip)),

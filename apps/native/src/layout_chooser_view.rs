@@ -15,9 +15,10 @@ use crate::layout_chooser::{
 };
 use crate::notice_view::modal_panel;
 use crate::palette::SELECTED_BG;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::close_button;
 use crate::tabs::collect_panes;
+use crate::ui_theme::theme;
 use crate::{BORDER, MUTED, RootView, TEXT};
 
 const TITLE: &str = "Set up this window";
@@ -198,12 +199,12 @@ impl RootView {
                 _ => {}
             }
         }
-        let panel = modal_panel("layout-chooser-panel")
+        let panel = modal_panel("layout-chooser-panel", &theme(cx))
             .track_focus(&self.chooser_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(div().text_color(gpui::rgb(MUTED)).child(INTRO))
             .child(div().flex().flex_col().gap(px(6.0)).children(options));
-        Some(backdrop("layout-chooser", panel))
+        Some(backdrop("layout-chooser", panel, &theme(cx)))
     }
 
     /// A press of a picker control, in whichever modal shows the picker.
@@ -429,7 +430,7 @@ impl RootView {
                 options.push(picker.into_any_element());
             }
         }
-        let close = close_button("import-close", false).on_click(cx.listener(
+        let close = close_button("import-close", false, &theme(cx)).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
                 this.press_import_control(&ImportControl::Keep, window, cx);
             },
@@ -441,7 +442,7 @@ impl RootView {
             .gap(px(8.0))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(IMPORT_TITLE))
             .child(close);
-        let panel = modal_panel("import-panel")
+        let panel = modal_panel("import-panel", &theme(cx))
             .track_focus(&self.chooser_focus)
             .child(header)
             .child(
@@ -451,7 +452,7 @@ impl RootView {
             )
             .child(div().text_color(gpui::rgb(MUTED)).child(IMPORT_REPLACES))
             .child(div().flex().flex_col().gap(px(6.0)).children(options));
-        Some(backdrop("import-modal", panel))
+        Some(backdrop("import-modal", panel, &theme(cx)))
     }
 }
 
@@ -518,9 +519,8 @@ fn picker_button(
     dialog_button(
         &control.selector(),
         chooser.label(control, aspect),
-        false,
+        dialog_look(false, true, &theme(cx)),
         focused == Some(control),
-        true,
     )
     .when(chooser.is_selected(control), |button| {
         button.bg(gpui::rgb(SELECTED_BG))

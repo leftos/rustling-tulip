@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::notice_view::toast_frame;
+use crate::ui_theme::UiTheme;
 use crate::{FOOTER_HEIGHT, RootView, tooltip};
 
 /// How long the chip takes to fade out.
@@ -131,12 +132,13 @@ impl RootView {
     }
 
     /// The chip, centred just above the footer bar while a copy is recent.
-    pub(crate) fn chip_layer(&self) -> Option<AnyElement> {
+    pub(crate) fn chip_layer(&self, t: &UiTheme) -> Option<AnyElement> {
         let chars = self.copy_chip.chars()?;
         let generation = self.copy_chip.generation();
-        let chip = toast_frame(ElementId::Name(SharedString::from(format!(
-            "copied-chip-{generation}"
-        ))))
+        let chip = toast_frame(
+            ElementId::Name(SharedString::from(format!("copied-chip-{generation}"))),
+            t,
+        )
         .debug_selector(|| CHIP_LABEL.to_owned())
         .shadow_none()
         .px(px(10.0))

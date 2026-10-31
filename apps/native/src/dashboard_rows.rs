@@ -17,6 +17,7 @@ use crate::dashboard::{DashboardRow, GroupKind, HeaderCounts};
 use crate::dashboard_facts::FactsStore;
 use crate::needs_you::{self, Reason};
 use crate::status_glyph::{Glyph, glyph};
+use crate::ui_theme::UiTheme;
 
 /// The ten-minute window of a session nothing was counted for yet.
 const QUIET_WINDOW: [u16; 10] = [0; 10];
@@ -364,7 +365,7 @@ pub struct NestedRow {
 /// The glyph a nested row's node shows for where it is in its run: a
 /// running node as working, a queued one as the faint ring, a finished one
 /// as the stopped dot, a failed one as the error dot.
-pub(crate) fn agent_glyph(state: AgentState) -> Glyph {
+pub(crate) fn agent_glyph(state: AgentState, t: &UiTheme) -> Glyph {
     let status = match state {
         AgentState::Running => SessionStatus::Working,
         AgentState::Queued => SessionStatus::Spawning,
@@ -372,7 +373,7 @@ pub(crate) fn agent_glyph(state: AgentState) -> Glyph {
         AgentState::Failed => SessionStatus::Error,
         AgentState::Unknown => SessionStatus::Idle,
     };
-    glyph(status, false, SessionMode::Interactive, false)
+    glyph(status, false, SessionMode::Interactive, false, t)
 }
 
 /// Everything one Dashboard row draws, column by column.
@@ -1426,7 +1427,7 @@ mod tests {
             AgentState::Failed,
             AgentState::Unknown,
         ]
-        .map(|state| agent_glyph(state).shape);
+        .map(|state| agent_glyph(state, &UiTheme::CONTRAST).shape);
         assert_eq!(
             shapes,
             [

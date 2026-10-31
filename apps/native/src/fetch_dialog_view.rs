@@ -14,8 +14,9 @@ use crate::fetch_link;
 use crate::file_fetch::FetchEntry;
 use crate::notice_view::modal_panel;
 use crate::palette::{ACCENT, BORDER, DANGER, DANGER_BG, MUTED, SELECTED_BG, TEXT};
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 
 const TITLE: &str = "Fetch file";
 
@@ -367,9 +368,8 @@ impl RootView {
         let close = dialog_button(
             &FetchControl::Close.selector(),
             "✕".to_owned(),
-            false,
+            dialog_look(false, dismissable, &theme(cx)),
             focus == FetchControl::Close,
-            dismissable,
         )
         .when(dismissable, |button| {
             button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -403,14 +403,14 @@ impl RootView {
                     .text_color(gpui::rgb(DANGER))
                     .child(error.to_owned())
             }));
-        let panel = modal_panel("fetch-panel")
+        let panel = modal_panel("fetch-panel", &theme(cx))
             .track_focus(&self.fetch_focus)
             .child(header)
             .child(scope_row(form, focus, cx))
             .child(field)
             .children(self.fetch_dialog_progress().map(progress_row))
             .child(footer(form.can_submit(&text), dismissable, focus, cx));
-        Some(backdrop("fetch-dialog", panel))
+        Some(backdrop("fetch-dialog", panel, &theme(cx)))
     }
 }
 
@@ -438,9 +438,8 @@ fn scope_row(form: &FetchForm, focus: FetchControl, cx: &mut Context<RootView>) 
         dialog_button(
             &control.selector(),
             root.repo_name.clone(),
-            false,
+            dialog_look(false, enabled, &theme(cx)),
             focus == control,
-            enabled,
         )
         .when(chosen.as_deref() == Some(root.repo_id.as_str()), |button| {
             button.bg(gpui::rgb(SELECTED_BG))
@@ -504,9 +503,8 @@ fn footer(
     let cancel = dialog_button(
         &FetchControl::Cancel.selector(),
         "Cancel".to_owned(),
-        false,
+        dialog_look(false, dismissable, &theme(cx)),
         focus == FetchControl::Cancel,
-        dismissable,
     )
     .when(dismissable, |button| {
         button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -516,9 +514,8 @@ fn footer(
     let submit = dialog_button(
         &FetchControl::Submit.selector(),
         "Fetch".to_owned(),
-        false,
+        dialog_look(false, can_submit, &theme(cx)),
         focus == FetchControl::Submit,
-        can_submit,
     )
     .when(can_submit, |button| {
         button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {

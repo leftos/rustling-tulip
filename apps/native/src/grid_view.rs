@@ -36,6 +36,7 @@ use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{self, PaneBinding, TabsModel};
 use crate::term::prompt_nav::Dir;
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
+use crate::ui_theme::theme;
 use crate::{
     BORDER, Drag, MUTED, PANE_GUTTER, RootView, TEXT, UI_TEXT_SIZE, new_request_id, tooltip,
 };
@@ -1317,7 +1318,7 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .children(self.orphan_banner(pane_id, session_id))
+            .children(self.orphan_banner(pane_id, session_id, &theme(cx)))
             .child(body)
             .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
@@ -1527,7 +1528,7 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .children(self.orphan_banner(&slot_id, Some(session_id)))
+            .children(self.orphan_banner(&slot_id, Some(session_id), &theme(cx)))
             .child(body)
             .children(self.exited_overlay(None, &slot_id, Some(session_id), cx))
             .children(self.abandoned_overlay(&slot_id, Some(session_id), cx));
@@ -1572,7 +1573,7 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .children(self.orphan_banner(pane_id, session_id))
+            .children(self.orphan_banner(pane_id, session_id, &theme(cx)))
             .child(body)
             .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
@@ -2196,9 +2197,16 @@ fn header_title(
             .id(SharedString::from(format!("pane-status-{pane_id}")))
             .flex_none()
             .child(glyph_view(
-                glyph(parts.status, parts.background, parts.mode, parts.unseen),
+                glyph(
+                    parts.status,
+                    parts.background,
+                    parts.mode,
+                    parts.unseen,
+                    &theme(cx),
+                ),
                 GlyphSize::Leaf,
                 &format!("pane-glyph-{pane_id}"),
+                &theme(cx),
             ))
             .tooltip(tooltip(parts.status_tip.clone()))
             .into_any_element(),

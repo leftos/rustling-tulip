@@ -14,6 +14,7 @@ use crate::overlay_owner::Overlay;
 use crate::pane_close::PaneClose;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator};
 use crate::tabs::{collect_panes, pick_balanced_drop_target};
+use crate::ui_theme::theme;
 use crate::undo;
 use crate::{RootView, tooltip};
 
@@ -334,7 +335,7 @@ impl RootView {
             .empty_pane_menu_lines(menu)
             .into_iter()
             .map(|line| match line {
-                None => menu_separator().into_any_element(),
+                None => menu_separator(&theme(cx)).into_any_element(),
                 Some(row) => empty_pane_row(row, cx).into_any_element(),
             })
             .collect();
@@ -346,6 +347,7 @@ impl RootView {
                 this.close_empty_pane_menu(window, cx);
                 cx.stop_propagation();
             }),
+            &theme(cx),
         )
         .children(rows);
         let backdrop = div().absolute().top_0().left_0().size_full().occlude();
@@ -443,7 +445,7 @@ impl RootView {
 
 /// A row of the empty pane's menu, with its hover text when it has one.
 fn empty_pane_row(row: MenuRow, cx: &mut Context<RootView>) -> Stateful<Div> {
-    let item = menu_item(&row.selector, row.label, false);
+    let item = menu_item(&row.selector, row.label, false, &theme(cx));
     let item = match row.tip {
         Some(tip) => item.tooltip(tooltip(tip)),
         None => item,

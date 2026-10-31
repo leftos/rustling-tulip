@@ -12,9 +12,10 @@ use protocol::{ClientMessage, RepoEntry, VscodeWorkspaceSuggestion, WorkspaceEnt
 
 use crate::notice_view::modal_panel;
 use crate::repo_add::host_workspace_file;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::checkbox_row;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 use crate::workspace_creator::{
     CreatorControl, CreatorMode, FILE_LABEL, MEMBERS_LABEL, NAME_PLACEHOLDER, NO_FILE, PARSING,
     Settled, TITLE, WORKSPACE_NAME_LABEL, WorkspaceCreator, file_field_label,
@@ -484,9 +485,8 @@ impl RootView {
         let cancel = dialog_button(
             CreatorControl::Cancel.selector(),
             "Cancel".to_owned(),
-            false,
+            dialog_look(false, true, &theme(cx)),
             focus == CreatorControl::Cancel,
-            true,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.press_workspace_control(CreatorControl::Cancel, window, cx);
@@ -495,16 +495,15 @@ impl RootView {
         let create = dialog_button(
             CreatorControl::Create.selector(),
             "Create".to_owned(),
-            false,
+            dialog_look(false, can_submit, &theme(cx)),
             focus == CreatorControl::Create,
-            can_submit,
         )
         .when(can_submit, |button| {
             button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.press_workspace_control(CreatorControl::Create, window, cx);
             }))
         });
-        let panel = modal_panel("workspace-creator-panel")
+        let panel = modal_panel("workspace-creator-panel", &theme(cx))
             .track_focus(&self.workspace_creator_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(tabs)
@@ -518,7 +517,7 @@ impl RootView {
                     .child(cancel)
                     .child(create),
             );
-        Some(backdrop("workspace-creator", panel))
+        Some(backdrop("workspace-creator", panel, &theme(cx)))
     }
 
     /// Whether the workspace creator is open.
@@ -739,7 +738,7 @@ fn repos_body(
                 .strip_prefix("workspace-creator-member-")
                 .unwrap_or_default()
                 .to_owned();
-            checkbox_row(&selector, checked, false, name).on_click(cx.listener(
+            checkbox_row(&selector, checked, false, name, &theme(cx)).on_click(cx.listener(
                 move |this, _: &ClickEvent, _, cx| this.toggle_workspace_member(&repo_id, cx),
             ))
         }))
@@ -813,9 +812,8 @@ fn browse_row(
     let browse = dialog_button(
         CreatorControl::Browse.selector(),
         "Browse…".to_owned(),
-        false,
+        dialog_look(false, browse_enabled, &theme(cx)),
         focus == CreatorControl::Browse,
-        browse_enabled,
     )
     .when(browse_enabled, |button| {
         button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {

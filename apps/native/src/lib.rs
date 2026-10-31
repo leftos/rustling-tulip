@@ -127,6 +127,7 @@ mod term_view;
 mod text_input;
 mod theme;
 pub mod toast_activation;
+pub mod ui_theme;
 mod undo;
 mod undo_view;
 pub mod update;
@@ -218,6 +219,7 @@ use crate::tabs::{
 };
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
+use crate::ui_theme::{UiTheme, theme};
 use crate::undo::UndoShelf;
 use crate::vscode_suggestion::VscodeSuggestions;
 use crate::window_layouts::WindowLayouts;
@@ -1270,6 +1272,7 @@ impl RootView {
             .map_or_else(UiState::default, load_ui_state);
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
         fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
+        ui_theme::set_theme(ui_theme::UiTheme::CONTRAST, cx);
         let mut view = Self {
             tx,
             now,
@@ -2350,6 +2353,13 @@ impl RootView {
             None => fonts::set_ui_family(stored, cx),
         }
         self.save_ui();
+        cx.refresh_windows();
+    }
+
+    /// Makes `theme` the one the interface draws in, and redraws every
+    /// window in it.
+    pub fn set_theme(&mut self, theme: ui_theme::UiTheme, cx: &mut Context<Self>) {
+        ui_theme::set_theme(theme, cx);
         cx.refresh_windows();
     }
 
@@ -4583,7 +4593,7 @@ impl Render for RootView {
             // Above the flyout's backdrop, so the chip's tooltip is reachable
             // while the flyout is open: its own copy button has no other
             // confirmation to show.
-            .children(self.chip_layer())
+            .children(self.chip_layer(&theme(cx)))
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
             .children(self.fetch_dialog_layer(cx))
@@ -4711,7 +4721,12 @@ impl RootView {
             .text_color(gpui::rgb(TEXT_2))
             .child(connections)
             .child(pill)
-            .children(counts.spans().into_iter().map(footer_count))
+            .children(
+                counts
+                    .spans()
+                    .into_iter()
+                    .map(|span| footer_count(span, &theme(cx))),
+            )
             .child(
                 ellipsis::truncating("footer-status", StyledText::new(self.footer_status()))
                     .debug_selector(|| "footer-status".to_owned())
@@ -4742,7 +4757,7 @@ impl RootView {
             .when(manages_daemon, |details| {
                 details.child(self.handshake_row(cx))
             });
-        popover_frame("daemon-flyout")
+        popover_frame("daemon-flyout", &theme(cx))
             .absolute()
             .left(px(PADDING))
             .bottom(px(FOOTER_HEIGHT + 4.0))
@@ -4753,7 +4768,7 @@ impl RootView {
             .p(px(10.0))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Daemon"))
             .child(details)
-            .child(self.files_section(manages_daemon))
+            .child(self.files_section(manages_daemon, &theme(cx)))
             .child(self.control_section(manages_daemon, cx))
             .into_any_element()
     }
@@ -4779,8 +4794,8 @@ impl RootView {
     /// "Logs & files": open the logs, reveal the config folder; disabled with
     /// the error when the config dir could not be resolved. `daemon.log`
     /// shows only with `daemon_log`, as a remote host's log is not here.
-    fn files_section(&self, daemon_log: bool) -> Div {
-        let section = flyout_section("Logs & files");
+    fn files_section(&self, daemon_log: bool, t: &UiTheme) -> Div {
+        let section = flyout_section("Logs & files", t);
         match &self.paths {
             Ok(paths) => section
                 .when(daemon_log, |section| {
@@ -4829,7 +4844,7 @@ impl RootView {
     /// two-click stop only with `stop`.
     fn control_section(&self, stop: bool, cx: &mut Context<Self>) -> Div {
         let armed = self.stop.armed;
-        flyout_section("Control")
+        flyout_section("Control", &theme(cx))
             .child(
                 action_button("restart-daemon", self.conn.restart_label(), TEXT, true).on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -4935,7 +4950,7 @@ fn connecting_overlay(
 
 /// One of the footer's status counts: its glyph, then its text, tagged
 /// `footer-count-<kind>`.
-fn footer_count(span: CountSpan) -> Div {
+fn footer_count(span: CountSpan, t: &UiTheme) -> Div {
     let name = span.kind.name();
     div()
         .flex()
@@ -4944,9 +4959,10 @@ fn footer_count(span: CountSpan) -> Div {
         .gap(px(6.0))
         .debug_selector(move || format!("footer-count-{name}"))
         .child(glyph_view(
-            span.kind.glyph(),
+            span.kind.glyph(t),
             GlyphSize::Footer,
             &format!("footer-glyph-{name}"),
+            t,
         ))
         .child(span.text)
 }

@@ -22,6 +22,7 @@ use crate::sidebar::{Activity, display_label};
 use crate::source_control::{Part, ScKey, Section, sections};
 use crate::stash_view::{ScStashes, stashes_part};
 use crate::text_input::TextInput;
+use crate::ui_theme::theme;
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
 /// The panel's title.
@@ -566,6 +567,7 @@ impl RootView {
                     this.close_sc_picker(window, cx);
                     cx.stop_propagation();
                 }),
+                &theme(cx),
             )
             .children(
                 self.sc_picker_rows()
@@ -590,7 +592,7 @@ fn picker_row(row: ScPickerRow, cx: &mut Context<RootView>) -> Stateful<Div> {
         repo_id,
         checked,
     } = row;
-    menu_item(&selector, label, false)
+    menu_item(&selector, label, false, &theme(cx))
         .flex()
         .items_center()
         .justify_between()

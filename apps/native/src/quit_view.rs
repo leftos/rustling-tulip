@@ -14,7 +14,8 @@ use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
 use crate::quit::{BODY, Counts, ExitButton, ExitDialog, TITLE, Walk, covered, removal_messages};
 use crate::session_menu::backdrop;
-use crate::session_menu::{ConfirmOwner, dialog_button};
+use crate::session_menu::{ConfirmOwner, dialog_button, dialog_look};
+use crate::ui_theme::theme;
 use crate::{DANGER, MUTED, RootView};
 
 /// Quits the app: `cx.quit()` in the binary, a recorder in the specs.
@@ -508,9 +509,8 @@ impl RootView {
                 let element = dialog_button(
                     button.selector(),
                     model.label(button, counts),
-                    button.is_danger(),
+                    dialog_look(button.is_danger(), enabled, &theme(cx)),
                     focused == Some(button),
-                    enabled,
                 );
                 if enabled {
                     element
@@ -533,7 +533,7 @@ impl RootView {
                     .orphan_note()
                     .map(|note| div().text_color(gpui::rgb(MUTED)).child(note)),
             );
-        let panel = modal_panel("exit-confirm-panel")
+        let panel = modal_panel("exit-confirm-panel", &theme(cx))
             .track_focus(&self.quit_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(div().child(BODY))
@@ -556,6 +556,6 @@ impl RootView {
                     .gap(px(6.0))
                     .children(buttons),
             );
-        Some(backdrop("exit-confirm-dialog", panel))
+        Some(backdrop("exit-confirm-dialog", panel, &theme(cx)))
     }
 }

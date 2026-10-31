@@ -10,9 +10,10 @@ use protocol::ClientMessage;
 
 use crate::move_panes::{Control, LayoutChoice, MovePanes, NAME_LABEL, NAME_PLACEHOLDER, TITLE};
 use crate::notice_view::modal_panel;
-use crate::session_menu::{backdrop, dialog_button};
+use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::tabs::collect_panes;
 use crate::text_input::{TextInput, TextInputEvent};
+use crate::ui_theme::theme;
 use crate::{BORDER, MUTED, RootView};
 
 /// The open dialog: its model and its name field.
@@ -280,7 +281,7 @@ impl RootView {
             .child(button(Control::Cancel, false))
             .child(button(Control::Confirm, false));
         let row = || div().flex().flex_wrap().gap(px(6.0));
-        let panel = modal_panel("move-panes-panel")
+        let panel = modal_panel("move-panes-panel", &theme(cx))
             .track_focus(&self.pane_ui.dialog_focus)
             .child(header)
             .child(muted(model.hint()))
@@ -293,7 +294,7 @@ impl RootView {
             .child(muted(NAME_LABEL))
             .child(Self::move_panes_name_field(dialog, cx))
             .child(footer);
-        Some(backdrop("move-panes", panel))
+        Some(backdrop("move-panes", panel, &theme(cx)))
     }
 
     /// The name field, outlined while focused; a press gives it the focus.
@@ -329,9 +330,8 @@ fn move_panes_button(
     let button = dialog_button(
         &model.selector(control),
         label,
-        false,
+        dialog_look(false, enabled, &theme(cx)),
         control == model.focused(),
-        enabled,
     )
     .when(selected, |button| {
         button.bg(gpui::rgb(crate::palette::POPOVER_HOVER))

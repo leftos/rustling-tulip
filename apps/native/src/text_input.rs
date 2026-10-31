@@ -24,7 +24,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::palette::{INPUT_CURSOR, INPUT_PLACEHOLDER, INPUT_SELECTION, INPUT_TEXT};
+use crate::ui_theme::{UiTheme, theme};
 
 /// The key context a single-line input's bindings apply in.
 const CONTEXT: &str = "TextInput";
@@ -889,7 +889,12 @@ impl TextLayout {
     /// One quad a row the selection `range` covers, `origin` the first row's
     /// top left. A row whose line break is selected shows a sliver past its
     /// end, so a selected empty line shows too.
-    fn selection_quads(&self, range: &Range<usize>, origin: Point<Pixels>) -> Vec<PaintQuad> {
+    fn selection_quads(
+        &self,
+        range: &Range<usize>,
+        origin: Point<Pixels>,
+        t: &UiTheme,
+    ) -> Vec<PaintQuad> {
         let line_break_width = self.line_height / 4.;
         self.rows
             .iter()
@@ -911,7 +916,7 @@ impl TextLayout {
                     point(origin.x + left, top),
                     point(origin.x + right, top + self.line_height),
                 );
-                Some(fill(corners, rgba(INPUT_SELECTION)))
+                Some(fill(corners, rgba(t.input_selection)))
             })
             .collect()
     }
@@ -1166,12 +1171,12 @@ struct Shaping {
 }
 
 impl Shaping {
-    fn of(input: &TextInput, window: &Window) -> Self {
+    fn of(input: &TextInput, window: &Window, t: &UiTheme) -> Self {
         let style = window.text_style();
         let (text, color) = if input.content.is_empty() {
-            (input.placeholder.clone(), rgb(INPUT_PLACEHOLDER))
+            (input.placeholder.clone(), rgb(t.input_placeholder))
         } else {
-            (input.shown(), rgb(INPUT_TEXT))
+            (input.shown(), rgb(t.input_text))
         };
         // A single-line input draws one row: a line break its owner set draws
         // as a space, byte for byte, so the offsets still hold.
@@ -1255,7 +1260,7 @@ impl Element for TextElement {
             style.size.height = line_height.into();
             return (window.request_layout(style, [], cx), ());
         };
-        let shaping = Shaping::of(input, window);
+        let shaping = Shaping::of(input, window, &theme(cx));
         let layout_id =
             window.request_measured_layout(style, move |known, available, window, _| {
                 let width = known.width.or(match available.width {
@@ -1282,11 +1287,12 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let t = theme(cx);
         let input = self.input.read(cx);
         let multi_line = input.mode.is_multi_line();
         let line_height = window.line_height();
         let wrap_width = multi_line.then_some(bounds.size.width);
-        let Some(lines) = Shaping::of(input, window).shape(window, wrap_width) else {
+        let Some(lines) = Shaping::of(input, window, &t).shape(window, wrap_width) else {
             return PrepaintState {
                 layout: None,
                 origin: bounds.origin,
@@ -1312,10 +1318,10 @@ impl Element for TextElement {
         let origin = point(bounds.left(), bounds.top() - scroll_y);
         let (selection, cursor) = if let Some(painted) = painted {
             let shown = input.range_to_shown(&painted);
-            (layout.selection_quads(&shown, origin), None)
+            (layout.selection_quads(&shown, origin, &t), None)
         } else {
             let caret = Bounds::new(origin + caret, size(px(2.), line_height));
-            (Vec::new(), Some(fill(caret, rgb(INPUT_CURSOR))))
+            (Vec::new(), Some(fill(caret, rgb(t.input_cursor))))
         };
         self.input.update(cx, |input, _| input.scroll_y = scroll_y);
         PrepaintState {
