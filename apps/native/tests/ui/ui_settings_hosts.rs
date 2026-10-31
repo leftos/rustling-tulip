@@ -10,7 +10,9 @@
 use crate::support;
 
 use gpui::{TestAppContext, px};
-use protocol::{AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, OptionValue};
+use protocol::{
+    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValue,
+};
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
 use support::{Fixture, Harness, PROTOCOL, TestDir, daemon_features, session};
@@ -299,6 +301,14 @@ fn the_chosen_host_disconnecting_returns_the_selector_to_this_pc(cx: &mut TestAp
 /// Walks Tab from where the keyboard is round the shown page's ring to the
 /// tab list, checking every control it reaches is drawn.
 fn assert_tab_reaches_only_drawn_controls(h: &mut Harness<'_>) {
+    for selector in tab_ring(h) {
+        assert!(drawn(h, selector), "Tab reached undrawn {selector}");
+    }
+}
+
+/// The controls Tab reaches from where the keyboard is round the shown
+/// page's ring, until it returns to the tab list.
+fn tab_ring(h: &mut Harness<'_>) -> Vec<&'static str> {
     let mut reached = Vec::new();
     for _ in 0..40 {
         h.keys("tab");
@@ -318,9 +328,7 @@ fn assert_tab_reaches_only_drawn_controls(h: &mut Harness<'_>) {
         reached.len() < 40,
         "Tab never returned to the tab list: {reached:?}"
     );
-    for selector in reached {
-        assert!(drawn(h, selector), "Tab reached undrawn {selector}");
-    }
+    reached
 }
 
 #[gpui::test]
@@ -342,6 +350,252 @@ fn a_remote_agent_list_keeps_this_pcs_agent_page_while_this_pc_is_down(cx: &mut 
     assert!(
         shown_tab(&mut h).eq_ignore_ascii_case("claude"),
         "box's agent list says nothing about This PC's pages"
+    );
+}
+
+/// The worktrees root each host's daemon reports: This PC's and box's
+/// overrides.
+fn two_roots(h: &mut Harness<'_>) {
+    h.send(root_changed(LOCAL_ROOT));
+    h.host(&remote()).send(root_changed(BOX_ROOT));
+}
+
+const LOCAL_ROOT: &str = "C:\\local-wt";
+const BOX_ROOT: &str = "/home/me/wt";
+
+fn root_changed(root: &str) -> DaemonMessage {
+    DaemonMessage::WorktreesRootChanged {
+        root: root.to_owned(),
+        is_override: true,
+    }
+}
+
+fn worktrees_path(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.worktrees_path())
+}
+
+/// The `path` of every `SetWorktreesRoot` among `sent`.
+fn root_sets(sent: &[ClientMessage]) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetWorktreesRoot { path } => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Settings open on the Worktrees page, both roots reported.
+fn worktrees_page<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = two_hosts(cx, dir);
+    two_roots(&mut h);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-worktrees");
+    h
+}
+
+#[gpui::test]
+fn the_worktrees_page_shows_and_saves_the_chosen_hosts_root(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = worktrees_page(cx, &dir);
+    assert_eq!(worktrees_path(&mut h).as_deref(), Some(LOCAL_ROOT));
+
+    h.click_on(&remote_row());
+    assert_eq!(
+        worktrees_path(&mut h).as_deref(),
+        Some(BOX_ROOT),
+        "box's page holds box's root"
+    );
+    assert!(
+        h.root(|root, _| root.worktrees_active_line())
+            .contains(BOX_ROOT),
+        "the root in use is box's"
+    );
+    h.click_on("settings-worktrees-root-input");
+    h.keys("ctrl-a");
+    type_line(&mut h, "boxroot");
+    h.click_on("settings-worktrees-root-save");
+
+    assert_eq!(
+        root_sets(&h.host(&remote()).sent()),
+        [Some("boxroot".to_owned())],
+        "Save goes to box"
+    );
+    let local_sent = root_sets(&h.sent());
+    assert!(
+        local_sent.is_empty(),
+        "nothing goes to This PC: {local_sent:?}"
+    );
+
+    h.send(root_changed("C:\\other"));
+    assert_eq!(
+        h.root(|root, _| root.worktrees_save_button()),
+        ("Save", true),
+        "This PC's echo does not answer box's save"
+    );
+    h.host(&remote()).send(root_changed("boxroot"));
+    assert_eq!(
+        h.root(|root, _| root.worktrees_save_button()),
+        ("Saved", false),
+        "box's echo answers box's save"
+    );
+}
+
+#[gpui::test]
+fn a_worktrees_draft_on_this_pc_survives_choosing_another_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = worktrees_page(cx, &dir);
+    h.click_on("settings-worktrees-root-input");
+    h.keys("ctrl-a");
+    type_line(&mut h, "mine");
+
+    h.click_on(&remote_row());
+    assert_eq!(worktrees_path(&mut h).as_deref(), Some(BOX_ROOT));
+    h.click_on(LOCAL_ROW);
+    assert_eq!(
+        worktrees_path(&mut h).as_deref(),
+        Some("mine"),
+        "This PC's draft is still there"
+    );
+    assert!(
+        root_sets(&h.sent()).is_empty() && root_sets(&h.host(&remote()).sent()).is_empty(),
+        "moving the selector sends no draft"
+    );
+}
+
+#[gpui::test]
+fn the_worktrees_page_on_a_remote_host_takes_a_typed_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = worktrees_page(cx, &dir);
+    assert!(
+        drawn(&mut h, "settings-worktrees-root-browse")
+            && tab_ring(&mut h).contains(&"settings-worktrees-root-browse"),
+        "This PC's page browses"
+    );
+    assert_eq!(h.root(|root, _| root.worktrees_host_note()), None);
+
+    h.click_on(&remote_row());
+    let ring = tab_ring(&mut h);
+    assert!(
+        !ring.contains(&"settings-worktrees-root-browse"),
+        "box's page offers no Browse: {ring:?}"
+    );
+    assert_eq!(
+        h.root(|root, _| root.worktrees_host_note()).as_deref(),
+        Some("Created on box if it does not exist.")
+    );
+    assert!(drawn(
+        &mut h,
+        "settings-worktrees-host-hint=Created on box if it does not exist."
+    ));
+    assert_tab_reaches_only_drawn_controls(&mut h);
+}
+
+#[gpui::test]
+fn the_chosen_host_disconnecting_drops_its_worktrees_draft(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = worktrees_page(cx, &dir);
+    h.click_on(&remote_row());
+    h.click_on("settings-worktrees-root-input");
+    h.keys("ctrl-a");
+    type_line(&mut h, "draft");
+
+    h.host(&remote())
+        .event(NetEvent::State(Connection::for_target(remote())));
+    assert_eq!(shown_host(&mut h), HostKey::Local);
+    assert_eq!(
+        worktrees_path(&mut h).as_deref(),
+        Some(LOCAL_ROOT),
+        "This PC's page shows"
+    );
+
+    let mut open = Connection::for_target(remote());
+    open.on_connecting();
+    open.on_socket_open(8787);
+    open.on_welcome(PROTOCOL, daemon_features());
+    h.host(&remote()).event(NetEvent::State(open));
+    h.host(&remote()).send(root_changed(BOX_ROOT));
+    h.click_on(&remote_row());
+    assert_eq!(
+        worktrees_path(&mut h).as_deref(),
+        Some(BOX_ROOT),
+        "box's draft went with its connection"
+    );
+}
+
+#[gpui::test]
+fn remote_access_is_not_offered_on_a_remote_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-remote-access");
+    assert_eq!(shown_tab(&mut h), "Remote access");
+
+    h.click_on(&remote_row());
+    assert_eq!(
+        shown_tab(&mut h),
+        "General",
+        "the page gives way to General"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_tab_rows())
+            .contains(&"Remote access"),
+        "box lists no Remote access"
+    );
+    h.click_on(LOCAL_ROW);
+    assert!(
+        h.root(|root, _| root.settings_tab_rows())
+            .contains(&"Remote access"),
+        "This PC lists it again"
+    );
+}
+
+fn keep_awake(mode: KeepAwakeMode) -> DaemonMessage {
+    DaemonMessage::KeepAwakeStatus {
+        enabled: mode != KeepAwakeMode::Off,
+        mode,
+        active: false,
+    }
+}
+
+/// The mode of every `SetKeepAwakeMode` among `sent`.
+fn keep_awake_sets(sent: &[ClientMessage]) -> Vec<KeepAwakeMode> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetKeepAwakeMode { mode } => Some(*mode),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn keep_awake_follows_the_chosen_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(keep_awake(KeepAwakeMode::Always));
+    h.host(&remote()).send(keep_awake(KeepAwakeMode::Off));
+    h.keys("ctrl-,");
+    let mode = |h: &mut Harness<'_>| h.root(|root, _| root.keep_awake_mode());
+    assert_eq!(mode(&mut h), Some(KeepAwakeMode::Always));
+
+    h.click_on(&remote_row());
+    assert_eq!(mode(&mut h), Some(KeepAwakeMode::Off), "box's mode shows");
+    h.click_on("settings-keep-awake-when-busy");
+    assert_eq!(
+        keep_awake_sets(&h.host(&remote()).sent()),
+        [KeepAwakeMode::WhenBusy],
+        "the choice goes to box"
+    );
+    let local_sent = keep_awake_sets(&h.sent());
+    assert!(
+        local_sent.is_empty(),
+        "nothing goes to This PC: {local_sent:?}"
+    );
+
+    h.click_on(LOCAL_ROW);
+    assert_eq!(
+        mode(&mut h),
+        Some(KeepAwakeMode::Always),
+        "This PC's mode is untouched"
     );
 }
 

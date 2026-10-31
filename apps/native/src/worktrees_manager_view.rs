@@ -189,16 +189,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         if *host != HostKey::Local {
-            if let DaemonMessage::WorktreesRootChanged { root, is_override } = msg
-                && let Some(mirrors) = self.mirrors_of_mut(host)
-            {
-                mirrors.worktrees_root = Some((root.clone(), *is_override));
+            if let DaemonMessage::WorktreesRootChanged { root, is_override } = msg {
+                self.on_worktrees_root_changed(host, root, *is_override, cx);
             }
             return;
         }
         match msg {
             DaemonMessage::WorktreesRootChanged { root, is_override } => {
-                self.on_worktrees_root_changed(root, *is_override, cx);
+                self.on_worktrees_root_changed(host, root, *is_override, cx);
                 // An idle open manager follows the new root.
                 if let Some(manager) = self
                     .worktrees_manager
