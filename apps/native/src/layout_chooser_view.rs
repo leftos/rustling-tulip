@@ -18,7 +18,7 @@ use crate::palette::SELECTED_BG;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_view::close_button;
 use crate::tabs::collect_panes;
-use crate::{BORDER, HOVER_BG, MUTED, RootView, TEXT};
+use crate::{BORDER, MUTED, RootView, TEXT};
 
 const TITLE: &str = "Set up this window";
 const INTRO: &str = "This is a new client. Sessions are shared with every connected window, but each curates its own tabs. How should this window start?";
@@ -501,7 +501,7 @@ fn option_row_element(
         .border_color(gpui::rgb(if focused { TEXT } else { BORDER }))
         .when(selected, |row| row.bg(gpui::rgb(SELECTED_BG)))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(crate::palette::POPOVER_HOVER)))
         .child(div().font_weight(FontWeight::SEMIBOLD).child(label))
         .children(detail.map(|detail| div().text_color(gpui::rgb(MUTED)).child(detail)))
 }

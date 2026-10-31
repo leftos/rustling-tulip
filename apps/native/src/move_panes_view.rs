@@ -13,7 +13,7 @@ use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::tabs::collect_panes;
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::{BORDER, HOVER_BG, MUTED, RootView};
+use crate::{BORDER, MUTED, RootView};
 
 /// The open dialog: its model and its name field.
 pub(crate) struct MovePanesDialog {
@@ -333,7 +333,9 @@ fn move_panes_button(
         control == model.focused(),
         enabled,
     )
-    .when(selected, |button| button.bg(gpui::rgb(HOVER_BG)));
+    .when(selected, |button| {
+        button.bg(gpui::rgb(crate::palette::POPOVER_HOVER))
+    });
     button.when(enabled, |button| {
         button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.press_move_panes(control, window, cx);

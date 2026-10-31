@@ -8,7 +8,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 
-use crate::buttons::{ButtonSize, outlined_button};
+use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::notices::{
     ActionFailedNotice, CLOSE_SESSION, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast,
     ToastKind, ToastSpec, agent_exit_session_of, spawning_key, toast_action_selector,
@@ -671,14 +671,19 @@ impl RootView {
 /// an error's border is red.
 fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) -> AnyElement {
     let id = toast.id;
-    let close = outlined_button(&format!("toast-close-{id}"), ButtonSize::Compact, true)
-        .flex_none()
-        .w(px(CLOSE_SIZE))
-        .px(px(0.0))
-        .child("✕")
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.dismiss_toast(id, cx);
-        }));
+    let close = outlined_button(
+        &format!("toast-close-{id}"),
+        ButtonSize::Compact,
+        true,
+        Layer::Floating,
+    )
+    .flex_none()
+    .w(px(CLOSE_SIZE))
+    .px(px(0.0))
+    .child("✕")
+    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+        this.dismiss_toast(id, cx);
+    }));
     let accent = match toast.kind {
         ToastKind::Error => Some(DANGER),
         ToastKind::Warning => Some(WARNING),
@@ -748,8 +753,11 @@ fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
             &toast_action_selector(id, action_id),
             ButtonSize::Compact,
             true,
+            Layer::Floating,
         )
-        .when(action.danger, |button| button.text_color(gpui::rgb(DANGER)))
+        .when(action.danger, |button| {
+            button.text_color(gpui::rgb(crate::palette::DANGER_TEXT))
+        })
         .child(action.label)
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.press_toast_action(id, action_id, window, cx);

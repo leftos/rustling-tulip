@@ -16,7 +16,7 @@ use gpui::{
 use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_PAIRING, PendingDevice, Secret};
 
 use crate::activity_bar::badge_text;
-use crate::buttons::{ButtonKind, ButtonSize, button, focus_ring};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, focus_ring};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notify::PairingActionSink;
@@ -883,6 +883,7 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
         ButtonKind::Danger,
         ButtonSize::Compact,
         true,
+        Layer::Floating,
     )
     .child("Deny")
     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -895,6 +896,7 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
             ButtonKind::Primary,
             ButtonSize::Compact,
             true,
+            Layer::Floating,
         )
         .child("Approve…")
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -923,11 +925,17 @@ fn dialog_button(
 ) -> Stateful<Div> {
     let size = ButtonSize::Regular;
     let request_id = request_id.to_owned();
-    let drawn = button(pressed.selector(), pressed.kind(), size, enabled)
-        .when(focused == Some(pressed.label()), |button| {
-            button.child(focus_ring(size.radius()))
-        })
-        .child(pressed.label());
+    let drawn = button(
+        pressed.selector(),
+        pressed.kind(),
+        size,
+        enabled,
+        Layer::Floating,
+    )
+    .when(focused == Some(pressed.label()), |button| {
+        button.child(focus_ring(size.radius()))
+    })
+    .child(pressed.label());
     if !enabled {
         return drawn;
     }

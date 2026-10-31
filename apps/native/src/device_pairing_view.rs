@@ -13,12 +13,12 @@ use gpui::{
 use protocol::DaemonMessage;
 
 use crate::RootView;
-use crate::buttons::{ButtonKind, ButtonSize, button, focus_ring};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, focus_ring};
 use crate::connection::State;
 use crate::device_pairing::{DeviceButton, DevicePairing};
 use crate::net::{NetCommand, NetEvent};
 use crate::notice_view::modal_panel;
-use crate::palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, TEXT};
+use crate::palette::{BORDER, DANGER, DANGER_BG, MUTED, TEXT};
 use crate::session_menu::backdrop;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 
@@ -651,7 +651,11 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .rounded(px(LINK_RADIUS))
         .text_color(gpui::rgb(if focused { TEXT } else { MUTED }))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .hover(|style| {
+            style
+                .bg(gpui::rgb(crate::palette::POPOVER_HOVER))
+                .text_color(gpui::rgb(TEXT))
+        })
         .when(focused, |link| link.child(focus_ring(LINK_RADIUS)))
         .child(CODE_LINK_LABEL)
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -687,7 +691,7 @@ fn device_button(
     } else {
         ButtonKind::Outlined
     };
-    let drawn = button(pressed.selector(), kind, size, enabled)
+    let drawn = button(pressed.selector(), kind, size, enabled, Layer::Floating)
         .when(focused, |button| button.child(focus_ring(size.radius())))
         .child(pressed.label());
     if !enabled {

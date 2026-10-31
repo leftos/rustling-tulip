@@ -18,7 +18,7 @@ use gpui::{
     UnderlineStyle, Window, div, list, prelude::*, px,
 };
 
-use crate::buttons::{ButtonSize, outlined_button, primary_button};
+use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::fonts;
 use crate::links::TerminalLinkCandidate;
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
@@ -842,9 +842,9 @@ pub(crate) fn markdown_toggle(
     .map(|(mode, name, label)| {
         let selector = format!("viewer-md-{name}-{tab_id}");
         let button = if mode == shown {
-            primary_button(&selector, ButtonSize::Compact, enabled)
+            primary_button(&selector, ButtonSize::Compact, enabled, Layer::Base)
         } else {
-            outlined_button(&selector, ButtonSize::Compact, enabled)
+            outlined_button(&selector, ButtonSize::Compact, enabled, Layer::Base)
         }
         .flex_none()
         .child(label);

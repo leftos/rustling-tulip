@@ -9,7 +9,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_BLOCK};
 
-use crate::buttons::{ButtonKind, ButtonSize, button};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button};
 use crate::devices::{
     BLOCKED_TAG, BlockConfirm, CONFIRM_BODY, ConfirmButton, DeviceRow, DevicesState, NO_DEVICES,
     RowAction, forget_message,
@@ -266,6 +266,7 @@ fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
         },
         ButtonSize::Compact,
         true,
+        Layer::Floating,
     )
     .child(action.label())
     .on_click(

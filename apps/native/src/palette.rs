@@ -21,9 +21,17 @@ pub const SURFACE: u32 = 0x000d_0c10;
 pub const RAISED: u32 = 0x0016_151a;
 /// The fill of a chip, as `0xRRGGBB`.
 pub const CHIP: u32 = 0x001e_1c23;
-/// The fill of a hovered row or button and of a chosen segment, as
-/// `0xRRGGBB`.
-pub const HOVER: u32 = 0x004a_4756;
+/// The fill of a hovered row or button on the dark surfaces: the ground, the
+/// sidebar, a panel, a row card, as `0xRRGGBB`.
+pub const HOVER: u32 = 0x002c_2a34;
+/// The fill of a pressed button on the dark surfaces, as `0xRRGGBB`.
+pub const PRESSED: u32 = 0x0024_222b;
+/// The fill of a hovered row, button or chosen segment inside a modal, a
+/// popover, a menu or a toast, as `0xRRGGBB`.
+pub const POPOVER_HOVER: u32 = 0x004a_4756;
+/// The fill of a pressed button inside a modal, a popover, a menu or a
+/// toast, as `0xRRGGBB`.
+pub const POPOVER_PRESSED: u32 = 0x0045_4250;
 /// The fill of a sidebar leaf a preset launch's Select marked: the accent
 /// washed into the ground, as `0xRRGGBB`.
 pub const LAUNCHED_TINT: u32 = 0x0030_2122;
@@ -35,8 +43,9 @@ pub const TERMINAL_GROUND: u32 = 0x0007_0609;
 pub const ROW_CARD: u32 = 0x1615_1bff;
 /// The fill of a hovered sidebar leaf, as `0xRRGGBB`.
 pub const ROW_HOVER: u32 = 0x001e_1d24;
-/// The space above and below each sidebar leaf, in px.
-pub const ROW_GAP: f32 = 2.0;
+/// The space above and below each sidebar leaf, in px: 2 px between two
+/// leaves.
+pub const ROW_GAP: f32 = 1.0;
 
 /// The fill of a menu, a popover and a toast, as `0xRRGGBB`.
 pub const POPOVER: u32 = 0x003d_3a47;
@@ -69,7 +78,7 @@ pub const TEXT: u32 = 0x00ed_e9e4;
 /// on a hovered row, as `0xRRGGBB`.
 pub const TEXT_2: u32 = 0x00bd_b8c4;
 /// The quietest text: a count, a stamp, a leaf's subline, as `0xRRGGBB`;
-/// never on [`HOVER`], where it falls below 4.5:1.
+/// never on [`POPOVER_HOVER`], where it falls below 4.5:1.
 pub const SUBTLE: u32 = 0x00ae_aab8;
 /// The fill of an idle or spawning glyph, never of text, as `0xRRGGBB`.
 pub const FAINT: u32 = 0x006e_6a77;
@@ -106,8 +115,12 @@ pub const ASKING: u32 = 0x00f6_bc4e;
 pub const ON_ASKING: u32 = 0x002a_1b00;
 /// An unseen finished turn, as `0xRRGGBB`.
 pub const WAITING: u32 = 0x004f_c89d;
-/// Something that failed, as `0xRRGGBB`.
+/// Something that failed, as `0xRRGGBB`: a fill, a glyph, an edge, and
+/// danger text on the dark surfaces.
 pub const DANGER: u32 = 0x00f2_6d6d;
+/// Danger text inside a modal, a popover, a menu or a toast: a lighter
+/// [`DANGER`] that keeps 4.5:1 on their fills, as `0xRRGGBB`.
+pub const DANGER_TEXT: u32 = 0x00ff_9c9c;
 /// A workspace's sidebar tag, a renamed file's letter and a diff's strings,
 /// as `0xRRGGBB`.
 pub const LILAC: u32 = 0x00c9_b8ff;
@@ -237,12 +250,16 @@ mod tests {
         assert_eq!(SURFACE, 0x000d_0c10);
         assert_eq!(RAISED, 0x0016_151a);
         assert_eq!(CHIP, 0x001e_1c23);
-        assert_eq!(HOVER, 0x004a_4756);
+        assert_eq!(HOVER, 0x002c_2a34);
+        assert_eq!(PRESSED, 0x0024_222b);
+        assert_eq!(POPOVER_HOVER, 0x004a_4756);
+        assert_eq!(POPOVER_PRESSED, 0x0045_4250);
+        assert_eq!(DANGER_TEXT, 0x00ff_9c9c);
         assert_eq!(LAUNCHED_TINT, 0x0030_2122);
         assert_eq!(TERMINAL_GROUND, 0x0007_0609);
         assert_eq!(ROW_CARD, 0x1615_1bff);
         assert_eq!(ROW_HOVER, 0x001e_1d24);
-        assert!((ROW_GAP - 2.0).abs() < f32::EPSILON);
+        assert!((ROW_GAP - 1.0).abs() < f32::EPSILON);
         assert_eq!(POPOVER, 0x003d_3a47);
         assert_eq!(POPOVER_EDGE, 0x0050_4d5b);
         assert_eq!(POPOVER_SHADOW, 0x0000_00b3);
@@ -351,9 +368,10 @@ mod tests {
 
     /// The floors every token pair the client draws must keep: ordinary text
     /// at 7:1 on the ground, body, secondary and quiet text at 4.5:1 on every
-    /// surface they sit on, and the dark text on the fills that carry it. A
-    /// hovered row lifts its quiet text to [`TEXT_2`], so [`SUBTLE`] is never
-    /// drawn on [`HOVER`] and has no pair there.
+    /// surface they sit on, every coloured text on the hover and press fills,
+    /// and the dark text on the fills that carry it. A hovered row on a
+    /// floating layer lifts its quiet text to [`TEXT_2`], so [`SUBTLE`] is
+    /// never drawn on [`POPOVER_HOVER`] and has no pair there.
     #[test]
     fn the_token_pairs_keep_their_contrast_floors() {
         let surfaces = [
@@ -377,10 +395,49 @@ mod tests {
                 pairs.push((format!("{on_name} on {under_name}"), on, under, 4.5));
             }
         }
+        // Every text colour drawn on a dark-surface hover or press: body,
+        // secondary and quiet text, danger, the accent link, the syntax
+        // colours and the change-status letters.
+        let on_dark_hover = [
+            ("TEXT", TEXT),
+            ("TEXT_2", TEXT_2),
+            ("SUBTLE", SUBTLE),
+            ("DANGER", DANGER),
+            ("ACCENT", ACCENT),
+            ("LILAC", LILAC),
+            ("ROSE", ROSE),
+            ("OCHRE", OCHRE),
+            ("PERIWINKLE", PERIWINKLE),
+            ("CHANGE_DELETED", CHANGE_DELETED),
+            ("WAITING", WAITING),
+            ("WORKING", WORKING),
+        ];
+        for (under_name, under) in [("HOVER", HOVER), ("PRESSED", PRESSED)] {
+            for (on_name, on) in on_dark_hover {
+                pairs.push((format!("{on_name} on {under_name}"), on, under, 4.5));
+            }
+        }
+        // Every text colour drawn on a floating layer's fills: body and
+        // secondary text, danger text, and the accent link on a modal.
+        let on_floating = [
+            ("TEXT", TEXT),
+            ("TEXT_2", TEXT_2),
+            ("DANGER_TEXT", DANGER_TEXT),
+        ];
+        for (under_name, under) in [
+            ("POPOVER", POPOVER),
+            ("POPOVER_HOVER", POPOVER_HOVER),
+            ("POPOVER_PRESSED", POPOVER_PRESSED),
+            ("MODAL", MODAL),
+            ("MODAL_INSET", MODAL_INSET),
+        ] {
+            for (on_name, on) in on_floating {
+                pairs.push((format!("{on_name} on {under_name}"), on, under, 4.5));
+            }
+        }
         for (pair, on, under, floor) in [
             ("TEXT on GROUND", TEXT, GROUND, 7.0),
-            ("TEXT on HOVER", TEXT, HOVER, 4.5),
-            ("TEXT_2 on HOVER", TEXT_2, HOVER, 4.5),
+            ("ACCENT on MODAL", ACCENT, MODAL, 4.5),
             ("ON_ACCENT on ACCENT", ON_ACCENT, ACCENT, 4.5),
             ("ON_ACCENT on PRIMARY", ON_ACCENT, PRIMARY, 4.5),
             ("ON_ACCENT on PRIMARY_HOVER", ON_ACCENT, PRIMARY_HOVER, 4.5),
@@ -394,9 +451,13 @@ mod tests {
         ] {
             pairs.push((pair.to_owned(), on, under, floor));
         }
-        for (pair, on, under, floor) in pairs {
-            let ratio = contrast(on, under);
-            assert!(ratio >= floor, "{pair} is {ratio:.2}:1, below {floor}:1");
-        }
+        let short: Vec<String> = pairs
+            .into_iter()
+            .filter_map(|(pair, on, under, floor)| {
+                let ratio = contrast(on, under);
+                (ratio < floor).then(|| format!("{pair} is {ratio:.2}:1, below {floor}:1"))
+            })
+            .collect();
+        assert!(short.is_empty(), "{short:#?}");
     }
 }

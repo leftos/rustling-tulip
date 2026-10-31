@@ -17,7 +17,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, DaemonMessage, TabContent};
 
-use crate::buttons::{ButtonSize, outlined_button, primary_button};
+use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::diff_tab::split_path;
 use crate::ellipsis::ellipsized;
 use crate::fonts;
@@ -1139,9 +1139,9 @@ fn find_button(
 ) -> Stateful<Div> {
     let selector = action.selector(tab_id);
     let button = if action == FindAction::MatchCase && case_on {
-        primary_button(&selector, ButtonSize::Compact, true)
+        primary_button(&selector, ButtonSize::Compact, true, Layer::Base)
     } else {
-        outlined_button(&selector, ButtonSize::Compact, true)
+        outlined_button(&selector, ButtonSize::Compact, true, Layer::Base)
     };
     let tab_id = tab_id.to_owned();
     button
@@ -1190,9 +1190,14 @@ fn header_button(
     enabled: bool,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
-    let button = outlined_button(&action.selector(tab_id), ButtonSize::Compact, enabled)
-        .flex_none()
-        .child(action.label());
+    let button = outlined_button(
+        &action.selector(tab_id),
+        ButtonSize::Compact,
+        enabled,
+        Layer::Base,
+    )
+    .flex_none()
+    .child(action.label());
     if !enabled {
         let opens = matches!(action, HeaderAction::OpenDefault | HeaderAction::Reveal);
         return button.when(opens, |button| button.tooltip(tooltip(LOCAL_FILES_REASON)));

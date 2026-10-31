@@ -21,10 +21,10 @@ use crate::appearance_stops::{
     family_entries, family_highlight, same_family, step, step_family, step_swatch, stops,
     swatch_cursor,
 };
-use crate::buttons::{ButtonSize, field_frame_with_ring, focus_ring, outlined_button};
+use crate::buttons::{ButtonSize, Layer, field_frame_with_ring, focus_ring, outlined_button};
 use crate::fonts;
 use crate::notices::ToastKind;
-use crate::palette::{GROUND, HOVER, LINE_STRONG};
+use crate::palette::{GROUND, LINE_STRONG, POPOVER_HOVER};
 use crate::section::field_column;
 use crate::session_menu::{backdrop, dialog_button, muted_row};
 use crate::settings_view::SettingsControl;
@@ -1525,7 +1525,7 @@ fn hex_line(
 /// Apply, an outlined dialog button; a disabled one is dimmed, with the
 /// default cursor and no hover.
 fn apply_button(selector: &str, enabled: bool) -> Stateful<Div> {
-    outlined_button(selector, ButtonSize::Regular, enabled)
+    outlined_button(selector, ButtonSize::Regular, enabled, Layer::Floating)
         .flex_none()
         .child("Apply")
 }
@@ -1622,7 +1622,7 @@ fn list_row(selector: &str, label: impl Into<SharedString>, chosen: bool) -> Sta
         .py(px(2.0))
         .rounded(px(ROW_RADIUS))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER)))
+        .hover(|style| style.bg(gpui::rgb(POPOVER_HOVER)))
         .child(
             div()
                 .flex_none()
@@ -1765,8 +1765,11 @@ fn link(selector: &'static str, label: &'static str, enabled: bool) -> Stateful<
         .text_color(gpui::rgb(MUTED))
         .child(label);
     if enabled {
-        link.cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
+        link.cursor_pointer().hover(|style| {
+            style
+                .bg(gpui::rgb(POPOVER_HOVER))
+                .text_color(gpui::rgb(TEXT))
+        })
     } else {
         link.opacity(0.5).cursor_default()
     }

@@ -19,7 +19,7 @@ use gpui::{
 
 use crate::RootView;
 use crate::assets::{CHECK_ICON, HOST_PC_ICON, HOST_SSH_ICON, HOST_TAILNET_ICON, TAB_CLOSE_ICON};
-use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, field_frame, focus_ring};
 use crate::connection_picker::{
     AddButton, AddField, AddMode, ConnectionPicker, HostKind, LiveState, PeerSource, PickerSection,
     Row, RowDetail, RowFacts, RowHost, RowKind, RowState, SCAN_PENDING, SavedHost, Section,
@@ -31,8 +31,8 @@ use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::palette::{
-    ASK_BORDER, ASK_WASH, ASKING, CARD_EDGE, DANGER, DANGER_BG, FAINT, HOVER, LINE, MODAL_INSET,
-    OK_WASH, RAISED, SELECTION, STATUS_IDLE, STATUS_OK, SUBTLE, TEXT, TEXT_2,
+    ASK_BORDER, ASK_WASH, ASKING, CARD_EDGE, DANGER, DANGER_BG, FAINT, LINE, MODAL_INSET, OK_WASH,
+    POPOVER_HOVER, RAISED, SELECTION, STATUS_IDLE, STATUS_OK, SUBTLE, TEXT, TEXT_2,
 };
 use crate::session_menu::backdrop;
 use crate::ssh::DEFAULT_REMOTE_COMMAND;
@@ -975,15 +975,21 @@ fn control_button(
     draw: &Draw<'_>,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
-    button(&control.selector(draw.rows), kind, size, true)
-        .relative()
-        .when(draw.focus == control, |button| {
-            button.child(focus_ring(size.radius()))
-        })
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            cx.stop_propagation();
-            this.press_connection_control(control, window, cx);
-        }))
+    button(
+        &control.selector(draw.rows),
+        kind,
+        size,
+        true,
+        Layer::Floating,
+    )
+    .relative()
+    .when(draw.focus == control, |button| {
+        button.child(focus_ring(size.radius()))
+    })
+    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+        cx.stop_propagation();
+        this.press_connection_control(control, window, cx);
+    }))
 }
 
 /// The title and the mouse-only close X.
@@ -997,7 +1003,7 @@ fn header(cx: &mut Context<RootView>) -> Div {
         .size(px(26.0))
         .rounded(px(6.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER)))
+        .hover(|style| style.bg(gpui::rgb(POPOVER_HOVER)))
         .child(
             svg()
                 .path(TAB_CLOSE_ICON)
@@ -1123,7 +1129,7 @@ fn host_row(
         .rounded(px(ROW_RADIUS))
         .cursor_pointer()
         .when(facts.current, |row| row.bg(gpui::rgb(SELECTION)))
-        .hover(|style| style.bg(gpui::rgb(HOVER)))
+        .hover(|style| style.bg(gpui::rgb(POPOVER_HOVER)))
         .child(kind_tile(facts.host))
         .child(text)
         .child(trail)
@@ -1516,7 +1522,7 @@ fn segment(
         .cursor_pointer()
         .when(on, |segment| {
             segment
-                .bg(gpui::rgb(HOVER))
+                .bg(gpui::rgb(POPOVER_HOVER))
                 .text_color(gpui::rgb(TEXT))
                 .font_weight(FontWeight::SEMIBOLD)
         })

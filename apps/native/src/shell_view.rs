@@ -16,7 +16,7 @@ use crate::shell_dialog::{
 use crate::spawn_view::checkbox_row;
 use crate::spawns::OpenIn;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::{BORDER, HOVER_BG, MUTED, Pick, RootView, TEXT, tooltip};
+use crate::{BORDER, MUTED, Pick, RootView, TEXT, tooltip};
 
 const TITLE: &str = "Open a shell";
 const SAVE_DEFAULT_LABEL: &str = "Use as quick shell default";
@@ -517,7 +517,11 @@ fn link_button(selector: &'static str, label: &'static str, focused: bool) -> St
         .rounded(px(4.0))
         .text_color(gpui::rgb(if focused { TEXT } else { MUTED }))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .hover(|style| {
+            style
+                .bg(gpui::rgb(crate::palette::POPOVER_HOVER))
+                .text_color(gpui::rgb(TEXT))
+        })
         .child(label)
 }
 

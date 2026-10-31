@@ -8,7 +8,7 @@ use gpui::{
     px,
 };
 
-use crate::buttons::{ButtonSize, outlined_button, primary_button};
+use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::ellipsis::truncating;
 use crate::notice_view::{CLOSE_SIZE, toast_frame};
 use crate::undo::{self, TabSnapshot, UndoEntry};
@@ -203,21 +203,31 @@ impl RootView {
 /// One entry's card: what it says, its primary Undo button and its ✕.
 fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
     let id = entry.id;
-    let action = primary_button(&format!("undo-action-{id}"), ButtonSize::Compact, true)
-        .flex_none()
-        .child(undo::UNDO_LABEL)
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.press_undo(id, window, cx);
-        }));
-    let dismiss = outlined_button(&format!("undo-dismiss-{id}"), ButtonSize::Compact, true)
-        .flex_none()
-        .w(px(CLOSE_SIZE))
-        .px(px(0.0))
-        .child("✕")
-        .tooltip(tooltip("Dismiss undo"))
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.dismiss_undo(id, cx);
-        }));
+    let action = primary_button(
+        &format!("undo-action-{id}"),
+        ButtonSize::Compact,
+        true,
+        Layer::Floating,
+    )
+    .flex_none()
+    .child(undo::UNDO_LABEL)
+    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+        this.press_undo(id, window, cx);
+    }));
+    let dismiss = outlined_button(
+        &format!("undo-dismiss-{id}"),
+        ButtonSize::Compact,
+        true,
+        Layer::Floating,
+    )
+    .flex_none()
+    .w(px(CLOSE_SIZE))
+    .px(px(0.0))
+    .child("✕")
+    .tooltip(tooltip("Dismiss undo"))
+    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+        this.dismiss_undo(id, cx);
+    }));
     let message = truncating(
         &format!("undo-entry-{id}-message"),
         StyledText::new(entry.message.clone()),
