@@ -31,7 +31,7 @@ It is alpha software, Windows only for now.
 ### Remote access over Tailscale
 
 - Turn on remote access in Settings and your other PCs on your tailnet can open this PC's sessions. The daemon serves only your tailnet, over TLS with a Tailscale certificate.
-- The host picker lists your tailnet machines and the hosts you saved, and the app reconnects to the last host when it starts.
+- The host picker lists your tailnet machines and the hosts you saved, and the app connects to every saved host you have switched on when it starts.
 - A new device has to be approved on the host PC with a one-time pairing code. The Devices list shows who is connected and when each device was last seen, and Block cuts a device off until you forget it.
 - Ctrl+click a file path in a remote session's terminal, or use Fetch file…, to copy the file to this PC and open it. An HTML page brings its images and stylesheets with it.
 - When a host's session count changed since your last visit, the app offers to keep your layout, open all its sessions or start empty.
