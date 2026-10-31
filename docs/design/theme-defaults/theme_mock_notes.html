@@ -1,0 +1,30 @@
+<div class="notes">
+<h3>How a scheme becomes our tokens</h3>
+<p>herdr-gpui derives its chrome from three things in a scheme: <code>background</code>, <code>foreground</code> and the 16-colour palette. Its blend is <code>mix(base, over, pct)</code>, an integer per-channel blend of <code>pct</code>% of <code>over</code> onto <code>base</code> (<code>crates/herdr-gpui/src/config/theme.rs:366-373</code>). Its <code>ink(c)</code> moves a colour's OKLab lightness, keeping its hue, only as far as it needs to reach 3:1 against the background, surface and active fills (<code>theme.rs:509-515</code>, <code>contrast.rs:154-181</code>; 3:1 is the Standard contrast level, <code>contrast.rs:32-37</code>). Paths are under <code>X:\dev\_ext\penso\herdr-gpui</code>.</p>
+<table>
+<tr><th>Our token</th><th>Rule</th><th>From</th></tr>
+<tr><td><code>GROUND</code>, <code>TERMINAL_GROUND</code></td><td>background</td><td>the scheme</td></tr>
+<tr><td><code>SURFACE</code> (sidebar, tab bar)</td><td><code>mix(bg, fg, 5)</code></td><td>herdr <code>surface</code>, theme.rs:544</td></tr>
+<tr><td><code>CHIP</code>, <code>HOVER</code></td><td><code>mix(bg, fg, 12)</code></td><td>herdr <code>active</code>, theme.rs:545; a hover is <code>active</code>, menu/chrome.rs:810</td></tr>
+<tr><td><code>SUBTLE</code></td><td><code>mix(bg, fg, 55)</code></td><td>herdr <code>muted</code>, theme.rs:546</td></tr>
+<tr><td><code>TEXT</code></td><td>foreground</td><td>the scheme</td></tr>
+<tr><td><code>TEXT_2</code></td><td><code>ink(mix(bg, fg, 78))</code></td><td>herdr <code>subtext</code>, theme.rs:473-475</td></tr>
+<tr><td><code>LINE</code></td><td><code>mix(bg, fg, 14)</code></td><td>herdr <code>border</code>, browser/kit.rs:46</td></tr>
+<tr><td><code>LINE_STRONG</code>, <code>POPOVER_EDGE</code></td><td><code>mix(bg, fg, 24)</code></td><td>herdr card edge, chat/view/layout/bubbles.rs:33</td></tr>
+<tr><td><code>MENU_RULE</code></td><td><code>mix(bg, fg, 22)</code></td><td>herdr rule line, chat/view/layout/timeline.rs:29</td></tr>
+<tr><td><code>POPOVER</code> (the ⋯ menu)</td><td>dark: <code>active</code>; light: <code>mix(bg, #fff, 70)</code></td><td>herdr <code>raised</code>, browser/kit.rs:34-39</td></tr>
+<tr><td><code>POPOVER_HOVER</code></td><td><code>mix(POPOVER, fg, 12)</code></td><td>herdr button hover, chat/view/settings.rs:114</td></tr>
+<tr><td><code>ACCENT</code></td><td><code>ink(palette[5])</code>, the scheme's magenta</td><td>herdr <code>primary</code>, theme.rs:452-456</td></tr>
+<tr><td><code>SELECTION</code></td><td><code>mix(SURFACE, ACCENT, 22)</code></td><td>herdr <code>primary_wash</code>, theme.rs:485-487</td></tr>
+<tr><td><code>ON_ACCENT</code>, <code>ON_ASKING</code></td><td>whichever of bg or fg contrasts more with the fill</td><td>herdr <code>text_on</code>, theme.rs:492-503</td></tr>
+<tr><td><code>WORKING</code> / <code>ASKING</code> / <code>WAITING</code> / <code>DANGER</code></td><td><code>ink</code> of palette[4] blue / [3] yellow / [2] green / [1] red</td><td>herdr run states Running / Waiting / Ok / Failed, automations/model.rs:36-39</td></tr>
+<tr><td>Terminal ANSI 0–15</td><td>the scheme's palette, never inked</td><td>theme.rs:505-508 ("never for terminal cells")</td></tr>
+<tr><td><code>SUNKEN</code> (rail, footer, unfocused pane header)</td><td>bg pushed 4% further from fg</td><td><em>ours</em>: herdr has no tier below its background</td></tr>
+<tr><td><code>RAISED</code>, <code>ROW_CARD</code></td><td><code>mix(bg, fg, 8)</code></td><td><em>ours</em>: a step between herdr's surface (5) and active (12)</td></tr>
+<tr><td><code>FAINT</code> (idle glyph)</td><td><code>mix(bg, fg, 35)</code></td><td><em>ours</em></td></tr>
+<tr><td><code>PRIMARY</code> button</td><td><code>mix(bg, fg, 92)</code>, label in bg</td><td><em>ours</em>: today's near-white primary, carried over</td></tr>
+<tr><td><code>DANGER_TEXT</code> (menu)</td><td><code>DANGER</code> blended toward white (black on a light theme) in 5% steps until 4.5:1 on POPOVER and POPOVER_HOVER</td><td><em>ours</em>: herdr's <code>ink</code> asked for 4.5:1 turns these pastel reds pure white (its chroma gain clips out of gamut and it falls back to the pole), so it is not used here</td></tr>
+</table>
+<p>herdr's <strong>Default</strong> is hand-authored and skips the derivation: its surface <code>#1c1c22</code>, active <code>#2b2933</code> and muted <code>#827e91</code> are fixed (theme.rs:348-362), its palette is the xterm VGA set, and its accent is that palette's dark magenta <code>#800080</code>, inked. The rest of that lane follows the rules above.</p>
+<p>Claude's own lines in the top pane (<span style="color:#d77757">✻ Brewing…</span>, <span style="color:#af87ff">⏵⏵ accept edits on</span>) are truecolor Claude Code prints whatever the scheme, so they do not change between lanes. The flags under each lane hold our floors from <code>palette.rs</code>'s contrast test (TEXT 7:1 on GROUND, TEXT_2 and SUBTLE 4.5:1 on every surface they sit on), ANSI colours under 3:1 on the terminal ground, colours whose OKLab distance is under 0.12 (easily confused), and two status colours whose OKLab hues sit under 35° apart (they read as one colour at glyph size).</p>
+</div>
