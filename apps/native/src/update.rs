@@ -1,7 +1,7 @@
 //! The updater's core: finds a newer published release on the GitHub Releases
 //! feed, downloads its installer into a fresh folder, and verifies it against
 //! the release's `.sha256` asset while holding the file open so nothing can
-//! replace it (`docs/plans/auto-update.md`, decisions 1, 2 and 4). No UI lives
+//! replace it (`docs/auto-update.md`, decisions 1, 2 and 4). No UI lives
 //! here: the client calls [`check_and_download`] from a background task.
 
 use anyhow::{Context as _, anyhow, bail};

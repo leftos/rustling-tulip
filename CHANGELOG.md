@@ -6,6 +6,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Added
 
+- The app checks for new releases, downloads and verifies them, and offers Restart to update; your sessions keep running through the update.
 - `rustling-tulipd screen <session id>` prints how the app read a session's screen, rule by rule, with the screen itself, and `--fixture <path>` saves it.
 
 ### Fixed

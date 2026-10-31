@@ -6,6 +6,7 @@ The start page for working on rustling-tulip: a native Windows desktop client (G
 
 - [architecture.md](architecture.md): the entry point. Components, what the product does, the task index (which files to read, in order, for each kind of change), and non-goals.
 - [native-client.md](native-client.md): the native client's settled design decisions, view by view.
+- [auto-update.md](auto-update.md): how the native client finds, verifies and installs a published release, and how the daemon is taken over.
 - [env-secrets.md](env-secrets.md): how secret env rows are sealed into Windows Credential Manager, and what is and isn't protected.
 - [tracer-abi.md](tracer-abi.md): the daemon/tracer ABI, its stability contract and what counts as a bump.
 - [release.md](release.md): how a versioned release is cut, from the Linear release pipeline to the GitHub release.
@@ -81,6 +82,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.
 - **Answer rule**: the test that an `Idle` session needs you because its latest summary asks the user something (`NeedsAnswer`) and was made at or after its last status change (`needs_you::is_answer`); the Dashboard's Needs you group uses it.
 - **App id (AUMID)**: the Windows application user model id a toast is raised under, which names its sender; the installed native client uses `leftos.RustlingTulip` (`toast_activation::APP_ID`), anything else the PowerShell id.
+- **apply-update**: `rustling-tulipd apply-update --from <staging> --to <dir>`, the subcommand the installer runs from the staged daemon to swap the installed files for the staged ones (stop the daemon, rename each file to `.old`, roll back on failure, record `last-result.json`); `crates/daemon/src/cli_apply_update.rs`, `docs/auto-update.md`.
 - **Attention feed**: the daemon's one stream of items that want the user (Needs you, Hand-off ready, Progress, Done, Fleet), shared by every client and the phone push, resolved everywhere at once; planned (RT-87, `docs/plans/off-orca.md`).
 - **Auth kind**: how a connection authenticates, `Local` (loopback, checked against the `daemon.json` token) or `Tailnet` (the admitted peer's identity, with the presented value read as its device token); it also decides which host-only messages the connection may send (`AuthKind` in `crates/daemon/src/server/connection.rs`).
 - **Auto-resume**: the daemon resuming, by itself once its listener is bound, each session a reboot or any other joint death of the daemon and its tracers killed that qualifies (`recovery::auto_resume`); the rest stay in Recover. See `docs/architecture.md` (Session history and recovery).
@@ -207,6 +209,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Reached tests**: the tests a change's diff reaches through the test map, as one nextest filterset; `.\rt.ps1 test -Reached` runs them, and a central or unmapped file reaches the full suite instead.
 - **Reading**: one way to take a terminal path link's path as a file under a repo or worktree of the pane's session; a link has one reading per candidate. See `docs/native-client.md` ("Fetched files").
 - **Ready signal**: how much output an agent's TUI must have printed, and how long it must then stay quiet, before it counts as up (`Agent::ready_signal`, `ReadySignal`; Claude's is 1024 bytes then 1.5 s).
+- **Ready update**: a newer release the native client has downloaded and checked against its `.sha256`, waiting in an `updates\<version>-<random>\` folder for the owner's `Restart to update`; the footer shows `Update {version} ready` while one is held (`docs/auto-update.md`).
 - **Recovery**: respawning a session from its history entry: a Claude entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command.
 - **Remote mode**: the native client connected to a tailnet or SSH host (`Target::Tailnet`, `Target::Ssh`) instead of the local daemon; local-file actions are disabled with a reason, Stop and the daemon's files are hidden, and quitting only disconnects. See `docs/native-client.md`.
 - **Remote status**: the daemon's `RemoteStatus` message, pushed at connect and broadcast on every change, whose `state` (`RemoteState`) says why remote access is off, down or serving (`crates/protocol/src/lib.rs`).
@@ -231,6 +234,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Spend ledger**: the summarizer's per-day spend record, `summarizer-spend.json` in the config dir (`{"date", "spent_usd"}` for the current local day); see "Where things live on disk" in `CLAUDE.md`.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **SSH target**: `Target::Ssh`, a host the native client reaches by running `ssh` with an `~/.ssh/config` alias or `user@host[:port]` and `rustling-tulipd bridge` (or the saved host's `remote_command`), speaking the protocol over the child's stdio; the SSH login is the owner, so there is no device token; `apps/native/src/ssh.rs`, `docs/native-client.md`, `docs/plans/ssh-remote.md`.
+- **Staging folder**: `$INSTDIR\.staging`, where the installer extracts a setup's files before the staged `rustling-tulipd apply-update` swaps them into the install folder; the installer removes it afterwards (`docs/auto-update.md`).
 - **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
 - **Status sequence (`status_seq`)**: the count of status changes on a `SessionSnapshot` (default 0), raised by one on each change (a reattach or orphan rebuild that changes the stored status included) and kept in the sidecar's `meta.json`; a client compares it to tell a newer snapshot from an older one.
 - **Status-change log**: the planned `activity/<key>.jsonl` files in the config dir, one line per status change of a session or dispatch run, kept 2 hours and across daemon restarts, which the activity track draws from; see `docs/plans/dashboard.md`.

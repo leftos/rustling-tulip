@@ -148,8 +148,46 @@ fn main() {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::rotate_log;
+    use super::{rotate_log, take_updated_from};
     use std::path::Path;
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn take_updated_from_leaves_args_without_the_flag_alone() {
+        let (rest, from) = take_updated_from(args(&["s1", "-ToastActivated"]));
+        assert_eq!(rest, args(&["s1", "-ToastActivated"]));
+        assert_eq!(from, None);
+    }
+
+    #[test]
+    fn take_updated_from_takes_the_flag_alone() {
+        let (rest, from) = take_updated_from(args(&["--updated-from", "0.1.0"]));
+        assert_eq!(rest, Vec::<String>::new());
+        assert_eq!(from.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn take_updated_from_keeps_the_other_args_in_order() {
+        let (rest, from) = take_updated_from(args(&[
+            "s1",
+            "--updated-from",
+            "0.1.0",
+            "-ToastActivated",
+            "-Embedding",
+        ]));
+        assert_eq!(rest, args(&["s1", "-ToastActivated", "-Embedding"]));
+        assert_eq!(from.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn take_updated_from_drops_a_trailing_flag_with_no_value() {
+        let (rest, from) = take_updated_from(args(&["s1", "--updated-from"]));
+        assert_eq!(rest, args(&["s1"]));
+        assert_eq!(from, None);
+    }
 
     #[test]
     fn rotate_moves_log_to_old() {

@@ -130,7 +130,23 @@ fn a_ready_update_shows_in_the_footer(cx: &mut TestAppContext) {
     assert!(drawn(&mut h, "footer-update"), "Restart to update is drawn");
 
     h.advance(CHECK_EVERY);
-    assert_eq!(updater.checks(), 2, "and again 24 h later");
+    assert_eq!(
+        updater.checks(),
+        1,
+        "no scheduled check while an update is ready"
+    );
+}
+
+#[gpui::test]
+fn check_now_still_checks_while_an_update_is_ready(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = ready_update(cx, &dir, &updater);
+    let before = updater.checks();
+
+    press_in_settings(&mut h, "settings-general-check-now");
+
+    assert_eq!(updater.checks(), before + 1, "Check now ran a check");
 }
 
 #[gpui::test]

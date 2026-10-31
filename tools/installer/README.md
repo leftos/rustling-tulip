@@ -30,6 +30,12 @@ The installer adds **no Windows Firewall rule**: the owner runs Fort Firewall, a
 
 The finish page offers "Run rustling-tulip", which starts the client unelevated.
 
+## Staging and updates
+
+Every install extracts its files into `$INSTDIR\.staging` and runs the staged daemon's `rustling-tulipd apply-update --from <staging> --to $INSTDIR`, which stops the daemon and swaps the files in with rollback (`docs/auto-update.md`); the script removes `.staging` afterwards, and a non-zero exit shows `apply-update`'s message and aborts.
+
+The app's `Restart to update` runs the downloaded setup as `/S /UPDATE /RELAUNCH`: `/UPDATE` writes only the uninstall key's `DisplayVersion`, leaving the autostart value, the desktop shortcut and the PATH entry as they are, and `/RELAUNCH` has `apply-update` start the client again afterwards.
+
 ## Stopping the daemon
 
 After it copies the daemon and tracer and before it copies the client, and before the uninstaller deletes the files, the script stops a running daemon with the shipped daemon's own `rustling-tulipd shutdown`.
@@ -52,7 +58,7 @@ Kept: the config and data directories — `%APPDATA%\leftos\rustling-tulip\` (re
 .\rt.ps1 installer
 ```
 
-The verb always builds the release profile (`cargo build --release -p daemon -p tracer -p rustling-tulip-native`) and writes `target\installer\rustling-tulip-<version>-setup.exe`, printing its path. The version comes from `[workspace.package] version` in `Cargo.toml`; a pre-release suffix such as `0.1.0-alpha` stays in the exe's name and in `DisplayVersion`, while the four-part file-version resource uses the numeric part (`0.1.0.0`).
+The verb always builds the release profile (`cargo build --release -p daemon -p tracer -p rustling-tulip-native`) and writes `target\installer\rustling-tulip-<version>-setup.exe`, printing its path, and writes `rustling-tulip-<version>-setup.exe.sha256` (`<hex>  <file name>`) beside it, which the app's updater checks a download against. The version comes from `[workspace.package] version` in `Cargo.toml`; a pre-release suffix such as `0.1.0-alpha` stays in the exe's name and in `DisplayVersion`, while the four-part file-version resource uses the numeric part (`0.1.0.0`).
 
 Requires NSIS 3, which the verb looks for at `%ProgramFiles(x86)%\NSIS\makensis.exe` and then on `PATH`:
 
@@ -86,4 +92,8 @@ It is built from the SVGs in `icon/`: `icon.svg` for 24 px and up, and `icon-16.
 2. Sign out and back in: the daemon starts at login (`%APPDATA%\leftos\rustling-tulip\config\logs\autostart.log` shows the launch) and the client connects without starting one itself.
 3. With the client open and a session running, run the same setup exe again: it completes and the session survives (the tracer kept the PTY alive and the new daemon reattached).
 4. Toasts: with the installed client connected to this PC's daemon, a device pairing request raises a toast under rustling-tulip (the sender name and icon, not PowerShell). Close the client, then press Approve… or Deny from Action Center: the client starts (`native.log`: "started by a toast press") and applies the press. `native.log` also says "toast activator registered", and the Start menu shortcut and the CLSID key above exist.
-5. Uninstall from Settings → Apps (or the Start menu): the `rustling-tulip-daemon` value is gone from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the `HKCU\Software\Classes\CLSID\{354BE9DC-…}` key is gone, the Start menu entry is gone, the install directory is gone and no longer on the user PATH (the other PATH entries unchanged), and `%APPDATA%\leftos\rustling-tulip\config\` is still there.
+5. Update: install an older setup, open the client with a session running, then run a newer setup exe over it (or, with an older client connected to a published newer release, wait for the check or press Settings → General → Updates → Check now). The footer shows `Update {version} ready`; press `Restart to update`.
+
+   The client closes, the new one opens on the new version with the toast `Updated to {version}`, the session is still running, `daemon.json` has the new `build_version`, no `.staging` folder or `.old` file is left in the install folder after the next launch, and the Run value, PATH entry and desktop shortcut are as they were.
+6. Failed update: with a file in the install folder held open (for example `rustling-tulipd.exe bridge` running from it), press `Restart to update`. The client comes back on the old version with the toast `Update to {version} didn't install` whose detail names the running exe, nothing in the install folder has changed, and `Restart to update` is offered again.
+7. Uninstall from Settings → Apps (or the Start menu): the `rustling-tulip-daemon` value is gone from `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the `HKCU\Software\Classes\CLSID\{354BE9DC-…}` key is gone, the Start menu entry is gone, the install directory is gone and no longer on the user PATH (the other PATH entries unchanged), and `%APPDATA%\leftos\rustling-tulip\config\` is still there.

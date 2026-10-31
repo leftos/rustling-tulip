@@ -74,7 +74,10 @@ pub fn remote_files_dir() -> anyhow::Result<PathBuf> {
     Ok(pd.data_local_dir().join("remote-files"))
 }
 
-/// Resolve the folder the native client's updater downloads releases into:
+/// Resolve the folder the native client's updater downloads releases into.
+///
+/// Honors `RUSTLING_TULIP_UPDATES_DIR` if set and non-empty (used to isolate
+/// test runs), otherwise falls back to
 /// `ProjectDirs::from("dev", "leftos", "rustling-tulip").data_local_dir()`
 /// joined with `updates`, machine-local like [`remote_files_dir`].
 ///
@@ -82,6 +85,11 @@ pub fn remote_files_dir() -> anyhow::Result<PathBuf> {
 ///
 /// Fails when no home directory can be resolved for the current user.
 pub fn updates_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(value) = std::env::var("RUSTLING_TULIP_UPDATES_DIR")
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
+    }
     let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
         .ok_or_else(|| anyhow!("could not resolve the local data directory"))?;
     Ok(pd.data_local_dir().join("updates"))
@@ -763,6 +771,39 @@ mod tests {
             fallback.display()
         );
         assert_ne!(fallback, chosen);
+    }
+
+    #[test]
+    fn updates_dir_honours_the_override() {
+        const VAR: &str = "RUSTLING_TULIP_UPDATES_DIR";
+        let _lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let prior = std::env::var_os(VAR);
+        let chosen = PathBuf::from("override").join("updates");
+
+        // SAFETY: ENV_LOCK is held until the end of the test, and no other
+        // test in this crate reads the environment without it.
+        unsafe { std::env::set_var(VAR, &chosen) };
+        let overridden = super::updates_dir();
+        // SAFETY: as above.
+        unsafe { std::env::set_var(VAR, "") };
+        let empty = super::updates_dir();
+        // SAFETY: as above.
+        unsafe {
+            match &prior {
+                Some(value) => std::env::set_var(VAR, value),
+                None => std::env::remove_var(VAR),
+            }
+        }
+
+        assert_eq!(overridden.expect("the override resolves"), chosen);
+        let fallback = empty.expect("an empty override falls back to the data dir");
+        assert!(
+            fallback.ends_with("updates"),
+            "the default is <data_local_dir>/updates: {}",
+            fallback.display()
+        );
+        assert_ne!(fallback, chosen);
+        assert_ne!(fallback, PathBuf::new(), "an empty value is not the folder");
     }
 
     #[cfg(windows)]
