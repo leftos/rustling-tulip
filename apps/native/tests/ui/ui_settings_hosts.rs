@@ -259,6 +259,17 @@ fn the_chosen_host_disconnecting_returns_the_selector_to_this_pc(cx: &mut TestAp
         HostKey::Local,
         "the selector falls back"
     );
+    assert_eq!(shown_tab(&mut h), "Claude", "This PC lists Claude too");
+    assert!(
+        drawn(&mut h, "settings-agent-program") && drawn(&mut h, "settings-agent-args"),
+        "This PC's Claude page draws its launch rows"
+    );
+    assert_eq!(
+        launch_program(&mut h).as_deref(),
+        Some("local-claude"),
+        "This PC's page holds This PC's launch command"
+    );
+    assert_tab_reaches_only_drawn_controls(&mut h);
     assert_eq!(
         h.root(|root, _| root.settings_host_choices()),
         [(HostKey::Local, true), (remote_key(), false)],
@@ -282,6 +293,55 @@ fn the_chosen_host_disconnecting_returns_the_selector_to_this_pc(cx: &mut TestAp
         launch_program(&mut h),
         None,
         "box's drafts went with its connection"
+    );
+}
+
+/// Walks Tab from where the keyboard is round the shown page's ring to the
+/// tab list, checking every control it reaches is drawn.
+fn assert_tab_reaches_only_drawn_controls(h: &mut Harness<'_>) {
+    let mut reached = Vec::new();
+    for _ in 0..40 {
+        h.keys("tab");
+        let root = h.root.clone();
+        let focus =
+            h.cx.update(|window, cx| root.read(cx).settings_focus(window, cx));
+        assert!(
+            focus.is_some(),
+            "Tab left the Settings frame after {reached:?}"
+        );
+        if focus == Some("list") {
+            break;
+        }
+        reached.extend(focus);
+    }
+    assert!(
+        reached.len() < 40,
+        "Tab never returned to the tab list: {reached:?}"
+    );
+    for selector in reached {
+        assert!(drawn(h, selector), "Tab reached undrawn {selector}");
+    }
+}
+
+#[gpui::test]
+fn a_remote_agent_list_keeps_this_pcs_agent_page_while_this_pc_is_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-claude");
+
+    h.event(NetEvent::State(Connection::for_target(Target::Local)));
+    assert!(
+        shown_tab(&mut h).eq_ignore_ascii_case("claude"),
+        "a lost connection keeps the page"
+    );
+    h.host(&remote()).send(DaemonMessage::Agents {
+        agents: agent_registry::descriptors(),
+    });
+
+    assert!(
+        shown_tab(&mut h).eq_ignore_ascii_case("claude"),
+        "box's agent list says nothing about This PC's pages"
     );
 }
 
