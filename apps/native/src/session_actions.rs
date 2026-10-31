@@ -224,21 +224,25 @@ struct PendingDuplicate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingPrefill {
     pub(crate) session_id: String,
-    /// The source's workspace, else its first member's repo; `None` for a
-    /// session in neither.
+    /// The host that lists the source, where its copy spawns.
+    pub(crate) host: HostKey,
+    /// The source's workspace, else its first member's repo, on `host`;
+    /// `None` for a session in neither.
     pub(crate) source: Option<Target>,
     pub(crate) target: DuplicateTarget,
 }
 
 impl PendingPrefill {
-    pub(crate) fn of(session: &SessionSnapshot, target: DuplicateTarget) -> Self {
+    /// The prefill a Shift-duplicate of `host`'s `session` waits for.
+    pub(crate) fn of(host: &HostKey, session: &SessionSnapshot, target: DuplicateTarget) -> Self {
         let source = match (&session.workspace_id, session.members.first()) {
-            (Some(id), _) => Some(Target::Workspace(id.clone())),
-            (None, Some(member)) => Some(Target::Repo(member.repo_id.clone())),
+            (Some(id), _) => Some(Target::workspace(host, id)),
+            (None, Some(member)) => Some(Target::repo(host, &member.repo_id)),
             (None, None) => None,
         };
         Self {
             session_id: session.id.clone(),
+            host: host.clone(),
             source,
             target,
         }
@@ -2388,7 +2392,8 @@ mod tests {
     fn prefill_of(session_id: &str) -> PendingPrefill {
         PendingPrefill {
             session_id: session_id.to_owned(),
-            source: Some(Target::Repo("r1".to_owned())),
+            host: HostKey::Local,
+            source: Some(Target::repo(&HostKey::Local, "r1")),
             target: DuplicateTarget::Tab("t2".to_owned()),
         }
     }
@@ -2424,20 +2429,27 @@ mod tests {
     #[test]
     fn a_pending_prefill_names_its_source_and_open_in_choice() {
         let session = session("idle");
-        let pending = PendingPrefill::of(&session, DuplicateTarget::NewTab);
+        let pending = PendingPrefill::of(&HostKey::Local, &session, DuplicateTarget::NewTab);
         assert_eq!(pending.session_id, "s1");
-        assert_eq!(pending.source, Some(Target::Repo("r1".to_owned())));
+        assert_eq!(pending.source, Some(Target::repo(&HostKey::Local, "r1")));
         assert_eq!(pending.open_in(), Some(OpenChoice::NewTab));
         let mut in_workspace = session;
         in_workspace.workspace_id = Some("w1".to_owned());
-        let pending = PendingPrefill::of(&in_workspace, DuplicateTarget::Tab("t2".to_owned()));
-        assert_eq!(pending.source, Some(Target::Workspace("w1".to_owned())));
+        let pending = PendingPrefill::of(
+            &HostKey::Local,
+            &in_workspace,
+            DuplicateTarget::Tab("t2".to_owned()),
+        );
+        assert_eq!(
+            pending.source,
+            Some(Target::workspace(&HostKey::Local, "w1"))
+        );
         assert_eq!(pending.open_in(), Some(OpenChoice::Tab("t2".to_owned())));
         let mut standalone = in_workspace;
         standalone.workspace_id = None;
         standalone.members.clear();
         assert_eq!(
-            PendingPrefill::of(&standalone, DuplicateTarget::Restart).source,
+            PendingPrefill::of(&HostKey::Local, &standalone, DuplicateTarget::Restart).source,
             None
         );
     }

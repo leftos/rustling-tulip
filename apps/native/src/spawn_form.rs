@@ -22,57 +22,87 @@ use crate::combobox::{ComboRow, Combobox};
 use crate::sidebar::SpawnDefaults;
 use crate::spawn_preview::{Preview, PreviewKey, ReuseChoice};
 use crate::spawns::OpenIn;
+use crate::target::HostKey;
 
 /// How long a branch-name suggestion is waited for before the field stops
 /// showing that one is on the way.
 pub(crate) const SUGGESTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A repo or a workspace to spawn into.
+/// A repo or a workspace to spawn into, on the host that registered it: two
+/// hosts' ids can coincide, so the host is part of every key a target makes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Target {
-    Repo(String),
-    Workspace(String),
+    Repo { host: HostKey, id: String },
+    Workspace { host: HostKey, id: String },
 }
 
 impl Target {
+    /// Repo `id` on `host`.
+    pub(crate) fn repo(host: &HostKey, id: &str) -> Self {
+        Self::Repo {
+            host: host.clone(),
+            id: id.to_owned(),
+        }
+    }
+
+    /// Workspace `id` on `host`.
+    pub(crate) fn workspace(host: &HostKey, id: &str) -> Self {
+        Self::Workspace {
+            host: host.clone(),
+            id: id.to_owned(),
+        }
+    }
+
+    /// The host that registered the repo or workspace.
+    pub(crate) fn host(&self) -> &HostKey {
+        match self {
+            Self::Repo { host, .. } | Self::Workspace { host, .. } => host,
+        }
+    }
+
     fn suggest(&self) -> SuggestTarget {
         match self {
-            Self::Repo(id) => SuggestTarget::Repo {
+            Self::Repo { id, .. } => SuggestTarget::Repo {
                 repo_id: id.clone(),
             },
-            Self::Workspace(id) => SuggestTarget::Workspace {
+            Self::Workspace { id, .. } => SuggestTarget::Workspace {
                 workspace_id: id.clone(),
             },
         }
     }
 
-    /// The repo or workspace a stored spawn target names; `None` for a
-    /// standalone one.
-    pub(crate) fn from_spawn(target: &SpawnTarget) -> Option<Self> {
+    /// The repo or workspace on `host` a stored spawn target names; `None`
+    /// for a standalone one.
+    pub(crate) fn from_spawn(host: &HostKey, target: &SpawnTarget) -> Option<Self> {
         match target {
-            SpawnTarget::Single { repo_id, .. } => Some(Self::Repo(repo_id.clone())),
+            SpawnTarget::Single { repo_id, .. } => Some(Self::repo(host, repo_id)),
             SpawnTarget::Workspace { workspace_id, .. } => {
-                Some(Self::Workspace(workspace_id.clone()))
+                Some(Self::workspace(host, workspace_id))
             }
             SpawnTarget::Standalone { .. } => None,
         }
     }
 
-    /// The target a suggestion reply names, if it is one.
-    pub(crate) fn from_suggest(target: &SuggestTarget) -> Option<Self> {
+    /// The target on `host` that a suggestion reply from `host` names, if
+    /// it is one.
+    pub(crate) fn from_suggest(host: &HostKey, target: &SuggestTarget) -> Option<Self> {
         match target {
-            SuggestTarget::Repo { repo_id } => Some(Self::Repo(repo_id.clone())),
-            SuggestTarget::Workspace { workspace_id } => {
-                Some(Self::Workspace(workspace_id.clone()))
-            }
+            SuggestTarget::Repo { repo_id } => Some(Self::repo(host, repo_id)),
+            SuggestTarget::Workspace { workspace_id } => Some(Self::workspace(host, workspace_id)),
             SuggestTarget::Unknown => None,
         }
     }
 
+    /// The target's part of a control selector: This PC's targets keep the
+    /// bare id, a remote host's add `@` and the host's key.
     fn selector_part(&self) -> String {
-        match self {
-            Self::Repo(id) => format!("repo-{id}"),
-            Self::Workspace(id) => format!("workspace-{id}"),
+        let (kind, id) = match self {
+            Self::Repo { id, .. } => ("repo", id),
+            Self::Workspace { id, .. } => ("workspace", id),
+        };
+        match self.host() {
+            HostKey::Local => format!("{kind}-{id}"),
+            HostKey::Remote(key) => format!("{kind}-{id}@{key}"),
         }
     }
 }
@@ -185,6 +215,12 @@ impl EnvRow {
         }
     }
 
+    /// The value is an exact `${secret:…}` reference, typed or prefilled:
+    /// a value sealed on This PC.
+    fn is_secret_reference(&self) -> bool {
+        matches!(env_rows::reference(&self.value), Some(Reference::Secret(_)))
+    }
+
     /// The value is an exact `${env:…}` or `${secret:…}` reference.
     fn is_reference(&self) -> bool {
         env_rows::reference(&self.value).is_some()
@@ -212,6 +248,11 @@ pub(crate) enum EnvRowNote {
     /// value securely.
     PatternKeepsSecret,
 }
+
+/// The env section's line after a target move to another host dropped its
+/// `${secret:…}` rows.
+pub(crate) const SECRET_ROWS_DROPPED_NOTE: &str =
+    "Secret rows were removed: they are sealed on This PC.";
 
 pub(crate) const ENV_SAVED_NOTE: &str =
     "Saved in Windows Credential Manager; only a reference is kept.";
@@ -638,10 +679,10 @@ pub(crate) struct Lock {
 }
 
 impl Lock {
-    /// The lock a worktrees-root group's launch asks for: its repo or
-    /// workspace, pinned to its worktree or its members' worktrees. `None`
-    /// when the group maps onto nothing this build can spawn.
-    pub(crate) fn from_group(entry: &RootWorktreeEntry) -> Option<Self> {
+    /// The lock a worktrees-root group of `host`'s launch asks for: its repo
+    /// or workspace, pinned to its worktree or its members' worktrees.
+    /// `None` when the group maps onto nothing this build can spawn.
+    pub(crate) fn from_group(host: &HostKey, entry: &RootWorktreeEntry) -> Option<Self> {
         match entry.launch.as_ref()? {
             WorktreeLaunchTarget::Single {
                 repo_id,
@@ -660,13 +701,13 @@ impl Lock {
                     pin: Pin::Worktree(worktree_path.clone()),
                 };
                 Some(Self {
-                    place: LockPlace::Target(Target::Repo(repo_id.clone())),
+                    place: LockPlace::Target(Target::repo(host, repo_id)),
                     pin: Some(pin),
                     share_confirmed: false,
                 })
             }
             WorktreeLaunchTarget::Workspace { workspace_id, .. } => Some(Self {
-                place: LockPlace::Target(Target::Workspace(workspace_id.clone())),
+                place: LockPlace::Target(Target::workspace(host, workspace_id)),
                 pin: ExistingOption::from_group(entry, workspace_id),
                 share_confirmed: false,
             }),
@@ -710,17 +751,20 @@ impl Lock {
     }
 
     /// Why the lock's target can no longer take a spawn dialog, if it
-    /// cannot: the repo or workspace it names left the registry.
+    /// cannot: the repo or workspace it names left its host's registry,
+    /// `repos` and `workspaces`.
     pub(crate) fn unregistered(
         &self,
         repos: &[RepoEntry],
         workspaces: &[WorkspaceEntry],
     ) -> Option<&'static str> {
         match &self.place {
-            LockPlace::Target(Target::Repo(id)) if !repos.iter().any(|repo| &repo.id == id) => {
+            LockPlace::Target(Target::Repo { id, .. })
+                if !repos.iter().any(|repo| &repo.id == id) =>
+            {
                 Some("the repo is no longer registered")
             }
-            LockPlace::Target(Target::Workspace(id))
+            LockPlace::Target(Target::Workspace { id, .. })
                 if !workspaces.iter().any(|workspace| &workspace.id == id) =>
             {
                 Some("the workspace is no longer registered")
@@ -758,6 +802,9 @@ struct Advanced {
     /// The user opened or closed it, so it no longer follows the values.
     chosen: bool,
     env: Vec<EnvRow>,
+    /// A target move to another host dropped `${secret:…}` rows; the env
+    /// section says so until its next edit.
+    secrets_dropped: bool,
 }
 
 /// Which runtime defaults the user has overridden.
@@ -822,8 +869,8 @@ struct Existing {
               reads on its own rather than as one lifecycle state"
 )]
 pub(crate) struct SpawnForm {
-    repos: Vec<RepoEntry>,
-    workspaces: Vec<WorkspaceEntry>,
+    /// Each connected host's registry, agents and agent settings.
+    hosts: Vec<HostInputs>,
     target: Target,
     /// The target cannot be changed.
     locked: bool,
@@ -831,9 +878,9 @@ pub(crate) struct SpawnForm {
     /// the dialog.
     tab_lock: Option<String>,
     runtime: RuntimeChoice,
-    /// The daemon's agents, in its order.
+    /// The target's host's agents, in its daemon's order.
     agents: Vec<AgentDescriptor>,
-    /// Each agent's Settings page values.
+    /// Each of the target's host's agents' Settings page values.
     agent_settings: BTreeMap<AgentId, OptionValues>,
     /// Each listed agent's options, kept across runtime switches.
     options: BTreeMap<AgentId, AgentChoice>,
@@ -880,20 +927,57 @@ pub(crate) struct Prefill {
     pub open_in: Option<OpenChoice>,
 }
 
+/// One connected host as the dialog sees it: its registry, its agents and
+/// their Settings values.
+#[derive(Debug, Clone)]
+pub(crate) struct HostInputs {
+    pub host: HostKey,
+    /// The host's name, which a remote host's targets carry in the picker.
+    pub label: String,
+    pub repos: Vec<RepoEntry>,
+    pub workspaces: Vec<WorkspaceEntry>,
+    /// The host's agents, in its daemon's order: the runtimes besides a
+    /// plain shell.
+    pub agents: Vec<AgentDescriptor>,
+    /// Each agent's Settings page values on the host, its options' first
+    /// seed.
+    pub agent_settings: BTreeMap<AgentId, OptionValues>,
+}
+
+impl HostInputs {
+    /// The host's targets, repos then workspaces.
+    fn targets(&self) -> impl Iterator<Item = Target> + '_ {
+        let repos = self.repos.iter().map(|r| Target::repo(&self.host, &r.id));
+        let workspaces = self
+            .workspaces
+            .iter()
+            .map(|w| Target::workspace(&self.host, &w.id));
+        repos.chain(workspaces)
+    }
+
+    /// The host's first target: its first workspace, else its first repo.
+    fn first_target(&self) -> Option<Target> {
+        self.workspaces
+            .first()
+            .map(|w| Target::workspace(&self.host, &w.id))
+            .or_else(|| self.repos.first().map(|r| Target::repo(&self.host, &r.id)))
+    }
+}
+
+/// The host `host` among `hosts`.
+fn host_in<'a>(hosts: &'a [HostInputs], host: &HostKey) -> Option<&'a HostInputs> {
+    hosts.iter().find(|inputs| &inputs.host == host)
+}
+
 /// What the dialog opens over.
 pub(crate) struct FormInputs<'a> {
-    pub repos: &'a [RepoEntry],
-    pub workspaces: &'a [WorkspaceEntry],
-    /// The session in the focused pane.
-    pub focused: Option<&'a SessionSnapshot>,
+    /// Every connected host, This PC first.
+    pub hosts: Vec<HostInputs>,
+    /// The session in the focused pane, with the host of that pane.
+    pub focused: Option<(HostKey, &'a SessionSnapshot)>,
     pub tabs: TabChoices,
     /// The saved Spawn defaults the trusted launch is seeded from.
     pub spawn_defaults: SpawnDefaults,
-    /// The daemon's agents, in its order: the runtimes besides a plain
-    /// shell.
-    pub agents: &'a [AgentDescriptor],
-    /// Each agent's Settings page values, its options' first seed.
-    pub agent_settings: &'a BTreeMap<AgentId, OptionValues>,
     /// The target the dialog is held on, and the worktree it is pinned to.
     pub lock: Option<Lock>,
 }
@@ -902,30 +986,27 @@ pub(crate) struct FormInputs<'a> {
 /// the target is locked, and the tab the placement is locked to.
 type OpeningLock = (Target, Option<ExistingOption>, bool, bool, Option<String>);
 
-/// How a dialog opens, or `None` when a locked target left the registry or
-/// there is nothing to spawn into.
+/// How a dialog opens, or `None` when a locked target left its host's
+/// registry or there is nothing to spawn into.
 fn opening_lock(
-    focused: Option<&SessionSnapshot>,
-    repos: &[RepoEntry],
-    workspaces: &[WorkspaceEntry],
+    focused: Option<(&HostKey, &SessionSnapshot)>,
+    hosts: &[HostInputs],
     lock: Option<Lock>,
 ) -> Option<OpeningLock> {
     let Some(lock) = lock else {
-        return Some((
-            initial_target(focused, repos, workspaces)?,
-            None,
-            false,
-            false,
-            None,
-        ));
+        return Some((initial_target(focused, hosts)?, None, false, false, None));
     };
-    if lock.unregistered(repos, workspaces).is_some() {
-        return None;
+    if let Some(target) = lock.target() {
+        let (repos, workspaces) = host_in(hosts, target.host())
+            .map_or((&[][..], &[][..]), |h| (&h.repos[..], &h.workspaces[..]));
+        if lock.unregistered(repos, workspaces).is_some() {
+            return None;
+        }
     }
     match lock.place {
         LockPlace::Target(target) => Some((target, lock.pin, lock.share_confirmed, true, None)),
         LockPlace::Tab(tab) => Some((
-            initial_target(focused, repos, workspaces)?,
+            initial_target(focused, hosts)?,
             None,
             false,
             false,
@@ -943,17 +1024,23 @@ impl SpawnForm {
         cache: &mut BranchCache,
         now: Instant,
     ) -> Option<(Self, Vec<ClientMessage>)> {
+        let focused = inputs
+            .focused
+            .as_ref()
+            .map(|(host, session)| (host, *session));
         let (target, pin, share_confirmed, locked, tab_lock) =
-            opening_lock(inputs.focused, inputs.repos, inputs.workspaces, inputs.lock)?;
+            opening_lock(focused, &inputs.hosts, inputs.lock)?;
         let open_in = if inputs.tabs.current.is_some() {
             OpenChoice::CurrentTab
         } else {
             OpenChoice::NewTab
         };
         let defaults = inputs.spawn_defaults;
+        let (agents, agent_settings) = host_in(&inputs.hosts, target.host())
+            .map(|h| (h.agents.clone(), h.agent_settings.clone()))
+            .unwrap_or_default();
         let mut form = Self {
-            repos: inputs.repos.to_vec(),
-            workspaces: inputs.workspaces.to_vec(),
+            hosts: inputs.hosts,
             target: target.clone(),
             locked,
             tab_lock: None,
@@ -962,8 +1049,8 @@ impl SpawnForm {
                 plain_shell: false,
                 touched: Touched::default(),
             },
-            agents: inputs.agents.to_vec(),
-            agent_settings: inputs.agent_settings.clone(),
+            agents,
+            agent_settings,
             options: BTreeMap::new(),
             tabs: inputs.tabs,
             open_in,
@@ -1097,7 +1184,7 @@ impl SpawnForm {
             .map(|(key, value)| EnvRow::prefilled(key, value))
             .collect();
         self.follow_advanced();
-        if Target::from_spawn(&config.target).as_ref() == Some(&self.target) {
+        if Target::from_spawn(self.target.host(), &config.target).as_ref() == Some(&self.target) {
             self.apply_branch_fields(&config.target, cache, now)
         } else {
             Vec::new()
@@ -1143,7 +1230,38 @@ impl SpawnForm {
         let agent_set = self
             .chosen_agent()
             .is_some_and(|choice| choice.options.advanced_set());
-        self.advanced.open = agent_set || !self.advanced.env.is_empty();
+        self.advanced.open =
+            agent_set || !self.advanced.env.is_empty() || self.advanced.secrets_dropped;
+    }
+
+    /// The target moved to another host: the agents and their Settings
+    /// values become that host's, a chosen agent it does not list falls
+    /// back to the first it lists, and `${secret:…}` env rows go, since
+    /// their values are sealed on This PC.
+    fn follow_host(&mut self) {
+        let (agents, settings) = host_in(&self.hosts, self.target.host())
+            .map(|h| (h.agents.clone(), h.agent_settings.clone()))
+            .unwrap_or_default();
+        self.agents = agents;
+        self.agent_settings = settings;
+        if self.runtime.touched.agent {
+            self.runtime.agent = self.listed_agent(self.runtime.agent.clone());
+        }
+        let before = self.advanced.env.len();
+        self.advanced.env.retain(|row| !row.is_secret_reference());
+        if self.advanced.env.len() != before {
+            self.advanced.secrets_dropped = true;
+            self.env_list.close();
+            self.env_list_row = None;
+        }
+    }
+
+    /// The env section's note after a host move dropped secret rows, until
+    /// the next edit there.
+    pub(crate) fn env_section_note(&self) -> Option<&'static str> {
+        self.advanced
+            .secrets_dropped
+            .then_some(SECRET_ROWS_DROPPED_NOTE)
     }
 
     /// `agent` when the daemon lists it, else the first agent it lists.
@@ -1242,7 +1360,11 @@ impl SpawnForm {
         cache: &mut BranchCache,
         now: Instant,
     ) -> Vec<ClientMessage> {
+        let moved = target.host() != self.target.host();
         self.target = target;
+        if moved {
+            self.follow_host();
+        }
         self.apply_runtime_defaults();
         self.use_worktree = self.entry_default_use_worktree();
         self.worktree_chosen = false;
@@ -1313,14 +1435,14 @@ impl SpawnForm {
     /// The target's defaults for the runtime, unless the user chose.
     fn apply_runtime_defaults(&mut self) {
         let (config, fallback) = match &self.target {
-            Target::Repo(id) => {
+            Target::Repo { id, .. } => {
                 let repo = self.repo(id);
                 (
                     repo.and_then(|r| r.last_spawn_config.as_ref()),
                     repo.and_then(|r| r.last_agent.clone()),
                 )
             }
-            Target::Workspace(id) => {
+            Target::Workspace { id, .. } => {
                 let workspace = self.workspace(id);
                 (
                     workspace.and_then(|w| w.last_spawn_config.as_ref()),
@@ -1344,12 +1466,19 @@ impl SpawnForm {
         self.follow_advanced();
     }
 
-    fn repo(&self, id: &str) -> Option<&RepoEntry> {
-        self.repos.iter().find(|r| r.id == id)
+    /// The target's host's registry and agents.
+    fn target_host(&self) -> Option<&HostInputs> {
+        host_in(&self.hosts, self.target.host())
     }
 
+    /// Repo `id` on the target's host.
+    fn repo(&self, id: &str) -> Option<&RepoEntry> {
+        self.target_host()?.repos.iter().find(|r| r.id == id)
+    }
+
+    /// Workspace `id` on the target's host.
     fn workspace(&self, id: &str) -> Option<&WorkspaceEntry> {
-        self.workspaces.iter().find(|w| w.id == id)
+        self.target_host()?.workspaces.iter().find(|w| w.id == id)
     }
 
     /// A workspace's first registered member.
@@ -1364,8 +1493,8 @@ impl SpawnForm {
     /// first member.
     fn defaults_repo(&self) -> Option<&RepoEntry> {
         match &self.target {
-            Target::Repo(id) => self.repo(id),
-            Target::Workspace(id) => self.workspace(id).and_then(|w| self.first_member(w)),
+            Target::Repo { id, .. } => self.repo(id),
+            Target::Workspace { id, .. } => self.workspace(id).and_then(|w| self.first_member(w)),
         }
     }
 
@@ -1376,8 +1505,8 @@ impl SpawnForm {
     /// The repos fetched on open: the repo, or every workspace member.
     fn fetch_repo_ids(&self) -> Vec<String> {
         match &self.target {
-            Target::Repo(id) => vec![id.clone()],
-            Target::Workspace(id) => self
+            Target::Repo { id, .. } => vec![id.clone()],
+            Target::Workspace { id, .. } => self
                 .workspace(id)
                 .map(|w| w.member_repo_ids.clone())
                 .unwrap_or_default(),
@@ -1386,8 +1515,10 @@ impl SpawnForm {
 
     fn entry_default_use_worktree(&self) -> bool {
         match &self.target {
-            Target::Repo(id) => self.repo(id).is_none_or(|r| r.default_use_worktree),
-            Target::Workspace(id) => self.workspace(id).is_none_or(|w| w.default_use_worktree),
+            Target::Repo { id, .. } => self.repo(id).is_none_or(|r| r.default_use_worktree),
+            Target::Workspace { id, .. } => {
+                self.workspace(id).is_none_or(|w| w.default_use_worktree)
+            }
         }
     }
 
@@ -1396,13 +1527,13 @@ impl SpawnForm {
     pub(crate) fn in_place_default(&self) -> String {
         let repo_default = self.defaults_repo().and_then(|r| r.default_branch.clone());
         let found = match self.target {
-            Target::Repo(_) => self
+            Target::Repo { .. } => self
                 .refs
                 .current
                 .clone()
                 .or(repo_default)
                 .or_else(|| self.refs.known.first().cloned()),
-            Target::Workspace(_) => repo_default,
+            Target::Workspace { .. } => repo_default,
         };
         found.unwrap_or_else(|| "main".to_owned())
     }
@@ -1411,10 +1542,10 @@ impl SpawnForm {
     fn local_default(&self) -> String {
         let repo_default = self.defaults_repo().and_then(|r| r.default_branch.clone());
         let found = match self.target {
-            Target::Repo(_) => repo_default
+            Target::Repo { .. } => repo_default
                 .or_else(|| self.refs.current.clone())
                 .or_else(|| self.refs.known.first().cloned()),
-            Target::Workspace(_) => repo_default,
+            Target::Workspace { .. } => repo_default,
         };
         found.unwrap_or_else(|| "main".to_owned())
     }
@@ -1425,23 +1556,30 @@ impl SpawnForm {
         prefer_remote_base(&self.local_default(), &self.refs.remote)
     }
 
-    /// Folds in a daemon reply; returns what to send in answer, or `None`
-    /// when the message is not one the form follows and nothing changed.
-    pub(crate) fn on_message(&mut self, msg: &DaemonMessage) -> Option<Vec<ClientMessage>> {
+    /// Folds in a daemon reply from `host`; returns what to send in answer,
+    /// or `None` when the message is not one the form follows and nothing
+    /// changed. A reply about a repo or workspace counts only from the
+    /// target's own host.
+    pub(crate) fn on_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+    ) -> Option<Vec<ClientMessage>> {
+        let own = host == self.target.host();
         match msg {
             DaemonMessage::Branches {
                 repo_id,
                 branches,
                 current,
                 remote_branches,
-            } if Some(repo_id) == self.branches_repo_id().as_ref() => {
+            } if own && Some(repo_id) == self.branches_repo_id().as_ref() => {
                 self.refs.known.clone_from(branches);
                 self.refs.remote.clone_from(remote_branches);
                 self.refs.current.clone_from(current);
                 self.reseed_from_refs();
             }
             DaemonMessage::RepoFetched { repo_id, error }
-                if Some(repo_id) == self.branches_repo_id().as_ref() =>
+                if own && Some(repo_id) == self.branches_repo_id().as_ref() =>
             {
                 self.refs.fetch_failed = error.is_some();
                 if error.is_none() {
@@ -1451,7 +1589,9 @@ impl SpawnForm {
                 }
             }
             DaemonMessage::Worktrees { repo_id, worktrees }
-                if self.listing_existing() && self.target == Target::Repo(repo_id.clone()) =>
+                if own
+                    && self.listing_existing()
+                    && matches!(&self.target, Target::Repo { id, .. } if id == repo_id) =>
             {
                 let options = worktrees
                     .iter()
@@ -1460,11 +1600,11 @@ impl SpawnForm {
                 self.set_existing(options);
             }
             DaemonMessage::WorktreesRootSnapshot { entries, .. }
-                if self.listing_existing() && self.is_workspace() =>
+                if own && self.listing_existing() && self.is_workspace() =>
             {
                 let id = match &self.target {
-                    Target::Workspace(id) => id.clone(),
-                    Target::Repo(_) => return None,
+                    Target::Workspace { id, .. } => id.clone(),
+                    Target::Repo { .. } => return None,
                 };
                 let options = entries
                     .iter()
@@ -1477,7 +1617,7 @@ impl SpawnForm {
                 branch_name,
                 preview,
                 request_id,
-            } => {
+            } if own => {
                 if !self
                     .preview
                     .on_repo_reply(repo_id, branch_name, preview, request_id.as_deref())
@@ -1490,7 +1630,7 @@ impl SpawnForm {
                 branch_name,
                 per_member,
                 request_id,
-            } => {
+            } if own => {
                 if !self.preview.on_workspace_reply(
                     workspace_id,
                     branch_name,
@@ -1530,12 +1670,14 @@ impl SpawnForm {
             .filter(|base| !base.is_empty())
             .map(str::to_owned);
         Some(match &self.target {
-            Target::Repo(repo_id) => PreviewKey::Repo {
+            Target::Repo { id: repo_id, .. } => PreviewKey::Repo {
                 repo_id: repo_id.clone(),
                 branch,
                 base,
             },
-            Target::Workspace(workspace_id) => PreviewKey::Workspace {
+            Target::Workspace {
+                id: workspace_id, ..
+            } => PreviewKey::Workspace {
                 workspace_id: workspace_id.clone(),
                 branch,
                 base,
@@ -1879,17 +2021,23 @@ impl SpawnForm {
         true
     }
 
-    /// Replaces the registry. A target that went away snaps to the first
-    /// target; `None` means none is left and the dialog must close.
+    /// Replaces one host's registry, or adds the host. A target that went
+    /// away snaps to the first target left on its host, else the first
+    /// target of any host; `None` means none is left and the dialog must
+    /// close.
     pub(crate) fn set_registry(
         &mut self,
-        repos: &[RepoEntry],
-        workspaces: &[WorkspaceEntry],
+        inputs: HostInputs,
         cache: &mut BranchCache,
         now: Instant,
     ) -> Option<Vec<ClientMessage>> {
-        repos.clone_into(&mut self.repos);
-        workspaces.clone_into(&mut self.workspaces);
+        match self.hosts.iter_mut().find(|h| h.host == inputs.host) {
+            Some(slot) => {
+                slot.repos = inputs.repos;
+                slot.workspaces = inputs.workspaces;
+            }
+            None => self.hosts.push(inputs),
+        }
         let targets = self.targets();
         if targets.contains(&self.target) {
             return Some(Vec::new());
@@ -1897,7 +2045,11 @@ impl SpawnForm {
         if self.locked {
             return None;
         }
-        let first = targets.into_iter().next()?;
+        let first = targets
+            .iter()
+            .find(|target| target.host() == self.target.host())
+            .or_else(|| targets.first())?
+            .clone();
         Some(self.load_target(first, cache, now))
     }
 
@@ -1927,14 +2079,15 @@ impl SpawnForm {
         }
     }
 
-    /// Every target, repos then workspaces, as the picker lists them.
+    /// Every target as the picker lists them: each host's repos then its
+    /// workspaces, This PC's first.
     pub(crate) fn targets(&self) -> Vec<Target> {
-        let repos = self.repos.iter().map(|r| Target::Repo(r.id.clone()));
-        let workspaces = self
-            .workspaces
-            .iter()
-            .map(|w| Target::Workspace(w.id.clone()));
-        repos.chain(workspaces).collect()
+        self.hosts.iter().flat_map(HostInputs::targets).collect()
+    }
+
+    /// The host the dialog spawns on: its target's.
+    pub(crate) fn host(&self) -> &HostKey {
+        self.target.host()
     }
 
     /// The targets the picker shows: only the current one while locked.
@@ -1950,17 +2103,26 @@ impl SpawnForm {
         &self.target
     }
 
-    /// A target's picker label.
+    /// A target's picker label; a remote host's target ends in ` · ` and
+    /// the host's name.
     pub(crate) fn target_label(&self, target: &Target) -> String {
-        match target {
-            Target::Repo(id) => {
-                let name = self.repo(id).map_or(id.as_str(), |r| r.name.as_str());
+        let host = host_in(&self.hosts, target.host());
+        let label = match target {
+            Target::Repo { id, .. } => {
+                let repo = host.and_then(|h| h.repos.iter().find(|r| &r.id == id));
+                let name = repo.map_or(id.as_str(), |r| r.name.as_str());
                 format!("[REPO]  {name}")
             }
-            Target::Workspace(id) => match self.workspace(id) {
-                Some(w) => format!("[WS]    {} ({} repos)", w.name, w.member_repo_ids.len()),
-                None => format!("[WS]    {id}"),
-            },
+            Target::Workspace { id, .. } => {
+                match host.and_then(|h| h.workspaces.iter().find(|w| &w.id == id)) {
+                    Some(w) => format!("[WS]    {} ({} repos)", w.name, w.member_repo_ids.len()),
+                    None => format!("[WS]    {id}"),
+                }
+            }
+        };
+        match (target.host(), host) {
+            (HostKey::Remote(_), Some(host)) => format!("{label} · {}", host.label),
+            _ => label,
         }
     }
 
@@ -2126,6 +2288,7 @@ impl SpawnForm {
     /// The user typed in row `index`'s key field. Until the user touches
     /// the row's Secret toggle, it follows the key's name pattern.
     pub(crate) fn edit_env_key(&mut self, index: usize, text: &str) {
+        self.advanced.secrets_dropped = false;
         if let Some(row) = self.advanced.env.get_mut(index) {
             text.clone_into(&mut row.key);
             let secret = is_secret_key(row.key.trim());
@@ -2139,6 +2302,7 @@ impl SpawnForm {
     /// The user typed in row `index`'s value field. A `$` typed into an
     /// empty value opens the variable-name list under it.
     pub(crate) fn edit_env_value(&mut self, index: usize, text: &str) {
+        self.advanced.secrets_dropped = false;
         let Some(row) = self.advanced.env.get_mut(index) else {
             return;
         };
@@ -2319,7 +2483,7 @@ impl SpawnForm {
     }
 
     pub(crate) fn is_workspace(&self) -> bool {
-        matches!(self.target, Target::Workspace(_))
+        matches!(self.target, Target::Workspace { .. })
     }
 
     pub(crate) fn use_worktree(&self) -> bool {
@@ -2366,10 +2530,10 @@ impl SpawnForm {
         self.existing.options = self.existing.pinned.iter().cloned().collect();
         self.existing.loaded = false;
         match &self.target {
-            Target::Repo(id) => vec![ClientMessage::ListWorktrees {
+            Target::Repo { id, .. } => vec![ClientMessage::ListWorktrees {
                 repo_id: id.clone(),
             }],
-            Target::Workspace(_) => vec![ClientMessage::InspectWorktreesRoot],
+            Target::Workspace { .. } => vec![ClientMessage::InspectWorktreesRoot],
         }
     }
 
@@ -2410,10 +2574,10 @@ impl SpawnForm {
             Pin::Worktree(path) => Some(format!("Runs in {path}")),
             Pin::Group(members) => {
                 let total = match &self.target {
-                    Target::Workspace(id) => {
+                    Target::Workspace { id, .. } => {
                         self.workspace(id).map_or(0, |w| w.member_repo_ids.len())
                     }
-                    Target::Repo(_) => 0,
+                    Target::Repo { .. } => 0,
                 };
                 let bound = members.len();
                 let plural = if bound == 1 { "" } else { "s" };
@@ -2682,6 +2846,15 @@ impl SpawnForm {
     /// A press on an agent field's or an Advanced control. A field trusted
     /// launch locks does not change while it is on.
     fn press_option(&mut self, control: &Control) {
+        if matches!(
+            control,
+            Control::EnvAdd
+                | Control::EnvRemove(_)
+                | Control::EnvSecret(_)
+                | Control::EnvReplace(_)
+        ) {
+            self.advanced.secrets_dropped = false;
+        }
         match control {
             Control::FieldChoice { field, choice } => self.choose_option(field, choice),
             Control::FieldToggle(field) => self.toggle_option(field),
@@ -2847,7 +3020,7 @@ impl SpawnForm {
         let base_branch =
             (self.use_worktree && pick.is_none() && !base.is_empty()).then(|| base.to_owned());
         match &self.target {
-            Target::Repo(id) => SpawnTarget::Single {
+            Target::Repo { id, .. } => SpawnTarget::Single {
                 repo_id: id.clone(),
                 branch_name,
                 base_branch,
@@ -2859,7 +3032,7 @@ impl SpawnForm {
                     Pin::Group(_) => None,
                 }),
             },
-            Target::Workspace(id) => SpawnTarget::Workspace {
+            Target::Workspace { id, .. } => SpawnTarget::Workspace {
                 workspace_id: id.clone(),
                 branch_name,
                 base_branch,
@@ -2904,14 +3077,14 @@ impl SpawnForm {
             return None;
         }
         match &self.target {
-            Target::Repo(id) => self
+            Target::Repo { id, .. } => self
                 .repo(id)
                 .filter(|r| r.default_use_worktree != value)
                 .map(|r| ClientMessage::SetRepoWorktreeDefault {
                     repo_id: r.id.clone(),
                     value,
                 }),
-            Target::Workspace(id) => self
+            Target::Workspace { id, .. } => self
                 .workspace(id)
                 .filter(|w| w.default_use_worktree != value)
                 .map(|w| ClientMessage::SetWorkspaceWorktreeDefault {
@@ -2922,29 +3095,29 @@ impl SpawnForm {
     }
 }
 
-/// The dialog's first target: the focused session's repo or workspace,
-/// else the first workspace, else the first repo.
+/// The dialog's first target: the focused session's repo or workspace on
+/// the focused pane's own host, else This PC's first workspace, else its
+/// first repo, else the first target of the other hosts in order.
 pub(crate) fn initial_target(
-    focused: Option<&SessionSnapshot>,
-    repos: &[RepoEntry],
-    workspaces: &[WorkspaceEntry],
+    focused: Option<(&HostKey, &SessionSnapshot)>,
+    hosts: &[HostInputs],
 ) -> Option<Target> {
-    let has_repo = |id: &str| repos.iter().any(|r| r.id == id);
-    let has_workspace = |id: &str| workspaces.iter().any(|w| w.id == id);
-    let from_session = focused.and_then(|session| {
+    let from_session = focused.and_then(|(host, session)| {
+        let inputs = host_in(hosts, host)?;
         if let Some(id) = session
             .workspace_id
             .as_deref()
-            .filter(|id| has_workspace(id))
+            .filter(|id| inputs.workspaces.iter().any(|w| w.id == *id))
         {
-            return Some(Target::Workspace(id.to_owned()));
+            return Some(Target::workspace(host, id));
         }
         let repo_id = &session.members.first()?.repo_id;
-        has_repo(repo_id).then(|| Target::Repo(repo_id.clone()))
+        let registered = inputs.repos.iter().any(|r| &r.id == repo_id);
+        registered.then(|| Target::repo(host, repo_id))
     });
     from_session
-        .or_else(|| workspaces.first().map(|w| Target::Workspace(w.id.clone())))
-        .or_else(|| repos.first().map(|r| Target::Repo(r.id.clone())))
+        .or_else(|| host_in(hosts, &HostKey::Local).and_then(HostInputs::first_target))
+        .or_else(|| hosts.iter().find_map(HostInputs::first_target))
 }
 
 /// `field`'s controls in Tab order: each choice, the toggle, or the text
@@ -3179,6 +3352,21 @@ mod tests {
         agents: Vec<AgentDescriptor>,
         agent_settings: BTreeMap<AgentId, OptionValues>,
         lock: Option<Lock>,
+        /// The hosts connected beside This PC.
+        others: Vec<HostInputs>,
+    }
+
+    /// This PC holding `repos` and `workspaces`, with every agent and no
+    /// Settings values.
+    fn this_pc(repos: Vec<RepoEntry>, workspaces: Vec<WorkspaceEntry>) -> HostInputs {
+        HostInputs {
+            host: HostKey::Local,
+            label: "This PC".to_owned(),
+            repos,
+            workspaces,
+            agents: agent_registry::descriptors(),
+            agent_settings: BTreeMap::new(),
+        }
     }
 
     impl Setup {
@@ -3192,7 +3380,23 @@ mod tests {
                 agents: agent_registry::descriptors(),
                 agent_settings: BTreeMap::new(),
                 lock: None,
+                others: Vec::new(),
             }
+        }
+
+        /// This PC's inputs, then the other hosts'.
+        fn hosts(&self) -> Vec<HostInputs> {
+            let local = HostInputs {
+                host: HostKey::Local,
+                label: "This PC".to_owned(),
+                repos: self.repos.clone(),
+                workspaces: self.workspaces.clone(),
+                agents: self.agents.clone(),
+                agent_settings: self.agent_settings.clone(),
+            };
+            std::iter::once(local)
+                .chain(self.others.iter().cloned())
+                .collect()
         }
 
         /// The agents' Settings values the dialog opens over.
@@ -3210,13 +3414,10 @@ mod tests {
         fn open(&self, cache: &mut BranchCache) -> (SpawnForm, Vec<ClientMessage>) {
             SpawnForm::open(
                 FormInputs {
-                    repos: &self.repos,
-                    workspaces: &self.workspaces,
-                    focused: self.focused.as_ref(),
+                    hosts: self.hosts(),
+                    focused: self.focused.as_ref().map(|s| (HostKey::Local, s)),
                     tabs: self.tabs.clone(),
                     spawn_defaults: self.spawn_defaults,
-                    agents: &self.agents,
-                    agent_settings: &self.agent_settings,
                     lock: self.lock.clone(),
                 },
                 cache,
@@ -3275,15 +3476,16 @@ mod tests {
     fn initial_target_is_focused_panes_repo() {
         let repos = vec![repo("r1"), repo("r2")];
         let workspaces = vec![workspace("w1", &["r1", "r2"])];
+        let hosts = [this_pc(repos, workspaces)];
         let focused = session_in(Some("r2"), None);
         assert_eq!(
-            initial_target(Some(&focused), &repos, &workspaces),
-            Some(Target::Repo("r2".to_owned()))
+            initial_target(Some((&HostKey::Local, &focused)), &hosts),
+            Some(Target::repo(&HostKey::Local, "r2"))
         );
         let in_workspace = session_in(Some("r1"), Some("w1"));
         assert_eq!(
-            initial_target(Some(&in_workspace), &repos, &workspaces),
-            Some(Target::Workspace("w1".to_owned())),
+            initial_target(Some((&HostKey::Local, &in_workspace)), &hosts),
+            Some(Target::workspace(&HostKey::Local, "w1")),
             "a workspace session preselects its workspace"
         );
     }
@@ -3294,15 +3496,164 @@ mod tests {
         let workspaces = vec![workspace("w1", &["r1"]), workspace("w2", &["r2"])];
         let stranger = session_in(Some("gone"), None);
         assert_eq!(
-            initial_target(Some(&stranger), &repos, &workspaces),
-            Some(Target::Workspace("w1".to_owned())),
+            initial_target(
+                Some((&HostKey::Local, &stranger)),
+                &[this_pc(repos.clone(), workspaces)]
+            ),
+            Some(Target::workspace(&HostKey::Local, "w1")),
             "an unregistered repo falls back"
         );
         assert_eq!(
-            initial_target(None, &repos, &[]),
-            Some(Target::Repo("r1".to_owned()))
+            initial_target(None, &[this_pc(repos, Vec::new())]),
+            Some(Target::repo(&HostKey::Local, "r1"))
         );
-        assert_eq!(initial_target(None, &[], &[]), None);
+        assert_eq!(
+            initial_target(None, &[this_pc(Vec::new(), Vec::new())]),
+            None
+        );
+    }
+
+    /// The remote host the multi-host cases connect beside This PC.
+    fn box_host() -> HostKey {
+        HostKey::Remote("box".to_owned())
+    }
+
+    /// The remote host holding `repos`, listing `agents`, with Settings
+    /// values `settings`.
+    fn box_inputs(
+        repos: &[&str],
+        agents: Vec<AgentDescriptor>,
+        settings: BTreeMap<AgentId, OptionValues>,
+    ) -> HostInputs {
+        HostInputs {
+            host: box_host(),
+            label: "box".to_owned(),
+            repos: repos.iter().map(|id| repo(id)).collect(),
+            workspaces: Vec::new(),
+            agents,
+            agent_settings: settings,
+        }
+    }
+
+    #[test]
+    fn initial_target_follows_the_focused_panes_host() {
+        let hosts = [
+            this_pc(vec![repo("r1")], Vec::new()),
+            box_inputs(&["r1"], agent_registry::descriptors(), BTreeMap::new()),
+        ];
+        let focused = session_in(Some("r1"), None);
+        assert_eq!(
+            initial_target(Some((&box_host(), &focused)), &hosts),
+            Some(Target::repo(&box_host(), "r1")),
+            "the remote pane's repo, on the remote host, though This PC holds the same id"
+        );
+        assert_eq!(
+            initial_target(Some((&HostKey::Local, &focused)), &hosts),
+            Some(Target::repo(&HostKey::Local, "r1"))
+        );
+        let only_remote = [
+            this_pc(Vec::new(), Vec::new()),
+            box_inputs(&["r9"], agent_registry::descriptors(), BTreeMap::new()),
+        ];
+        assert_eq!(
+            initial_target(None, &only_remote),
+            Some(Target::repo(&box_host(), "r9")),
+            "with no repo on This PC, the first target of another host"
+        );
+    }
+
+    #[test]
+    fn two_hosts_holding_one_repo_id_give_two_targets_and_two_cache_entries() {
+        let mut setup = Setup::repos(vec![repo("r1")]);
+        setup.others = vec![box_inputs(
+            &["r1"],
+            agent_registry::descriptors(),
+            BTreeMap::new(),
+        )];
+        let (form, _) = setup.open(&mut BranchCache::default());
+        let (local, remote) = (
+            Target::repo(&HostKey::Local, "r1"),
+            Target::repo(&box_host(), "r1"),
+        );
+        assert_eq!(form.targets(), [local.clone(), remote.clone()]);
+        assert_ne!(
+            Control::Target(local.clone()).selector(),
+            Control::Target(remote.clone()).selector(),
+            "each picker button has its own selector"
+        );
+        assert_eq!(form.target_label(&local), "[REPO]  r1");
+        assert_eq!(form.target_label(&remote), "[REPO]  r1 · box");
+        let mut cache = BranchCache::default();
+        cache.insert(local.clone(), "here".to_owned());
+        cache.insert(remote.clone(), "there".to_owned());
+        assert_eq!(cache.get(&local), Some("here"));
+        assert_eq!(cache.get(&remote), Some("there"));
+    }
+
+    #[test]
+    fn a_branches_reply_from_another_host_is_ignored() {
+        let mut setup = Setup::repos(vec![repo("r1")]);
+        setup.others = vec![box_inputs(
+            &["r1"],
+            agent_registry::descriptors(),
+            BTreeMap::new(),
+        )];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        assert_eq!(form.host(), &HostKey::Local);
+        let reply = branches("r1", Some("feature"), &["feature"], &[]);
+        assert!(
+            form.on_message(&box_host(), &reply).is_none(),
+            "the remote host's r1 is not the dialog's r1"
+        );
+        assert_eq!(form.current_branch(), None);
+        assert!(form.on_message(&HostKey::Local, &reply).is_some());
+        assert_eq!(form.current_branch(), Some("feature"));
+    }
+
+    #[test]
+    fn moving_the_target_to_another_host_takes_its_agents_and_drops_secret_rows() {
+        let mut box_agent = agent_registry::descriptors()
+            .into_iter()
+            .next()
+            .expect("the registry lists an agent");
+        box_agent.id = AgentId("box-agent".to_owned());
+        let remote_agents = vec![box_agent];
+        let mut setup =
+            Setup::repos(vec![repo("r1")]).settings(claude_settings(&[("model", "here-model")]));
+        setup.others = vec![box_inputs(&["r2"], remote_agents.clone(), BTreeMap::new())];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
+        press(&mut form, &Control::EnvAdd);
+        form.edit_env_key(0, "PLAIN");
+        form.edit_env_value(0, "1");
+        press(&mut form, &Control::EnvAdd);
+        form.edit_env_key(1, "TOKEN");
+        form.edit_env_value(1, "${secret:0123456789abcdef0123456789abcdef}");
+        assert_eq!(form.env_section_note(), None);
+
+        press(&mut form, &Control::Target(Target::repo(&box_host(), "r2")));
+
+        assert_eq!(form.host(), &box_host());
+        let runtimes: Vec<Runtime> = remote_agents
+            .iter()
+            .map(|d| Runtime::Agent(d.id.clone()))
+            .chain([Runtime::PlainShell])
+            .collect();
+        assert_eq!(form.runtimes(), runtimes, "the remote host's agents");
+        assert_eq!(
+            form.runtime(),
+            Runtime::Agent(remote_agents[0].id.clone()),
+            "an agent the remote host does not list falls back to its first"
+        );
+        let rows: Vec<(&str, &str)> = form
+            .env_rows()
+            .iter()
+            .map(|row| (row.key.as_str(), row.value.as_str()))
+            .collect();
+        assert_eq!(rows, [("PLAIN", "1")], "the plain row stays");
+        assert_eq!(form.env_section_note(), Some(SECRET_ROWS_DROPPED_NOTE));
+        form.edit_env_value(0, "2");
+        assert_eq!(form.env_section_note(), None, "gone after the next edit");
     }
 
     #[test]
@@ -3339,14 +3690,20 @@ mod tests {
             .open(&mut BranchCache::default())
             .0;
         press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
-        press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r2")),
+        );
         assert_eq!(
             form.runtime(),
             Runtime::PlainShell,
             "the untouched run mode still follows r2"
         );
         press(&mut form, &Control::Runtime(Runtime::Agent(claude_id())));
-        press(&mut form, &Control::Target(Target::Repo("r3".to_owned())));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r3")),
+        );
         assert_eq!(
             form.runtime(),
             Runtime::Agent(claude_id()),
@@ -3407,7 +3764,10 @@ mod tests {
             Some(text("accept_edits"))
         );
 
-        press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r2")),
+        );
         assert_eq!(
             form.option_value("permission_mode"),
             Some(text("accept_edits")),
@@ -3467,10 +3827,14 @@ mod tests {
             },
         ];
         for msg in &unrelated {
-            assert!(form.on_message(msg).is_none(), "{msg:?} is not the form's");
+            assert!(
+                form.on_message(&HostKey::Local, msg).is_none(),
+                "{msg:?} is not the form's"
+            );
         }
         assert!(
-            form.on_message(&branches("r1", None, &[], &[])).is_some(),
+            form.on_message(&HostKey::Local, &branches("r1", None, &[], &[]))
+                .is_some(),
             "its own repo's branches are"
         );
     }
@@ -3496,20 +3860,21 @@ mod tests {
         main.default_branch = Some("main".to_owned());
         let mut form = open_repo(main);
         assert_eq!(form.base(), "main");
-        form.on_message(&branches(
-            "r1",
-            Some("main"),
-            &["main"],
-            &["upstream/main", "origin/main"],
-        ));
+        form.on_message(
+            &HostKey::Local,
+            &branches(
+                "r1",
+                Some("main"),
+                &["main"],
+                &["upstream/main", "origin/main"],
+            ),
+        );
         assert_eq!(form.base(), "origin/main");
         form.edit_base("dev");
-        form.on_message(&branches(
-            "r1",
-            Some("main"),
-            &["main"],
-            &["origin/main", "origin/x"],
-        ));
+        form.on_message(
+            &HostKey::Local,
+            &branches("r1", Some("main"), &["main"], &["origin/main", "origin/x"]),
+        );
         assert_eq!(form.base(), "dev", "an edit sticks");
         assert_eq!(
             prefer_remote_base("main", &["upstream/main".to_owned()]),
@@ -3537,7 +3902,7 @@ mod tests {
             }
         ));
         assert!(form.suggestion_pending(Instant::now()));
-        let r1 = Target::Repo("r1".to_owned());
+        let r1 = Target::repo(&HostKey::Local, "r1");
         form.on_suggestion(&r1, "wt/brave-fox");
         assert_eq!(form.branch(), "wt/brave-fox");
         assert!(!form.suggestion_pending(Instant::now()));
@@ -3570,13 +3935,10 @@ mod tests {
         let start = Instant::now();
         let (mut form, _) = SpawnForm::open(
             FormInputs {
-                repos: &[repo("r1")],
-                workspaces: &[],
+                hosts: vec![this_pc(vec![repo("r1")], Vec::new())],
                 focused: None,
                 tabs: TabChoices::default(),
                 spawn_defaults: SpawnDefaults::default(),
-                agents: &agent_registry::descriptors(),
-                agent_settings: &BTreeMap::new(),
                 lock: None,
             },
             &mut BranchCache::default(),
@@ -3601,7 +3963,10 @@ mod tests {
         let mut form = open_repo(main);
         press(&mut form, &Control::UseWorktree);
         assert_eq!(form.branch(), "main", "the default before the refs arrive");
-        form.on_message(&branches("r1", Some("feature"), &["feature", "main"], &[]));
+        form.on_message(
+            &HostKey::Local,
+            &branches("r1", Some("feature"), &["feature", "main"], &[]),
+        );
         assert_eq!(form.branch(), "feature", "the branch checked out");
         assert_eq!(form.branch_placeholder(Instant::now()), "feature");
         let Outcome::Stay(sent) = press(&mut form, &Control::UseWorktree) else {
@@ -3628,13 +3993,16 @@ mod tests {
         ));
         assert_eq!(form.existing_placeholder(), "Loading…");
         assert!(!form.can_submit(), "nothing picked yet");
-        form.on_message(&DaemonMessage::Worktrees {
-            repo_id: "r1".to_owned(),
-            worktrees: vec![
-                worktree("C:/wt/wt.old/r1", "", RootWorktreeStatus::Detached),
-                worktree("C:/wt/x", "feat", RootWorktreeStatus::Stale),
-            ],
-        });
+        form.on_message(
+            &HostKey::Local,
+            &DaemonMessage::Worktrees {
+                repo_id: "r1".to_owned(),
+                worktrees: vec![
+                    worktree("C:/wt/wt.old/r1", "", RootWorktreeStatus::Detached),
+                    worktree("C:/wt/x", "feat", RootWorktreeStatus::Stale),
+                ],
+            },
+        );
         assert_eq!(form.existing_options().len(), 2);
         press(&mut form, &Control::Existing("C:/wt/wt.old/r1".to_owned()));
         assert_eq!(
@@ -3665,10 +4033,13 @@ mod tests {
     fn active_existing_worktree_asks_before_sharing() {
         let mut form = open_repo(repo("r1"));
         press(&mut form, &Control::Mode(WorktreeMode::Existing));
-        form.on_message(&DaemonMessage::Worktrees {
-            repo_id: "r1".to_owned(),
-            worktrees: vec![worktree("C:/wt/x", "feat", RootWorktreeStatus::Active)],
-        });
+        form.on_message(
+            &HostKey::Local,
+            &DaemonMessage::Worktrees {
+                repo_id: "r1".to_owned(),
+                worktrees: vec![worktree("C:/wt/x", "feat", RootWorktreeStatus::Active)],
+            },
+        );
         press(&mut form, &Control::Existing("C:/wt/x".to_owned()));
         assert!(form.existing_warning().is_some());
         let mut cache = BranchCache::default();
@@ -3706,9 +4077,10 @@ mod tests {
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
             lock: None,
+            others: Vec::new(),
         };
         let (mut form, sent) = setup.open(&mut BranchCache::default());
-        assert_eq!(form.target(), &Target::Workspace("w1".to_owned()));
+        assert_eq!(form.target(), &Target::workspace(&HostKey::Local, "w1"));
         assert!(has(
             &sent,
             &ClientMessage::ListBranches {
@@ -3721,7 +4093,10 @@ mod tests {
                 repo_id: "r2".to_owned()
             }
         ));
-        form.on_message(&branches("r1", Some("main"), &["main"], &["origin/main"]));
+        form.on_message(
+            &HostKey::Local,
+            &branches("r1", Some("main"), &["main"], &["origin/main"]),
+        );
         form.edit_branch("feature", &mut BranchCache::default());
         let spawn = submission(form.submit(&mut BranchCache::default()));
         assert_eq!(
@@ -3748,6 +4123,7 @@ mod tests {
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
             lock: None,
+            others: Vec::new(),
         };
         let mut form = setup.open(&mut BranchCache::default()).0;
         let Outcome::Stay(sent) = press(&mut form, &Control::Mode(WorktreeMode::Existing)) else {
@@ -3764,11 +4140,14 @@ mod tests {
             }))
             .expect("root entry fixture")
         };
-        form.on_message(&DaemonMessage::WorktreesRootSnapshot {
-            root: "C:/wt".to_owned(),
-            is_override: false,
-            entries: vec![entry("w1", "ours"), entry("w9", "theirs")],
-        });
+        form.on_message(
+            &HostKey::Local,
+            &DaemonMessage::WorktreesRootSnapshot {
+                root: "C:/wt".to_owned(),
+                is_override: false,
+                entries: vec![entry("w1", "ours"), entry("w9", "theirs")],
+            },
+        );
         let options = form.existing_options();
         assert_eq!(options.len(), 1, "only this workspace's groups");
         assert_eq!(
@@ -3844,7 +4223,7 @@ mod tests {
             "no branch yet"
         );
         assert!(!form.controls().contains(&Control::Submit));
-        let r1 = Target::Repo("r1".to_owned());
+        let r1 = Target::repo(&HostKey::Local, "r1");
         form.on_suggestion(&r1, "wt/x");
         cache.insert(r1.clone(), "wt/x".to_owned());
         assert!(matches!(form.submit(&mut cache), Outcome::Spawn(_)));
@@ -3859,16 +4238,18 @@ mod tests {
     fn registry_change_snaps_to_first_target() {
         let (mut form, _) =
             Setup::repos(vec![repo("r1"), repo("r2")]).open(&mut BranchCache::default());
-        press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r2")),
+        );
         let sent = form
             .set_registry(
-                &[repo("r1")],
-                &[],
+                this_pc(vec![repo("r1")], Vec::new()),
                 &mut BranchCache::default(),
                 Instant::now(),
             )
             .expect("r1 is left");
-        assert_eq!(form.target(), &Target::Repo("r1".to_owned()));
+        assert_eq!(form.target(), &Target::repo(&HostKey::Local, "r1"));
         assert!(has(
             &sent,
             &ClientMessage::ListBranches {
@@ -3876,8 +4257,12 @@ mod tests {
             }
         ));
         assert!(
-            form.set_registry(&[], &[], &mut BranchCache::default(), Instant::now())
-                .is_none()
+            form.set_registry(
+                this_pc(Vec::new(), Vec::new()),
+                &mut BranchCache::default(),
+                Instant::now()
+            )
+            .is_none()
         );
     }
 
@@ -3890,7 +4275,7 @@ mod tests {
             ring,
             [
                 Control::Close,
-                Control::Target(Target::Repo("r1".to_owned())),
+                Control::Target(Target::repo(&HostKey::Local, "r1")),
                 Control::Runtime(Runtime::Agent(claude_id())),
                 Control::Runtime(Runtime::PlainShell),
                 choice("provider", "anthropic"),
@@ -4350,7 +4735,10 @@ mod tests {
             ],
             request_id: Some(form.env_names_request.clone()),
         };
-        assert!(form.on_message(&reply).is_some(), "the dialog's reply");
+        assert!(
+            form.on_message(&HostKey::Local, &reply).is_some(),
+            "the dialog's reply"
+        );
         form
     }
 
@@ -4396,7 +4784,7 @@ mod tests {
             request_id: Some("another-dialog".to_owned()),
         };
         assert!(
-            stale.on_message(&other).is_none(),
+            stale.on_message(&HostKey::Local, &other).is_none(),
             "another request's reply"
         );
         stale.edit_env_value(0, "$");
@@ -4597,10 +4985,13 @@ mod tests {
         press(&mut form, &Control::Mode(WorktreeMode::Existing));
         let mut grouped = worktree("C:/wt/wt.feat/r1", "", RootWorktreeStatus::Detached);
         grouped.group_path = Some("C:/wt/wt.feat/r1".to_owned());
-        form.on_message(&DaemonMessage::Worktrees {
-            repo_id: "r1".to_owned(),
-            worktrees: vec![grouped],
-        });
+        form.on_message(
+            &HostKey::Local,
+            &DaemonMessage::Worktrees {
+                repo_id: "r1".to_owned(),
+                worktrees: vec![grouped],
+            },
+        );
         press(&mut form, &Control::Existing("C:/wt/wt.feat/r1".to_owned()));
         let spawn = submission(form.submit(&mut BranchCache::default()));
         let SpawnTarget::Single { branch_name, .. } = spawn.request.target else {
@@ -4633,15 +5024,16 @@ mod tests {
             agents: agent_registry::descriptors(),
             agent_settings: BTreeMap::new(),
             lock: None,
+            others: Vec::new(),
         }
         .open(&mut BranchCache::default())
         .0;
         assert_eq!(
-            form.target_label(&Target::Repo("r1".to_owned())),
+            form.target_label(&Target::repo(&HostKey::Local, "r1")),
             "[REPO]  r1"
         );
         assert_eq!(
-            form.target_label(&Target::Workspace("w1".to_owned())),
+            form.target_label(&Target::workspace(&HostKey::Local, "w1")),
             "[WS]    w1 (2 repos)"
         );
     }
@@ -4668,10 +5060,10 @@ mod tests {
 
     #[test]
     fn locked_target_shows_alone_and_ignores_target_presses() {
-        let setup = locked_setup(Lock::for_target(Target::Repo("r2".to_owned())));
+        let setup = locked_setup(Lock::for_target(Target::repo(&HostKey::Local, "r2")));
         let mut form = setup.open(&mut BranchCache::default()).0;
         assert!(form.target_locked());
-        assert_eq!(form.shown_targets(), [Target::Repo("r2".to_owned())]);
+        assert_eq!(form.shown_targets(), [Target::repo(&HostKey::Local, "r2")]);
         assert!(
             !form
                 .controls()
@@ -4679,20 +5071,20 @@ mod tests {
                 .any(|c| matches!(c, Control::Target(_))),
             "the locked chip is out of the ring"
         );
-        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
-        assert_eq!(form.target(), &Target::Repo("r2".to_owned()));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r1")),
+        );
+        assert_eq!(form.target(), &Target::repo(&HostKey::Local, "r2"));
         let mut unknown = setup;
-        unknown.lock = Some(Lock::for_target(Target::Repo("gone".to_owned())));
+        unknown.lock = Some(Lock::for_target(Target::repo(&HostKey::Local, "gone")));
         assert!(
             SpawnForm::open(
                 FormInputs {
-                    repos: &unknown.repos,
-                    workspaces: &[],
+                    hosts: vec![this_pc(unknown.repos.clone(), Vec::new())],
                     focused: None,
                     tabs: TabChoices::default(),
                     spawn_defaults: SpawnDefaults::default(),
-                    agents: &agent_registry::descriptors(),
-                    agent_settings: &BTreeMap::new(),
                     lock: unknown.lock.clone(),
                 },
                 &mut BranchCache::default(),
@@ -4705,17 +5097,17 @@ mod tests {
 
     #[test]
     fn a_pinless_lock_shows_only_its_target() {
-        let setup = locked_setup(Lock::for_target(Target::Repo("r2".to_owned())));
+        let setup = locked_setup(Lock::for_target(Target::repo(&HostKey::Local, "r2")));
         let form = setup.open(&mut BranchCache::default()).0;
         assert!(form.target_locked());
-        assert_eq!(form.shown_targets(), [Target::Repo("r2".to_owned())]);
+        assert_eq!(form.shown_targets(), [Target::repo(&HostKey::Local, "r2")]);
         assert_eq!(form.mode(), WorktreeMode::New, "no worktree is pinned");
         assert_eq!(form.existing_selected(), None);
     }
 
     #[test]
     fn a_target_lock_locks_only_the_target() {
-        let mut setup = locked_setup(Lock::for_target(Target::Repo("r2".to_owned())));
+        let mut setup = locked_setup(Lock::for_target(Target::repo(&HostKey::Local, "r2")));
         setup.tabs = tabs(Some("t1"), &["t2"]);
         let form = setup.open(&mut BranchCache::default()).0;
         assert!(form.target_locked(), "the target cannot change");
@@ -4768,10 +5160,16 @@ mod tests {
         assert!(!form.target_locked(), "the target can still change");
         assert_eq!(
             form.shown_targets(),
-            [Target::Repo("r1".to_owned()), Target::Repo("r2".to_owned())]
+            [
+                Target::repo(&HostKey::Local, "r1"),
+                Target::repo(&HostKey::Local, "r2")
+            ]
         );
-        press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
-        assert_eq!(form.target(), &Target::Repo("r2".to_owned()));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r2")),
+        );
+        assert_eq!(form.target(), &Target::repo(&HostKey::Local, "r2"));
     }
 
     #[test]
@@ -4798,7 +5196,7 @@ mod tests {
         setup.tabs = tabs(Some("t1"), &["t2"]);
         setup.lock = Some(lock);
         let form = setup.open(&mut BranchCache::default()).0;
-        assert_eq!(form.target(), &Target::Repo("r1".to_owned()));
+        assert_eq!(form.target(), &Target::repo(&HostKey::Local, "r1"));
         assert_eq!(form.open_in_locked(), Some("t2"));
     }
 
@@ -4839,7 +5237,7 @@ mod tests {
         let mut setup = Setup::repos(vec![r1, repo("r2")])
             .defaults(all_defaults())
             .settings(claude_settings(&[("permission_mode", "plan")]));
-        setup.lock = Some(Lock::for_target(Target::Repo("r1".to_owned())));
+        setup.lock = Some(Lock::for_target(Target::repo(&HostKey::Local, "r1")));
         setup
     }
 
@@ -4911,7 +5309,10 @@ mod tests {
         let mut form = duplicated(stored_config(&json!({})));
         assert_eq!(form.base(), "origin/dev");
         assert!(form.use_worktree());
-        form.on_message(&branches("r1", Some("main"), &["main"], &["origin/main"]));
+        form.on_message(
+            &HostKey::Local,
+            &branches("r1", Some("main"), &["main"], &["origin/main"]),
+        );
         assert_eq!(form.base(), "origin/dev", "the branch list leaves it");
         let in_place = duplicated(in_place_config());
         assert!(!in_place.use_worktree());
@@ -4926,7 +5327,7 @@ mod tests {
     fn a_shift_duplicate_never_reuses_the_source_branch() {
         let mut form = duplicated(stored_config(&json!({})));
         assert_ne!(form.branch(), "feat/dup");
-        form.on_suggestion(&Target::Repo("r1".to_owned()), "wt/fresh-owl");
+        form.on_suggestion(&Target::repo(&HostKey::Local, "r1"), "wt/fresh-owl");
         assert_eq!(
             form.branch(),
             "wt/fresh-owl",
@@ -4977,7 +5378,8 @@ mod tests {
 
     #[test]
     fn pin_opens_existing_mode_on_the_pinned_worktree() {
-        let lock = Lock::from_group(&single_group("C:/wt/wt.feat/r1", "stale")).expect("a lock");
+        let lock = Lock::from_group(&HostKey::Local, &single_group("C:/wt/wt.feat/r1", "stale"))
+            .expect("a lock");
         let (mut form, sent) = locked_setup(lock).open(&mut BranchCache::default());
         assert!(has(
             &sent,
@@ -4985,7 +5387,7 @@ mod tests {
                 repo_id: "r1".to_owned()
             }
         ));
-        assert_eq!(form.target(), &Target::Repo("r1".to_owned()));
+        assert_eq!(form.target(), &Target::repo(&HostKey::Local, "r1"));
         assert!(form.target_locked());
         assert!(form.use_worktree(), "on, though r1 defaults to in place");
         assert_eq!(form.mode(), WorktreeMode::Existing);
@@ -4995,10 +5397,13 @@ mod tests {
             Control::Existing("C:/wt/wt.feat/r1".to_owned())
         );
         assert!(form.can_submit(), "the pin is on offer before the list");
-        form.on_message(&DaemonMessage::Worktrees {
-            repo_id: "r1".to_owned(),
-            worktrees: vec![worktree("C:/wt/other", "o", RootWorktreeStatus::Stale)],
-        });
+        form.on_message(
+            &HostKey::Local,
+            &DaemonMessage::Worktrees {
+                repo_id: "r1".to_owned(),
+                worktrees: vec![worktree("C:/wt/other", "o", RootWorktreeStatus::Stale)],
+            },
+        );
         let keys: Vec<&str> = form
             .existing_options()
             .iter()
@@ -5029,16 +5434,20 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn pin_adopts_the_lists_spelling_of_its_path() {
-        let lock = Lock::from_group(&single_group("C:/wt/wt.feat/r1", "active")).expect("a lock");
+        let lock = Lock::from_group(&HostKey::Local, &single_group("C:/wt/wt.feat/r1", "active"))
+            .expect("a lock");
         let mut form = locked_setup(lock).open(&mut BranchCache::default()).0;
-        form.on_message(&DaemonMessage::Worktrees {
-            repo_id: "r1".to_owned(),
-            worktrees: vec![worktree(
-                r"c:\WT\wt.feat\r1",
-                "feat/x",
-                RootWorktreeStatus::Active,
-            )],
-        });
+        form.on_message(
+            &HostKey::Local,
+            &DaemonMessage::Worktrees {
+                repo_id: "r1".to_owned(),
+                worktrees: vec![worktree(
+                    r"c:\WT\wt.feat\r1",
+                    "feat/x",
+                    RootWorktreeStatus::Active,
+                )],
+            },
+        );
         assert_eq!(form.existing_options().len(), 1, "no synthetic twin");
         assert_eq!(form.existing_selected(), Some(r"c:\WT\wt.feat\r1"));
         assert_eq!(
@@ -5061,17 +5470,17 @@ mod tests {
         .expect("root entry fixture");
         let mut setup = Setup::repos(vec![repo("r1"), repo("r2")]);
         setup.workspaces = vec![workspace("w1", &["r1", "r2"])];
-        setup.lock = Lock::from_group(&entry);
+        setup.lock = Lock::from_group(&HostKey::Local, &entry);
         let (form, sent) = setup.open(&mut BranchCache::default());
         assert!(has(&sent, &ClientMessage::InspectWorktreesRoot));
-        assert_eq!(form.target(), &Target::Workspace("w1".to_owned()));
+        assert_eq!(form.target(), &Target::workspace(&HostKey::Local, "w1"));
         assert_eq!(
             form.existing_note().as_deref(),
             Some("1 member bound; 1 to be created")
         );
         let mut unknown = entry;
         unknown.launch = Some(WorktreeLaunchTarget::Unknown);
-        assert!(Lock::from_group(&unknown).is_none());
+        assert!(Lock::from_group(&HostKey::Local, &unknown).is_none());
     }
 
     /// A stored Claude spawn of `mode` routed to `DeepSeek`.
@@ -5195,15 +5604,24 @@ mod tests {
             .0;
         assert_eq!(provider_of(&form), Some(text("anthropic")));
         assert_eq!(form.option_value("permission_mode"), Some(text("plan")));
-        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r1")),
+        );
         assert_eq!(
             provider_of(&form),
             Some(text("deepseek")),
             "a target switch follows the new target's last spawn"
         );
         press(&mut form, &choice("provider", "anthropic"));
-        press(&mut form, &Control::Target(Target::Repo("r0".to_owned())));
-        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r0")),
+        );
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r1")),
+        );
         assert_eq!(
             provider_of(&form),
             Some(text("anthropic")),
@@ -5263,7 +5681,10 @@ mod tests {
             .0;
         press(&mut form, &Control::AdvancedToggle);
         form.edit_option_text("model", "mine");
-        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r1")),
+        );
         assert_eq!(provider_of(&form), Some(text("deepseek")));
         assert_eq!(form.option_value("permission_mode"), Some(text("plan")));
         assert_eq!(
