@@ -15,7 +15,7 @@ use protocol::{
     SessionSnapshot, SessionStatus, SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
-use crate::appearance::{self, PaneFrame, Resolved};
+use crate::appearance::{self, PaneFrame, Resolved, Source};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
@@ -303,7 +303,7 @@ impl RootView {
             tab_id: String::new(),
             session: None,
             attached: false,
-            accent: appearance::BUILTIN_ACCENT,
+            accent: self.sidebar.theme_base().accent,
             focus_in,
             _events: events,
         }
@@ -592,16 +592,22 @@ impl RootView {
                 (pane_id.clone(), resolved)
             })
             .collect();
+        let authored = theme(cx).terminal;
         for (pane_id, resolved) in resolved {
             let Some(slot) = self.panes.get_mut(&pane_id) else {
                 continue;
             };
             slot.accent = resolved.accent.value;
-            let background = appearance::term_rgb(resolved.background.value);
+            // A background some level sets is a modifier on the theme and
+            // gets the contrast nudge; with none the theme's own palette
+            // is drawn as given.
+            let override_bg = (resolved.background.source != Source::BuiltIn)
+                .then(|| appearance::term_rgb(resolved.background.value));
+            let palette = crate::theme::resolve_palette(override_bg, &authored);
             let frame = resolved.frame.value.map(appearance::term_rgb);
             slot.view.update(cx, |pane, cx| {
                 pane.set_font(resolved.font(), by_user, cx);
-                pane.set_colors(background, frame, cx);
+                pane.set_colors(palette, frame, cx);
             });
         }
     }
@@ -679,6 +685,19 @@ impl RootView {
             appearance::packed(background),
             appearance::packed(foreground),
         ))
+    }
+
+    /// The colour the text in visible cell (`row`, `col`) of pane
+    /// `pane_id` paints in, `0xRRGGBB`; `None` for a cell with no text.
+    #[must_use]
+    pub fn pane_cell_foreground(
+        &self,
+        pane_id: &str,
+        (row, col): (usize, usize),
+        cx: &App,
+    ) -> Option<u32> {
+        let view = self.panes.get(pane_id)?.view.read(cx);
+        view.cell_foreground(row, col).map(appearance::packed)
     }
 
     /// A pane's scrollback retry, sent once per session and attempt; a

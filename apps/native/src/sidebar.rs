@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::agent_options::{AgentOptions, descriptor_for};
-use crate::appearance::{self, AppColors, AppLevel, Resolved};
+use crate::appearance::{self, AppColors, AppLevel, Resolved, ThemeBase};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
@@ -814,6 +814,9 @@ pub struct SidebarModel {
     /// oldest first: a quit that starts before the next write saves them
     /// again.
     closed_popouts: Vec<(usize, SavedPopout)>,
+    /// The active theme's accent and terminal background, the bottom of
+    /// every session's appearance cascade.
+    theme_base: ThemeBase,
 }
 
 impl SidebarModel {
@@ -829,8 +832,22 @@ impl SidebarModel {
     pub fn clear_daemon_state(&mut self) {
         let ui = std::mem::take(&mut self.ui);
         let closed_popouts = std::mem::take(&mut self.closed_popouts);
+        let theme_base = self.theme_base;
         *self = Self::new(ui);
         self.closed_popouts = closed_popouts;
+        self.theme_base = theme_base;
+    }
+
+    /// Makes `base` the bottom of every appearance cascade, as a theme
+    /// switch does.
+    pub fn set_theme_base(&mut self, base: ThemeBase) {
+        self.theme_base = base;
+    }
+
+    /// The active theme's accent and terminal background.
+    #[must_use]
+    pub fn theme_base(&self) -> ThemeBase {
+        self.theme_base
     }
 
     /// Keeps the daemon's agents, in its order, as a connection sends them.
@@ -1518,6 +1535,7 @@ impl SidebarModel {
             AppLevel {
                 colors: &self.ui.app_appearance,
                 font: &self.ui.terminal_font,
+                theme: self.theme_base,
             },
         )
     }

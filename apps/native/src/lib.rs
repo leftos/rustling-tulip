@@ -2351,9 +2351,13 @@ impl RootView {
     }
 
     /// Makes `theme` the one the interface draws in, and redraws every
-    /// window in it.
+    /// window in it. Every open terminal repaints with its new palette, in
+    /// place: nothing is reattached or reloaded.
     pub fn set_theme(&mut self, theme: ui_theme::UiTheme, cx: &mut Context<Self>) {
         ui_theme::set_theme(theme, cx);
+        self.sidebar
+            .set_theme_base(appearance::ThemeBase::of(&theme));
+        self.apply_pane_fonts(false, cx);
         cx.refresh_windows();
     }
 

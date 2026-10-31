@@ -4,12 +4,15 @@
 //! derived tokens included. The window's theme is an app global read with
 //! [`theme`]; until one is set it is [`UiTheme::CONTRAST`], the built-in
 //! look whose values are the palette's. A function with no `cx` takes the
-//! theme as `&UiTheme`. The terminal's colours are not here: they are
-//! `theme.rs`'s.
+//! theme as `&UiTheme`. Its `terminal` part is the palette a terminal pane
+//! paints with when no appearance level overrides its background.
+
+#![expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
 
 use gpui::{App, Global};
 
 use crate::palette;
+use crate::theme::{TerminalPalette, rgb};
 
 /// Every UI colour of one look. Each field is the token of the same name
 /// in [`crate::palette`]: a `u32` as `0xRRGGBB` or `0xRRGGBBAA` as that
@@ -168,6 +171,8 @@ pub struct UiTheme {
     pub shell_mark_border: u32,
     /// `palette::TRANSPARENT`.
     pub transparent: u32,
+    /// The terminal's colours, drawn as given: no contrast nudge.
+    pub terminal: TerminalPalette,
 }
 
 impl UiTheme {
@@ -249,6 +254,32 @@ impl UiTheme {
         spawn_badge_ok: palette::SPAWN_BADGE_OK,
         shell_mark_border: palette::SHELL_MARK_BORDER,
         transparent: palette::TRANSPARENT,
+        terminal: TerminalPalette {
+            fg: rgb(0xe5e6e8),
+            bg: rgb(0x070609),
+            caret: rgb(0xffffff),
+            selection: rgb(0x5b9bff),
+            selection_alpha: 0.3,
+            selection_fg: rgb(0xe5e6e8),
+            ansi: [
+                rgb(0x5a5c5f),
+                rgb(0xef5c5c),
+                rgb(0x3fb96a),
+                rgb(0xe8a531),
+                rgb(0x5b9bff),
+                rgb(0xb787f0),
+                rgb(0x5dd5e3),
+                rgb(0xe5e6e8),
+                rgb(0x656872),
+                rgb(0xff8585),
+                rgb(0x62d18a),
+                rgb(0xf5c267),
+                rgb(0x7eb4ff),
+                rgb(0xd4abff),
+                rgb(0x8feaf3),
+                rgb(0xf5f6f8),
+            ],
+        },
     };
 }
 
@@ -375,6 +406,14 @@ mod tests {
             ),
             ("transparent", t.transparent, palette::TRANSPARENT),
         ]
+    }
+
+    /// The built-in theme's terminal part is the palette `build_theme` makes
+    /// for the default ground, so a terminal with no override looks as before.
+    #[test]
+    fn contrast_terminal_matches_todays_build_theme() {
+        use crate::theme::{DEFAULT_BACKGROUND, build_theme};
+        assert_eq!(UiTheme::CONTRAST.terminal, build_theme(DEFAULT_BACKGROUND));
     }
 
     /// The built-in theme is the palette: every field equals its token, so

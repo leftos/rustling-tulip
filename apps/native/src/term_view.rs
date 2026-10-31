@@ -35,7 +35,7 @@ use crate::term::prompt_nav::{self, Dir, Jump};
 use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, ShellCommand, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
-use crate::theme;
+use crate::theme::TerminalPalette;
 use crate::ui_theme::{self, UiTheme};
 
 /// `DSR 6`: the program asks where the cursor is and waits for the reply.
@@ -106,8 +106,8 @@ pub struct TerminalPane {
     /// Bumped whenever the terminal's content may have changed: output,
     /// history, a resize or a fresh terminal. Keys the hover's link cache.
     content_generation: u64,
-    /// The terminal's background, which every fresh terminal is given.
-    background: Rgb,
+    /// The terminal's palette, which every fresh terminal is given.
+    palette: TerminalPalette,
     /// The padding's colour around the terminal; `None` follows the
     /// terminal's background.
     frame: Option<Rgb>,
@@ -344,21 +344,27 @@ impl TerminalPane {
             base_dirs: Vec::new(),
             links: LinkHover::default(),
             content_generation: 0,
-            background: theme::DEFAULT_BACKGROUND,
+            palette: TerminalPalette::default(),
             frame: None,
         }
     }
 
-    /// Paints the terminal on `background`, whose theme it rebuilds, and the
-    /// padding around it in `frame`, or in the terminal's background when
-    /// `frame` is `None`.
-    pub fn set_colors(&mut self, background: Rgb, frame: Option<Rgb>, cx: &mut Context<Self>) {
-        if background == self.background && frame == self.frame {
+    /// Paints the terminal with `palette`, and the padding around it in
+    /// `frame`, or in the terminal's background when `frame` is `None`. A
+    /// new palette repaints every row already drawn.
+    pub fn set_colors(
+        &mut self,
+        palette: TerminalPalette,
+        frame: Option<Rgb>,
+        cx: &mut Context<Self>,
+    ) {
+        if palette == self.palette && frame == self.frame {
             return;
         }
-        if background != self.background {
-            self.background = background;
-            self.term.set_background(background);
+        if palette != self.palette {
+            self.palette = palette;
+            self.term.set_palette(palette);
+            self.content_changed();
         }
         self.frame = frame;
         cx.notify();
@@ -376,6 +382,19 @@ impl TerminalPane {
     pub fn terminal_colors(&self) -> (Rgb, Rgb) {
         let snapshot = self.term.snapshot();
         (snapshot.background, snapshot.foreground)
+    }
+
+    /// The colour the text in visible cell (`row`, `col`) paints in; `None`
+    /// for a cell with no text.
+    pub fn cell_foreground(&self, row: usize, col: usize) -> Option<Rgb> {
+        self.term
+            .snapshot()
+            .text
+            .into_iter()
+            .find(|span| {
+                span.row == row && (span.col..span.col + span.text.chars().count()).contains(&col)
+            })
+            .map(|span| span.fg)
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -678,7 +697,7 @@ impl TerminalPane {
         } else {
             Terminal::new(size, cursor)
         };
-        self.term.set_background(self.background);
+        self.term.set_palette(self.palette);
         self.content_changed();
         self.tracker = Tracker::default();
         self.last_motion = None;

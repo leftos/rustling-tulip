@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::Pick;
-use crate::appearance;
 use crate::assets::{
     SIDEBAR_BRANCH_ICON, SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON,
     SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON, SIDEBAR_PLAY_ICON, SIDEBAR_PLUS_ICON,
@@ -1935,11 +1934,7 @@ fn leaf_row(
     let t = theme(cx);
     let id = leaf.id.as_str();
     let selected = ctx.attached == Some(id);
-    let accent = ctx
-        .accents
-        .get(id)
-        .copied()
-        .unwrap_or(appearance::BUILTIN_ACCENT);
+    let accent = ctx.accents.get(id).copied().unwrap_or(t.accent);
     let ground = leaf_ground(selected, ctx.highlighted.contains(id), &t);
     let row = leaf_frame(leaf, ground, accent, ctx.density, cx);
     match ctx.density {

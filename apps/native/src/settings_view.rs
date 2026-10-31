@@ -22,7 +22,6 @@ use protocol::{
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
 use crate::agent_options_view::{LOCKED, UPDATE_CLIENT};
-use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
@@ -3210,7 +3209,7 @@ impl RootView {
             .rounded(px(LINK_RADIUS))
             .border_1()
             .border_color(gpui::rgba(t.transparent))
-            .text_color(gpui::rgb(appearance::BUILTIN_ACCENT))
+            .text_color(gpui::rgb(t.accent))
             .cursor_pointer()
             .hover(|style| {
                 style

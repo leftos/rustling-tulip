@@ -56,9 +56,10 @@ const BASE_ANSI: [Rgb; 16] = [
     rgb(0xf5f6f8),
 ];
 
-/// Every colour a grid cell resolves against.
+/// Every colour a grid cell resolves against: a theme's terminal part, or
+/// the palette [`build_theme`] makes for a background override.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Theme {
+pub struct TerminalPalette {
     /// The default text colour.
     pub fg: Rgb,
     pub bg: Rgb,
@@ -74,7 +75,7 @@ pub struct Theme {
     pub ansi: [Rgb; 16],
 }
 
-impl Default for Theme {
+impl Default for TerminalPalette {
     fn default() -> Self {
         build_theme(DEFAULT_BACKGROUND)
     }
@@ -83,7 +84,7 @@ impl Default for Theme {
 /// The theme for `background`: the base palette, each colour raised toward
 /// white (or lowered toward black on a light background) until it reaches its
 /// contrast minimum.
-pub fn build_theme(background: Rgb) -> Theme {
+pub fn build_theme(background: Rgb) -> TerminalPalette {
     let base = if luminance(background) < 0.5 {
         FOREGROUND_ON_DARK
     } else {
@@ -99,7 +100,7 @@ pub fn build_theme(background: Rgb) -> Theme {
         };
         ansi[i] = ensure_contrast(color, background, min);
     }
-    Theme {
+    TerminalPalette {
         fg,
         bg: background,
         caret: ensure_contrast(WHITE, background, MIN_TINT_CONTRAST),
@@ -108,6 +109,14 @@ pub fn build_theme(background: Rgb) -> Theme {
         selection_fg: fg,
         ansi,
     }
+}
+
+/// The palette a pane paints with: with a background `override_bg` from
+/// any appearance level, [`build_theme`] for it, each colour nudged to its
+/// contrast minimum; with none, the theme's own `authored` palette exactly
+/// as given.
+pub fn resolve_palette(override_bg: Option<Rgb>, authored: &TerminalPalette) -> TerminalPalette {
+    override_bg.map_or(*authored, build_theme)
 }
 
 /// `color` moved away from `background` until it reaches `min_ratio`, or the
@@ -169,7 +178,8 @@ pub fn luminance(color: Rgb) -> f64 {
     0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
 }
 
-const fn rgb(hex: u32) -> Rgb {
+/// `hex`, `0xRRGGBB`, as a terminal colour.
+pub const fn rgb(hex: u32) -> Rgb {
     let [_, r, g, b] = hex.to_be_bytes();
     Rgb { r, g, b }
 }
@@ -177,9 +187,31 @@ const fn rgb(hex: u32) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_BACKGROUND, Theme, build_theme, contrast_ratio, ensure_contrast, luminance, mix,
-        rgb,
+        DEFAULT_BACKGROUND, TerminalPalette, build_theme, contrast_ratio, ensure_contrast,
+        luminance, mix, resolve_palette, rgb,
     };
+
+    #[test]
+    fn an_authored_palette_is_drawn_as_given() {
+        let mut authored = TerminalPalette::default();
+        // Base black on this ground is below its 2.4:1 minimum, which
+        // `build_theme` would raise; an authored palette keeps it.
+        authored.ansi[0] = rgb(0x16181d);
+        assert!(contrast_ratio(authored.ansi[0], authored.bg) < 2.4);
+        assert_eq!(resolve_palette(None, &authored), authored);
+    }
+
+    #[test]
+    fn a_background_override_builds_a_nudged_palette() {
+        let mut authored = TerminalPalette::default();
+        authored.ansi[0] = rgb(0x16181d);
+        let paper = rgb(0xf6f4ef);
+        assert_eq!(resolve_palette(Some(paper), &authored), build_theme(paper));
+        assert_eq!(
+            resolve_palette(Some(DEFAULT_BACKGROUND), &authored).ansi[0],
+            rgb(0x5a5c5f)
+        );
+    }
 
     #[test]
     fn luminance_of_black_white_and_blue() {
@@ -230,7 +262,7 @@ mod tests {
 
     #[test]
     fn default_theme_matches_the_ported_values() {
-        let theme = Theme::default();
+        let theme = TerminalPalette::default();
         assert_eq!(theme.bg, DEFAULT_BACKGROUND);
         assert_eq!(theme.bg, rgb(0x070609));
         assert_eq!(theme.fg, rgb(0xe5e6e8));

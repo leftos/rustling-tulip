@@ -3,7 +3,6 @@
 //! Plain Rust over the sidebar model, so the list is unit-testable without
 //! GPUI; the view in `needs_you_view` draws these rows.
 
-use crate::appearance;
 use crate::sidebar::{Leaf, LeafState, SidebarModel, session_title};
 use chrono::{DateTime, Utc};
 use protocol::{
@@ -58,7 +57,7 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
                 accent: accents
                     .get(session.id.as_str())
                     .copied()
-                    .unwrap_or(appearance::BUILTIN_ACCENT),
+                    .unwrap_or(model.theme_base().accent),
                 label: leaf.label.clone(),
                 reason,
                 since: session.status_since,
@@ -338,7 +337,7 @@ mod tests {
         assert_eq!(ids(&listed), ["s1"]);
         let row = &listed[0];
         assert_eq!(row.container_name, REPO);
-        assert_eq!(row.accent, appearance::BUILTIN_ACCENT);
+        assert_eq!(row.accent, crate::appearance::BUILTIN_ACCENT);
         assert_eq!(row.label, "s1");
         assert_eq!(row.reason, Reason::Asking);
         assert_eq!(row.detail, "Waiting for input");

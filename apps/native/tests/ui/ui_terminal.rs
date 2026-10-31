@@ -5,15 +5,17 @@
     clippy::expect_used,
     reason = "a spec fails with the message of the precondition it lost"
 )]
+#![expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
 
 use crate::support;
 
 use std::time::Duration;
 
-use alacritty_terminal::vte::ansi::CursorShape;
+use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use gpui::{Modifiers, Point, TestAppContext, point, px, size};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::fonts::FontSettings;
+use rustling_tulip_native::ui_theme::UiTheme;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 /// `s` alone in pane `p1`, its scrollback answered, the pane focused and
@@ -1383,4 +1385,87 @@ fn an_idless_scrollback_replaces_a_loaded_panes_terminal(cx: &mut TestAppContext
         !screen.contains("OLD-HISTORY") && !screen.contains("OLD-LIVE"),
         "only the resync's content shows, as after a fresh attach, got {screen:?}"
     );
+}
+
+/// The built-in theme with another terminal background and another red.
+fn recoloured_theme() -> UiTheme {
+    let mut theme = UiTheme::CONTRAST;
+    theme.terminal.bg = Rgb {
+        r: 0x20,
+        g: 0x24,
+        b: 0x30,
+    };
+    theme.terminal.ansi[1] = Rgb {
+        r: 0xaa,
+        g: 0x11,
+        b: 0x22,
+    };
+    theme
+}
+
+/// Pane `p1`'s terminal background and the colour of the text in its top
+/// left cell, `0xRRGGBB`.
+fn p1_colors(h: &mut Harness<'_>) -> (u32, u32) {
+    h.root(|root, cx| {
+        let (background, _) = root
+            .pane_terminal_colors("p1", cx)
+            .expect("the pane has a terminal");
+        let red = root
+            .pane_cell_foreground("p1", (0, 0), cx)
+            .expect("the cell has text");
+        (background, red)
+    })
+}
+
+/// Whether `sent` attaches a session or asks for its history again.
+fn reattaches(sent: &[ClientMessage]) -> bool {
+    sent.iter().any(|m| {
+        matches!(
+            m,
+            ClientMessage::Attach { .. } | ClientMessage::LoadScrollback { .. }
+        )
+    })
+}
+
+#[gpui::test]
+fn setting_a_theme_recolours_a_running_terminal_without_reattaching(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[31mR\x1b[0m");
+    assert_eq!(
+        p1_colors(&mut h),
+        (0x070609, 0xef5c5c),
+        "the built-in theme's ground and red"
+    );
+    h.sent();
+
+    h.root_update(|root, _, cx| root.set_theme(recoloured_theme(), cx));
+
+    assert_eq!(
+        p1_colors(&mut h),
+        (0x202430, 0xaa1122),
+        "the running terminal paints with the new theme's palette"
+    );
+    let sent = h.sent();
+    assert!(!reattaches(&sent), "nothing is reattached, sent {sent:?}");
+}
+
+#[gpui::test]
+fn a_session_background_override_still_wins_over_the_theme(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut paper = session("s1").build();
+    paper.appearance.terminal_background_color = Some("#f6f4ef".to_owned());
+    let mut h = attached(cx, &dir, paper);
+    h.pty("s1", b"\x1b[31mR\x1b[0m");
+    let (background, red) = p1_colors(&mut h);
+    assert_eq!(background, 0xf6f4ef);
+
+    h.root_update(|root, _, cx| root.set_theme(recoloured_theme(), cx));
+
+    assert_eq!(
+        p1_colors(&mut h),
+        (0xf6f4ef, red),
+        "the session's background and the palette built for it stay"
+    );
+    assert_ne!(red, 0xaa1122, "the theme's red is not drawn");
 }

@@ -494,6 +494,7 @@ impl RootView {
         let app = AppLevel {
             colors: &ui.app_appearance,
             font: &ui.terminal_font,
+            theme: self.sidebar.theme_base(),
         };
         // A container's last send, until the daemon's list echoes it, is
         // what the next change builds on.

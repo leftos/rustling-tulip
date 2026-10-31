@@ -21,7 +21,7 @@ use crate::copy_text::{self, CopyRow};
 use crate::links::{self, TerminalLink, TerminalRow};
 use crate::mouse::{MouseExt, MouseModeScan};
 use crate::shell_marks::{Record, Records, Scanner, ShellDot, Split};
-use crate::theme::{self, Theme};
+use crate::theme::{self, TerminalPalette};
 
 /// The prompt scan and jump choice behind the pane header's prompt buttons.
 /// Declared here, beside the grid it reads, rather than in the crate root.
@@ -91,7 +91,7 @@ pub struct Terminal {
     listener: Listener,
     /// The colours cells resolve against. A program's own palette changes
     /// (`OSC 4`, `OSC 10`) still win over it.
-    theme: Theme,
+    theme: TerminalPalette,
     /// The shell integration marks, for a plain shell's pane only.
     shell: Option<Shell>,
     /// The mouse-report modes the grid does not track.
@@ -492,7 +492,7 @@ impl Terminal {
             parser: Processor::new(),
             size,
             listener,
-            theme: Theme::default(),
+            theme: TerminalPalette::default(),
             shell,
             mouse_modes: MouseModeScan::default(),
         }
@@ -502,9 +502,10 @@ impl Terminal {
         self.size
     }
 
-    /// Rebuilds the theme for a new pane background.
-    pub fn set_background(&mut self, background: Rgb) {
-        self.theme = theme::build_theme(background);
+    /// Paints with `palette` from the next snapshot on; a program's own
+    /// colours (`OSC 4`, `OSC 10`, `OSC 11`, `OSC 12`) still win over it.
+    pub fn set_palette(&mut self, palette: TerminalPalette) {
+        self.theme = palette;
     }
 
     /// Feeds live output. Replies it provokes wait in [`Self::take_replies`].
@@ -1258,7 +1259,7 @@ fn blend(base: Rgb, tint: Rgb, alpha: f64) -> Rgb {
 /// The colours cells resolve against.
 struct Palette<'a> {
     colors: &'a Colors,
-    theme: &'a Theme,
+    theme: &'a TerminalPalette,
     /// The background `snapshot()` resolved, a program's `OSC 11` included: a
     /// cell painted its colour needs no span of its own.
     background: Rgb,
@@ -1390,7 +1391,7 @@ fn brighten(color: Color, bold: bool) -> Color {
     }
 }
 
-fn resolve(color: Color, overrides: &Colors, theme: &Theme) -> Rgb {
+fn resolve(color: Color, overrides: &Colors, theme: &TerminalPalette) -> Rgb {
     match color {
         Color::Spec(rgb) => rgb,
         Color::Indexed(i) => overrides[usize::from(i)].unwrap_or_else(|| default_indexed(i, theme)),
@@ -1398,7 +1399,7 @@ fn resolve(color: Color, overrides: &Colors, theme: &Theme) -> Rgb {
     }
 }
 
-fn default_named(named: NamedColor, theme: &Theme) -> Rgb {
+fn default_named(named: NamedColor, theme: &TerminalPalette) -> Rgb {
     match named {
         NamedColor::Foreground | NamedColor::BrightForeground => theme.fg,
         NamedColor::Background => theme.bg,
@@ -1416,7 +1417,7 @@ fn default_named(named: NamedColor, theme: &Theme) -> Rgb {
     }
 }
 
-fn default_indexed(i: u8, theme: &Theme) -> Rgb {
+fn default_indexed(i: u8, theme: &TerminalPalette) -> Rgb {
     match i {
         0..16 => theme.ansi[usize::from(i)],
         16..232 => {
@@ -1452,14 +1453,14 @@ mod tests {
     use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
     use crate::links::LinkKind;
-    use crate::theme::Theme;
+    use crate::theme::TerminalPalette;
 
     use super::{
         GridSize, SpanBuilder, Terminal, TextSpan, blend, brighten, default_named, resolve, rgb,
     };
 
-    fn default_theme() -> Theme {
-        Theme::default()
+    fn default_theme() -> TerminalPalette {
+        TerminalPalette::default()
     }
 
     fn span(col: usize, text: &str, fg: u32, flags: Flags) -> TextSpan {
@@ -1971,7 +1972,7 @@ mod tests {
     fn a_new_background_rebuilds_the_theme() {
         let mut term = fed(b"\x1b[47mX");
         assert_eq!(term.snapshot().bg[0].color, rgb(0xe5e6e8));
-        term.set_background(rgb(0xf6f4ef));
+        term.set_palette(crate::theme::build_theme(rgb(0xf6f4ef)));
         let snap = term.snapshot();
         // The Paper theme lowers the base white to clear its contrast
         // minimum, and would not be reached if the theme were not rebuilt.

@@ -17,11 +17,13 @@ use serde::{Deserialize, Serialize};
 use crate::fonts::{self, FontSettings};
 use crate::palette;
 use crate::theme;
+use crate::ui_theme::UiTheme;
 
-/// The accent a session has when no level sets one.
+/// The built-in theme's accent, which a session has when no level sets one
+/// and that theme is active.
 pub const BUILTIN_ACCENT: u32 = palette::ACCENT;
-/// The terminal background a session has when no level sets one: the
-/// theme's default.
+/// The built-in theme's terminal background, which a session has when no
+/// level sets one and that theme is active.
 pub const BUILTIN_BACKGROUND: u32 = packed(theme::DEFAULT_BACKGROUND);
 /// How many recent custom colours are kept.
 pub const RECENT_LIMIT: usize = 12;
@@ -99,11 +101,38 @@ pub struct AppColors {
     pub terminal_frame_color: Option<String>,
 }
 
-/// The app level: its colours and its font.
+/// The bottom of the cascade: the active theme's accent and terminal
+/// background, `0xRRGGBB`, which a session has when no level sets them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeBase {
+    pub accent: u32,
+    pub background: u32,
+}
+
+impl ThemeBase {
+    /// The accent and terminal background of `theme`.
+    #[must_use]
+    pub const fn of(theme: &UiTheme) -> Self {
+        Self {
+            accent: theme.accent,
+            background: packed(theme.terminal.bg),
+        }
+    }
+}
+
+impl Default for ThemeBase {
+    /// The built-in theme's.
+    fn default() -> Self {
+        Self::of(&UiTheme::CONTRAST)
+    }
+}
+
+/// The app level: its colours and its font, over the active theme's base.
 #[derive(Debug, Clone, Copy)]
 pub struct AppLevel<'a> {
     pub colors: &'a AppColors,
     pub font: &'a FontSettings,
+    pub theme: ThemeBase,
 }
 
 /// The level a resolved value came from.
@@ -477,13 +506,13 @@ fn resolve_levels(levels: &Levels<'_>, app: AppLevel<'_>) -> Resolved {
             levels,
             |a| a.accent_color.as_deref(),
             app.colors.accent_color.as_deref(),
-            BUILTIN_ACCENT,
+            app.theme.accent,
         ),
         background: color(
             levels,
             |a| a.terminal_background_color.as_deref(),
             app.colors.terminal_background_color.as_deref(),
-            BUILTIN_BACKGROUND,
+            app.theme.background,
         ),
         frame: colour_field(
             levels,
@@ -730,7 +759,16 @@ mod tests {
         let mut session = session_with(None, &["r1"]);
         session.appearance = overrides(own);
         let repos = [repo_with("r1", repo)];
-        resolve(Some(&session), &repos, &[], AppLevel { colors, font })
+        resolve(
+            Some(&session),
+            &repos,
+            &[],
+            AppLevel {
+                colors,
+                font,
+                theme: ThemeBase::default(),
+            },
+        )
     }
 
     fn app_colors(color: &str) -> AppColors {
@@ -861,6 +899,7 @@ mod tests {
         let app = AppLevel {
             colors: &colors,
             font: &font,
+            theme: ThemeBase::default(),
         };
         let own = overrides(json!({
             "terminal_background_color": REPO_ALL,
@@ -886,6 +925,44 @@ mod tests {
     }
 
     #[test]
+    fn the_cascades_bottom_is_the_themes_accent_and_terminal_background() {
+        let mut ui = UiTheme::CONTRAST;
+        ui.accent = 0x123456;
+        ui.terminal.bg = Rgb {
+            r: 0xfa,
+            g: 0xf0,
+            b: 0xe6,
+        };
+        let theme = ThemeBase::of(&ui);
+        assert_eq!(
+            theme,
+            ThemeBase {
+                accent: 0x123456,
+                background: 0xfaf0e6
+            }
+        );
+        let (colors, font) = (AppColors::default(), FontSettings::default());
+        let app = AppLevel {
+            colors: &colors,
+            font: &font,
+            theme,
+        };
+        let resolved = resolve(None, &[], &[], app);
+        assert_eq!(resolved.accent, Field::new(0x123456, Source::BuiltIn));
+        assert_eq!(resolved.background, Field::new(0xfaf0e6, Source::BuiltIn));
+        let container = resolve_container(&AppearanceOverrides::default(), app);
+        assert_eq!(container.accent, Field::new(0x123456, Source::BuiltIn));
+        assert_eq!(container.background, Field::new(0xfaf0e6, Source::BuiltIn));
+        assert_eq!(
+            ThemeBase::default(),
+            ThemeBase {
+                accent: BUILTIN_ACCENT,
+                background: BUILTIN_BACKGROUND
+            }
+        );
+    }
+
+    #[test]
     fn the_app_level_resolves_to_the_built_in_values_it_does_not_set() {
         let colors = AppColors {
             terminal_background_color: Some("#0b1020".to_owned()),
@@ -895,6 +972,7 @@ mod tests {
         let app = AppLevel {
             colors: &colors,
             font: &font,
+            theme: ThemeBase::default(),
         };
         let resolved = resolve(None, &[], &[], app);
         assert_eq!(resolved.background, Field::new(0x0b1020, Source::App));
@@ -918,6 +996,7 @@ mod tests {
             AppLevel {
                 colors: &colors,
                 font: &set,
+                theme: ThemeBase::default(),
             },
         );
         assert_eq!(resolved.font_size, Field::new(20.0, Source::App));
@@ -935,6 +1014,7 @@ mod tests {
         let own = app_overrides(AppLevel {
             colors: &colors,
             font: &font,
+            theme: ThemeBase::default(),
         });
         assert_eq!(own.terminal_font_size, Some(20));
         assert_eq!(own.terminal_font_bold, Some(true));
@@ -943,6 +1023,7 @@ mod tests {
         let plain = app_overrides(AppLevel {
             colors: &AppColors::default(),
             font: &FontSettings::default(),
+            theme: ThemeBase::default(),
         });
         assert_eq!(
             plain,
@@ -1012,6 +1093,7 @@ mod tests {
             AppLevel {
                 colors: &colors,
                 font: &font,
+                theme: ThemeBase::default(),
             },
         );
         assert_eq!(colors_of(&resolved), [(Some(0x333333), Source::App); 3]);
