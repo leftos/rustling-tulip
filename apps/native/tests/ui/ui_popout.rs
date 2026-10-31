@@ -16,8 +16,8 @@ use rustling_tulip_native::{
 };
 use serde_json::json;
 use support::{
-    Fixture, Harness, REMOTE, TestDir, mixed_tabs, pane, remote_lists, repo, saved_remote,
-    saved_remote_over, saved_ui, seed_ui, session, split, tab, two_tab_fixture,
+    Fixture, Harness, PROTOCOL, REMOTE, TestDir, mixed_tabs, pane, remote_lists, repo,
+    saved_remote, saved_remote_over, saved_ui, seed_ui, session, split, tab, two_tab_fixture,
 };
 
 /// A diff tab of `path` in `r1`'s main tree.
@@ -3961,6 +3961,126 @@ fn a_saved_pane_popout_whose_session_the_remote_list_omits_never_opens(cx: &mut 
         saved_ui(&dir)["popouts"],
         json!([]),
         "the saved entry is gone"
+    );
+}
+
+/// The saved pane pop-out of `t2`'s `p3`, which shows [`REMOTE`]'s `b2`.
+fn saved_p3() -> serde_json::Value {
+    json!({
+        "key": { "kind": "pane", "tab_id": "t2", "pane_id": "p3" },
+        "window": null,
+    })
+}
+
+#[gpui::test]
+fn a_saved_pane_popout_whose_session_the_remote_list_omits_never_opens_when_the_list_comes_first(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    seed_saved_popouts(&dir, &json!([saved_p3()]));
+    let mut h = Harness::open(cx, &dir);
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, &["b1"]);
+
+    h.load(&two_tab_fixture());
+
+    assert_eq!(
+        h.window_count(),
+        1,
+        "the remote host's list omits b2, so p3's pop-out never opens"
+    );
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([]),
+        "the saved entry is gone"
+    );
+}
+
+#[gpui::test]
+fn a_saved_pane_popout_whose_session_the_remote_list_omits_never_opens_while_this_pc_is_offline(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    seed_saved_popouts(&dir, &json!([saved_p3()]));
+    let mut h = Harness::with(cx, &dir, &two_tab_fixture());
+    h.lose_connection();
+
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, &["b1"]);
+    assert_eq!(
+        h.window_count(),
+        1,
+        "nothing opens while This PC is offline"
+    );
+
+    h.welcome_with_features();
+    h.send_welcome(PROTOCOL);
+    h.load(&two_tab_fixture());
+    assert_eq!(h.window_count(), 1, "nor once This PC's layout is back");
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([]),
+        "the saved entry is gone"
+    );
+}
+
+#[gpui::test]
+fn a_moved_saved_pane_popout_waits_for_its_own_host(cx: &mut TestAppContext) {
+    const OTHER: &str = "den.tail1234.ts.net";
+    let dir = TestDir::new();
+    let saved_pane = |pane_id: &str| json!({ "key": { "kind": "pane", "tab_id": "t2", "pane_id": pane_id }, "window": null });
+    seed_ui(
+        &dir,
+        &json!({
+            "saved_hosts": [
+                { "name": REMOTE, "port": 8787 },
+                { "name": OTHER, "port": 8787 },
+            ],
+            "popouts": [saved_pane("p3"), saved_pane("p4")],
+        }),
+    );
+    let mut fixture = two_tab_fixture();
+    fixture.tabs[1] = tab(
+        "t2",
+        &split(
+            SplitDirection::Horizontal,
+            support::remote_pane("p3", "b2"),
+            support::remote_pane("p4", "b3"),
+        ),
+    );
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(h.window_count(), 1, "both wait for the remote host's list");
+
+    // Each pane moves to a tab of its own before the host lists.
+    let mut moved = fixture.tabs.clone();
+    moved[1] = tab("t5", &support::remote_pane("p3", "b2"));
+    moved.push(tab("t6", &support::remote_pane("p4", "b3")));
+    h.send(DaemonMessage::Tabs { tabs: moved });
+    let mut other = h.host(&Target::tailnet(OTHER, Some(8787)));
+    other.connect();
+    other.send(DaemonMessage::Sessions {
+        sessions: Vec::new(),
+    });
+    assert_eq!(
+        h.window_count(),
+        1,
+        "another host's list is not the moved panes' host's"
+    );
+
+    remote_lists(&mut h, &["b1", "b3"]);
+
+    assert_eq!(
+        h.window_count(),
+        2,
+        "p4's session is listed and its pop-out opens; p3's is not and never opens"
+    );
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([{ "key": { "kind": "pane", "tab_id": "t6", "pane_id": "p4" }, "window": null }]),
+        "p3's entry is gone; p4's follows its pane to its new tab"
     );
 }
 
