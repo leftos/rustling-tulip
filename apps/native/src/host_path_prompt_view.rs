@@ -16,8 +16,10 @@ use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 
-/// The open prompt: its state and its path field.
+/// The open prompt: the host it adds the repo on, its state and its path
+/// field.
 pub(crate) struct HostPathDialog {
+    host: HostKey,
     prompt: HostPathPrompt,
     path_input: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
@@ -78,23 +80,25 @@ impl RootView {
             .is_some_and(|slot| slot.view().read(cx).is_focused(window))
     }
 
-    /// Add repo on a remote host: opens the prompt naming the host, its
+    /// Add repo on remote host `host`: opens the prompt naming the host, its
     /// field empty, since this PC's remembered folder means nothing there.
-    pub(crate) fn open_host_path_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_host_path_prompt(
+        &mut self,
+        host: HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.host_path_prompt.is_some() {
             return;
         }
-        let Some(host) = self.conn().target().short_name().map(str::to_owned) else {
-            tracing::warn!("the Add repo prompt opens only on a remote host");
-            return;
-        };
-        let prompt = HostPathPrompt::new(host);
+        let prompt = HostPathPrompt::new(self.host_name(&host));
         let placeholder = prompt.placeholder();
         let path_input = cx.new(|cx| TextInput::new(String::new(), placeholder, cx));
         let subscriptions = Self::watch_host_path_field(&path_input, window, cx);
         self.renaming = None;
         self.close_flyout();
         self.host_path_prompt = Some(HostPathDialog {
+            host,
             prompt,
             path_input,
             _subscriptions: subscriptions,
@@ -146,10 +150,18 @@ impl RootView {
         vec![keys, edits, focus]
     }
 
-    /// Add: the typed folder is registered and the prompt closes, or the
-    /// refusal shows under the field.
+    /// Add: the typed folder is registered on the prompt's host and the
+    /// prompt closes, or the refusal shows under the field. A host gone
+    /// offline is refused with the offline toast, the prompt kept open.
     fn submit_host_path_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = self.host_path_prompt_text(cx) else {
+            return;
+        };
+        let Some(host) = self
+            .host_path_prompt
+            .as_ref()
+            .map(|dialog| dialog.host.clone())
+        else {
             return;
         };
         let add = self
@@ -157,9 +169,18 @@ impl RootView {
             .as_mut()
             .and_then(|dialog| dialog.prompt.submit(&text));
         match add {
+            Some(_) if self.is_remote_offline(&host) => {
+                self.push_offline_toast(&host, cx);
+                self.apply_host_path_focus(window, cx);
+            }
             Some(add) => {
-                tracing::info!("adding repo {} on the host as {}", add.path, add.name);
-                self.send_to(&HostKey::Local, add.message());
+                tracing::info!(
+                    ?host,
+                    "adding repo {} on the host as {}",
+                    add.path,
+                    add.name
+                );
+                self.send_to(&host, add.message());
                 self.close_host_path_prompt(window, cx);
             }
             None => self.apply_host_path_focus(window, cx),

@@ -483,11 +483,48 @@ impl RootView {
     }
 
     /// What the daemon on `host` can do for this client, by the target the
-    /// window's connection to it holds; This PC's for a host the window
-    /// has no connection to.
+    /// window's connection to it holds; a remote host the window holds no
+    /// connection to still has a remote host's.
     pub(crate) fn capabilities_of(&self, host: &HostKey) -> Capabilities {
-        let conn = self.conn_of(host).unwrap_or_else(|| self.conn());
-        Capabilities::for_target(conn.target())
+        match host {
+            HostKey::Local => Capabilities::for_target(self.conn().target()),
+            HostKey::Remote(_) => self
+                .conn_of(host)
+                .map_or_else(Capabilities::remote, |conn| {
+                    Capabilities::for_target(conn.target())
+                }),
+        }
+    }
+
+    /// The hosts a spawn can go to now: This PC, then each remote host
+    /// whose connection is open (so online and approved) and that is not
+    /// another host's duplicate.
+    pub(crate) fn connected_hosts(&self) -> Vec<HostKey> {
+        self.held_hosts()
+            .into_iter()
+            .filter(|host| {
+                *host == HostKey::Local
+                    || (!self.is_remote_offline(host) && self.duplicate_of(host).is_none())
+            })
+            .collect()
+    }
+
+    /// The host of the active tab's focused pane; This PC with no tab or
+    /// no focused pane.
+    pub(crate) fn focused_host(&self) -> HostKey {
+        self.tabs.active_tab().map_or(HostKey::Local, |tab| {
+            self.tabs
+                .focused_pane(&tab.id)
+                .map_or(HostKey::Local, |pane| self.tabs.pane_host(&tab.id, &pane))
+        })
+    }
+
+    /// `host`'s short name, as its connection's target gives it, else as
+    /// the sidebar labels the host.
+    pub(crate) fn host_name(&self, host: &HostKey) -> String {
+        self.conn_of(host)
+            .and_then(|conn| conn.target().short_name())
+            .map_or_else(|| crate::sidebar::host_label(host), str::to_owned)
     }
 
     /// What the host of the focused pane's session lets this client do;

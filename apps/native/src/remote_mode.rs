@@ -43,6 +43,16 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// A remote host's: it opens no file on this PC and manages no daemon,
+    /// whether or not the window holds a connection to it.
+    #[must_use]
+    pub const fn remote() -> Self {
+        Self {
+            local_files: false,
+            daemon_management: false,
+        }
+    }
+
     /// The capabilities on `target`: everything on the local daemon, none
     /// of these on a remote host.
     #[must_use]
