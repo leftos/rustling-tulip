@@ -14,6 +14,7 @@ RequestExecutionLevel user
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
 
 !ifndef VERSION
   !error "VERSION is not defined: pass /DVERSION=<x.y.z[-suffix]>."
@@ -69,12 +70,12 @@ VIAddVersionKey "LegalCopyright" "leftos. MIT License."
 
 !insertmacro MUI_LANGUAGE "English"
 
-; Stops a running daemon before the client is replaced or the files are
-; deleted, with the shipped daemon's own `shutdown`: it sends the token only
-; to a listener that proves it holds it, and leaves every rt-tracer.exe
-; alive so the next daemon reattaches the user's sessions. The running
+; Stops a running daemon before the uninstaller deletes the files, with the
+; installed daemon's own `shutdown`: it sends the token only to a listener
+; that proves it holds it, and leaves every rt-tracer.exe alive. The running
 ; daemon is a cached copy, so the installed exe is never locked. Its exit
-; code is only logged: a missing or unproven daemon must not fail the setup.
+; code is only logged: a missing or unproven daemon must not fail the
+; uninstall. An install stops the daemon through `apply-update` instead.
 !macro RT_STOP_DAEMON
   Push $0
   IfFileExists "$INSTDIR\${DAEMONEXE}" 0 rt_stop_done
@@ -124,6 +125,63 @@ rt_stop_done:
 
 ; The install folder of the previous install, read before this one rewrites it.
 Var PreviousInstDir
+; The previous install's DisplayVersion, empty on a first install.
+Var OldVersion
+; 1 when the command line holds /UPDATE: the files are applied, and of the
+; registry only DisplayVersion is written, once they are in place.
+Var UpdateMode
+; 1 when the command line holds /RELAUNCH: `apply-update` starts the client
+; again when it ends, whatever its outcome.
+Var RelaunchMode
+
+Function .onInit
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${IfNot} ${Errors}
+    StrCpy $UpdateMode 1
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/RELAUNCH" $R1
+  ${IfNot} ${Errors}
+    StrCpy $RelaunchMode 1
+  ${EndIf}
+  ClearErrors
+FunctionEnd
+
+; Puts the files staged in $INSTDIR\.staging in place with the staged daemon's
+; own `apply-update` (crates/daemon/src/cli_apply_update.rs): it takes the
+; update mutex, waits for the client to exit, stops the running daemon before
+; writing any file, refuses while anything still runs from $INSTDIR, swaps
+; each file in with the client last, rolls every swap back on a failure,
+; writes last-result.json and, under /RELAUNCH, starts the client again.
+; Leaves its exit code in $0 ("error" when it could not be started) and its
+; output in $1, then removes the staging folder.
+;
+; A --to folder ending in `\` (a drive root) gets that backslash doubled, as
+; in RT_USER_PATH, so it never forms `\"` with the closing quote.
+Function RtApplyUpdate
+  StrCpy $3 $INSTDIR
+  StrCpy $2 $3 "" -1
+  ${If} $2 == "\"
+    StrCpy $3 "$3\"
+  ${EndIf}
+  StrCpy $2 '"$INSTDIR\.staging\${DAEMONEXE}" apply-update --from "$INSTDIR\.staging" --to "$3"'
+  ${If} $OldVersion != ""
+    StrCpy $2 '$2 --old-version "$OldVersion"'
+  ${EndIf}
+  ${If} $UpdateMode == 1
+    StrCpy $2 "$2 --update"
+  ${EndIf}
+  ${If} $RelaunchMode == 1
+    StrCpy $2 "$2 --relaunch"
+  ${EndIf}
+  nsExec::ExecToStack $2
+  Pop $0
+  Pop $1
+  DetailPrint "rustling-tulipd apply-update exited with $0: $1"
+  RMDir /r "$INSTDIR\.staging"
+FunctionEnd
 
 ; A reinstall pointed at another folder takes the previous folder off the user
 ; PATH, so sshd never runs the stale exe left there and uninstalling the new
@@ -150,14 +208,38 @@ Section "rustling-tulip" SEC_APP
   ClearErrors
   ReadRegStr $PreviousInstDir HKCU "${UNINSTKEY}" "InstallLocation"
   ClearErrors
-  SetOutPath "$INSTDIR"
+  ReadRegStr $OldVersion HKCU "${UNINSTKEY}" "DisplayVersion"
+  ClearErrors
+  ; Every file goes to the staging folder; only `apply-update` writes $INSTDIR.
+  RMDir /r "$INSTDIR\.staging"
+  SetOutPath "$INSTDIR\.staging"
   File "${BINDIR}\${DAEMONEXE}"
   File "${BINDIR}\${TRACEREXE}"
-  !insertmacro RT_STOP_DAEMON
-
   File "${BINDIR}\${APPEXE}"
   File "${__FILEDIR__}\user-path.ps1"
-  WriteUninstaller "$INSTDIR\uninstall.exe"
+  WriteUninstaller "$INSTDIR\.staging\uninstall.exe"
+  SetOutPath "$INSTDIR"
+  Call RtApplyUpdate
+  ${If} $0 != 0
+    ${If} $1 == ""
+      StrCpy $1 "Setup could not update the app (code $0)."
+    ${Else}
+      StrCpy $1 "Setup could not update the app (code $0):$\r$\n$\r$\n$1"
+    ${EndIf}
+    ${If} $0 == "error"
+      StrCpy $0 1
+    ${EndIf}
+    MessageBox MB_OK|MB_ICONSTOP $1 /SD IDOK
+    SetErrorLevel $0
+    Abort
+  ${EndIf}
+
+  ; An update leaves the Run value, the shortcuts, the PATH and the rest of
+  ; the uninstall key as the user's install set them.
+  ${If} $UpdateMode == 1
+    WriteRegStr HKCU "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
+    Return
+  ${EndIf}
 
   CreateShortcut "$SMPROGRAMS\rustling-tulip.lnk" "$INSTDIR\${APPEXE}"
 
@@ -175,11 +257,15 @@ Section "rustling-tulip" SEC_APP
 SectionEnd
 
 Section "Start the daemon when I sign in" SEC_AUTOSTART
-  WriteRegStr HKCU "${RUNKEY}" "${RUNVALUE}" '"$INSTDIR\${DAEMONEXE}" --detach'
+  ${If} $UpdateMode != 1
+    WriteRegStr HKCU "${RUNKEY}" "${RUNVALUE}" '"$INSTDIR\${DAEMONEXE}" --detach'
+  ${EndIf}
 SectionEnd
 
 Section /o "Desktop shortcut" SEC_DESKTOP
-  CreateShortcut "$DESKTOP\rustling-tulip.lnk" "$INSTDIR\${APPEXE}"
+  ${If} $UpdateMode != 1
+    CreateShortcut "$DESKTOP\rustling-tulip.lnk" "$INSTDIR\${APPEXE}"
+  ${EndIf}
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
@@ -200,6 +286,9 @@ Section "Uninstall"
   Delete "$INSTDIR\${TRACEREXE}"
   Delete "$INSTDIR\user-path.ps1"
   Delete "$INSTDIR\uninstall.exe"
+  Delete "$INSTDIR\*.old"
+  Delete "$INSTDIR\*.new"
+  RMDir /r "$INSTDIR\.staging"
 
   Delete "$SMPROGRAMS\rustling-tulip.lnk"
   Delete "$DESKTOP\rustling-tulip.lnk"
