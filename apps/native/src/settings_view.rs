@@ -840,20 +840,34 @@ impl RootView {
             return;
         }
         tracing::info!(?host, "settings: showing the host's agent pages");
+        self.show_settings_host(host, window, cx);
+    }
+
+    /// The selector moves to `host`: the shown tab stays while `host`
+    /// offers it, else General; a shown agent page holds `host`'s page
+    /// state for that agent, as selecting the tab would. Another tab's
+    /// drafts stay.
+    fn show_settings_host(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_host = host;
         self.keep_offered_tab();
-        // Only an agent page follows the selector; another tab's drafts stay.
-        if matches!(self.settings_tab, SettingsTab::Agent(_)) {
-            self.select_settings_tab(self.settings_tab, window, cx);
-        } else {
-            cx.notify();
+        self.settings_control = None;
+        if self.settings_open()
+            && let Some(agent) = self.settings_tab.agent()
+        {
+            self.hold_agent_tab(agent, window, cx);
         }
+        cx.notify();
     }
 
     /// `host`'s connection closed: a remote host's agent pages and their
     /// drafts go, and the selector returns to This PC when it showed
     /// `host`.
-    pub(crate) fn settings_host_closed(&mut self, host: &HostKey) {
+    pub(crate) fn settings_host_closed(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if *host != HostKey::Local {
             self.agent_tabs.drop_host(host);
         }
@@ -863,8 +877,12 @@ impl RootView {
                 ?host,
                 "settings: the shown host's connection closed; showing This PC"
             );
-            self.settings_host = shown;
-            self.keep_offered_tab();
+            self.show_settings_host(shown, window, cx);
+            // The keyboard may have been in one of the closed host's inputs,
+            // which went with its pages.
+            if self.settings_open() {
+                self.settings_tabs_focus.focus(window);
+            }
         }
     }
 
@@ -914,7 +932,9 @@ impl RootView {
     /// agent it no longer lists gives way to General while `host` is shown,
     /// and drops `host`'s drafts and applies for it.
     fn follow_agent_list(&mut self, host: &HostKey) {
-        self.keep_offered_tab();
+        if *host == self.settings_host {
+            self.keep_offered_tab();
+        }
         let agents = self.sidebar.agents(host).to_vec();
         if let Some(tabs) = self.agent_tabs.of_mut(host) {
             tabs.keep_listed(&agents);
@@ -2518,23 +2538,29 @@ impl RootView {
             self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
             self.on_devices_page_selected();
         }
-        // An agent page keeps its fields and the apply they wait on until
-        // Settings closes, so selecting it again loses nothing.
         if let Some(agent) = tab.agent() {
-            let host = self.settings_host.clone();
-            let held = self
-                .agent_tabs
-                .of(&host)
-                .is_some_and(|tabs| tabs.tabs.contains_key(&agent));
-            let fresh = (!held).then(|| self.new_agent_tab(&host, &agent, window, cx));
-            let tabs = self.agent_tabs.entry(&host);
-            if let Some(fresh) = fresh {
-                tabs.tabs.insert(agent.clone(), fresh);
-            }
-            tabs.current = Some(agent);
+            self.hold_agent_tab(agent, window, cx);
         }
         self.settings_tabs_focus.focus(window);
         cx.notify();
+    }
+
+    /// The shown host's page of `agent` becomes the one last selected,
+    /// built afresh unless held. An agent page keeps its fields and the
+    /// apply they wait on until Settings closes, so selecting it again
+    /// loses nothing.
+    fn hold_agent_tab(&mut self, agent: AgentId, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
+        let held = self
+            .agent_tabs
+            .of(&host)
+            .is_some_and(|tabs| tabs.tabs.contains_key(&agent));
+        let fresh = (!held).then(|| self.new_agent_tab(&host, &agent, window, cx));
+        let tabs = self.agent_tabs.entry(&host);
+        if let Some(fresh) = fresh {
+            tabs.tabs.insert(agent.clone(), fresh);
+        }
+        tabs.current = Some(agent);
     }
 
     /// Reads Windows' toast setting on a background thread; the tab shows

@@ -339,7 +339,7 @@ impl RootView {
         if self.hosts.get(host).is_none() {
             self.forget_device_pairing(host, window, cx);
         }
-        self.settings_host_closed(host);
+        self.settings_host_closed(host, window, cx);
     }
 
     /// `host`'s connection reported `state`: once it has ended (closed,
