@@ -11,8 +11,8 @@ use crate::support;
 use chrono::{TimeDelta, Utc};
 use gpui::{TestAppContext, px};
 use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_PAIRING, PendingDevice, Secret};
-use rustling_tulip_native::Connection;
 use rustling_tulip_native::target::Target;
+use rustling_tulip_native::{Connection, NetEvent};
 use support::{Fixture, Harness, TestDir, session};
 
 const TAB: &str = "settings-tab-remote-access";
@@ -72,6 +72,19 @@ fn reconnect(h: &mut Harness<'_>, target: Target, features: Vec<String>) -> Vec<
     h.set_connection(conn);
     h.send_welcome(support::PROTOCOL);
     h.sent()
+}
+
+/// The window holds `target` beside This PC, its `Welcome` listing
+/// `features`; returns what the client sent on that host's connection.
+fn beside(h: &mut Harness<'_>, target: &Target, features: Vec<String>) -> Vec<ClientMessage> {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(support::PROTOCOL, features);
+    let mut host = h.host(target);
+    host.event(NetEvent::State(conn));
+    host.send(support::welcome(support::PROTOCOL));
+    host.sent()
 }
 
 fn lists_pending(sent: &[ClientMessage]) -> usize {
@@ -481,7 +494,7 @@ fn list_pending_devices_is_sent_on_connect(cx: &mut TestAppContext) {
     assert_eq!(lists_pending(&sent), 0, "an older daemon: {sent:?}");
 
     let host = Target::tailnet("box.tail1234.ts.net", None);
-    let sent = reconnect(&mut h, host, pairing);
+    let sent = beside(&mut h, &host, pairing);
     assert_eq!(lists_pending(&sent), 0, "a tailnet host: {sent:?}");
 }
 
@@ -495,7 +508,7 @@ fn an_ssh_target_never_asks_for_pending_devices(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     let pairing = vec![FEATURE_DEVICE_PAIRING.to_owned()];
-    let sent = reconnect(&mut h, devbox(), pairing.clone());
+    let sent = beside(&mut h, &devbox(), pairing.clone());
     assert_eq!(lists_pending(&sent), 0, "an SSH host: {sent:?}");
 
     let sent = reconnect(&mut h, Target::Local, pairing);
@@ -506,9 +519,11 @@ fn an_ssh_target_never_asks_for_pending_devices(cx: &mut TestAppContext) {
 fn an_ssh_target_ignores_pending_devices_pushed_by_the_daemon(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
-    reconnect(&mut h, devbox(), vec![FEATURE_DEVICE_PAIRING.to_owned()]);
+    beside(&mut h, &devbox(), vec![FEATURE_DEVICE_PAIRING.to_owned()]);
 
-    fold(&mut h, &[request("r1")]);
+    h.host(&devbox()).send(DaemonMessage::PendingDevices {
+        requests: vec![request("r1")],
+    });
     assert_eq!(
         h.root(|root, _| root.pairing_rows()),
         Vec::<(String, String)>::new(),

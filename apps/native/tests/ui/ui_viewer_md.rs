@@ -469,12 +469,13 @@ fn an_unknown_anchor_does_nothing(cx: &mut TestAppContext) {
     assert_eq!(h.opened(), []);
 }
 
-/// A harness on the remote host [`HOST`] whose tab `v1` shows a fetched
-/// copy of `notes.md` holding `text`, under the download root `<dir>/remote-files`;
-/// returns the copy's path.
+/// A harness on This PC with the remote host [`HOST`] held beside it, whose
+/// tab `v1` shows a fetched copy of `notes.md` holding `text`, under the
+/// download root `<dir>/remote-files`; returns the copy's path.
 fn fetched<'a>(cx: &'a mut TestAppContext, dir: &TestDir, text: &str) -> (Harness<'a>, PathBuf) {
     let fixture = Fixture::single(session("s1").worktree("r1").build());
-    let mut h = Harness::on_target(cx, dir, Target::tailnet(HOST, None), &fixture);
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.host(&Target::tailnet(HOST, None)).connect();
     let root = dir.path().join("remote-files");
     let set = root.clone();
     h.root_update(move |view, _, _| view.set_remote_files_root(set));
