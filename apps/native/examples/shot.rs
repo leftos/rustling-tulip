@@ -44,6 +44,7 @@ use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTes
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::target::SshHost;
+use rustling_tulip_native::update::{LastResult, Ready, Updater};
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
     NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
@@ -136,10 +137,11 @@ enum View {
     Dashboard,
     Connections,
     ConnectionsSsh,
+    Update,
 }
 
 impl View {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -152,6 +154,7 @@ impl View {
         Self::Dashboard,
         Self::Connections,
         Self::ConnectionsSsh,
+        Self::Update,
     ];
 
     fn name(self) -> &'static str {
@@ -168,14 +171,20 @@ impl View {
             Self::Dashboard => "dashboard",
             Self::Connections => "connections",
             Self::ConnectionsSsh => "connections-ssh",
+            Self::Update => "update",
         }
     }
 
     /// How many rounds of input reach the view, each given [`DRIVE_WAIT`]
     /// to draw before the next: the SSH form opens from the picker, and its
-    /// Host field takes typing only once drawn.
+    /// Host field takes typing only once drawn; the update shot checks and
+    /// opens Settings, then turns the wheel down to the update rows.
     fn steps(self) -> usize {
-        if self == Self::ConnectionsSsh { 3 } else { 1 }
+        match self {
+            Self::ConnectionsSsh => 3,
+            Self::Update => 2,
+            _ => 1,
+        }
     }
 
     /// The window's size for this view.
@@ -229,6 +238,7 @@ impl View {
                 root.connection_picker_ssh_result().as_deref()
                     == Some(&*format!("Connected: {SHOT_SSH_SHORT}"))
             }
+            Self::Update => root.settings_open() && root.update_footer_text().is_some(),
         }
     }
 }
@@ -284,12 +294,18 @@ impl Shot {
             | View::Spawn
             | View::Dashboard
             | View::Connections
-            | View::ConnectionsSsh => None,
+            | View::ConnectionsSsh
+            | View::Update => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
             return std::fs::write(&sample, text)
                 .with_context(|| format!("writing {}", sample.display()));
+        }
+        if self.view == View::Update {
+            let installer = self.ui_dir.join(SHOT_INSTALLER);
+            return std::fs::write(&installer, b"stand-in installer")
+                .with_context(|| format!("writing {}", installer.display()));
         }
         let state = match self.view {
             View::MainCompact => compact_ui_state(),
@@ -476,6 +492,9 @@ fn deps(
         pick_file,
         autostart: Arc::new(NoAutostart),
         tokens: paired_tokens(),
+        updater: Arc::new(ShotUpdater {
+            installer: ui_dir.join(SHOT_INSTALLER),
+        }),
     }
 }
 
@@ -621,6 +640,61 @@ fn drive(
         }
         View::Connections => open_picker(window, cx),
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
+        View::Update => drive_update(step, address, window, cx),
+    }
+}
+
+/// The stand-in installer the `update` shot's ready update holds open,
+/// beside the layout file.
+const SHOT_INSTALLER: &str = "rustling-tulip-0.99.0-setup.exe";
+
+/// Where the `update` shot's wheel turns: inside Settings' General page.
+const SETTINGS_PAGE_POINT: (i32, i32) = (560, 300);
+/// Enough wheel notches to reach the General page's end.
+const SETTINGS_PAGE_NOTCHES: i16 = 40;
+
+/// Step `step` of the `update` shot: Check now, which the shot's updater
+/// answers with a ready 0.99.0, and Settings; then the wheel over the
+/// General page down to its end, where the update rows are.
+fn drive_update(step: usize, address: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    if step == 0 {
+        let root = window
+            .root::<RootView>()
+            .flatten()
+            .context("the window has no root view")?;
+        root.update(cx, RootView::check_for_updates_now);
+        return press("ctrl-,", window, cx);
+    }
+    win32::wheel_down(address, SETTINGS_PAGE_POINT, SETTINGS_PAGE_NOTCHES)
+}
+
+/// An updater whose every check finds 0.99.0 ready at `installer`, which
+/// starts nothing and has no last result.
+struct ShotUpdater {
+    installer: PathBuf,
+}
+
+impl Updater for ShotUpdater {
+    fn check(&self, _current: &semver::Version) -> BoxFuture<'static, Result<Option<Ready>>> {
+        let path = self.installer.clone();
+        let ready = std::fs::File::open(&path)
+            .with_context(|| format!("opening {}", path.display()))
+            .map(|file| {
+                Some(Ready {
+                    version: semver::Version::new(0, 99, 0),
+                    path,
+                    file,
+                })
+            });
+        futures::future::ready(ready).boxed()
+    }
+
+    fn start_installer(&self, _ready: &Ready) -> Result<()> {
+        bail!("the shot starts no installer")
+    }
+
+    fn read_last_result(&self) -> Option<LastResult> {
+        None
     }
 }
 
@@ -1603,17 +1677,18 @@ mod win32 {
     use anyhow::{Context as _, Result, anyhow, bail};
     use gpui::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
     use windows::Win32::Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
-        DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, ClientToScreen, CreateCompatibleBitmap,
+        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
+        SelectObject,
     };
     use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PW_CLIENTONLY, PrintWindow};
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClientRect, GetForegroundWindow, PW_RENDERFULLCONTENT, PostMessageW, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MOUSEMOVE,
+        WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     };
 
     /// How long the window gets to stop changing between captures.
@@ -1647,6 +1722,31 @@ mod win32 {
         post(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, at)?;
         post(hwnd, WM_LBUTTONUP, 0, at)?;
         post(hwnd, WM_MOUSEMOVE, 0, coordinates(PARKED.0, PARKED.1))
+    }
+
+    /// Turns the wheel `notches` notches toward the user over client point
+    /// `at`, in logical pixels, of the window at `address`, with one posted
+    /// wheel message, whose position Windows gives in screen pixels.
+    pub fn wheel_down(address: usize, (x, y): (i32, i32), notches: i16) -> Result<()> {
+        /// One notch of the wheel, as `WM_MOUSEWHEEL` counts it.
+        const WHEEL_DELTA: i16 = 120;
+        let hwnd = hwnd(address);
+        // SAFETY: a plain query on this live window; 0 means it has no DPI.
+        let dpi = match unsafe { GetDpiForWindow(hwnd) } {
+            0 => 96,
+            dpi => i32::try_from(dpi).unwrap_or(96),
+        };
+        let mut at = POINT {
+            x: x * dpi / 96,
+            y: y * dpi / 96,
+        };
+        // SAFETY: `at` is a live POINT and `hwnd` a live window.
+        if !unsafe { ClientToScreen(hwnd, &raw mut at) }.as_bool() {
+            bail!("mapping the wheel's point to the screen failed");
+        }
+        let delta = notches.saturating_mul(-WHEEL_DELTA);
+        let wparam = usize::from(delta.cast_unsigned()) << 16;
+        post(hwnd, WM_MOUSEWHEEL, wparam, coordinates(at.x, at.y))
     }
 
     /// Client pixel (`x`, `y`) packed as a mouse message's `lParam`: two
@@ -1825,6 +1925,10 @@ mod win32 {
 
     pub fn click(_address: usize, _at: (i32, i32)) -> Result<()> {
         bail!("the shot clicks a Win32 window, so it runs on Windows only")
+    }
+
+    pub fn wheel_down(_address: usize, _at: (i32, i32), _notches: i16) -> Result<()> {
+        bail!("the shot scrolls a Win32 window, so it runs on Windows only")
     }
 
     pub fn write_settled(_address: usize, _out: &Path) -> Result<bool> {

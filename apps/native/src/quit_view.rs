@@ -187,7 +187,7 @@ impl RootView {
     /// window move or a pop-out left pending, so the open pop-outs, and
     /// those whose windows closed since the last write, are saved before
     /// the app goes.
-    fn request_quit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) {
         self.keep_closed_popouts(cx);
         self.flush_ui_save();
         self.quitter.request(cx);

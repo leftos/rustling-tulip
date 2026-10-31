@@ -31,6 +31,7 @@ use rustling_tulip_native::{
     remote_access::Autostart,
     spawn_net,
     target::{TailnetHost, Target},
+    update::{AlreadyRunning, LastResult, Ready, Updater},
 };
 use serde_json::{Value, json};
 
@@ -916,6 +917,8 @@ pub struct Harness<'a> {
     autostart: Arc<AutostartRecorder>,
     /// The device tokens the client holds per tailnet host.
     tokens: Arc<MemoryTokens>,
+    /// The updater the client checks, installs and reads back through.
+    updater: Arc<UpdaterRecorder>,
 }
 
 /// A folder picker that answers with the folder a spec set, as the test
@@ -1170,6 +1173,141 @@ impl Notifier for NotifyRecorder {
     }
 }
 
+/// How the recording updater answers an installer start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InstallAnswer {
+    Started,
+    Fails(String),
+    AlreadyRunning,
+}
+
+/// An updater that answers the checks, installer starts and last result a
+/// spec set, and records each call; it reaches no feed and runs nothing.
+pub struct UpdaterRecorder {
+    /// The release a check offers: its version and the installer file a
+    /// `Ready` holds open.
+    offer: Mutex<Option<(String, PathBuf)>>,
+    /// The error a check fails with, before any offer.
+    check_error: Mutex<Option<String>>,
+    install: Mutex<InstallAnswer>,
+    last_result: Mutex<Option<LastResult>>,
+    checks: AtomicUsize,
+    installs: Mutex<Vec<PathBuf>>,
+    last_result_reads: AtomicUsize,
+}
+
+impl Default for UpdaterRecorder {
+    fn default() -> Self {
+        Self {
+            offer: Mutex::new(None),
+            check_error: Mutex::new(None),
+            install: Mutex::new(InstallAnswer::Started),
+            last_result: Mutex::new(None),
+            checks: AtomicUsize::new(0),
+            installs: Mutex::new(Vec::new()),
+            last_result_reads: AtomicUsize::new(0),
+        }
+    }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl UpdaterRecorder {
+    /// Checks offer `version`, its installer at `installer` (which must
+    /// exist), and stop failing.
+    pub fn offer(&self, version: &str, installer: &Path) {
+        *locked(&self.offer) = Some((version.to_owned(), installer.to_path_buf()));
+        *locked(&self.check_error) = None;
+    }
+
+    /// Checks find nothing newer.
+    pub fn offer_nothing(&self) {
+        *locked(&self.offer) = None;
+        *locked(&self.check_error) = None;
+    }
+
+    /// Checks fail with `error`.
+    pub fn fail_checks(&self, error: &str) {
+        *locked(&self.check_error) = Some(error.to_owned());
+    }
+
+    /// Installer starts fail with `error`.
+    pub fn fail_installs(&self, error: &str) {
+        *locked(&self.install) = InstallAnswer::Fails(error.to_owned());
+    }
+
+    /// Installer starts find another update holding the lock.
+    pub fn refuse_installs_as_running(&self) {
+        *locked(&self.install) = InstallAnswer::AlreadyRunning;
+    }
+
+    /// The last update's outcome, handed out once.
+    pub fn set_last_result(&self, result: LastResult) {
+        *locked(&self.last_result) = Some(result);
+    }
+
+    /// How many checks ran.
+    pub fn checks(&self) -> usize {
+        self.checks.load(Ordering::SeqCst)
+    }
+
+    /// The installer each start was asked to run, oldest first.
+    pub fn installs(&self) -> Vec<PathBuf> {
+        locked(&self.installs).clone()
+    }
+
+    /// How many times the last result was read.
+    pub fn last_result_reads(&self) -> usize {
+        self.last_result_reads.load(Ordering::SeqCst)
+    }
+
+    fn answer_check(&self) -> anyhow::Result<Option<Ready>> {
+        if let Some(error) = locked(&self.check_error).clone() {
+            anyhow::bail!("{error}");
+        }
+        let Some((version, path)) = locked(&self.offer).clone() else {
+            return Ok(None);
+        };
+        let version = semver::Version::parse(&version).map_err(|err| {
+            anyhow::anyhow!("the spec's version {version:?} is not semver: {err}")
+        })?;
+        let file = std::fs::File::open(&path)
+            .map_err(|err| anyhow::anyhow!("opening {}: {err}", path.display()))?;
+        Ok(Some(Ready {
+            version,
+            path,
+            file,
+        }))
+    }
+}
+
+impl Updater for UpdaterRecorder {
+    fn check(
+        &self,
+        _current: &semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<Ready>>> {
+        use futures::FutureExt as _;
+        self.checks.fetch_add(1, Ordering::SeqCst);
+        futures::future::ready(self.answer_check()).boxed()
+    }
+
+    fn start_installer(&self, ready: &Ready) -> anyhow::Result<()> {
+        locked(&self.installs).push(ready.path.clone());
+        match locked(&self.install).clone() {
+            InstallAnswer::Started => Ok(()),
+            InstallAnswer::Fails(error) => Err(anyhow::anyhow!("{error}")),
+            InstallAnswer::AlreadyRunning => Err(AlreadyRunning.into()),
+        }
+    }
+
+    fn read_last_result(&self) -> Option<LastResult> {
+        self.last_result_reads.fetch_add(1, Ordering::SeqCst);
+        locked(&self.last_result).take()
+    }
+}
+
 /// A login launch that never touches the registry: it starts off, records
 /// each switch the client asks for, and fails the next one with the error a
 /// spec queued.
@@ -1249,6 +1387,17 @@ impl<'a> Harness<'a> {
     /// command line as the session to focus once the layout and the
     /// sessions are in.
     pub fn open_wanting(cx: &'a mut TestAppContext, dir: &TestDir, wanted: Option<&str>) -> Self {
+        Self::open_with_updater(cx, dir, wanted, Arc::new(UpdaterRecorder::default()))
+    }
+
+    /// Opens the window as [`Self::open_wanting`] does, over `updater`, so a
+    /// spec sets what the launch reads from it first.
+    pub fn open_with_updater(
+        cx: &'a mut TestAppContext,
+        dir: &TestDir,
+        wanted: Option<&str>,
+        updater: Arc<UpdaterRecorder>,
+    ) -> Self {
         cx.update(bind_keys);
         let (tx, commands) = unbounded();
         let (events, rx) = unbounded();
@@ -1273,6 +1422,7 @@ impl<'a> Harness<'a> {
             pick_file: PickRecorder::file_picker(&picker),
             autostart: autostart.clone(),
             tokens: tokens.clone(),
+            updater: updater.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -1290,6 +1440,7 @@ impl<'a> Harness<'a> {
             picker,
             autostart,
             tokens,
+            updater,
         };
         harness.count_the_window_hovered();
         harness.connect();
@@ -1310,6 +1461,7 @@ impl<'a> Harness<'a> {
         let (tx, net_commands) = unbounded();
         let (net_events, rx) = unbounded();
         spawn_net(net, Target::Local, net_commands, net_events);
+        let updater = Arc::new(UpdaterRecorder::default());
         let clock = TestClock::new();
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
@@ -1331,6 +1483,7 @@ impl<'a> Harness<'a> {
             pick_file: PickRecorder::file_picker(&picker),
             autostart: autostart.clone(),
             tokens: tokens.clone(),
+            updater: updater.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -1348,6 +1501,7 @@ impl<'a> Harness<'a> {
             picker,
             autostart,
             tokens,
+            updater,
         };
         harness.count_the_window_hovered();
         harness
@@ -1356,6 +1510,11 @@ impl<'a> Harness<'a> {
     /// The device tokens the client holds per tailnet host.
     pub fn tokens(&self) -> &MemoryTokens {
         &self.tokens
+    }
+
+    /// The updater the client checks, installs and reads back through.
+    pub fn updater(&self) -> &UpdaterRecorder {
+        &self.updater
     }
 
     /// How many times the view asked the app to quit.

@@ -21,7 +21,7 @@
 use anyhow::Context as _;
 use daemon_client::capped_log::{self, CappedLog};
 use gpui::{App, Application};
-use rustling_tulip_native::{Assets, LOG_FILE, toast_activation};
+use rustling_tulip_native::{Assets, LOG_FILE, offscreen, toast_activation, update};
 use std::path::Path;
 use std::sync::Mutex;
 use tracing_subscriber::EnvFilter;
@@ -95,6 +95,23 @@ fn install_panic_hook() {
     }));
 }
 
+/// Splits `--updated-from <version>`, which the installer's relaunch adds,
+/// out of the launch arguments, so the version is never taken for a session
+/// id.
+fn take_updated_from(args: impl IntoIterator<Item = String>) -> (Vec<String>, Option<String>) {
+    let mut rest = Vec::new();
+    let mut updated_from = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--updated-from" {
+            updated_from = args.next();
+        } else {
+            rest.push(arg);
+        }
+    }
+    (rest, updated_from)
+}
+
 fn main() {
     init_tracing();
     install_panic_hook();
@@ -102,7 +119,15 @@ fn main() {
     // daemon is rewritten in its current `--detach` form. An entry naming any
     // other path, or none at all, is left alone.
     daemon_client::autostart::refresh_registration();
-    let launch = toast_activation::parse_launch_args(std::env::args().skip(1));
+    let (args, updated_from) = take_updated_from(std::env::args().skip(1));
+    if let Some(version) = updated_from {
+        tracing::info!(%version, "started by an update from this version");
+    }
+    // The cloaked smoke window leaves the user's own downloads alone.
+    if !offscreen::requested() {
+        update::clean_at_launch(daemon_client::updates_dir());
+    }
+    let launch = toast_activation::parse_launch_args(args);
     if launch.toast_activated {
         tracing::info!("started by a toast press");
     }

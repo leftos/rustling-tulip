@@ -679,6 +679,9 @@ pub struct GeneralSettings {
     /// Whether text files a link or a fetch opens go to the external app
     /// instead of the built-in viewer.
     pub open_text_externally: bool,
+    /// Whether the client checks for updates 30 s after launch and every
+    /// 24 h; Settings' Check now checks either way.
+    pub check_updates: bool,
 }
 
 impl Default for GeneralSettings {
@@ -689,6 +692,7 @@ impl Default for GeneralSettings {
             sessions_under_repos: SessionsUnderRepos::Every,
             repo_sort: RepoSort::NeedsYou,
             open_text_externally: false,
+            check_updates: true,
         }
     }
 }
@@ -1232,6 +1236,11 @@ impl SidebarModel {
     /// Whether text files go to the external app instead of the viewer.
     pub fn set_open_text_externally(&mut self, on: bool) {
         self.ui.general.open_text_externally = on;
+    }
+
+    /// Whether the client checks for updates on its own.
+    pub fn set_check_updates(&mut self, on: bool) {
+        self.ui.general.check_updates = on;
     }
 
     /// How much room each session leaf takes.
@@ -3924,6 +3933,7 @@ pub(crate) mod tests {
                 sessions_under_repos: SessionsUnderRepos::Busy,
                 repo_sort: RepoSort::Active,
                 open_text_externally: true,
+                check_updates: false,
             },
             title: TitleSettings {
                 show_count: false,

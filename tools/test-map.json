@@ -352,7 +352,13 @@
       "paths": [
         "apps/native/src/update.rs"
       ],
-      "filter": "binary_id(rustling-tulip-native) & test(/^update::/)"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^update::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_update)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/update_view.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^(ui_update)::/)"
     },
     {
       "paths": [
@@ -1046,6 +1052,12 @@
         "apps/native/tests/ui/ui_quit.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_quit)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/tests/ui/ui_update.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native::ui) & test(/^(ui_update)::/))"
     },
     {
       "paths": [

@@ -1144,6 +1144,7 @@ impl<'a> Harness<'a> {
         let notifier = Arc::new(NotifyRecorder::default());
         let picker = std::rc::Rc::new(PickRecorder::default());
         let autostart = Arc::new(super::AutostartRecorder::default());
+        let updater = Arc::new(super::UpdaterRecorder::default());
         let deps = RootDeps {
             tx: tx.clone(),
             events: view_events,
@@ -1158,6 +1159,7 @@ impl<'a> Harness<'a> {
             pick_file: PickRecorder::file_picker(&picker),
             autostart: autostart.clone(),
             tokens: tokens.clone(),
+            updater: updater.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -1175,6 +1177,7 @@ impl<'a> Harness<'a> {
             picker,
             autostart,
             tokens,
+            updater,
         };
         (
             harness,
