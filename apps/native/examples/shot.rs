@@ -13,11 +13,13 @@
 //! over a Markdown file, rendered), `dashboard`, `connections` (the host
 //! picker with a saved tailnet host and a saved SSH host) and
 //! `connections-ssh` (its add form switched to SSH, filled in, after a
-//! passing Test connection), `menu` (the sessions panel's ⋯ menu open
-//! over the repo rows, with a toast over the panes), `chat` (the Petal
-//! pane switched to its chat, a row of each kind, an answer with one stretch
-//! open and two closed, and a live answer) and `summary` (the Petal pane
-//! switched to its summary: three lines, the second one open, under a
+//! passing Test connection), `multi-host` (the main window with the
+//! tailnet host "box" online, one of its sessions in a pane of the first
+//! tab, and the tailnet host "lab" offline), `menu` (the sessions panel's ⋯
+//! menu open over the repo rows, with a toast over the panes), `chat` (the
+//! Petal pane switched to its chat, a row of each kind, an answer with one
+//! stretch open and two closed, and a live answer) and `summary` (the Petal
+//! pane switched to its summary: three lines, the second one open, under a
 //! pinned Permission card). The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -161,10 +163,11 @@ enum View {
     Update,
     Chat,
     Summary,
+    MultiHost,
 }
 
 impl View {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -181,6 +184,7 @@ impl View {
         Self::Update,
         Self::Chat,
         Self::Summary,
+        Self::MultiHost,
     ];
 
     fn name(self) -> &'static str {
@@ -201,6 +205,7 @@ impl View {
             Self::Update => "update",
             Self::Chat => "chat",
             Self::Summary => "summary",
+            Self::MultiHost => "multi-host",
         }
     }
 
@@ -287,6 +292,14 @@ impl View {
             }
             Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
             Self::Update => root.settings_open() && root.update_footer_text().is_some(),
+            Self::MultiHost => {
+                !root.tab_ids().is_empty()
+                    && root
+                        .sidebar_containers()
+                        .iter()
+                        .flat_map(|container| &container.leaves)
+                        .any(|leaf| leaf.id == BOX_SESSION)
+            }
         }
     }
 }
@@ -346,7 +359,8 @@ impl Shot {
             | View::Menu
             | View::Update
             | View::Chat
-            | View::Summary => None,
+            | View::Summary
+            | View::MultiHost => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -361,6 +375,7 @@ impl Shot {
         let state = match self.view {
             View::MainCompact => compact_ui_state(),
             View::Connections | View::ConnectionsSsh => connections_ui_state(),
+            View::MultiHost => multi_host_ui_state(),
             _ => return Ok(()),
         };
         let layout = serde_json::to_vec_pretty(&state)
@@ -404,6 +419,24 @@ fn connections_ui_state() -> Value {
             { "kind": "ssh", "name": SHOT_SSH_SAVED, "enabled": false },
         ],
         "host_session_counts": { SHOT_TAILNET_HOST: 3 },
+    })
+}
+
+/// The tailnet host the `multi-host` shot has saved and cannot reach.
+const SHOT_LAB_HOST: &str = "lab.tail1234.ts.net";
+/// The repo the `multi-host` shot's "box" lists, and its one session.
+const BOX_REPO: &str = "relay";
+const BOX_REPO_PATH: &str = r"D:\src\relay";
+const BOX_SESSION: &str = "b-relay";
+
+/// The layout the `multi-host` shot starts from: "box" and "lab" saved and
+/// switched on, so launch connects both.
+fn multi_host_ui_state() -> Value {
+    json!({
+        "saved_hosts": [
+            { "name": SHOT_TAILNET_HOST, "port": 8787 },
+            { "name": SHOT_LAB_HOST, "port": 8787 },
+        ],
     })
 }
 
@@ -496,13 +529,18 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     let (event_tx, event_rx) = unbounded();
     let now = Utc::now();
     let fixture = Fixture::build(shot.view, now)?;
+    let failure = Arc::new(Mutex::new(None));
+    let remote = if shot.view == View::MultiHost {
+        Some(start_box_daemon(now, &failure)?)
+    } else {
+        None
+    };
     let handle = open_window(
-        deps(cmd_tx, event_rx, &shot.ui_dir),
+        deps(shot.view, (cmd_tx, event_rx), remote, &shot.ui_dir),
         shot.view.window_size(),
         cx,
     )?;
     let address = handle.update(cx, |_, window, _| win32::window_address(window))??;
-    let failure = Arc::new(Mutex::new(None));
     let daemon = FakeDaemon {
         events: event_tx,
         view: shot.view,
@@ -524,13 +562,55 @@ fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Res
     Ok(())
 }
 
-/// The root view's dependencies: the fake daemon's channels, a frozen clock,
-/// and an opener, notifier and folder picker that do nothing.
-fn deps(
-    tx: UnboundedSender<NetCommand>,
-    events: UnboundedReceiver<NetEvent>,
-    ui_dir: &Path,
-) -> RootDeps {
+/// One connection's channels: the commands the window sends and the
+/// events it reads.
+type HostPair = (UnboundedSender<NetCommand>, UnboundedReceiver<NetEvent>);
+
+/// Starts the fake daemon the `multi-host` shot's "box" answers with, on a
+/// thread of its own, and returns the channels the window's connection to
+/// "box" uses.
+fn start_box_daemon(
+    now: DateTime<Utc>,
+    failure: &Arc<Mutex<Option<anyhow::Error>>>,
+) -> Result<HostPair> {
+    let fixture = RemoteFixture::build(now)?;
+    let (cmd_tx, cmd_rx) = unbounded();
+    let (event_tx, event_rx) = unbounded();
+    let daemon = FakeDaemon {
+        events: event_tx,
+        now,
+        failure: Arc::clone(failure),
+    };
+    let target = Target::tailnet(SHOT_TAILNET_HOST, Some(8787));
+    std::thread::Builder::new()
+        .name("fake-box-daemon".to_owned())
+        .spawn(move || daemon.run_remote(&fixture, &target, cmd_rx))
+        .context("starting the box daemon's thread")?;
+    Ok((cmd_tx, event_rx))
+}
+
+/// The state a later connection's pair reports: the `multi-host` shot's
+/// other hosts were reached and dropped, and the `connections` shots'
+/// saved tailnet host does not know this PC.
+fn later_host_state(view: View, target: &Target) -> Option<Connection> {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    if view == View::MultiHost {
+        let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
+        conn.on_welcome(version, Vec::new());
+        let _ = conn.on_closed("socket closed".to_owned());
+        return Some(conn);
+    }
+    target.tailnet_host()?;
+    conn.on_not_approved("device not approved".to_owned(), false);
+    Some(conn)
+}
+
+/// The root view's dependencies: the fake daemon's channels (and, for the
+/// `multi-host` shot, the "box" daemon's), a frozen clock, and an opener,
+/// notifier and folder picker that do nothing.
+fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) -> RootDeps {
     let started = Instant::now();
     let now: Clock = Arc::new(move || started);
     let pick_folder: FolderPicker =
@@ -538,28 +618,30 @@ fn deps(
     let pick_file: FilePicker = Rc::new(|_: &mut App, _: Option<PathBuf>, _: FileFilter| {
         futures::future::ready(None).boxed_local()
     });
-    // The fake daemon's channels serve the first connection; a later one
-    // gets a pair nothing answers but its state: the `connections` shots'
-    // saved tailnet host does not know this PC.
-    let first = RefCell::new(Some((tx, events)));
+    // The fake daemon's channels serve the first connection, and the "box"
+    // daemon's the `multi-host` shot's "box"; any other gets a pair nothing
+    // answers but its state.
+    let first = RefCell::new(Some(local));
+    let remote = RefCell::new(remote);
     let open_host: Transport = Rc::new(move |target: &Target| {
-        first.borrow_mut().take().unwrap_or_else(|| {
-            let (tx, _) = unbounded();
-            let (states, events) = unbounded();
-            if target.tailnet_host().is_some() {
-                let mut conn = rustling_tulip_native::Connection::for_target(target.clone());
-                conn.on_connecting();
-                conn.on_socket_open(8787);
-                conn.on_not_approved("device not approved".to_owned(), false);
-                if states
-                    .unbounded_send(rustling_tulip_native::NetEvent::State(conn))
-                    .is_err()
-                {
-                    tracing::warn!("the shot's host state found no listener");
-                }
-            }
-            (tx, events)
-        })
+        if let Some(pair) = first.borrow_mut().take() {
+            return pair;
+        }
+        if target
+            .tailnet_host()
+            .is_some_and(|host| host.name() == SHOT_TAILNET_HOST)
+            && let Some(pair) = remote.borrow_mut().take()
+        {
+            return pair;
+        }
+        let (tx, _) = unbounded();
+        let (states, events) = unbounded();
+        if let Some(conn) = later_host_state(view, target)
+            && states.unbounded_send(NetEvent::State(conn)).is_err()
+        {
+            tracing::warn!("the shot's host state found no listener");
+        }
+        (tx, events)
     });
     RootDeps {
         open_host,
@@ -663,7 +745,7 @@ fn drive(
     cx: &mut App,
 ) -> Result<()> {
     match view {
-        View::Main | View::MainCompact => Ok(()),
+        View::Main | View::MainCompact | View::MultiHost => Ok(()),
         View::SourceControl => {
             let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(
@@ -946,7 +1028,7 @@ impl Fixture {
             .map(|row| row.snapshot(now))
             .collect::<Result<Vec<_>>>()?;
         let mut tabs = vec![
-            grid_tab("t-tulip", "tulip", &tulip_grid()),
+            grid_tab("t-tulip", "tulip", &tulip_grid(view)),
             grid_tab("t-yaat", "yaat", &yaat_grid()),
         ];
         if view == View::Diff {
@@ -1010,13 +1092,54 @@ fn pane(id: &str, session: &str) -> GridNode {
     }
 }
 
-/// The Petal session above its shell.
-fn tulip_grid() -> GridNode {
+/// The Petal session above its shell; the `multi-host` shot shows "box"'s
+/// session in the shell's place.
+fn tulip_grid(view: View) -> GridNode {
+    let second = if view == View::MultiHost {
+        GridNode::Pane {
+            pane_id: "p2".to_owned(),
+            session_id: Some(BOX_SESSION.to_owned()),
+            host: Some(SHOT_TAILNET_HOST.to_owned()),
+        }
+    } else {
+        pane("p2", "s-shell")
+    };
     GridNode::Split {
         direction: SplitDirection::Vertical,
         ratio: 0.58,
         first: Box::new(pane("p1", "s-petal")),
-        second: Box::new(pane("p2", "s-shell")),
+        second: Box::new(second),
+    }
+}
+
+/// What the `multi-host` shot's "box" lists: one repo and its session.
+struct RemoteFixture {
+    repos: DaemonMessage,
+    sessions: Vec<SessionSnapshot>,
+}
+
+impl RemoteFixture {
+    fn build(now: DateTime<Utc>) -> Result<Self> {
+        let repos = parse_message(json!({
+            "type": "repos",
+            "repos": [
+                { "id": BOX_REPO, "name": BOX_REPO, "path": BOX_REPO_PATH, "default_branch": "main" },
+            ],
+        }))
+        .context("the box fixture's repos")?;
+        let session = Row {
+            id: BOX_SESSION,
+            label: "Relay soak test",
+            status: "working",
+            members: json!([member(BOX_REPO, "main", BOX_REPO_PATH)]),
+            minutes: 3,
+            extra: json!({}),
+        }
+        .snapshot(now)?;
+        Ok(Self {
+            repos,
+            sessions: vec![session],
+        })
     }
 }
 
@@ -1182,11 +1305,31 @@ struct FakeDaemon {
 }
 
 impl FakeDaemon {
-    fn run(&self, fixture: &Fixture, mut commands: UnboundedReceiver<NetCommand>) {
+    fn run(&self, fixture: &Fixture, commands: UnboundedReceiver<NetCommand>) {
         if let Err(err) = self.greet(fixture) {
             self.fail(err);
             return;
         }
+        self.serve(commands);
+    }
+
+    /// As [`Self::run`], for a remote host on `target`: no handshake file,
+    /// and only its repos and sessions.
+    fn run_remote(
+        &self,
+        fixture: &RemoteFixture,
+        target: &Target,
+        commands: UnboundedReceiver<NetCommand>,
+    ) {
+        if let Err(err) = self.greet_remote(fixture, target) {
+            self.fail(err);
+            return;
+        }
+        self.serve(commands);
+    }
+
+    /// Answers the window's requests until it stops sending.
+    fn serve(&self, mut commands: UnboundedReceiver<NetCommand>) {
         while let Some(command) = futures::executor::block_on(commands.next()) {
             let NetCommand::Send(msg) = command else {
                 continue;
@@ -1262,6 +1405,34 @@ impl FakeDaemon {
         })?;
         self.finish_review_turn(fixture)?;
         self.send(fixture.attention.clone())
+    }
+
+    /// What a remote host on `target` sends first: its open connection,
+    /// `Welcome`, its agents, then its repos and sessions. A tailnet host
+    /// reports no handshake file.
+    fn greet_remote(&self, fixture: &RemoteFixture, target: &Target) -> Result<()> {
+        let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
+        let mut conn = Connection::for_target(target.clone());
+        conn.on_connecting();
+        conn.on_socket_open(8787);
+        conn.on_welcome(version, Vec::new());
+        self.event(NetEvent::State(conn))?;
+        self.send(DaemonMessage::Welcome {
+            protocol_version: version,
+            supported_versions: vec![version],
+            features: Vec::new(),
+            daemon_id: None,
+        })?;
+        self.send(DaemonMessage::Agents {
+            agents: agent_registry::descriptors(),
+        })?;
+        self.send(DaemonMessage::AgentSettings {
+            settings: std::collections::BTreeMap::new(),
+        })?;
+        self.send(fixture.repos.clone())?;
+        self.send(DaemonMessage::Sessions {
+            sessions: fixture.sessions.clone(),
+        })
     }
 
     /// The review session works, then goes idle while nobody looks at it.

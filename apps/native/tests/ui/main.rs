@@ -33,6 +33,7 @@ mod ui_fetch_dialog;
 mod ui_file_fetch;
 mod ui_font_size;
 mod ui_history;
+mod ui_host_chips;
 mod ui_host_groups;
 mod ui_keys;
 mod ui_launch_last;

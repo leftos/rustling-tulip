@@ -16,12 +16,15 @@ use crate::activity_bar::badge_text;
 use crate::assets::{DASHBOARD_ICON, TAB_CLOSE_ICON, TAB_NEW_ICON};
 use crate::drag::{self, DragPayload, Side};
 use crate::fonts;
+use crate::grid_view::HostLabel;
 use crate::overlay_owner::Overlay;
 use crate::popouts::PopoutKey;
 use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator, muted_row};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, head_lines, merge_lines, rearrange_lines};
-use crate::tabs::{PillClick, TabBadge, bound_pane_count, collect_panes, tab_session_counts};
+use crate::tabs::{
+    PillClick, TabBadge, bound_pane_count, collect_panes, sole_remote_host, tab_session_counts,
+};
 use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
@@ -649,6 +652,7 @@ impl RootView {
         let popped = self
             .is_tab_popped(&tab.id)
             .then(|| popped_mark(&tab.id, &t));
+        let host = self.tab_host(tab).map(|host| host_chip(&tab.id, host));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
             .debug_selector(|| name)
@@ -699,11 +703,32 @@ impl RootView {
             .children(badge)
             .children(icon)
             .child(label)
+            .children(host)
             .children(need_badge)
             .children(popped)
             .child(close_button(&tab.id, armed, cx))
             .children(mark)
             .into_any_element()
+    }
+
+    /// The remote host every pane of `tab` that shows a session is on;
+    /// `None` when a pane is on This PC, the panes span hosts, or none
+    /// shows a session.
+    fn tab_host(&self, tab: &TabEntry) -> Option<HostLabel> {
+        let panes = tab.grid().map(collect_panes).unwrap_or_default();
+        let hosts = panes
+            .iter()
+            .filter_map(|pane| pane.session)
+            .map(|session| self.host_of_session(session));
+        self.host_chip_label(&sole_remote_host(hosts)?)
+    }
+
+    /// The short host name on tab `tab_id`'s pill; `None` when its pill
+    /// shows no host chip.
+    #[must_use]
+    pub fn tab_host_chip(&self, tab_id: &str) -> Option<String> {
+        let tab = self.tabs.tabs().iter().find(|tab| tab.id == tab_id)?;
+        self.tab_host(tab).map(|host| host.short)
     }
 
     /// What starts `tab`'s pill drag: it records the tab as the one being
@@ -1274,6 +1299,28 @@ fn count_badge(offset: i8, tab_id: &str, badge: TabBadge, t: &UiTheme) -> Statef
             ))
         })
         .child(pill.text)
+}
+
+/// The remote host's short name after a tab's name, tagged
+/// `tab-host-<id>`; its full name on hover.
+fn host_chip(tab_id: &str, host: HostLabel) -> Stateful<Div> {
+    let name = format!("tab-host-{tab_id}");
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(BUSY_PILL_HEIGHT))
+        .px(px(6.0))
+        .rounded(px(BUSY_PILL_HEIGHT / 2.0))
+        .bg(gpui::rgb(CHIP))
+        .font_family(fonts::DEFAULT_FAMILY)
+        .text_size(px(BUSY_PILL_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT_2))
+        .whitespace_nowrap()
+        .tooltip(tooltip(host.full))
+        .child(host.short)
 }
 
 /// The Dashboard icon before a Dashboard tab's name, tagged
