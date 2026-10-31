@@ -551,7 +551,7 @@ pub(crate) fn session_rows(
     if find_tab_containing_session(tabs.tabs(), &shown).is_some() {
         rows.push(offered(SessionRow::MoveTo));
         if can_attach(session) {
-            rows.push(pop_out_row(&session.id, tabs, popouts));
+            rows.push(pop_out_row(&shown, tabs, popouts));
         }
     } else if can_attach(session) {
         let new_tab = matches!(tabs.place(hosted, sessions), Placement::NewTab);
@@ -559,7 +559,7 @@ pub(crate) fn session_rows(
         if !new_tab {
             rows.push(offered(SessionRow::AddToNewTab));
         }
-        rows.push(pop_out_row(&session.id, tabs, popouts));
+        rows.push(pop_out_row(&shown, tabs, popouts));
     }
     if worktree_to_reveal(session).is_some() {
         rows.push(OfferedRow {
@@ -570,16 +570,13 @@ pub(crate) fn session_rows(
     rows
 }
 
-/// Pop out for `session_id`: the pane showing it, else the session alone;
-/// dimmed while an open pop-out already shows what it would pop, or content
-/// overlapping it.
-fn pop_out_row(session_id: &str, tabs: &TabsModel, popouts: &Popouts) -> OfferedRow {
-    let key = match pane_to_pop(session_id, tabs.tabs(), tabs.active_id()) {
+/// Pop out for `shown`: the pane showing it, else the session alone on its
+/// host; dimmed while an open pop-out already shows what it would pop, or
+/// content overlapping it.
+fn pop_out_row(shown: &SessionRef, tabs: &TabsModel, popouts: &Popouts) -> OfferedRow {
+    let key = match pane_to_pop(shown, tabs.tabs(), tabs.active_id()) {
         Some((tab_id, pane_id)) => PopoutKey::Pane { tab_id, pane_id },
-        None => PopoutKey::Session {
-            session_id: session_id.to_owned(),
-            host: None,
-        },
+        None => PopoutKey::session(&shown.host, &shown.id),
     };
     let disabled = popouts
         .blocking(&key, tabs.tabs())
@@ -1732,6 +1729,38 @@ mod tests {
                 disabled: Some(POP_OUT_ALREADY_TIP),
             }),
             "its session pop-out is already open"
+        );
+    }
+
+    #[test]
+    fn pop_out_is_dimmed_for_an_already_popped_remote_session() {
+        let remote = HostKey::Remote("box".to_owned());
+        let entries = [tab("t1", &pane("p1", None))];
+        let tabs = model_with(&entries);
+        let s = session("idle");
+        let mut popped = Popouts::default();
+        popped.open(PopoutKey::session(&remote, &s.id), &entries);
+        let row = |host: &HostKey| {
+            session_rows(HostedSession::new(host, &s), &tabs, &[], &popped, local())
+                .into_iter()
+                .find(|offered| offered.row == SessionRow::PopOut)
+        };
+
+        assert_eq!(
+            row(&remote),
+            Some(OfferedRow {
+                row: SessionRow::PopOut,
+                disabled: Some(POP_OUT_ALREADY_TIP),
+            }),
+            "the remote session's own pop-out is open"
+        );
+        assert_eq!(
+            row(&HostKey::Local),
+            Some(OfferedRow {
+                row: SessionRow::PopOut,
+                disabled: None,
+            }),
+            "This PC's session of the same id has no pop-out"
         );
     }
 

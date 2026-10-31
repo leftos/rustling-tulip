@@ -54,6 +54,20 @@ impl PopoutKey {
             }
         }
     }
+
+    /// The hosts whose sessions the pop-out shows, each once, read from
+    /// `tabs`: a pane's session's host, every host a tab's bound panes
+    /// name, a session key's own; none for an empty or missing pane.
+    #[must_use]
+    pub(crate) fn hosts(&self, tabs: &[TabEntry]) -> Vec<HostKey> {
+        let mut hosts: Vec<HostKey> = Vec::new();
+        for session in sessions_of(self, tabs) {
+            if !hosts.contains(&session.host) {
+                hosts.push(session.host);
+            }
+        }
+        hosts
+    }
 }
 
 /// An open pop-out as `native-ui.json` keeps it across restarts: what it
@@ -158,12 +172,12 @@ impl Popouts {
         self.keys.iter().position(|open| open == key)
     }
 
-    /// The open pop-out of session `session_id`, whichever host its key
-    /// names.
-    pub(crate) fn session_key(&self, session_id: &str) -> Option<&PopoutKey> {
-        self.keys.iter().find(
-            |key| matches!(key, PopoutKey::Session { session_id: id, .. } if id == session_id),
-        )
+    /// The open session pop-out of `session`, host and id both.
+    pub(crate) fn session_key(&self, session: &SessionRef) -> Option<&PopoutKey> {
+        self.keys.iter().find(|key| {
+            matches!(key, PopoutKey::Session { session_id, .. } if *session_id == session.id)
+                && key.host() == session.host
+        })
     }
 
     /// The pane pop-out showing pane `pane_id`, whichever tab its key names.
@@ -173,15 +187,16 @@ impl Popouts {
             .find(|key| matches!(key, PopoutKey::Pane { pane_id: id, .. } if id == pane_id))
     }
 
-    /// The pane or session pop-out showing session `session_id`, if any.
+    /// The pane or session pop-out showing `session`, host and id both, if
+    /// any.
     pub(crate) fn showing_session(
         &self,
-        session_id: &str,
+        session: &SessionRef,
         tabs: &[TabEntry],
     ) -> Option<&PopoutKey> {
         self.keys.iter().find(|key| {
             matches!(key, PopoutKey::Pane { .. } | PopoutKey::Session { .. })
-                && sessions_of(key, tabs).contains(&session_id)
+                && sessions_of(key, tabs).contains(session)
         })
     }
 
@@ -292,7 +307,7 @@ pub(crate) fn title(
                 |s| display_label(s, agents),
             ),
         PopoutKey::Pane { tab_id, pane_id } => bound_session(tab_id, pane_id, tabs)
-            .and_then(|id| sessions.iter().find(|s| s.id == id))
+            .and_then(|bound| sessions.iter().find(|s| s.id == bound.id))
             .map_or_else(|| "Empty pane".to_owned(), |s| display_label(s, agents)),
         PopoutKey::Tab { tab_id } => tabs
             .iter()
@@ -353,19 +368,19 @@ pub(crate) fn terminal_slot(key: &PopoutKey) -> Option<String> {
     }
 }
 
-/// The pane Pop out pops for `session_id`, as `(tab id, pane id)`: the
-/// pane showing it in the active tab, else the first pane showing it in tab
-/// order; `None` when no pane shows it.
+/// The pane Pop out pops for `session`, as `(tab id, pane id)`: the pane
+/// showing it, host and id both, in the active tab, else the first pane
+/// showing it in tab order; `None` when no pane shows it.
 #[must_use]
 pub(crate) fn pane_to_pop(
-    session_id: &str,
+    session: &SessionRef,
     tabs: &[TabEntry],
     active_tab_id: Option<&str>,
 ) -> Option<(String, String)> {
     let shown_in = |tab: &TabEntry| {
         let pane = collect_panes(tab.grid()?)
             .into_iter()
-            .find(|pane| pane.session == Some(session_id))?;
+            .find(|pane| pane.shows(session))?;
         Some((tab.id.clone(), pane.id.to_owned()))
     };
     active_tab_id
@@ -421,17 +436,23 @@ fn pane_exists(tab_id: &str, pane_id: &str, tabs: &[TabEntry]) -> bool {
         .is_some_and(|grid| collect_panes(grid).iter().any(|pane| pane.id == pane_id))
 }
 
-/// The session bound to `pane_id` in `tab_id`'s grid: none when the tab or the
-/// pane has gone, or the pane is empty.
-fn bound_session<'a>(tab_id: &str, pane_id: &str, tabs: &'a [TabEntry]) -> Option<&'a str> {
-    collect_panes(tabs.iter().find(|t| t.id == tab_id)?.grid()?)
-        .into_iter()
-        .find(|pane| pane.id == pane_id)?
-        .session
+/// The session `pane` shows, with its host; none for an empty pane.
+fn pane_session(pane: &Pane<'_>) -> Option<SessionRef> {
+    Some(SessionRef::new(pane.host.clone(), pane.session?))
 }
 
-/// The sessions `key` shows: its own, a pane's one, a tab's every bound one.
-fn sessions_of<'a>(key: &'a PopoutKey, tabs: &'a [TabEntry]) -> Vec<&'a str> {
+/// The session bound to `pane_id` in `tab_id`'s grid, with its host: none
+/// when the tab or the pane has gone, or the pane is empty.
+fn bound_session(tab_id: &str, pane_id: &str, tabs: &[TabEntry]) -> Option<SessionRef> {
+    let pane = collect_panes(tabs.iter().find(|t| t.id == tab_id)?.grid()?)
+        .into_iter()
+        .find(|pane| pane.id == pane_id)?;
+    pane_session(&pane)
+}
+
+/// The sessions `key` shows, host and id: its own, a pane's one, a tab's
+/// every bound one.
+fn sessions_of(key: &PopoutKey, tabs: &[TabEntry]) -> Vec<SessionRef> {
     match key {
         PopoutKey::Pane { tab_id, pane_id } => {
             bound_session(tab_id, pane_id, tabs).into_iter().collect()
@@ -442,12 +463,14 @@ fn sessions_of<'a>(key: &'a PopoutKey, tabs: &'a [TabEntry]) -> Vec<&'a str> {
             .and_then(TabEntry::grid)
             .map(|grid| {
                 collect_panes(grid)
-                    .into_iter()
-                    .filter_map(|pane| pane.session)
+                    .iter()
+                    .filter_map(pane_session)
                     .collect()
             })
             .unwrap_or_default(),
-        PopoutKey::Session { session_id, .. } => vec![session_id.as_str()],
+        PopoutKey::Session { session_id, .. } => {
+            vec![SessionRef::new(key.host(), session_id.clone())]
+        }
     }
 }
 
@@ -522,6 +545,35 @@ mod tests {
             Some(SessionRef::new(HostKey::Local, "s1"))
         );
         assert_eq!(slot_session("p1"), None, "a pane's slot is no session's");
+    }
+
+    #[test]
+    fn the_same_session_id_on_two_hosts_gets_two_slots() {
+        let remote = HostKey::Remote("box".to_owned());
+        assert_ne!(
+            session_slot_id(&HostKey::Local, "s1"),
+            session_slot_id(&remote, "s1"),
+            "one id on two hosts is two terminals"
+        );
+        let tabs = vec![tab("t1", &pane("p1", Some("s1")))];
+        let mut popouts = Popouts::default();
+        let theirs = PopoutKey::session(&remote, "s1");
+
+        assert_eq!(
+            popouts.open(pane_key("t1", "p1"), &tabs),
+            OpenOutcome::Opened
+        );
+        assert_eq!(
+            popouts.open(theirs.clone(), &tabs),
+            OpenOutcome::Opened,
+            "the remote host's s1 is not the one This PC's pane shows"
+        );
+        assert_eq!(
+            popouts.open(session_key("s1"), &tabs),
+            OpenOutcome::Overlaps(pane_key("t1", "p1")),
+            "This PC's s1 is"
+        );
+        assert_eq!(terminal_slot(&theirs), Some(session_slot_id(&remote, "s1")));
     }
 
     /// A tab holding two panes, `p1` on session `s1` and `p2` on `s2`.
@@ -806,6 +858,11 @@ mod tests {
         assert_eq!(popouts.cascade_index(&session_key("gone")), None);
     }
 
+    /// This PC's session `id`.
+    fn local(id: &str) -> SessionRef {
+        SessionRef::new(HostKey::Local, id)
+    }
+
     fn ids(tab_id: &str, pane_id: &str) -> (String, String) {
         (tab_id.to_owned(), pane_id.to_owned())
     }
@@ -829,12 +886,12 @@ mod tests {
     #[test]
     fn pane_to_pop_prefers_the_active_tab() {
         assert_eq!(
-            pane_to_pop("s1", &shown_twice(), Some("t2")),
+            pane_to_pop(&local("s1"), &shown_twice(), Some("t2")),
             Some(ids("t2", "p2")),
             "the pane in the tab on screen"
         );
         assert_eq!(
-            pane_to_pop("s2", &shown_twice(), Some("t2")),
+            pane_to_pop(&local("s2"), &shown_twice(), Some("t2")),
             Some(ids("t2", "p3"))
         );
     }
@@ -844,23 +901,26 @@ mod tests {
         let mut tabs = shown_twice();
         tabs.push(tab("t3", &pane("p4", None)));
         assert_eq!(
-            pane_to_pop("s1", &tabs, Some("t3")),
+            pane_to_pop(&local("s1"), &tabs, Some("t3")),
             Some(ids("t1", "p1")),
             "the active tab does not show it: the first pane in tab order"
         );
         assert_eq!(
-            pane_to_pop("s1", &tabs, None),
+            pane_to_pop(&local("s1"), &tabs, None),
             Some(ids("t1", "p1")),
             "no active tab"
         );
-        assert_eq!(pane_to_pop("s2", &tabs, Some("t1")), Some(ids("t2", "p3")));
+        assert_eq!(
+            pane_to_pop(&local("s2"), &tabs, Some("t1")),
+            Some(ids("t2", "p3"))
+        );
     }
 
     #[test]
     fn pane_to_pop_is_none_without_a_pane() {
         let tabs = vec![tab("t1", &pane("p1", None))];
-        assert_eq!(pane_to_pop("s1", &tabs, Some("t1")), None);
-        assert_eq!(pane_to_pop("s1", &[], None), None, "no tabs at all");
+        assert_eq!(pane_to_pop(&local("s1"), &tabs, Some("t1")), None);
+        assert_eq!(pane_to_pop(&local("s1"), &[], None), None, "no tabs at all");
     }
 
     fn saved(key: PopoutKey) -> SavedPopout {

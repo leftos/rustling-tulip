@@ -567,7 +567,9 @@ impl RootView {
         let skip_when = self.sidebar.ui_state().notifications.skip_when;
         // A session a pop-out shows with its active window's keyboard is on
         // screen in a focused window of this client.
-        let in_popout = self.popout_focused_session().as_deref() == Some(toast.session_id);
+        let in_popout = self
+            .popout_focused_session()
+            .is_some_and(|shown| shown.id == toast.session_id);
         if skips(skip_when, window_focused || in_popout, || {
             in_popout || self.session_on_screen(toast.session_id)
         }) {
