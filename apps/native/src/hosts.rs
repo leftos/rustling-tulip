@@ -455,6 +455,7 @@ impl RootView {
         let dropped_self = duplicate == *host;
         self.duplicate_of.insert(duplicate, owner);
         self.rehost_stranded_panes();
+        self.follow_rehosted_session_popouts(cx);
         dropped_self
     }
 

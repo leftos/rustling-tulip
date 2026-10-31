@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use protocol::{ClientMessage, GridNode, TabContent, TabEntry};
 
 use crate::tabs::{SessionRef, host_of_wire};
+use crate::target::HostKey;
 
 /// How long an entry stays before it goes by itself.
 pub const UNDO_LIFETIME: Duration = Duration::from_secs(8);
@@ -146,20 +147,22 @@ impl UndoShelf {
 /// The messages that put `entry` back, in ascending tab-index order: a tab
 /// still among `live_tab_ids` is replaced by
 /// [`ClientMessage::RestoreTabSnapshot`], a tab that is gone returns at its
-/// index by [`ClientMessage::RestoreTab`]. A snapshot pane whose session,
-/// host and id both, is not among `known_sessions` comes back empty, with
-/// no host.
+/// index by [`ClientMessage::RestoreTab`]. A snapshot pane of a host for
+/// which `rehosted` names another comes back on that host; a pane whose
+/// session, host and id both, is then not among `known_sessions` comes
+/// back empty, with no host.
 #[must_use]
 pub fn restore_messages(
     entry: &UndoEntry,
     live_tab_ids: &HashSet<String>,
     known_sessions: &HashSet<SessionRef>,
+    rehosted: &dyn Fn(&HostKey) -> Option<HostKey>,
 ) -> Vec<ClientMessage> {
     entry
         .ordered()
         .into_iter()
         .map(|snapshot| {
-            let tab = keeping_known_sessions(&snapshot.tab, known_sessions);
+            let tab = keeping_known_sessions(&snapshot.tab, known_sessions, rehosted);
             if live_tab_ids.contains(&tab.id) {
                 ClientMessage::RestoreTabSnapshot { tab }
             } else {
@@ -230,31 +233,43 @@ pub fn live_tabs(tabs: &[TabEntry], closing: &HashSet<String>) -> HashSet<String
         .collect()
 }
 
-/// `tab` with every pane whose session the client no longer knows emptied.
-fn keeping_known_sessions(tab: &TabEntry, known_sessions: &HashSet<SessionRef>) -> TabEntry {
+/// `tab` with every pane of a rehosted host on its new host, and every
+/// pane whose session the client no longer knows emptied.
+fn keeping_known_sessions(
+    tab: &TabEntry,
+    known_sessions: &HashSet<SessionRef>,
+    rehosted: &dyn Fn(&HostKey) -> Option<HostKey>,
+) -> TabEntry {
     let mut tab = tab.clone();
     if let Some(grid) = tab.grid_mut() {
-        *grid = emptied(grid, known_sessions);
+        *grid = emptied(grid, known_sessions, rehosted);
     }
     tab
 }
 
-/// `grid` with the panes of forgotten sessions emptied, an emptied pane
+/// `grid` with the panes of a host `rehosted` names another for on that
+/// host, and the panes of forgotten sessions emptied, an emptied pane
 /// naming no host.
-fn emptied(grid: &GridNode, known_sessions: &HashSet<SessionRef>) -> GridNode {
+fn emptied(
+    grid: &GridNode,
+    known_sessions: &HashSet<SessionRef>,
+    rehosted: &dyn Fn(&HostKey) -> Option<HostKey>,
+) -> GridNode {
     match grid {
         GridNode::Pane {
             pane_id,
             session_id,
             host,
         } => {
+            let named = host_of_wire(host.as_deref());
+            let host_key = rehosted(&named).unwrap_or(named);
             let known = session_id.as_ref().is_some_and(|id| {
-                known_sessions.contains(&SessionRef::new(host_of_wire(host.as_deref()), id.clone()))
+                known_sessions.contains(&SessionRef::new(host_key.clone(), id.clone()))
             });
             GridNode::Pane {
                 pane_id: pane_id.clone(),
                 session_id: session_id.clone().filter(|_| known),
-                host: host.clone().filter(|_| known),
+                host: host_key.wire().map(str::to_owned).filter(|_| known),
             }
         }
         GridNode::Split {
@@ -265,8 +280,8 @@ fn emptied(grid: &GridNode, known_sessions: &HashSet<SessionRef>) -> GridNode {
         } => GridNode::Split {
             direction: *direction,
             ratio: *ratio,
-            first: Box::new(emptied(first, known_sessions)),
-            second: Box::new(emptied(second, known_sessions)),
+            first: Box::new(emptied(first, known_sessions, rehosted)),
+            second: Box::new(emptied(second, known_sessions, rehosted)),
         },
     }
 }
@@ -521,7 +536,12 @@ mod tests {
         );
         let entry = shelf.take(id).expect("the entry is there");
 
-        let sent = restore_messages(&entry, &ids(&["t2"]), &known(&[(HostKey::Local, "s1")]));
+        let sent = restore_messages(
+            &entry,
+            &ids(&["t2"]),
+            &known(&[(HostKey::Local, "s1")]),
+            &|_| None,
+        );
         assert_eq!(restored(&sent), ["t1", "t2"], "ascending index");
         assert!(
             matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 1),
@@ -547,7 +567,12 @@ mod tests {
         );
         let entry = shelf.take(id).expect("the entry is there");
 
-        let sent = restore_messages(&entry, &ids(&["t2"]), &known(&[(HostKey::Local, "s1")]));
+        let sent = restore_messages(
+            &entry,
+            &ids(&["t2"]),
+            &known(&[(HostKey::Local, "s1")]),
+            &|_| None,
+        );
         assert_eq!(restored(&sent), ["t1", "t2"]);
         assert!(
             matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 0),
@@ -574,7 +599,7 @@ mod tests {
         let live = live_tabs(&listed, &ids(&["t1"]));
         assert_eq!(live, ids(&["t2"]), "the closing tab is not live");
 
-        let sent = restore_messages(&entry, &live, &known(&[(HostKey::Local, "s1")]));
+        let sent = restore_messages(&entry, &live, &known(&[(HostKey::Local, "s1")]), &|_| None);
         assert!(
             matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 1),
             "its removal is on its way, so it comes back at its index: {sent:?}"
@@ -597,7 +622,7 @@ mod tests {
 
         let listed = [tab_of("t1", Some("s1")), tab_of("t2", Some("s1"))];
         let live = live_tabs(&listed, &ids(&["t1"]));
-        let sent = restore_messages(&entry, &live, &known(&[(HostKey::Local, "s1")]));
+        let sent = restore_messages(&entry, &live, &known(&[(HostKey::Local, "s1")]), &|_| None);
         assert_eq!(restored(&sent), ["t1", "t2"]);
         assert!(
             matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 0),
@@ -635,7 +660,12 @@ mod tests {
         );
         let entry = shelf.take(id).expect("the entry is there");
 
-        let sent = restore_messages(&entry, &ids(&["t1"]), &known(&[(HostKey::Local, "s1")]));
+        let sent = restore_messages(
+            &entry,
+            &ids(&["t1"]),
+            &known(&[(HostKey::Local, "s1")]),
+            &|_| None,
+        );
         assert!(
             matches!(sent.as_slice(), [ClientMessage::RestoreTabSnapshot { .. }]),
             "the tab is still open, so it is replaced in place: {sent:?}"
@@ -659,6 +689,58 @@ mod tests {
             .iter()
             .map(|(host, id)| SessionRef::new(host.clone(), *id))
             .collect()
+    }
+
+    #[test]
+    fn a_snapshot_pane_of_a_rehosted_key_restores_under_its_target() {
+        let grid: GridNode = serde_json::from_value(serde_json::json!({
+            "kind": "split",
+            "direction": "horizontal",
+            "ratio": 0.5,
+            "first": { "kind": "pane", "pane_id": "p1", "session_id": "d1", "host": "ssh:me@devbox" },
+            "second": { "kind": "pane", "pane_id": "p2", "session_id": "s1" },
+        }))
+        .expect("a grid fixture");
+        let mut tab = tab_of("t1", None);
+        tab.content = protocol::TabContent::Grid { grid };
+        let mut shelf = UndoShelf::default();
+        let id = shelf.push(
+            closed_pane_message("d1"),
+            vec![TabSnapshot {
+                tab,
+                index: 0,
+                restore_active: true,
+                focus_pane: None,
+            }],
+            Instant::now(),
+        );
+        let entry = shelf.take(id).expect("the entry is there");
+        let ssh = HostKey::Remote("ssh:me@devbox".to_owned());
+        let owner = HostKey::Remote("box".to_owned());
+        let rehosted = |host: &HostKey| (*host == ssh).then(|| owner.clone());
+
+        let sent = restore_messages(
+            &entry,
+            &ids(&[]),
+            &known(&[(owner.clone(), "d1"), (HostKey::Local, "s1")]),
+            &rehosted,
+        );
+
+        let grid = restored_tab(&sent[0])
+            .and_then(TabEntry::grid)
+            .expect("a restored grid");
+        let expected: GridNode = serde_json::from_value(serde_json::json!({
+            "kind": "split",
+            "direction": "horizontal",
+            "ratio": 0.5,
+            "first": { "kind": "pane", "pane_id": "p1", "session_id": "d1", "host": "box" },
+            "second": { "kind": "pane", "pane_id": "p2", "session_id": "s1" },
+        }))
+        .expect("the expected grid");
+        assert_eq!(
+            grid, &expected,
+            "the rehosted key's pane comes back on its target; This PC's pane keeps its host"
+        );
     }
 
     #[test]
@@ -693,7 +775,7 @@ mod tests {
         let entry = shelf.take(id).expect("the entry is there");
         let box_host = HostKey::Remote("box".to_owned());
 
-        let sent = restore_messages(&entry, &ids(&[]), &known(&[(box_host, "b1")]));
+        let sent = restore_messages(&entry, &ids(&[]), &known(&[(box_host, "b1")]), &|_| None);
 
         let pane = |id: &str, session: Option<&str>, host: Option<&str>| serde_json::json!({ "kind": "pane", "pane_id": id, "session_id": session, "host": host });
         let grid = restored_tab(&sent[0])

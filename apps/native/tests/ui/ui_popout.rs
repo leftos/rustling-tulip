@@ -12,7 +12,7 @@ use gpui::{
 use protocol::{AttentionReason, ClientMessage, DaemonMessage, SplitDirection, TabEntry};
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
-    OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
+    Connection, NetEvent, OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
 };
 use serde_json::json;
 use support::{
@@ -4289,5 +4289,108 @@ fn rekeying_a_remote_session_popout_keeps_its_host(cx: &mut TestAppContext) {
             },
         ]),
         "the remote pop-out follows the copy on its host; This PC's b1 keeps its own"
+    );
+}
+
+/// The daemon id both of [`seed_two_paths`]' hosts reach.
+const DAEMON: &str = "6f1e2d3c-0000-4000-8000-000000000001";
+
+/// The SSH host `me@devbox`'s key as the wire's `host` value.
+const SSH_KEY: &str = "ssh:me@devbox";
+
+fn ssh_box() -> Target {
+    Target::parse_ssh("me@devbox", None).expect("an SSH host string")
+}
+
+/// Saves [`REMOTE`] first and the SSH host `me@devbox` second, both
+/// switched on, with `popouts` as the saved pop-outs.
+fn seed_two_paths(dir: &TestDir, popouts: &serde_json::Value) {
+    seed_ui(
+        dir,
+        &json!({
+            "saved_hosts": [
+                { "name": REMOTE, "port": 8787 },
+                { "kind": "ssh", "name": "me@devbox" },
+            ],
+            "popouts": popouts,
+        }),
+    );
+}
+
+/// Opens `target`'s connection beside This PC's and has its daemon say
+/// `Welcome`, naming itself `id`.
+fn welcome_as(h: &mut Harness<'_>, target: &Target, id: &str) {
+    let mut conn = Connection::for_target(target.clone());
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_welcome(PROTOCOL, support::daemon_features());
+    let mut host = h.host(target);
+    host.event(NetEvent::State(conn));
+    host.send(support::welcome_with_id(PROTOCOL, id));
+}
+
+/// A saved session pop-out of `id` on the host whose wire key is `host`.
+fn saved_session_popout(id: &str, host: &str) -> serde_json::Value {
+    json!({
+        "key": { "kind": "session", "session_id": id, "host": host },
+        "window": null,
+    })
+}
+
+#[gpui::test]
+fn a_saved_session_popout_on_a_dropped_key_reopens_under_its_owner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_two_paths(&dir, &json!([saved_session_popout("d1", SSH_KEY)]));
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    welcome_as(&mut h, &saved_remote(), DAEMON);
+    welcome_as(&mut h, &ssh_box(), DAEMON);
+    assert_eq!(h.window_count(), 1, "no host has listed d1 yet");
+
+    remote_lists(&mut h, &["d1"]);
+
+    assert_eq!(
+        h.window_count(),
+        2,
+        "the pop-out reopens on the host that owns the dropped key's daemon"
+    );
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"],
+        json!([saved_session_popout("d1", REMOTE)]),
+        "the saved entry names the owner"
+    );
+}
+
+#[gpui::test]
+fn an_open_session_popout_follows_its_session_to_the_new_owner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_two_paths(&dir, &json!([]));
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    welcome_as(&mut h, &ssh_box(), DAEMON);
+    h.host(&ssh_box()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+    let on_ssh = PopoutKey::session(&HostKey::of(&ssh_box()), "b1");
+    assert_eq!(
+        h.root_update(move |root, window, cx| root.open_popout(on_ssh, window, cx)),
+        OpenOutcome::Opened
+    );
+    assert_eq!(h.window_count(), 2);
+
+    welcome_as(&mut h, &saved_remote(), DAEMON);
+    remote_lists(&mut h, &["b1"]);
+
+    assert_eq!(h.window_count(), 2, "the same window is kept");
+    let on_tailnet = PopoutKey::session(&HostKey::of(&saved_remote()), "b1");
+    let opened = on_tailnet.clone();
+    assert_eq!(
+        h.root_update(move |root, window, cx| root.open_popout(opened, window, cx)),
+        OpenOutcome::Existing(on_tailnet),
+        "the pop-out is keyed on the owner"
+    );
+    assert_eq!(
+        h.host(&saved_remote()).scrollback_requests("b1").len(),
+        1,
+        "its terminal attaches on the owner's connection"
     );
 }

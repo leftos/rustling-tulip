@@ -1963,9 +1963,10 @@ impl RootView {
             .is_some_and(|key| self.popout_windows.contains_key(key))
     }
 
-    /// A restart of `old`, whose session pop-out is open, arrived as `new`:
-    /// the pop-out, its window and its terminal now show `new`'s id on
-    /// `old`'s host.
+    /// `old`, whose session pop-out is open, now shows as `new`: a restart
+    /// of it on the same host, or the same session on the host `old`'s
+    /// host moved to. The pop-out, its window and its terminal now show
+    /// `new`, on `new`'s host.
     pub(crate) fn rekey_session_popout(
         &mut self,
         old: &SessionRef,
@@ -1973,12 +1974,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let Some(old_key) = self.popouts.session_key(old).cloned() else {
-            tracing::debug!(?old, "the restarted session's pop-out has closed");
+            tracing::debug!(?old, "the session's pop-out has closed");
             return;
         };
-        let host = old.host.clone();
-        let (old, new) = (old.id.as_str(), new.id.as_str());
-        let new_key = PopoutKey::session(&host, new);
+        let new_key = PopoutKey::session(&new.host, &new.id);
         self.popouts.rekey(&old_key, new_key.clone());
         if self.sidebar.rekey_saved_popout(&old_key, new_key.clone()) {
             self.schedule_ui_save(cx);
@@ -1990,15 +1989,64 @@ impl RootView {
                 cx.notify();
             });
             if let Err(err) = followed {
-                tracing::debug!(%new, "the restarted session's pop-out window has gone: {err:#}");
+                tracing::debug!(?new, "the session's pop-out window has gone: {err:#}");
             }
             self.popout_windows.insert(new_key.clone(), popout);
         }
-        self.rekey_session_slot(&host, old, new, cx);
+        self.rekey_session_slot(old, new, cx);
         self.update_pane_roles(cx);
         self.mark_popout_resized(&new_key, cx);
         self.refresh_popout_titles(cx);
         cx.notify();
+    }
+
+    /// `key` on its host's rehost target, for a session key of a host the
+    /// window let go that has one; none otherwise.
+    fn rehosted_session_key(&self, key: &PopoutKey) -> Option<PopoutKey> {
+        let PopoutKey::Session { session_id, .. } = key else {
+            return None;
+        };
+        let target = self.rehost_target(&key.host())?;
+        Some(PopoutKey::session(&target, session_id))
+    }
+
+    /// Each open session pop-out of a host the window let go moves, in its
+    /// own window, to that host's rehost target once the target has listed
+    /// its session since its `Welcome`; one whose target already has a
+    /// pop-out of that session stays.
+    pub(crate) fn follow_rehosted_session_popouts(&mut self, cx: &mut Context<Self>) {
+        let moves: Vec<(SessionRef, SessionRef)> = self
+            .popouts
+            .keys()
+            .iter()
+            .filter_map(|key| {
+                let to = self.rehosted_session_key(key)?;
+                let PopoutKey::Session { session_id, .. } = &to else {
+                    return None;
+                };
+                let target = to.host();
+                let listed = self.listed_since_welcome(&target)
+                    && self
+                        .sidebar
+                        .sessions_of(&target)
+                        .iter()
+                        .any(|session| session.id == *session_id);
+                (listed && !self.popouts.is_open(&to)).then(|| {
+                    (
+                        SessionRef::new(key.host(), session_id.clone()),
+                        SessionRef::new(target, session_id.clone()),
+                    )
+                })
+            })
+            .collect();
+        for (old, new) in moves {
+            tracing::info!(
+                ?old,
+                ?new,
+                "a session pop-out follows its session to the host that reaches its daemon"
+            );
+            self.rekey_session_popout(&old, &new, cx);
+        }
     }
 
     /// Sets each open pop-out window's title to what its content now reads,
@@ -3228,14 +3276,19 @@ impl RootView {
     /// that wait for the session lists of the remote hosts they show (a
     /// session key's own, a pane's or a tab's from the layout) that the
     /// window holds; a host it does not hold is not waited for. A session
-    /// pop-out of a remote host the window holds no connection to and that
-    /// never listed is dropped.
+    /// pop-out of a host the window let go that has a rehost target is
+    /// first keyed on that target; one of a remote host the window holds no
+    /// connection to and that never listed is dropped.
     fn split_awaited_popouts(
         &self,
         saved: Vec<SavedPopout>,
     ) -> (Vec<SavedPopout>, Vec<SavedPopout>) {
         let (mut now, mut awaiting) = (Vec::new(), Vec::new());
-        for entry in saved {
+        for mut entry in saved {
+            if let Some(key) = self.rehosted_session_key(&entry.key) {
+                tracing::info!(from = ?entry.key, to = ?key, "a saved pop-out follows its session to the host that reaches its daemon");
+                entry.key = key;
+            }
             let host = entry.key.host();
             let host_gone = matches!(entry.key, PopoutKey::Session { .. })
                 && host != HostKey::Local
@@ -3329,13 +3382,20 @@ impl RootView {
     }
 
     /// Reopens each awaited pop-out whose hosts, read under its current key
-    /// (a moved pane under its new tab), have all listed; a pane pop-out
-    /// whose pane is gone or being forgotten, or one that does not open, is
-    /// dropped and un-saved.
+    /// (a moved pane under its new tab, a session of a host the window let
+    /// go on that host's rehost target, saved so), have all listed; a pane
+    /// pop-out whose pane is gone or being forgotten, or one that does not
+    /// open, is dropped and un-saved.
     fn reopen_awaited_popouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let awaiting = std::mem::take(&mut self.popouts_awaiting_hosts);
         let (mut due, mut rest) = (Vec::new(), Vec::new());
-        for was in awaiting {
+        let mut changed = false;
+        for mut was in awaiting {
+            if let Some(key) = self.rehosted_session_key(&was.key) {
+                tracing::info!(from = ?was.key, to = ?key, "a saved pop-out follows its session to the host that reaches its daemon");
+                changed |= self.sidebar.rekey_saved_popout(&was.key, key.clone());
+                was.key = key;
+            }
             let entry = self.followed_popout(&was);
             if self.unlisted_hosts(&entry.key).is_empty() {
                 due.push((was, entry));
@@ -3344,7 +3404,6 @@ impl RootView {
             }
         }
         self.popouts_awaiting_hosts = rest;
-        let mut changed = false;
         for (was, entry) in due {
             if entry.key != was.key {
                 changed |= self.sidebar.forget_saved_popout(&was.key);
@@ -4621,6 +4680,7 @@ impl RootView {
             self.rehost_stranded_panes();
             self.prune_remote_panes();
         }
+        self.follow_rehosted_session_popouts(cx);
         self.try_restore_popouts(window, cx);
         if *host != HostKey::Local {
             self.restore_awaited_popouts(window, cx);

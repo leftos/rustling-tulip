@@ -110,7 +110,8 @@ impl RootView {
                     .map(move |session| SessionRef::new(host.clone(), session.id.clone()))
             })
             .collect();
-        let messages = undo::restore_messages(&entry, &live, &known);
+        let messages =
+            undo::restore_messages(&entry, &live, &known, &|host| self.rehost_target(host));
         for snapshot in entry.ordered() {
             if !snapshot.restore_active {
                 continue;

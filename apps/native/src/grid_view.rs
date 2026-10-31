@@ -921,36 +921,40 @@ impl RootView {
         self.update_pane_roles(cx);
     }
 
-    /// Moves `host`'s session `old`'s pop-out terminal to its restart `new`
-    /// on the same host: the same terminal, emptied and attached afresh to
-    /// `new`.
+    /// Moves session `old`'s pop-out terminal to `new`, its restart on the
+    /// same host or the same session on the host `old`'s host moved to:
+    /// the same terminal, emptied, sending to `new`'s host and attached
+    /// afresh to `new`.
     pub(crate) fn rekey_session_slot(
         &mut self,
-        host: &HostKey,
-        old: &str,
-        new: &str,
+        old: &SessionRef,
+        new: &SessionRef,
         cx: &mut Context<Self>,
     ) {
-        let old_id = popouts::session_slot_id(host, old);
+        let old_id = popouts::session_slot_id(&old.host, &old.id);
         let Some(mut slot) = self.panes.remove(&old_id) else {
             return;
         };
-        let new_id = popouts::session_slot_id(host, new);
+        let new_id = popouts::session_slot_id(&new.host, &new.id);
+        let sender = (slot.host != new.host).then(|| self.hosts.sender(&new.host));
         slot.view.update(cx, |pane, cx| {
             pane.release();
             pane.set_pane_id(new_id.clone());
+            if let Some(sender) = sender {
+                pane.set_sender(sender);
+            }
             cx.notify();
         });
-        slot.session = Some(new.to_owned());
+        slot.host = new.host.clone();
+        slot.session = Some(new.id.clone());
         slot.attached = false;
         self.panes.insert(new_id.clone(), slot);
         self.chat.rekey_pane(&old_id, &new_id);
         if self.popout_focused.as_deref() == Some(old_id.as_str()) {
             self.popout_focused = Some(new_id);
         }
-        let new = SessionRef::new(host.clone(), new);
-        self.apply_fonts_where(|slot| slot.shows(&new), false, cx);
-        self.sync_session(&new, cx);
+        self.apply_fonts_where(|slot| slot.shows(new), false, cx);
+        self.sync_session(new, cx);
         self.sync_chat_loads();
     }
 
