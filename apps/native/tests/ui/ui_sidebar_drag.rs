@@ -10,10 +10,11 @@ use crate::support;
 
 use gpui::{Pixels, Point, TestAppContext, point, px};
 use protocol::{
-    ClientMessage, ContainerRef, DaemonMessage, PaneDropEdge, SplitDirection, SplitPlace,
+    ClientMessage, ContainerRef, DaemonMessage, GridNode, PaneDropEdge, SplitDirection, SplitPlace,
 };
+use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{RootView, Side, SidebarRow};
-use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
+use support::{Fixture, Harness, REMOTE, TestDir, pane, repo, session, split, tab, workspace};
 
 /// Workspace `w1` (session `u`, shown in no pane); repos `r1` (sessions
 /// `a`, `b`) and `r2` (session `c`); the standalone shell `sh`, the folder
@@ -155,22 +156,58 @@ fn overlay(h: &mut Harness) -> Option<(String, PaneDropEdge)> {
     h.root(RootView::pane_drop_overlay)
 }
 
+/// Whether `msg` is a layout request a leaf drop sends.
+fn is_placement(msg: &ClientMessage) -> bool {
+    matches!(
+        msg,
+        ClientMessage::SplitPane { .. }
+            | ClientMessage::ReplacePaneSession { .. }
+            | ClientMessage::MovePane { .. }
+            | ClientMessage::SwapPanes { .. }
+            | ClientMessage::CreateTab { .. }
+    )
+}
+
 /// The layout requests a leaf drop sends, among what the client sent since
 /// the last call.
 fn placements(h: &mut Harness) -> Vec<ClientMessage> {
-    h.sent()
+    h.sent().into_iter().filter(is_placement).collect()
+}
+
+fn remote() -> Target {
+    Target::tailnet(REMOTE, None)
+}
+
+/// The layout requests sent to [`REMOTE`] since the last call.
+fn remote_placements(h: &mut Harness) -> Vec<ClientMessage> {
+    h.host(&remote())
+        .sent()
         .into_iter()
-        .filter(|msg| {
-            matches!(
-                msg,
-                ClientMessage::SplitPane { .. }
-                    | ClientMessage::ReplacePaneSession { .. }
-                    | ClientMessage::MovePane { .. }
-                    | ClientMessage::SwapPanes { .. }
-                    | ClientMessage::CreateTab { .. }
-            )
-        })
+        .filter(is_placement)
         .collect()
+}
+
+/// This PC lists `a1` and lays tab `t1` out as `grid`; [`REMOTE`] is
+/// connected beside it and lists `b1` in its repo `r2`, shown in no pane.
+/// Nothing sent is left unread on either host.
+fn remote_beside<'a>(cx: &'a mut TestAppContext, dir: &TestDir, grid: &GridNode) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![tab("t1", grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").in_repo("r2").build()],
+    });
+    host.sent();
+    h.sent();
+    h
 }
 
 /// Drags the leaf `leaf` to `to`, checks the overlay shows `shown` there,
@@ -646,6 +683,69 @@ fn leaf_dropped_on_a_pill_places_it_in_that_tab(cx: &mut TestAppContext) {
         "the drop does not change the shown tab"
     );
     assert_eq!(undo_messages(&mut h), Vec::<String>::new());
+}
+
+#[gpui::test]
+fn a_remote_leaf_dropped_on_a_pane_edge_splits_with_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = remote_beside(cx, &dir, &pane("p1", Some("a1")));
+
+    let to = at(&mut h, "p1", 0.1, 0.5);
+    drop_leaf(&mut h, "b1", to, ("p1", PaneDropEdge::Left));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::SplitPane {
+                tab_id,
+                pane_id,
+                direction: SplitDirection::Horizontal,
+                place: SplitPlace::First,
+                new_session_id: Some(session),
+                host: Some(host),
+                request_id: Some(_),
+            }] if tab_id == "t1" && pane_id == "p1" && session == "b1" && host == REMOTE
+        ),
+        "This PC splits the pane with the remote session, naming its host: sent {sent:?}"
+    );
+    assert!(
+        remote_placements(&mut h).is_empty(),
+        "the layout is This PC's alone"
+    );
+    assert!(
+        undo_messages(&mut h).is_empty(),
+        "placing a session records no undo"
+    );
+}
+
+#[gpui::test]
+fn a_remote_leaf_dropped_on_an_empty_pane_fills_it_with_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("a1")),
+        pane("p2", None),
+    );
+    let mut h = remote_beside(cx, &dir, &grid);
+
+    let to = at(&mut h, "p2", 0.5, 0.5);
+    drop_leaf(&mut h, "b1", to, ("p2", PaneDropEdge::Replace));
+
+    let sent = placements(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::ReplacePaneSession {
+                tab_id,
+                pane_id,
+                session_id: Some(session),
+                host: Some(host),
+            }] if tab_id == "t1" && pane_id == "p2" && session == "b1" && host == REMOTE
+        ),
+        "the empty pane takes the remote session with its host: sent {sent:?}"
+    );
+    assert!(remote_placements(&mut h).is_empty());
 }
 
 #[gpui::test]

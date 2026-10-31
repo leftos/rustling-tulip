@@ -11,7 +11,11 @@ use protocol::{
 };
 
 use crate::sidebar::{Container, ContainerKind, can_attach};
-use crate::tabs::{self, OuterSides, PaneTarget, Placement, Rect, TabsModel};
+use crate::tabs::{
+    self, HostSessions, HostedSession, OuterSides, PaneTarget, Placement, Rect, SessionRef,
+    TabsModel,
+};
+use crate::target::HostKey;
 use crate::undo;
 
 /// How much of a pane's side that touches the grid's edge is its outer band.
@@ -40,10 +44,12 @@ pub enum DragPayload {
     Tab(String),
     /// A sidebar container: a repo or a workspace.
     Container(ContainerRef),
-    /// A sidebar leaf: its session and the container holding it.
+    /// A sidebar leaf: its session, the container holding it and the host
+    /// that lists the session.
     Leaf {
         session_id: String,
         container_id: String,
+        host: HostKey,
     },
 }
 
@@ -432,7 +438,7 @@ pub fn container_payload(container: &Container) -> Option<DragPayload> {
     container_ref(container).map(DragPayload::Container)
 }
 
-/// What a drag started on the leaf of `session_id` in `container` carries:
+/// What a drag started on the leaf of `session` in `container` carries:
 /// every leaf drags, to a pane or a pill; only some reorder, as
 /// [`leaf_reorders`] says.
 #[must_use]
@@ -440,10 +446,11 @@ pub fn container_payload(container: &Container) -> Option<DragPayload> {
     clippy::unnecessary_wraps,
     reason = "the sidebar's row builder takes an optional payload, as container rows may not drag"
 )]
-pub fn leaf_payload(container: &Container, session_id: &str) -> Option<DragPayload> {
+pub fn leaf_payload(container: &Container, session: &SessionRef) -> Option<DragPayload> {
     Some(DragPayload::Leaf {
-        session_id: session_id.to_owned(),
+        session_id: session.id.clone(),
         container_id: container.id.clone(),
+        host: session.host.clone(),
     })
 }
 
@@ -496,6 +503,7 @@ pub fn sidebar_reorder(
             DragPayload::Leaf {
                 session_id,
                 container_id,
+                ..
             },
             SidebarRow::Leaf {
                 container_key,
@@ -650,28 +658,30 @@ pub struct LeafTarget<'a> {
     pub edge: PaneDropEdge,
 }
 
-/// `session_id` among `sessions` when a pane can show it: not headless.
+/// `session` as its host lists it among `sessions`, when a pane can show
+/// it: not headless.
 fn attachable<'a>(
-    sessions: &'a [SessionSnapshot],
-    session_id: &str,
+    sessions: &'a HostSessions<'_>,
+    session: &SessionRef,
 ) -> Option<&'a SessionSnapshot> {
     sessions
         .iter()
-        .find(|s| s.id == session_id)
+        .filter(|(host, _)| *host == session.host)
+        .find_map(|(_, list)| list.iter().find(|s| s.id == session.id))
         .filter(|s| can_attach(s))
 }
 
-/// The pane a bound leaf of `session_id` moves, as tab and pane ids: the
-/// active tab's pane showing it, else the first pane showing it in tab
-/// order. Tabs that are closing do not count; none when no other pane shows
-/// it, so the leaf drops as unbound.
+/// The pane a bound leaf of `session` moves, as tab and pane ids: the
+/// active tab's pane showing it (host and id both), else the first pane
+/// showing it in tab order. Tabs that are closing do not count; none when
+/// no other pane shows it, so the leaf drops as unbound.
 #[must_use]
-pub fn leaf_source_pane(tabs: &TabsModel, session_id: &str) -> Option<(String, String)> {
+pub fn leaf_source_pane(tabs: &TabsModel, session: &SessionRef) -> Option<(String, String)> {
     let open = |tab: &&TabEntry| !tabs.closing().contains(&tab.id);
     let showing = |tab: &TabEntry| {
         tabs::collect_panes(tab.grid()?)
             .into_iter()
-            .find(|pane| pane.session == Some(session_id))
+            .find(|pane| pane.shows(session))
             .map(|pane| (tab.id.clone(), pane.id.to_owned()))
     };
     tabs.active_tab()
@@ -723,12 +733,13 @@ fn edge_of_split(direction: SplitDirection, place: SplitPlace) -> PaneDropEdge {
     }
 }
 
-/// Where the unbound `session_id` dropped at `target` goes: an empty pane
-/// or the centre takes it in place of what the pane shows, a half (or the
-/// outer edge on that side) splits the pane with it.
+/// Where the unbound `session` dropped at `target` goes: an empty pane or
+/// the centre takes it in place of what the pane shows, a half (or the
+/// outer edge on that side) splits the pane with it. Either request names
+/// the session's host and goes to This PC, the layout home.
 fn unbound_drop(
     tabs: &[TabEntry],
-    session_id: &str,
+    session: &SessionRef,
     target: &LeafTarget<'_>,
     request_id: Option<String>,
 ) -> Option<(PaneDropEdge, LeafDrop)> {
@@ -738,15 +749,16 @@ fn unbound_drop(
     }
     let tab_id = target.tab_id.to_owned();
     let pane_id = target.pane_id.to_owned();
-    let session = Some(session_id.to_owned());
+    let host = session.host.wire().map(str::to_owned);
+    let session_id = Some(session.id.clone());
     let edge = half_of(target.edge);
     let split = split_of(edge).filter(|_| pane_is_bound(grid, target.pane_id));
     let Some((direction, place)) = split else {
         let message = ClientMessage::ReplacePaneSession {
             tab_id,
             pane_id,
-            session_id: session,
-            host: None,
+            session_id,
+            host,
         };
         return Some((PaneDropEdge::Replace, LeafDrop::Send(Box::new(message))));
     };
@@ -755,29 +767,30 @@ fn unbound_drop(
         pane_id,
         direction,
         place,
-        new_session_id: session,
-        host: None,
+        new_session_id: session_id,
+        host,
         request_id,
     };
     Some((edge, LeafDrop::Send(Box::new(message))))
 }
 
-/// What the leaf of `session_id` dropped at `target` does, and the edge it
+/// What the leaf of `session` dropped at `target` does, and the edge it
 /// lands on, which the overlay shows: a bound leaf moves its pane (see
 /// [`leaf_source_pane`]) as [`pane_drop`] would move it; an unbound one is
-/// placed there (see `unbound_drop`). None for a session a pane cannot show
-/// (headless, unknown) and for a drop [`pane_drop`] refuses.
+/// placed there (see `unbound_drop`). None for a session its host's list in
+/// `sessions` lacks or a pane cannot show (headless), and for a drop
+/// [`pane_drop`] refuses.
 #[must_use]
 pub fn leaf_drop(
     tabs: &TabsModel,
-    sessions: &[SessionSnapshot],
-    session_id: &str,
+    sessions: &HostSessions<'_>,
+    session: &SessionRef,
     target: &LeafTarget<'_>,
     request_id: Option<String>,
 ) -> Option<(PaneDropEdge, LeafDrop)> {
-    attachable(sessions, session_id)?;
-    let Some((tab_id, pane_id)) = leaf_source_pane(tabs, session_id) else {
-        return unbound_drop(tabs.tabs(), session_id, target, request_id);
+    attachable(sessions, session)?;
+    let Some((tab_id, pane_id)) = leaf_source_pane(tabs, session) else {
+        return unbound_drop(tabs.tabs(), session, target, request_id);
     };
     let payload = DragPayload::Pane { tab_id, pane_id };
     let drop = pane_drop(
@@ -798,12 +811,13 @@ pub fn pill_takes_leaf(tabs: &TabsModel, pill: &str) -> bool {
     !tabs.closing().contains(pill) && pill_takes_pane(tabs.tabs(), pill)
 }
 
-/// What the leaf of `session_id` dropped on the pill of tab `pill` does:
-/// an unbound leaf is placed in that tab where [`TabsModel::place_in`]
-/// says; a bound leaf's pane (see [`leaf_source_pane`]) moves to the spot
-/// [`tabs::pane_target_for_session`] gives in that tab, and nothing happens
-/// when the tab already shows the session. None for a pill that takes no
-/// leaf ([`pill_takes_leaf`]) and a session a pane cannot show.
+/// What the leaf of `session` dropped on the pill of tab `pill` does: an
+/// unbound leaf is placed in that tab where [`TabsModel::place_in`] says,
+/// naming its host; a bound leaf's pane (see [`leaf_source_pane`]) moves to
+/// the spot [`tabs::pane_target_for_session`] gives in that tab, and
+/// nothing happens when the tab already shows the session. None for a pill
+/// that takes no leaf ([`pill_takes_leaf`]) and a session its host's list
+/// in `sessions` lacks or a pane cannot show.
 ///
 /// This differs on purpose from a pane dropped on a pill, which lands at
 /// [`tabs::pick_balanced_drop_target`]: a leaf goes where placing its
@@ -811,33 +825,32 @@ pub fn pill_takes_leaf(tabs: &TabsModel, pill: &str) -> bool {
 #[must_use]
 pub fn leaf_pill_drop(
     tabs: &TabsModel,
-    sessions: &[SessionSnapshot],
-    session_id: &str,
+    sessions: &HostSessions<'_>,
+    session: &SessionRef,
     pill: &str,
     request_id: Option<String>,
 ) -> Option<LeafDrop> {
-    let session = attachable(sessions, session_id)?;
+    let snapshot = attachable(sessions, session)?;
     if !pill_takes_leaf(tabs, pill) {
         return None;
     }
-    let local = [(crate::target::HostKey::Local, sessions)];
-    let hosted = tabs::HostedSession::local(session);
-    let Some((src_tab, src_pane)) = leaf_source_pane(tabs, session_id) else {
-        return match tabs.place_in(pill, hosted, &local) {
+    let hosted = HostedSession::new(&session.host, snapshot);
+    let Some((src_tab, src_pane)) = leaf_source_pane(tabs, session) else {
+        return match tabs.place_in(pill, hosted, sessions) {
             Placement::NewTab => None,
             placement @ Placement::Pane { .. } => Some(LeafDrop::Send(Box::new(
-                placement.message(hosted.host, session_id, request_id),
+                placement.message(hosted.host, &session.id, request_id),
             ))),
         };
     };
     let grid = tabs.tab(pill)?.grid()?;
     if tabs::collect_panes(grid)
         .iter()
-        .any(|pane| pane.session == Some(session_id))
+        .any(|pane| pane.shows(session))
     {
         return None;
     }
-    let (dst_pane, edge) = match tabs::pane_target_for_session(grid, &local, hosted)? {
+    let (dst_pane, edge) = match tabs::pane_target_for_session(grid, sessions, hosted)? {
         PaneTarget::Replace { pane_id } => (pane_id, PaneDropEdge::Replace),
         PaneTarget::Split(split) => (split.pane_id, edge_of_split(split.direction, split.place)),
     };
@@ -857,7 +870,7 @@ pub fn leaf_pill_drop(
 )]
 mod tests {
     use super::*;
-    use crate::tabs::tests::{diff_tab, pane, split, tab, wire};
+    use crate::tabs::tests::{diff_tab, on_local, pane, pane_on, split, tab, wire};
     use protocol::SplitDirection;
     use serde_json::json;
 
@@ -1669,7 +1682,13 @@ mod tests {
         DragPayload::Leaf {
             session_id: session_id.to_owned(),
             container_id: container_id.to_owned(),
+            host: HostKey::Local,
         }
+    }
+
+    /// Session `id` of This PC.
+    fn here(id: &str) -> SessionRef {
+        SessionRef::new(HostKey::Local, id)
     }
 
     #[test]
@@ -1722,22 +1741,22 @@ mod tests {
                 continue;
             };
             assert_eq!(
-                leaf_payload(container, &leaf.id),
+                leaf_payload(container, &here(&leaf.id)),
                 Some(leaf_drag(&leaf.id, &container.id)),
                 "{kind:?} leaves drag"
             );
         }
         assert_eq!(
-            leaf_payload(of_kind(&repos, ContainerKind::Repo), "a"),
+            leaf_payload(of_kind(&repos, ContainerKind::Repo), &here("a")),
             Some(leaf_drag("a", "r1"))
         );
         assert_eq!(
-            leaf_payload(of_kind(&tabs, ContainerKind::Tab), "b"),
+            leaf_payload(of_kind(&tabs, ContainerKind::Tab), &here("b")),
             Some(leaf_drag("b", "t1"))
         );
         let unbound = of_kind(&tabs, ContainerKind::Unbound);
         assert_eq!(
-            leaf_payload(unbound, "u"),
+            leaf_payload(unbound, &here("u")),
             Some(leaf_drag("u", &unbound.id))
         );
 
@@ -1813,8 +1832,8 @@ mod tests {
         model.activate("t2");
         let (edge, drop) = leaf_drop(
             &model,
-            &sessions,
-            "s1",
+            &on_local(&sessions),
+            &here("s1"),
             &onto("t1", "b", PaneDropEdge::Right),
             Some("r".to_owned()),
         )
@@ -1832,8 +1851,8 @@ mod tests {
         model.activate("t4");
         let (_, drop) = leaf_drop(
             &model,
-            &sessions,
-            "s1",
+            &on_local(&sessions),
+            &here("s1"),
             &onto("t4", "f", PaneDropEdge::Replace),
             None,
         )
@@ -1849,8 +1868,8 @@ mod tests {
         assert!(
             leaf_drop(
                 &model,
-                &sessions,
-                "s1",
+                &on_local(&sessions),
+                &here("s1"),
                 &onto("t1", "a", PaneDropEdge::Left),
                 None
             )
@@ -1866,8 +1885,8 @@ mod tests {
         model.mark_closing("t1");
         let drop = leaf_drop(
             &model,
-            &sessions,
-            "s2",
+            &on_local(&sessions),
+            &here("s2"),
             &onto("t4", "f", PaneDropEdge::Replace),
             None,
         );
@@ -1886,7 +1905,7 @@ mod tests {
         );
 
         let (_, message) = landed(
-            leaf_pill_drop(&model, &sessions, "s2", "t2", None)
+            leaf_pill_drop(&model, &on_local(&sessions), &here("s2"), "t2", None)
                 .map(|drop| (PaneDropEdge::Replace, drop)),
         );
         assert_eq!(
@@ -1913,8 +1932,8 @@ mod tests {
         ] {
             let drop = leaf_drop(
                 &model,
-                &sessions,
-                "u",
+                &on_local(&sessions),
+                &here("u"),
                 &onto("t1", "b", edge),
                 Some("r".to_owned()),
             );
@@ -1942,8 +1961,8 @@ mod tests {
         let sessions = leaf_sessions();
         let drop = leaf_drop(
             &leaf_tabs(),
-            &sessions,
-            "u",
+            &on_local(&sessions),
+            &here("u"),
             &onto("t1", "b", PaneDropEdge::Replace),
             Some("r".to_owned()),
         );
@@ -1997,8 +2016,8 @@ mod tests {
         ] {
             let drop = leaf_drop(
                 &model,
-                &sessions,
-                "u",
+                &on_local(&sessions),
+                &here("u"),
                 &onto("t1", pane_id, outer),
                 Some("r".to_owned()),
             );
@@ -2031,7 +2050,13 @@ mod tests {
             PaneDropEdge::OuterBottom,
             PaneDropEdge::Replace,
         ] {
-            let drop = leaf_drop(&model, &sessions, "u", &onto("t2", "e", edge), None);
+            let drop = leaf_drop(
+                &model,
+                &on_local(&sessions),
+                &here("u"),
+                &onto("t2", "e", edge),
+                None,
+            );
             assert_eq!(
                 landed(drop),
                 (
@@ -2056,8 +2081,8 @@ mod tests {
             assert!(
                 leaf_drop(
                     &model,
-                    &sessions,
-                    session,
+                    &on_local(&sessions),
+                    &here(session),
                     &onto("t1", "b", PaneDropEdge::Left),
                     None
                 )
@@ -2065,15 +2090,15 @@ mod tests {
                 "{session} drops on no pane"
             );
             assert!(
-                leaf_pill_drop(&model, &sessions, session, "t4", None).is_none(),
+                leaf_pill_drop(&model, &on_local(&sessions), &here(session), "t4", None).is_none(),
                 "{session} drops on no pill"
             );
         }
         assert!(
             leaf_drop(
                 &model,
-                &sessions,
-                "u",
+                &on_local(&sessions),
+                &here("u"),
                 &onto("t1", "nowhere", PaneDropEdge::Left),
                 None
             )
@@ -2089,7 +2114,8 @@ mod tests {
         for session in ["u", "s2"] {
             for pill in ["t3", "t9"] {
                 assert!(
-                    leaf_pill_drop(&model, &sessions, session, pill, None).is_none(),
+                    leaf_pill_drop(&model, &on_local(&sessions), &here(session), pill, None)
+                        .is_none(),
                     "{session} on {pill}"
                 );
             }
@@ -2098,7 +2124,7 @@ mod tests {
         assert!(pill_takes_leaf(&model, "t4"));
 
         let (_, message) = landed(
-            leaf_pill_drop(&model, &sessions, "u", "t4", None)
+            leaf_pill_drop(&model, &on_local(&sessions), &here("u"), "t4", None)
                 .map(|drop| (PaneDropEdge::Replace, drop)),
         );
         assert_eq!(
@@ -2115,7 +2141,7 @@ mod tests {
         assert!(!pill_takes_leaf(&model, "t4"));
         for session in ["u", "s2"] {
             assert!(
-                leaf_pill_drop(&model, &sessions, session, "t4", None).is_none(),
+                leaf_pill_drop(&model, &on_local(&sessions), &here(session), "t4", None).is_none(),
                 "a closing tab takes no {session}"
             );
         }
@@ -2127,15 +2153,15 @@ mod tests {
         let model = leaf_tabs();
         for pill in ["t1", "t2"] {
             assert!(
-                leaf_pill_drop(&model, &sessions, "s1", pill, None).is_none(),
+                leaf_pill_drop(&model, &on_local(&sessions), &here("s1"), pill, None).is_none(),
                 "{pill} already shows s1"
             );
         }
 
         let drop = moved(leaf_pill_drop(
             &model,
-            &sessions,
-            "s2",
+            &on_local(&sessions),
+            &here("s2"),
             "t2",
             Some("r".to_owned()),
         ));
@@ -2154,6 +2180,166 @@ mod tests {
         );
         assert!(!drop.touch, "a pill drop leaves the tab untouched");
         assert_eq!(drop.undo_label, undo::MOVED_PANE);
+    }
+
+    /// The remote host the mixed-host leaf tests list sessions on.
+    const BOX: &str = "box";
+
+    /// Session `id` of [`BOX`].
+    fn on_box(id: &str) -> SessionRef {
+        SessionRef::new(HostKey::Remote(BOX.to_owned()), id)
+    }
+
+    /// `t1` is `a | b`, `a` showing This PC's `s1` and `b` showing
+    /// [`BOX`]'s `s1`; `t4` is the lone empty pane `f`.
+    fn mixed_leaf_tabs() -> tabs::TabsModel {
+        crate::tabs::tests::model_with(&[
+            tab(
+                "t1",
+                &split(H, 0.5, pane("a", Some("s1")), pane_on("b", Some("s1"), BOX)),
+            ),
+            tab("t4", &pane("f", None)),
+        ])
+    }
+
+    #[test]
+    fn an_unbound_remote_leaf_is_placed_naming_its_host() {
+        let local = leaf_sessions();
+        let remote = vec![crate::sidebar::tests::session("rb")];
+        let sessions = [
+            (HostKey::Local, local.as_slice()),
+            (HostKey::Remote(BOX.to_owned()), remote.as_slice()),
+        ];
+        let model = leaf_tabs();
+
+        let drop = leaf_drop(
+            &model,
+            &sessions,
+            &on_box("rb"),
+            &onto("t1", "b", PaneDropEdge::Left),
+            Some("r".to_owned()),
+        );
+        assert_eq!(
+            landed(drop),
+            (
+                PaneDropEdge::Left,
+                json!({
+                    "type": "split_pane",
+                    "tab_id": "t1",
+                    "pane_id": "b",
+                    "direction": "horizontal",
+                    "place": "first",
+                    "new_session_id": "rb",
+                    "host": BOX,
+                    "request_id": "r",
+                })
+            ),
+            "a half splits the pane with the remote session"
+        );
+
+        let drop = leaf_drop(
+            &model,
+            &sessions,
+            &on_box("rb"),
+            &onto("t2", "e", PaneDropEdge::Replace),
+            None,
+        );
+        assert_eq!(
+            landed(drop),
+            (
+                PaneDropEdge::Replace,
+                json!({
+                    "type": "replace_pane_session",
+                    "tab_id": "t2",
+                    "pane_id": "e",
+                    "session_id": "rb",
+                    "host": BOX,
+                })
+            ),
+            "an empty pane takes the remote session"
+        );
+
+        let (_, message) = landed(
+            leaf_pill_drop(&model, &sessions, &on_box("rb"), "t4", None)
+                .map(|drop| (PaneDropEdge::Replace, drop)),
+        );
+        assert_eq!(
+            message,
+            json!({
+                "type": "replace_pane_session",
+                "tab_id": "t4",
+                "pane_id": "f",
+                "session_id": "rb",
+                "host": BOX,
+            }),
+            "on a pill too"
+        );
+
+        let elsewhere = onto("t1", "b", PaneDropEdge::Left);
+        for (session, why) in [
+            (here("rb"), "This PC lists no rb"),
+            (on_box("u"), "the remote host lists no u"),
+        ] {
+            assert!(
+                leaf_drop(&model, &sessions, &session, &elsewhere, None).is_none(),
+                "{why}"
+            );
+            assert!(
+                leaf_pill_drop(&model, &sessions, &session, "t4", None).is_none(),
+                "{why}, on a pill"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_remote_leaf_moves_the_pane_showing_it_on_its_host() {
+        let local = vec![crate::sidebar::tests::session("s1")];
+        let remote = vec![crate::sidebar::tests::session("s1")];
+        let sessions = [
+            (HostKey::Local, local.as_slice()),
+            (HostKey::Remote(BOX.to_owned()), remote.as_slice()),
+        ];
+        let model = mixed_leaf_tabs();
+        let to_f = onto("t4", "f", PaneDropEdge::Replace);
+
+        for (session, pane, why) in [
+            (on_box("s1"), "b", "the remote s1 moves b, not This PC's a"),
+            (here("s1"), "a", "This PC's s1 moves a"),
+        ] {
+            let (_, drop) =
+                leaf_drop(&model, &sessions, &session, &to_f, None).expect("the leaf drops");
+            let drop = moved(Some(drop));
+            assert_eq!(
+                (drop.src_tab_id.as_str(), drop.src_pane_id.as_str()),
+                ("t1", pane),
+                "{why}"
+            );
+        }
+
+        let drop = moved(leaf_pill_drop(
+            &model,
+            &sessions,
+            &on_box("s1"),
+            "t4",
+            Some("r".to_owned()),
+        ));
+        assert_eq!(
+            wire(&drop.message()),
+            json!({
+                "type": "move_pane",
+                "src_tab_id": "t1",
+                "src_pane_id": "b",
+                "dst_tab_id": "t4",
+                "dst_pane_id": "f",
+                "edge": "replace",
+                "request_id": "r",
+            }),
+            "on a pill, the remote session's own pane moves"
+        );
+        assert!(
+            leaf_pill_drop(&model, &sessions, &on_box("s1"), "t1", None).is_none(),
+            "t1 already shows the remote s1"
+        );
     }
 
     #[test]
@@ -2383,6 +2569,7 @@ mod tests {
             DragPayload::Leaf {
                 session_id: "s1".to_owned(),
                 container_id: "r1".to_owned(),
+                host: HostKey::Local,
             },
         ];
 

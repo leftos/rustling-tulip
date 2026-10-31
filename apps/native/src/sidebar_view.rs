@@ -34,7 +34,7 @@ use crate::sidebar::{
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
-use crate::tabs::TabPill;
+use crate::tabs::{SessionRef, TabPill};
 use crate::target::HostKey;
 use crate::target::Target;
 use crate::ui_theme::{UiTheme, theme};
@@ -290,6 +290,16 @@ impl RootView {
                     .unwrap_or_else(|| window.is_window_hovered()),
             ),
             detached_stop_all: self.detached_stop_all.armed(),
+            hosts: containers
+                .iter()
+                .chain(groups.iter().flat_map(|group| group.containers.iter()))
+                .map(|container| {
+                    (
+                        container.key.clone(),
+                        self.host_of_container(&container.key),
+                    )
+                })
+                .collect(),
             dimmed: self.dimmed_rows(containers),
             highlighted: &self.launched_highlight,
             dragged: self.dragged_sidebar_row(cx),
@@ -1181,7 +1191,8 @@ fn leaf_drag_row(
         container_key: container.key.clone(),
         session_id: leaf.id.clone(),
     };
-    let payload = drag::leaf_payload(container, &leaf.id);
+    let session = SessionRef::new(ctx.host_of(&container.key), leaf.id.clone());
+    let payload = drag::leaf_payload(container, &session);
     let dragged = payload.is_some() && ctx.dragged == payload;
     let line = ctx.mark_at(&target).map(|side| {
         let selector = format!("sidebar-drop-mark-{}-{}", container.key, leaf.id);
@@ -1358,9 +1369,9 @@ impl RootView {
 
     /// What a sidebar drop of `payload` at `side` of `row` sends. A workspace
     /// or repo dropped on another one's header moves in the full manual order,
-    /// so a row the Active filter hides keeps its place; under a repo sort
-    /// other than Manual the drop is refused unless both rows sort into the
-    /// same group.
+    /// so a row the Active filter hides keeps its place; the drop is refused
+    /// on another host's row, and under a repo sort other than Manual unless
+    /// both rows sort into the same group.
     fn sidebar_drop_message(
         &self,
         payload: &DragPayload,
@@ -1372,25 +1383,25 @@ impl RootView {
         else {
             return drag::sidebar_reorder(payload, &shown, row, side);
         };
+        let dragged_key = &shown
+            .iter()
+            .find(|c| drag::container_ref(c).as_ref() == Some(dragged))?
+            .key;
+        if self.host_of_container(dragged_key) != self.host_of_container(target) {
+            return None;
+        }
         let sorted = self.sidebar.sidebar_view() == SidebarView::Repos
             && self.sidebar.repo_sort() != RepoSort::Manual;
-        if sorted {
-            let dragged_key = &shown
-                .iter()
-                .find(|c| drag::container_ref(c).as_ref() == Some(dragged))?
-                .key;
-            if !self.sidebar.same_sort_group(dragged_key, target) {
-                return None;
-            }
+        if sorted && !self.sidebar.same_sort_group(dragged_key, target) {
+            return None;
         }
         drag::sidebar_reorder(payload, &shown, row, side)?;
         drag::sidebar_reorder(payload, &self.sidebar.containers(), row, side)
     }
 
     /// Splits a container order over every host's containers into one per
-    /// host, each keeping its containers' order, and takes and sends each to
-    /// its own host.
-    fn reorder_containers_by_host(&mut self, ordered: Vec<ContainerRef>) {
+    /// host, each keeping its containers' order.
+    fn containers_by_host(&self, ordered: Vec<ContainerRef>) -> Vec<(HostKey, Vec<ContainerRef>)> {
         let mut by_host: Vec<(HostKey, Vec<ContainerRef>)> = Vec::new();
         for container in ordered {
             let host = match &container {
@@ -1402,7 +1413,27 @@ impl RootView {
                 None => by_host.push((host, vec![container])),
             }
         }
-        for (host, ordered) in by_host {
+        by_host
+    }
+
+    /// Splits a container order over every host's containers into one per
+    /// host, and takes and sends each to its own host; a host whose order
+    /// it leaves unchanged is sent nothing.
+    fn reorder_containers_by_host(&mut self, ordered: Vec<ContainerRef>) {
+        let current: Vec<ContainerRef> = self
+            .sidebar
+            .containers()
+            .iter()
+            .filter_map(drag::container_ref)
+            .collect();
+        let before = self.containers_by_host(current);
+        for (host, ordered) in self.containers_by_host(ordered) {
+            let unchanged = before
+                .iter()
+                .any(|(owner, refs)| *owner == host && *refs == ordered);
+            if unchanged {
+                continue;
+            }
             self.sidebar.reorder_containers_local(&host, &ordered);
             self.send_to(&host, ClientMessage::ReorderContainers { ordered });
         }
@@ -1690,6 +1721,9 @@ struct LeafRows<'a> {
     hovered_row: Option<&'a str>,
     /// The Detached banner's Stop all is armed.
     detached_stop_all: bool,
+    /// Each listed container's host, by the container's key: the host
+    /// that lists the sessions of its leaves.
+    hosts: HashMap<String, HostKey>,
     /// The rows whose host is a remote host that is not open.
     dimmed: DimmedRows<'a>,
     /// The sessions Select launched marked.
@@ -1701,6 +1735,13 @@ struct LeafRows<'a> {
 }
 
 impl LeafRows<'_> {
+    /// The host of the container keyed `key`; This PC for a key the render
+    /// did not list, as [`RootView::host_of_container`] places a key it
+    /// cannot place.
+    fn host_of(&self, key: &str) -> HostKey {
+        self.hosts.get(key).cloned().unwrap_or(HostKey::Local)
+    }
+
     /// The side of `row` the insertion line stands at, when it is there.
     fn mark_at(&self, row: &SidebarRow) -> Option<Side> {
         self.drop_mark

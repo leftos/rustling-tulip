@@ -1,12 +1,13 @@
 //! Host group specs: the repos view's header row per host while more than
-//! one host is configured, its fold, and its `+ Shell` and `Pair` buttons.
+//! one host is configured, its fold, its `+ Shell` and `Pair` buttons, and
+//! a container drag that stays within its own host.
 
 use crate::support;
 
-use gpui::{TestAppContext, px};
-use protocol::{ClientMessage, DaemonMessage, SpawnTarget};
+use gpui::{Pixels, Point, TestAppContext, point, px};
+use protocol::{ClientMessage, ContainerRef, DaemonMessage, SpawnTarget};
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, NetEvent};
+use rustling_tulip_native::{Connection, NetEvent, RootView};
 use support::{Fixture, Harness, PROTOCOL, TestDir, repo, session};
 
 /// The tailnet host the specs save beside This PC.
@@ -99,6 +100,35 @@ fn shell_spawns(sent: Vec<ClientMessage>) -> Vec<Option<String>> {
             _ => None,
         })
         .collect()
+}
+
+/// The container orders among `sent`.
+fn container_orders(sent: Vec<ClientMessage>) -> Vec<Vec<ContainerRef>> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ReorderContainers { ordered } => Some(ordered),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Drags the row tagged `from` onto the row tagged `to`, `fy` down it, and
+/// holds it there.
+fn drag_row_over(h: &mut Harness<'_>, from: &str, to: &str, fy: f32) -> Point<Pixels> {
+    let row = |h: &mut Harness<'_>, selector: &str, fy: f32| {
+        let bounds = h.bounds(selector);
+        assert!(bounds.size.height > Pixels::ZERO, "{selector} is on screen");
+        point(
+            bounds.origin.x + bounds.size.width * 0.3,
+            bounds.origin.y + bounds.size.height * fy,
+        )
+    };
+    let start = row(h, from, 0.5);
+    let end = row(h, to, fy);
+    h.start_drag(start);
+    assert!(h.dragging(), "{from} drags");
+    h.drag_to(end);
+    end
 }
 
 #[gpui::test]
@@ -263,5 +293,93 @@ fn a_not_approved_host_shows_pair(cx: &mut TestAppContext) {
     assert!(
         h.root(|root, _| root.device_pairing_open()),
         "Pair opens the pairing dialog for the host"
+    );
+}
+
+#[gpui::test]
+fn a_container_dragged_over_another_hosts_rows_shows_no_drop_line_and_drops_nothing(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_listing(cx, &dir);
+    h.host(&saved_remote()).sent();
+    let before = shown_keys(&mut h);
+    let remote_row = format!("container-{}", remote_repo_key());
+
+    // Each drop would change the order across hosts: r1 after the remote
+    // repo, the remote repo before r1.
+    for (from, to, fy) in [
+        ("container-repo:r1", remote_row.as_str(), 0.8),
+        (remote_row.as_str(), "container-repo:r1", 0.2),
+    ] {
+        let at = drag_row_over(&mut h, from, to, fy);
+        assert_eq!(
+            h.root(RootView::sidebar_drop_mark),
+            None,
+            "{from} over {to}: no line on another host's row"
+        );
+        h.release(at);
+
+        assert_eq!(
+            container_orders(h.sent()),
+            Vec::<Vec<ContainerRef>>::new(),
+            "{from} on {to}: This PC is sent no order"
+        );
+        assert_eq!(
+            container_orders(h.host(&saved_remote()).sent()),
+            Vec::<Vec<ContainerRef>>::new(),
+            "{from} on {to}: nor is the remote host"
+        );
+        assert_eq!(shown_keys(&mut h), before, "the rows keep their order");
+    }
+}
+
+#[gpui::test]
+fn a_drop_that_changes_no_order_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_listing(cx, &dir);
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1"), repo("r3", "C:/r3")],
+    });
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("a1").in_repo("r1").build(),
+            session("a3").in_repo("r3").build(),
+        ],
+    });
+    h.sent();
+    h.host(&saved_remote()).sent();
+    assert_eq!(
+        shown_keys(&mut h),
+        [
+            "repo:r1".to_owned(),
+            "repo:r3".to_owned(),
+            remote_repo_key()
+        ]
+    );
+
+    let at = drag_row_over(&mut h, "container-repo:r3", "container-repo:r1", 0.2);
+    h.release(at);
+
+    assert_eq!(
+        container_orders(h.sent()),
+        [vec![
+            ContainerRef::Repo("r3".to_owned()),
+            ContainerRef::Repo("r1".to_owned()),
+        ]],
+        "This PC, whose order changed, is sent its new order"
+    );
+    assert_eq!(
+        container_orders(h.host(&saved_remote()).sent()),
+        Vec::<Vec<ContainerRef>>::new(),
+        "the remote host's order did not change: it is sent nothing"
+    );
+    assert_eq!(
+        shown_keys(&mut h),
+        [
+            "repo:r3".to_owned(),
+            "repo:r1".to_owned(),
+            remote_repo_key()
+        ]
     );
 }

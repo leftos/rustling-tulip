@@ -81,6 +81,7 @@ pub struct HostedSession<'a> {
     pub session: &'a SessionSnapshot,
 }
 
+#[cfg(test)]
 static LOCAL_HOST: HostKey = HostKey::Local;
 
 impl<'a> HostedSession<'a> {
@@ -89,6 +90,7 @@ impl<'a> HostedSession<'a> {
     }
 
     /// `session` of This PC.
+    #[cfg(test)]
     pub fn local(session: &'a SessionSnapshot) -> Self {
         Self::new(&LOCAL_HOST, session)
     }
