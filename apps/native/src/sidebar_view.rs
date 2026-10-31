@@ -34,7 +34,7 @@ use crate::sidebar::{
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
-use crate::tabs::{TabPill, tab_pills};
+use crate::tabs::TabPill;
 use crate::target::HostKey;
 use crate::target::Target;
 use crate::ui_theme::{UiTheme, theme};
@@ -274,7 +274,7 @@ impl RootView {
         let rows = LeafRows {
             attached: attached.as_deref(),
             accents: self.sidebar.session_accents(),
-            pills: self.tabs.is_loaded().then(|| tab_pills(self.tabs.tabs())),
+            pills: self.tabs.is_loaded().then(|| self.leaf_pills()),
             headless: self
                 .sidebar
                 .all_sessions()

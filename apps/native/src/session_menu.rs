@@ -43,7 +43,9 @@ use crate::session_actions::{
 use crate::sidebar::{Container, ContainerKind, can_attach};
 use crate::spawn_form::{Lock, Prefill, Target};
 use crate::spawn_view::SpawnEntry;
-use crate::tabs::{collect_panes, find_tab_containing_session};
+use crate::tabs::{
+    HostedSession, SessionRef, collect_panes, destination, find_tab_containing_session,
+};
 use crate::target::HostKey;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
@@ -827,12 +829,13 @@ impl RootView {
             .filter(|menu| menu.submenu == Submenu::None)
             .and_then(|menu| self.sidebar.session(&menu.session_id))
             .map(|session| {
+                let host = self.host_of_session(&session.id);
                 session_rows(
-                    session,
+                    HostedSession::new(&host, session),
                     &self.tabs,
-                    self.sidebar.local_sessions(),
+                    &self.sidebar.sessions_by_host(),
                     &self.popouts,
-                    self.capabilities_of(&self.host_of_session(&session.id)),
+                    self.capabilities_of(&host),
                 )
             })
             .unwrap_or_default()
@@ -1981,16 +1984,35 @@ impl RootView {
             .filter(|_| shift)
             .map(|session| PendingPrefill::of(session, target.clone()))
             .filter(|pending| pending.source.is_some());
+        let host = self.host_of_session(session_id);
         let request = if let Some(pending) = prefill {
             Some(self.prefills.request(pending))
         } else {
             let request_id = crate::new_request_id();
-            self.duplicates.request(session_id, request_id, target)
+            self.duplicates
+                .request(&host, session_id, request_id, target)
         };
         if let Some(request) = request {
-            self.send_to(&self.host_of_session(session_id), request);
+            self.send_duplicate(&host, request, cx);
         }
         self.close_session_menu(window, cx);
+    }
+
+    /// Sends a duplicate's `request` to `host`; to a remote host that is
+    /// offline it is not sent: the duplicate ends at once with a toast.
+    fn send_duplicate(&mut self, host: &HostKey, request: ClientMessage, cx: &mut Context<Self>) {
+        if !self.is_remote_offline(host) {
+            self.send_to(host, request);
+            return;
+        }
+        if let ClientMessage::DuplicateSession {
+            request_id: Some(request_id),
+            ..
+        } = &request
+        {
+            self.duplicates.fail(request_id);
+        }
+        self.push_offline_toast(host, cx);
     }
 
     /// The spawn config a Shift-duplicate asked for arrived: the dialog
@@ -2030,7 +2052,8 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let clicked = self.menu.as_ref().and_then(|menu| menu.pane.as_ref());
-        let source = move_source(self.tabs.tabs(), session_id, clicked);
+        let shown = SessionRef::new(self.host_of_session(session_id), session_id);
+        let source = move_source(self.tabs.tabs(), &shown, clicked);
         self.close_session_menu(window, cx);
         let Some((tab_id, pane_id)) = source else {
             tracing::warn!(session = %session_id, "move to: no pane shows the session");
@@ -2060,12 +2083,12 @@ impl RootView {
             SessionRow::AddToCurrentTab { .. } => {
                 let session = self
                     .sidebar
-                    .session(session_id)
-                    .filter(|s| can_attach(s))
-                    .cloned();
+                    .find_session(session_id)
+                    .filter(|(_, s)| can_attach(s))
+                    .map(|(host, s)| (host, s.clone()));
                 self.close_session_menu(window, cx);
-                if let Some(session) = session {
-                    self.place_session(&session, window, cx);
+                if let Some((host, session)) = session {
+                    self.place_session(&host, &session, window, cx);
                 }
             }
             SessionRow::AddToNewTab => {
@@ -2172,8 +2195,12 @@ impl RootView {
                 } else {
                     DuplicateTarget::Restart
                 };
-                if let Some(request) = self.duplicates.request(session_id, request_id, target) {
-                    self.send_to(&self.host_of_session(session_id), request);
+                let host = self.host_of_session(session_id);
+                if let Some(request) = self
+                    .duplicates
+                    .request(&host, session_id, request_id, target)
+                {
+                    self.send_duplicate(&host, request, cx);
                     self.close_session_menu(window, cx);
                 }
             }
@@ -2183,7 +2210,8 @@ impl RootView {
     /// Whether a tab pane or the session's own pop-out shows `session_id`,
     /// so a stop keeps it listed.
     fn is_shown(&self, session_id: &str) -> bool {
-        find_tab_containing_session(self.tabs.tabs(), session_id).is_some()
+        let shown = SessionRef::new(self.host_of_session(session_id), session_id);
+        find_tab_containing_session(self.tabs.tabs(), &shown).is_some()
             || self.popouts.session_key(session_id).is_some()
     }
 
@@ -2225,20 +2253,23 @@ impl RootView {
     /// A duplicate that answers one of this client's requests is placed by
     /// its target: a restart takes its original's panes (focusing the
     /// first) or a new tab; a copy opens a new tab, or goes into its tab,
-    /// which comes to the front with the copy focused.
+    /// which comes to the front with the copy focused. `copy` carries the
+    /// host that replied; its layout goes to This PC and the original's
+    /// discard to that host.
     pub(crate) fn place_duplicate(
         &mut self,
         request_id: Option<&str>,
-        copy: &SessionSnapshot,
+        copy: HostedSession<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(request_id) = request_id.filter(|id| self.duplicates.has_request(id)) else {
             return;
         };
-        let Some(mut placed) =
-            self.duplicates
-                .place(request_id, copy, &self.tabs, self.sidebar.local_sessions())
+        let sessions = self.sidebar.sessions_by_host();
+        let Some(mut placed) = self
+            .duplicates
+            .place(request_id, copy, &self.tabs, &sessions)
         else {
             return;
         };
@@ -2256,12 +2287,12 @@ impl RootView {
             PlacedFocus::Pane { tab_id, pane_id } => self.tabs.focus_pane(tab_id, pane_id),
             PlacedFocus::Tab(tab_id) => self.tabs.activate(tab_id),
             PlacedFocus::Popout { original } => {
-                self.rekey_session_popout(original, &copy.id, cx);
+                self.rekey_session_popout(original, &copy.session.id, cx);
             }
         }
         for msg in placed.messages {
             self.tabs.note_layout_request(&msg);
-            self.send_to(&HostKey::Local, msg);
+            self.send_to(&destination(&msg, &placed.session_host), msg);
         }
         if matches!(placed.focus, PlacedFocus::Pane { .. } | PlacedFocus::Tab(_)) {
             self.after_tabs_change(window, cx);
@@ -2554,7 +2585,8 @@ impl RootView {
             return Vec::new();
         };
         // The labels name a tab pane; a session pop-out alone is none.
-        let in_pane = find_tab_containing_session(self.tabs.tabs(), &session.id).is_some();
+        let shown = SessionRef::new(self.host_of_session(&session.id), &session.id);
+        let in_pane = find_tab_containing_session(self.tabs.tabs(), &shown).is_some();
         menu_entries(session, menu.mode)
             .into_iter()
             .map(|entry| {

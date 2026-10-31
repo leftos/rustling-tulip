@@ -5,48 +5,8 @@
 use crate::support;
 
 use gpui::{TestAppContext, VisualTestContext, px};
-use protocol::{DaemonMessage, GridNode, SplitDirection};
-use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{HeaderChip, HeaderChipKind, OpenOutcome, PopoutKey};
-use support::{Fixture, Harness, TestDir, pane, session, split, tab};
-
-/// The tailnet host connected beside This PC.
-const REMOTE: &str = "box.tail1234.ts.net";
-
-/// A pane showing `session` of [`REMOTE`].
-fn remote_pane(id: &str, session: &str) -> GridNode {
-    GridNode::Pane {
-        pane_id: id.to_owned(),
-        session_id: Some(session.to_owned()),
-        host: Some(REMOTE.to_owned()),
-    }
-}
-
-/// This PC lists `a1`; [`REMOTE`] lists `b1` and `b2`. Tab `t1` splits
-/// `a1` (pane `p1`) beside `b1` (pane `p2`); tab `t2` holds `b2` alone
-/// (pane `p3`).
-fn mixed_tabs<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
-    let mut fixture = Fixture::single(session("a1").build());
-    fixture.tabs = vec![
-        tab(
-            "t1",
-            &split(
-                SplitDirection::Horizontal,
-                pane("p1", Some("a1")),
-                remote_pane("p2", "b1"),
-            ),
-        ),
-        tab("t2", &remote_pane("p3", "b2")),
-    ];
-    let mut h = Harness::with(cx, dir, &fixture);
-    let mut host = h.host(&Target::tailnet(REMOTE, None));
-    host.connect();
-    host.send(DaemonMessage::Sessions {
-        sessions: vec![session("b1").build(), session("b2").build()],
-    });
-    h.sent();
-    h
-}
+use support::{Harness, REMOTE, TestDir, mixed_tabs};
 
 /// The host chip [`REMOTE`]'s panes carry.
 fn box_chip() -> HeaderChip {

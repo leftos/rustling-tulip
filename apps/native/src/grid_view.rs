@@ -1121,11 +1121,13 @@ impl RootView {
                 .and_then(|grid| tabs::split_sibling_session(grid, pane_id))
                 .map(str::to_owned),
         };
+        let replacing_ref =
+            replacing.map(|id| tabs::SessionRef::new(self.tabs.pane_host(tab_id, pane_id), id));
         let aim = PaneAim {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
-            expected: replacing.map(str::to_owned),
-            discard: replacing.map(str::to_owned),
+            expected: replacing_ref.clone(),
+            discard: replacing_ref,
         };
         self.open_spawn_dialog(SpawnEntry::Pane { aim, preselect }, window, cx);
         cx.notify();

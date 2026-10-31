@@ -2690,7 +2690,7 @@ impl RootView {
     /// counts as the App title settings shape them.
     fn wanted_window_title(&self) -> String {
         let tab = self.tabs.active_tab();
-        let counts = tab.and_then(|tab| tab_session_counts(tab, self.sidebar.local_sessions()));
+        let counts = tab.and_then(|tab| tab_session_counts(tab, &self.sidebar.sessions_by_host()));
         compute_title(
             counts,
             tab.map(|tab| tab.name.as_str()),

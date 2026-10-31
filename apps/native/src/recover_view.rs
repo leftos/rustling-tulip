@@ -407,7 +407,8 @@ impl RootView {
         if recovered.is_empty() {
             return;
         }
-        let messages = spawns::place_several(recovered, &self.tabs, self.sidebar.local_sessions());
+        let messages =
+            spawns::place_several(recovered, &self.tabs, &self.sidebar.sessions_by_host());
         tracing::info!(
             sessions = recovered.len(),
             requests = messages.len(),

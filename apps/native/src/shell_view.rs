@@ -105,19 +105,15 @@ impl RootView {
     }
 
     /// `+ Shell` on `host`'s sidebar header: This PC's is [`Self::quick_shell`];
-    /// a remote host's sends a plain shell with no folder, so its daemon picks
-    /// its own default, straight to that host.
+    /// a remote host's spawns a plain shell with no folder, so its daemon
+    /// picks its own default, on that host, with the spawning toast.
     pub(crate) fn quick_shell_on(&mut self, host: &HostKey, cx: &mut Context<Self>) {
         if *host == HostKey::Local {
             self.quick_shell(cx);
             return;
         }
         let open_in = self.open_in_active_tab();
-        let request_id = crate::new_request_id();
-        let msg = self
-            .spawns
-            .start(standalone_shell_request(None), request_id, open_in);
-        self.send_to(host, msg);
+        self.spawn_on(host, standalone_shell_request(None), open_in, cx);
         cx.notify();
     }
 

@@ -1320,6 +1320,15 @@ impl SidebarModel {
         self.slices().flat_map(|(_, slice)| slice.sessions.iter())
     }
 
+    /// Every host's session list with its host, This PC's first, then the
+    /// remote hosts' in order: what placement and the tab counts read.
+    #[must_use]
+    pub fn sessions_by_host(&self) -> Vec<(HostKey, &[SessionSnapshot])> {
+        self.slices()
+            .map(|(host, slice)| (host.clone(), slice.sessions.as_slice()))
+            .collect()
+    }
+
     /// How many of This PC's sessions are abandoned, the set
     /// `ResumeAllAbandoned` acts on.
     #[must_use]

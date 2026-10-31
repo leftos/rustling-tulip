@@ -228,8 +228,8 @@ use crate::stash_view::StashUi;
 use crate::status_glyph::{GlyphSize, glyph_view};
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{
-    PaneTarget, Placement, TabsModel, auto_grid_resends, find_tab_containing_session, is_auto_grid,
-    tab_pills,
+    HostedSession, PaneTarget, Placement, SessionRef, TabsModel, auto_grid_resends,
+    find_tab_containing_session, is_auto_grid, tab_pills,
 };
 use crate::target::HostKey;
 use crate::term::ShellCommand;
@@ -2186,8 +2186,18 @@ impl RootView {
         if !self.tabs.is_loaded() {
             return None;
         }
-        let pill = tab_pills(self.tabs.tabs()).remove(id);
+        let pill = self.leaf_pills().remove(id);
         Some(pill.unwrap_or(TabPill::Unbound))
+    }
+
+    /// The tab pill of each sidebar leaf, by session id: the panes that
+    /// show the session on the host the sidebar lists it under.
+    pub(crate) fn leaf_pills(&self) -> HashMap<String, TabPill> {
+        tab_pills(self.tabs.tabs())
+            .into_iter()
+            .filter(|(shown, _)| self.host_of_session(&shown.id) == shown.host)
+            .map(|(shown, pill)| (shown.id, pill))
+            .collect()
     }
 
     /// Groups the sessions panel by `view`, saving the choice when it
@@ -2213,14 +2223,19 @@ impl RootView {
     /// The unbound pill: opens session `id` in a new tab, when it can be
     /// shown in a pane.
     pub(crate) fn open_in_new_tab(&mut self, id: &str) {
-        if !self.sidebar.session(id).is_some_and(can_attach) {
+        let Some(host) = self
+            .sidebar
+            .find_session(id)
+            .filter(|(_, session)| can_attach(session))
+            .map(|(host, _)| host)
+        else {
             return;
-        }
+        };
         let request_id = new_request_id();
         self.tabs.arm_create(&request_id);
         self.send_to(
             &HostKey::Local,
-            Placement::NewTab.message(id, Some(request_id)),
+            Placement::NewTab.message(&host, id, Some(request_id)),
         );
     }
 
@@ -2964,7 +2979,10 @@ impl RootView {
         if let Some(key) = self.popouts.showing_session(id, self.tabs.tabs()).cloned() {
             // Its pane draws in a pop-out: that window comes to the front.
             self.activate_popout(&key, cx);
-        } else if let Some((tab_id, pane_id)) = find_tab_containing_session(self.tabs.tabs(), id) {
+        } else if let Some((tab_id, pane_id)) = find_tab_containing_session(
+            self.tabs.tabs(),
+            &SessionRef::new(self.host_of_session(id), id),
+        ) {
             if self.is_tab_popped(&tab_id) {
                 // Its tab draws in a pop-out: the pane takes its tab's focus
                 // and that window comes to the front, whichever tab the main
@@ -2976,22 +2994,32 @@ impl RootView {
                 self.tabs.focus_pane(&tab_id, &pane_id);
                 self.after_tabs_change(window, cx);
             }
-        } else if let Some(session) = self.sidebar.session(id).filter(|s| can_attach(s)).cloned() {
-            self.place_session(&session, window, cx);
+        } else if let Some((host, session)) = self
+            .sidebar
+            .find_session(id)
+            .filter(|(_, s)| can_attach(s))
+            .map(|(host, s)| (host, s.clone()))
+        {
+            self.place_session(&host, &session, window, cx);
         }
         cx.notify();
     }
 
     /// Sends the session to where smart placement puts it. A filled empty
     /// pane is focused now; a new pane or tab takes focus when the daemon's
-    /// update arrives.
+    /// update arrives. The placement names `host`, the session's host, and
+    /// goes to This PC.
     pub(crate) fn place_session(
         &mut self,
+        host: &HostKey,
         session: &SessionSnapshot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let placement = self.tabs.place(session, self.sidebar.local_sessions());
+        let placement = self.tabs.place(
+            HostedSession::new(host, session),
+            &self.sidebar.sessions_by_host(),
+        );
         let request_id = match &placement {
             Placement::NewTab => {
                 let request_id = new_request_id();
@@ -3008,7 +3036,7 @@ impl RootView {
             }
             Placement::Pane { .. } => None,
         };
-        let msg = placement.message(&session.id, request_id);
+        let msg = placement.message(host, &session.id, request_id);
         self.tabs.note_layout_request(&msg);
         self.send_to(&HostKey::Local, msg);
     }
@@ -3927,7 +3955,7 @@ impl RootView {
                 session,
                 request_id,
             } => self.on_session_updated(
-                &session,
+                HostedSession::new(host, &session),
                 moved.unwrap_or(false),
                 request_id.as_deref(),
                 window,
@@ -4321,15 +4349,16 @@ impl RootView {
 
     /// A session's snapshot: every pane showing it refreshes, the size it
     /// resolves to moves with its appearance, and a spawn or a duplicate
-    /// answers with it.
+    /// answers with it, placed with the host that sent it.
     fn on_session_updated(
         &mut self,
-        session: &SessionSnapshot,
+        reply: HostedSession<'_>,
         moved: bool,
         request_id: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let session = reply.session;
         for view in self.pane_views(Some(&session.id)) {
             view.update(cx, |pane, _| {
                 pane.update_session(session, self.sidebar.session_agents(&session.id));
@@ -4341,8 +4370,8 @@ impl RootView {
         if moved {
             self.apply_session_pane_fonts(&session.id, own_change, cx);
         }
-        self.place_duplicate(request_id, session, window, cx);
-        self.place_spawn(request_id, session, window, cx);
+        self.place_duplicate(request_id, reply, window, cx);
+        self.place_spawn(request_id, reply, window, cx);
         // A shell spawned after the session list, or moved to a new folder by
         // its own cwd report, reveals a folder only its snapshot names.
         self.scan_unseen_cwd_paths();

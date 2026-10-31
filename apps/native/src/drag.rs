@@ -820,11 +820,13 @@ pub fn leaf_pill_drop(
     if !pill_takes_leaf(tabs, pill) {
         return None;
     }
+    let local = [(crate::target::HostKey::Local, sessions)];
+    let hosted = tabs::HostedSession::local(session);
     let Some((src_tab, src_pane)) = leaf_source_pane(tabs, session_id) else {
-        return match tabs.place_in(pill, session, sessions) {
+        return match tabs.place_in(pill, hosted, &local) {
             Placement::NewTab => None,
             placement @ Placement::Pane { .. } => Some(LeafDrop::Send(Box::new(
-                placement.message(session_id, request_id),
+                placement.message(hosted.host, session_id, request_id),
             ))),
         };
     };
@@ -835,7 +837,7 @@ pub fn leaf_pill_drop(
     {
         return None;
     }
-    let (dst_pane, edge) = match tabs::pane_target_for_session(grid, sessions, session)? {
+    let (dst_pane, edge) = match tabs::pane_target_for_session(grid, &local, hosted)? {
         PaneTarget::Replace { pane_id } => (pane_id, PaneDropEdge::Replace),
         PaneTarget::Split(split) => (split.pane_id, edge_of_split(split.direction, split.place)),
     };
