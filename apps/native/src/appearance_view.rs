@@ -1,6 +1,6 @@
 //! The appearance editor: one modal for a session, a repo, a workspace or
 //! the app level, whose rows (accent and frame, shell background, font
-//! family, size and bold) apply at once and each show the value the level
+//! family, size and weight) apply at once and each show the value the level
 //! resolves to and the level it comes from. At the app level its rows are
 //! the Settings modal's Appearance tab ([`crate::settings_view`]), which
 //! adds the font the interface draws in.
@@ -28,8 +28,8 @@ use crate::section::field_column;
 use crate::session_menu::{backdrop, dialog_button, dialog_look, muted_row};
 use crate::settings_view::SettingsControl;
 use crate::spawn_view::{
-    Look, checkbox_row, choice_button, close_button, dialog_card, dialog_footer, dialog_title_bar,
-    field_label, segmented,
+    Look, choice_button, close_button, dialog_card, dialog_footer, dialog_title_bar, field_label,
+    segmented,
 };
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
@@ -51,7 +51,9 @@ const BODY_PAD_X: f32 = 18.0;
 const BODY_PAD_Y: f32 = 16.0;
 const HEX_PLACEHOLDER: &str = "#rrggbb";
 const HEX_HINT: &str = "Use #RRGGBB";
-const BOLD_LABEL: &str = "Render terminal text in bold";
+/// What the terminal weight row's buttons say, in the order of
+/// [`fonts::TERMINAL_WEIGHTS`].
+const TERM_WEIGHT_LABELS: [&str; 4] = ["Regular", "Medium", "SemiBold", "Bold"];
 /// What the UI weight row's buttons say, in the order of [`fonts::UI_WEIGHTS`].
 const UI_WEIGHT_LABELS: [&str; 3] = ["Regular", "Medium", "SemiBold"];
 /// What a family no level sets draws with.
@@ -262,9 +264,13 @@ impl LevelView {
         )
     }
 
-    fn bold_hint(&self) -> String {
-        let field = &self.resolved.font_bold;
-        let weight = if field.value { "bold" } else { "normal" };
+    fn weight_hint(&self) -> String {
+        let field = &self.resolved.font_weight;
+        let weight = fonts::TERMINAL_WEIGHTS
+            .iter()
+            .zip(TERM_WEIGHT_LABELS)
+            .find_map(|(offered, label)| (*offered == field.value).then_some(label))
+            .unwrap_or(TERM_WEIGHT_LABELS[0]);
         format!("Resolved: {weight} from {}", self.source_name(field.source))
     }
 
@@ -272,7 +278,7 @@ impl LevelView {
         match row {
             "family" => Some(self.family_hint()),
             "size" => Some(self.size_hint()),
-            "bold" => Some(self.bold_hint()),
+            "weight" => Some(self.weight_hint()),
             _ => ColorRow::named(row).map(|row| self.color_hint(row)),
         }
     }
@@ -298,7 +304,7 @@ impl RootView {
     }
 
     /// The hint under row `row` (`accent`, `background`, `family`, `size`
-    /// or `bold`), while the editor is open.
+    /// or `weight`), while the editor is open.
     #[must_use]
     pub fn appearance_hint(&self, row: &str) -> Option<String> {
         let editor = self.appearance_editor.as_ref()?;
@@ -720,17 +726,12 @@ impl RootView {
         }
     }
 
-    /// Sets the level's bold to the opposite of what it resolves to.
-    fn toggle_appearance_bold(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self
-            .appearance_editor
-            .as_ref()
-            .and_then(|editor| self.level_view(&editor.level))
-        else {
-            return;
-        };
-        let change = AppearanceChange::font_bold(Some(!view.resolved.font_bold.value));
-        self.change_appearance(&change, cx);
+    /// Sets the level's terminal weight to the one at `place` of
+    /// [`fonts::TERMINAL_WEIGHTS`].
+    fn pick_term_weight(&mut self, place: u8, cx: &mut Context<Self>) {
+        if let Some(&weight) = fonts::TERMINAL_WEIGHTS.get(usize::from(place)) {
+            self.change_appearance(&AppearanceChange::font_weight(Some(weight)), cx);
+        }
     }
 
     /// The editor of a session, repo or workspace over a backdrop that takes
@@ -818,7 +819,7 @@ impl RootView {
             .w(px(COLUMN_WIDTH))
             .children(self.family_section(FontList::Terminal, view.family_hint(), focus, cx))
             .child(size_section(&view, reset, focus, cx))
-            .child(bold_section(&view, reset, focus, cx));
+            .child(term_weight_section(&view, reset, focus, cx));
         Some(div().flex().gap(px(16.0)).child(colours).child(font))
     }
 
@@ -1102,7 +1103,7 @@ fn reset_change(row: ResetRow) -> AppearanceChange {
     match row {
         ResetRow::Color(row) => row.change(None),
         ResetRow::Size => AppearanceChange::font_size(None),
-        ResetRow::Bold => AppearanceChange::font_bold(None),
+        ResetRow::TermWeight => AppearanceChange::font_weight(None),
     }
 }
 
@@ -1111,11 +1112,11 @@ fn can_reset(row: ResetRow, own: &AppearanceOverrides) -> bool {
     !reset_change(row).changes_nothing_in(own)
 }
 
-/// The reset row named `name` (`accent`, `background`, `size` or `bold`).
+/// The reset row named `name` (`accent`, `background`, `size` or `weight`).
 fn reset_row_named(name: &str) -> Option<ResetRow> {
     match name {
         "size" => Some(ResetRow::Size),
-        "bold" => Some(ResetRow::Bold),
+        "weight" => Some(ResetRow::TermWeight),
         _ => ColorRow::named(name).map(ResetRow::Color),
     }
 }
@@ -1150,7 +1151,7 @@ fn header_with_reset(
 
 impl RootView {
     /// Whether row `row`'s reset link (`accent`, `background`, `size` or
-    /// `bold`) acts: the editor's level sets the row's field.
+    /// `weight`) acts: the editor's level sets the row's field.
     #[must_use]
     pub fn appearance_can_reset(&self, row: &str) -> bool {
         let Some(view) = self
@@ -1538,7 +1539,7 @@ impl RootView {
             AppearanceStop::UiWeight(place) => self.pick_ui_weight(place, cx),
             AppearanceStop::SizeDown => self.step_appearance_size(-1.0, cx),
             AppearanceStop::SizeUp => self.step_appearance_size(1.0, cx),
-            AppearanceStop::Bold => self.toggle_appearance_bold(cx),
+            AppearanceStop::TermWeight(place) => self.pick_term_weight(place, cx),
             AppearanceStop::Close => self.close_appearance_editor(window, cx),
         }
     }
@@ -2056,39 +2057,62 @@ fn size_section(
         .child(hint_line("appearance-size-hint", view.size_hint(), &t))
 }
 
-/// The bold checkbox, ticked while the level resolves to bold.
-fn bold_section(
+/// The terminal weight row: one segment for each weight, the one the level
+/// resolves to marked.
+fn term_weight_section(
     view: &LevelView,
     reset: &'static str,
     focus: Option<AppearanceStop>,
     cx: &mut Context<RootView>,
 ) -> Div {
     let t = theme(cx);
-    let checkbox = checkbox_row(
-        crate::fonts::ui_text_size(cx),
-        crate::fonts::ui_weight_shift(cx),
-        AppearanceStop::Bold.selector(),
-        view.resolved.font_bold.value,
-        focus == Some(AppearanceStop::Bold),
-        BOLD_LABEL,
-        &theme(cx),
-    )
-    .on_click(click_stop(AppearanceStop::Bold, Aim::Stop, cx));
+    let offset = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
+    let chosen = view.resolved.font_weight.value;
+    let mut buttons = Vec::with_capacity(fonts::TERMINAL_WEIGHTS.len());
+    for (place, (weight, label)) in
+        (0..).zip(fonts::TERMINAL_WEIGHTS.into_iter().zip(TERM_WEIGHT_LABELS))
+    {
+        let stop = AppearanceStop::TermWeight(place);
+        let look = Look {
+            selected: weight == chosen,
+            focused: focus == Some(stop),
+            enabled: true,
+        };
+        let on_click = click_stop(stop, Aim::Stop, cx);
+        buttons.push(
+            choice_button(
+                offset,
+                shift,
+                stop.selector().to_owned(),
+                label,
+                look,
+                on_click,
+                &t,
+            )
+            .into_any_element(),
+        );
+    }
     div()
         .flex()
         .flex_col()
         .gap(px(7.0))
         .child(header_with_reset(
-            checkbox,
+            field_label(offset, shift, "Terminal weight", &t),
             ResetLink {
-                row: ResetRow::Bold,
+                row: ResetRow::TermWeight,
                 label: reset,
-                focused: focus == Some(AppearanceStop::Reset(ResetRow::Bold)),
+                focused: focus == Some(AppearanceStop::Reset(ResetRow::TermWeight)),
             },
             &view.own,
             cx,
         ))
-        .child(hint_line("appearance-bold-hint", view.bold_hint(), &t))
+        .child(segmented(buttons, &t))
+        .child(hint_line(
+            "appearance-term-weight-hint",
+            view.weight_hint(),
+            &t,
+        ))
 }
 
 /// Field stop `stop`'s text field in its frame, tagged `<selector>`. The

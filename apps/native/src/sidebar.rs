@@ -4322,7 +4322,7 @@ pub(crate) mod tests {
             terminal_font: FontSettings {
                 family: Some("JetBrains Mono".to_owned()),
                 size: 15.0,
-                bold: true,
+                weight: 700,
             },
             ui_font_family: Some("Inter".to_owned()),
             ui_text_size: 3,

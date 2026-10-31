@@ -135,7 +135,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] **(hard)** Shell integration (plain shells): OSC 133 A/B/C/D + OSC 633 E; gutter dot per command (ok / fail / unknown, exit code and duration tooltip), 1000-command cap — `components/shellIntegration.ts`
 - [x] Gutter-dot menu: exit and duration, copy command / output / both, re-run (types the command without Enter) — `ShellCommandMenu.tsx`
 - [x] Theme: fixed palette, ANSI colours contrast-adjusted against the background, white caret, blue selection — `utils/terminalTheme.ts`
-- [x] **(hard)** Fonts: Geist Mono preloaded; Fira Code / JetBrains Mono / Cascadia Code bundled; system fonts listed; bold toggle; size 8–32; applied live — `Terminal.tsx`, `utils/bundledFonts.ts` (native: P2.8 bundled the four families with italics (none for Fira Code); the P2.10 editor chooses the family from the bundled and system lists, and sets size and bold)
+- [x] **(hard)** Fonts: Geist Mono preloaded; Fira Code / JetBrains Mono / Cascadia Code bundled; system fonts listed; weight (Regular, Medium, SemiBold, Bold); size 8–32; applied live — `Terminal.tsx`, `utils/bundledFonts.ts` (native: P2.8 bundled the four families with italics (none for Fira Code); the P2.10 editor chooses the family from the bundled and system lists, and sets size and weight)
 - [x] Font size per app / repo / session (Ctrl+= / − / 0) / tab (Ctrl+Shift+= / −, tab menu) — `utils/fontSize.ts`
 - [x] Focus goes to the terminal after spawn and when a pop-out opens — `utils/autofocus.ts` (native: a pop-out's terminal or diff takes its window's keyboard when it opens, except a restored one, which leaves the keyboard in the main window)
 
@@ -166,7 +166,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [x] General: keep the machine awake (with status), default sidebar view, copy on select — `SettingsModal.tsx` (native: keep awake and copy on select in P4.2a; the default sidebar view comes with P4.9)
 - [x] Settings defaults: trusted default, Claude approval mode — `SettingsModal.tsx` (native: P4.2b; Spawn defaults holds only trusted launch, while the Claude page holds approval mode and provider)
 - [x] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`
-- [x] Appearance editor at app / repo-workspace / session level: accent colour, shell background (presets, 12 recent, custom), font family, size, bold, each showing its resolved value and source — `AppearanceEditor.tsx`, `utils/appearance.ts`
+- [x] Appearance editor at app / repo-workspace / session level: accent colour, shell background (presets, 12 recent, custom), font family, size, terminal weight, each showing its resolved value and source — `AppearanceEditor.tsx`, `utils/appearance.ts`
 - [x] Session accent drives the sidebar stripe, pane frame and focus colour — `SessionPane.tsx`, `utils/sessionColor.ts`
 
 ## Notifications & attention

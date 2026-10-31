@@ -2714,7 +2714,10 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
         "appearance-family-list",
         "appearance-size-down",
         "appearance-size-up",
-        "appearance-bold",
+        "appearance-term-weight-regular",
+        "appearance-term-weight-medium",
+        "appearance-term-weight-semibold",
+        "appearance-term-weight-bold",
     ];
     for stop in ring {
         h.keys("tab");
@@ -3084,18 +3087,33 @@ fn appearance_size_buttons_are_two_stops_and_enter_steps(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn appearance_bold_checkbox_toggles_with_space(cx: &mut TestAppContext) {
+fn appearance_term_weight_picks_with_space(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);
-    tab_to(&mut h, "appearance-bold");
+    tab_to(&mut h, "appearance-term-weight-semibold");
     h.keys("space");
-    assert_eq!(appearance_hint(&mut h, "bold"), "Resolved: bold from app");
+    assert_eq!(
+        appearance_hint(&mut h, "weight"),
+        "Resolved: SemiBold from app"
+    );
+    assert_eq!(saved_ui(&dir)["terminal_font"]["weight"], 600);
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-term-weight-semibold"),
+        "the pick keeps the keyboard on the button"
+    );
     h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("appearance-bold-reset"));
+    assert_eq!(settings_focus(&mut h), Some("appearance-term-weight-bold"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-term-weight-reset"),
+        "the reset link is a stop while the level sets the weight"
+    );
     h.keys("enter");
     assert_eq!(
-        appearance_hint(&mut h, "bold"),
-        "Resolved: normal from built-in"
+        appearance_hint(&mut h, "weight"),
+        "Resolved: Regular from built-in"
     );
 }
 
@@ -3167,14 +3185,14 @@ fn appearance_size_reset_hands_the_keyboard_to_the_stop_after_it(cx: &mut TestAp
     );
     assert_eq!(
         settings_focus(&mut h),
-        Some("appearance-bold"),
-        "the reset link is off now, so the keyboard moved on to bold"
+        Some("appearance-term-weight-regular"),
+        "the reset link is off now, so the keyboard moved on to the weight row"
     );
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
-        "the ring walks on from bold"
+        Some("appearance-term-weight-medium"),
+        "the ring walks on along the weight row"
     );
 }
 
@@ -3182,7 +3200,7 @@ fn appearance_size_reset_hands_the_keyboard_to_the_stop_after_it(cx: &mut TestAp
 fn a_click_on_an_appearance_control_moves_the_keyboard_there(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);
-    tab_to(&mut h, "appearance-bold");
+    tab_to(&mut h, "appearance-term-weight-bold");
     h.click_on("appearance-accent-preset-sky");
     assert_eq!(settings_focus(&mut h), Some("appearance-accent-presets"));
     h.keys("left space");
@@ -3192,9 +3210,9 @@ fn a_click_on_an_appearance_control_moves_the_keyboard_there(cx: &mut TestAppCon
         "the cursor stood on the clicked swatch: Left went to Periwinkle"
     );
     assert_eq!(
-        appearance_hint(&mut h, "bold"),
-        "Resolved: normal from built-in",
-        "Space was the swatch line's, not bold's"
+        appearance_hint(&mut h, "weight"),
+        "Resolved: Regular from built-in",
+        "Space was the swatch line's, not the weight button's"
     );
 
     h.click_on("appearance-family-option-Fira Code");

@@ -1915,22 +1915,18 @@ struct Metrics {
     cell_width: Pixels,
     line_height: Pixels,
     font_size: Pixels,
-    /// The font normal text draws in: the settings' family, at the bold
-    /// weight when the settings ask for it.
+    /// The font normal text draws in: the settings' family, at the settings'
+    /// weight.
     font: Font,
 }
 
-/// The font the terminal draws in: the settings' family, at the bold weight
-/// when the settings ask for it, with every ligature feature off. A ligature
-/// draws `->` as one substituted glyph, and the per-cell width lock then
-/// shifts every glyph after it one cell left.
-fn terminal_font(family: SharedString, bold: bool) -> Font {
+/// The font the terminal draws in: `family` at `weight`, with every ligature
+/// feature off. A ligature draws `->` as one substituted glyph, and the
+/// per-cell width lock then shifts every glyph after it one cell left. A
+/// family without a face at `weight` draws its nearest one.
+fn terminal_font(family: SharedString, weight: u16) -> Font {
     Font {
-        weight: if bold {
-            FontWeight::BOLD
-        } else {
-            FontWeight::NORMAL
-        },
+        weight: FontWeight(f32::from(weight)),
         features: FontFeatures(Arc::new(vec![
             ("calt".into(), 0),
             ("liga".into(), 0),
@@ -1941,7 +1937,7 @@ fn terminal_font(family: SharedString, bold: bool) -> Font {
 }
 
 fn metrics(window: &Window, family: SharedString, settings: &FontSettings) -> Metrics {
-    let font = terminal_font(family, settings.bold);
+    let font = terminal_font(family, settings.weight);
     let text = window.text_system();
     let font_id = text.resolve_font(&font);
     let font_size = px(settings.size);
@@ -2155,7 +2151,7 @@ fn text_run(span: &TextSpan, m: &Metrics) -> TextRun {
         len: span.text.len(),
         font: Font {
             weight: if span.flags.contains(Flags::BOLD) {
-                FontWeight::BOLD
+                FontWeight(m.font.weight.0.max(FontWeight::BOLD.0))
             } else {
                 m.font.weight
             },
@@ -2285,20 +2281,42 @@ mod tests {
 
     #[test]
     fn terminal_font_turns_off_ligatures() {
-        for bold in [false, true] {
-            let font = terminal_font(gpui::SharedString::from("Cascadia Mono"), bold);
+        for weight in crate::fonts::TERMINAL_WEIGHTS {
+            let font = terminal_font(gpui::SharedString::from("Cascadia Mono"), weight);
             let tags = font.features.tag_value_list();
             for tag in ["calt", "liga", "clig"] {
                 let value = tags.iter().find(|(t, _)| t == tag).map(|(_, v)| *v);
-                assert_eq!(value, Some(0), "{tag} off when bold={bold}, got {tags:?}");
+                assert_eq!(value, Some(0), "{tag} off at weight {weight}, got {tags:?}");
             }
-            let weight = if bold {
-                gpui::FontWeight::BOLD
-            } else {
-                gpui::FontWeight::NORMAL
-            };
-            assert_eq!(font.weight, weight, "bold={bold}");
+            assert_eq!(font.weight, gpui::FontWeight(f32::from(weight)));
         }
+    }
+
+    #[test]
+    fn bold_cells_draw_at_bold_or_the_heavier_base_weight() {
+        let span = |flags| crate::term::TextSpan {
+            row: 0,
+            col: 0,
+            text: "ab".to_owned(),
+            fg: Rgb { r: 0, g: 0, b: 0 },
+            underline_color: None,
+            flags,
+            cluster: false,
+        };
+        let drawn = |base: u16, flags| {
+            let m = super::Metrics {
+                cell_width: gpui::px(8.0),
+                line_height: gpui::px(16.0),
+                font_size: gpui::px(14.0),
+                font: terminal_font(gpui::SharedString::from("Geist Mono"), base),
+            };
+            super::text_run(&span(flags), &m).font.weight
+        };
+        assert_eq!(drawn(600, Flags::empty()), gpui::FontWeight(600.0));
+        assert_eq!(drawn(600, Flags::BOLD), gpui::FontWeight::BOLD);
+        assert_eq!(drawn(400, Flags::BOLD), gpui::FontWeight::BOLD);
+        assert_eq!(drawn(700, Flags::empty()), gpui::FontWeight::BOLD);
+        assert_eq!(drawn(700, Flags::BOLD), gpui::FontWeight::BOLD);
     }
 
     #[test]

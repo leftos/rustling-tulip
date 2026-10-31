@@ -432,7 +432,7 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 
   It applies to all UI text: the shell, every panel and dialog, modals, popovers, menus, toasts, the chat and summary panes and all four button sizes. Every fixed height that holds one line of text grows by the same amount, two-line rows by twice it; `min_h` floors, panel sizes and `dashboard_view`'s `ROW_MIN_H` stay. Terminal text, the viewer and diff gutters, a viewer tab's text and rendered Markdown, and code blocks in a chat keep their own sizes. A chat answer's headings, task boxes and list markers follow the offset; a tick in a fixed box stays 11 px.
 
-  The UI weight (`native-ui.json`'s `ui_font_weight`: 400, 500 or 600) shifts every UI weight by the same step, capped at 700, through `fonts::ui_weight`, and the roots that set the UI family set the shifted Regular, so unweighted body text moves too. Text inputs, the terminal, all mono text (`fonts::mono_weight`, since the bundled mono faces are 400 and 700 only), rendered Markdown's bold and the Themes miniature stay as they are.
+  The UI weight (`native-ui.json`'s `ui_font_weight`: 400, 500 or 600) shifts every UI weight by the same step, capped at 700, through `fonts::ui_weight`, and the roots that set the UI family set the shifted Regular, so unweighted body text moves too. Text inputs, the terminal, all mono text (`fonts::mono_weight`, always Regular, since Cascadia Code has no static Medium), rendered Markdown's bold and the Themes miniature stay as they are.
 
   Geist Mono, Fira Code, JetBrains Mono and Cascadia Code are bundled for terminals, and Inter, Geist and Schibsted Grotesk at 400 to 700 for the interface (OFL, `assets/fonts/`); a family resolves against the installed list, falling back to Geist Mono, Cascadia Mono, Consolas, then Courier New.
 - **Status glyphs**: a session's status draws as a shape as well as a colour (`status_glyph.rs`, tinted SVG layers in `assets/icons/status-*.svg`) in sidebar leaves, pane headers, Needs You rows, the tab bar's busy pill and the footer.
@@ -529,7 +529,9 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 - **Busy exclusion**: a session marked "Don't count as busy" (the daemon's `busy_excluded` flag) leaves the busy count of the window title and tab pill in the "Busy / total" mode but stays in the total, and leaves the footer's "working" count; the footer's "need you" still counts it when it waits on the owner. The leaf's `!` attention badge and the repo, workspace and tab-container `!` roll-ups skip it, while Needs You still lists it (asking and ended) and OS notifications and spoken alerts still fire.
 
   The leaf shows a 12 px muted crossed-out pulse in the `!` slot, tooltip "Not counted as busy" (`tabs.rs` `tab_session_counts`, `sidebar.rs` `shows_attention`). Restart and Resume keep the flag (`DuplicateSession.carry_busy_excluded: true`); Duplicate starts the copy counted. The `unseen` mark and the status glyph are unchanged.
-- **Appearance levels**: accent, shell background, font family, size and bold resolve session → repo/workspace → app → built-in, each shown with its source. Font size also has a per-tab override (Ctrl+Shift+= / −) above the session level (Ctrl+= / −); Ctrl+0 clears both.
+- **Appearance levels**: accent, shell background, font family, size and terminal weight (Regular, Medium, SemiBold or Bold: 400, 500, 600 or 700) resolve session → repo/workspace → app → built-in, each shown with its source. Bold terminal cells draw at 700, or at the base weight when that is 700; a family missing a weight draws the nearest one it has, and italics stay at 400 and 700.
+
+  The weight is `terminal_font.weight` in `native-ui.json` (a stored `"bold": true` with no weight loads as 700, any other value as 400 with a warning) and `AppearanceOverrides.terminal_font_weight` on the wire (an unoffered value normalizes to unset; a stored `terminal_font_bold` with no weight reads as 700 for true and 400 for false from that level; setting or resetting the weight clears that level's `terminal_font_bold`, which the client never writes). Font size also has a per-tab override (Ctrl+Shift+= / −) above the session level (Ctrl+= / −); Ctrl+0 clears both.
 
 ## Chat and summary panes
 
@@ -775,7 +777,7 @@ Quitting closes the pop-outs with the app after saving the open set, and the exi
 
 Settings → Appearance and the appearance editor share one set of keyboard stops. Tab and Shift-Tab leave the hex and filter fields for the next or previous stop, as the Worktrees path field does, rather than staying inside the field.
 
-Stops run in reading order, column 1 then column 2: per colour section (Accent, then Background) the preset swatch line, the recent swatch line (only when recents exist), the hex field, Apply (while enabled) and the reset link (while enabled); then the font filter and the family list; size −, size + and the size reset link; the bold checkbox and the bold reset link; then Close, in the session, repo and workspace editor only.
+Stops run in reading order, column 1 then column 2: per colour section (Accent, then Background) the preset swatch line, the recent swatch line (only when recents exist), the hex field, Apply (while enabled) and the reset link (while enabled); then the font filter and the family list; size −, size + and the size reset link; the four "Terminal weight" buttons (Regular, Medium, SemiBold, Bold) and the weight reset link (while the level sets a weight); then Close, in the session, repo and workspace editor only.
 
 Disabled stops are skipped. The family row has no reset link; the list's Reset row covers it.
 

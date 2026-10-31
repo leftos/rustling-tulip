@@ -171,7 +171,7 @@ fn session_menu_opens_the_editor_with_resolved_hints(cx: &mut TestAppContext) {
         "Resolved: default cascade from built-in"
     );
     assert_eq!(hint(&mut h, "size"), "Resolved: 13px from built-in");
-    assert_eq!(hint(&mut h, "bold"), "Resolved: normal from built-in");
+    assert_eq!(hint(&mut h, "weight"), "Resolved: Regular from built-in");
     assert_eq!(
         h.root(|root, _| root.appearance_reset_label()),
         Some("Inherit")
@@ -239,12 +239,12 @@ fn a_settings_appearance_stop_does_not_follow_into_the_session_editor(cx: &mut T
     h.keys("ctrl-,");
     h.click_on("settings-tab-appearance");
     for _ in 0..30 {
-        if settings_focus(&mut h) == Some("appearance-bold") {
+        if settings_focus(&mut h) == Some("appearance-term-weight-bold") {
             break;
         }
         h.keys("tab");
     }
-    assert_eq!(settings_focus(&mut h), Some("appearance-bold"));
+    assert_eq!(settings_focus(&mut h), Some("appearance-term-weight-bold"));
     h.keys("escape");
     assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
 
@@ -385,7 +385,7 @@ fn editor_click_then_tab_continues_from_the_clicked_stop(cx: &mut TestAppContext
     let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
     let mut h = focused(cx, &dir, &fixture);
     open_session_editor(&mut h, "s1");
-    tab_to(&mut h, "appearance-bold");
+    tab_to(&mut h, "appearance-term-weight-bold");
 
     h.click_on("appearance-background-preset-ink");
     assert_eq!(
@@ -466,9 +466,12 @@ fn escape_in_editor_with_a_stop_focused_still_closes(cx: &mut TestAppContext) {
     let mut h = focused(cx, &dir, &fixture);
 
     open_session_editor(&mut h, "s1");
-    tab_to(&mut h, "appearance-bold");
+    tab_to(&mut h, "appearance-term-weight-bold");
     h.keys("escape");
-    assert!(editor_title(&mut h).is_none(), "Esc on the bold checkbox");
+    assert!(
+        editor_title(&mut h).is_none(),
+        "Esc on a terminal weight button"
+    );
 
     open_session_editor(&mut h, "s1");
     assert_eq!(settings_focus(&mut h), None, "closing cleared the stop");
@@ -748,13 +751,13 @@ fn container_changes_before_the_echo_build_on_each_other(cx: &mut TestAppContext
         "Resolved: #f07a62 from built-in",
         "once echoed, the stored overrides lead again"
     );
-    h.click_on("appearance-bold");
+    h.click_on("appearance-term-weight-bold");
     assert_eq!(
         container_appearances(&h.sent()),
         [(
             "repo r1".to_owned(),
             AppearanceOverrides {
-                terminal_font_bold: Some(true),
+                terminal_font_weight: Some(700),
                 ..AppearanceOverrides::default()
             }
         )]
@@ -834,31 +837,33 @@ fn font_size_steppers_clamp(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn bold_toggle_and_reset(cx: &mut TestAppContext) {
+fn term_weight_pick_and_reset(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
     let mut h = focused(cx, &dir, &fixture);
     open_session_editor(&mut h, "s1");
 
-    let can_reset = |h: &mut Harness<'_>| h.root(|root, _| root.appearance_can_reset("bold"));
+    let can_reset = |h: &mut Harness<'_>| h.root(|root, _| root.appearance_can_reset("weight"));
     assert!(!can_reset(&mut h), "nothing set here to reset");
-    h.click_on("appearance-bold");
-    assert_eq!(hint(&mut h, "bold"), "Resolved: bold from session");
+    h.click_on("appearance-term-weight-medium");
+    assert_eq!(hint(&mut h, "weight"), "Resolved: Medium from session");
     assert!(can_reset(&mut h));
-    h.click_on("appearance-bold");
-    h.click_on("appearance-bold-reset");
-    h.click_on("appearance-bold-reset");
+    h.click_on("appearance-term-weight-reset");
+    h.click_on("appearance-term-weight-reset");
 
-    let bold: Vec<Option<bool>> = session_appearances(&h.sent(), "s1")
-        .iter()
-        .map(|a| a.terminal_font_bold)
-        .collect();
+    let sent = session_appearances(&h.sent(), "s1");
+    let weights: Vec<Option<u16>> = sent.iter().map(|a| a.terminal_font_weight).collect();
     assert_eq!(
-        bold,
-        [Some(true), Some(false), None],
-        "on, off, cleared; a second reset has nothing to clear"
+        weights,
+        [Some(500), None],
+        "Medium, then cleared; a second reset has nothing to clear"
     );
-    assert_eq!(hint(&mut h, "bold"), "Resolved: normal from built-in");
+    assert!(
+        sent.iter().all(|a| a.terminal_font_bold.is_none()),
+        "the old bold switch is never set: {sent:?}"
+    );
+    assert_eq!(hint(&mut h, "weight"), "Resolved: Regular from built-in");
+    assert!(!can_reset(&mut h), "the reset cleared the level's weight");
 }
 
 #[gpui::test]
@@ -926,7 +931,7 @@ fn ctrl_comma_opens_settings_and_app_level_changes_persist_locally_without_a_mes
 
     h.click_on("appearance-accent-preset-sky");
     h.click_on("appearance-size-up");
-    h.click_on("appearance-bold");
+    h.click_on("appearance-term-weight-semibold");
 
     assert_eq!(appearance_sends(&h.sent()), 0, "the app level stays here");
     assert_eq!(
@@ -936,12 +941,12 @@ fn ctrl_comma_opens_settings_and_app_level_changes_persist_locally_without_a_mes
     );
     assert_eq!(hint(&mut h, "accent"), "Resolved: #8fd3e8 from current");
     assert_eq!(hint(&mut h, "size"), "Resolved: 14px from app");
-    assert_eq!(hint(&mut h, "bold"), "Resolved: bold from app");
+    assert_eq!(hint(&mut h, "weight"), "Resolved: SemiBold from app");
     let saved = saved_ui(&dir);
     assert_eq!(saved["app_appearance"]["accent_color"], "#8fd3e8");
     assert_eq!(saved["app_appearance"]["terminal_frame_color"], "#8fd3e8");
     assert_eq!(saved["terminal_font"]["size"], 14.0);
-    assert_eq!(saved["terminal_font"]["bold"], true);
+    assert_eq!(saved["terminal_font"]["weight"], 600);
 
     h.click_on("appearance-size-reset");
     h.click_on("appearance-accent-reset");

@@ -31,9 +31,23 @@ pub const BUNDLED_FAMILIES: [&str; 4] =
 /// Tried in order when the requested family is not installed.
 const FALLBACK_CHAIN: [&str; 4] = ["Geist Mono", "Cascadia Mono", "Consolas", "Courier New"];
 
-/// A bundled face and the style it is.
+/// A bundled face: its family, the weight its `OS/2` table declares and
+/// whether it is italic.
 struct Face {
     data: &'static [u8],
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the tests check each face's family, weight and style against it"
+        )
+    )]
+    family: &'static str,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the tests check each face's weight against it")
+    )]
+    weight: u16,
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the tests check each face's style against it")
@@ -41,60 +55,133 @@ struct Face {
     italic: bool,
 }
 
-const fn upright(data: &'static [u8]) -> Face {
+const fn upright(family: &'static str, weight: u16, data: &'static [u8]) -> Face {
     Face {
         data,
+        family,
+        weight,
         italic: false,
     }
 }
 
-const fn italic(data: &'static [u8]) -> Face {
-    Face { data, italic: true }
+const fn italic(family: &'static str, weight: u16, data: &'static [u8]) -> Face {
+    Face {
+        data,
+        family,
+        weight,
+        italic: true,
+    }
 }
 
-/// The bundled faces: Regular and Bold of each family, plus Italic and Bold
-/// Italic where the family has them (Fira Code has none).
-const BUNDLED_FILES: [Face; 14] = [
-    upright(include_bytes!(
-        "../assets/fonts/GeistMono/GeistMono-Regular.ttf"
-    )),
-    upright(include_bytes!(
-        "../assets/fonts/GeistMono/GeistMono-Bold.ttf"
-    )),
-    italic(include_bytes!(
-        "../assets/fonts/GeistMono/GeistMono-Italic.ttf"
-    )),
-    italic(include_bytes!(
-        "../assets/fonts/GeistMono/GeistMono-BoldItalic.ttf"
-    )),
-    upright(include_bytes!(
-        "../assets/fonts/FiraCode/FiraCode-Regular.ttf"
-    )),
-    upright(include_bytes!("../assets/fonts/FiraCode/FiraCode-Bold.ttf")),
-    upright(include_bytes!(
-        "../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"
-    )),
-    upright(include_bytes!(
-        "../assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"
-    )),
-    italic(include_bytes!(
-        "../assets/fonts/JetBrainsMono/JetBrainsMono-Italic.ttf"
-    )),
-    italic(include_bytes!(
-        "../assets/fonts/JetBrainsMono/JetBrainsMono-BoldItalic.ttf"
-    )),
-    upright(include_bytes!(
-        "../assets/fonts/CascadiaCode/CascadiaCode-Regular.ttf"
-    )),
-    upright(include_bytes!(
-        "../assets/fonts/CascadiaCode/CascadiaCode-Bold.ttf"
-    )),
-    italic(include_bytes!(
-        "../assets/fonts/CascadiaCode/CascadiaCode-Italic.ttf"
-    )),
-    italic(include_bytes!(
-        "../assets/fonts/CascadiaCode/CascadiaCode-BoldItalic.ttf"
-    )),
+/// The bundled faces: Regular, Medium, `SemiBold` and Bold of each family
+/// (Cascadia Code has no static Medium), plus Italic and Bold Italic where
+/// the family has them (Fira Code has none).
+const BUNDLED_FILES: [Face; 21] = [
+    upright(
+        "Geist Mono",
+        400,
+        include_bytes!("../assets/fonts/GeistMono/GeistMono-Regular.ttf"),
+    ),
+    upright(
+        "Geist Mono",
+        500,
+        include_bytes!("../assets/fonts/GeistMono/GeistMono-Medium.ttf"),
+    ),
+    upright(
+        "Geist Mono",
+        600,
+        include_bytes!("../assets/fonts/GeistMono/GeistMono-SemiBold.ttf"),
+    ),
+    upright(
+        "Geist Mono",
+        700,
+        include_bytes!("../assets/fonts/GeistMono/GeistMono-Bold.ttf"),
+    ),
+    italic(
+        "Geist Mono",
+        400,
+        include_bytes!("../assets/fonts/GeistMono/GeistMono-Italic.ttf"),
+    ),
+    italic(
+        "Geist Mono",
+        700,
+        include_bytes!("../assets/fonts/GeistMono/GeistMono-BoldItalic.ttf"),
+    ),
+    upright(
+        "Fira Code",
+        400,
+        include_bytes!("../assets/fonts/FiraCode/FiraCode-Regular.ttf"),
+    ),
+    upright(
+        "Fira Code",
+        500,
+        include_bytes!("../assets/fonts/FiraCode/FiraCode-Medium.ttf"),
+    ),
+    upright(
+        "Fira Code",
+        600,
+        include_bytes!("../assets/fonts/FiraCode/FiraCode-SemiBold.ttf"),
+    ),
+    upright(
+        "Fira Code",
+        700,
+        include_bytes!("../assets/fonts/FiraCode/FiraCode-Bold.ttf"),
+    ),
+    upright(
+        "JetBrains Mono",
+        400,
+        include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"),
+    ),
+    upright(
+        "JetBrains Mono",
+        500,
+        include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-Medium.ttf"),
+    ),
+    upright(
+        "JetBrains Mono",
+        600,
+        include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-SemiBold.ttf"),
+    ),
+    upright(
+        "JetBrains Mono",
+        700,
+        include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"),
+    ),
+    italic(
+        "JetBrains Mono",
+        400,
+        include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-Italic.ttf"),
+    ),
+    italic(
+        "JetBrains Mono",
+        700,
+        include_bytes!("../assets/fonts/JetBrainsMono/JetBrainsMono-BoldItalic.ttf"),
+    ),
+    upright(
+        "Cascadia Code",
+        400,
+        include_bytes!("../assets/fonts/CascadiaCode/CascadiaCode-Regular.ttf"),
+    ),
+    upright(
+        "Cascadia Code",
+        600,
+        include_bytes!("../assets/fonts/CascadiaCode/CascadiaCode-SemiBold.ttf"),
+    ),
+    upright(
+        "Cascadia Code",
+        700,
+        include_bytes!("../assets/fonts/CascadiaCode/CascadiaCode-Bold.ttf"),
+    ),
+    italic(
+        "Cascadia Code",
+        400,
+        include_bytes!("../assets/fonts/CascadiaCode/CascadiaCode-Italic.ttf"),
+    ),
+    italic(
+        "Cascadia Code",
+        700,
+        include_bytes!("../assets/fonts/CascadiaCode/CascadiaCode-BoldItalic.ttf"),
+    ),
 ];
 
 /// A bundled UI face, its family and the weight its `OS/2` table declares.
@@ -276,8 +363,10 @@ pub fn set_ui_weight(weight: u16, cx: &mut App) {
     });
 }
 
-/// The weight mono text draws at: the bundled mono faces are Regular and Bold
-/// only, so a shift would draw all source code Bold.
+/// The weight mono text draws at, which the UI weight shift leaves alone: the
+/// bundled mono faces are regular, medium, semibold and bold upright, but
+/// Cascadia Code has no medium, so a shift would not draw every mono family
+/// at the weight it names.
 #[must_use]
 pub const fn mono_weight() -> FontWeight {
     FontWeight::NORMAL
@@ -354,16 +443,24 @@ pub fn resolve_ui_family(
         })
 }
 
+/// The weights the user may draw normal terminal text at, lightest first.
+pub const TERMINAL_WEIGHTS: [u16; 4] = protocol::TERMINAL_FONT_WEIGHTS;
+/// The weight normal terminal text draws at when no level picked one.
+pub const DEFAULT_TERMINAL_WEIGHT: u16 = TERMINAL_WEIGHTS[0];
+/// The weight a stored bold switch stands for.
+pub const BOLD_TERMINAL_WEIGHT: u16 = 700;
+
 /// How a terminal pane draws its text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "StoredFontSettings")]
 pub struct FontSettings {
     /// The family asked for; `None` is [`DEFAULT_FAMILY`].
     pub family: Option<String>,
     /// The size in pixels, a whole number from [`MIN_SIZE`] to [`MAX_SIZE`].
     pub size: f32,
-    /// Draws normal text at the bold weight; bold cells stay bold.
-    pub bold: bool,
+    /// The weight normal text draws at, one of [`TERMINAL_WEIGHTS`]; bold
+    /// cells draw at least Bold.
+    pub weight: u16,
 }
 
 impl Default for FontSettings {
@@ -371,8 +468,57 @@ impl Default for FontSettings {
         Self {
             family: None,
             size: DEFAULT_SIZE,
+            weight: DEFAULT_TERMINAL_WEIGHT,
+        }
+    }
+}
+
+/// [`FontSettings`] as `native-ui.json` holds it: a file from before the
+/// weight setting has `bold` instead, which reads as Bold.
+#[derive(Deserialize)]
+#[serde(default)]
+struct StoredFontSettings {
+    family: Option<String>,
+    size: f32,
+    weight: Option<u16>,
+    bold: bool,
+}
+
+impl Default for StoredFontSettings {
+    fn default() -> Self {
+        Self {
+            family: None,
+            size: DEFAULT_SIZE,
+            weight: None,
             bold: false,
         }
+    }
+}
+
+impl From<StoredFontSettings> for FontSettings {
+    fn from(stored: StoredFontSettings) -> Self {
+        let weight = match (stored.weight, stored.bold) {
+            (Some(weight), _) => offered_terminal_weight(weight),
+            (None, true) => BOLD_TERMINAL_WEIGHT,
+            (None, false) => DEFAULT_TERMINAL_WEIGHT,
+        };
+        Self {
+            family: stored.family,
+            size: stored.size,
+            weight,
+        }
+    }
+}
+
+/// `weight` when it is one of [`TERMINAL_WEIGHTS`], else
+/// [`DEFAULT_TERMINAL_WEIGHT`].
+#[must_use]
+pub fn offered_terminal_weight(weight: u16) -> u16 {
+    if TERMINAL_WEIGHTS.contains(&weight) {
+        weight
+    } else {
+        tracing::warn!("terminal font weight {weight} is not offered; drawing at Regular");
+        DEFAULT_TERMINAL_WEIGHT
     }
 }
 
@@ -758,11 +904,12 @@ mod tests {
             terminal_font: FontSettings {
                 family: Some("Fira Code".to_owned()),
                 size: 16.0,
-                bold: true,
+                weight: 600,
             },
             ..UiState::default()
         };
         let json = serde_json::to_string(&state).expect("serialize");
+        assert!(!json.contains("bold"), "only the weight is written: {json}");
         let back: UiState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, state);
 
@@ -776,7 +923,35 @@ mod tests {
         let partial: UiState = serde_json::from_str(r#"{ "terminal_font": { "size": 20.0 } }"#)
             .expect("a font with only its size");
         assert_eq!(partial.terminal_font.family, None);
-        assert!(!partial.terminal_font.bold);
+        assert_eq!(partial.terminal_font.weight, 400);
+    }
+
+    #[test]
+    fn a_stored_bold_reads_as_bold_and_an_unoffered_weight_as_regular() {
+        let load = |json: &str| -> u16 {
+            serde_json::from_str::<FontSettings>(json)
+                .expect("a terminal font")
+                .weight
+        };
+        assert_eq!(
+            load(r#"{ "bold": true }"#),
+            700,
+            "a file from before weights"
+        );
+        assert_eq!(load(r#"{ "bold": false }"#), 400);
+        assert_eq!(
+            load(r#"{ "bold": true, "weight": 500 }"#),
+            500,
+            "the weight wins"
+        );
+        assert_eq!(load(r#"{ "weight": 600 }"#), 600);
+        for odd in [0, 300, 450, 800] {
+            assert_eq!(
+                load(&format!(r#"{{ "weight": {odd} }}"#)),
+                400,
+                "weight {odd}"
+            );
+        }
     }
 
     #[test]
@@ -847,6 +1022,32 @@ mod tests {
     fn bundled_faces_carry_their_italic_style() {
         for (i, face) in BUNDLED_FILES.iter().enumerate() {
             assert_eq!(os2_italic(face.data), face.italic, "face {i}");
+        }
+    }
+
+    #[test]
+    fn bundled_faces_carry_their_family_and_weight() {
+        for (i, face) in BUNDLED_FILES.iter().enumerate() {
+            assert_eq!(os2_weight(face.data), face.weight, "face {i}");
+            let names = name_table_families(face.data);
+            assert!(
+                names.iter().any(|name| name == face.family),
+                "face {i} names itself {}: {names:?}",
+                face.family
+            );
+        }
+        for family in BUNDLED_FAMILIES {
+            let upright: Vec<u16> = BUNDLED_FILES
+                .iter()
+                .filter(|face| face.family == family && !face.italic)
+                .map(|face| face.weight)
+                .collect();
+            let expected: &[u16] = if family == "Cascadia Code" {
+                &[400, 600, 700]
+            } else {
+                &[400, 500, 600, 700]
+            };
+            assert_eq!(upright, expected, "{family}'s upright faces");
         }
     }
 

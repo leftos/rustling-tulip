@@ -1321,28 +1321,29 @@ fn cell_width_follows_the_app_font_size(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn bold_setting_is_applied(cx: &mut TestAppContext) {
+fn weight_setting_is_applied(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, session("s1").build());
-    let bold = |h: &mut Harness<'_>| h.root(|root, cx| root.pane_font("p1", cx).map(|f| f.bold));
-    assert_eq!(bold(&mut h), Some(false), "normal weight by default");
+    let weight =
+        |h: &mut Harness<'_>| h.root(|root, cx| root.pane_font("p1", cx).map(|f| f.weight));
+    assert_eq!(weight(&mut h), Some(400), "Regular by default");
 
     set_app_font(
         &mut h,
         FontSettings {
-            bold: true,
+            weight: 600,
             ..FontSettings::default()
         },
     );
 
-    assert_eq!(bold(&mut h), Some(true), "the open pane draws bold");
+    assert_eq!(weight(&mut h), Some(600), "the open pane draws SemiBold");
     let saved: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("native-ui.json")).expect("native-ui.json"),
     )
     .expect("native-ui.json is JSON");
     assert_eq!(
-        saved["terminal_font"]["bold"],
-        serde_json::Value::Bool(true),
+        saved["terminal_font"]["weight"],
+        serde_json::Value::from(600),
         "the app default is saved"
     );
 }

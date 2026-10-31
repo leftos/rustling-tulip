@@ -38,7 +38,7 @@ pub(crate) enum SwatchLine {
 pub(crate) enum ResetRow {
     Color(ColorRow),
     Size,
-    Bold,
+    TermWeight,
 }
 
 /// A control of the Appearance rows that Tab reaches.
@@ -67,7 +67,9 @@ pub(crate) enum AppearanceStop {
     UiWeight(u8),
     SizeDown,
     SizeUp,
-    Bold,
+    /// The terminal weight button at this place of
+    /// [`crate::fonts::TERMINAL_WEIGHTS`].
+    TermWeight(u8),
     /// The session, repo or workspace editor's Close.
     Close,
 }
@@ -92,7 +94,7 @@ impl AppearanceStop {
             Self::Reset(ResetRow::Color(ColorRow::Accent)) => "appearance-accent-reset",
             Self::Reset(ResetRow::Color(ColorRow::Background)) => "appearance-background-reset",
             Self::Reset(ResetRow::Size) => "appearance-size-reset",
-            Self::Reset(ResetRow::Bold) => "appearance-bold-reset",
+            Self::Reset(ResetRow::TermWeight) => "appearance-term-weight-reset",
             Self::FamilyFilter => "appearance-family-filter",
             Self::FamilyList => "appearance-family-list",
             Self::UiFamilyFilter => "appearance-ui-family-filter",
@@ -104,7 +106,10 @@ impl AppearanceStop {
             Self::UiWeight(_) => "appearance-ui-weight-semibold",
             Self::SizeDown => "appearance-size-down",
             Self::SizeUp => "appearance-size-up",
-            Self::Bold => "appearance-bold",
+            Self::TermWeight(0) => "appearance-term-weight-regular",
+            Self::TermWeight(1) => "appearance-term-weight-medium",
+            Self::TermWeight(2) => "appearance-term-weight-semibold",
+            Self::TermWeight(_) => "appearance-term-weight-bold",
             Self::Close => "appearance-footer-close",
         }
     }
@@ -174,8 +179,8 @@ impl FontList {
 /// its recent line (`has_recent`), its hex field, Apply and its reset link;
 /// the UI font filter and list, the UI text size − and + and the UI weight
 /// buttons (`app_level`);
-/// then the font filter and list, size − and + and the size reset, the bold
-/// checkbox and its reset, and Close (`close`). Apply, the reset links and
+/// then the font filter and list, size − and + and the size reset, the
+/// terminal weight buttons and their reset, and Close (`close`). Apply, the reset links and
 /// the UI text size buttons are left out while `enabled` says they do
 /// nothing.
 pub(crate) fn stops(
@@ -216,8 +221,11 @@ pub(crate) fn stops(
         AppearanceStop::SizeDown,
         AppearanceStop::SizeUp,
         AppearanceStop::Reset(ResetRow::Size),
-        AppearanceStop::Bold,
-        AppearanceStop::Reset(ResetRow::Bold),
+        AppearanceStop::TermWeight(0),
+        AppearanceStop::TermWeight(1),
+        AppearanceStop::TermWeight(2),
+        AppearanceStop::TermWeight(3),
+        AppearanceStop::Reset(ResetRow::TermWeight),
     ]);
     if close {
         ring.push(AppearanceStop::Close);
@@ -422,7 +430,7 @@ mod tests {
     use crate::fonts::{BUNDLED_FAMILIES, BUNDLED_UI_FAMILIES};
 
     use AppearanceStop::{
-        Apply, Bold, Close, FamilyFilter, FamilyList, Hex, Reset, SizeDown, SizeUp, Swatches,
+        Apply, Close, FamilyFilter, FamilyList, Hex, Reset, SizeDown, SizeUp, Swatches, TermWeight,
         UiFamilyList, UiTextSizeDown, UiTextSizeUp, UiWeight,
     };
     use ColorRow::{Accent, Background};
@@ -535,8 +543,11 @@ mod tests {
             SizeDown,
             SizeUp,
             Reset(ResetRow::Size),
-            Bold,
-            Reset(ResetRow::Bold),
+            TermWeight(0),
+            TermWeight(1),
+            TermWeight(2),
+            TermWeight(3),
+            Reset(ResetRow::TermWeight),
         ];
         let mut without: Vec<AppearanceStop> = Vec::new();
         for row in ColorRow::ALL {
@@ -632,19 +643,22 @@ mod tests {
                 FamilyList,
                 SizeDown,
                 SizeUp,
-                Bold,
+                TermWeight(0),
+                TermWeight(1),
+                TermWeight(2),
+                TermWeight(3),
             ]
         );
         let all_off = stops(false, false, false, |_| false);
         assert!(
-            all_off.contains(&FamilyList) && all_off.contains(&Bold),
+            all_off.contains(&FamilyList) && all_off.contains(&TermWeight(3)),
             "only Apply and the reset links can be disabled"
         );
     }
 
     #[test]
     fn step_wraps_at_both_ends() {
-        let ring = [Swatches(Accent, Presets), Hex(Accent), Bold, Close];
+        let ring = [Swatches(Accent, Presets), Hex(Accent), TermWeight(3), Close];
         assert_eq!(
             step(&ring, None, false),
             Some(Swatches(Accent, Presets)),
@@ -655,7 +669,7 @@ mod tests {
             Some(Close),
             "Shift-Tab from no stop: the last"
         );
-        assert_eq!(step(&ring, Some(Hex(Accent)), false), Some(Bold));
+        assert_eq!(step(&ring, Some(Hex(Accent)), false), Some(TermWeight(3)));
         assert_eq!(
             step(&ring, Some(Hex(Accent)), true),
             Some(Swatches(Accent, Presets))
@@ -688,13 +702,14 @@ mod tests {
             Some(Swatches(Background, Presets)),
             "past the disabled reset link to the next enabled stop"
         );
-        let ring_without_bold_reset =
-            stops(false, false, false, |stop| stop != Reset(ResetRow::Bold));
+        let ring_without_weight_reset = stops(false, false, false, |stop| {
+            stop != Reset(ResetRow::TermWeight)
+        });
         assert_eq!(
             after_lost(
                 &stops(false, false, false, |_| true),
-                &ring_without_bold_reset,
-                Reset(ResetRow::Bold)
+                &ring_without_weight_reset,
+                Reset(ResetRow::TermWeight)
             ),
             Some(Swatches(Accent, Presets)),
             "the last stop lost: round to the first"
@@ -705,7 +720,7 @@ mod tests {
             "a ring that lost every stop"
         );
         assert_eq!(
-            after_lost(&[Bold], &[Bold], Close),
+            after_lost(&[TermWeight(3)], &[TermWeight(3)], Close),
             None,
             "a stop the order does not hold"
         );

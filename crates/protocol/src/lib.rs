@@ -354,13 +354,22 @@ pub struct AppearanceOverrides {
     /// Terminal font size in px.
     #[serde(default)]
     pub terminal_font_size: Option<u16>,
-    /// Terminal normal text weight override.
+    /// The older bold switch: `Some(true)` reads as weight 700 while
+    /// [`Self::terminal_font_weight`] is unset. Clients no longer set it.
     #[serde(default)]
     pub terminal_font_bold: Option<bool>,
+    /// The weight normal terminal text draws at, one of
+    /// [`TERMINAL_FONT_WEIGHTS`]. `None` inherits the next level's weight.
+    #[serde(default)]
+    pub terminal_font_weight: Option<u16>,
 }
 
 /// The terminal font sizes an appearance level may set, in px.
 pub const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<u16> = 8..=32;
+
+/// The terminal font weights an appearance level may set: Regular, Medium,
+/// `SemiBold` and Bold.
+pub const TERMINAL_FONT_WEIGHTS: [u16; 4] = [400, 500, 600, 700];
 
 /// Why an appearance cannot be stored.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -379,7 +388,8 @@ pub enum AppearanceError {
 
 impl AppearanceOverrides {
     /// This appearance as it is stored: colours lowercase `#rrggbb`, a
-    /// blank colour or family unset, the family trimmed.
+    /// blank colour or family unset, the family trimmed, a weight outside
+    /// [`TERMINAL_FONT_WEIGHTS`] unset.
     ///
     /// # Errors
     ///
@@ -408,6 +418,9 @@ impl AppearanceOverrides {
             }),
             terminal_font_size: self.terminal_font_size,
             terminal_font_bold: self.terminal_font_bold,
+            terminal_font_weight: self
+                .terminal_font_weight
+                .filter(|weight| TERMINAL_FONT_WEIGHTS.contains(weight)),
         })
     }
 }
@@ -5591,6 +5604,7 @@ mod tests {
             terminal_font_family: Some("   ".to_owned()),
             terminal_font_size: Some(8),
             terminal_font_bold: Some(true),
+            terminal_font_weight: Some(600),
         }
         .normalized()
         .expect("valid");
@@ -5601,6 +5615,7 @@ mod tests {
                 terminal_frame_color: Some("#0a0b0c".to_owned()),
                 terminal_font_size: Some(8),
                 terminal_font_bold: Some(true),
+                terminal_font_weight: Some(600),
                 ..AppearanceOverrides::default()
             },
             "blank colours and families are unset"
@@ -5614,6 +5629,48 @@ mod tests {
         .expect("valid");
         assert_eq!(family.terminal_font_family.as_deref(), Some("Fira Code"));
         assert_eq!(family.terminal_font_size, Some(32));
+    }
+
+    #[test]
+    fn appearance_weight_round_trips_and_an_unoffered_weight_is_unset() {
+        let medium = AppearanceOverrides {
+            terminal_font_weight: Some(500),
+            ..AppearanceOverrides::default()
+        };
+        let json = serde_json::to_string(&medium).expect("serializes");
+        let back: AppearanceOverrides = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(back, medium);
+        assert_eq!(back.normalized().expect("valid"), medium);
+
+        let older: AppearanceOverrides =
+            serde_json::from_str(r#"{"terminal_font_bold": true}"#).expect("decodes");
+        assert_eq!(
+            older.terminal_font_weight, None,
+            "a missing weight is unset"
+        );
+        assert_eq!(older.terminal_font_bold, Some(true));
+
+        for weight in [0, 300, 450, 800, 900] {
+            let odd = AppearanceOverrides {
+                terminal_font_weight: Some(weight),
+                ..AppearanceOverrides::default()
+            };
+            assert_eq!(
+                odd.normalized().expect("valid").terminal_font_weight,
+                None,
+                "weight {weight}"
+            );
+        }
+        for weight in TERMINAL_FONT_WEIGHTS {
+            let offered = AppearanceOverrides {
+                terminal_font_weight: Some(weight),
+                ..AppearanceOverrides::default()
+            };
+            assert_eq!(
+                offered.normalized().expect("valid").terminal_font_weight,
+                Some(weight)
+            );
+        }
     }
 
     #[test]

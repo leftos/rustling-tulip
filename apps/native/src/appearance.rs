@@ -192,7 +192,8 @@ pub struct Resolved {
     pub font_family: Field<Option<String>>,
     /// Clamped to [`fonts::MIN_SIZE`]..=[`fonts::MAX_SIZE`].
     pub font_size: Field<f32>,
-    pub font_bold: Field<bool>,
+    /// One of [`fonts::TERMINAL_WEIGHTS`].
+    pub font_weight: Field<u16>,
 }
 
 impl Resolved {
@@ -211,7 +212,7 @@ impl Resolved {
         FontSettings {
             family: self.font_family.value.clone(),
             size: self.font_size.value,
-            bold: self.font_bold.value,
+            weight: self.font_weight.value,
         }
     }
 }
@@ -233,7 +234,9 @@ pub enum AppearanceField {
     Frame,
     FontFamily,
     FontSize,
-    FontBold,
+    /// The weight, and with it the older bold switch, which a weight
+    /// change clears so a reset falls back to the next level.
+    FontWeight,
 }
 
 impl AppearanceField {
@@ -251,7 +254,10 @@ impl AppearanceField {
                 .terminal_font_family
                 .clone_from(&from.terminal_font_family),
             Self::FontSize => to.terminal_font_size = from.terminal_font_size,
-            Self::FontBold => to.terminal_font_bold = from.terminal_font_bold,
+            Self::FontWeight => {
+                to.terminal_font_weight = from.terminal_font_weight;
+                to.terminal_font_bold = from.terminal_font_bold;
+            }
         }
     }
 
@@ -263,7 +269,10 @@ impl AppearanceField {
             Self::Frame => a.terminal_frame_color == b.terminal_frame_color,
             Self::FontFamily => a.terminal_font_family == b.terminal_font_family,
             Self::FontSize => a.terminal_font_size == b.terminal_font_size,
-            Self::FontBold => a.terminal_font_bold == b.terminal_font_bold,
+            Self::FontWeight => {
+                a.terminal_font_weight == b.terminal_font_weight
+                    && a.terminal_font_bold == b.terminal_font_bold
+            }
         }
     }
 }
@@ -328,15 +337,16 @@ impl AppearanceChange {
         }
     }
 
-    /// Bold text set on or off, or cleared.
+    /// The weight of normal text set to `weight`, or cleared; either way
+    /// the older bold switch is cleared.
     #[must_use]
-    pub fn font_bold(bold: Option<bool>) -> Self {
+    pub fn font_weight(weight: Option<u16>) -> Self {
         Self {
             values: AppearanceOverrides {
-                terminal_font_bold: bold,
+                terminal_font_weight: weight,
                 ..AppearanceOverrides::default()
             },
-            fields: vec![AppearanceField::FontBold],
+            fields: vec![AppearanceField::FontWeight],
         }
     }
 
@@ -503,8 +513,8 @@ pub fn resolve_container(container: &AppearanceOverrides, app: AppLevel<'_>) -> 
 }
 
 /// Every field from the first of `levels` that sets it, else the app's,
-/// else the built-in one. An app size at the default and an app bold that
-/// is off set nothing, so they report the built-in level.
+/// else the built-in one. An app size and an app weight at their defaults
+/// set nothing, so they report the built-in level.
 fn resolve_levels(levels: &Levels<'_>, app: AppLevel<'_>) -> Resolved {
     let app_size = fonts::clamp_size(app.font.size);
     let size_source = if (app_size - fonts::DEFAULT_SIZE).abs() < f32::EPSILON {
@@ -512,10 +522,11 @@ fn resolve_levels(levels: &Levels<'_>, app: AppLevel<'_>) -> Resolved {
     } else {
         Source::App
     };
-    let bold_source = if app.font.bold {
-        Source::App
-    } else {
+    let app_weight = fonts::offered_terminal_weight(app.font.weight);
+    let weight_source = if app_weight == fonts::DEFAULT_TERMINAL_WEIGHT {
         Source::BuiltIn
+    } else {
+        Source::App
     };
     let family = app.font.family.clone().map_or_else(
         || Field::new(None, Source::BuiltIn),
@@ -549,9 +560,25 @@ fn resolve_levels(levels: &Levels<'_>, app: AppLevel<'_>) -> Resolved {
                 .map(|size| fonts::clamp_size(f32::from(size)))
         })
         .unwrap_or_else(|| Field::new(app_size, size_source)),
-        font_bold: first(levels, |a| a.terminal_font_bold)
-            .unwrap_or_else(|| Field::new(app.font.bold, bold_source)),
+        font_weight: first(levels, level_weight)
+            .unwrap_or_else(|| Field::new(app_weight, weight_source)),
     }
+}
+
+/// The weight level `own` sets: its weight when it is offered, else what
+/// its older bold switch stands for (on is Bold, off Regular).
+fn level_weight(own: &AppearanceOverrides) -> Option<u16> {
+    own.terminal_font_weight
+        .filter(|weight| fonts::TERMINAL_WEIGHTS.contains(weight))
+        .or_else(|| {
+            own.terminal_font_bold.map(|bold| {
+                if bold {
+                    fonts::BOLD_TERMINAL_WEIGHT
+                } else {
+                    fonts::DEFAULT_TERMINAL_WEIGHT
+                }
+            })
+        })
 }
 
 /// The first level `pick` finds a value in.
@@ -622,7 +649,8 @@ pub fn parse_hex_input(raw: &str) -> Option<String> {
 }
 
 /// The app level as overrides, so a change applies to it as to any other
-/// level: a size at the default and bold that is off set nothing.
+/// level: a size and a weight at their defaults set nothing, and the older
+/// bold switch is never written.
 #[must_use]
 pub fn app_overrides(app: AppLevel<'_>) -> AppearanceOverrides {
     let size = fonts::clamp_size(app.font.size);
@@ -633,12 +661,15 @@ pub fn app_overrides(app: AppLevel<'_>) -> AppearanceOverrides {
         terminal_frame_color: app.colors.terminal_frame_color.clone(),
         terminal_font_family: app.font.family.clone(),
         terminal_font_size: ((size - fonts::DEFAULT_SIZE).abs() >= f32::EPSILON).then_some(whole),
-        terminal_font_bold: app.font.bold.then_some(true),
+        terminal_font_bold: None,
+        terminal_font_weight: Some(fonts::offered_terminal_weight(app.font.weight))
+            .filter(|weight| *weight != fonts::DEFAULT_TERMINAL_WEIGHT),
     }
 }
 
 /// The app level's colours and font `overrides` stands for: an unset
-/// size is the default and an unset bold is off.
+/// size is the default, and an unset weight is Bold when the older bold
+/// switch is on, else Regular.
 #[must_use]
 pub fn app_from_overrides(overrides: &AppearanceOverrides) -> (AppColors, FontSettings) {
     let colors = AppColors {
@@ -651,7 +682,7 @@ pub fn app_from_overrides(overrides: &AppearanceOverrides) -> (AppColors, FontSe
         size: overrides
             .terminal_font_size
             .map_or(fonts::DEFAULT_SIZE, f32::from),
-        bold: overrides.terminal_font_bold.unwrap_or(false),
+        weight: level_weight(overrides).unwrap_or(fonts::DEFAULT_TERMINAL_WEIGHT),
     };
     (colors, font.normalized())
 }
@@ -802,14 +833,14 @@ mod tests {
     const SESSION_ALL: &str = "#111111";
     const REPO_ALL: &str = "#222222";
 
-    fn every_field(color: &str, family: &str, size: u16, bold: bool) -> serde_json::Value {
+    fn every_field(color: &str, family: &str, size: u16, weight: u16) -> serde_json::Value {
         json!({
             "accent_color": color,
             "terminal_background_color": color,
             "terminal_frame_color": color,
             "terminal_font_family": family,
             "terminal_font_size": size,
-            "terminal_font_bold": bold,
+            "terminal_font_weight": weight,
         })
     }
 
@@ -826,12 +857,12 @@ mod tests {
         let font = FontSettings {
             family: Some("App Mono".to_owned()),
             size: 13.0,
-            bold: false,
+            weight: 400,
         };
         let colors = app_colors("#333333");
         let both = resolve_levels(
-            every_field(SESSION_ALL, "Session Mono", 16, true),
-            every_field(REPO_ALL, "Repo Mono", 20, false),
+            every_field(SESSION_ALL, "Session Mono", 16, 500),
+            every_field(REPO_ALL, "Repo Mono", 20, 600),
             &colors,
             &font,
         );
@@ -841,11 +872,11 @@ mod tests {
             Field::new(Some("Session Mono".to_owned()), Source::Session)
         );
         assert_eq!(both.font_size, Field::new(16.0, Source::Session));
-        assert_eq!(both.font_bold, Field::new(true, Source::Session));
+        assert_eq!(both.font_weight, Field::new(500, Source::Session));
 
         let repo_only = resolve_levels(
             json!({}),
-            every_field(REPO_ALL, "Repo Mono", 20, true),
+            every_field(REPO_ALL, "Repo Mono", 20, 600),
             &colors,
             &font,
         );
@@ -858,7 +889,55 @@ mod tests {
             Field::new(Some("Repo Mono".to_owned()), Source::Container)
         );
         assert_eq!(repo_only.font_size, Field::new(20.0, Source::Container));
-        assert_eq!(repo_only.font_bold, Field::new(true, Source::Container));
+        assert_eq!(repo_only.font_weight, Field::new(600, Source::Container));
+    }
+
+    #[test]
+    fn an_older_bold_switch_reads_as_bold_until_a_weight_is_set() {
+        let font = FontSettings {
+            weight: 500,
+            ..FontSettings::default()
+        };
+        let colors = AppColors::default();
+        let weight = |session: serde_json::Value, repo: serde_json::Value| {
+            resolve_levels(session, repo, &colors, &font).font_weight
+        };
+        assert_eq!(
+            weight(json!({}), json!({"terminal_font_bold": true})),
+            Field::new(700, Source::Container),
+            "a bold-only level reads as Bold"
+        );
+        assert_eq!(
+            weight(
+                json!({"terminal_font_bold": false}),
+                json!({"terminal_font_bold": true})
+            ),
+            Field::new(400, Source::Session),
+            "a bold switch that is off reads as Regular"
+        );
+        assert_eq!(
+            weight(
+                json!({}),
+                json!({"terminal_font_bold": true, "terminal_font_weight": 600})
+            ),
+            Field::new(600, Source::Container),
+            "the weight wins over the switch"
+        );
+        assert_eq!(
+            weight(json!({"terminal_font_weight": 450}), json!({})),
+            Field::new(500, Source::App),
+            "an unoffered weight sets nothing"
+        );
+
+        let own = overrides(json!({"terminal_font_bold": true}));
+        let set = AppearanceChange::font_weight(Some(600)).apply_to(&own);
+        assert_eq!(set.terminal_font_weight, Some(600));
+        assert_eq!(
+            set.terminal_font_bold, None,
+            "a weight change clears the switch"
+        );
+        let reset = AppearanceChange::font_weight(None).apply_to(&own);
+        assert_eq!(level_weight(&reset), None, "a reset leaves nothing behind");
     }
 
     #[test]
@@ -866,7 +945,7 @@ mod tests {
         let font = FontSettings {
             family: Some("App Mono".to_owned()),
             size: 18.0,
-            bold: true,
+            weight: 700,
         };
         let app = resolve_levels(json!({}), json!({}), &app_colors("#333333"), &font);
         assert_eq!(colors_of(&app), [(Some(0x333333), Source::App); 3]);
@@ -875,7 +954,7 @@ mod tests {
             Field::new(Some("App Mono".to_owned()), Source::App)
         );
         assert_eq!(app.font_size, Field::new(18.0, Source::App));
-        assert_eq!(app.font_bold, Field::new(true, Source::App));
+        assert_eq!(app.font_weight, Field::new(700, Source::App));
 
         let built_in = resolve_levels(
             json!({}),
@@ -899,9 +978,9 @@ mod tests {
             "an app size at the default sets nothing"
         );
         assert_eq!(
-            built_in.font_bold,
-            Field::new(false, Source::BuiltIn),
-            "an app bold that is off sets nothing"
+            built_in.font_weight,
+            Field::new(400, Source::BuiltIn),
+            "an app weight at Regular sets nothing"
         );
     }
 
@@ -910,7 +989,7 @@ mod tests {
         let font = FontSettings {
             family: Some("App Mono".to_owned()),
             size: 18.0,
-            bold: false,
+            weight: 400,
         };
         let colors = AppColors {
             accent_color: Some("#333333".to_owned()),
@@ -923,11 +1002,11 @@ mod tests {
         };
         let own = overrides(json!({
             "terminal_background_color": REPO_ALL,
-            "terminal_font_bold": true,
+            "terminal_font_weight": 600,
         }));
         let resolved = resolve_container(&own, app);
         assert_eq!(resolved.background, Field::new(0x222222, Source::Container));
-        assert_eq!(resolved.font_bold, Field::new(true, Source::Container));
+        assert_eq!(resolved.font_weight, Field::new(600, Source::Container));
         assert_eq!(resolved.accent, Field::new(0x333333, Source::App));
         assert_eq!(
             resolved.font_family,
@@ -938,9 +1017,9 @@ mod tests {
 
         let bare = resolve_container(&AppearanceOverrides::default(), app);
         assert_eq!(
-            bare.font_bold,
-            Field::new(false, Source::BuiltIn),
-            "an app bold that is off is the built-in value"
+            bare.font_weight,
+            Field::new(400, Source::BuiltIn),
+            "an app weight at Regular is the built-in value"
         );
     }
 
@@ -1002,12 +1081,12 @@ mod tests {
             resolved.font_size,
             Field::new(fonts::DEFAULT_SIZE, Source::BuiltIn)
         );
-        assert_eq!(resolved.font_bold, Field::new(false, Source::BuiltIn));
+        assert_eq!(resolved.font_weight, Field::new(400, Source::BuiltIn));
 
         let set = FontSettings {
             family: None,
             size: 20.0,
-            bold: true,
+            weight: 600,
         };
         let resolved = resolve(
             None,
@@ -1020,7 +1099,7 @@ mod tests {
             },
         );
         assert_eq!(resolved.font_size, Field::new(20.0, Source::App));
-        assert_eq!(resolved.font_bold, Field::new(true, Source::App));
+        assert_eq!(resolved.font_weight, Field::new(600, Source::App));
     }
 
     #[test]
@@ -1029,7 +1108,7 @@ mod tests {
         let font = FontSettings {
             family: Some("Fira Code".to_owned()),
             size: 20.0,
-            bold: true,
+            weight: 500,
         };
         let own = app_overrides(AppLevel {
             colors: &colors,
@@ -1037,8 +1116,16 @@ mod tests {
             theme: ThemeBase::default(),
         });
         assert_eq!(own.terminal_font_size, Some(20));
-        assert_eq!(own.terminal_font_bold, Some(true));
+        assert_eq!(own.terminal_font_weight, Some(500));
+        assert_eq!(own.terminal_font_bold, None, "only the weight is written");
         assert_eq!(app_from_overrides(&own), (colors, font.clone()));
+
+        let older = overrides(json!({"terminal_font_bold": true}));
+        assert_eq!(
+            app_from_overrides(&older).1.weight,
+            700,
+            "bold-only reads as Bold"
+        );
 
         let plain = app_overrides(AppLevel {
             colors: &AppColors::default(),
