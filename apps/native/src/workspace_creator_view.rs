@@ -43,8 +43,9 @@ struct FileField {
 }
 
 impl RootView {
-    /// "Add workspace…": opens the creator on `host`, unless the connection
-    /// is down or another dialog, menu or prompt is up.
+    /// "Add workspace…": opens the creator on `host`, unless This PC's
+    /// connection is down, `host` is an offline remote host, or another
+    /// dialog, menu or prompt is up.
     pub(crate) fn open_workspace_creator(
         &mut self,
         host: HostKey,
@@ -66,7 +67,8 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.stash.drop.is_some()
             || self.notices.has_modal()
-            || self.conn().overlay().is_some();
+            || self.conn().overlay().is_some()
+            || self.is_remote_offline(&host);
         if blocked {
             return;
         }
