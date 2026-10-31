@@ -18,7 +18,8 @@
 //! pane switched to its chat, a row of each kind, an answer with one stretch
 //! open and two closed, and a live answer) and `summary` (the Petal pane
 //! switched to its summary: three lines, the second one open, under a
-//! pinned Permission card) and `themes` (the Themes modal over Settings,
+//! pinned Permission card), `themes-edit` (the theme editor on a duplicate of
+//! Nord with its Ground edited) and `themes` (the Themes modal over Settings,
 //! over a user theme, a broken file and a file named after a built-in).
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
@@ -166,10 +167,11 @@ enum View {
     Chat,
     Summary,
     Themes,
+    ThemesEdit,
 }
 
 impl View {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -187,6 +189,7 @@ impl View {
         Self::Chat,
         Self::Summary,
         Self::Themes,
+        Self::ThemesEdit,
     ];
 
     fn name(self) -> &'static str {
@@ -208,6 +211,7 @@ impl View {
             Self::Chat => "chat",
             Self::Summary => "summary",
             Self::Themes => "themes",
+            Self::ThemesEdit => "themes-edit",
         }
     }
 
@@ -217,11 +221,14 @@ impl View {
     /// once drawn; the update shot checks and opens Settings, then moves the
     /// keyboard to Check now, which scrolls the update rows into view; a
     /// summary line opens only once the lines have arrived; the Themes
-    /// modal opens over Settings once drawn, and takes its Down once drawn.
+    /// modal opens over Settings once drawn, and takes its Down once drawn;
+    /// the editor opens on the modal once drawn, its input takes the keyboard
+    /// once drawn and takes its typing once focused.
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
             Self::Themes => 3,
+            Self::ThemesEdit => 5,
             Self::Update | Self::Summary | Self::Chat => 2,
             _ => 1,
         }
@@ -297,9 +304,15 @@ impl View {
             Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
             Self::Update => root.settings_open() && root.update_footer_text().is_some(),
             Self::Themes => root.themes_modal_open(),
+            Self::ThemesEdit => root
+                .themes_editor()
+                .is_some_and(rustling_tulip_native::themes::ThemeEditor::is_dirty),
         }
     }
 }
+
+/// The Ground the `themes-edit` shot types.
+const SHOT_EDITED_GROUND: &str = "#5a6478";
 
 /// What to show and where to write it.
 struct Shot {
@@ -357,7 +370,8 @@ impl Shot {
             | View::Update
             | View::Chat
             | View::Summary
-            | View::Themes => None,
+            | View::Themes
+            | View::ThemesEdit => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -487,6 +501,30 @@ fn drive_themes(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
             Ok(())
         }
         _ => press("down", window, cx),
+    }
+}
+
+/// Step `step` of the `themes-edit` shot: the modal as in the `themes` shot,
+/// then Duplicate and edit on the theme in use, the hex input, and a new Ground
+/// that takes some pairs below their floor.
+fn drive_themes_edit(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    match step {
+        0 | 1 => drive_themes(step, window, cx),
+        2 => {
+            let root = window
+                .root::<RootView>()
+                .flatten()
+                .context("the window has no root view")?;
+            root.update(cx, |root, cx| root.duplicate_theme(window, cx));
+            Ok(())
+        }
+        3 => press("enter", window, cx),
+        _ => {
+            for key in SHOT_EDITED_GROUND.chars() {
+                press(&key.to_string(), window, cx)?;
+            }
+            press("enter", window, cx)
+        }
     }
 }
 
@@ -741,6 +779,7 @@ fn drive(
         }
         View::Connections => open_picker(window, cx),
         View::Themes => drive_themes(step, window, cx),
+        View::ThemesEdit => drive_themes_edit(step, window, cx),
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
         View::Menu => open_menu(window, cx),
         View::Update => drive_update(step, address, window, cx),

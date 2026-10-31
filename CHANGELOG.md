@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Settings › Appearance opens a Themes window: pick a built-in or your own theme from a live preview with its contrast check.
+- The Themes window's editor changes any colour of a copied theme, shows its contrast as you go, and can jump to a colour by clicking its preview.
 - A UI weight setting in Settings › Appearance draws the interface in Regular, Medium or SemiBold, applied at once.
 - A UI text size setting in Settings › Appearance makes the interface's text 2 px smaller to 4 px larger, applied at once.
 - `rustling-tulipd screen <session id>` prints how the app read a session's screen, rule by rule, with the screen itself, and `--fixture <path>` saves it.

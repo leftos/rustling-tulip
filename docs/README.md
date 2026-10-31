@@ -203,6 +203,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Pending input**: what a hook-reported `AwaitingInput` is waiting on (a question, a permission or a plan approval), on the session record and snapshot as `pending_input` and in `meta.json` beside `status`, restored by a reattach only with `AwaitingInput`; see `docs/plans/hook-status.md`.
 - **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
 - **PF, AT, SV, RD, AR, OT**: idea ids in `docs/plans/off-orca.md` (files across machines, attention streams, session views, remote desktop, artifacts by account, absorbing ops-tower).
+- **Pick mode**: the theme editor's toggle that makes a click on a part of its preview jump the token list to that part's token (`PICK_REGIONS` in `apps/native/src/themes_view.rs`).
 - **Pinned question**: the summary view's open prompt shown as a card on top, answered from the same card as in the chat.
 - **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
 - **Poller**: the task that runs a waiting session's discovery passes, every 2 s for 5 minutes, every 10 s up to an hour, then every minute while the session runs (`crates/daemon/src/conversations/discovery.rs`).

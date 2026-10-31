@@ -420,7 +420,7 @@ fn disabled_controls_are_out_of_the_ring(cx: &mut TestAppContext) {
     h.keys("shift-tab");
     assert_eq!(themes_focus(&mut h), Some("themes-use"), "and back");
 
-    for control in ["themes-duplicate", "themes-export", "themes-import"] {
+    for control in ["themes-export", "themes-import"] {
         h.click_on(control);
         assert!(
             h.root(|root, _| root.themes_modal_open()),

@@ -1,9 +1,11 @@
 //! The themes modal's model: one row per theme the store lists, holding the
 //! theme it loads to, the contrast pairs it fails and whether it reads light,
-//! so the view draws the list without touching the filesystem.
+//! so the view draws the list without touching the filesystem; and the theme
+//! editor, the working copy of one theme with the row the keyboard is on.
 
 use crate::contrast::{self, PairResult};
 use crate::theme_store::{self, ThemeEntry, ThemeStore};
+use crate::theme_tokens::{self, TokenRow, TokenValue};
 use crate::ui_theme::UiTheme;
 
 /// The ground's relative luminance above which a theme reads light.
@@ -114,6 +116,130 @@ impl ThemesDialog {
     }
 }
 
+/// What a token's row shows of the contrast pairs it is the foreground of.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContrastBadge {
+    /// The lowest ratio among its pairs.
+    pub ratio: f32,
+    /// Whether that ratio is below its pair's floor.
+    pub below: bool,
+}
+
+/// The badge of the row `token` among measured `pairs`, when it is the
+/// foreground of one.
+#[must_use]
+pub fn badge_in(pairs: &[PairResult], token: &str) -> Option<ContrastBadge> {
+    pairs
+        .iter()
+        .filter(|pair| pair.fg == token)
+        .min_by(|a, b| a.ratio.total_cmp(&b.ratio))
+        .map(|pair| ContrastBadge {
+            ratio: pair.ratio,
+            below: !pair.passes,
+        })
+}
+
+/// The theme being edited: the tokens as they stand, what they stood at when
+/// opened or last saved, and the row the keyboard is on.
+#[derive(Debug, Clone)]
+pub struct ThemeEditor {
+    /// The user theme it edits; `None` until a first Save.
+    pub id: Option<String>,
+    pub name: String,
+    /// The name when opened or last saved, which Revert returns to.
+    original_name: String,
+    /// The tokens when opened or last saved, which Revert returns to.
+    pub original: UiTheme,
+    pub working: UiTheme,
+    pub base: Option<String>,
+    pub terminal_source: Option<String>,
+    /// The keyboard's row of [`theme_tokens::ROWS`].
+    pub cursor: usize,
+}
+
+impl ThemeEditor {
+    /// An unchanged editor of `theme` on the first token.
+    #[must_use]
+    pub fn new(
+        id: Option<String>,
+        name: String,
+        theme: UiTheme,
+        base: Option<String>,
+        terminal_source: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            original_name: name.clone(),
+            name,
+            original: theme,
+            working: theme,
+            base,
+            terminal_source,
+            cursor: 0,
+        }
+    }
+
+    /// Whether the tokens or the name differ from those last saved.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.working != self.original || self.name != self.original_name
+    }
+
+    /// The working theme's pairs below their floor.
+    #[must_use]
+    pub fn failing(&self) -> Vec<PairResult> {
+        contrast::check(&self.working)
+            .into_iter()
+            .filter(|pair| !pair.passes)
+            .collect()
+    }
+
+    /// The badge of the row `token`, when it is the foreground of a pair.
+    #[must_use]
+    pub fn badge(&self, token: &str) -> Option<ContrastBadge> {
+        badge_in(&contrast::check(&self.working), token)
+    }
+
+    /// Writes the row `name` and re-derives the tokens that follow it.
+    pub fn set_token(&mut self, name: &str, value: TokenValue) {
+        if theme_tokens::set(&mut self.working, name, value) {
+            theme_tokens::recompute(&mut self.working, name);
+        }
+    }
+
+    /// The keyboard's row.
+    #[must_use]
+    pub fn row(&self) -> &'static TokenRow {
+        &theme_tokens::ROWS[self.cursor]
+    }
+
+    /// Moves the keyboard's row by `delta`, stopping at either end.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let last = theme_tokens::ROWS.len() - 1;
+        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+    }
+
+    /// Moves the keyboard to the row `token`; an unknown token moves nothing.
+    pub fn jump_to(&mut self, token: &str) {
+        if let Some(at) = theme_tokens::ROWS.iter().position(|row| row.name == token) {
+            self.cursor = at;
+        }
+    }
+
+    /// Returns the tokens and the name to those last saved.
+    pub fn revert(&mut self) {
+        self.working = self.original;
+        self.name.clone_from(&self.original_name);
+    }
+
+    /// Records a save under `id`: what stands now is what Revert returns to.
+    pub fn mark_saved(&mut self, id: String) {
+        self.id = Some(id);
+        self.original = self.working;
+        self.original_name.clone_from(&self.name);
+    }
+}
+
 /// The first row `id` names that loads: built-in rows come first, so a file
 /// shadowing a built-in's id never answers for it.
 fn matching(rows: &[ThemeRow], id: &str) -> Option<usize> {
@@ -210,6 +336,89 @@ mod tests {
             .iter()
             .find(|row| row.entry.error.is_none() && row.entry.id == id)
             .expect("the row")
+    }
+
+    fn nord_editor() -> ThemeEditor {
+        ThemeEditor::new(
+            None,
+            "Nord copy".to_owned(),
+            NORD,
+            Some("nord".to_owned()),
+            None,
+        )
+    }
+
+    #[test]
+    fn a_new_editor_is_clean() {
+        let editor = nord_editor();
+
+        assert!(!editor.is_dirty());
+        assert_eq!(editor.working, NORD);
+        assert_eq!(editor.original, NORD);
+        assert_eq!(editor.cursor, 0);
+        assert_eq!(editor.id, None, "nothing is written yet");
+    }
+
+    #[test]
+    fn setting_a_token_dirties_the_editor_and_recomputes() {
+        let mut editor = nord_editor();
+
+        editor.set_token("accent", TokenValue::Color(0x00ff_0000));
+
+        assert!(editor.is_dirty());
+        assert_eq!(editor.working.accent, 0x00ff_0000);
+        assert_eq!(editor.working.input_cursor, 0x00ff_0000, "it recomputes");
+        assert_eq!(editor.original, NORD, "the original stays");
+    }
+
+    #[test]
+    fn revert_returns_the_original() {
+        let mut editor = nord_editor();
+        editor.set_token("accent", TokenValue::Color(0x00ff_0000));
+        editor.name = "Harbour".to_owned();
+
+        editor.revert();
+
+        assert!(!editor.is_dirty());
+        assert_eq!(editor.working, NORD);
+        assert_eq!(editor.name, "Nord copy");
+    }
+
+    #[test]
+    fn failing_counts_pairs_below_their_floor() {
+        let mut editor = nord_editor();
+        assert!(editor.failing().is_empty(), "Nord passes");
+
+        let ground = TokenValue::Color(editor.working.ground);
+        editor.set_token("text", ground);
+
+        let failing = editor.failing();
+        assert!(
+            failing
+                .iter()
+                .any(|pair| pair.fg == "text" && pair.bg == "ground"),
+            "{failing:?}"
+        );
+        assert!(failing.iter().all(|pair| pair.ratio < pair.minimum));
+    }
+
+    #[test]
+    fn jump_to_moves_the_cursor_to_the_token() {
+        let mut editor = nord_editor();
+
+        editor.jump_to("modal");
+
+        assert_eq!(theme_tokens::ROWS[editor.cursor].name, "modal");
+    }
+
+    #[test]
+    fn jump_to_an_unknown_token_changes_nothing() {
+        let mut editor = nord_editor();
+        editor.move_cursor(3);
+
+        editor.jump_to("not_a_token");
+
+        assert_eq!(editor.cursor, 3);
     }
 
     #[test]

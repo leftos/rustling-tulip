@@ -365,9 +365,13 @@ impl ThemeStore {
     }
 
     /// Deletes the file `<id>.json` whatever it holds, a built-in's shadow
-    /// file included; only an id no file can be named after is refused.
+    /// file and a file whose stem is no valid id included; a stem that could
+    /// leave the folder is refused.
     pub fn delete_file(&self, id: &str) -> Result<(), ThemeError> {
-        let path = self.path_of(id)?;
+        if !deletable_stem(id) {
+            return Err(ThemeError::InvalidId { id: id.to_owned() });
+        }
+        let path = self.dir.join(format!("{id}.json"));
         std::fs::remove_file(&path).map_err(|source| {
             if source.kind() == ErrorKind::NotFound {
                 ThemeError::NotFound { id: id.to_owned() }
@@ -493,6 +497,12 @@ pub fn load_selection(themes_dir: Option<&Path>, id: &str) -> Result<UiTheme, Th
         Some(dir) => ThemeStore::new(dir.to_path_buf()).load(id),
         None => built_in(id).ok_or_else(|| ThemeError::NotFound { id: id.to_owned() }),
     }
+}
+
+/// Whether `stem` names a file in the themes folder itself: no path
+/// separator and no `..`.
+fn deletable_stem(stem: &str) -> bool {
+    !stem.is_empty() && !stem.contains(['/', '\\']) && !stem.contains("..")
 }
 
 /// Whether `id` can name a user theme file: only `a-z`, `0-9` and `-`.
@@ -1245,6 +1255,27 @@ mod tests {
             store.delete_file("missing"),
             Err(ThemeError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn delete_file_removes_a_file_with_an_invalid_stem() {
+        let dir = TestDir::new("delete-invalid-stem");
+        std::fs::create_dir_all(&dir.0).expect("make the folder");
+        std::fs::write(dir.0.join("Dark Mode.json"), "{").expect("write");
+        dir.store().delete_file("Dark Mode").expect("the file");
+        assert!(!dir.0.join("Dark Mode.json").exists());
+    }
+
+    #[test]
+    fn delete_file_refuses_a_path_separator() {
+        let dir = TestDir::new("delete-separator");
+        let store = dir.store();
+        for id in ["sub/mine", "sub\\mine", "a..b", ""] {
+            assert!(
+                matches!(store.delete_file(id), Err(ThemeError::InvalidId { .. })),
+                "{id:?}"
+            );
+        }
     }
 
     #[test]
