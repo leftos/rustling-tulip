@@ -204,7 +204,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `client-id-native` — per-install client identity (a bare UUID) that the native client sends in `Hello`; tab layouts are keyed by it.
 - `native-ui.json` — native client UI state that stays on this machine (`apps/native/src/sidebar.rs`). It holds the sidebar width, the sidebar's collapsed flag and the collapsed containers, the Repos view's Active filter (`repo_filter`, `"all"` default or `"active"`; a missing key or unknown value loads as `"all"`), the active tab, the quick-shell folder, the folder Add repo opens at (`last_repo_dir`) and the folder the workspace creator's `.code-workspace` picker opens at (`last_vscode_dir`).
 
-  It also holds the app-level terminal font and colours, the interface font (`ui_font_family`, absent for the bundled Geist), the shared list of recent custom colours, per-tab font sizes, the activity rail's view (`activity`), and the source-control panel's pinned repo, collapsed sections and split heights.
+  It also holds the app-level terminal font and colours, the interface font (`ui_font_family`, absent for the bundled Inter), the shared list of recent custom colours, per-tab font sizes, the activity rail's view (`activity`), and the source-control panel's pinned repo, collapsed sections and split heights.
 
   It holds the diff tabs' include-whitespace and highlight toggles, whether a Markdown viewer tab opens rendered (`viewer_markdown_rendered`, default true; a missing key loads as true), and the per-host remote session counts (`host_session_counts`, `{"<lower-cased MagicDNS name>": <count>}`, or `"ssh:<host string>"` for an SSH host, only for hosts in `saved_hosts`; the import-remote-sessions modal compares against it).
 

@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_FAMILY: &str = "Geist Mono";
 /// The family the client's own interface draws in when the user picked
 /// none; terminal panes draw in their own.
-pub const DEFAULT_UI_FAMILY: &str = "Geist";
+pub const DEFAULT_UI_FAMILY: &str = "Inter";
 /// The proportional families the client ships for its interface, as their
-/// fonts name them; no terminal picker lists them.
-pub const BUNDLED_UI_FAMILIES: [&str; 3] = [DEFAULT_UI_FAMILY, "Inter", "Schibsted Grotesk"];
+/// fonts name them, in the order the interface font picker lists them; no
+/// terminal picker lists them.
+pub const BUNDLED_UI_FAMILIES: [&str; 3] = ["Inter", "Geist", "Schibsted Grotesk"];
 pub const DEFAULT_SIZE: f32 = 13.0;
 /// The smallest size any level may set: the protocol's.
 pub const MIN_SIZE: f32 = *protocol::TERMINAL_FONT_SIZES.start() as f32;
@@ -417,12 +418,12 @@ mod tests {
     }
 
     #[test]
-    fn ui_family_defaults_to_geist() {
-        assert_eq!(DEFAULT_UI_FAMILY, "Geist");
+    fn ui_family_defaults_to_inter() {
+        assert_eq!(DEFAULT_UI_FAMILY, "Inter");
         let calls = std::cell::Cell::new(0);
         assert_eq!(
             resolve_ui_family(None, counted(&["Arial"], &calls)),
-            "Geist"
+            "Inter"
         );
         assert_eq!(calls.get(), 0, "the default lists no fonts");
         assert_eq!(
@@ -448,7 +449,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         assert_eq!(
             resolve_ui_family(Some("Nope Sans"), counted(&["Arial"], &calls)),
-            "Geist"
+            "Inter"
         );
         assert_eq!(calls.get(), 1, "a stored family not bundled is looked up");
         assert_eq!(

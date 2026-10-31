@@ -2826,15 +2826,15 @@ fn a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_defa
 ) {
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);
-    assert_eq!(ui_family(&mut h), "Geist", "nothing picked: the default");
+    assert_eq!(ui_family(&mut h), "Inter", "nothing picked: the default");
 
-    h.click_on("appearance-ui-family-option-Inter");
+    h.click_on("appearance-ui-family-option-Geist");
     assert_eq!(
         saved_ui(&dir)["ui_font_family"],
-        "Inter",
+        "Geist",
         "saved on this machine"
     );
-    assert_eq!(ui_family(&mut h), "Inter", "the pick draws at once");
+    assert_eq!(ui_family(&mut h), "Geist", "the pick draws at once");
 
     // A family the test text system knows: one of gpui's fallbacks.
     h.click_on("appearance-ui-family-filter");
@@ -2851,7 +2851,7 @@ fn a_ui_font_pick_redraws_the_interface_and_is_saved_and_reset_restores_the_defa
     h.click_on("appearance-ui-family-reset");
     assert_eq!(
         ui_family(&mut h),
-        "Geist",
+        "Inter",
         "Use built-in restores the default"
     );
     assert_eq!(saved_ui(&dir)["ui_font_family"], serde_json::Value::Null);

@@ -1,6 +1,6 @@
 # Bundled fonts
 
-The native client embeds these static TTFs with `include_bytes!` in `apps/native/src/fonts.rs` and registers them with the text system at startup. The terminal families ship Regular (400) and Bold (700), plus Italic and Bold Italic where the family has them. Geist (the default), Inter and Schibsted Grotesk are the proportional families the interface can draw in, each at 400, 500, 600 and 700. Each family is licensed under the SIL Open Font License 1.1; its `OFL.txt` sits beside the fonts.
+The native client embeds these static TTFs with `include_bytes!` in `apps/native/src/fonts.rs` and registers them with the text system at startup. The terminal families ship Regular (400) and Bold (700), plus Italic and Bold Italic where the family has them. Inter (the default), Geist and Schibsted Grotesk are the proportional families the interface can draw in, each at 400, 500, 600 and 700. Each family is licensed under the SIL Open Font License 1.1; its `OFL.txt` sits beside the fonts.
 
 | Family | Folder | Faces | Version | Source |
 |---|---|---|---|---|

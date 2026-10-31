@@ -1838,16 +1838,16 @@ mod tests {
     #[test]
     fn the_ui_font_hint_names_its_source_and_a_missing_stored_family() {
         assert_eq!(
-            ui_font_hint_text(None, "Geist"),
-            "Resolved: Geist from built-in"
+            ui_font_hint_text(None, "Inter"),
+            "Resolved: Inter from built-in"
         );
         assert_eq!(
-            ui_font_hint_text(Some("inter"), "Inter"),
-            "Resolved: Inter from app"
+            ui_font_hint_text(Some("geist"), "Geist"),
+            "Resolved: Geist from app"
         );
         assert_eq!(
-            ui_font_hint_text(Some("Nope Sans"), "Geist"),
-            "Resolved: Geist (built-in; \"Nope Sans\" is not installed)"
+            ui_font_hint_text(Some("Nope Sans"), "Inter"),
+            "Resolved: Inter (built-in; \"Nope Sans\" is not installed)"
         );
     }
 }

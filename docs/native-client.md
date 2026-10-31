@@ -398,13 +398,13 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 
   The terminal's palette is the active theme's `terminal` part (`UiTheme.terminal`, a `TerminalPalette`: foreground, background, caret, selection and 16 ANSI colours), drawn as given; a background override at the session, container or app level instead builds a palette whose ANSI colours are contrast-adjusted against that background (`theme.rs` `resolve_palette`, `build_theme`). Setting a theme repaints open terminals in place. The built-in theme's terminal ground is #070609; the built-in session accent is Coral #F07A62, with six accent presets (Coral, Rose, Ochre, Periwinkle, Sky, Lilac); a program's OSC 11 background and OSC 12 caret colour win.
 
-  The interface draws in Geist by default (`fonts::DEFAULT_UI_FAMILY`); `fonts::ui_family(cx)` is the current choice, set on the root view and the tooltip view, and the terminal font pickers never list Geist, Inter or Schibsted Grotesk.
+  The interface draws in Inter by default (`fonts::DEFAULT_UI_FAMILY`); `fonts::ui_family(cx)` is the current choice, set on the root view and the tooltip view, and the terminal font pickers never list Inter, Geist or Schibsted Grotesk.
 
-  Settings → Appearance has a "UI font" row under "Shell background": a filter field and a list (Use built-in, Bundled: Geist, Inter, Schibsted Grotesk, System: installed fonts) with a hint `Resolved: <family> from app|built-in`.
+  Settings → Appearance has a "UI font" row under "Shell background": a filter field and a list (Use built-in, Bundled: Inter, Geist, Schibsted Grotesk, System: installed fonts) with a hint `Resolved: <family> from app|built-in`.
 
-  A pick applies to every window at once (`fonts::set_ui_family`, `RootView::set_ui_font`) and is saved in `native-ui.json` as `ui_font_family` (null or absent is Geist); a stored family that is no longer installed falls back to Geist with a log line (`fonts::resolve_ui_family`).
+  A pick applies to every window at once (`fonts::set_ui_family`, `RootView::set_ui_font`) and is saved in `native-ui.json` as `ui_font_family` (null or absent is Inter; a saved "Geist" still loads as Geist); a stored family that is no longer installed falls back to Inter with a log line (`fonts::resolve_ui_family`).
 
-  Geist Mono, Fira Code, JetBrains Mono and Cascadia Code are bundled for terminals, and Geist, Inter and Schibsted Grotesk at 400 to 700 for the interface (OFL, `assets/fonts/`); a family resolves against the installed list, falling back to Geist Mono, Cascadia Mono, Consolas, then Courier New.
+  Geist Mono, Fira Code, JetBrains Mono and Cascadia Code are bundled for terminals, and Inter, Geist and Schibsted Grotesk at 400 to 700 for the interface (OFL, `assets/fonts/`); a family resolves against the installed list, falling back to Geist Mono, Cascadia Mono, Consolas, then Courier New.
 - **Status glyphs**: a session's status draws as a shape as well as a colour (`status_glyph.rs`, tinted SVG layers in `assets/icons/status-*.svg`) in sidebar leaves, pane headers, Needs You rows, the tab bar's busy pill and the footer.
 
   It is a spinning arc while working, an amber diamond with `?` while asking, a faint hollow ring while spawning, a small dot when idle or stopped (dimmed), a red dot with `×` on error, and a ring with a spinning arc in the Working colour while the turn is over but background work still runs (the snapshot's `background` flag on an `Idle` session).

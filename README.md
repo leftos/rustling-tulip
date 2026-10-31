@@ -79,7 +79,7 @@ It is alpha software, Windows only for now.
 - A page per agent: Claude's permission mode, its provider (Anthropic, or DeepSeek with your own `DEEPSEEK_API_KEY`), and its launch command, so you can run another program, an alias or extra arguments.
 - Trusted launch by default, which notifications to show and when to skip them, and whether to keep the PC awake (off, while a session is busy, or always).
 - Start the daemon at login, the folder worktrees go in, and Manage worktrees to clean up old ones.
-- Appearance: session accent colours, terminal and interface fonts (Geist, Inter, Schibsted Grotesk or any installed font), font sizes per session or per tab, and the window title.
+- Appearance: session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), font sizes per session or per tab, and the window title.
 
 ![The Settings window on its General page](docs/images/settings.png)
 

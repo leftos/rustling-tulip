@@ -480,7 +480,7 @@ mod tests {
         let entries = family_entries(&BUNDLED_UI_FAMILIES, &[], Some("inter"), "");
         assert_eq!(
             names(&entries),
-            ["reset", "[Bundled]", "Geist", "Inter", "Schibsted Grotesk"],
+            ["reset", "[Bundled]", "Inter", "Geist", "Schibsted Grotesk"],
             "a stored `inter` is the bundled Inter, not a saved row"
         );
         let at = family_highlight(&entries, None, Some("inter"));
