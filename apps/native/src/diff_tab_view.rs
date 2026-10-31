@@ -782,8 +782,13 @@ impl RootView {
     }
 
     /// `host`'s connection closed: its diff tabs say it is offline until its
-    /// next `Welcome`, which reads their files again.
+    /// next `Welcome`, which reads their files again. This PC's own tabs are
+    /// left exactly as they were: its `Welcome` refetches only what it
+    /// refetched before remote tabs existed.
     pub(crate) fn close_diff_tabs_of(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        if *host == HostKey::Local {
+            return;
+        }
         let label = crate::sidebar::host_label(host);
         for view in self.diff_views() {
             if view.read(cx).state.host() != host {

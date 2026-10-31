@@ -668,6 +668,55 @@ fn a_remote_close_says_the_host_is_offline_and_its_welcome_reads_again(cx: &mut 
     );
 }
 
+/// Whether `tab`'s body says a host is offline.
+fn says_offline(h: &mut Harness<'_>, tab: &str) -> bool {
+    matches!(
+        body(h, tab),
+        DiffTabBody::Text { text, .. } if text.ends_with("is offline")
+    )
+}
+
+#[gpui::test]
+fn this_pcs_reconnect_leaves_its_diff_tabs_as_they_were(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    h.send(updated(&diff_tab_in("d1", "a.rs", None, Some(TREE))));
+    let live = one_snapshot_id(&mut h);
+    answer(&mut h, &live, &lines(3, &[]), &lines(3, &[2]));
+    h.send(updated(&diff_tab_in(
+        "d2",
+        "src/main.rs",
+        Some(SHA),
+        Some(TREE),
+    )));
+    let commit = one_snapshot_id(&mut h);
+    answer(&mut h, &commit, &lines(3, &[]), &lines(3, &[1]));
+
+    h.lose_connection();
+    assert!(
+        !says_offline(&mut h, "d1"),
+        "This PC's own tab never reads offline"
+    );
+    assert!(!says_offline(&mut h, "d2"), "nor does a commit's diff");
+    assert_eq!(header(&mut h, "d2").count, "1 change", "it keeps its count");
+
+    h.welcome_with_features();
+    h.send_welcome(support::PROTOCOL);
+    let again = snapshot_requests(&mut h);
+    assert_eq!(
+        again.len(),
+        1,
+        "the live tab reads again, as it always has, and the commit's does not: {again:?}"
+    );
+    assert_eq!(again[0].1, "a.rs");
+    assert_eq!(again[0].2, None, "the worktree-against-index read");
+    assert_eq!(
+        header(&mut h, "d2").count,
+        "1 change",
+        "the commit's diff is untouched"
+    );
+}
+
 // --- The changes tree ----------------------------------------------------
 
 fn file(path: &str) -> Value {
