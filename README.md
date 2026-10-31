@@ -13,6 +13,7 @@ It is alpha software, Windows only for now.
 - Start a Claude session or a plain shell in a repo's own folder, or in a new git worktree on its own branch, so parallel sessions never edit the same checkout.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
+- Tab pills and the window title count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead.
 - The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A Windows notification fires when a session needs you or finishes (skipped when you are already looking at it).
 - Each finished turn of a Claude session gets a one-line summary, kept across restarts, and the Finished notification is worded from it.
 - The Dashboard tab, opened from the activity rail, lists every agent session by status: what each is doing now, its context, recent activity, cost and running subagents, with a queue of the sessions waiting on you.
@@ -27,6 +28,24 @@ It is alpha software, Windows only for now.
 - Secret environment values you give a session are stored in Windows Credential Manager, never in a settings file.
 
 ![The Dashboard tab: sessions grouped as Needs you, Working, Idle and Done, each with what it is doing now, its context, recent activity, cost and running subagents](docs/images/dashboard.png)
+
+### Chat and summary views
+
+- A Claude session's pane can show its conversation as a chat instead of the terminal (the pane's Chat button, its menu or Ctrl+Shift+M), with answers appearing as they are written. Each session remembers which view it was last shown in.
+- Answer Claude's questions and permission prompts from cards, by click or key, and send messages from a box under the chat that keeps your text when a send is refused.
+- A strip under the chat shows what is still running: subagents, background shells and the next wakeup, with their ages.
+- The Summary view (Ctrl+Shift+U) shows a session as one line per stretch of work, each opening into its messages.
+- Long replies written as expandable text open a short phrase into its longer form with a click, one level at a time.
+
+![A Claude session's pane in the chat view, with its conversation, a permission card and the message box](docs/images/chat.png)
+
+### Several hosts in one window
+
+- The app connects to this PC and every saved host you switch on, over Tailscale or SSH, and keeps each host's sessions, alerts and panels.
+- The sidebar groups sessions by host, each with its own + Shell; remote panes and tabs carry their host's name, one tab can mix panes from several hosts, and an offline host dims until it reconnects.
+- Spawning, shells, Add repo, presets and Settings work on any connected host: the spawn picker groups repos by host, and Settings has a host selector.
+
+![This PC's group in the sidebar with its + Repo and + Shell, a remote session's pane marked with its host "box" beside a local one, and the footer counting 2/3 hosts online](docs/images/multi-host.png)
 
 ### Remote access over Tailscale
 
@@ -79,9 +98,12 @@ It is alpha software, Windows only for now.
 - A page per agent: Claude's permission mode, its provider (Anthropic, or DeepSeek with your own `DEEPSEEK_API_KEY`), and its launch command, so you can run another program, an alias or extra arguments.
 - Trusted launch by default, which notifications to show and when to skip them, and whether to keep the PC awake (off, while a session is busy, or always).
 - Start the daemon at login, the folder worktrees go in, and Manage worktrees to clean up old ones.
-- Appearance: session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), font sizes per session or per tab, and the window title.
+- Appearance: themes for the whole window and its terminals (built-in ones, Nord by default, or your own), session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), the interface's text size and weight, the terminal's weight per app, repo, workspace or session, font sizes per session or per tab, and the window title.
+- The Themes window previews every theme with its contrast check, edits any colour of your own copy, and exports or imports theme files.
 
 ![The Settings window on its General page](docs/images/settings.png)
+
+![The Themes window: the theme list with a live preview and its contrast check](docs/images/themes.png)
 
 ## Install
 
@@ -91,16 +113,16 @@ It is alpha software, Windows only for now.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
 
-## What's new in v0.5.0-alpha
+## What's new in v0.6.0-alpha
 
-- Connect to another Windows PC over SSH, without Tailscale: Add SSH host… and Test connection in the Connections picker. The installer now puts its folder on your user PATH.
-- A Dashboard tab, opened from the activity rail, lists every agent session by status with what it is doing, its context, cost and subagents, and a queue of the sessions waiting on you.
-- Each finished turn is summarized in one line, and notifications are worded from the summary.
-- Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
-- Terminal programs that ask for urxvt or pixel-precise mouse reporting now get it.
-- Many fixes to Settings, the installer, presets, worktree panes and logs.
+- Several hosts in one window: this PC and every saved host you switch on connect at once, the sidebar groups sessions by host, and spawning, shells, presets and Settings work on any of them.
+- A chat view and a summary view for Claude sessions, with prompt cards, a message box and a strip of the work still running.
+- Themes: pick a built-in theme or make your own in the Themes window; the default look is now Nord with the Inter font.
+- Interface text size and weight settings, and a terminal weight setting from Regular to Bold.
+- Tab pills and the window title count the sessions that need you.
+- Sessions running when Windows signs out, restarts or shuts down resume on their own at the next start, and many reliability fixes.
 
-The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.5.0-alpha).
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.6.0-alpha).
 
 ## Building from source
 
