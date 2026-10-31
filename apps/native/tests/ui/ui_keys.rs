@@ -289,16 +289,16 @@ fn settings_escape_closes_from_its_fields(cx: &mut TestAppContext) {
 
     h.keys("ctrl-,");
     h.click_on("settings-tab-appearance");
-    h.click_on("appearance-accent-hex");
+    h.click_on("appearance-ui-family-filter");
     assert_eq!(
         settings_focus(&mut h),
-        Some("appearance-accent-hex"),
-        "the hex field has the keyboard"
+        Some("appearance-ui-family-filter"),
+        "the font filter has the keyboard"
     );
     h.keys("escape");
     assert!(
         !h.root(|root, _| root.settings_open()),
-        "Esc closes Settings from the hex field"
+        "Esc closes Settings from the font filter"
     );
     h.keys("a");
     assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard again");

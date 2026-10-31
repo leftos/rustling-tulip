@@ -111,14 +111,24 @@ pub const BACKGROUND_PRESETS: [Preset; 6] = [
     },
 ];
 
-/// The app level's colours, kept on this machine; its font is the app's
-/// [`FontSettings`]. `None` falls through to the built-in value.
+/// The app-level colours releases up to v0.5.2-alpha kept in
+/// `native-ui.json`, read only to move them into a theme
+/// ([`crate::theme_store::migrate_app_colors`]); the app's colours are its
+/// theme's.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppColors {
     pub accent_color: Option<String>,
     pub terminal_background_color: Option<String>,
     pub terminal_frame_color: Option<String>,
+}
+
+impl AppColors {
+    /// Whether no colour is stored.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The bottom of the cascade: the active theme's accent and terminal
@@ -147,10 +157,10 @@ impl Default for ThemeBase {
     }
 }
 
-/// The app level: its colours and its font, over the active theme's base.
+/// The app level: its font, over the active theme's base, which is where a
+/// colour no level sets comes from.
 #[derive(Debug, Clone, Copy)]
 pub struct AppLevel<'a> {
-    pub colors: &'a AppColors,
     pub font: &'a FontSettings,
     pub theme: ThemeBase,
 }
@@ -533,26 +543,16 @@ fn resolve_levels(levels: &Levels<'_>, app: AppLevel<'_>) -> Resolved {
         |family| Field::new(Some(family), Source::App),
     );
     Resolved {
-        accent: color(
-            levels,
-            |a| a.accent_color.as_deref(),
-            app.colors.accent_color.as_deref(),
-            app.theme.accent,
-        ),
+        accent: color(levels, |a| a.accent_color.as_deref(), app.theme.accent),
         background: color(
             levels,
             |a| a.terminal_background_color.as_deref(),
-            app.colors.terminal_background_color.as_deref(),
             app.theme.background,
         ),
-        frame: colour_field(
-            levels,
-            |a| a.terminal_frame_color.as_deref(),
-            app.colors.terminal_frame_color.as_deref(),
-        )
-        .map_or(Field::new(None, Source::BuiltIn), |field| {
-            Field::new(Some(field.value), field.source)
-        }),
+        frame: colour_field(levels, |a| a.terminal_frame_color.as_deref())
+            .map_or(Field::new(None, Source::BuiltIn), |field| {
+                Field::new(Some(field.value), field.source)
+            }),
         font_family: first(levels, |a| non_blank(a.terminal_font_family.as_deref()))
             .map_or(family, |field| Field::new(Some(field.value), field.source)),
         font_size: first(levels, |a| {
@@ -593,27 +593,22 @@ fn first<T>(
     })
 }
 
-/// A colour field: the first level whose value parses, else the app's,
-/// else `builtin`.
+/// A colour field: the first level whose value parses, else the theme's
+/// `builtin`.
 fn color(
     levels: &Levels<'_>,
     pick: impl Fn(&AppearanceOverrides) -> Option<&str>,
-    app: Option<&str>,
     builtin: u32,
 ) -> Field<u32> {
-    colour_field(levels, pick, app).unwrap_or_else(|| Field::new(builtin, Source::BuiltIn))
+    colour_field(levels, pick).unwrap_or_else(|| Field::new(builtin, Source::BuiltIn))
 }
 
-/// A colour field: the first level whose value parses, else the app's.
+/// A colour field: the first level whose value parses.
 fn colour_field(
     levels: &Levels<'_>,
     pick: impl Fn(&AppearanceOverrides) -> Option<&str>,
-    app: Option<&str>,
 ) -> Option<Field<u32>> {
-    first(levels, |a| pick(a).and_then(parse_color)).or_else(|| {
-        app.and_then(parse_color)
-            .map(|c| Field::new(c, Source::App))
-    })
+    first(levels, |a| pick(a).and_then(parse_color))
 }
 
 fn non_blank(family: Option<&str>) -> Option<String> {
@@ -649,16 +644,16 @@ pub fn parse_hex_input(raw: &str) -> Option<String> {
 }
 
 /// The app level as overrides, so a change applies to it as to any other
-/// level: a size and a weight at their defaults set nothing, and the older
-/// bold switch is never written.
+/// level: it sets no colour, a size and a weight at their defaults set
+/// nothing, and the older bold switch is never written.
 #[must_use]
 pub fn app_overrides(app: AppLevel<'_>) -> AppearanceOverrides {
     let size = fonts::clamp_size(app.font.size);
     let whole = crate::font_size_to_u16(size);
     AppearanceOverrides {
-        accent_color: app.colors.accent_color.clone(),
-        terminal_background_color: app.colors.terminal_background_color.clone(),
-        terminal_frame_color: app.colors.terminal_frame_color.clone(),
+        accent_color: None,
+        terminal_background_color: None,
+        terminal_frame_color: None,
         terminal_font_family: app.font.family.clone(),
         terminal_font_size: ((size - fonts::DEFAULT_SIZE).abs() >= f32::EPSILON).then_some(whole),
         terminal_font_bold: None,
@@ -667,16 +662,11 @@ pub fn app_overrides(app: AppLevel<'_>) -> AppearanceOverrides {
     }
 }
 
-/// The app level's colours and font `overrides` stands for: an unset
-/// size is the default, and an unset weight is Bold when the older bold
-/// switch is on, else Regular.
+/// The app level's font `overrides` stands for: an unset size is the
+/// default, and an unset weight is Bold when the older bold switch is on,
+/// else Regular.
 #[must_use]
-pub fn app_from_overrides(overrides: &AppearanceOverrides) -> (AppColors, FontSettings) {
-    let colors = AppColors {
-        accent_color: overrides.accent_color.clone(),
-        terminal_background_color: overrides.terminal_background_color.clone(),
-        terminal_frame_color: overrides.terminal_frame_color.clone(),
-    };
+pub fn app_font_from_overrides(overrides: &AppearanceOverrides) -> FontSettings {
     let font = FontSettings {
         family: overrides.terminal_font_family.clone(),
         size: overrides
@@ -684,7 +674,7 @@ pub fn app_from_overrides(overrides: &AppearanceOverrides) -> (AppColors, FontSe
             .map_or(fonts::DEFAULT_SIZE, f32::from),
         weight: level_weight(overrides).unwrap_or(fonts::DEFAULT_TERMINAL_WEIGHT),
     };
-    (colors, font.normalized())
+    font.normalized()
 }
 
 /// `color` as the terminal's colour type.
@@ -800,11 +790,10 @@ mod tests {
     }
 
     /// Resolves session `s1` of repo `r1` with `own` overrides, repo `r1`'s
-    /// `repo` overrides and the app level `colors` and `font`.
+    /// `repo` overrides and the app level's `font`.
     fn resolve_levels(
         own: serde_json::Value,
         repo: serde_json::Value,
-        colors: &AppColors,
         font: &FontSettings,
     ) -> Resolved {
         let mut session = session_with(None, &["r1"]);
@@ -815,19 +804,10 @@ mod tests {
             &repos,
             &[],
             AppLevel {
-                colors,
                 font,
                 theme: ThemeBase::default(),
             },
         )
-    }
-
-    fn app_colors(color: &str) -> AppColors {
-        AppColors {
-            accent_color: Some(color.to_owned()),
-            terminal_background_color: Some(color.to_owned()),
-            terminal_frame_color: Some(color.to_owned()),
-        }
     }
 
     const SESSION_ALL: &str = "#111111";
@@ -859,11 +839,9 @@ mod tests {
             size: 13.0,
             weight: 400,
         };
-        let colors = app_colors("#333333");
         let both = resolve_levels(
             every_field(SESSION_ALL, "Session Mono", 16, 500),
             every_field(REPO_ALL, "Repo Mono", 20, 600),
-            &colors,
             &font,
         );
         assert_eq!(colors_of(&both), [(Some(0x111111), Source::Session); 3]);
@@ -877,7 +855,6 @@ mod tests {
         let repo_only = resolve_levels(
             json!({}),
             every_field(REPO_ALL, "Repo Mono", 20, 600),
-            &colors,
             &font,
         );
         assert_eq!(
@@ -898,9 +875,8 @@ mod tests {
             weight: 500,
             ..FontSettings::default()
         };
-        let colors = AppColors::default();
         let weight = |session: serde_json::Value, repo: serde_json::Value| {
-            resolve_levels(session, repo, &colors, &font).font_weight
+            resolve_levels(session, repo, &font).font_weight
         };
         assert_eq!(
             weight(json!({}), json!({"terminal_font_bold": true})),
@@ -947,8 +923,16 @@ mod tests {
             size: 18.0,
             weight: 700,
         };
-        let app = resolve_levels(json!({}), json!({}), &app_colors("#333333"), &font);
-        assert_eq!(colors_of(&app), [(Some(0x333333), Source::App); 3]);
+        let app = resolve_levels(json!({}), json!({}), &font);
+        assert_eq!(
+            colors_of(&app),
+            [
+                (Some(BUILTIN_ACCENT), Source::BuiltIn),
+                (Some(BUILTIN_BACKGROUND), Source::BuiltIn),
+                (None, Source::BuiltIn),
+            ],
+            "the app sets no colour: the theme's"
+        );
         assert_eq!(
             app.font_family,
             Field::new(Some("App Mono".to_owned()), Source::App)
@@ -956,12 +940,7 @@ mod tests {
         assert_eq!(app.font_size, Field::new(18.0, Source::App));
         assert_eq!(app.font_weight, Field::new(700, Source::App));
 
-        let built_in = resolve_levels(
-            json!({}),
-            json!({}),
-            &AppColors::default(),
-            &FontSettings::default(),
-        );
+        let built_in = resolve_levels(json!({}), json!({}), &FontSettings::default());
         assert_eq!(
             colors_of(&built_in),
             [
@@ -991,12 +970,7 @@ mod tests {
             size: 18.0,
             weight: 400,
         };
-        let colors = AppColors {
-            accent_color: Some("#333333".to_owned()),
-            ..AppColors::default()
-        };
         let app = AppLevel {
-            colors: &colors,
             font: &font,
             theme: ThemeBase::default(),
         };
@@ -1007,7 +981,7 @@ mod tests {
         let resolved = resolve_container(&own, app);
         assert_eq!(resolved.background, Field::new(0x222222, Source::Container));
         assert_eq!(resolved.font_weight, Field::new(600, Source::Container));
-        assert_eq!(resolved.accent, Field::new(0x333333, Source::App));
+        assert_eq!(resolved.accent, Field::new(BUILTIN_ACCENT, Source::BuiltIn));
         assert_eq!(
             resolved.font_family,
             Field::new(Some("App Mono".to_owned()), Source::App)
@@ -1040,12 +1014,8 @@ mod tests {
                 background: 0xfaf0e6
             }
         );
-        let (colors, font) = (AppColors::default(), FontSettings::default());
-        let app = AppLevel {
-            colors: &colors,
-            font: &font,
-            theme,
-        };
+        let font = FontSettings::default();
+        let app = AppLevel { font: &font, theme };
         let resolved = resolve(None, &[], &[], app);
         assert_eq!(resolved.accent, Field::new(0x123456, Source::BuiltIn));
         assert_eq!(resolved.background, Field::new(0xfaf0e6, Source::BuiltIn));
@@ -1063,18 +1033,16 @@ mod tests {
 
     #[test]
     fn the_app_level_resolves_to_the_built_in_values_it_does_not_set() {
-        let colors = AppColors {
-            terminal_background_color: Some("#0b1020".to_owned()),
-            ..AppColors::default()
-        };
         let font = FontSettings::default();
         let app = AppLevel {
-            colors: &colors,
             font: &font,
             theme: ThemeBase::default(),
         };
         let resolved = resolve(None, &[], &[], app);
-        assert_eq!(resolved.background, Field::new(0x0b1020, Source::App));
+        assert_eq!(
+            resolved.background,
+            Field::new(BUILTIN_BACKGROUND, Source::BuiltIn)
+        );
         assert_eq!(resolved.accent, Field::new(BUILTIN_ACCENT, Source::BuiltIn));
         assert_eq!(resolved.font_family, Field::new(None, Source::BuiltIn));
         assert_eq!(
@@ -1093,7 +1061,6 @@ mod tests {
             &[],
             &[],
             AppLevel {
-                colors: &colors,
                 font: &set,
                 theme: ThemeBase::default(),
             },
@@ -1104,31 +1071,29 @@ mod tests {
 
     #[test]
     fn the_app_level_round_trips_through_overrides() {
-        let colors = app_colors("#123456");
         let font = FontSettings {
             family: Some("Fira Code".to_owned()),
             size: 20.0,
             weight: 500,
         };
         let own = app_overrides(AppLevel {
-            colors: &colors,
             font: &font,
             theme: ThemeBase::default(),
         });
         assert_eq!(own.terminal_font_size, Some(20));
         assert_eq!(own.terminal_font_weight, Some(500));
         assert_eq!(own.terminal_font_bold, None, "only the weight is written");
-        assert_eq!(app_from_overrides(&own), (colors, font.clone()));
+        assert_eq!(own.accent_color, None, "the app level sets no colour");
+        assert_eq!(app_font_from_overrides(&own), font);
 
         let older = overrides(json!({"terminal_font_bold": true}));
         assert_eq!(
-            app_from_overrides(&older).1.weight,
+            app_font_from_overrides(&older).weight,
             700,
             "bold-only reads as Bold"
         );
 
         let plain = app_overrides(AppLevel {
-            colors: &AppColors::default(),
             font: &FontSettings::default(),
             theme: ThemeBase::default(),
         });
@@ -1139,7 +1104,7 @@ mod tests {
         );
         let cleared = AppearanceChange::font_size(None).apply_to(&own);
         assert_eq!(
-            app_from_overrides(&cleared).1,
+            app_font_from_overrides(&cleared),
             FontSettings {
                 size: fonts::DEFAULT_SIZE,
                 ..font
@@ -1165,7 +1130,6 @@ mod tests {
         let resolved = resolve_levels(
             json!({ "accent_color": SESSION_ALL }),
             json!({ "terminal_frame_color": REPO_ALL }),
-            &AppColors::default(),
             &FontSettings::default(),
         );
         assert_eq!(
@@ -1183,7 +1147,6 @@ mod tests {
         let resolved = resolve_levels(
             json!({ "accent_color": "blue" }),
             json!({ "accent_color": "#ABCDEF" }),
-            &AppColors::default(),
             &FontSettings::default(),
         );
         assert_eq!(resolved.accent, Field::new(0xabcdef, Source::Container));
@@ -1191,26 +1154,28 @@ mod tests {
 
     #[test]
     fn a_pane_with_no_session_takes_the_app_level() {
-        let colors = app_colors("#333333");
-        let font = FontSettings::default();
+        let font = FontSettings {
+            size: 18.0,
+            ..FontSettings::default()
+        };
         let resolved = resolve(
             None,
             &[],
             &[],
             AppLevel {
-                colors: &colors,
                 font: &font,
                 theme: ThemeBase::default(),
             },
         );
-        assert_eq!(colors_of(&resolved), [(Some(0x333333), Source::App); 3]);
+        assert_eq!(resolved.font_size, Field::new(18.0, Source::App));
+        assert_eq!(resolved.accent, Field::new(BUILTIN_ACCENT, Source::BuiltIn));
     }
 
     #[test]
     fn resolution_prefers_tab_then_session_then_container_then_app() {
         let font = FontSettings::default();
         let size = |tab: Option<f32>, own: serde_json::Value, repo: serde_json::Value| {
-            resolve_levels(own, repo, &AppColors::default(), &font)
+            resolve_levels(own, repo, &font)
                 .with_tab_size(tab)
                 .font_size
         };
@@ -1230,7 +1195,7 @@ mod tests {
             ..FontSettings::default()
         };
         assert_eq!(
-            resolve_levels(json!({}), json!({}), &AppColors::default(), &app).font_size,
+            resolve_levels(json!({}), json!({}), &app).font_size,
             Field::new(18.0, Source::App)
         );
     }
@@ -1238,13 +1203,11 @@ mod tests {
     #[test]
     fn resolution_clamps_the_winning_level() {
         let default = FontSettings::default();
-        let colors = AppColors::default();
-        let tab = resolve_levels(json!({}), json!({}), &colors, &default).with_tab_size(Some(99.0));
+        let tab = resolve_levels(json!({}), json!({}), &default).with_tab_size(Some(99.0));
         assert_eq!(tab.font_size, Field::new(fonts::MAX_SIZE, Source::Tab));
         let own = resolve_levels(
             json!({ "terminal_font_size": 1 }),
             json!({ "terminal_font_size": 9 }),
-            &colors,
             &default,
         );
         assert_eq!(own.font_size, Field::new(fonts::MIN_SIZE, Source::Session));
@@ -1253,7 +1216,7 @@ mod tests {
             ..FontSettings::default()
         };
         assert_eq!(
-            resolve_levels(json!({}), json!({}), &colors, &nan).font_size,
+            resolve_levels(json!({}), json!({}), &nan).font_size,
             Field::new(fonts::DEFAULT_SIZE, Source::BuiltIn),
             "an app size that is not a number is the default"
         );
@@ -1341,19 +1304,11 @@ mod tests {
         assert_eq!(ACCENT_PRESETS[1].stored().as_deref(), Some("#e7849b"));
     }
 
-    /// A level whose overrides are `own`, resolved over the app level with
-    /// no colours and the theme base `theme`.
+    /// A level whose overrides are `own`, resolved over the default app
+    /// level and the theme base `theme`.
     fn resolved_over(own: &AppearanceOverrides, theme: ThemeBase) -> Resolved {
-        let colors = AppColors::default();
         let font = FontSettings::default();
-        resolve_container(
-            own,
-            AppLevel {
-                colors: &colors,
-                font: &font,
-                theme,
-            },
-        )
+        resolve_container(own, AppLevel { font: &font, theme })
     }
 
     /// A theme base that is not the built-in theme's.
@@ -1462,7 +1417,10 @@ mod tests {
     #[test]
     fn ui_state_round_trips_the_app_colours_and_recent_colours() {
         let state = UiState {
-            app_appearance: app_colors("#123456"),
+            app_appearance: AppColors {
+                accent_color: Some("#123456".to_owned()),
+                ..AppColors::default()
+            },
             recent_colors: vec!["#abcdef".to_owned(), "#000001".to_owned()],
             ..UiState::default()
         };

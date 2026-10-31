@@ -450,9 +450,11 @@ pub struct UiState {
     /// The source-control panel's pinned repo and collapsed sections.
     #[serde(default)]
     pub source_control: ScUiState,
-    /// The app level's colours, below every repo's, workspace's and
-    /// session's.
-    #[serde(default)]
+    /// The app-level colours releases up to v0.5.2-alpha saved, read so the
+    /// boot can move them into a theme
+    /// ([`crate::theme_store::migrate_app_colors`]); written back only while
+    /// that move has not happened.
+    #[serde(default, skip_serializing_if = "AppColors::is_empty")]
     pub app_appearance: AppColors,
     /// The custom colours chosen lately, newest first, `#rrggbb`.
     #[serde(default)]
@@ -1791,15 +1793,10 @@ impl SidebarModel {
             &self.repos,
             &self.workspaces,
             AppLevel {
-                colors: &self.ui.app_appearance,
                 font: &self.ui.terminal_font,
                 theme: self.theme_base,
             },
         )
-    }
-
-    pub fn set_app_colors(&mut self, colors: AppColors) {
-        self.ui.app_appearance = colors;
     }
 
     /// The recent custom colours to offer, `0xRRGGBB`, newest first.
@@ -4377,6 +4374,162 @@ pub(crate) mod tests {
         save_ui_state(&dir.0, &state).expect("save over the existing file");
         assert_eq!(load_ui_state(&dir.0), state);
         assert!(!dir.0.join(format!("{UI_FILE}.tmp")).exists());
+    }
+
+    /// `native-ui.json` as v0.5.1-alpha wrote it for the state its
+    /// `ui_state_round_trips` built: every key that release saved, each
+    /// away from its default, with a custom app accent and background.
+    fn v0_5_1_alpha_ui_file() -> serde_json::Value {
+        serde_json::json!({
+            "sidebar_width": 333.0,
+            "sidebar_collapsed": true,
+            "activity": "source_control",
+            "sidebar_view": "tabs",
+            "repo_filter": "active",
+            "collapsed_containers": ["detached", "repo:r1"],
+            "active_tab_id": "t1",
+            "quick_shell_dir": "C:\\work",
+            "last_repo_dir": "D:\\src",
+            "last_vscode_dir": "E:\\workspaces",
+            "terminal_font": { "family": "JetBrains Mono", "size": 15.0, "bold": true },
+            "ui_font_family": "Inter",
+            "tab_font_sizes": { "t1": 20.0 },
+            "source_control": {
+                "pinned_repo": "r1",
+                "collapsed": {},
+                "changes_height": null,
+                "history_list_height": {}
+            },
+            "app_appearance": {
+                "accent_color": "#38bdf8",
+                "terminal_background_color": "#f6f4ef",
+                "terminal_frame_color": null
+            },
+            "recent_colors": ["#abcdef"],
+            "diff_include_whitespace": false,
+            "diff_highlight": false,
+            "viewer_markdown_rendered": false,
+            "window": null,
+            "popouts": [],
+            "general": {
+                "copy_on_select": false,
+                "leaf_density": "compact",
+                "sessions_under_repos": "busy",
+                "repo_sort": "active",
+                "open_text_externally": true
+            },
+            "title": { "show_count": false, "suffix": false },
+            "notifications": { "awaiting_input": false, "finished": false, "skip_when": "never" },
+            "spawn": { "trusted": true },
+            "last_target": null,
+            "saved_hosts": [],
+            "host_session_counts": {}
+        })
+    }
+
+    /// The state `file` loads and migrates to, with its themes in `dir`.
+    fn load_released(dir: &TestDir, file: &serde_json::Value) -> UiState {
+        std::fs::create_dir_all(&dir.0).expect("create the config dir");
+        std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+        let mut ui = load_ui_state(&dir.0);
+        let store = crate::theme_store::ThemeStore::new(dir.0.join(crate::theme_store::THEMES_DIR));
+        assert!(
+            crate::theme_store::migrate_app_colors(&mut ui, &store),
+            "the colours move"
+        );
+        ui
+    }
+
+    /// Every value v0.5.1-alpha's file sets, as main holds it once the app
+    /// colours moved into the theme `theme`.
+    fn released_values(theme: Option<String>, general: GeneralSettings) -> UiState {
+        UiState {
+            sidebar_width: 333.0,
+            sidebar_collapsed: true,
+            activity: Activity::SourceControl,
+            sidebar_view: SidebarView::Tabs,
+            repo_filter: RepoFilter::Active,
+            collapsed_containers: ["repo:r1".to_owned(), "detached".to_owned()].into(),
+            active_tab_id: Some("t1".to_owned()),
+            quick_shell_dir: Some("C:\\work".to_owned()),
+            last_repo_dir: Some("D:\\src".to_owned()),
+            last_vscode_dir: Some("E:\\workspaces".to_owned()),
+            terminal_font: FontSettings {
+                family: Some("JetBrains Mono".to_owned()),
+                size: 15.0,
+                weight: 700,
+            },
+            ui_font_family: Some("Inter".to_owned()),
+            theme,
+            tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
+            source_control: ScUiState {
+                pinned_repo: Some("r1".to_owned()),
+                ..ScUiState::default()
+            },
+            recent_colors: vec!["#abcdef".to_owned()],
+            diff_include_whitespace: false,
+            diff_highlight: false,
+            viewer_markdown_rendered: false,
+            general,
+            title: TitleSettings {
+                show_count: false,
+                suffix: false,
+                ..TitleSettings::default()
+            },
+            notifications: NotificationSettings {
+                awaiting_input: false,
+                finished: false,
+                skip_when: NotifySkip::Never,
+            },
+            spawn: SpawnDefaults { trusted: true },
+            ..UiState::default()
+        }
+    }
+
+    fn released_general() -> GeneralSettings {
+        GeneralSettings {
+            copy_on_select: false,
+            leaf_density: LeafDensity::Compact,
+            sessions_under_repos: SessionsUnderRepos::Busy,
+            repo_sort: RepoSort::Active,
+            open_text_externally: true,
+            ..GeneralSettings::default()
+        }
+    }
+
+    #[test]
+    fn ui_file_written_by_v0_5_1_alpha_loads_with_every_set_value_kept() {
+        let dir = TestDir::new("v0-5-1-alpha");
+        let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
+        let id = ui.theme.clone().expect("the migrated theme is selected");
+        assert_eq!(ui, released_values(Some(id.clone()), released_general()));
+        assert_eq!(ui.terminal_font.weight, 700, "bold: true reads as Bold");
+
+        let store = crate::theme_store::ThemeStore::new(dir.0.join(crate::theme_store::THEMES_DIR));
+        assert_eq!(store.name_of(&id).as_deref(), Some("My colours"));
+        let theme = store.load(&id).expect("the migrated theme loads");
+        assert_eq!(theme.accent, 0x38_bdf8);
+        assert_eq!(appearance::packed(theme.terminal.bg), 0xf6_f4ef);
+
+        save_ui_state(&dir.0, &ui).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("the saved layout");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert!(saved.get("app_appearance").is_none(), "{saved}");
+        assert_eq!(saved["theme"], id.as_str());
+    }
+
+    #[test]
+    fn ui_file_written_by_v0_5_2_alpha_keeps_its_update_check_choice() {
+        let dir = TestDir::new("v0-5-2-alpha");
+        let mut file = v0_5_1_alpha_ui_file();
+        file["general"]["check_updates"] = serde_json::Value::Bool(false);
+        let ui = load_released(&dir, &file);
+        let general = GeneralSettings {
+            check_updates: false,
+            ..released_general()
+        };
+        assert_eq!(ui, released_values(ui.theme.clone(), general));
+        assert!(ui.theme.is_some());
     }
 
     fn pane_popout(tab_id: &str, pane_id: &str) -> SavedPopout {

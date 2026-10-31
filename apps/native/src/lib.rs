@@ -1303,16 +1303,25 @@ impl RootView {
         Self::watch_close_request(window, cx);
         Self::forward_net_events(events, window, cx);
         let drag_escape = Self::intercept_drag_escape(window, cx);
-        let ui = ui_dir
+        let mut ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
+        let themes_dir = ui_dir
+            .as_deref()
+            .map(|dir| dir.join(theme_store::THEMES_DIR));
+        if let (Some(dir), Some(themes)) = (ui_dir.as_deref(), themes_dir.as_ref())
+            && theme_store::migrate_app_colors(
+                &mut ui,
+                &theme_store::ThemeStore::new(themes.clone()),
+            )
+            && let Err(err) = save_ui_state(dir, &ui)
+        {
+            tracing::warn!("saving the layout after moving the app colours into a theme: {err:#}");
+        }
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
         fonts::set_ui_family(ui.ui_font_family.as_deref(), cx);
         fonts::set_ui_text_size(ui.ui_text_size, cx);
         fonts::set_ui_weight(ui.ui_font_weight, cx);
-        let themes_dir = ui_dir
-            .as_deref()
-            .map(|dir| dir.join(theme_store::THEMES_DIR));
         let theme = theme_store::resolve_selection(themes_dir.as_deref(), ui.theme.as_deref());
         ui_theme::set_theme(theme, cx);
         let chat = chat_view::ChatPanes::new(chat_view::WallClock::starting_at(now()));
@@ -2458,13 +2467,6 @@ impl RootView {
         self.set_theme(theme, cx);
         self.save_ui();
         Ok(())
-    }
-
-    /// Sets the app level's colours, below every repo's, workspace's and
-    /// session's; every pane and sidebar row re-resolves its own.
-    pub fn set_app_colors(&mut self, colors: appearance::AppColors, cx: &mut Context<Self>) {
-        self.sidebar.set_app_colors(colors);
-        self.after_font_change(cx);
     }
 
     /// The active theme's accent and terminal background, the bottom of

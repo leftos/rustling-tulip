@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::appearance::{self, AppColors};
+use crate::sidebar::UiState;
 use crate::theme::TerminalPalette;
+use crate::theme_tokens::{self, TokenValue};
 use crate::ui_theme::UiTheme;
 
 /// The folder under the config dir that holds the user's themes.
@@ -526,6 +529,76 @@ pub fn load_selection(themes_dir: Option<&Path>, id: &str) -> Result<UiTheme, Th
         Some(dir) => ThemeStore::new(dir.to_path_buf()).load(id),
         None => built_in(id).ok_or_else(|| ThemeError::NotFound { id: id.to_owned() }),
     }
+}
+
+/// The name the theme made from a release's app-level colours takes, or the
+/// next free one.
+pub const MIGRATED_NAME: &str = "My colours";
+
+/// Moves the app-level accent and terminal background that releases up to
+/// v0.5.2-alpha kept in `native-ui.json` into a user theme: the default
+/// theme with those colours, saved as [`MIGRATED_NAME`] (or the next free
+/// name) and selected. A file that already selects a theme only drops them.
+/// A colour that does not parse, and the terminal frame colour, which no
+/// theme holds, are left out with a warning. Returns whether `ui` changed
+/// and should be saved; a failed theme write leaves `ui` as it is, so the
+/// next start tries again.
+pub fn migrate_app_colors(ui: &mut UiState, store: &ThemeStore) -> bool {
+    if ui.app_appearance.is_empty() {
+        return false;
+    }
+    if ui.theme.is_some() {
+        ui.app_appearance = AppColors::default();
+        return true;
+    }
+    let Some(theme) = theme_from_app_colors(&ui.app_appearance) else {
+        ui.app_appearance = AppColors::default();
+        return true;
+    };
+    let name = store.free_name(MIGRATED_NAME);
+    match store.save(&name, &theme, Some(DEFAULT_ID), None) {
+        Ok(id) => {
+            ui.theme = Some(id);
+            ui.app_appearance = AppColors::default();
+            true
+        }
+        Err(err) => {
+            tracing::warn!(
+                "saving the app colours as the theme {name:?}: {err}; they are kept for the next start"
+            );
+            false
+        }
+    }
+}
+
+/// The default theme with the app-level accent and terminal background of
+/// `colors`, its derived tokens following them; `None` when neither parses.
+fn theme_from_app_colors(colors: &AppColors) -> Option<UiTheme> {
+    if let Some(frame) = &colors.terminal_frame_color {
+        tracing::warn!(
+            "the app's terminal frame colour {frame:?} is not kept: a theme holds no frame colour"
+        );
+    }
+    let mut theme = DEFAULT_THEME;
+    let mut set_any = false;
+    let stored = [
+        ("accent", &colors.accent_color),
+        ("terminal_bg", &colors.terminal_background_color),
+    ];
+    for (row, raw) in stored {
+        let Some(raw) = raw else { continue };
+        let Some(color) = appearance::parse_color(raw) else {
+            tracing::warn!(
+                "the app's {row} colour {raw:?} is not #rrggbb; the theme keeps its own"
+            );
+            continue;
+        };
+        if theme_tokens::set(&mut theme, row, TokenValue::Color(color)) {
+            theme_tokens::recompute(&mut theme, row);
+            set_any = true;
+        }
+    }
+    set_any.then_some(theme)
 }
 
 /// Whether `stem` names a file in the themes folder itself: no path
@@ -1225,6 +1298,87 @@ mod tests {
             store.name_taken("Nord", Some(&id)),
             "a built-in stays taken"
         );
+    }
+
+    fn released_ui(accent: Option<&str>, background: Option<&str>) -> UiState {
+        UiState {
+            app_appearance: AppColors {
+                accent_color: accent.map(str::to_owned),
+                terminal_background_color: background.map(str::to_owned),
+                terminal_frame_color: None,
+            },
+            ..UiState::default()
+        }
+    }
+
+    fn user_ids(store: &ThemeStore) -> Vec<String> {
+        store
+            .list()
+            .into_iter()
+            .filter(|entry| !entry.built_in)
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    #[test]
+    fn app_colours_beside_a_selected_theme_are_dropped_and_the_theme_kept() {
+        let dir = TestDir::new("migrate-selected");
+        let store = dir.store();
+        let mut ui = UiState {
+            theme: Some("dracula".to_owned()),
+            ..released_ui(Some("#38bdf8"), Some("#f6f4ef"))
+        };
+        assert!(migrate_app_colors(&mut ui, &store), "the file changes");
+        assert_eq!(ui.theme.as_deref(), Some("dracula"));
+        assert!(ui.app_appearance.is_empty());
+        assert!(user_ids(&store).is_empty(), "no theme is written");
+    }
+
+    #[test]
+    fn an_app_colour_that_does_not_parse_is_left_out_of_the_theme() {
+        let dir = TestDir::new("migrate-unparsable");
+        let store = dir.store();
+        let mut ui = released_ui(Some("not a colour"), Some("#102030"));
+        assert!(migrate_app_colors(&mut ui, &store));
+        let id = ui.theme.clone().expect("the migrated theme is selected");
+        let theme = store.load(&id).expect("the migrated theme loads");
+        assert_eq!(theme.accent, DEFAULT_THEME.accent, "the default's accent");
+        assert_eq!(appearance::packed(theme.terminal.bg), 0x10_2030);
+        assert!(ui.app_appearance.is_empty());
+
+        let mut only_bad = released_ui(Some("#12345"), None);
+        assert!(migrate_app_colors(&mut only_bad, &store));
+        assert_eq!(only_bad.theme, None, "nothing to keep: no theme");
+        assert!(only_bad.app_appearance.is_empty());
+        assert_eq!(user_ids(&store), [id]);
+    }
+
+    #[test]
+    fn a_taken_migrated_name_takes_the_next_free_one() {
+        let dir = TestDir::new("migrate-taken");
+        let store = dir.store();
+        store
+            .save(MIGRATED_NAME, &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        let mut ui = released_ui(Some("#38bdf8"), None);
+        assert!(migrate_app_colors(&mut ui, &store));
+        let id = ui.theme.expect("the migrated theme is selected");
+        assert_eq!(store.name_of(&id).as_deref(), Some("My colours 2"));
+        assert_eq!(store.load(&id).expect("loads").accent, 0x38_bdf8);
+    }
+
+    #[test]
+    fn a_failed_theme_write_keeps_the_app_colours_for_the_next_start() {
+        let dir = TestDir::new("migrate-failed");
+        std::fs::write(&dir.0, "a file where the themes folder goes").expect("write");
+        let mut ui = released_ui(Some("#38bdf8"), Some("#f6f4ef"));
+        let before = ui.clone();
+        assert!(
+            !migrate_app_colors(&mut ui, &dir.store()),
+            "nothing to save"
+        );
+        assert_eq!(ui, before);
+        std::fs::remove_file(&dir.0).expect("remove the file");
     }
 
     #[test]

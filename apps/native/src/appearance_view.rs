@@ -528,7 +528,6 @@ impl RootView {
     fn level_view(&self, level: &Level) -> Option<LevelView> {
         let ui = self.sidebar.ui_state();
         let app = AppLevel {
-            colors: &ui.app_appearance,
             font: &ui.terminal_font,
             theme: self.sidebar.theme_base(),
         };
@@ -695,17 +694,11 @@ impl RootView {
         true
     }
 
-    /// Makes `overrides` the app level: its colours and its font, each
-    /// written only when it changed.
+    /// Makes `overrides` the app level's font, written only when it changed;
+    /// the app level sets no colour.
     fn set_app_appearance(&mut self, overrides: &AppearanceOverrides, cx: &mut Context<Self>) {
-        let (colors, font) = appearance::app_from_overrides(overrides);
-        let ui = self.sidebar.ui_state();
-        let colors_changed = ui.app_appearance != colors;
-        let font_changed = ui.terminal_font != font;
-        if colors_changed {
-            self.set_app_colors(colors, cx);
-        }
-        if font_changed {
+        let font = appearance::app_font_from_overrides(overrides);
+        if self.sidebar.ui_state().terminal_font != font {
             self.set_app_font(font, cx);
         }
     }
@@ -792,6 +785,11 @@ impl RootView {
         let reset = editor.level.reset_label();
         // The interface's font is the app's alone.
         let theme_row = (editor.level == Level::App).then(|| theme_section(editor, focus, cx));
+        // The app's colours are its theme's: only the lower levels set one.
+        let color_rows = (editor.level != Level::App).then(|| {
+            [ColorRow::Accent, ColorRow::Background]
+                .map(|row| self.color_section(editor, &view, row, focus, cx))
+        });
         let (ui_font, ui_text_size, ui_weight) = if editor.level == Level::App {
             (
                 self.family_section(FontList::Ui, self.ui_font_hint(cx), focus, cx),
@@ -807,8 +805,7 @@ impl RootView {
             .gap(px(12.0))
             .w(px(COLUMN_WIDTH))
             .children(theme_row)
-            .child(self.color_section(editor, &view, ColorRow::Accent, focus, cx))
-            .child(self.color_section(editor, &view, ColorRow::Background, focus, cx))
+            .children(color_rows.into_iter().flatten())
             .children(ui_font)
             .children(ui_text_size)
             .children(ui_weight);

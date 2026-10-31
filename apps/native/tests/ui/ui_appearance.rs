@@ -655,8 +655,9 @@ fn background_survives_a_reattach(cx: &mut TestAppContext) {
     );
 }
 
-/// Opens Settings › Appearance over a saved theme whose accent is Rose's.
-fn settings_over_a_rose_theme<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+/// Opens session `s1`'s appearance editor over a saved theme whose accent is
+/// Rose's.
+fn editor_over_a_rose_theme<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     let mut mine = UiTheme::CONTRAST;
     mine.accent = ROSE;
     let id = ThemeStore::new(dir.path().join(THEMES_DIR))
@@ -672,15 +673,15 @@ fn settings_over_a_rose_theme<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> 
         ..Fixture::single(session("s1").in_repo("r1").build())
     };
     let mut h = Harness::with_saved_theme(cx, dir, &fixture);
-    h.keys("ctrl-,");
-    h.click_on("settings-tab-appearance");
+    h.right_click_on("leaf-s1");
+    h.click_on("session-menu-appearance");
     h
 }
 
 #[gpui::test]
 fn a_preset_equal_to_the_theme_colour_keeps_its_own_swatch(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = settings_over_a_rose_theme(cx, &dir);
+    let mut h = editor_over_a_rose_theme(cx, &dir);
 
     h.click_on("appearance-accent-preset-rose");
     assert!(

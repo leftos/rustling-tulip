@@ -6,11 +6,10 @@
     clippy::expect_used,
     reason = "a spec fails with the message of the precondition it lost"
 )]
-#![expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
 
 use crate::support;
 
-use gpui::{Modifiers, Pixels, TestAppContext, px};
+use gpui::{Modifiers, Pixels, TestAppContext, point, px};
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, WorkspaceEntry,
 };
@@ -300,13 +299,23 @@ fn editor_tab_walks_the_same_stops_as_settings(cx: &mut TestAppContext) {
         "Settings walks its Appearance stops: {ring:?}"
     );
     // The theme, the UI font, its text size and weight are the app's alone: no
-    // session's editor shows them.
+    // session's editor shows them. The accent and background rows are a
+    // session's, repo's or workspace's alone: the app's colours are its theme's.
     ring.retain(|stop| {
         !stop.starts_with("appearance-ui-family")
             && !stop.starts_with("appearance-ui-text-size")
             && !stop.starts_with("appearance-ui-weight")
             && *stop != "appearance-theme"
     });
+    ring.splice(
+        0..0,
+        [
+            "appearance-accent-presets",
+            "appearance-accent-hex",
+            "appearance-background-presets",
+            "appearance-background-hex",
+        ],
+    );
     ring.push("appearance-footer-close");
 
     open_session_editor(&mut h, "s1");
@@ -913,7 +922,7 @@ fn font_filter_narrows_the_list_and_a_pick_sends_the_family(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn ctrl_comma_opens_settings_and_app_level_changes_persist_locally_without_a_message(
+fn ctrl_comma_opens_settings_and_app_level_font_changes_persist_locally_without_a_message(
     cx: &mut TestAppContext,
 ) {
     let dir = TestDir::new();
@@ -929,32 +938,24 @@ fn ctrl_comma_opens_settings_and_app_level_changes_persist_locally_without_a_mes
         Some("Use built-in")
     );
 
-    h.click_on("appearance-accent-preset-sky");
     h.click_on("appearance-size-up");
     h.click_on("appearance-term-weight-semibold");
 
     assert_eq!(appearance_sends(&h.sent()), 0, "the app level stays here");
-    assert_eq!(
-        h.root(|root, _| root.session_accent("s1")),
-        Some(0x8fd3e8),
-        "the session inherits the app's accent"
-    );
-    assert_eq!(hint(&mut h, "accent"), "Resolved: #8fd3e8 from current");
     assert_eq!(hint(&mut h, "size"), "Resolved: 14px from app");
     assert_eq!(hint(&mut h, "weight"), "Resolved: SemiBold from app");
     let saved = saved_ui(&dir);
-    assert_eq!(saved["app_appearance"]["accent_color"], "#8fd3e8");
-    assert_eq!(saved["app_appearance"]["terminal_frame_color"], "#8fd3e8");
     assert_eq!(saved["terminal_font"]["size"], 14.0);
     assert_eq!(saved["terminal_font"]["weight"], 600);
+    assert!(
+        saved.get("app_appearance").is_none(),
+        "the app's colours are its theme's: {saved}"
+    );
 
     h.click_on("appearance-size-reset");
-    h.click_on("appearance-accent-reset");
     assert_eq!(hint(&mut h, "size"), "Resolved: 13px from built-in");
-    assert_eq!(hint(&mut h, "accent"), "Resolved: #f07a62 from built-in");
     let saved = saved_ui(&dir);
     assert_eq!(saved["terminal_font"]["size"], 13.0);
-    assert!(saved["app_appearance"]["accent_color"].is_null());
     assert_eq!(appearance_sends(&h.sent()), 0);
 
     h.click_on("settings-footer-close");
@@ -1036,12 +1037,11 @@ fn the_editor_blocks_the_spawn_dialog(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn settings_appearance_shows_the_six_petal_accent_swatches(cx: &mut TestAppContext) {
+fn the_editor_shows_the_six_petal_accent_swatches(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
     let mut h = focused(cx, &dir, &fixture);
-    h.keys("ctrl-,");
-    h.click_on("settings-tab-appearance");
+    open_session_editor(&mut h, "s1");
 
     let presets = ["theme", "rose", "ochre", "periwinkle", "sky", "lilac"];
     let lefts: Vec<Pixels> = presets
@@ -1062,4 +1062,130 @@ fn settings_appearance_shows_the_six_petal_accent_swatches(cx: &mut TestAppConte
     );
     let apply = h.bounds("appearance-accent-apply").size.height;
     assert_eq!(apply, px(32.0), "Apply is a regular button");
+}
+
+/// The harness with session `s1`'s editor open, nothing set anywhere.
+fn editor_open<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, dir, &fixture);
+    open_session_editor(&mut h, "s1");
+    h
+}
+
+#[gpui::test]
+fn editor_tab_in_the_hex_field_leaves_for_the_next_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = editor_open(cx, &dir);
+    h.click_on("appearance-accent-hex");
+    assert_eq!(settings_focus(&mut h), Some("appearance-accent-hex"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-background-presets"),
+        "Apply has nothing to apply, so Tab passes it"
+    );
+    type_text(&mut h, "#12AB34");
+    assert!(
+        !can_apply(&mut h, "accent"),
+        "the field gave up the keyboard"
+    );
+
+    h.keys("shift-tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-accent-hex"));
+    type_text(&mut h, "#12AB34");
+    assert!(
+        can_apply(&mut h, "accent"),
+        "typing reaches the field again"
+    );
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-accent-apply"));
+    h.keys("enter");
+    assert_eq!(hint(&mut h, "accent"), "Resolved: #12ab34 from current");
+}
+
+#[gpui::test]
+fn editor_swatch_line_lands_on_the_chosen_swatch_and_arrows_move_and_enter_picks(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = editor_open(cx, &dir);
+    h.click_on("appearance-accent-preset-sky");
+    assert_eq!(settings_focus(&mut h), Some("appearance-accent-presets"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-accent-recents"),
+        "the recent line is a stop of its own"
+    );
+    h.keys("shift-tab");
+
+    // Lands on Sky; Right to Lilac, the last, stays there; Left twice.
+    h.keys("right right left left");
+    assert_eq!(
+        hint(&mut h, "accent"),
+        "Resolved: #8fd3e8 from current",
+        "the arrows only move the cursor"
+    );
+    h.keys("enter");
+    assert_eq!(
+        hint(&mut h, "accent"),
+        "Resolved: #8fb3f0 from current",
+        "Periwinkle, left of Sky"
+    );
+    assert_eq!(
+        h.root(|root, _| root.appearance_recent_rows("accent")),
+        [
+            "appearance-accent-recent-8fb3f0",
+            "appearance-accent-recent-8fd3e8"
+        ],
+        "a keyboard pick joins the recent colours"
+    );
+    h.keys("left left left left space");
+    assert_eq!(
+        hint(&mut h, "accent"),
+        "Resolved: #f07a62 from built-in",
+        "Left stops at the first swatch, the theme's accent; Space picks it, clearing the override"
+    );
+}
+
+#[gpui::test]
+fn editor_apply_hands_the_keyboard_to_the_stop_after_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = editor_open(cx, &dir);
+    h.click_on("appearance-accent-hex");
+    type_text(&mut h, "#12AB34");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-accent-apply"));
+    h.keys("enter");
+    assert_eq!(hint(&mut h, "accent"), "Resolved: #12ab34 from current");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-accent-reset"),
+        "Apply set the accent, which turned on the reset link after it"
+    );
+
+    h.click_on("appearance-background-preset-ink");
+    h.click_on("appearance-background-hex");
+    type_text(&mut h, "#123456");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-background-apply"));
+    h.keys("enter");
+    assert_eq!(hint(&mut h, "background"), "Resolved: #123456 from current");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-background-reset"),
+        "the background reset link followed Apply"
+    );
+}
+
+#[gpui::test]
+fn editor_click_in_the_hex_field_frame_keeps_the_field(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = editor_open(cx, &dir);
+    let field = h.bounds("appearance-accent-hex");
+    let padding = point(field.origin.x + px(4.0), field.center().y);
+    h.click(padding, Modifiers::none());
+    assert_eq!(settings_focus(&mut h), Some("appearance-accent-hex"));
+    type_text(&mut h, "#12AB34");
+    assert!(can_apply(&mut h, "accent"), "typed text reaches the field");
 }

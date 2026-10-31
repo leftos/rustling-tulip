@@ -162,6 +162,50 @@ fn the_settings_row_opens_on_the_theme_in_use(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn colours_a_released_build_saved_open_as_my_colours_in_use(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::json!({
+            "sidebar_width": 300.0,
+            "app_appearance": {
+                "accent_color": "#38bdf8",
+                "terminal_background_color": "#f6f4ef",
+                "terminal_frame_color": null
+            },
+            "recent_colors": ["#38bdf8"]
+        })
+        .to_string(),
+    )
+    .expect("write native-ui.json");
+    let mut h = Harness::with_saved_theme(cx, &dir, &fixture());
+    assert_eq!(drawn(&mut h).accent, 0x38_bdf8, "the window's accent");
+    assert_eq!(
+        h.root(|root, _| root.theme_base()).background,
+        0xf6_f4ef,
+        "the terminal's background"
+    );
+    assert_eq!(
+        h.root(|root, _| root.session_accent("s1")),
+        Some(0x38_bdf8),
+        "a session with no colour of its own takes the theme's"
+    );
+
+    open_dialog(&mut h);
+    let (name, id) = h.root(|root, _| {
+        let dialog = root.themes_modal().expect("open");
+        let entry = &dialog.rows[dialog.in_use].entry;
+        (entry.name.clone(), entry.id.clone())
+    });
+    assert_eq!(name, "My colours", "the migrated theme is the one in use");
+    assert_eq!(saved_theme(&dir).as_deref(), Some(id.as_str()));
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("read");
+    let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    assert!(saved.get("app_appearance").is_none(), "{saved}");
+    assert_eq!(saved["recent_colors"][0], "#38bdf8", "the rest is kept");
+}
+
+#[gpui::test]
 fn arrow_keys_move_the_preview(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

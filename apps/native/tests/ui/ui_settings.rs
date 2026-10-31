@@ -2627,11 +2627,6 @@ fn tab_rows_list_every_tab_of_the_tab_enum_in_order(cx: &mut TestAppContext) {
     );
 }
 
-fn can_apply(h: &mut Harness<'_>, row: &str) -> bool {
-    let row = row.to_owned();
-    h.root(move |root, cx| root.appearance_can_apply(&row, cx))
-}
-
 fn appearance_hint(h: &mut Harness<'_>, row: &str) -> String {
     let row = row.to_owned();
     h.root(move |root, _| root.appearance_hint(&row))
@@ -2659,50 +2654,11 @@ fn tab_to(h: &mut Harness<'_>, stop: &str) {
 }
 
 #[gpui::test]
-fn tab_in_appearance_hex_field_leaves_for_the_next_stop(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = appearance_tab(cx, &dir);
-    h.click_on("appearance-accent-hex");
-    assert_eq!(settings_focus(&mut h), Some("appearance-accent-hex"));
-    h.keys("tab");
-    assert_eq!(shown_tab(&mut h), "Appearance");
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("appearance-background-presets"),
-        "Apply has nothing to apply, so Tab passes it"
-    );
-    type_text(&mut h, "#12AB34");
-    assert!(
-        !can_apply(&mut h, "accent"),
-        "the field gave up the keyboard"
-    );
-
-    h.keys("shift-tab");
-    assert_eq!(settings_focus(&mut h), Some("appearance-accent-hex"));
-    type_text(&mut h, "#12AB34");
-    assert!(
-        can_apply(&mut h, "accent"),
-        "typing reaches the field again"
-    );
-    h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("appearance-accent-apply"));
-    h.keys("enter");
-    assert_eq!(
-        appearance_hint(&mut h, "accent"),
-        "Resolved: #12ab34 from current"
-    );
-}
-
-#[gpui::test]
 fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);
     let ring = [
         "appearance-theme",
-        "appearance-accent-presets",
-        "appearance-accent-hex",
-        "appearance-background-presets",
-        "appearance-background-hex",
         "appearance-ui-family-filter",
         "appearance-ui-family-list",
         "appearance-ui-text-size-down",
@@ -2734,50 +2690,21 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn appearance_swatch_line_lands_on_the_chosen_swatch_and_arrows_move_and_enter_picks(
-    cx: &mut TestAppContext,
-) {
+fn settings_appearance_draws_no_accent_or_background_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = appearance_tab(cx, &dir);
-    h.click_on("appearance-accent-preset-sky");
-    h.click_on("settings-tab-appearance");
-    h.keys("tab tab");
-    assert_eq!(settings_focus(&mut h), Some("appearance-accent-presets"));
-    h.keys("tab");
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("appearance-accent-recents"),
-        "the recent line is a stop of its own"
-    );
-    h.keys("shift-tab");
-
-    // Lands on Sky; Right to Lilac, the last, stays there; Left twice.
-    h.keys("right right left left");
-    assert_eq!(
-        appearance_hint(&mut h, "accent"),
-        "Resolved: #8fd3e8 from current",
-        "the arrows only move the cursor"
-    );
-    h.keys("enter");
-    assert_eq!(
-        appearance_hint(&mut h, "accent"),
-        "Resolved: #8fb3f0 from current",
-        "Periwinkle, left of Sky"
-    );
-    assert_eq!(
-        h.root(|root, _| root.appearance_recent_rows("accent")),
-        [
-            "appearance-accent-recent-8fb3f0",
-            "appearance-accent-recent-8fd3e8"
-        ],
-        "a keyboard pick joins the recent colours"
-    );
-    h.keys("left left left left space");
-    assert_eq!(
-        appearance_hint(&mut h, "accent"),
-        "Resolved: #f07a62 from built-in",
-        "Left stops at the first swatch, the theme's accent; Space picks it, clearing the override"
-    );
+    let h = appearance_tab(cx, &dir);
+    for row in [
+        "appearance-accent-presets",
+        "appearance-accent-hex",
+        "appearance-background-presets",
+        "appearance-background-hex",
+    ] {
+        assert!(
+            h.cx.debug_bounds(row).is_none(),
+            "{row}: a custom colour lives in a theme"
+        );
+    }
+    assert!(h.cx.debug_bounds("appearance-theme").is_some());
 }
 
 #[gpui::test]
@@ -3121,7 +3048,7 @@ fn appearance_term_weight_picks_with_space(cx: &mut TestAppContext) {
 fn appearance_hex_and_filter_fields_draw_the_focus_ring(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);
-    for field in ["appearance-accent-hex", "appearance-family-filter"] {
+    for field in ["appearance-ui-family-filter", "appearance-family-filter"] {
         let ring = format!("{field}-ring");
         assert!(h.bounds(&ring).origin.x < px(0.0), "{field}: no ring yet");
         tab_to(&mut h, field);
@@ -3133,42 +3060,6 @@ fn appearance_hex_and_filter_fields_draw_the_focus_ring(cx: &mut TestAppContext)
             "{field}: the ring sits round the frame"
         );
     }
-}
-
-#[gpui::test]
-fn appearance_apply_hands_the_keyboard_to_the_stop_after_it(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = appearance_tab(cx, &dir);
-    h.click_on("appearance-accent-hex");
-    type_text(&mut h, "#12AB34");
-    h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("appearance-accent-apply"));
-    h.keys("enter");
-    assert_eq!(
-        appearance_hint(&mut h, "accent"),
-        "Resolved: #12ab34 from current"
-    );
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("appearance-accent-reset"),
-        "Apply set the accent, which turned on the reset link after it"
-    );
-
-    h.click_on("appearance-background-preset-ink");
-    h.click_on("appearance-background-hex");
-    type_text(&mut h, "#123456");
-    h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("appearance-background-apply"));
-    h.keys("enter");
-    assert_eq!(
-        appearance_hint(&mut h, "background"),
-        "Resolved: #123456 from current"
-    );
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("appearance-background-reset"),
-        "the background reset link followed Apply"
-    );
 }
 
 #[gpui::test]
@@ -3201,20 +3092,6 @@ fn a_click_on_an_appearance_control_moves_the_keyboard_there(cx: &mut TestAppCon
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);
     tab_to(&mut h, "appearance-term-weight-bold");
-    h.click_on("appearance-accent-preset-sky");
-    assert_eq!(settings_focus(&mut h), Some("appearance-accent-presets"));
-    h.keys("left space");
-    assert_eq!(
-        appearance_hint(&mut h, "accent"),
-        "Resolved: #8fb3f0 from current",
-        "the cursor stood on the clicked swatch: Left went to Periwinkle"
-    );
-    assert_eq!(
-        appearance_hint(&mut h, "weight"),
-        "Resolved: Regular from built-in",
-        "Space was the swatch line's, not the weight button's"
-    );
-
     h.click_on("appearance-family-option-Fira Code");
     assert_eq!(settings_focus(&mut h), Some("appearance-family-list"));
     h.keys("down enter");
@@ -3276,18 +3153,6 @@ fn a_family_row_click_keeps_the_clicked_row_in_view(cx: &mut TestAppContext) {
         format!("Resolved: {before_far} from app"),
         "the highlight stood on the clicked row"
     );
-}
-
-#[gpui::test]
-fn a_click_in_the_hex_field_frame_keeps_the_field(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = appearance_tab(cx, &dir);
-    let field = h.bounds("appearance-accent-hex");
-    let padding = point(field.origin.x + px(4.0), field.center().y);
-    h.click(padding, Modifiers::none());
-    assert_eq!(settings_focus(&mut h), Some("appearance-accent-hex"));
-    type_text(&mut h, "#12AB34");
-    assert!(can_apply(&mut h, "accent"), "typed text reaches the field");
 }
 
 #[gpui::test]

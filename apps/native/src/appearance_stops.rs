@@ -175,7 +175,7 @@ impl FontList {
 }
 
 /// The stops Tab walks, in reading order: the Theme row (`app_level`);
-/// per colour row its preset line,
+/// below the app level, per colour row its preset line,
 /// its recent line (`has_recent`), its hex field, Apply and its reset link;
 /// the UI font filter and list, the UI text size − and + and the UI weight
 /// buttons (`app_level`);
@@ -192,17 +192,18 @@ pub(crate) fn stops(
     let mut ring = Vec::new();
     if app_level {
         ring.push(AppearanceStop::Theme);
-    }
-    for row in ColorRow::ALL {
-        ring.push(AppearanceStop::Swatches(row, SwatchLine::Presets));
-        if has_recent {
-            ring.push(AppearanceStop::Swatches(row, SwatchLine::Recent));
+    } else {
+        for row in ColorRow::ALL {
+            ring.push(AppearanceStop::Swatches(row, SwatchLine::Presets));
+            if has_recent {
+                ring.push(AppearanceStop::Swatches(row, SwatchLine::Recent));
+            }
+            ring.extend([
+                AppearanceStop::Hex(row),
+                AppearanceStop::Apply(row),
+                AppearanceStop::Reset(ResetRow::Color(row)),
+            ]);
         }
-        ring.extend([
-            AppearanceStop::Hex(row),
-            AppearanceStop::Apply(row),
-            AppearanceStop::Reset(ResetRow::Color(row)),
-        ]);
     }
     if app_level {
         ring.extend([
@@ -583,6 +584,24 @@ mod tests {
         );
         assert_eq!(with.last(), Some(&Close), "Close comes last when asked for");
         assert_eq!(with.len(), without.len() + 3);
+    }
+
+    #[test]
+    fn the_app_level_walks_no_colour_row() {
+        let ring = stops(true, true, false, |_| true);
+        assert_eq!(ring.first(), Some(&AppearanceStop::Theme));
+        assert!(
+            ring.iter().all(|stop| !matches!(
+                stop,
+                Swatches(..) | Hex(_) | Apply(_) | Reset(ResetRow::Color(_))
+            )),
+            "the app's colours are its theme's: {ring:?}"
+        );
+        assert_eq!(
+            ring[1],
+            AppearanceStop::UiFamilyFilter,
+            "the UI font follows the Theme row"
+        );
     }
 
     #[test]
