@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use protocol::CheckoutStrategy;
 
+use crate::target::HostKey;
+
 /// How long a toast stays before it goes by itself.
 pub const TOAST_LIFETIME: Duration = Duration::from_secs(8);
 /// The most toasts on screen at once; a toast arriving while this many are
@@ -108,7 +110,7 @@ pub const CLOSE_SESSION: ToastAction = ToastAction {
 /// descriptor label; with none the toast says "The agent". Closing the
 /// session is a click away; letting the toast go keeps the shell.
 #[must_use]
-pub fn agent_exited_toast(session_id: &str, label: Option<&str>) -> ToastSpec {
+pub fn agent_exited_toast(host: &HostKey, session_id: &str, label: Option<&str>) -> ToastSpec {
     let title = match label {
         Some(label) => format!("{label} exited. The pane is a shell now."),
         None => "The agent exited. The pane is a shell now.".to_owned(),
@@ -117,18 +119,34 @@ pub fn agent_exited_toast(session_id: &str, label: Option<&str>) -> ToastSpec {
         kind: ToastKind::Info,
         title,
         detail: None,
-        key: Some(format!("{AGENT_EXIT_PREFIX}{session_id}")),
+        key: Some(agent_exit_key(host, session_id)),
         sticky: false,
         actions: vec![CLOSE_SESSION],
     }
 }
 
-/// The session id of a key [`agent_exited_toast`] raised; `None` for any
-/// other toast's key, and for a key with no id after the prefix.
+/// The key of `host`'s session `session_id`'s agent-exit toast: the prefix
+/// and the id, then `@` and the host's key for a remote host's session, so
+/// each host's exit of a shared id keeps its own toast. A session id holds
+/// no `@`.
+fn agent_exit_key(host: &HostKey, session_id: &str) -> String {
+    match host {
+        HostKey::Local => format!("{AGENT_EXIT_PREFIX}{session_id}"),
+        HostKey::Remote(name) => format!("{AGENT_EXIT_PREFIX}{session_id}@{name}"),
+    }
+}
+
+/// The host and session id of a key [`agent_exited_toast`] raised; `None`
+/// for any other toast's key, and for a key with no id or no host name.
 #[must_use]
-pub fn agent_exit_session_of(key: &str) -> Option<&str> {
-    key.strip_prefix(AGENT_EXIT_PREFIX)
-        .filter(|id| !id.is_empty())
+pub fn agent_exit_session_of(key: &str) -> Option<(HostKey, &str)> {
+    let rest = key.strip_prefix(AGENT_EXIT_PREFIX)?;
+    let (id, host) = match rest.split_once('@') {
+        Some((id, name)) if !name.is_empty() => (id, HostKey::Remote(name.to_owned())),
+        Some(_) => return None,
+        None => (rest, HostKey::Local),
+    };
+    (!id.is_empty()).then_some((host, id))
 }
 
 /// The toast for [`protocol::DaemonMessage::SessionNotice`]: what the
@@ -733,7 +751,7 @@ mod tests {
 
     #[test]
     fn agent_exited_toast_reads_claude_exited_with_a_close_action() {
-        let toast = agent_exited_toast("s1", Some("Claude"));
+        let toast = agent_exited_toast(&HostKey::Local, "s1", Some("Claude"));
         assert_eq!(toast.kind, ToastKind::Info);
         assert_eq!(toast.title, "Claude exited. The pane is a shell now.");
         assert_eq!(toast.detail, None);
@@ -748,7 +766,7 @@ mod tests {
 
     #[test]
     fn agent_exited_toast_names_the_agent() {
-        let toast = agent_exited_toast("s1", Some("Test agent"));
+        let toast = agent_exited_toast(&HostKey::Local, "s1", Some("Test agent"));
         assert_eq!(toast.title, "Test agent exited. The pane is a shell now.");
         assert_eq!(
             toast.key.as_deref(),
@@ -760,7 +778,7 @@ mod tests {
 
     #[test]
     fn agent_exited_toast_without_a_label_says_the_agent() {
-        let toast = agent_exited_toast("s1", None);
+        let toast = agent_exited_toast(&HostKey::Local, "s1", None);
         assert_eq!(toast.title, "The agent exited. The pane is a shell now.");
     }
 
@@ -803,7 +821,21 @@ mod tests {
 
     #[test]
     fn agent_exit_session_of_parses_only_its_own_keys() {
-        assert_eq!(agent_exit_session_of("agent-exit-s1"), Some("s1"));
+        assert_eq!(
+            agent_exit_session_of("agent-exit-s1"),
+            Some((HostKey::Local, "s1"))
+        );
+        let remote = HostKey::Remote("ssh:me@box".to_owned());
+        assert_eq!(
+            agent_exit_session_of(&agent_exit_key(&remote, "s1")),
+            Some((remote, "s1")),
+            "a remote host's key, whose name may hold an @, keeps its host"
+        );
+        assert_eq!(
+            agent_exit_session_of("agent-exit-s1@"),
+            None,
+            "no host name"
+        );
         assert_eq!(agent_exit_session_of("resume-report"), None);
         assert_eq!(
             agent_exit_session_of("preset:job1"),

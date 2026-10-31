@@ -1255,7 +1255,17 @@ fn leaf_drag_row(
         let selector = format!("sidebar-drop-mark-{}-{}", container.key, leaf.id);
         drop_line(selector, side, &t)
     });
-    let row = leaf_row(leaf, ctx, window, cx);
+    // The menu opens for the session of this row's host, whichever other
+    // host lists the same id.
+    let menu_session = session.clone();
+    let row = leaf_row(leaf, ctx, window, cx).on_mouse_down(
+        MouseButton::Right,
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            let SessionRef { host, id } = &menu_session;
+            this.open_session_menu(host, id, None, event.position, window, cx);
+            cx.stop_propagation();
+        }),
+    );
     let dim = ctx.dimmed.sessions.contains(leaf.id.as_str());
     dimmed(draggable_row(row, payload, &target, &leaf.label, cx), dim)
         .when(dragged, |row| row.opacity(DRAGGED_ROW_OPACITY))
@@ -1520,7 +1530,13 @@ impl RootView {
                 container_id,
                 ordered_ids,
             }) => {
-                let host = self.host_of_container(&container_id);
+                // The container's id holds no host, and another host may
+                // register the same repo id: the row dropped on names it.
+                let key = match &target {
+                    SidebarRow::Leaf { container_key, .. } => container_key,
+                    SidebarRow::Container(key) => key,
+                };
+                let host = self.host_of_container(key);
                 self.sidebar
                     .reorder_sessions_local(&host, &container_id, &ordered_ids);
                 self.send_to(
@@ -2491,7 +2507,6 @@ fn leaf_frame(
 ) -> Stateful<Div> {
     let t = theme(cx);
     let id = leaf.id.clone();
-    let menu_id = leaf.id.clone();
     let name = format!("leaf-{}", leaf.id);
     div()
         .id(SharedString::from(name.clone()))
@@ -2519,13 +2534,6 @@ fn leaf_frame(
                 .w(px(ACCENT_STRIPE_WIDTH))
                 .rounded(px(2.0))
                 .bg(gpui::rgb(accent)),
-        )
-        .on_mouse_down(
-            MouseButton::Right,
-            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                this.open_session_menu(&menu_id, None, event.position, window, cx);
-                cx.stop_propagation();
-            }),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.select_session(&id, window, cx);
@@ -2769,7 +2777,7 @@ fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
-                    this.choose_action(&id, inline.action, window, cx);
+                    this.choose_action(&this.host_of_session(&id), &id, inline.action, window, cx);
                 }),
             )
             .into_any_element()

@@ -775,8 +775,9 @@ impl RootView {
     }
 
     /// Folds a diff message in; returns whether nothing else is owed it.
-    /// Only This PC's `Welcome` resets the opens, since diff tabs live in
-    /// its layout.
+    /// Diff tabs live in This PC's layout and ask only This PC, so only its
+    /// messages fold here: a remote host's open answer, snapshot, error or
+    /// repo status names nothing of theirs.
     pub(crate) fn on_diff_message(
         &mut self,
         host: &crate::target::HostKey,
@@ -784,11 +785,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if *host != crate::target::HostKey::Local {
+            return false;
+        }
         match msg {
             DaemonMessage::Welcome { .. } => {
-                if *host != crate::target::HostKey::Local {
-                    return false;
-                }
                 self.diff_opens.reset();
                 for view in self.diff_views() {
                     if view.update(cx, |tab, _| tab.state.reset_connection()) {

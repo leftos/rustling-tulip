@@ -3,13 +3,17 @@
 
 use crate::support;
 
-use gpui::TestAppContext;
+use gpui::{Modifiers, Pixels, Point, TestAppContext, point};
 use protocol::{
-    ClientMessage, DaemonMessage, InitLayoutKind, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
+    ClientMessage, DaemonMessage, InitLayoutKind, SplitDirection, VscodeWorkspaceFolder,
+    VscodeWorkspaceSuggestion,
 };
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent};
-use support::{Fixture, Harness, PROTOCOL, TestDir, repo, saved_remote, seed_ui, session};
+use support::{
+    Fixture, Harness, PROTOCOL, TestDir, pane, remote_in_pane, remote_pane, repo, saved_remote,
+    seed_ui, session, split, tab,
+};
 
 /// The tailnet host the specs connect beside This PC.
 const REMOTE: &str = "box.tail1234.ts.net";
@@ -246,5 +250,360 @@ fn a_dropped_duplicate_is_dialled_again_only_once_its_owner_closes(cx: &mut Test
         dials(&h, &ssh_box()),
         2,
         "once the owner's connection closes, its duplicate is dialled again"
+    );
+}
+
+/// Every toast's title, oldest first.
+fn toast_titles(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|toast| toast.title.clone())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn each_hosts_resume_report_keeps_its_own_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+
+    h.send(DaemonMessage::ResumeReport {
+        resumed: 2,
+        left_in_recover: 0,
+    });
+    h.host(&remote()).send(DaemonMessage::ResumeReport {
+        resumed: 1,
+        left_in_recover: 0,
+    });
+
+    let reports: Vec<String> = toast_titles(&mut h)
+        .into_iter()
+        .filter(|title| title.ends_with("after restart"))
+        .collect();
+    assert_eq!(
+        reports,
+        [
+            "Resumed 2 sessions after restart",
+            "Resumed 1 session after restart"
+        ],
+        "the remote host's report does not replace This PC's"
+    );
+}
+
+/// How many agent-exit toasts show.
+fn exit_toasts(h: &mut Harness<'_>) -> usize {
+    toast_titles(h)
+        .iter()
+        .filter(|title| title.contains("exited. The pane is a shell now."))
+        .count()
+}
+
+#[gpui::test]
+fn an_agent_exit_reads_the_session_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s2").build()],
+    });
+
+    h.host(&remote()).send(DaemonMessage::AgentExited {
+        session_id: "s1".to_owned(),
+    });
+    assert_eq!(
+        exit_toasts(&mut h),
+        0,
+        "the remote host does not list s1, so its exit raises nothing"
+    );
+
+    h.host(&remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+    h.host(&remote()).send(DaemonMessage::AgentExited {
+        session_id: "s1".to_owned(),
+    });
+    h.send(DaemonMessage::AgentExited {
+        session_id: "s1".to_owned(),
+    });
+    assert_eq!(
+        exit_toasts(&mut h),
+        2,
+        "each host's exit of the shared id keeps its own toast"
+    );
+}
+
+/// This PC lists `s1` live; [`REMOTE`] lists `remote_s1` under the same id.
+/// Tab `t1` splits This PC's `s1` (pane `p1`) beside the remote one (pane
+/// `p2`).
+fn shared_id<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    remote_s1: protocol::SessionSnapshot,
+) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.tabs = vec![tab(
+        "t1",
+        &split(
+            SplitDirection::Horizontal,
+            pane("p1", Some("s1")),
+            remote_pane("p2", "s1"),
+        ),
+    )];
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![remote_s1],
+    });
+    host.sent();
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn a_remote_panes_exit_overlay_reads_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id(cx, &dir, session("s1").exited(1).build());
+
+    let selectors = h.root(|root, _| root.exited_overlay_selectors());
+    assert!(
+        selectors.iter().any(|s| s == "exited-p2"),
+        "the remote pane's exited session shows its overlay: {selectors:?}"
+    );
+    assert!(
+        !selectors.iter().any(|s| s == "exited-p1"),
+        "This PC's live s1 shows none: {selectors:?}"
+    );
+    assert!(
+        h.in_model("exited-p2"),
+        "the overlay draws on the remote pane"
+    );
+    assert!(!h.in_model("exited-p1"));
+}
+
+#[gpui::test]
+fn a_duplicate_from_a_remote_pane_of_a_shared_id_goes_to_that_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id(cx, &dir, session("s1").build());
+
+    h.right_click_on("pane-header-p2");
+    h.click_on("session-menu-duplicate");
+    h.click_on("duplicate-new-tab");
+
+    let duplicates = |sent: Vec<ClientMessage>| -> usize {
+        sent.iter()
+            .filter(|msg| matches!(msg, ClientMessage::DuplicateSession { .. }))
+            .count()
+    };
+    assert_eq!(
+        duplicates(h.host(&remote()).sent()),
+        1,
+        "the remote pane's session is duplicated on its host"
+    );
+    assert_eq!(duplicates(h.sent()), 0, "This PC is not asked");
+}
+
+#[gpui::test]
+fn a_remote_panes_link_fetches_from_that_host_when_both_hold_the_repo_id(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ui = serde_json::json!({ "general": { "open_text_externally": true } });
+    let mut h = remote_in_pane(cx, &dir, &ui, &["r1"], session("s1").worktree("r1").build());
+    let root = dir.path().join("remote-files");
+    h.root_update(move |view, _, _| view.set_remote_files_root(root));
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/local/r1")],
+    });
+    h.sent();
+
+    h.host(&saved_remote()).pty("s1", b"see C:/wt/x/src/a.rs");
+    let on = h.cell_center("p2", 6, 0);
+    h.click(on, Modifiers::secondary_key());
+
+    let fetches = |sent: Vec<ClientMessage>| -> Vec<String> {
+        sent.into_iter()
+            .filter_map(|msg| match msg {
+                ClientMessage::FetchFile { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        fetches(h.host(&saved_remote()).sent()),
+        ["src/a.rs"],
+        "the link is fetched from the pane's host"
+    );
+    assert!(fetches(h.sent()).is_empty(), "This PC is not asked");
+}
+
+/// A point `fy` of the way down the row tagged `selector`.
+fn on_row(h: &mut Harness<'_>, selector: &str, fy: f32) -> Point<Pixels> {
+    let row = h.bounds(selector);
+    assert!(row.size.height > Pixels::ZERO, "{selector} is on screen");
+    point(
+        row.origin.x + row.size.width * 0.3,
+        row.origin.y + row.size.height * fy,
+    )
+}
+
+#[gpui::test]
+fn a_leaf_reorder_in_a_remote_repo_goes_to_that_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/r1")],
+        sessions: vec![
+            session("a").in_repo("r1").build(),
+            session("b").in_repo("r1").build(),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "D:/remote/r1")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("c").in_repo("r1").build(),
+            session("d").in_repo("r1").build(),
+        ],
+    });
+    host.sent();
+    h.sent();
+
+    let from = on_row(&mut h, "leaf-d", 0.5);
+    let to = on_row(&mut h, "leaf-c", 0.2);
+    h.drag_and_drop(from, to);
+
+    let reorders = |sent: Vec<ClientMessage>| -> Vec<(String, Vec<String>)> {
+        sent.into_iter()
+            .filter_map(|msg| match msg {
+                ClientMessage::ReorderSessions {
+                    container_id,
+                    ordered_ids,
+                } => Some((container_id, ordered_ids)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        reorders(h.host(&remote()).sent()),
+        [("r1".to_owned(), vec!["d".to_owned(), "c".to_owned()])],
+        "the remote repo's order goes to its host"
+    );
+    assert!(reorders(h.sent()).is_empty(), "This PC is not asked");
+}
+
+/// A `LayoutInitRequired` for a client with `count` active sessions.
+fn layout_question(count: u32) -> DaemonMessage {
+    DaemonMessage::LayoutInitRequired {
+        has_legacy: false,
+        active_session_count: count,
+        clonable: Vec::new(),
+    }
+}
+
+/// How many `InitLayout`s are in `sent`.
+fn init_count(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::InitLayout { .. }))
+        .count()
+}
+
+/// Reports `target`'s connection closed.
+fn close_host(h: &mut Harness<'_>, target: &Target) {
+    let mut closed = Connection::for_target(target.clone());
+    closed.on_connecting();
+    let _ = closed.on_closed("socket closed".to_owned());
+    h.host(target).event(NetEvent::State(closed));
+}
+
+#[gpui::test]
+fn a_remote_hosts_layout_chooser_closes_with_its_connection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+    h.host(&remote()).send(layout_question(0));
+    assert!(h.root(|root, _| root.layout_chooser_open()));
+
+    close_host(&mut h, &remote());
+
+    assert!(
+        !h.root(|root, _| root.layout_chooser_open()),
+        "the chooser goes with its host's connection"
+    );
+}
+
+#[gpui::test]
+fn two_hosts_layout_questions_are_each_answered(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+    h.send(layout_question(0));
+    h.host(&remote()).send(layout_question(0));
+    h.sent();
+    h.host(&remote()).sent();
+
+    h.click_on("layout-choose-empty");
+    assert!(
+        h.root(|root, _| root.layout_chooser_open()),
+        "the second host's question shows once the first is answered"
+    );
+    h.click_on("layout-choose-empty");
+
+    assert_eq!(init_count(&h.sent()), 1, "This PC is answered once");
+    assert_eq!(
+        init_count(&h.host(&remote()).sent()),
+        1,
+        "the remote host is answered once"
+    );
+    assert!(!h.root(|root, _| root.layout_chooser_open()));
+}
+
+#[gpui::test]
+fn this_pcs_tab_list_leaves_a_remote_hosts_chooser_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+    h.host(&remote()).send(layout_question(0));
+
+    h.send(DaemonMessage::Tabs { tabs: Vec::new() });
+
+    assert!(
+        h.root(|root, _| root.layout_chooser_open()),
+        "only the remote host's own answer closes its chooser"
+    );
+}
+
+#[gpui::test]
+fn a_layout_picked_for_a_remote_host_is_not_laid_over_this_pcs_tabs(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // No session of This PC's, so its tab list owes it nothing else.
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    h.host(&remote()).connect();
+    h.host(&remote()).send(layout_question(5));
+    h.sent();
+    h.click_on("layout-choose-all");
+    h.click_on("chooser-grid-shape-2");
+    h.click_on("chooser-confirm-all");
+    assert_eq!(
+        init_count(&h.host(&remote()).sent()),
+        1,
+        "the choice goes to the remote host"
+    );
+
+    let row = |a: &str, b: &str| split(SplitDirection::Horizontal, pane(a, None), pane(b, None));
+    let grid = split(SplitDirection::Vertical, row("p1", "p2"), row("p3", "p4"));
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &grid)],
+    });
+
+    let sent = h.sent();
+    assert!(
+        sent.is_empty(),
+        "no arrangement goes to This PC: sent {sent:?}"
     );
 }

@@ -20,6 +20,9 @@ use crate::target::{HostKey, Target};
 /// fetch onto this PC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchRequest {
+    /// The host the path lives on: the host of the pane, dialog or page
+    /// the fetch came from, never one found by the repo id.
+    pub host: HostKey,
     /// The registered repo the path is under.
     pub repo_id: String,
     /// The repo's name, the folder its files land in.
@@ -894,6 +897,7 @@ impl FetchRegistry {
             .next()
             .into_iter()
             .map(|rel_path| FetchRequest {
+                host: page.host.clone(),
                 repo_id: page.repo_id.clone(),
                 repo_name: page.repo_name.clone(),
                 worktree_path: page.worktree_path.clone(),
@@ -1254,6 +1258,7 @@ mod tests {
 
     fn entry(host: &str, rel: &str) -> FetchEntry {
         let request = FetchRequest {
+            host: HostKey::Local,
             repo_id: "r1".to_owned(),
             repo_name: "repo".to_owned(),
             worktree_path: None,

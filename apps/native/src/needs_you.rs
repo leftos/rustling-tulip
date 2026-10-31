@@ -4,6 +4,7 @@
 //! GPUI; the view in `needs_you_view` draws these rows.
 
 use crate::sidebar::{Leaf, LeafState, SidebarModel, session_title};
+use crate::target::HostKey;
 use chrono::{DateTime, Utc};
 use protocol::{
     AgentDescriptor, AlertKind, PendingInput, PendingQuestion, SessionSnapshot, SessionStatus,
@@ -21,6 +22,8 @@ pub(crate) enum Reason {
 /// One row of the list.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NeedsYouRow {
+    /// The host whose session the row is.
+    pub(crate) host: HostKey,
     pub(crate) session_id: String,
     /// The sidebar container the session sits in.
     pub(crate) container_name: String,
@@ -52,6 +55,7 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
                 continue;
             };
             let row = NeedsYouRow {
+                host: container.host.clone(),
                 session_id: session.id.clone(),
                 container_name: container.name.clone(),
                 accent: accents

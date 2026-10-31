@@ -7,6 +7,7 @@ use protocol::{RepoEntry, SessionMember, SessionSnapshot};
 
 use crate::file_fetch::FetchRequest;
 use crate::links::TerminalLinkCandidate;
+use crate::target::HostKey;
 
 /// A folder on the host a fetch may name: a repo or one of its worktrees.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,12 +97,14 @@ pub(crate) fn strip_root(root_path: &str, text: &str) -> RootStrip {
     }
 }
 
-/// The fetches to try for a link's `candidates` (longest first): each
+/// The fetches from `host` to try for a link's `candidates` (longest
+/// first): each
 /// candidate in turn, against each of `roots`. A relative candidate is read
 /// against `cwd` first, then against each root; `.` and `..` are resolved as
 /// text, and a path outside every root gives no reading.
 #[must_use]
 pub fn readings(
+    host: &HostKey,
     candidates: &[TerminalLinkCandidate],
     cwd: Option<&str>,
     roots: &[Root],
@@ -119,6 +122,7 @@ pub fn readings(
                     continue;
                 };
                 let request = FetchRequest {
+                    host: host.clone(),
                     repo_id: root.repo_id.clone(),
                     repo_name: root.repo_name.clone(),
                     worktree_path: Some(root.path.clone()),
@@ -248,15 +252,16 @@ pub(crate) fn split_anchor(unified: &str) -> Option<(&str, &str)> {
     unified.strip_prefix('/').map(|rest| ("/", rest))
 }
 
-/// [`readings`] for a link in a pane of `session`.
+/// [`readings`] for a link in a pane of `host`'s `session`.
 #[must_use]
 pub fn session_readings(
+    host: &HostKey,
     candidates: &[TerminalLinkCandidate],
     session: &SessionSnapshot,
     repos: &[RepoEntry],
 ) -> Vec<FetchRequest> {
     let cwd = session.current_cwd.as_deref();
-    readings(candidates, cwd, &roots(&session.members, cwd, repos))
+    readings(host, candidates, cwd, &roots(&session.members, cwd, repos))
 }
 
 #[cfg(test)]
@@ -271,6 +276,7 @@ mod tests {
     use super::{Root, RootStrip, readings, root_holding, roots, strip_root};
     use crate::file_fetch::FetchRequest;
     use crate::links::TerminalLinkCandidate;
+    use crate::target::HostKey;
 
     fn candidate(path: &str, line: Option<u32>, column: Option<u32>) -> TerminalLinkCandidate {
         TerminalLinkCandidate {
@@ -309,6 +315,7 @@ mod tests {
     /// The reading of `rel` under `root`, with no line.
     fn reading(root: &Root, rel: &str) -> FetchRequest {
         FetchRequest {
+            host: HostKey::Local,
             repo_id: root.repo_id.clone(),
             repo_name: root.repo_name.clone(),
             worktree_path: Some(root.path.clone()),
@@ -341,6 +348,7 @@ mod tests {
     fn absolute_host_path_under_a_member_becomes_a_relative_reading() {
         let x = root("r1", "C:/wt/x");
         let found = readings(
+            &HostKey::Local,
             &[candidate(r"C:\wt\x\src\a.rs", Some(12), Some(3))],
             None,
             std::slice::from_ref(&x),
@@ -357,15 +365,25 @@ mod tests {
         let share = root("r2", r"\\server\share\repo");
         let all = [x.clone(), share.clone()];
         assert_eq!(
-            readings(&[plain(r"\\?\c:\WT\x\a.rs")], None, &all),
+            readings(&HostKey::Local, &[plain(r"\\?\c:\WT\x\a.rs")], None, &all),
             [reading(&x, "a.rs")]
         );
         assert_eq!(
-            readings(&[plain(r"\\?\UNC\SERVER\share\Repo\sub\b.rs")], None, &all),
+            readings(
+                &HostKey::Local,
+                &[plain(r"\\?\UNC\SERVER\share\Repo\sub\b.rs")],
+                None,
+                &all
+            ),
             [reading(&share, "sub/b.rs")]
         );
         assert_eq!(
-            readings(&[plain("//server/SHARE/repo/c.rs")], None, &all),
+            readings(
+                &HostKey::Local,
+                &[plain("//server/SHARE/repo/c.rs")],
+                None,
+                &all
+            ),
             [reading(&share, "c.rs")]
         );
     }
@@ -375,21 +393,31 @@ mod tests {
         let home = root("r1", "/home/me/repo");
         let all = [home.clone()];
         assert_eq!(
-            readings(&[plain("/home/me/repo/src/a.rs")], None, &all),
+            readings(
+                &HostKey::Local,
+                &[plain("/home/me/repo/src/a.rs")],
+                None,
+                &all
+            ),
             [reading(&home, "src/a.rs")]
         );
         assert_eq!(
-            readings(&[plain("/Home/me/repo/src/a.rs")], None, &all),
+            readings(
+                &HostKey::Local,
+                &[plain("/Home/me/repo/src/a.rs")],
+                None,
+                &all
+            ),
             [],
             "a Unix host path differs by case"
         );
         assert_eq!(
-            readings(&[plain("/home/me/repo")], None, &all),
+            readings(&HostKey::Local, &[plain("/home/me/repo")], None, &all),
             [],
             "the root itself is not a file in it"
         );
         assert_eq!(
-            readings(&[plain("/home/me/repo2/a.rs")], None, &all),
+            readings(&HostKey::Local, &[plain("/home/me/repo2/a.rs")], None, &all),
             [],
             "a sibling sharing the root's prefix is not under it"
         );
@@ -400,6 +428,7 @@ mod tests {
         let a = root("ra", "C:/wt/a");
         let b = root("rb", "C:/wt/b");
         let found = readings(
+            &HostKey::Local,
             &[candidate("x.rs", Some(4), None)],
             Some(r"C:\wt\b\sub"),
             &[a, b],
@@ -426,26 +455,38 @@ mod tests {
         let all = [x.clone()];
         let cwd = Some("C:/wt/x");
         assert_eq!(
-            readings(&[plain("./a.rs")], cwd, &all),
+            readings(&HostKey::Local, &[plain("./a.rs")], cwd, &all),
             [reading(&x, "a.rs")]
         );
         assert_eq!(
-            readings(&[plain(r"sub\..\a.rs")], cwd, &all),
+            readings(&HostKey::Local, &[plain(r"sub\..\a.rs")], cwd, &all),
             [reading(&x, "a.rs")]
         );
         assert_eq!(
-            readings(&[plain("../x/b.rs")], Some("C:/wt/x/sub"), &all),
+            readings(
+                &HostKey::Local,
+                &[plain("../x/b.rs")],
+                Some("C:/wt/x/sub"),
+                &all
+            ),
             [reading(&x, "x/b.rs"), reading(&x, "b.rs")],
             "a parent segment that stays inside the root reads under it, from the cwd then the root"
         );
-        assert_eq!(readings(&[plain("../../outside.rs")], cwd, &all), []);
-        assert_eq!(readings(&[plain("C:/wt/x/../y/a.rs")], cwd, &all), []);
+        assert_eq!(
+            readings(&HostKey::Local, &[plain("../../outside.rs")], cwd, &all),
+            []
+        );
+        assert_eq!(
+            readings(&HostKey::Local, &[plain("C:/wt/x/../y/a.rs")], cwd, &all),
+            []
+        );
     }
 
     #[test]
     fn longest_candidate_comes_first_and_duplicates_are_dropped() {
         let x = root("r1", "C:/wt/x");
         let found = readings(
+            &HostKey::Local,
             &[plain("docs/long name.md"), plain("docs/long")],
             Some("C:/wt/x"),
             &[x],
@@ -471,7 +512,7 @@ mod tests {
         let found = roots(&[], cwd, &repos);
         assert_eq!(found, [root("app", r"C:\repos\app")], "the deepest repo");
         assert_eq!(
-            places(&readings(&[plain("main.rs")], cwd, &found)),
+            places(&readings(&HostKey::Local, &[plain("main.rs")], cwd, &found)),
             [
                 place("app", r"C:\repos\app", "src/main.rs"),
                 place("app", r"C:\repos\app", "main.rs"),
@@ -499,8 +540,14 @@ mod tests {
         let repos = [repo("app", "C:/repos/app")];
         assert_eq!(roots(&[], Some("C:/elsewhere"), &repos), []);
         assert_eq!(roots(&[], None, &repos), []);
-        assert_eq!(readings(&[plain("C:/repos/app/a.rs")], None, &[]), []);
-        assert_eq!(readings(&[plain("a.rs")], Some("C:/repos/app"), &[]), []);
+        assert_eq!(
+            readings(&HostKey::Local, &[plain("C:/repos/app/a.rs")], None, &[]),
+            []
+        );
+        assert_eq!(
+            readings(&HostKey::Local, &[plain("a.rs")], Some("C:/repos/app"), &[]),
+            []
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::fetch_link::{self, Root, RootStrip};
 use crate::file_fetch::{FetchRequest, display_host_path};
 use crate::links::split_path_position;
 use crate::spawn_form::human_size;
+use crate::target::HostKey;
 
 /// A focusable control of the Fetch file… dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,7 +240,7 @@ impl FetchForm {
     /// Fetch: the request for `text` under the chosen root, once, which
     /// starts the fetch. A path that cannot be fetched says why under the
     /// field instead; `None` then, with no root, and while a fetch is on.
-    pub(crate) fn submit(&mut self, text: &str) -> Option<FetchRequest> {
+    pub(crate) fn submit(&mut self, host: &HostKey, text: &str) -> Option<FetchRequest> {
         if self.phase != Phase::Editing {
             return None;
         }
@@ -252,6 +253,7 @@ impl FetchForm {
             }
         };
         let request = FetchRequest {
+            host: host.clone(),
             repo_id: root.repo_id.clone(),
             repo_name: root.repo_name.clone(),
             worktree_path: Some(root.path.clone()),
@@ -361,6 +363,7 @@ mod tests {
         progress_text,
     };
     use crate::fetch_link::Root;
+    use crate::target::HostKey;
 
     fn root(repo_id: &str, path: &str) -> Root {
         Root {
@@ -505,7 +508,7 @@ mod tests {
         assert_eq!(form.scope(), None);
         assert_eq!(form.caption().as_deref(), Some(NO_REPO));
         assert_eq!(form.hint(), None);
-        assert_eq!(form.submit("a.rs"), None);
+        assert_eq!(form.submit(&HostKey::Local, "a.rs"), None);
         assert_eq!(form.error(), None, "the caption already says why");
     }
 
@@ -588,7 +591,9 @@ mod tests {
     fn submit_builds_the_request_for_the_chosen_scope() {
         let mut form = FetchForm::new(two_roots(), None);
         form.select_scope(1);
-        let request = form.submit("src/a.rs:4:2").expect("a request");
+        let request = form
+            .submit(&HostKey::Local, "src/a.rs:4:2")
+            .expect("a request");
         assert_eq!(request.repo_id, "rb");
         assert_eq!(request.repo_name, "rb-name");
         assert_eq!(request.worktree_path.as_deref(), Some("C:/wt/b"));
@@ -603,7 +608,7 @@ mod tests {
         let mut form = FetchForm::new(vec![root("r1", "C:/wt/x")], None);
         form.set_focus(FetchControl::Submit);
         assert_eq!(form.focused("a.rs"), FetchControl::Submit);
-        assert!(form.submit("a.rs").is_some());
+        assert!(form.submit(&HostKey::Local, "a.rs").is_some());
         assert_eq!(
             form.focused("a.rs"),
             FetchControl::Path,
@@ -614,22 +619,26 @@ mod tests {
     #[test]
     fn a_second_submit_is_ignored_while_starting() {
         let mut form = FetchForm::new(vec![root("r1", "C:/wt/x")], None);
-        assert!(form.submit("a.rs").is_some());
-        assert_eq!(form.submit("a.rs"), None);
+        assert!(form.submit(&HostKey::Local, "a.rs").is_some());
+        assert_eq!(form.submit(&HostKey::Local, "a.rs"), None);
         assert!(!form.can_submit("a.rs"));
         form.started("fetch-1".to_owned());
         assert_eq!(form.fetch_id(), Some("fetch-1"));
-        assert_eq!(form.submit("a.rs"), None, "nor while fetching");
+        assert_eq!(
+            form.submit(&HostKey::Local, "a.rs"),
+            None,
+            "nor while fetching"
+        );
     }
 
     #[test]
     fn a_failure_reopens_editing_with_the_error_and_an_edit_clears_it() {
         let mut form = FetchForm::new(vec![root("r1", "C:/wt/x")], None);
-        assert_eq!(form.submit("../a.rs"), None);
+        assert_eq!(form.submit(&HostKey::Local, "../a.rs"), None);
         assert_eq!(form.error(), Some("A path can't contain \"..\"."));
         form.edited();
         assert_eq!(form.error(), None);
-        assert!(form.submit("a.rs").is_some());
+        assert!(form.submit(&HostKey::Local, "a.rs").is_some());
         form.started("fetch-1".to_owned());
         form.set_focus(FetchControl::Cancel);
         form.fail("path \"a.rs\" does not exist".to_owned());
@@ -637,7 +646,10 @@ mod tests {
         assert_eq!(form.fetch_id(), None);
         assert_eq!(form.error(), Some("path \"a.rs\" does not exist"));
         assert_eq!(form.focused("a.rs"), FetchControl::Path);
-        assert!(form.submit("a.rs").is_some(), "Fetch goes again");
+        assert!(
+            form.submit(&HostKey::Local, "a.rs").is_some(),
+            "Fetch goes again"
+        );
         assert_eq!(form.error(), None);
     }
 

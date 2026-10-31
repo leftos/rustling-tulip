@@ -2008,7 +2008,14 @@ fn session_menu_opens_in_the_popout(cx: &mut TestAppContext) {
 
     let pane = ("t1".to_owned(), "p1".to_owned());
     in_popout(&h, &mut popout, |root, window, cx| {
-        root.open_session_menu("s1", Some(&pane), point(px(40.0), px(12.0)), window, cx);
+        root.open_session_menu(
+            &rustling_tulip_native::target::HostKey::Local,
+            "s1",
+            Some(&pane),
+            point(px(40.0), px(12.0)),
+            window,
+            cx,
+        );
     });
 
     assert!(
@@ -2201,7 +2208,14 @@ fn opening_a_menu_in_main_hands_the_popouts_keys_back(cx: &mut TestAppContext) {
     let mut popout = h.popout_window();
     let pane = ("t1".to_owned(), "p1".to_owned());
     in_popout(&h, &mut popout, |root, window, cx| {
-        root.open_session_menu("s1", Some(&pane), point(px(40.0), px(12.0)), window, cx);
+        root.open_session_menu(
+            &rustling_tulip_native::target::HostKey::Local,
+            "s1",
+            Some(&pane),
+            point(px(40.0), px(12.0)),
+            window,
+            cx,
+        );
     });
     assert!(!focused_in_popout(&h, &mut popout, "p1"), "the menu has it");
 

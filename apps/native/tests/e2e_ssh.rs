@@ -19,7 +19,7 @@ use gpui::TestAppContext;
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind};
 use rustling_tulip_native::Connection;
 use rustling_tulip_native::file_fetch::FetchRequest;
-use rustling_tulip_native::target::Target;
+use rustling_tulip_native::target::{HostKey, Target};
 use support::live::{
     FakeSsh, LiveClient, LiveDaemon, commit_all, kill_tree, processes_under, spawn_shell,
 };
@@ -138,6 +138,7 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
     h.root_update(move |view, _, _| view.set_remote_files_root(set));
 
     let request = FetchRequest {
+        host: HostKey::of(&Target::parse_ssh(HOST, None).expect("devbox is a valid ssh host")),
         repo_id: repo_id.expect("the wait just found it"),
         repo_name: repo_name.clone(),
         worktree_path: None,

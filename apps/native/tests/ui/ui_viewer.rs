@@ -19,7 +19,7 @@ use base64::Engine as _;
 use gpui::{Modifiers, ScrollStrategy, TestAppContext, px};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, TabEntry};
 use rustling_tulip_native::file_fetch::FetchRequest;
-use rustling_tulip_native::target::Target;
+use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{MarkdownMode, ViewerLoad, ViewerOrigin, ViewerTab};
 use serde_json::json;
 use support::{Fixture, Harness, Opened, TestDir, session};
@@ -370,6 +370,7 @@ fn on_remote<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, Pat
 /// `bytes`; returns the saved copy.
 fn fetch(h: &mut Harness<'_>, root: &Path, rel: &str, line: Option<u32>, bytes: &[u8]) -> PathBuf {
     let request = FetchRequest {
+        host: HostKey::of(&Target::tailnet(HOST, None)),
         repo_id: "r1".to_owned(),
         repo_name: "repo".to_owned(),
         worktree_path: Some("C:/wt/r1".to_owned()),

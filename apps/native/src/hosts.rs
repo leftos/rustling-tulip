@@ -323,6 +323,11 @@ impl RootView {
         self.forget_daemon_id(host);
         self.end_fetches_on_disconnect(host, window, cx);
         self.close_fetch_dialog_of(host, window, cx);
+        // This PC's chooser stays under the connecting overlay until its
+        // next `Welcome`; a remote host's question ends with its connection.
+        if *host != HostKey::Local {
+            self.close_layout_chooser_of(host, window, cx);
+        }
         self.set_remote_status(host, None, cx);
         // A remote host's spawns and duplicates in flight end with its
         // connection; This PC's end with its reset.

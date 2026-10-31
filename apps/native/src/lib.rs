@@ -1024,6 +1024,9 @@ pub struct RootView {
     layout_chooser: Option<layout_chooser::LayoutChooser>,
     /// The host whose daemon asked for the open layout chooser's answer.
     layout_chooser_host: HostKey,
+    /// Other hosts' layout questions waiting while one host's chooser shows,
+    /// in arrival order.
+    layout_questions: Vec<layout_chooser_view::LayoutQuestion>,
     /// The layout chooser's keyboard focus.
     chooser_focus: FocusHandle,
     /// The arrangement the chooser picked, applied to the daemon's next tab
@@ -1450,6 +1453,7 @@ impl RootView {
             quit_focus: cx.focus_handle(),
             layout_chooser: None,
             layout_chooser_host: HostKey::Local,
+            layout_questions: Vec::new(),
             chooser_focus: cx.focus_handle(),
             pending_arrangement: None,
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
@@ -4155,11 +4159,12 @@ impl RootView {
         self.on_containers_changed(cx);
     }
 
-    /// Shows the daemon's start-up resume report as one toast; a later report
-    /// replaces it in place. Returns whether `msg` was that report.
+    /// Shows a daemon's start-up resume report as one toast per host; a
+    /// later report from the same host replaces it in place. Returns whether
+    /// `msg` was that report.
     fn on_resume_report(
         &mut self,
-        _host: &HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -4170,34 +4175,37 @@ impl RootView {
         else {
             return false;
         };
-        self.push_toast_spec(notices::resume_report_toast(*resumed, *left_in_recover), cx);
+        let mut toast = notices::resume_report_toast(*resumed, *left_in_recover);
+        if let HostKey::Remote(name) = host {
+            toast.key = toast.key.map(|key| format!("{key}@{name}"));
+        }
+        self.push_toast_spec(toast, cx);
         true
     }
 
-    /// Shows a session's agent exit as one toast, keyed by the session so a
-    /// second exit updates it in place; an exit for a session this client
-    /// does not list raises nothing. Returns whether `msg` was that notice.
+    /// Shows a session's agent exit as one toast, keyed by the host and the
+    /// session so a second exit updates it in place; an exit for a session
+    /// its host does not list raises nothing. Returns whether `msg` was that
+    /// notice.
     fn on_agent_exited(
         &mut self,
-        _host: &HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         cx: &mut Context<Self>,
     ) -> bool {
         let DaemonMessage::AgentExited { session_id } = msg else {
             return false;
         };
-        let Some(session) = self.sidebar.session(session_id) else {
+        let Some(session) = self.sidebar.session_on(host, session_id) else {
             return true;
         };
         let label = session
             .agent
             .as_ref()
-            .and_then(|id| {
-                crate::agent_options::descriptor_for(self.sidebar.session_agents(session_id), id)
-            })
+            .and_then(|id| crate::agent_options::descriptor_for(self.sidebar.agents(host), id))
             .map(|descriptor| descriptor.label.clone());
         self.push_toast_spec(
-            notices::agent_exited_toast(session_id, label.as_deref()),
+            notices::agent_exited_toast(host, session_id, label.as_deref()),
             cx,
         );
         true
@@ -4244,14 +4252,14 @@ impl RootView {
     /// The Close session button of an agent-exit toast: stops and discards
     /// the session, leaving its worktrees on disk; a session this client no
     /// longer lists sends nothing.
-    fn close_session_after_agent_exit(&mut self, session_id: &str) {
+    fn close_session_after_agent_exit(&mut self, host: &HostKey, session_id: &str) {
         let messages = self
             .sidebar
-            .session(session_id)
+            .session_on(host, session_id)
             .map(branch_fate::close_after_agent_exit)
             .unwrap_or_default();
         for msg in messages {
-            self.send_to(&self.host_of_session(session_id), msg);
+            self.send_to(host, msg);
         }
     }
 
@@ -4457,7 +4465,7 @@ impl RootView {
         self.tabs.clear_armed_creates();
         self.tabs.clear_layout_requests();
         self.pending_arrangement = None;
-        self.close_layout_chooser(window, cx);
+        self.close_layout_chooser_of(&HostKey::Local, window, cx);
         self.reset_cleanup_failed(window, cx);
         self.reset_worktrees(window, cx);
     }

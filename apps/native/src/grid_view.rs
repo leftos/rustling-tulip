@@ -1579,7 +1579,12 @@ impl RootView {
                 &theme(cx),
             ))
             .child(body)
-            .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
+            .children(self.exited_overlay(
+                Some(tab_id),
+                pane_id,
+                session_id.map(|id| SessionRef::new(self.tabs.pane_host(tab_id, pane_id), id)),
+                cx,
+            ))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
         let colors = self.frame_colors(pane_id, session_id, focused, &t);
         let overlay = self
@@ -1826,7 +1831,12 @@ impl RootView {
                 &theme(cx),
             ))
             .child(body)
-            .children(self.exited_overlay(None, &slot_id, Some(session_id), cx))
+            .children(self.exited_overlay(
+                None,
+                &slot_id,
+                Some(SessionRef::new(host.clone(), session_id)),
+                cx,
+            ))
             .children(self.abandoned_overlay(&slot_id, Some(session_id), cx));
         popout_column(toolbar, body.into_any_element())
     }
@@ -1874,7 +1884,12 @@ impl RootView {
                 &theme(cx),
             ))
             .child(body)
-            .children(self.exited_overlay(Some(tab_id), pane_id, session_id, cx))
+            .children(self.exited_overlay(
+                Some(tab_id),
+                pane_id,
+                session_id.map(|id| SessionRef::new(self.tabs.pane_host(tab_id, pane_id), id)),
+                cx,
+            ))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
         let toolbar = self.popout_toolbar(pane_id, session_id, cx);
         Some(popout_column(toolbar, body.into_any_element()))
@@ -1967,7 +1982,15 @@ impl RootView {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if let Some(id) = &menu_session {
-                        this.open_session_menu(id, Some(&menu_ids), event.position, window, cx);
+                        let host = this.tabs.pane_host(&menu_ids.0, &menu_ids.1);
+                        this.open_session_menu(
+                            &host,
+                            id,
+                            Some(&menu_ids),
+                            event.position,
+                            window,
+                            cx,
+                        );
                     } else {
                         let (tab, pane) = &menu_ids;
                         this.open_empty_pane_menu(tab, pane, event.position, window, cx);
