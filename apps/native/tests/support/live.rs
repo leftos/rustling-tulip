@@ -1110,26 +1110,9 @@ impl<'a> Harness<'a> {
     /// through its isolated handshake. The fake-daemon half of the harness
     /// ([`Self::send`], [`Self::sent`]) does nothing here.
     pub fn open_live(cx: &'a mut TestAppContext, daemon: &LiveDaemon) -> (Self, LiveClient) {
-        Self::open_live_on(
-            cx,
-            daemon,
-            Target::Local,
-            None,
-            Arc::new(MemoryTokens::default()),
-        )
-    }
-
-    /// [`Self::open_live`] on `target`: a tailnet dial trusts only `tls`'s
-    /// roots (`None` for the OS store) and holds the device tokens in
-    /// `tokens`, which the view's pairing flow shares.
-    pub fn open_live_on(
-        cx: &'a mut TestAppContext,
-        daemon: &LiveDaemon,
-        target: Target,
-        tls: Option<Arc<rustls::ClientConfig>>,
-        tokens: Arc<MemoryTokens>,
-    ) -> (Self, LiveClient) {
-        let (client, view_events) = live_client(&daemon.config_dir(), target, tls, tokens.clone());
+        let tokens = Arc::new(MemoryTokens::default());
+        let (client, view_events) =
+            live_client(&daemon.config_dir(), Target::Local, None, tokens.clone());
         let first = (client.tx.clone(), view_events);
         let harness = Self::open_live_with(cx, daemon.dir().join("ui"), tokens, |opened| {
             super::fake_transport(first, opened)
@@ -1142,7 +1125,10 @@ impl<'a> Harness<'a> {
     /// first, so the window dials it at start through its saved hosts. Every
     /// host runs its own real network thread; [`LiveHosts`] holds the client
     /// side of each. `tokens` are the device tokens the view and every
-    /// connection share.
+    /// connection share. A tailnet host whose name a saved host may not hold
+    /// (the fake tailnet's bare [`REMOTE_HOST`]) is dialled once the window
+    /// is open, as the Connections picker dials one, since the window drops
+    /// such a saved host unconnected.
     #[expect(
         clippy::panic,
         reason = "a window opening a host the spec did not list is a bug in the spec"
@@ -1155,6 +1141,11 @@ impl<'a> Harness<'a> {
     ) -> (Self, LiveHosts) {
         let ui_dir = home.dir().join("ui");
         seed_saved_hosts(&ui_dir, &remotes);
+        let dialled: Vec<Target> = remotes
+            .iter()
+            .filter(|spec| !can_be_saved(spec))
+            .map(|spec| spec.target.clone())
+            .collect();
         let connecting: Vec<HostKey> = std::iter::once(HostKey::Local)
             .chain(
                 remotes
@@ -1195,6 +1186,9 @@ impl<'a> Harness<'a> {
                 (tx, view_events)
             })
         });
+        for target in dialled {
+            harness.root_update(move |view, window, cx| view.connect_host(target, window, cx));
+        }
         harness.start_empty_layouts(&hosts, &connecting);
         (harness, hosts)
     }
@@ -1360,8 +1354,17 @@ impl LiveHosts {
     }
 }
 
-/// Writes `remotes` as the saved hosts of the `native-ui.json` in `ui_dir`,
-/// keeping every other key a spec seeded there first.
+/// Whether the window accepts `spec`'s host as a saved host: every SSH host,
+/// and a tailnet host whose name is a full `MagicDNS` name.
+fn can_be_saved(spec: &LiveHostSpec) -> bool {
+    spec.target
+        .tailnet_host()
+        .is_none_or(|host| Target::parse_tailnet(host.name(), Some(host.port())).is_ok())
+}
+
+/// Writes those of `remotes` the window accepts as saved hosts into the
+/// `native-ui.json` in `ui_dir`, keeping every other key a spec seeded there
+/// first.
 fn seed_saved_hosts(ui_dir: &Path, remotes: &[LiveHostSpec]) {
     let path = ui_dir.join("native-ui.json");
     let mut state = match std::fs::read_to_string(&path) {
@@ -1375,6 +1378,7 @@ fn seed_saved_hosts(ui_dir: &Path, remotes: &[LiveHostSpec]) {
     };
     let saved: Vec<Value> = remotes
         .iter()
+        .filter(|spec| can_be_saved(spec))
         .map(|spec| {
             let host = SavedHost::from_target(&spec.target).expect("a remote host is not This PC");
             serde_json::to_value(host).expect("a saved host serializes")

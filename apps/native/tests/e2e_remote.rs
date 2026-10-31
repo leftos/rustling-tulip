@@ -16,11 +16,13 @@ use std::sync::Arc;
 
 use daemon_client::device_tokens::{DeviceTokenStore as _, MemoryTokens};
 use gpui::TestAppContext;
-use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, RemoteState};
+use protocol::{ClientMessage, DaemonMessage, RemoteState};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetCommand};
-use support::live::{LiveClient, LiveDaemon, REMOTE_HOST, commit_all, free_port, spawn_shell};
+use support::live::{
+    LiveClient, LiveDaemon, LiveHostSpec, REMOTE_HOST, commit_all, free_port, spawn_shell,
+};
 use support::{Harness, Opened};
 
 /// The line the listener logs when the owner rule refuses a peer
@@ -91,13 +93,9 @@ fn remote_listener_comes_up_for_the_fake_tailnet(
         );
     }
 
-    let (mut device, device_client) = Harness::open_live_on(
-        device_cx,
-        &daemon,
-        Target::tailnet(REMOTE_HOST, Some(remote_port)),
-        Some(daemon.tailnet_tls()),
-        Arc::new(MemoryTokens::default()),
-    );
+    let home = LiveDaemon::start("remote-up-home");
+    let tokens = Arc::new(MemoryTokens::default());
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, remote_port, &tokens);
     device.wait_until("the host to refuse the unpaired device", |_| {
         device_client
             .find_message(|msg| {
@@ -130,10 +128,11 @@ fn unpaired_device_lands_in_pairing_and_is_approved_on_the_host(
     device_cx: &mut TestAppContext,
 ) {
     let daemon = LiveDaemon::start_remote("remote-pair");
+    let home = LiveDaemon::start("remote-pair-home");
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let port = serve_remote(&mut host, &host_client, &daemon);
     let tokens = Arc::new(MemoryTokens::default());
-    let (mut device, device_client) = open_device(device_cx, &daemon, port, &tokens);
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
 
     wait_not_approved(&mut device, &device_client, 0);
     assert!(
@@ -172,10 +171,12 @@ fn paired_device_reconnects_with_its_token_and_drives_a_shell(
     paired_cx: &mut TestAppContext,
 ) {
     let daemon = LiveDaemon::start_remote("remote-shell");
+    let home = LiveDaemon::start("remote-shell-home");
+    let paired_home = LiveDaemon::start("remote-shell-paired-home");
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let port = serve_remote(&mut host, &host_client, &daemon);
     let tokens = Arc::new(MemoryTokens::default());
-    let (mut device, device_client) = open_device(device_cx, &daemon, port, &tokens);
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
     wait_not_approved(&mut device, &device_client, 0);
     pair(&mut host, &host_client, &mut device, &device_client);
     let token = tokens
@@ -184,7 +185,7 @@ fn paired_device_reconnects_with_its_token_and_drives_a_shell(
         .expect("pairing stored a token");
 
     let paired_tokens = Arc::new(MemoryTokens::with(REMOTE_HOST, &token));
-    let (mut h, client) = open_device(paired_cx, &daemon, port, &paired_tokens);
+    let (mut h, client) = open_device(paired_cx, &paired_home, &daemon, port, &paired_tokens);
     wait_open(
         &mut h,
         &client,
@@ -204,7 +205,7 @@ fn paired_device_reconnects_with_its_token_and_drives_a_shell(
     );
 
     client.send(spawn_shell(daemon.dir()));
-    let pane = place_first_session(&mut h, &client);
+    let pane = place_remote_session(&mut h);
     h.wait_for_row(&pane, "the shell's prompt", |row| {
         row.trim_end().ends_with('>')
     });
@@ -227,11 +228,12 @@ fn non_owner_peer_is_dropped_before_the_handshake(
     device_cx: &mut TestAppContext,
 ) {
     let daemon = LiveDaemon::start_remote("remote-non-owner");
+    let home = LiveDaemon::start("remote-non-owner-home");
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let port = serve_remote(&mut host, &host_client, &daemon);
     daemon.make_peers_non_owners();
     let tokens = Arc::new(MemoryTokens::default());
-    let (mut device, device_client) = open_device(device_cx, &daemon, port, &tokens);
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
 
     let mut refusal = None;
     device.wait_until(
@@ -277,10 +279,11 @@ fn shutdown_and_remote_off_are_refused_from_the_tailnet_client(
     device_cx: &mut TestAppContext,
 ) {
     let daemon = LiveDaemon::start_remote("remote-host-only");
+    let home = LiveDaemon::start("remote-host-only-home");
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let port = serve_remote(&mut host, &host_client, &daemon);
     let tokens = Arc::new(MemoryTokens::default());
-    let (mut device, device_client) = open_device(device_cx, &daemon, port, &tokens);
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
     wait_not_approved(&mut device, &device_client, 0);
     pair(&mut host, &host_client, &mut device, &device_client);
 
@@ -363,10 +366,11 @@ fn revoke_while_connected_closes_the_connection_and_the_next_hello_lands_in_pair
     device_cx: &mut TestAppContext,
 ) {
     let daemon = LiveDaemon::start_remote("remote-revoke");
+    let home = LiveDaemon::start("remote-revoke-home");
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let port = serve_remote(&mut host, &host_client, &daemon);
     let tokens = Arc::new(MemoryTokens::default());
-    let (mut device, device_client) = open_device(device_cx, &daemon, port, &tokens);
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
     wait_not_approved(&mut device, &device_client, 0);
     pair(&mut host, &host_client, &mut device, &device_client);
 
@@ -466,6 +470,7 @@ fn remote_html_fetch_brings_its_relative_media(
     const PAGE: &[u8] = b"<!doctype html><html><body><img src=\"img/dot.png\"></body></html>\n";
     const DOT: &[u8] = b"\x89PNG\r\n\x1a\nrt-e2e dot";
     let daemon = LiveDaemon::start_remote("remote-media");
+    let home = LiveDaemon::start("remote-media-home");
     let repo = daemon.git_fixture();
     std::fs::create_dir_all(repo.join("img")).expect("create the fixture's img dir");
     std::fs::write(repo.join("page.html"), PAGE).expect("write the page");
@@ -473,7 +478,7 @@ fn remote_html_fetch_brings_its_relative_media(
     commit_all(&repo, "a page with an image");
     // Text files open externally, so the page's open is the recorded one.
     std::fs::write(
-        daemon.dir().join("ui").join("native-ui.json"),
+        home.dir().join("ui").join("native-ui.json"),
         serde_json::json!({ "general": { "open_text_externally": true } }).to_string(),
     )
     .expect("seed native-ui.json");
@@ -496,15 +501,15 @@ fn remote_html_fetch_brings_its_relative_media(
         .into_owned();
 
     let tokens = Arc::new(MemoryTokens::default());
-    let (mut device, device_client) = open_device(device_cx, &daemon, port, &tokens);
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
     wait_not_approved(&mut device, &device_client, 0);
     pair(&mut host, &host_client, &mut device, &device_client);
-    let root = daemon.dir().join("remote-files");
+    let root = home.dir().join("remote-files");
     let set = root.clone();
     device.root_update(move |view, _, _| view.set_remote_files_root(set));
 
     let request = FetchRequest {
-        host: HostKey::of(&Target::tailnet(REMOTE_HOST, None)),
+        host: remote_key(),
         repo_id: repo_id.expect("the wait just found it"),
         repo_name: repo_name.clone(),
         worktree_path: None,
@@ -549,10 +554,11 @@ fn turning_remote_access_off_closes_served_connections(
     device_cx: &mut TestAppContext,
 ) {
     let daemon = LiveDaemon::start_remote("remote-off");
+    let home = LiveDaemon::start("remote-off-home");
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let port = serve_remote(&mut host, &host_client, &daemon);
     let tokens = Arc::new(MemoryTokens::default());
-    let (mut device, device_client) = open_device(device_cx, &daemon, port, &tokens);
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
     wait_not_approved(&mut device, &device_client, 0);
     pair(&mut host, &host_client, &mut device, &device_client);
 
@@ -610,21 +616,66 @@ fn serve_remote(host: &mut Harness<'_>, host_client: &LiveClient, daemon: &LiveD
     port
 }
 
-/// A tailnet client of `daemon`'s remote access on `port`, trusting its test
-/// CA and holding device tokens in `tokens`.
+/// Waits for a session of the tailnet host in the sidebar, clicks its leaf
+/// and returns the pane it lands in. The window dials [`REMOTE_HOST`]
+/// without saving it, so the host has no header and no `+ Shell` button.
+fn place_remote_session(h: &mut Harness<'_>) -> String {
+    let mut session = None;
+    h.wait_until("the tailnet host's session in the sidebar", |h| {
+        session = h.root(|root, _| {
+            root.sidebar_containers()
+                .iter()
+                .filter(|container| container.host == remote_key())
+                .find_map(|container| container.leaves.first().map(|leaf| leaf.id.clone()))
+        });
+        session.is_some()
+    });
+    let session = session.expect("the wait just found it");
+    let leaf = format!("leaf-{session}");
+    h.wait_until(&format!("the {leaf} row"), |h| {
+        h.bounds(&leaf).size.height > gpui::px(0.0)
+    });
+    h.click_on(&leaf);
+    let mut placed = None;
+    h.wait_until("a pane holding the clicked session", |h| {
+        placed = h.first_pane().and_then(|pane| {
+            let held = h.root(|root, _| root.pane_session(&pane));
+            (held.as_deref() == Some(session.as_str())).then_some(pane)
+        });
+        placed.is_some()
+    });
+    placed.expect("the wait just found it")
+}
+
+/// The host key of the tailnet host [`REMOTE_HOST`], whatever its port.
+fn remote_key() -> HostKey {
+    HostKey::of(&Target::tailnet(REMOTE_HOST, None))
+}
+
+/// A device window whose This PC is `home` and whose one saved host is
+/// `daemon`'s remote access on `port`, trusting its test CA and holding
+/// device tokens in `tokens`; returns the client of that tailnet host. A
+/// device with a token for [`REMOTE_HOST`] is expected to connect, so the
+/// window is returned once that host has its layout too.
 fn open_device<'a>(
     cx: &'a mut TestAppContext,
+    home: &LiveDaemon,
     daemon: &LiveDaemon,
     port: u16,
     tokens: &Arc<MemoryTokens>,
 ) -> (Harness<'a>, LiveClient) {
-    Harness::open_live_on(
-        cx,
-        daemon,
-        Target::tailnet(REMOTE_HOST, Some(port)),
-        Some(daemon.tailnet_tls()),
-        Arc::clone(tokens),
-    )
+    let paired = tokens
+        .get(REMOTE_HOST)
+        .expect("the token store answers")
+        .is_some();
+    let remote = LiveHostSpec {
+        target: Target::tailnet(REMOTE_HOST, Some(port)),
+        config_dir: daemon.config_dir(),
+        tls: Some(daemon.tailnet_tls()),
+        connects: paired,
+    };
+    let (h, hosts) = Harness::open_hosts(cx, home, vec![remote], Arc::clone(tokens));
+    (h, hosts.client(&remote_key()))
 }
 
 /// The newest remote access state the daemon sent `client`.
@@ -749,21 +800,4 @@ fn pair(
         device_client,
         "the paired device to connect with its token",
     );
-}
-
-/// Waits for a session in the sidebar, has the daemon lay out every session
-/// for this client, and returns the pane it lands in.
-fn place_first_session(h: &mut Harness<'_>, client: &LiveClient) -> String {
-    h.wait_until("a session in the sidebar", |h| {
-        h.root(|root, _| {
-            root.sidebar_containers()
-                .iter()
-                .any(|c| !c.leaves.is_empty())
-        })
-    });
-    client.send(ClientMessage::InitLayout {
-        kind: InitLayoutKind::AllSessions,
-    });
-    h.wait_until("a pane for the session", |h| h.first_pane().is_some());
-    h.first_pane().expect("a pane was just laid out")
 }
