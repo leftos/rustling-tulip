@@ -916,7 +916,7 @@ impl RootView {
         if enabled {
             self.connect_host(row.target, window, cx);
         } else {
-            self.disconnect_host(&HostKey::of(&row.target));
+            self.disconnect_host(&HostKey::of(&row.target), window, cx);
         }
         self.apply_connection_picker_focus(window, cx);
     }
@@ -961,7 +961,7 @@ impl RootView {
             .conn_of(&key)
             .is_some_and(|conn| *conn.target() != target)
         {
-            self.disconnect_host(&key);
+            self.disconnect_host(&key, window, cx);
         }
         self.connect_host(target, window, cx);
         self.close_connection_picker(window, cx);
@@ -987,7 +987,7 @@ impl RootView {
         }
         let host = HostKey::of(&row.target);
         if host != HostKey::Local {
-            self.disconnect_host(&host);
+            self.disconnect_host(&host, window, cx);
             self.clear_remote_slice(&host, window, cx);
         }
         self.save_ui();

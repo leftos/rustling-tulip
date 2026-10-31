@@ -1297,7 +1297,14 @@ impl RootView {
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
         let (tx, events) = open_host(&target::Target::Local);
-        Self::forward_net_events(HostKey::Local, events, window, cx);
+        let hosts = Hosts::new(HostConn::new(tx, target::Target::Local));
+        Self::forward_net_events(
+            HostKey::Local,
+            hosts.local().generation(),
+            events,
+            window,
+            cx,
+        );
         let drag_escape = Self::intercept_drag_escape(window, cx);
         let themes_dir = ui_dir
             .as_deref()
@@ -1319,7 +1326,7 @@ impl RootView {
         ui_theme::set_theme(theme, cx);
         let chat = chat_view::ChatPanes::new(chat_view::WallClock::starting_at(now()));
         let mut view = Self {
-            hosts: Hosts::new(HostConn::new(tx, target::Target::Local)),
+            hosts,
             open_host,
             now,
             tabs: TabsModel::new(ui.active_tab_id.clone()),
@@ -1525,10 +1532,11 @@ impl RootView {
         });
     }
 
-    /// Handles every event `host`'s `events` delivers, until the view is
-    /// gone.
+    /// Handles every event `host`'s `events` delivers, each tagged with
+    /// `generation`, the connection it came on, until the view is gone.
     fn forward_net_events(
         host: HostKey,
+        generation: u64,
         mut events: UnboundedReceiver<NetEvent>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1536,7 +1544,9 @@ impl RootView {
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this
-                    .update_in(cx, |view, window, cx| view.on_net(&host, event, window, cx))
+                    .update_in(cx, |view, window, cx| {
+                        view.on_net(&host, generation, event, window, cx);
+                    })
                     .is_err()
                 {
                     break;
@@ -3610,17 +3620,21 @@ impl RootView {
         }
     }
 
+    /// `host`'s network thread sent `event` on its connection `generation`;
+    /// one sent on a connection since replaced or let go is dropped.
     fn on_net(
         &mut self,
         host: &HostKey,
+        generation: u64,
         event: NetEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.hosts.get(host).is_none() {
+        if !self.is_current_connection(host, generation) {
             tracing::debug!(
                 ?host,
-                "dropping an event from a host the window no longer holds"
+                generation,
+                "dropping an event from a replaced connection"
             );
             return;
         }
@@ -3635,6 +3649,7 @@ impl RootView {
                     | DaemonMessage::SessionRemoved { .. }
             ),
             NetEvent::Handshake(_)
+            | NetEvent::DaemonId(_)
             | NetEvent::ShutdownSent
             | NetEvent::ShutdownFailed
             | NetEvent::Paired
@@ -3644,47 +3659,14 @@ impl RootView {
         };
         let pairing_input = device_pairing_view::PairingInput::of(&event);
         match event {
-            NetEvent::State(conn) => {
-                // A remote host's old address's slice goes before its new
-                // state does; This PC's target never moves.
-                let moved = *host != HostKey::Local
-                    && self
-                        .conn_of(host)
-                        .is_some_and(|old| old.target() != conn.target());
-                if moved {
-                    tracing::info!(?host, "the host's address changed");
-                    self.clear_remote_slice(host, window, cx);
-                }
-                // A remote host's disconnect clears nothing: its slice stays
-                // as it last stood. Its agents go with the connection.
-                if !conn.is_open() {
-                    self.forget_agents(host);
-                    self.forget_daemon_settings(host);
-                    self.forget_daemon_id(host);
-                }
-                if !conn.is_open() && *host == HostKey::Local {
-                    self.agent_tabs.forget_applies();
-                    self.launch_last.clear();
-                }
-                // The handshake is the old target's daemon's.
-                if moved {
-                    self.clear_handshake(host);
-                }
-                // A fetch streams over the connection it was asked on, and
-                // the remote access status is that connection's daemon's.
-                if !conn.is_open() || moved {
-                    self.end_fetches_on_disconnect(host, window, cx);
-                    self.set_remote_status(host, None, cx);
-                }
-                self.set_conn(host, conn);
-                if *host == HostKey::Local {
-                    self.follow_settings_target();
-                }
-            }
+            NetEvent::State(conn) => self.on_conn_state(host, conn, window, cx),
             NetEvent::Handshake(info) => self.set_handshake(host, info),
+            NetEvent::DaemonId(id) => {
+                self.drop_if_duplicate(host, Some(&id), window, cx);
+            }
             NetEvent::Message(msg) => {
                 let reseed = moves_source_control_inputs(&msg);
-                self.on_message(host, *msg, window, cx);
+                self.on_message(host, generation, *msg, window, cx);
                 let dropped_picker = self.drop_stale_sc_picker();
                 let dropped_changes = reseed && self.seed_source_control(window, cx);
                 if dropped_picker || dropped_changes {
@@ -3727,6 +3709,48 @@ impl RootView {
             self.after_exit_event(window, cx);
         }
         cx.notify();
+    }
+
+    /// `host`'s network thread reported its connection's new state, `conn`.
+    fn on_conn_state(
+        &mut self,
+        host: &HostKey,
+        conn: Connection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A remote host's old address's slice goes before its new state
+        // does; This PC's target never moves.
+        let moved = *host != HostKey::Local
+            && self
+                .conn_of(host)
+                .is_some_and(|old| old.target() != conn.target());
+        if moved {
+            tracing::info!(?host, "the host's address changed");
+            self.clear_remote_slice(host, window, cx);
+        }
+        // A remote host's disconnect clears nothing: its slice stays as it
+        // last stood. What went with the connection goes.
+        if !conn.is_open() {
+            self.on_host_closed(host, window, cx);
+        }
+        if !conn.is_open() && *host == HostKey::Local {
+            self.agent_tabs.forget_applies();
+            self.launch_last.clear();
+        }
+        // The handshake, the fetches streaming over the connection and the
+        // remote access status are the old target's daemon's.
+        if moved {
+            self.clear_handshake(host);
+        }
+        if moved && conn.is_open() {
+            self.end_fetches_on_disconnect(host, window, cx);
+            self.set_remote_status(host, None, cx);
+        }
+        self.set_conn(host, conn);
+        if *host == HostKey::Local {
+            self.follow_settings_target();
+        }
     }
 
     /// Folds a message in to the file fetches, the diff, viewer and
@@ -3805,14 +3829,16 @@ impl RootView {
     fn on_message(
         &mut self,
         host: &HostKey,
+        generation: u64,
         msg: DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.hosts.get(host).is_none() {
+        if !self.is_current_connection(host, generation) {
             tracing::debug!(
                 ?host,
-                "dropping an event from a host the window no longer holds"
+                generation,
+                "dropping an event from a replaced connection"
             );
             return;
         }

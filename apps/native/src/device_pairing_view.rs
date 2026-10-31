@@ -65,7 +65,10 @@ impl PairingInput {
             NetEvent::PairingLost => Some(Self::Lost),
             NetEvent::TokenSaveFailed => Some(Self::TokenSaveFailed),
             NetEvent::PairRequestSent => Some(Self::RequestSent),
-            NetEvent::Handshake(_) | NetEvent::ShutdownSent | NetEvent::ShutdownFailed => None,
+            NetEvent::Handshake(_)
+            | NetEvent::DaemonId(_)
+            | NetEvent::ShutdownSent
+            | NetEvent::ShutdownFailed => None,
         }
     }
 }
@@ -204,6 +207,24 @@ impl RootView {
     /// "not approved", the dialog opens for it by itself.
     pub(crate) fn pair_on_not_approved(&mut self, host: HostKey) {
         self.device_pairing.pair_on_not_approved.insert(host);
+    }
+
+    /// The window let `host`'s connection go: a Pair armed for it is
+    /// forgotten, and its open dialog closes; sends nothing.
+    pub(crate) fn forget_device_pairing(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.device_pairing.pair_on_not_approved.remove(host);
+        if self.device_pairing_is_for(host) {
+            tracing::info!(
+                ?host,
+                "device pairing: the host's connection is gone; the dialog closes"
+            );
+            self.close_device_pairing(window, cx);
+        }
     }
 
     /// Whether the open dialog pairs with `host`.

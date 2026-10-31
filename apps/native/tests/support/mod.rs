@@ -1478,16 +1478,32 @@ pub fn fake_transport_sharing(
 pub struct HostHandle<'h, 'a> {
     harness: &'h mut Harness<'a>,
     target: Target,
+    /// Which of the connections opened to the target this handle drives,
+    /// counted back from the newest: 0 is the newest.
+    back: usize,
 }
 
-impl HostHandle<'_, '_> {
+impl<'h, 'a> HostHandle<'h, 'a> {
+    /// The connection the window opened to this target before the one this
+    /// handle drives: a replaced connection, whose events the window must
+    /// ignore.
+    #[must_use]
+    pub fn old_connection(self) -> HostHandle<'h, 'a> {
+        HostHandle {
+            back: self.back + 1,
+            ..self
+        }
+    }
+
     /// Runs `act` on this host's fake-daemon ends.
     fn wire<R>(&mut self, act: impl FnOnce(&mut ExtraHost) -> R) -> R {
         let mut hosts = self.harness.extra_hosts.borrow_mut();
         let host = hosts
             .iter_mut()
-            .find(|host| host.target == self.target)
-            .expect("the window opened a connection to the host's target");
+            .rev()
+            .filter(|host| host.target == self.target)
+            .nth(self.back)
+            .expect("the window opened that connection to the host's target");
         act(host)
     }
 
@@ -2340,6 +2356,7 @@ impl<'a> Harness<'a> {
         HostHandle {
             harness: self,
             target: target.clone(),
+            back: 0,
         }
     }
 
