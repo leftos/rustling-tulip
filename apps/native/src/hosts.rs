@@ -51,6 +51,10 @@ pub(crate) struct HostConn {
     /// The id the daemon named itself by in its last `Welcome` on this
     /// connection, if it named one.
     daemon_id: Option<String>,
+    /// Which of the window's connections this is: every connection the
+    /// window opens gets a new one, so an event its network thread sends
+    /// after a newer connection replaced it is told apart.
+    generation: u64,
     pub(crate) mirrors: HostMirrors,
 }
 
@@ -62,8 +66,14 @@ impl HostConn {
             conn: Connection::for_target(target),
             handshake: None,
             daemon_id: None,
+            generation: 0,
             mirrors: HostMirrors::default(),
         }
+    }
+
+    /// Which of the window's connections this is.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -73,15 +83,27 @@ impl HostConn {
 pub(crate) struct Hosts {
     local: HostConn,
     remote: Vec<(String, HostConn)>,
+    /// The generation the next connection added gets.
+    next_generation: u64,
 }
 
 impl Hosts {
-    /// The connections of a window that holds only This PC's, `local`.
-    pub(crate) fn new(local: HostConn) -> Self {
+    /// The connections of a window that holds only This PC's, `local`,
+    /// which is the first generation.
+    pub(crate) fn new(mut local: HostConn) -> Self {
+        local.generation = 0;
         Self {
             local,
             remote: Vec::new(),
+            next_generation: 1,
         }
+    }
+
+    /// Whether `generation` is that of the connection the window holds to
+    /// `key`; never for a host it holds none to.
+    pub(crate) fn is_current(&self, key: &HostKey, generation: u64) -> bool {
+        self.get(key)
+            .is_some_and(|conn| conn.generation == generation)
     }
 
     /// This PC's connection.
@@ -130,14 +152,18 @@ impl Hosts {
             .collect()
     }
 
-    /// Adds remote host `name`'s connection after the others; returns
-    /// false, adding nothing, when the window already holds one to it.
-    pub(crate) fn insert(&mut self, name: String, conn: HostConn) -> bool {
+    /// Adds remote host `name`'s connection after the others as a new
+    /// generation and returns it; `None`, adding nothing, when the window
+    /// already holds one to it.
+    pub(crate) fn insert(&mut self, name: String, mut conn: HostConn) -> Option<u64> {
         if self.remote.iter().any(|(key, _)| *key == name) {
-            return false;
+            return None;
         }
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        conn.generation = generation;
         self.remote.push((name, conn));
-        true
+        Some(generation)
     }
 
     /// Takes remote host `key`'s connection out of the window; `None` when
@@ -195,14 +221,82 @@ impl RootView {
     }
 
     /// Drops the window's connection to remote host `host`: its network
-    /// thread quits once its sender is gone. Its sidebar slice stays.
+    /// thread quits once its sender is gone, and what went with the
+    /// connection is cleaned up as on a close. Its sidebar slice stays.
     /// Returns whether the window held one.
-    pub(crate) fn disconnect_host(&mut self, host: &HostKey) -> bool {
+    pub(crate) fn disconnect_host(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let held = self.hosts.remove(host).is_some();
         if held {
             tracing::info!(?host, "disconnected from the host");
+            self.on_host_closed(host, window, cx);
         }
         held
+    }
+
+    /// `host`'s connection closed or the window let it go: its agents,
+    /// daemon settings, daemon id, fetches and remote access status go with
+    /// it, and each host dropped as its duplicate is dialled again. Once
+    /// the window holds no connection to it, a Pair armed for it is
+    /// forgotten and its pairing dialog closes.
+    pub(crate) fn on_host_closed(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.forget_agents(host);
+        self.forget_daemon_settings(host);
+        self.forget_daemon_id(host);
+        self.end_fetches_on_disconnect(host, window, cx);
+        self.set_remote_status(host, None, cx);
+        if self.hosts.get(host).is_none() {
+            self.forget_device_pairing(host, window, cx);
+        }
+        self.reconnect_duplicates_of(host, window, cx);
+    }
+
+    /// `owner` no longer holds its daemon: every host dropped as its
+    /// duplicate is freed, and each still saved and switched on is dialled
+    /// again, taking the daemon if it says `Welcome` first.
+    fn reconnect_duplicates_of(
+        &mut self,
+        owner: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let freed: Vec<HostKey> = self
+            .duplicate_of
+            .iter()
+            .filter(|(_, held_by)| *held_by == owner)
+            .map(|(duplicate, _)| duplicate.clone())
+            .collect();
+        for duplicate in freed {
+            self.duplicate_of.remove(&duplicate);
+            if let Some(target) = self.enabled_saved_target(&duplicate) {
+                tracing::info!(
+                    ?duplicate,
+                    ?owner,
+                    "the daemon's first connection is gone; dialling its duplicate again"
+                );
+                self.connect_host(target, window, cx);
+            }
+        }
+    }
+
+    /// The target of saved host `host` while its switch is on.
+    fn enabled_saved_target(&self, host: &HostKey) -> Option<Target> {
+        self.sidebar
+            .ui_state()
+            .saved_hosts
+            .iter()
+            .filter(|saved| saved.enabled)
+            .filter_map(|saved| saved.target().ok())
+            .find(|target| HostKey::of(target) == *host)
     }
 
     /// `host`'s connection closed: the daemon id it last named no longer
@@ -251,7 +345,7 @@ impl RootView {
             ?owner,
             "two connections reach one daemon; dropping the later one"
         );
-        self.disconnect_host(&duplicate);
+        self.disconnect_host(&duplicate, window, cx);
         self.clear_remote_slice(&duplicate, window, cx);
         let dropped_self = duplicate == *host;
         self.duplicate_of.insert(duplicate, owner);
@@ -374,8 +468,16 @@ impl RootView {
         }
         let (tx, events) = (self.open_host)(&target);
         self.duplicate_of.remove(&HostKey::Remote(name.clone()));
-        self.hosts.insert(name.clone(), HostConn::new(tx, target));
-        Self::forward_net_events(HostKey::Remote(name), events, window, cx);
+        if let Some(generation) = self.hosts.insert(name.clone(), HostConn::new(tx, target)) {
+            Self::forward_net_events(HostKey::Remote(name), generation, events, window, cx);
+        }
+    }
+
+    /// Whether `generation` is that of the connection the window holds to
+    /// `host`: an event from any other was sent by a connection since
+    /// replaced or let go.
+    pub(crate) fn is_current_connection(&self, host: &HostKey, generation: u64) -> bool {
+        self.hosts.is_current(host, generation)
     }
 
     /// Opens a connection to each enabled saved host, in saved order, beside
@@ -619,7 +721,11 @@ mod tests {
     fn removing_a_remote_host_drops_it_and_local_cannot_be_removed() {
         let mut hosts = Hosts::new(conn(Target::Local));
         let remote = HostKey::Remote(BOX.to_owned());
-        assert!(hosts.insert(BOX.to_owned(), conn(Target::tailnet(BOX, None))));
+        assert!(
+            hosts
+                .insert(BOX.to_owned(), conn(Target::tailnet(BOX, None)))
+                .is_some()
+        );
 
         assert!(
             hosts.remove(&remote).is_some(),

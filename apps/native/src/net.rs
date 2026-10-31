@@ -252,6 +252,11 @@ pub enum NetEvent {
     Handshake(HandshakeInfo),
     /// A message from the daemon.
     Message(Box<DaemonMessage>),
+    /// A tailnet host that has not approved this device named its daemon by
+    /// this id in the `Welcome` held back from the view: the view checks it
+    /// for a second connection to one daemon without treating the host as
+    /// welcomed.
+    DaemonId(String),
     /// A [`NetCommand::Shutdown`] went out in full; the close that follows
     /// is the daemon exiting.
     ShutdownSent,
@@ -779,7 +784,7 @@ impl Net {
         self.note_pairing_step(&msg);
         if self.held_welcome.is_some() {
             if is_not_approved(&msg) {
-                self.held_welcome = None;
+                self.report_held_daemon_id();
                 self.on_not_approved();
                 self.emit(NetEvent::Message(msg));
                 return Step::Continue;
@@ -854,6 +859,22 @@ impl Net {
         matches!(msg, DaemonMessage::Welcome { .. })
             && matches!(self.conn.target(), Target::Tailnet(_))
             && matches!(self.conn.state(), State::Connecting)
+    }
+
+    /// Drop the held `Welcome` of a host that has not approved this device,
+    /// telling the view only the daemon id it names, so a second path to a
+    /// daemon already connected is dropped before it offers Pair.
+    fn report_held_daemon_id(&mut self) {
+        let Some(welcome) = self.held_welcome.take() else {
+            return;
+        };
+        if let DaemonMessage::Welcome {
+            daemon_id: Some(id),
+            ..
+        } = *welcome
+        {
+            self.emit(NetEvent::DaemonId(id));
+        }
     }
 
     /// Handle the held `Welcome`, if any, as if it had just arrived.
@@ -1742,7 +1763,7 @@ mod tests {
             protocol_version: 23,
             supported_versions: vec![23],
             features: Vec::new(),
-            daemon_id: None,
+            daemon_id: Some(FAKE_DAEMON_ID.to_owned()),
         };
         let refusal = DaemonMessage::DevicePairFailed {
             reason: DEVICE_NOT_APPROVED.to_owned(),
@@ -1752,6 +1773,8 @@ mod tests {
         }
     }
 
+    /// The id the fake tailnet daemon names itself by in its `Welcome`.
+    const FAKE_DAEMON_ID: &str = "6f1e2d3c-0000-4000-8000-0000000000aa";
     /// The token the fake daemon issues for [`GOOD_CODE`]; a `Hello`
     /// carrying it is served whatever the daemon's [`Answer`].
     const ISSUED_TOKEN: &str = "issued-device-token";
@@ -1914,7 +1937,7 @@ mod tests {
             protocol_version: 23,
             supported_versions: vec![23],
             features: Vec::new(),
-            daemon_id: None,
+            daemon_id: Some(FAKE_DAEMON_ID.to_owned()),
         };
         let served = matches!(answer, Answer::Served) || token == ISSUED_TOKEN;
         let next = if served {
@@ -2302,6 +2325,32 @@ mod tests {
         assert!(
             !welcomed.get(),
             "the pairing connection's Welcome reached the view"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn a_not_approved_tailnet_welcome_still_reports_its_daemon_id() {
+        let ca = TestCa::new();
+        let (port, _seen) = tls_daemon_answering(&ca, Answer::NotApproved);
+        let (view_tx, mut view_rx, net) = run_net(
+            tailnet_deps(&ca, None),
+            Target::tailnet(TLS_HOST, Some(port)),
+        );
+        let reported = Cell::new(false);
+
+        let reached = saw(&mut view_rx, |event| match event {
+            NetEvent::DaemonId(id) => {
+                reported.set(id == FAKE_DAEMON_ID);
+                false
+            }
+            NetEvent::State(conn) => is_not_approved(conn, false),
+            _ => false,
+        });
+        assert!(reached, "never reached not approved");
+        assert!(
+            reported.get(),
+            "the held Welcome's daemon id did not reach the view before not approved"
         );
         stop_net(view_tx, net);
     }

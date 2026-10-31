@@ -1414,11 +1414,21 @@ fn a_not_approved_duplicate_is_dropped_before_pairing(cx: &mut TestAppContext) {
     refused.on_socket_open(8787);
     refused.on_not_approved(protocol::DEVICE_NOT_APPROVED.to_owned(), false);
 
+    // What the network thread sends for a tailnet host whose held Welcome
+    // is followed by "device not approved".
     let mut host = h.host(&remote());
+    host.event(NetEvent::DaemonId(DAEMON.to_owned()));
     host.event(NetEvent::State(refused));
-    host.send(support::welcome_with_id(PROTOCOL, DAEMON));
+    host.send(DaemonMessage::DevicePairFailed {
+        reason: protocol::DEVICE_NOT_APPROVED.to_owned(),
+    });
 
     assert_eq!(duplicate_of(&mut h, &remote()), Some(HostKey::Local));
+    assert_eq!(
+        h.root(|root, _| root.held_hosts()),
+        [HostKey::Local],
+        "the duplicate's connection is dropped before its row offers Pair"
+    );
     assert!(
         !h.root(|root, _| root.device_pairing_open()),
         "no pairing for a daemon already connected"
@@ -1735,5 +1745,258 @@ fn the_footer_hides_the_count_with_one_host(cx: &mut TestAppContext) {
     assert!(
         h.bounds("footer-hosts").origin.x < px(0.0),
         "only This PC is on: the count was never drawn"
+    );
+}
+
+/// Opens Connections over a Tailscale that sees no peers.
+fn open_connections(h: &mut Harness<'_>) {
+    h.root_update(|root, _, _| root.set_peer_source(Arc::new(NoPeers)));
+    h.click_on("footer-connections");
+}
+
+/// The Connected switch on [`REMOTE`]'s Connections row.
+fn remote_switch() -> String {
+    format!("connections-row-{REMOTE}-enabled")
+}
+
+/// Types `text` one key at a time.
+fn type_text(h: &mut Harness<'_>, text: &str) {
+    let keys: Vec<String> = text.chars().map(|c| c.to_string()).collect();
+    h.keys(&keys.join(" "));
+}
+
+/// A connection to `target` that the host refused as not approved.
+fn not_approved(target: Target) -> Connection {
+    let mut conn = Connection::for_target(target);
+    conn.on_connecting();
+    conn.on_socket_open(8787);
+    conn.on_not_approved(protocol::DEVICE_NOT_APPROVED.to_owned(), false);
+    conn
+}
+
+/// The files directly in `dir`; none when it is missing.
+fn files_in(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir).map_or(0, Iterator::count)
+}
+
+/// Whether a toast says the fetch of `name` failed.
+fn fetch_failed(h: &mut Harness<'_>, name: &str) -> bool {
+    let title = format!("Couldn't fetch {name}");
+    h.root(move |root, _| root.toasts().iter().any(|toast| toast.title == title))
+}
+
+#[gpui::test]
+fn switching_a_host_off_mid_fetch_ends_its_fetch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_listing(cx, &dir);
+    let root = dir.path().join("remote-files");
+    let set = root.clone();
+    h.root_update(move |view, _, _| view.set_remote_files_root(set));
+    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r2", "b.txt"), cx));
+    let ids = fetch_ids(h.host(&saved_remote()).sent());
+    assert_eq!(ids.len(), 1, "one fetch is sent: {ids:?}");
+    let id = &ids[0];
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::FileFetchStarted {
+        id: id.clone(),
+        resolved_path: r"\\?\C:\r2\b.txt".to_owned(),
+        size: 10,
+    });
+    host.send(DaemonMessage::FileChunk {
+        id: id.clone(),
+        seq: 0,
+        data_b64: "aGFsZg==".to_owned(),
+    });
+    let folder = root.join(REMOTE).join("repo");
+    assert_eq!(
+        files_in(&folder),
+        1,
+        "the part file is written while the fetch runs"
+    );
+
+    open_connections(&mut h);
+    h.click_on(&remote_switch());
+
+    assert!(
+        fetch_failed(&mut h, "b.txt"),
+        "the fetch ends with the disconnect toast"
+    );
+    assert_eq!(files_in(&folder), 0, "the part file is deleted");
+    h.click_on(&remote_switch());
+    h.host(&saved_remote()).connect();
+    h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r2", "b.txt"), cx));
+    assert_eq!(
+        fetch_ids(h.host(&saved_remote()).sent()).len(),
+        1,
+        "the same file is fetched again once the host is back on"
+    );
+}
+
+#[gpui::test]
+fn a_stale_event_from_a_replaced_connection_is_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_listing(cx, &dir);
+    open_connections(&mut h);
+    h.click_on(&remote_switch());
+    h.click_on(&remote_switch());
+    h.host(&saved_remote()).connect();
+
+    h.host(&saved_remote())
+        .old_connection()
+        .send(DaemonMessage::Sessions {
+            sessions: Vec::new(),
+        });
+    h.host(&saved_remote())
+        .old_connection()
+        .event(NetEvent::State(dropped(saved_remote())));
+
+    assert_eq!(
+        shown_leaves(&mut h),
+        ["a1", "b1"],
+        "the old connection's empty list empties nothing"
+    );
+    assert_eq!(
+        remote_rows_dimmed(&mut h),
+        (false, false),
+        "the old connection's close leaves the new one open"
+    );
+}
+
+#[gpui::test]
+fn changing_a_hosts_port_ignores_the_old_connections_late_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_listing(cx, &dir);
+    open_connections(&mut h);
+    h.click_on("connections-add-host");
+    type_text(&mut h, REMOTE);
+    h.keys("tab");
+    type_text(&mut h, "9443");
+    h.keys("enter");
+    let moved = Target::tailnet(REMOTE, Some(9443));
+    assert_eq!(
+        h.opened_targets().last(),
+        Some(&moved),
+        "the host is dialled on its new port"
+    );
+    let mut host = h.host(&moved);
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b2").in_repo("r2").build()],
+    });
+
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("b1").in_repo("r2").build(),
+            session("b9").in_repo("r2").build(),
+        ],
+    });
+
+    assert_eq!(
+        shown_leaves(&mut h),
+        ["a1", "b2"],
+        "the old port's late list is ignored"
+    );
+}
+
+/// [`REMOTE`] and the SSH host `me@devbox` saved and switched on, both
+/// reaching [`DAEMON`]: the SSH host welcomed second and was dropped.
+fn two_paths_to_one_daemon<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": REMOTE, "port": 8787 },
+            { "kind": "ssh", "name": "me@devbox" },
+        ] }),
+    );
+    let mut h = Harness::with(cx, dir, &Fixture::default());
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    assert_eq!(
+        duplicate_of(&mut h, &ssh_box()),
+        Some(HostKey::of(&saved_remote()))
+    );
+    h
+}
+
+/// How many connections the window opened to `target`.
+fn times_opened(h: &Harness<'_>, target: &Target) -> usize {
+    h.opened_targets()
+        .iter()
+        .filter(|opened| *opened == target)
+        .count()
+}
+
+/// Asserts the dropped SSH duplicate was dialled again and, welcoming
+/// first this time, now holds the daemon.
+fn assert_duplicate_reconnected(h: &mut Harness<'_>) {
+    assert_eq!(
+        duplicate_of(h, &ssh_box()),
+        None,
+        "the duplicate no longer names its owner"
+    );
+    assert_eq!(
+        times_opened(h, &ssh_box()),
+        2,
+        "the duplicate is dialled again"
+    );
+    welcome_as(h, &ssh_box(), Some(DAEMON));
+    assert_eq!(
+        duplicate_of(h, &ssh_box()),
+        None,
+        "welcoming first, it takes the daemon"
+    );
+    assert!(
+        h.root(|root, _| root.held_hosts())
+            .contains(&HostKey::of(&ssh_box())),
+        "its connection is held"
+    );
+}
+
+#[gpui::test]
+fn a_duplicate_reconnects_when_its_owner_is_switched_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_paths_to_one_daemon(cx, &dir);
+    open_connections(&mut h);
+
+    h.click_on(&remote_switch());
+
+    assert_duplicate_reconnected(&mut h);
+}
+
+#[gpui::test]
+fn a_duplicate_reconnects_when_its_owner_drops(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_paths_to_one_daemon(cx, &dir);
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+
+    assert_duplicate_reconnected(&mut h);
+}
+
+#[gpui::test]
+fn a_pair_armed_while_dialling_is_forgotten_when_the_host_is_switched_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    open_connections(&mut h);
+    h.click_on(&format!("connections-row-{REMOTE}-pair"));
+    assert!(
+        !h.root(|root, _| root.device_pairing_open()),
+        "the host is still being dialled: the dialog waits for its answer"
+    );
+
+    open_connections(&mut h);
+    h.click_on(&remote_switch());
+    h.click_on(&remote_switch());
+    h.host(&saved_remote())
+        .event(NetEvent::State(not_approved(saved_remote())));
+
+    assert!(
+        !h.root(|root, _| root.device_pairing_open()),
+        "the Pair asked before the switch-off is forgotten"
     );
 }
