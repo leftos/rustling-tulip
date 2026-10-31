@@ -798,6 +798,17 @@
     },
     {
       "paths": [
+        "apps/native/src/builtin_themes.rs",
+        "apps/native/src/contrast.rs",
+        "apps/native/src/theme_store.rs",
+        "apps/native/src/themes.rs",
+        "apps/native/src/ui_theme.rs",
+        "apps/native/tests/ui/ui_theme.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(builtin_themes|contrast|theme_store|themes|ui_theme)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_theme)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/term.rs",
         "apps/native/src/prompt_nav.rs",
         "apps/native/tests/ui/ui_prompt_jump.rs"

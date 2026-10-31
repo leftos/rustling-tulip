@@ -408,7 +408,7 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 
   `save` writes `.<slug>.json.tmp` and renames it into place, never overwrites (it picks a free slug, `slug-2`, `slug-3`, …), and ids outside `[a-z0-9-]` are refused.
 
-  The selection is `native-ui.json`'s `theme` (absent or null is Nord), read once at boot by `resolve_selection`; a saved theme that does not load logs `the saved theme "<id>" does not load: <err>; drawing the built-in theme "nord"` and draws Nord. A failed `save` removes its `.<id>.json.tmp` (logging if it cannot), and a `themes/*.json` whose name is not a valid id is listed with the error `"<name>" is not a theme id: only a-z, 0-9 and - are allowed`, unread.
+  The selection is `native-ui.json`'s `theme` (absent or null is Nord), read at boot by `resolve_selection` and written by `RootView::select_theme`, which changes nothing when the theme does not load; a saved theme that does not load at boot logs `the saved theme "<id>" does not load: <err>; drawing the built-in theme "nord"` and draws Nord. A failed `save` removes its `.<id>.json.tmp` (logging if it cannot). A `themes/*.json` whose name is not a valid id is listed with the error `"<name>" is not a theme id: only a-z, 0-9 and - are allowed`, unread, and one named after a built-in is listed with `themes/<id>.json has the id of a built-in theme; rename the file to use it`, unread.
 
   `contrast.rs` holds the WCAG ratio and the `PAIRS` of text and fill tokens a theme is checked against (`check`): text, text_2 and subtle on each fill they sit on, including `selection`, and on_accent on primary, each at 4.5:1.
 
