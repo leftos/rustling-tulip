@@ -28,6 +28,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - The interface uses Inter by default, which reads better at small sizes; Geist is still in Settings › Appearance.
+- The window and its terminals draw in the softer Nord colours by default, instead of the near-black look.
 - In Appearance, the first accent swatch is now "Theme" and the "Default" background follows the theme: picking either clears that level's colour.
 - The Connections picker groups this PC, your saved hosts and the devices on your tailnet, shows each host's state, and adds a tailnet or SSH host from one form.
 - Tab pills and the window title count the sessions that need you, showing nothing at zero; Settings › App title brings back busy/total or shows idle/total.

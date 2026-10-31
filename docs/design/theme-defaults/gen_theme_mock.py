@@ -249,7 +249,7 @@ def contrast_today():
         "ansi": [0x5A5C5F, 0xEF5C5C, 0x3FB96A, 0xE8A531, 0x5B9BFF, 0xB787F0, 0x5DD5E3, 0xE5E6E8,
                  0x656872, 0xFF8585, 0x62D18A, 0xF5C267, 0x7EB4FF, 0xD4ABFF, 0x8FEAF3, 0xF5F6F8],
     }
-    return {"name": "Contrast (today)", "source": "apps/native/src/palette.rs + ui_theme.rs:258-280", "light": False, "t": t}
+    return {"name": "Contrast (today)", "source": "apps/native/src/palette.rs + ui_theme.rs:329-354", "light": False, "t": t}
 
 
 def lanes():
