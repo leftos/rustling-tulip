@@ -594,31 +594,48 @@ pub fn has_any_session(grid: &GridNode) -> bool {
     }
 }
 
-/// Rebind every local pane (no `host`) bound to `old` across `tabs` to `new`,
-/// in place. Used by
-/// abandoned-session resume: the fresh session takes over the slot(s) the
-/// abandoned one occupied instead of orphaning into the sidebar. Topology is
-/// untouched. Returns clones of the tabs whose grids changed so the caller can
-/// broadcast scoped tab events.
-pub fn rebind_session(tabs: &mut [TabEntry], old: &str, new: &str) -> Vec<TabEntry> {
+/// Rebind every pane of `host` (`None` for this daemon's own) bound to `old`
+/// across `tabs` to `new`, in place. A pane of any other host with the same
+/// id stays. Used wherever one session replaces another: a resume, an
+/// auto-resume or a recovery here, and another daemon's through
+/// `RebindHostSessions`. The new session takes over the slot(s) the old one
+/// occupied instead of orphaning into the sidebar. Topology is untouched.
+/// Returns clones of the tabs whose grids changed so the caller can broadcast
+/// scoped tab events.
+pub fn rebind_session(
+    tabs: &mut [TabEntry],
+    host: Option<&str>,
+    old: &str,
+    new: &str,
+) -> Vec<TabEntry> {
     let mut updated = Vec::new();
     for tab in tabs.iter_mut() {
         let Some(grid) = tab.grid_mut() else {
             continue;
         };
-        if rebind_grid(grid, old, new) {
+        if rebind_grid(grid, host, old, new) {
             updated.push(tab.clone());
         }
     }
     updated
 }
 
-fn rebind_grid(grid: &mut GridNode, old: &str, new: &str) -> bool {
+/// Whether a pane of `host` (`None` for this daemon's own) in `tabs` shows
+/// `session`.
+pub fn shows_session(tabs: &[TabEntry], host: Option<&str>, session: &str) -> bool {
+    tabs.iter().filter_map(TabEntry::grid).any(|grid| {
+        collect_panes(grid)
+            .iter()
+            .any(|pane| pane.host.as_deref() == host && pane.session_id.as_deref() == Some(session))
+    })
+}
+
+fn rebind_grid(grid: &mut GridNode, target: Option<&str>, old: &str, new: &str) -> bool {
     match grid {
         GridNode::Pane {
             session_id, host, ..
         } => {
-            if host.is_none() && session_id.as_deref() == Some(old) {
+            if host.as_deref() == target && session_id.as_deref() == Some(old) {
                 *session_id = Some(new.to_string());
                 true
             } else {
@@ -626,8 +643,8 @@ fn rebind_grid(grid: &mut GridNode, old: &str, new: &str) -> bool {
             }
         }
         GridNode::Split { first, second, .. } => {
-            let a = rebind_grid(first, old, new);
-            let b = rebind_grid(second, old, new);
+            let a = rebind_grid(first, target, old, new);
+            let b = rebind_grid(second, target, old, new);
             a || b
         }
     }
@@ -1777,7 +1794,7 @@ mod tests {
             grid_tab("C", pane("c1", Some("other"))),
         ];
 
-        let updated = rebind_session(&mut tabs, "old", "new");
+        let updated = rebind_session(&mut tabs, None, "old", "new");
 
         // A + B reported (changed); C not.
         let updated_ids: Vec<String> = updated.iter().map(|t| t.id.clone()).collect();
@@ -1795,6 +1812,26 @@ mod tests {
         assert_eq!(
             collect_panes(tabs[2].grid().expect("C grid")),
             vec![local("c1", Some("other"))]
+        );
+    }
+
+    #[test]
+    fn a_local_rebind_leaves_a_host_pane_alone() {
+        let host_pane = GridNode::Pane {
+            pane_id: "h1".to_string(),
+            session_id: Some("old".to_string()),
+            host: Some("ssh:devbox".to_string()),
+        };
+        let mut tabs = vec![grid_tab(
+            "A",
+            split(Horizontal, 0.5, pane("a1", Some("old")), host_pane.clone()),
+        )];
+
+        rebind_session(&mut tabs, None, "old", "new");
+
+        assert_eq!(
+            tabs[0].grid(),
+            Some(&split(Horizontal, 0.5, pane("a1", Some("new")), host_pane)),
         );
     }
 

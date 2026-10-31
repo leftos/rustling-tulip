@@ -46,7 +46,7 @@ Orchestrator decisions:
 
 - `SidebarModel` holds a `HostSlice` per host (repos, workspaces, sessions, agents, and the container and session orders, attention and unseen sets kept from them); a remote host's container keys are `{host key}::{key}`; the `Sessions`, `Repos` and `Workspaces` folds replace only the sending host's slice; id lookups return `(HostKey, &item)`.
 - Keyed by `(host, id)`: `seen_sessions` and notifications, dashboard facts (`WatchDashboard` per host), the source-control model and pins, the file-fetch registry (ended per host on its disconnect), `Capabilities` (`remote_mode.rs`), `PopoutKey::Session`.
-- Foreign-pane pruning: when a remote host's fresh `Sessions` omits an id a pane references, the client sends `ForgetHostSessions` to Local; nothing is pruned for a host that is offline, switched off, a duplicate or not approved. The details are in `docs/native-client.md` ("Mixed tabs").
+- Foreign-pane pruning: when a remote host's `Sessions` or `SessionRemoved` leaves a pane's id unlisted with no successor in any session's `resumed_from`, the client sends `ForgetHostSessions` to Local; nothing is pruned for a host that is offline, switched off, a duplicate or not approved. The details are in `docs/native-client.md` ("Mixed tabs").
 
 ### UI
 

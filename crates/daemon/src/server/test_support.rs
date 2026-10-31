@@ -362,6 +362,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         hook_agent: None,
         hook_options: protocol::OptionValues::new(),
         hook_trusted: false,
+        resumed_from: Vec::new(),
     }
 }
 

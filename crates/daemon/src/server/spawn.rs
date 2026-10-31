@@ -257,7 +257,8 @@ pub(crate) async fn spawn_session_with_extras(
 /// What a spawn takes beside its request that never travels on the wire
 /// `SpawnRequest` and is never stored in `SpawnConfig`: a recovered shell's
 /// hook agent, the conversation it resumes in it and the options and trust
-/// it resumes with. A recovery sets them.
+/// it resumes with, and the abandoned sessions the new one replaces. A
+/// recovery sets them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SpawnExtras {
     /// The agent whose plugin writes a recovered shell's hook files, builds
@@ -271,6 +272,9 @@ pub(crate) struct SpawnExtras {
     /// Whether the recovered run was trusted, which the hook agent's hook
     /// plan takes in place of the plain shell's own flag.
     pub(crate) hook_trusted: bool,
+    /// The abandoned sessions the new session replaces, oldest first (see
+    /// [`protocol::SessionSnapshot::resumed_from`]).
+    pub(crate) resumed_from: Vec<String>,
 }
 
 /// The longest a recovered shell waits for its prompt before typing its
@@ -602,8 +606,8 @@ struct SpawnArgs {
     resume_conversation: Option<String>,
     /// A standalone target's extra `--add-dir` directories.
     add_dirs: Vec<String>,
-    /// What a recovery sets beside the request (see [`SpawnExtras`]); only
-    /// the plain-shell path reads it.
+    /// What a recovery sets beside the request (see [`SpawnExtras`]): every
+    /// path reads its `resumed_from`, only the plain-shell path the rest.
     extras: SpawnExtras,
 }
 
@@ -684,6 +688,8 @@ struct NewInteractive {
     /// The label of the shell the agent is typed into, when the PTY child is
     /// that shell; `None` when the agent is the child.
     shell_label: Option<String>,
+    /// The abandoned sessions the new session replaces.
+    resumed_from: Vec<String>,
 }
 
 /// The record of a new interactive session.
@@ -739,6 +745,7 @@ fn interactive_record(
         hook_agent: None,
         hook_options: OptionValues::new(),
         hook_trusted: false,
+        resumed_from: new.resumed_from,
     };
     push_recent_action(&mut record, "session started".to_string());
     record
@@ -763,6 +770,8 @@ struct NewPlainShell {
     /// Whether the recovered run was trusted, which those hook events are
     /// mapped with.
     hook_trusted: bool,
+    /// The abandoned sessions the new session replaces.
+    resumed_from: Vec<String>,
 }
 
 /// The record of a new plain-shell session.
@@ -822,6 +831,7 @@ fn plain_shell_record(
         hook_agent: new.hook_agent,
         hook_options: new.hook_options,
         hook_trusted: new.hook_trusted,
+        resumed_from: new.resumed_from,
     };
     push_recent_action(
         &mut record,
@@ -848,7 +858,7 @@ fn interactive_meta(
     pid: u32,
     tracer: TracerSidecar,
 ) -> anyhow::Result<OrphanMeta> {
-    orphan::meta_from_record(
+    let mut meta = orphan::meta_from_record(
         record.id.clone(),
         pid,
         record.label.clone(),
@@ -866,7 +876,9 @@ fn interactive_meta(
         Some(tracer.pipe),
         Some(tracer.exe_path),
         record.conversation_id.clone(),
-    )
+    )?;
+    meta.resumed_from.clone_from(&record.resumed_from);
+    Ok(meta)
 }
 
 /// The spawn-time sidecar of a new plain-shell session whose child is `pid`.
@@ -1281,6 +1293,7 @@ async fn spawn_interactive_session(
             started_at,
             busy_excluded,
             shell_label,
+            resumed_from: cfg.extras.resumed_from.clone(),
         },
         Some(Arc::clone(&pty)),
     );
@@ -1525,6 +1538,7 @@ async fn spawn_plain_shell_session(
             hook_agent: cfg.extras.hook_agent.clone(),
             hook_options: cfg.extras.hook_options.clone(),
             hook_trusted: cfg.extras.hook_trusted,
+            resumed_from: cfg.extras.resumed_from.clone(),
         },
         Some(Arc::clone(&pty)),
     );
@@ -1596,6 +1610,7 @@ async fn spawn_plain_shell_session(
         meta.hook_agent.clone_from(&cfg.extras.hook_agent);
         meta.hook_options.clone_from(&cfg.extras.hook_options);
         meta.hook_trusted = cfg.extras.hook_trusted;
+        meta.resumed_from.clone_from(&cfg.extras.resumed_from);
         write_meta_then_sync(hub, &meta);
     }
     pending.publish_from(cfg.origin.clone());
@@ -1782,6 +1797,7 @@ fn spawn_headless_session(
         hook_agent: None,
         hook_options: OptionValues::new(),
         hook_trusted: false,
+        resumed_from: cfg.extras.resumed_from.clone(),
     };
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
@@ -1829,6 +1845,7 @@ fn spawn_headless_session(
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
         meta.status_seq = snap.status_seq;
+        meta.resumed_from.clone_from(&cfg.extras.resumed_from);
         write_meta_then_sync(hub, &meta);
     }
     pending.publish_from(cfg.origin.clone());
@@ -2777,6 +2794,7 @@ mod tests {
                 resume_conversation: Some("abc-123".to_owned()),
                 hook_options: claude_options(),
                 hook_trusted: false,
+                resumed_from: Vec::new(),
             },
         }
     }
@@ -2943,6 +2961,7 @@ mod tests {
                 resume_conversation: Some("abc-123".to_owned()),
                 hook_options: recovered_options(),
                 hook_trusted: true,
+                resumed_from: Vec::new(),
             },
             ..note_spawn_args()
         }
@@ -4133,6 +4152,7 @@ mod tests {
                 started_at: Utc::now(),
                 busy_excluded: false,
                 shell_label: None,
+                resumed_from: Vec::new(),
             },
             None,
         );
@@ -4158,6 +4178,63 @@ mod tests {
             cwd: Some(hub.dirs.config.to_string_lossy().into_owned()),
             add_dirs: Vec::new(),
         }
+    }
+
+    /// A spawn's record and sidecar carry the lineage its extras name, whichever
+    /// builder made them; the path that sets the extras is pinned by the
+    /// test of this name in `recovery.rs`.
+    #[test]
+    fn resume_stamps_the_lineage_on_every_snapshot() {
+        let lineage = vec!["older".to_owned(), "lost".to_owned()];
+        let record = interactive_record(
+            NewInteractive {
+                session_id: "fresh".to_owned(),
+                label: "fresh".to_owned(),
+                kind: SessionKind::Standalone,
+                members: Vec::new(),
+                workspace_id: None,
+                agent: agent_registry::default_agent(),
+                program_name: claude_backend().descriptor().tag.clone(),
+                cwd: "C:\\work".to_owned(),
+                stored_config: standalone_config(SessionMode::Interactive),
+                last_prompt: None,
+                conversation_id: None,
+                started_at: Utc::now(),
+                busy_excluded: false,
+                shell_label: None,
+                resumed_from: lineage.clone(),
+            },
+            None,
+        );
+        assert_eq!(record.snapshot().resumed_from, lineage);
+        let tracer = TracerSidecar {
+            pid: 7,
+            pipe: r"\\.\pipe\rt-tracer-fresh".to_owned(),
+            exe_path: "rt-tracer.exe".to_owned(),
+        };
+        let meta = interactive_meta(&record, 42, tracer).expect("sidecar meta");
+        assert_eq!(meta.resumed_from, lineage, "and so does its sidecar");
+
+        let shell = plain_shell_record(
+            NewPlainShell {
+                session_id: "shell".to_owned(),
+                label: "shell".to_owned(),
+                kind: SessionKind::Standalone,
+                members: Vec::new(),
+                workspace_id: None,
+                shell_label: "pwsh".to_owned(),
+                cwd: "C:\\work".to_owned(),
+                stored_config: standalone_config(SessionMode::PlainShell),
+                started_at: Utc::now(),
+                busy_excluded: false,
+                hook_agent: None,
+                hook_options: OptionValues::new(),
+                hook_trusted: false,
+                resumed_from: lineage.clone(),
+            },
+            None,
+        );
+        assert_eq!(shell.snapshot().resumed_from, lineage, "a recovered shell");
     }
 
     /// Put `record` into `hub`'s registry unpublished and then publish it,
@@ -4204,6 +4281,7 @@ mod tests {
                 started_at: Utc::now(),
                 busy_excluded: false,
                 shell_label: None,
+                resumed_from: Vec::new(),
             },
             None,
         );
@@ -4240,6 +4318,7 @@ mod tests {
                 hook_agent: None,
                 hook_options: OptionValues::new(),
                 hook_trusted: false,
+                resumed_from: Vec::new(),
             },
             None,
         );
@@ -4292,6 +4371,7 @@ mod tests {
                 hook_agent: None,
                 hook_options: OptionValues::new(),
                 hook_trusted: false,
+                resumed_from: Vec::new(),
             },
             None,
         );
@@ -4334,6 +4414,7 @@ mod tests {
                 started_at: Utc::now(),
                 busy_excluded: true,
                 shell_label: None,
+                resumed_from: Vec::new(),
             },
             None,
         );
@@ -4576,7 +4657,7 @@ mod tests {
         abandoned.status = protocol::SessionStatus::Stopped;
         hub.sessions.insert(abandoned);
         let _ = child_env_probe::take();
-        resume_abandoned(&hub, "abandoned", &out_tx)
+        resume_abandoned(&hub, "abandoned")
             .await
             .expect_err("no tracer can start");
         assert_eq!(

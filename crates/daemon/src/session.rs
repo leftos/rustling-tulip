@@ -341,6 +341,10 @@ pub struct SessionRecord {
     /// which its hook events are mapped with. False for every other session.
     /// Written to the sidecar once at spawn and never changed after.
     pub hook_trusted: bool,
+    /// The abandoned sessions this one replaced in place, oldest first (see
+    /// [`protocol::SessionSnapshot::resumed_from`]). Written to the sidecar once
+    /// at spawn and never changed after.
+    pub resumed_from: Vec<String>,
     /// The cols and rows last applied to this session's PTY. Until a client's
     /// `Resize` has sized this session it is `None`, and any `Resize` applies;
     /// after that only a claimed one does, so a client without recent input
@@ -489,6 +493,7 @@ impl SessionRecord {
             busy_excluded: self.busy_excluded,
             pending_input: self.pending_input.clone(),
             background: self.background,
+            resumed_from: self.resumed_from.clone(),
         }
     }
 
@@ -1711,6 +1716,7 @@ impl SessionRegistry {
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             hook_trusted: meta.hook_trusted,
+            resumed_from: meta.resumed_from.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -1796,6 +1802,7 @@ impl SessionRegistry {
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             hook_trusted: meta.hook_trusted,
+            resumed_from: meta.resumed_from.clone(),
         };
         push_recent_action(
             &mut record,
@@ -1858,6 +1865,7 @@ impl SessionRegistry {
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
             hook_trusted: meta.hook_trusted,
+            resumed_from: meta.resumed_from.clone(),
         };
         push_recent_action(
             &mut record,
@@ -1948,6 +1956,7 @@ mod tests {
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),
             hook_trusted: false,
+            resumed_from: Vec::new(),
         }
     }
 
@@ -3040,6 +3049,58 @@ mod tests {
     fn assert_keeps_busy_excluded(registry: &SessionRegistry) {
         let arc = registry.get("s1").expect("the inserted session");
         assert!(lock(&arc).busy_excluded, "the sidecar's flag is restored");
+    }
+
+    #[tokio::test]
+    async fn resumed_from_survives_each_insert() {
+        type Insert = fn(&SessionRegistry, &OrphanMeta);
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs("resumed-from-inserts");
+        let lineage = vec!["older".to_string(), "newer".to_string()];
+        let mut meta = standalone_meta();
+        meta.resumed_from.clone_from(&lineage);
+        crate::orphan::write_meta(&dirs, &meta).expect("write the sidecar");
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load the sidecar");
+
+        let inserted: [(&str, Insert); 3] = [
+            ("orphan", |registry, meta| registry.insert_orphan(meta)),
+            ("abandoned", |registry, meta| {
+                registry.insert_abandoned(meta);
+            }),
+            ("reattached", |registry, meta| {
+                let (pty, _exit) = fake_pty();
+                registry.insert_reattached(meta, pty).publish();
+            }),
+        ];
+        for (name, insert) in inserted {
+            let registry = SessionRegistry::new(dirs.clone());
+            insert(&registry, &meta);
+            let snapshots = registry.snapshots();
+            assert_eq!(snapshots[0].resumed_from, lineage, "the {name} insert");
+        }
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn a_sidecar_sync_keeps_resumed_from() {
+        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
+        let dirs = scratch_dirs("sidecar-resumed-from");
+        write_meta_for(&dirs, "s1");
+        let bare = std::fs::read_to_string(dirs.sessions_dir.join("s1").join("meta.json"))
+            .expect("read the sidecar");
+        assert!(!bare.contains("resumed_from"), "absent when empty: {bare}");
+        let mut meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        meta.resumed_from = vec!["older".to_string()];
+        crate::orphan::write_meta(&dirs, &meta).expect("write the sidecar");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Interactive));
+
+        registry.update("s1", |rec| rec.busy_excluded = true);
+
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        assert!(meta.busy_excluded, "the sync rewrote the sidecar");
+        assert_eq!(meta.resumed_from, ["older"], "and kept the lineage");
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

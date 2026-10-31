@@ -182,6 +182,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   `summary.json` sits beside `meta.json` too: the session's summary ring as a protocol `SessionSummary` whose `lines` is the whole ring (at most 12 lines, none older than 2 hours, newest first). It is written atomically right after each ring update and only while `meta.json` exists (it never creates the folder), restored by the orphan, reattached and abandoned inserts (a missing, corrupt or emptied ring restores no summary), and deleted with the sidecar (`crates/daemon/src/summarizer/turns.rs`, `crates/daemon/src/session.rs`).
 
+  The sidecar's `resumed_from` (absent when empty) holds the session ids a resume replaced, oldest first, the newest 8, restored by the orphan, reattached and abandoned inserts; it is set at spawn and never changes.
+
   The sidecar's `program_name` follows the record (the shell's label once an agent typed into its shell has ended, the agent again on its next `SessionStart`), and `agent_in_shell` and `shell_label` mark a session whose PTY child is the user's shell, so a reattach runs the shell's status watcher (absent means the agent is the child).
 
   A recovered shell's `hook_agent` (the plugin that maps its hook events; absent means none, and the hook route then maps nothing for the session), `hook_options` (the recovered selection's options, an empty object by default) and `hook_trusted` (whether the recovered run was trusted, false by default) are stored there too, written once at spawn, and restored by the orphan, reattached and abandoned inserts; the shell's hook events are mapped with them, not with its own spawn config.

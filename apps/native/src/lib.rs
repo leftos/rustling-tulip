@@ -3209,7 +3209,8 @@ impl RootView {
     /// host has listed since its latest `Welcome` without the pane's
     /// session, or whose session a forget of its panes is on its way for:
     /// restoring it would open a window the pane's forget closes again,
-    /// whatever This PC's state.
+    /// whatever This PC's state. A listed successor keeps a pane from
+    /// counting as unlisted: it is rebound rather than forgotten.
     fn popout_pane_forgotten(&self, key: &PopoutKey) -> bool {
         let PopoutKey::Pane { tab_id, pane_id } = key else {
             return false;
@@ -3228,6 +3229,7 @@ impl RootView {
         };
         let unlisted = pane.host != HostKey::Local
             && self.listed_since_welcome(&pane.host)
+            && self.successor_of(&pane.host, id).is_none()
             && !self
                 .sidebar
                 .sessions_of(&pane.host)
@@ -4006,6 +4008,9 @@ impl RootView {
                 request_id: id,
                 code,
             } => {
+                if let Some(request_id) = &id {
+                    self.pane_forgets.rebind_refused(request_id);
+                }
                 let failure = DaemonFailure {
                     message,
                     request_id: id.as_deref(),

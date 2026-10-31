@@ -16,8 +16,9 @@ use rustling_tulip_native::{
 };
 use serde_json::json;
 use support::{
-    Fixture, Harness, PROTOCOL, REMOTE, TestDir, mixed_tabs, pane, remote_lists, repo,
+    Fixture, Harness, PROTOCOL, REMOTE, TestDir, mixed_tabs, pane, remote_lists, remote_pane, repo,
     saved_remote, saved_remote_over, saved_ui, seed_ui, session, split, tab, two_tab_fixture,
+    two_tabs,
 };
 
 /// A diff tab of `path` in `r1`'s main tree.
@@ -3962,6 +3963,97 @@ fn a_saved_pane_popout_whose_session_the_remote_list_omits_never_opens(cx: &mut 
         json!([]),
         "the saved entry is gone"
     );
+}
+
+#[gpui::test]
+fn a_saved_pane_popout_survives_a_resume(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_saved_popouts(&dir, &json!([saved_p3()]));
+    let mut h = Harness::with(cx, &dir, &two_tab_fixture());
+    assert_eq!(h.window_count(), 1, "p3 waits for the remote host's list");
+
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build(), resumed_b2()],
+    });
+
+    assert_eq!(h.window_count(), 2, "p3 has a successor, so it reopens");
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t2", &remote_pane("p3", "b3")),
+    });
+    assert_eq!(h.window_count(), 2, "and stays through the rebind");
+    h.advance(std::time::Duration::from_millis(500));
+    assert_eq!(
+        saved_ui(&dir)["popouts"][0]["key"],
+        saved_p3()["key"],
+        "the saved entry stays"
+    );
+}
+
+#[gpui::test]
+fn a_stale_list_does_not_save_a_pane_popout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_saved_popouts(&dir, &json!([saved_p3()]));
+    let mut h = Harness::open(cx, &dir);
+    h.send(DaemonMessage::Tabs { tabs: two_tabs() });
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, &["b1"]);
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build(), resumed_b2()],
+    });
+    h.host(&saved_remote()).send(support::welcome(PROTOCOL));
+
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("a1").build()],
+    });
+
+    assert_eq!(
+        h.window_count(),
+        1,
+        "p3's forget is on its way, and the list naming a successor predates the Welcome"
+    );
+}
+
+/// [`REMOTE`]'s session `b3`, which replaced `b2`.
+fn resumed_b2() -> protocol::SessionSnapshot {
+    let mut snapshot = session("b3").build();
+    snapshot.resumed_from = vec!["b2".to_owned()];
+    snapshot
+}
+
+#[gpui::test]
+fn a_remote_resume_in_a_popout_keeps_the_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t2", &remote_pane("p3", "b2")),
+    });
+    pop_out(&mut h, "t2", "p3");
+    assert_eq!(h.window_count(), 2, "the pop-out has a window of its own");
+    h.sent();
+
+    h.host(&saved_remote()).send(DaemonMessage::SessionUpdated {
+        session: resumed_b2(),
+        request_id: None,
+    });
+    h.host(&saved_remote()).send(DaemonMessage::SessionRemoved {
+        session_id: "b2".to_owned(),
+    });
+    assert!(
+        h.sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::RebindHostSessions { .. })),
+        "This PC is asked to rebind the pane"
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t2", &remote_pane("p3", "b3")),
+    });
+
+    assert_eq!(h.window_count(), 2, "the pop-out window stays open");
+    assert!(h.root(|root, _| root.is_popped_out("t2", "p3")));
+    let mut popout = h.popout_window();
+    popout.run_until_parked();
+    assert_eq!(popout.window_title().as_deref(), Some("b3"));
 }
 
 /// The saved pane pop-out of `t2`'s `p3`, which shows [`REMOTE`]'s `b2`.

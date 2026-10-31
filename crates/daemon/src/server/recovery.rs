@@ -4,8 +4,7 @@ use super::git::active_sessions_using_worktree;
 use super::sessions::rerun_request;
 use super::settings::{env_names, register_repo};
 use super::spawn::{
-    SpawnExtras, check_spawn_request, expected_output_subscribers, spawn_session,
-    spawn_session_with_extras,
+    SpawnExtras, check_spawn_request, expected_output_subscribers, spawn_session_with_extras,
 };
 use super::tabs::rebind_session_panes;
 use super::{Hub, StateEvent};
@@ -34,10 +33,10 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
     let ConnCtx { out_tx, .. } = *ctx;
     match msg {
         ClientMessage::ResumeAbandoned { session_id } => {
-            resume_abandoned(hub, &session_id, out_tx).await?;
+            resume_abandoned(hub, &session_id).await?;
         }
         ClientMessage::DiscardAbandoned { session_id } => {
-            dismiss_abandoned(hub, &session_id, out_tx)?;
+            dismiss_abandoned(hub, &session_id)?;
         }
         ClientMessage::ResumeAllAbandoned => {
             resume_all_abandoned(hub, out_tx).await;
@@ -362,29 +361,48 @@ fn restart_discovery(sessions: &SessionRegistry, restart: DiscoveryRestart) -> b
 /// [`finish_resume`] rebinds every pane that pointed at the old id and moves
 /// the id in each container's session order, so the resume lands in the slot
 /// it left.
-pub(super) async fn resume_abandoned(
-    hub: &Hub,
-    session_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<()> {
-    let spawn = move |req: SpawnRequest, busy_excluded: bool| async move {
-        spawn_session(hub, req, None, busy_excluded)
+pub(super) async fn resume_abandoned(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
+    let spawn = move |req: SpawnRequest, busy_excluded: bool, extras: SpawnExtras| async move {
+        spawn_session_with_extras(hub, req, None, busy_excluded, extras)
             .await
             .map(|snap| snap.id)
     };
-    resume_abandoned_with(hub, session_id, out_tx, spawn).await
+    resume_abandoned_with(hub, session_id, spawn).await
+}
+
+/// The most predecessors a session names; the newest are kept.
+const RESUMED_FROM_CAP: usize = 8;
+
+/// The lineage a session replacing `old` carries: `old`'s own, then `old`.
+fn lineage_of(old: &SessionRecord) -> Vec<String> {
+    let mut lineage = old.resumed_from.clone();
+    lineage.push(old.id.clone());
+    lineage.drain(..lineage.len().saturating_sub(RESUMED_FROM_CAP));
+    lineage
+}
+
+/// The extras of a spawn replacing `id`: its lineage while it is an abandoned
+/// session, and none otherwise, since nothing else is replaced in place.
+fn replacing_extras(hub: &Hub, id: &str) -> SpawnExtras {
+    let resumed_from = hub.sessions.get(id).map_or_else(Vec::new, |rec| {
+        let rec = crate::sync::lock(&rec);
+        if rec.is_abandoned {
+            lineage_of(&rec)
+        } else {
+            Vec::new()
+        }
+    });
+    SpawnExtras {
+        resumed_from,
+        ..SpawnExtras::default()
+    }
 }
 
 /// [`resume_abandoned`], starting the session with `spawn`, which returns the
 /// new session's id.
-async fn resume_abandoned_with<F, Fut>(
-    hub: &Hub,
-    session_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    spawn: F,
-) -> anyhow::Result<()>
+async fn resume_abandoned_with<F, Fut>(hub: &Hub, session_id: &str, spawn: F) -> anyhow::Result<()>
 where
-    F: Fn(SpawnRequest, bool) -> Fut,
+    F: Fn(SpawnRequest, bool, SpawnExtras) -> Fut,
     Fut: Future<Output = anyhow::Result<String>>,
 {
     let _claim = hub
@@ -392,8 +410,9 @@ where
         .claim(session_id)
         .ok_or_else(|| anyhow!("session {session_id} is {ALREADY_RECOVERING}"))?;
     let (req, busy_excluded) = resume_request(hub, session_id).await?;
-    let new_id = spawn(req, busy_excluded).await?;
-    finish_resume(hub, session_id, &new_id, out_tx);
+    let extras = replacing_extras(hub, session_id);
+    let new_id = spawn(req, busy_excluded, extras).await?;
+    finish_resume(hub, session_id, &new_id);
     Ok(())
 }
 
@@ -475,16 +494,11 @@ fn abandoned_resume_request(rec: &SessionRecord) -> anyhow::Result<(SpawnRequest
 /// held; remove the abandoned placeholder and its sidecar (if the spawn
 /// failed, the placeholder stays so the user can try again); and mark its
 /// history entry recovered, so it stops counting as a session to recover.
-fn finish_resume(
-    hub: &Hub,
-    old_id: &str,
-    new_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) {
+fn finish_resume(hub: &Hub, old_id: &str, new_id: &str) {
     rebind_session_panes(hub, old_id, new_id);
     carry_identity(hub, old_id, new_id);
     keep_session_order(hub, old_id, new_id);
-    discard_abandoned(hub, old_id, out_tx);
+    discard_abandoned(hub, old_id);
     mark_history_recovered(hub, old_id);
 }
 
@@ -538,10 +552,10 @@ pub(super) async fn auto_resume(
     ids: Vec<String>,
     in_flight: ResumeInFlight,
 ) -> (usize, usize) {
-    let spawn = |req: SpawnRequest, busy_excluded: bool| {
+    let spawn = |req: SpawnRequest, busy_excluded: bool, extras: SpawnExtras| {
         let hub = &hub;
         async move {
-            spawn_session(hub, req, None, busy_excluded)
+            spawn_session_with_extras(hub, req, None, busy_excluded, extras)
                 .await
                 .map(|snap| snap.id)
         }
@@ -575,15 +589,13 @@ async fn auto_resume_with<F, Fut>(
     in_flight: ResumeInFlight,
 ) -> (usize, usize)
 where
-    F: Fn(SpawnRequest, bool) -> Fut,
+    F: Fn(SpawnRequest, bool, SpawnExtras) -> Fut,
     Fut: Future<Output = anyhow::Result<String>>,
 {
     let _in_flight = in_flight;
-    // The registry's own events tell every client; nobody asked for these.
-    let (out_tx, _) = mpsc::unbounded_channel();
     let (mut resumed, mut left) = (0, 0);
     for id in ids {
-        match auto_resume_one(hub, &id, &spawn, &out_tx).await {
+        match auto_resume_one(hub, &id, &spawn).await {
             Ok(Some(new_id)) => {
                 info!(session_id = %id, %new_id, "auto-resume at start: resumed");
                 resumed += 1;
@@ -609,14 +621,9 @@ where
 /// Auto-resume the lost session `id`: the new session's id, `None` when a
 /// recovery or a Resume already holds it or it is already gone (resumed,
 /// recovered or dismissed), or why it stays abandoned.
-async fn auto_resume_one<F, Fut>(
-    hub: &Hub,
-    id: &str,
-    spawn: &F,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> Result<Option<String>, String>
+async fn auto_resume_one<F, Fut>(hub: &Hub, id: &str, spawn: &F) -> Result<Option<String>, String>
 where
-    F: Fn(SpawnRequest, bool) -> Fut,
+    F: Fn(SpawnRequest, bool, SpawnExtras) -> Fut,
     Fut: Future<Output = anyhow::Result<String>>,
 {
     let Some(_claim) = hub.recovering.claim(id) else {
@@ -628,10 +635,11 @@ where
         return Ok(None);
     }
     let (req, busy_excluded) = auto_resume_request(hub, id).await?;
-    let new_id = spawn(req, busy_excluded)
+    let extras = replacing_extras(hub, id);
+    let new_id = spawn(req, busy_excluded, extras)
         .await
         .map_err(|err| format!("spawn failed: {err:#}"))?;
-    finish_resume(hub, id, &new_id, out_tx);
+    finish_resume(hub, id, &new_id);
     Ok(Some(new_id))
 }
 
@@ -755,7 +763,7 @@ async fn resume_all_abandoned(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMe
         "resume_all_abandoned: starting bulk resume"
     );
     for id in abandoned_ids {
-        if let Err(err) = resume_abandoned(hub, &id, out_tx).await {
+        if let Err(err) = resume_abandoned(hub, &id).await {
             warn!(session_id = %id, ?err, "bulk resume: per-session failure");
             let _ = out_tx.send(DaemonMessage::Error {
                 message: format!("resume {id}: {err}"),
@@ -838,6 +846,26 @@ async fn recover_one(
     item: &protocol::RecoverItem,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> Result<String, String> {
+    let spawn = move |req: SpawnRequest, busy_excluded: bool, extras: SpawnExtras| async move {
+        spawn_session_with_extras(hub, req, None, busy_excluded, extras)
+            .await
+            .map(|snap| snap.id)
+    };
+    recover_one_with(hub, item, out_tx, spawn).await
+}
+
+/// [`recover_one`], starting the session with `spawn`, which returns the new
+/// session's id.
+async fn recover_one_with<F, Fut>(
+    hub: &Hub,
+    item: &protocol::RecoverItem,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    spawn: F,
+) -> Result<String, String>
+where
+    F: Fn(SpawnRequest, bool, SpawnExtras) -> Fut,
+    Fut: Future<Output = anyhow::Result<String>>,
+{
     let _claim = hub
         .recovering
         .claim(&item.history_id)
@@ -893,12 +921,13 @@ async fn recover_one(
         resume_conversation: plan.resume_conversation,
         hook_options: plan.hook_options,
         hook_trusted: plan.hook_trusted,
+        resumed_from: replacing_extras(hub, &item.history_id).resumed_from,
     };
-    let snapshot = spawn_session_with_extras(hub, plan.request, None, busy_excluded, extras)
+    let new_id = spawn(plan.request, busy_excluded, extras)
         .await
         .map_err(|err| format!("{err:#}"))?;
-    finish_recovery(hub, &item.history_id, &snapshot.id, out_tx);
-    Ok(snapshot.id)
+    finish_recovery(hub, &item.history_id, &new_id);
+    Ok(new_id)
 }
 
 /// The busy exclusion a recovered session starts with. A session still in
@@ -935,12 +964,7 @@ pub(super) fn recovery_conversation_exists(
 /// the new session the name, the look and the sidebar place the abandoned one
 /// held, and remove it from there. Its history entry already exists, so the
 /// removal writes no second end.
-fn finish_recovery(
-    hub: &Hub,
-    history_id: &str,
-    new_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) {
+fn finish_recovery(hub: &Hub, history_id: &str, new_id: &str) {
     mark_history_recovered(hub, history_id);
     let still_abandoned = hub
         .sessions
@@ -950,7 +974,7 @@ fn finish_recovery(
         rebind_session_panes(hub, history_id, new_id);
         carry_identity(hub, history_id, new_id);
         keep_session_order(hub, history_id, new_id);
-        discard_abandoned(hub, history_id, out_tx);
+        discard_abandoned(hub, history_id);
     }
 }
 
@@ -965,11 +989,7 @@ pub(super) fn mark_history_recovered(hub: &Hub, session_id: &str) {
 /// The user's Dismiss of an abandoned session: its start-up loss entry
 /// becomes `StoppedByUser`, so it stops counting as a session to recover, and
 /// the session is discarded.
-fn dismiss_abandoned(
-    hub: &Hub,
-    session_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<()> {
+fn dismiss_abandoned(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     let _claim = hub
         .recovering
         .claim(session_id)
@@ -977,26 +997,20 @@ fn dismiss_abandoned(
     if let Err(err) = history::dismiss_start_up_loss(&hub.dirs, session_id) {
         warn!(?err, %session_id, "failed to record the dismissed session as stopped");
     }
-    discard_abandoned(hub, session_id, out_tx);
+    discard_abandoned(hub, session_id);
     Ok(())
 }
 
 /// Remove an abandoned session from the registry + delete its sidecar.
 /// Used both as the cleanup step after a successful Resume and as the
 /// user-initiated "Dismiss" action for sessions they don't want to
-/// recover.
-pub(super) fn discard_abandoned(
-    hub: &Hub,
-    session_id: &str,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) {
+/// recover. Clients hear of the removal from the registry, which tells them
+/// after the session that replaced this one was published.
+pub(super) fn discard_abandoned(hub: &Hub, session_id: &str) {
     record_end(hub, session_id, SessionEnd::StoppedByUser);
     hub.sessions.delete_sidecar(session_id);
     hub.sessions.delete_session_dir(session_id);
     hub.sessions.remove(session_id);
-    let _ = out_tx.send(DaemonMessage::SessionRemoved {
-        session_id: session_id.to_string(),
-    });
 }
 
 #[cfg(test)]
@@ -1009,10 +1023,11 @@ mod tests {
     use crate::env_secrets;
     use crate::server::spawn::check_spawn_request_with;
     use crate::server::test_support::{
-        MISSING_SECRET_ID, UNSET_REF, deepseek_key, deepseek_options, deepseek_spawn, dispatch_one,
-        env, env_ref_repo_hub, env_spawn, git_init, git_ok, idle_record, secret_ref,
-        spawnless_test_hub, test_hub,
+        MISSING_SECRET_ID, UNSET_REF, deepseek_key, deepseek_options, deepseek_spawn, dispatch_all,
+        dispatch_one, env, env_ref_repo_hub, env_spawn, git_init, git_ok, idle_record, secret_ref,
+        snapshot_of, spawnless_test_hub, test_hub,
     };
+    use crate::session::SessionEvent;
     use chrono::Utc;
     use protocol::{SessionMember, SpawnTarget};
     use std::path::PathBuf;
@@ -1389,16 +1404,13 @@ mod tests {
     async fn recovering_abandoned_entry_removes_abandoned_session() {
         let (hub, _scratch) = spawnless_test_hub("recover-abandoned");
         insert_abandoned_with_history(&hub, "lost");
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        let mut events = hub.sessions.subscribe();
+        finish_recovery(&hub, "lost", "fresh");
         assert!(
             hub.sessions.get("lost").is_none(),
             "left the Abandoned group"
         );
-        assert!(matches!(
-            out_rx.try_recv(),
-            Ok(DaemonMessage::SessionRemoved { ref session_id }) if session_id == "lost"
-        ));
+        assert_eq!(removals(&mut events), ["lost"]);
         let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
         assert!(entry.recovered_at.is_some(), "marked recovered");
         assert_eq!(entry.end, SessionEnd::TracerLost, "no second end written");
@@ -1413,8 +1425,7 @@ mod tests {
         assert_eq!(ids, vec!["lost".to_owned()]);
         let lost = history::read_one(&hub.dirs, "lost").expect("start-up entry");
         hub.sessions.insert_abandoned(&meta);
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        dismiss_abandoned(&hub, "lost", &out_tx).expect("nothing holds it");
+        dismiss_abandoned(&hub, "lost").expect("nothing holds it");
         assert!(hub.sessions.get("lost").is_none(), "dismissed");
         let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
         assert_eq!(entry.end, SessionEnd::StoppedByUser);
@@ -1426,8 +1437,7 @@ mod tests {
     async fn resume_abandoned_marks_history_recovered() {
         let (hub, _scratch) = spawnless_test_hub("resume-marks-recovered");
         insert_abandoned_with_history(&hub, "lost");
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        finish_resume(&hub, "lost", "fresh", &out_tx);
+        finish_resume(&hub, "lost", "fresh");
         assert!(hub.sessions.get("lost").is_none(), "placeholder removed");
         let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
         assert!(entry.recovered_at.is_some(), "a resume counts as recovery");
@@ -1531,9 +1541,8 @@ mod tests {
             rec.last_prompt = Some("first".to_owned());
         });
         let spawned = Spawned::default();
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+        resume_abandoned_with(&hub, "lost", recording_spawn(&spawned))
             .await
             .expect("the resume spawns");
 
@@ -1573,9 +1582,8 @@ mod tests {
         hub.sessions
             .update("lost", |rec| rec.last_prompt = Some("first".to_owned()));
         let spawned = Spawned::default();
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+        resume_abandoned_with(&hub, "lost", recording_spawn(&spawned))
             .await
             .expect("the resume still spawns");
 
@@ -1605,9 +1613,8 @@ mod tests {
             rec.last_prompt = Some("ls".to_owned());
         });
         let spawned = Spawned::default();
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+        resume_abandoned_with(&hub, "lost", recording_spawn(&spawned))
             .await
             .expect("a plain shell resumes too");
 
@@ -1638,9 +1645,8 @@ mod tests {
         hub.sessions
             .update("lost", |rec| rec.last_prompt = Some("first".to_owned()));
         let spawned = Spawned::default();
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+        resume_abandoned_with(&hub, "lost", recording_spawn(&spawned))
             .await
             .expect("a Resume whose worktree is gone still spawns");
 
@@ -1681,9 +1687,8 @@ mod tests {
         ));
         set_member(&hub, "live", "wt/x", &folder);
         let spawned = Spawned::default();
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        resume_abandoned_with(&hub, "lost", &out_tx, recording_spawn(&spawned))
+        resume_abandoned_with(&hub, "lost", recording_spawn(&spawned))
             .await
             .expect("a Resume of a held worktree still spawns");
 
@@ -1708,9 +1713,8 @@ mod tests {
         insert_abandoned_with_history(&hub, "lost");
         rename_and_recolour(&hub, "lost");
         hub.sessions.insert(idle_record("fresh"));
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        finish_resume(&hub, "lost", "fresh", &out_tx);
+        finish_resume(&hub, "lost", "fresh");
 
         let rec = hub.sessions.get("fresh").expect("fresh is registered");
         let rec = crate::sync::lock(&rec);
@@ -1732,9 +1736,8 @@ mod tests {
         let (hub, _scratch) = spawnless_test_hub("resume-default-label");
         insert_abandoned_with_history(&hub, "lost");
         hub.sessions.insert(idle_record("fresh"));
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        finish_resume(&hub, "lost", "fresh", &out_tx);
+        finish_resume(&hub, "lost", "fresh");
 
         let rec = hub.sessions.get("fresh").expect("fresh is registered");
         let rec = crate::sync::lock(&rec);
@@ -1753,9 +1756,8 @@ mod tests {
         seed_session_order(&hub, "r1", &["a", "lost", "b"]);
         seed_session_order(&hub, "r2", &["x", "y"]);
         let mut events = hub.state_events.subscribe();
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        finish_resume(&hub, "lost", "fresh", &out_tx);
+        finish_resume(&hub, "lost", "fresh");
 
         assert_eq!(order_of(&hub, "r1"), Some(ids(&["a", "fresh", "b"])));
         assert_eq!(order_of(&hub, "r2"), Some(ids(&["x", "y"])));
@@ -1779,9 +1781,8 @@ mod tests {
         insert_abandoned_with_history(&hub, "lost");
         rename_and_recolour(&hub, "lost");
         hub.sessions.insert(idle_record("fresh"));
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        finish_recovery(&hub, "lost", "fresh");
 
         let rec = hub.sessions.get("fresh").expect("fresh is registered");
         let rec = crate::sync::lock(&rec);
@@ -1806,9 +1807,8 @@ mod tests {
         seed_session_order(&hub, "r1", &["a", "lost", "b"]);
         seed_session_order(&hub, "r2", &["x", "y"]);
         let mut events = hub.state_events.subscribe();
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        finish_recovery(&hub, "lost", "fresh");
 
         assert_eq!(order_of(&hub, "r1"), Some(ids(&["a", "fresh", "b"])));
         assert_eq!(order_of(&hub, "r2"), Some(ids(&["x", "y"])));
@@ -1831,9 +1831,8 @@ mod tests {
         let (hub, _scratch) = spawnless_test_hub("recover-history-only");
         write_history(&hub, "lost", SessionMode::Interactive, false);
         hub.sessions.insert(idle_record("fresh"));
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
 
-        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        finish_recovery(&hub, "lost", "fresh");
 
         let rec = hub.sessions.get("fresh").expect("fresh is registered");
         let rec = crate::sync::lock(&rec);
@@ -1980,8 +1979,7 @@ mod tests {
         let (hub, _scratch) = spawnless_test_hub("recover-rebinds");
         insert_abandoned_with_history(&hub, "lost");
         seed_pane_layout(&hub, "lost");
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        finish_recovery(&hub, "lost", "fresh");
         assert_eq!(
             shown_panes(&hub),
             [Some("fresh".to_owned())],
@@ -2023,6 +2021,213 @@ mod tests {
             .expect("read the layout")
     }
 
+    /// The sessions removed in `events`, in order.
+    fn removals(events: &mut broadcast::Receiver<SessionEvent>) -> Vec<String> {
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                SessionEvent::Removed(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The lineage of each snapshot of `fresh` in `events`, in order.
+    fn lineages_of_fresh(events: &mut broadcast::Receiver<SessionEvent>) -> Vec<Vec<String>> {
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                SessionEvent::Updated(snapshot, _) if snapshot.id == "fresh" => {
+                    Some(snapshot.resumed_from)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A stand-in for `spawn_session` that registers the new session `fresh`
+    /// with the lineage its extras carry, as a real spawn does.
+    fn lineage_spawn(
+        hub: &Hub,
+    ) -> impl Fn(SpawnRequest, bool, SpawnExtras) -> std::future::Ready<anyhow::Result<String>>
+    {
+        let hub = hub.clone();
+        move |_req, _busy_excluded, extras| {
+            let mut fresh = idle_record("fresh");
+            fresh.resumed_from = extras.resumed_from;
+            hub.sessions.insert(fresh);
+            std::future::ready(Ok("fresh".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_stamps_the_lineage_on_every_snapshot() {
+        let (_home_lock, home) = claude_home_scratch("resume-lineage").await;
+        let (hub, scratch) = spawnless_test_hub("resume-lineage");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        insert_abandoned_claude(
+            &hub,
+            "lost",
+            standalone(&folder),
+            Some(RECOVERY_CONVERSATION),
+        );
+        hub.sessions
+            .update("lost", |rec| rec.resumed_from = ids(&["older"]));
+        let mut events = hub.sessions.subscribe();
+
+        resume_abandoned_with(&hub, "lost", lineage_spawn(&hub))
+            .await
+            .expect("the resume spawns");
+
+        let lineages = lineages_of_fresh(&mut events);
+        assert!(lineages.len() >= 2, "born, then renamed: {lineages:?}");
+        for lineage in lineages {
+            assert_eq!(lineage, ids(&["older", "lost"]));
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_resume_stamps_the_lineage() {
+        let (_home_lock, home) = claude_home_scratch("auto-resume-lineage").await;
+        let (hub, scratch) = spawnless_test_hub("auto-resume-lineage");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        insert_abandoned_claude(
+            &hub,
+            "lost",
+            standalone(&folder),
+            Some(RECOVERY_CONVERSATION),
+        );
+        let mut events = hub.sessions.subscribe();
+        let in_flight = ResumeInFlight::start(&hub.resume_in_flight);
+
+        let counts = auto_resume_with(
+            &hub,
+            vec!["lost".to_owned()],
+            lineage_spawn(&hub),
+            in_flight,
+        )
+        .await;
+
+        assert_eq!(counts, (1, 0));
+        let lineages = lineages_of_fresh(&mut events);
+        assert!(!lineages.is_empty(), "fresh was published");
+        for lineage in lineages {
+            assert_eq!(lineage, ids(&["lost"]));
+        }
+    }
+
+    /// The lineage the session recovered from history entry `shell` is born
+    /// with, `live` being the record still there under that id, if any.
+    async fn recovered_lineage(tag: &str, live: Option<bool>) -> Vec<String> {
+        let (hub, _scratch) = spawnless_test_hub(tag);
+        write_history(&hub, "shell", SessionMode::PlainShell, false);
+        if let Some(is_abandoned) = live {
+            let mut rec = history::test_support::record("shell", SessionMode::PlainShell);
+            rec.is_abandoned = is_abandoned;
+            hub.sessions.insert(rec);
+        }
+        let item = protocol::RecoverItem {
+            history_id: "shell".to_owned(),
+            conversation_id: None,
+            how: protocol::RecoverAs::Shell,
+        };
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let new_id = recover_one_with(&hub, &item, &out_tx, lineage_spawn(&hub))
+            .await
+            .expect("the recovery spawns");
+        snapshot_of(&hub, &new_id).resumed_from
+    }
+
+    #[tokio::test]
+    async fn recover_stamps_the_lineage_only_while_the_old_session_is_abandoned() {
+        assert_eq!(
+            recovered_lineage("recover-lineage-abandoned", Some(true)).await,
+            ids(&["shell"])
+        );
+        assert!(
+            recovered_lineage("recover-lineage-live", Some(false))
+                .await
+                .is_empty(),
+            "a live record of that id is not replaced"
+        );
+        assert!(
+            recovered_lineage("recover-lineage-history", None)
+                .await
+                .is_empty(),
+            "a history entry alone leaves nothing to replace"
+        );
+    }
+
+    #[test]
+    fn a_chain_of_resumes_keeps_the_newest_eight_oldest_first() {
+        let mut lineage = Vec::new();
+        for n in 0..10 {
+            let mut rec = history::test_support::record(&format!("s{n}"), SessionMode::Interactive);
+            rec.resumed_from = lineage;
+            lineage = lineage_of(&rec);
+        }
+        assert_eq!(
+            lineage,
+            ids(&["s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"])
+        );
+    }
+
+    #[tokio::test]
+    async fn discard_abandoned_sends_nothing_on_the_requesters_channel() {
+        let (hub, _scratch) = spawnless_test_hub("discard-no-send");
+        insert_abandoned_with_history(&hub, "lost");
+        let mut events = hub.sessions.subscribe();
+
+        let sent = dispatch_all(
+            &hub,
+            ClientMessage::DiscardAbandoned {
+                session_id: "lost".to_owned(),
+            },
+        )
+        .await;
+
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(
+            removals(&mut events),
+            ["lost"],
+            "the registry tells everyone"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_new_session_is_published_before_the_old_one_is_removed() {
+        let (_home_lock, home) = claude_home_scratch("resume-order").await;
+        let (hub, scratch) = spawnless_test_hub("resume-order");
+        let folder = scratch.path().to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        insert_abandoned_claude(
+            &hub,
+            "lost",
+            standalone(&folder),
+            Some(RECOVERY_CONVERSATION),
+        );
+        let mut events = hub.sessions.subscribe();
+
+        resume_abandoned_with(&hub, "lost", lineage_spawn(&hub))
+            .await
+            .expect("the resume spawns");
+
+        let order: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                SessionEvent::Updated(snapshot, _) if snapshot.id == "fresh" => Some("fresh"),
+                SessionEvent::Removed(id) if id == "lost" => Some("removed"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order.first(), Some(&"fresh"), "{order:?}");
+        assert_eq!(order.last(), Some(&"removed"), "{order:?}");
+        assert_eq!(
+            order.iter().filter(|step| **step == "removed").count(),
+            1,
+            "{order:?}"
+        );
+    }
+
     /// What a test's stand-in for `spawn_session` was asked to start.
     type Spawned = Arc<Mutex<Vec<(SpawnRequest, bool)>>>;
 
@@ -2030,9 +2235,10 @@ mod tests {
     /// and reports a new session `fresh`.
     fn recording_spawn(
         spawned: &Spawned,
-    ) -> impl Fn(SpawnRequest, bool) -> std::future::Ready<anyhow::Result<String>> {
+    ) -> impl Fn(SpawnRequest, bool, SpawnExtras) -> std::future::Ready<anyhow::Result<String>>
+    {
         let spawned = Arc::clone(spawned);
-        move |req, busy_excluded| {
+        move |req, busy_excluded, _extras| {
             crate::sync::lock(&spawned).push((req, busy_excluded));
             std::future::ready(Ok("fresh".to_owned()))
         }
@@ -2044,10 +2250,11 @@ mod tests {
     fn recording_spawn_registering(
         hub: &Hub,
         spawned: &Spawned,
-    ) -> impl Fn(SpawnRequest, bool) -> std::future::Ready<anyhow::Result<String>> {
+    ) -> impl Fn(SpawnRequest, bool, SpawnExtras) -> std::future::Ready<anyhow::Result<String>>
+    {
         let spawned = Arc::clone(spawned);
         let hub = hub.clone();
-        move |req, busy_excluded| {
+        move |req, busy_excluded, _extras| {
             crate::sync::lock(&spawned).push((req, busy_excluded));
             hub.sessions.insert(idle_record("fresh"));
             std::future::ready(Ok("fresh".to_owned()))
@@ -2177,7 +2384,8 @@ mod tests {
         let in_flight = ResumeInFlight::start(&hub.resume_in_flight);
         let task_hub = hub.clone();
         let panicking = |_req: SpawnRequest,
-                         _busy_excluded: bool|
+                         _busy_excluded: bool,
+                         _extras: SpawnExtras|
          -> std::future::Ready<anyhow::Result<String>> {
             panic!("the spawn panics")
         };
@@ -2213,13 +2421,13 @@ mod tests {
         let (hub, _scratch) = spawnless_test_hub("dismiss-claimed");
         insert_abandoned_with_history(&hub, "lost");
         let _held = hub.recovering.claim("lost").expect("auto-resume claims it");
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut events = hub.sessions.subscribe();
 
-        let err = dismiss_abandoned(&hub, "lost", &out_tx).expect_err("the Dismiss is refused");
+        let err = dismiss_abandoned(&hub, "lost").expect_err("the Dismiss is refused");
 
         assert_eq!(err.to_string(), "This session is being resumed.");
         assert!(is_abandoned(&hub, "lost"), "nothing was discarded");
-        assert!(out_rx.try_recv().is_err(), "no removal was sent");
+        assert!(removals(&mut events).is_empty(), "no removal was sent");
         let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
         assert_eq!(entry.end, SessionEnd::TracerLost, "no stop was recorded");
     }
@@ -2621,8 +2829,7 @@ mod tests {
         let (hub, _scratch) = spawnless_test_hub("recover-claims");
         insert_abandoned_with_history(&hub, "lost");
         let _held = hub.recovering.claim("lost").expect("claim");
-        let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let resumed = resume_abandoned(&hub, "lost", &out_tx).await;
+        let resumed = resume_abandoned(&hub, "lost").await;
         let err = resumed.expect_err("a Resume while a recovery holds it fails");
         assert!(err.to_string().contains(ALREADY_RECOVERING), "{err}");
         let reply = dispatch_one(
