@@ -300,21 +300,22 @@ impl PendingSpawns {
 /// pane, else a split of its largest pane, else a new tab. Each placement is
 /// applied to a copy of the active tab's grid before the next is chosen, so
 /// no two take the same pane. A session a pane already shows, or one listed
-/// twice, is placed once at most. The recovered sessions are This PC's;
-/// `sessions` holds every host's list.
+/// twice, is placed once at most. The recovered sessions are `host`'s, whose
+/// daemon recovered them, and every message names it; `sessions` holds every
+/// host's list.
 pub(crate) fn place_several(
+    host: &HostKey,
     recovered: &[SessionSnapshot],
     tabs: &TabsModel,
     sessions: &HostSessions<'_>,
 ) -> Vec<ClientMessage> {
-    let host = HostKey::Local;
     let mut active: Option<(String, GridNode)> = tabs
         .active_id()
         .and_then(|id| tabs.tab(id))
         .and_then(|tab| tab.grid().map(|grid| (tab.id.clone(), grid.clone())));
     let mut known: Vec<SessionSnapshot> = sessions
         .iter()
-        .filter(|(listed_by, _)| *listed_by == host)
+        .filter(|(listed_by, _)| *listed_by == *host)
         .flat_map(|(_, list)| list.iter().cloned())
         .collect();
     let mut seen: HashSet<&str> = HashSet::new();
@@ -332,23 +333,23 @@ pub(crate) fn place_several(
         }
         let lists: Vec<(HostKey, &[SessionSnapshot])> = sessions
             .iter()
-            .filter(|(listed_by, _)| *listed_by != host)
+            .filter(|(listed_by, _)| *listed_by != *host)
             .cloned()
             .chain(std::iter::once((host.clone(), known.as_slice())))
             .collect();
-        let hosted = HostedSession::new(&host, session);
+        let hosted = HostedSession::new(host, session);
         let placement = active
             .as_mut()
             .and_then(|(tab_id, grid)| {
                 let target = pane_target_for_session(grid, &lists, hosted)?;
-                let target = shadows.take(grid, target, &session.id);
+                let target = shadows.take(grid, target, &session.id, host);
                 Some(Placement::Pane {
                     tab_id: tab_id.clone(),
                     target,
                 })
             })
             .unwrap_or(Placement::NewTab);
-        messages.push(placement.message(&host, &session.id, None));
+        messages.push(placement.message(host, &session.id, None));
     }
     messages
 }
@@ -364,11 +365,17 @@ struct ShadowPanes {
 
 impl ShadowPanes {
     /// `target` made real (a stand-in pane's split aimed at its origin) and
-    /// applied to `grid` for `session_id`.
-    fn take(&mut self, grid: &mut GridNode, target: PaneTarget, session_id: &str) -> PaneTarget {
+    /// applied to `grid` for `session_id`, whose host is `host`.
+    fn take(
+        &mut self,
+        grid: &mut GridNode,
+        target: PaneTarget,
+        session_id: &str,
+        host: &HostKey,
+    ) -> PaneTarget {
         match target {
             PaneTarget::Replace { pane_id } => {
-                fill_pane(grid, &pane_id, session_id);
+                fill_pane(grid, &pane_id, session_id, host);
                 PaneTarget::Replace { pane_id }
             }
             PaneTarget::Split(mut split) => {
@@ -380,7 +387,7 @@ impl ShadowPanes {
                 let new_pane = GridNode::Pane {
                     pane_id: stand_in,
                     session_id: Some(session_id.to_owned()),
-                    host: None,
+                    host: host.wire().map(str::to_owned),
                 };
                 split_pane(grid, &split, new_pane);
                 PaneTarget::Split(split)
@@ -389,21 +396,23 @@ impl ShadowPanes {
     }
 }
 
-/// Shows `session_id` in pane `pane_id` of `grid`.
-fn fill_pane(grid: &mut GridNode, pane_id: &str, session_id: &str) {
+/// Shows `session_id` of `host` in pane `pane_id` of `grid`, as the daemon's
+/// own pane will once it takes it.
+fn fill_pane(grid: &mut GridNode, pane_id: &str, session_id: &str, host: &HostKey) {
     match grid {
         GridNode::Pane {
             pane_id: id,
             session_id: shown,
-            ..
+            host: pane_host,
         } => {
             if id == pane_id {
                 *shown = Some(session_id.to_owned());
+                *pane_host = host.wire().map(str::to_owned);
             }
         }
         GridNode::Split { first, second, .. } => {
-            fill_pane(first, pane_id, session_id);
-            fill_pane(second, pane_id, session_id);
+            fill_pane(first, pane_id, session_id, host);
+            fill_pane(second, pane_id, session_id, host);
         }
     }
 }
@@ -1612,12 +1621,150 @@ mod tests {
     }
 
     #[test]
+    fn place_several_names_the_host_on_a_recovered_remote_pane() {
+        let box_host = HostKey::Remote("box".to_owned());
+        let tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
+        let recovered = [session("n1", None, None)];
+        let messages = place_several(
+            &box_host,
+            &recovered,
+            &tabs,
+            &on_local(&[session("s1", None, None)]),
+        );
+        assert_eq!(
+            messages.len(),
+            1,
+            "one session, one placement: {messages:?}"
+        );
+        let sent = wire(&messages[0]);
+        assert_eq!(sent["new_session_id"], serde_json::json!("n1"), "{sent}");
+        assert_eq!(
+            sent["host"],
+            serde_json::json!("box"),
+            "the pane named for a remote session carries its host: {sent}"
+        );
+    }
+
+    #[test]
+    fn place_several_skips_a_remote_pane_already_shown() {
+        let box_host = HostKey::Remote("box".to_owned());
+        let grid = split(
+            SplitDirection::Horizontal,
+            0.5,
+            pane("a", Some("s1")),
+            pane_on("b", Some("n1"), "box"),
+        );
+        let tabs = model_with(&[tab("t1", &grid)]);
+        let listed = [session("n1", None, None)];
+        let sessions: Vec<(HostKey, &[SessionSnapshot])> = vec![(box_host.clone(), &listed)];
+        let messages = place_several(&box_host, &[session("n1", None, None)], &tabs, &sessions);
+        assert!(
+            messages.is_empty(),
+            "a pane of the session's own host shows it: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn place_several_is_unchanged_on_this_pc() {
+        let tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
+        let recovered = [session("n1", None, None)];
+        let messages = place_several(
+            &HostKey::Local,
+            &recovered,
+            &tabs,
+            &on_local(&[session("s1", None, None)]),
+        );
+        assert_eq!(
+            aimed(&messages),
+            [("split", "a".to_owned(), "n1".to_owned())],
+            "beside the largest pane, as before"
+        );
+        let sent = wire(&messages[0]);
+        assert!(
+            sent["host"].is_null(),
+            "a This PC pane names no host: {sent}"
+        );
+    }
+
+    #[test]
+    fn a_remote_stand_in_pane_carries_its_host() {
+        let box_host = HostKey::Remote("box".to_owned());
+        let split_of = |pane_id: &str| {
+            PaneTarget::Split(SplitTarget {
+                pane_id: pane_id.to_owned(),
+                direction: SplitDirection::Horizontal,
+                place: SplitPlace::Second,
+            })
+        };
+        let stand_in = |grid: &GridNode| match grid {
+            GridNode::Split { second, .. } => second.as_ref().clone(),
+            other @ GridNode::Pane { .. } => panic!("expected a split, got {other:?}"),
+        };
+        let mut grid = pane("a", Some("s1"));
+        let mut shadows = ShadowPanes::default();
+        shadows.take(&mut grid, split_of("a"), "n1", &box_host);
+        assert_eq!(
+            stand_in(&grid),
+            pane_on("recovered-pane-0", Some("n1"), "box"),
+            "a remote session's stand-in pane names its host, so a later placement reads it as that host's"
+        );
+
+        let mut grid = pane("a", Some("s1"));
+        let mut shadows = ShadowPanes::default();
+        shadows.take(&mut grid, split_of("a"), "n1", &HostKey::Local);
+        assert_eq!(
+            stand_in(&grid),
+            pane("recovered-pane-0", Some("n1")),
+            "This PC's stand-in pane names none"
+        );
+    }
+
+    #[test]
+    fn a_batchs_second_remote_session_goes_beside_the_first() {
+        let box_host = HostKey::Remote("box".to_owned());
+        // Three panes: `a` is the largest, `b` empty and neither the largest
+        // nor the first.
+        let grid = split(
+            SplitDirection::Horizontal,
+            0.5,
+            pane("a", Some("s1")),
+            split(
+                SplitDirection::Vertical,
+                0.5,
+                pane("b", None),
+                pane("c", Some("s2")),
+            ),
+        );
+        let tabs = model_with(&[tab("t1", &grid)]);
+        let recovered = [
+            session("n1", Some("r1"), None),
+            session("n2", Some("r1"), None),
+        ];
+        let listed = recovered.clone();
+        let sessions: Vec<(HostKey, &[SessionSnapshot])> = vec![(box_host.clone(), &listed)];
+        let messages = place_several(&box_host, &recovered, &tabs, &sessions);
+        assert_eq!(
+            aimed(&messages),
+            [
+                ("replace", "b".to_owned(), "n1".to_owned()),
+                ("split", "b".to_owned(), "n2".to_owned()),
+            ],
+            "the first session takes the empty pane; the second goes beside that pane of its own host's repo, not into the largest unrelated one"
+        );
+    }
+
+    #[test]
     fn recovered_sessions_placed_once_each() {
         let tabs = model_with(&[tab("t1", &pane("a", Some("shown")))]);
         let new = session("new", None, None);
         let shown = session("shown", None, None);
         let sessions = [new.clone(), shown.clone()];
-        let messages = place_several(&[new.clone(), new, shown], &tabs, &on_local(&sessions));
+        let messages = place_several(
+            &HostKey::Local,
+            &[new.clone(), new, shown],
+            &tabs,
+            &on_local(&sessions),
+        );
         assert_eq!(
             aimed(&messages),
             [("split", "a".to_owned(), "new".to_owned())],
@@ -1626,6 +1773,7 @@ mod tests {
 
         let none = TabsModel::new(None);
         let messages = place_several(
+            &HostKey::Local,
             &[session("x", None, None), session("y", None, None)],
             &none,
             &[],
@@ -1659,7 +1807,12 @@ mod tests {
             session("n2", None, None),
             session("n3", None, None),
         ];
-        let messages = place_several(&recovered, &tabs, &on_local(&[session("s1", None, None)]));
+        let messages = place_several(
+            &HostKey::Local,
+            &recovered,
+            &tabs,
+            &on_local(&[session("s1", None, None)]),
+        );
         assert_eq!(
             aimed(&messages),
             [
@@ -1677,6 +1830,7 @@ mod tests {
             session("r3", Some("repo"), None),
         ];
         let messages = place_several(
+            &HostKey::Local,
             &recovered,
             &tabs,
             &on_local(&[session("s1", Some("repo"), None)]),

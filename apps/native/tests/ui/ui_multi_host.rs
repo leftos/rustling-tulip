@@ -859,9 +859,13 @@ fn asks_history(sent: &[ClientMessage]) -> bool {
         .any(|msg| matches!(msg, ClientMessage::ListSessionHistory { .. }))
 }
 
+/// A host's `RecoverSessions` requests: each one's id and the history ids it
+/// names.
+type Requests = Vec<(String, Vec<String>)>;
+
 /// The `RecoverSessions` requests among `sent`: each one's id and the
 /// history ids it names.
-fn recover_requests(sent: Vec<ClientMessage>) -> Vec<(String, Vec<String>)> {
+fn recover_requests(sent: Vec<ClientMessage>) -> Requests {
     sent.into_iter()
         .filter_map(|msg| match msg {
             ClientMessage::RecoverSessions { request_id, items } => Some((
@@ -884,6 +888,29 @@ fn recovered(request_id: &str, history_id: &str, session_id: &str) -> DaemonMess
             error: None,
         }],
     }
+}
+
+/// The messages among `sent` that put a session in a pane or a tab, each as
+/// its session id and the host it names (none for This PC).
+fn placed(sent: Vec<ClientMessage>) -> Vec<(String, Option<String>)> {
+    sent.into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ReplacePaneSession {
+                session_id, host, ..
+            } => Some((session_id.unwrap_or_default(), host)),
+            ClientMessage::SplitPane {
+                new_session_id,
+                host,
+                ..
+            } => Some((new_session_id.unwrap_or_default(), host)),
+            ClientMessage::CreateTab {
+                initial_session_id,
+                host,
+                ..
+            } => Some((initial_session_id.unwrap_or_default(), host)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// An approved device named `name`.
@@ -1035,6 +1062,250 @@ fn recover_lists_each_hosts_history_and_recovers_on_that_host(cx: &mut TestAppCo
     assert!(
         !h.root(|root, _| root.recover_open()),
         "both hosts answered with nothing failed"
+    );
+}
+
+/// Opens Recover and presses Recover, returning This PC's requests and the
+/// remote host's.
+fn recover_both(h: &mut Harness<'_>) -> (Requests, Requests) {
+    h.click_on("activity-recover");
+    h.sent();
+    h.host(&remote()).sent();
+    h.click_on("recover-submit");
+    let ours = recover_requests(h.sent());
+    let theirs = recover_requests(h.host(&remote()).sent());
+    (ours, theirs)
+}
+
+#[gpui::test]
+fn a_recovered_remote_session_is_placed_with_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, vec![session("b1").in_repo("r9").build()]);
+    h.host(&remote()).send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![history_item("b1").build()],
+    });
+    h.sent();
+    h.host(&remote()).sent();
+
+    let (ours, theirs) = recover_both(&mut h);
+    assert!(ours.is_empty(), "This PC has no row to recover: {ours:?}");
+    assert_eq!(
+        theirs
+            .iter()
+            .map(|(_, ids)| ids.clone())
+            .collect::<Vec<_>>(),
+        [["b1"]],
+        "the remote host recovers its own row"
+    );
+    h.host(&remote()).send(recovered(&theirs[0].0, "b1", "n2"));
+    h.host(&remote()).send(DaemonMessage::SessionUpdated {
+        session: session("n2").in_repo("r9").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        placed(h.sent()),
+        [("n2".to_owned(), Some(REMOTE.to_owned()))],
+        "the recovered session opens in This PC's layout, in a pane of its own host"
+    );
+    assert!(
+        placed(h.host(&remote()).sent()).is_empty(),
+        "the remote host lays out no panes itself"
+    );
+}
+
+#[gpui::test]
+fn an_already_shown_remote_pane_is_not_placed_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("a1")),
+        remote_pane("p2", "n2"),
+    );
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture {
+            sessions: vec![session("a1").build()],
+            tabs: vec![tab("t1", &grid)],
+            ..Fixture::default()
+        },
+    );
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("n2").build()],
+    });
+    host.send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![history_item("b1").build()],
+    });
+    host.answer_scrollback("n2", b"");
+    h.sent();
+    h.host(&remote()).sent();
+
+    let (_, theirs) = recover_both(&mut h);
+    h.host(&remote()).send(recovered(&theirs[0].0, "b1", "n2"));
+    h.host(&remote()).send(DaemonMessage::SessionUpdated {
+        session: session("n2").build(),
+        request_id: None,
+    });
+    assert!(
+        placed(h.sent()).is_empty(),
+        "a pane of the session's own host already shows it"
+    );
+}
+
+#[gpui::test]
+fn a_recovery_batch_waits_for_its_own_hosts_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("a1").build());
+    fixture.sessions.push(session("n9").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: Vec::new(),
+    });
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").in_repo("r9").build()],
+    });
+    host.send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![history_item("b1").build()],
+    });
+    h.sent();
+    h.host(&remote()).sent();
+
+    let (_, theirs) = recover_both(&mut h);
+    h.host(&remote()).send(recovered(&theirs[0].0, "b1", "n9"));
+    assert!(
+        placed(h.sent()).is_empty(),
+        "This PC's own `n9` is not the session its recovery answered with"
+    );
+    h.host(&remote()).send(DaemonMessage::SessionUpdated {
+        session: session("n9").in_repo("r9").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        placed(h.sent()),
+        [("n9".to_owned(), Some(REMOTE.to_owned()))],
+        "the batch places once its own host's snapshot arrives"
+    );
+}
+
+#[gpui::test]
+fn recover_names_a_remote_rows_repo_from_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r7", "C:/repos/r7")],
+    });
+    host.send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![
+            history_item("b1")
+                .folder_only("C:/src/proj", true, Some("r7"))
+                .shell_resume(true)
+                .build(),
+        ],
+    });
+    h.sent();
+    h.host(&remote()).sent();
+
+    h.click_on("activity-recover");
+    h.sent();
+    h.host(&remote()).sent();
+    let rows = h.root(|root, _| root.recover_rows());
+    let row = rows
+        .iter()
+        .find(|row| row.id == "b1")
+        .expect("the remote host's row");
+    assert_eq!(
+        row.recover_as.as_deref(),
+        Some("Claude session in r7"),
+        "the row's repo is named from the registry of the host that lists it"
+    );
+}
+
+#[gpui::test]
+fn a_remote_reconnect_clears_only_its_recoveries(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, vec![session("b1").in_repo("gone").build()]);
+    h.send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![history_item("a1").build()],
+    });
+    h.host(&remote()).send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![history_item("b1").build()],
+    });
+    h.sent();
+    h.host(&remote()).sent();
+
+    let (ours, theirs) = recover_both(&mut h);
+    assert_eq!(ours.len(), 1, "This PC recovers its row");
+    assert_eq!(theirs.len(), 1, "the remote host recovers its own");
+
+    h.host(&remote()).event(NetEvent::State(dropped(remote())));
+    assert!(
+        h.root(|root, _| root.recover_open()),
+        "the dialog stays open for the host still connected"
+    );
+    h.send(recovered(&ours[0].0, "a1", "n1"));
+    assert!(
+        !h.root(|root, _| root.recover_open()),
+        "the host that went is not waited for"
+    );
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("n1").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        placed(h.sent()),
+        [("n1".to_owned(), None)],
+        "This PC's own recovery still places, in a This PC pane"
+    );
+}
+
+#[gpui::test]
+fn this_pcs_recovery_is_unchanged_with_a_host_connected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, vec![session("b1").in_repo("gone").build()]);
+    h.send(DaemonMessage::SessionHistory {
+        request_id: None,
+        items: vec![history_item("a1").build()],
+    });
+    h.sent();
+    h.host(&remote()).sent();
+
+    let (ours, theirs) = recover_both(&mut h);
+    assert_eq!(
+        ours.iter().map(|(_, ids)| ids.clone()).collect::<Vec<_>>(),
+        [["a1"]],
+        "This PC recovers its own row"
+    );
+    assert!(
+        theirs.is_empty(),
+        "the connected host has no row to recover: {theirs:?}"
+    );
+    h.send(recovered(&ours[0].0, "a1", "n1"));
+    assert!(!h.root(|root, _| root.recover_open()), "nothing failed");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("n1").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        placed(h.sent()),
+        [("n1".to_owned(), None)],
+        "the recovered session opens in a This PC pane"
+    );
+    assert!(
+        placed(h.host(&remote()).sent()).is_empty(),
+        "the other host is sent no placement"
     );
 }
 

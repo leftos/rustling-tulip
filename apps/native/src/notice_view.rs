@@ -101,7 +101,8 @@ impl RootView {
     }
 
     /// `host`'s connection closed: its spawns in flight end, with their
-    /// spawning toasts, and its duplicates are forgotten.
+    /// spawning toasts, its duplicates and its recoveries in flight are
+    /// forgotten.
     pub(crate) fn drop_pending_of(&mut self, host: &HostKey, cx: &mut Context<Self>) {
         for request_id in self.spawns.drop_host(host) {
             tracing::info!(?host, request_id, "the host closed; its pending spawn ends");
@@ -110,6 +111,7 @@ impl RootView {
         if self.duplicates.drop_host(host) {
             tracing::info!(?host, "the host closed; its pending duplicates end");
         }
+        self.forget_recoveries_of(host);
     }
 
     /// The toasts on screen, oldest first.

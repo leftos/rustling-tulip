@@ -1188,6 +1188,12 @@ impl RecoverDialog {
         self.focus = self.focus_order().into_iter().next();
     }
 
+    /// Forgets the request `host` has in flight: its connection closed, so
+    /// no answer will come, and the rows it asked for stay as they are.
+    pub fn forget_host(&mut self, host: &HostKey) {
+        self.in_flight.retain(|flight| flight.host != *host);
+    }
+
     /// Ends the wait once a host's request has gone unanswered for
     /// [`RECOVER_TIMEOUT`] at `now`: that request counts as answered with
     /// every row it asked for failed, and a late answer to it is ignored.
