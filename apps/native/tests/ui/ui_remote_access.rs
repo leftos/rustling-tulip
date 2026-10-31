@@ -1,8 +1,7 @@
 //! Remote access page specs: the Settings tab after Worktrees, its switch
 //! and port sending `ConfigureRemote`, its lines following the daemon's
 //! `RemoteStatus`, its login-launch toggle over the autostart seam, its Tab
-//! ring, its Waiting devices rows with the tab's badge, and its absence
-//! while the target is a remote host.
+//! ring, and its Waiting devices rows with the tab's badge.
 
 use std::time::Duration;
 
@@ -25,26 +24,6 @@ const PORT: &str = "settings-remote-port-input";
 const APPLY: &str = "settings-remote-port-apply";
 const AUTOSTART: &str = "settings-remote-autostart-toggle";
 const NOT_CONNECTED: &str = "(daemon not connected)";
-
-/// A connection to `target` open on `port`, welcomed with the fake daemon's
-/// features.
-fn open_on(target: Target, port: u16) -> Connection {
-    let mut conn = Connection::for_target(target);
-    conn.on_connecting();
-    conn.on_socket_open(port);
-    conn.on_welcome(support::PROTOCOL, support::daemon_features());
-    conn
-}
-
-/// An open connection to the tailnet host [`HOST`].
-fn remote() -> Connection {
-    open_on(Target::tailnet(HOST, None), 8787)
-}
-
-/// An open connection to the local daemon, on the fake daemon's port.
-fn local() -> Connection {
-    open_on(Target::Local, 4242)
-}
 
 fn status(enabled: bool, port: u16, state: RemoteState) -> DaemonMessage {
     DaemonMessage::RemoteStatus {
@@ -472,48 +451,6 @@ fn a_new_connection_forgets_the_remote_status(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn page_is_hidden_while_the_target_is_remote(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = opened(cx, &dir);
-    h.set_connection(remote());
-    reload(&mut h);
-    h.keys("ctrl-,");
-    let has_page = |h: &mut Harness<'_>| {
-        let rows = h.root(|root, _| root.settings_tab_rows());
-        let labels = h.root(|root, _| root.settings_tab_labels());
-        (
-            rows.contains(&"Remote access"),
-            labels.contains(&"Remote access"),
-        )
-    };
-    assert_eq!(has_page(&mut h), (false, false));
-    assert!(!painted(&mut h, TAB), "the row is never drawn");
-    h.click_on("settings-tab-worktrees");
-    h.keys("down");
-    assert_eq!(
-        shown_tab(&mut h),
-        "Appearance",
-        "Down skips the absent page"
-    );
-
-    h.set_connection(local());
-    reload(&mut h);
-    h.keys("ctrl-,");
-    assert_eq!(has_page(&mut h), (true, true));
-    h.click_on(TAB);
-    assert_eq!(shown_tab(&mut h), "Remote access");
-    h.set_connection(remote());
-    reload(&mut h);
-    assert_eq!(shown_tab(&mut h), "General", "the shown page falls back");
-    h.keys("ctrl-,");
-    assert_eq!(has_page(&mut h), (false, false));
-    h.set_connection(local());
-    reload(&mut h);
-    h.keys("ctrl-,");
-    assert_eq!(has_page(&mut h), (true, true), "the row comes back");
-}
-
-#[gpui::test]
 fn tab_walks_the_remote_access_controls(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -613,16 +550,6 @@ fn autostart_toggle_calls_the_seam_and_shows_a_failure(cx: &mut TestAppContext) 
         "a failed switch leaves the launch as it was"
     );
     assert!(painted(&mut h, "settings-remote-autostart-error"));
-
-    h.set_connection(remote());
-    reload(&mut h);
-    assert_eq!(shown_tab(&mut h), "General");
-    assert!(
-        !h.root(|root, _| root.settings_tab_labels())
-            .contains(&"Remote access"),
-        "the toggle leaves with its page"
-    );
-    assert_eq!(h.autostart().sets(), [true, false]);
 }
 
 const DEVICES: &str = "settings-devices";

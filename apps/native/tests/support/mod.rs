@@ -30,7 +30,7 @@ use rustling_tulip_native::{
     RootView, SavePicker, ScPanel, Transport, bind_keys,
     remote_access::Autostart,
     spawn_net,
-    target::{TailnetHost, Target},
+    target::Target,
     ui_theme::UiTheme,
     update::{AlreadyRunning, LastResult, Ready, Updater},
 };
@@ -1498,6 +1498,19 @@ impl HostHandle<'_, '_> {
         self.harness.cx.run_until_parked();
     }
 
+    /// Delivers `events` on this host's connection back to back, then lets
+    /// the view settle, so the view reads them in one go.
+    pub fn events_together(&mut self, events: Vec<NetEvent>) {
+        self.wire(|host| {
+            for event in events {
+                host.events
+                    .unbounded_send(event)
+                    .expect("the root view listens");
+            }
+        });
+        self.harness.cx.run_until_parked();
+    }
+
     /// Delivers `msg` from this host's daemon and lets the view settle.
     pub fn send(&mut self, msg: DaemonMessage) {
         self.event(NetEvent::Message(Box::new(msg)));
@@ -1902,32 +1915,6 @@ impl<'a> Harness<'a> {
     /// messages would.
     pub fn with(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -> Self {
         let mut harness = Self::open(cx, dir);
-        harness.load(fixture);
-        harness
-    }
-
-    /// Opens the window, connects it to `target` and only then delivers
-    /// `fixture`, so a spec on a remote host never counts on the local
-    /// daemon's rows outliving a target switch. Only the local daemon
-    /// reports a handshake; a tailnet host never does.
-    pub fn on_target(
-        cx: &'a mut TestAppContext,
-        dir: &TestDir,
-        target: Target,
-        fixture: &Fixture,
-    ) -> Self {
-        let port = target.tailnet_host().map_or(4242, TailnetHost::port);
-        let local = target.is_local();
-        let mut harness = Self::open(cx, dir);
-        harness.event(NetEvent::State(connected_to(
-            target,
-            port,
-            daemon_features(),
-        )));
-        if local {
-            harness.report_handshake();
-        }
-        harness.welcome_messages();
         harness.load(fixture);
         harness
     }

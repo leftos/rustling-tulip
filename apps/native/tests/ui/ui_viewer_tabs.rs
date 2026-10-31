@@ -1,6 +1,6 @@
-//! Viewer tab specs: the pill, the body's note on a remote host, an
-//! open the daemon answers in either order, a refused open, the merge menu,
-//! undoing the close of a file that is open again, and a target switch.
+//! Viewer tab specs: the pill, an open the daemon answers in either
+//! order, a refused open, the merge menu, undoing the close of a file that
+//! is open again, and a target switch.
 
 #![expect(
     clippy::expect_used,
@@ -11,14 +11,11 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, TabEntry};
-use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{ToastKind, VIEWER_OPEN_FAILED_TITLE, ViewerLoad, ViewerOrigin};
 use serde_json::json;
-use support::{Fixture, Harness, TestDir, pane, session, tab};
+use support::{Fixture, Harness, TestDir, session};
 
-const HOST: &str = "box.tail1234.ts.net";
 const PATH: &str = r"C:\notes\a.md";
-const REMOTE_NOTE: &str = "Not available on a remote host: this opens files on this PC";
 
 /// A viewer tab of `path`, which the daemon named `name`.
 fn viewer_tab_named(id: &str, path: &str, name: &str) -> TabEntry {
@@ -131,32 +128,6 @@ fn a_viewer_tab_shows_its_file_name_on_the_pill(cx: &mut TestAppContext) {
     assert_eq!(
         shown(&mut h, "v1"),
         Some((ViewerOrigin::Link, ViewerLoad::Loaded, None, None))
-    );
-}
-
-#[gpui::test]
-fn a_restored_viewer_tab_on_a_remote_host_reads_nothing(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let fixture = Fixture {
-        tabs: vec![tab("ht1", &pane("hp1", None)), viewer_tab("v1", PATH)],
-        ..Fixture::default()
-    };
-    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOST, None), &fixture);
-    h.click_on("tab-v1");
-    assert_eq!(active(&mut h).as_deref(), Some("v1"));
-    assert_eq!(
-        shown(&mut h, "v1"),
-        Some((
-            ViewerOrigin::NotAvailable,
-            ViewerLoad::NotAvailable,
-            Some(REMOTE_NOTE),
-            None
-        ))
-    );
-    assert!(drawn(&mut h, "viewer-v1"));
-    assert!(
-        drawn(&mut h, "viewer-banner-v1"),
-        "the remote-host note shows"
     );
 }
 

@@ -774,13 +774,16 @@ fn fetch_ids(sent: Vec<ClientMessage>) -> Vec<String> {
 fn a_remote_hosts_disconnect_ends_only_its_fetches(cx: &mut TestAppContext) {
     const HOME: &str = "home.tail1234.ts.net";
     let dir = TestDir::new();
-    let fixture = Fixture {
-        repos: vec![repo("r1", "C:/r1")],
-        ..Fixture::default()
-    };
-    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOME, None), &fixture);
+    let home = Target::tailnet(HOME, None);
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
     let root = dir.path().join("remote-files");
     h.root_update(move |view, _, _| view.set_remote_files_root(root));
+    let mut host = h.host(&home);
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    host.sent();
     let mut host = h.host(&remote());
     host.connect();
     host.send(DaemonMessage::Repos {
@@ -789,7 +792,7 @@ fn a_remote_hosts_disconnect_ends_only_its_fetches(cx: &mut TestAppContext) {
     h.sent();
     h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r1", "a.txt"), cx));
     h.root_update(|view, _, cx| view.fetch_remote_file(fetch_request("r2", "b.txt"), cx));
-    let home_fetch = fetch_ids(h.sent());
+    let home_fetch = fetch_ids(h.host(&home).sent());
     let remote_fetch = fetch_ids(h.host(&remote()).sent());
     assert_eq!(
         (home_fetch.len(), remote_fetch.len()),
@@ -818,7 +821,7 @@ fn a_remote_hosts_disconnect_ends_only_its_fetches(cx: &mut TestAppContext) {
             .toasts()
             .iter()
             .any(|toast| toast.title == "Already fetching a.txt")),
-        "This PC's slot's fetch still runs"
+        "the other host's fetch still runs"
     );
 }
 

@@ -591,17 +591,18 @@ fn forget_drops_a_hosts_session_count_for_good(cx: &mut TestAppContext) {
             "host_session_counts": { HOST: 1 },
         }),
     );
-    let mut h = Harness::on_target(
-        cx,
-        &dir,
-        Target::tailnet(HOST, Some(8787)),
-        &Fixture::single(support::session("s1").build()),
-    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let saved = Target::tailnet(HOST, Some(8787));
+    let mut host = h.host(&saved);
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![support::session("s1").build()],
+    });
     open_picker(&mut h, tailnet_with(&[]));
     h.click_on(&format!("connections-forget-{HOST}"));
     assert!(saved_ui(&dir)["host_session_counts"][HOST].is_null());
 
-    h.send(DaemonMessage::SessionUpdated {
+    h.host(&saved).send(DaemonMessage::SessionUpdated {
         session: support::session("s2").build(),
         request_id: None,
     });
@@ -1198,7 +1199,7 @@ fn a_saved_tailnet_host_without_a_token_shows_not_paired(cx: &mut TestAppContext
 #[gpui::test]
 fn this_pc_row_shows_connected(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::on_target(cx, &dir, Target::Local, &Fixture::default());
+    let mut h = Harness::open(cx, &dir);
 
     open_picker(&mut h, tailnet_with(&[]));
 

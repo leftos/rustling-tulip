@@ -345,11 +345,20 @@ fn an_executable_script_is_viewed_and_the_button_still_asks_first(cx: &mut TestA
     );
 }
 
-/// A harness on the remote host [`HOST`], its downloads under `dir`; returns
-/// the download root.
+/// A harness on This PC with the remote host [`HOST`] held beside it, that
+/// host's daemon listing the repo `r1`; the downloads go under `dir`, and
+/// the download root is returned.
 fn on_remote<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBuf) {
-    let fixture = Fixture::single(session("s1").worktree("r1").build());
-    let mut h = Harness::on_target(cx, dir, Target::tailnet(HOST, None), &fixture);
+    let mut h = Harness::with(cx, dir, &Fixture::default());
+    let mut host = h.host(&Target::tailnet(HOST, None));
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![support::repo("r1", "C:/repos/repo")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").worktree("r1").build()],
+    });
+    host.sent();
     let root = dir.path().join("remote-files");
     let set = root.clone();
     h.root_update(move |view, _, _| view.set_remote_files_root(set));
@@ -372,19 +381,20 @@ fn fetch(h: &mut Harness<'_>, root: &Path, rel: &str, line: Option<u32>, bytes: 
     let id = h
         .root_update(move |view, _, cx| view.fetch_remote_file(request, cx))
         .expect("a fetch on a remote host starts");
-    h.sent();
+    let mut host = h.host(&Target::tailnet(HOST, None));
+    host.sent();
     let size = u64::try_from(bytes.len()).expect("a small file");
-    h.send(DaemonMessage::FileFetchStarted {
+    host.send(DaemonMessage::FileFetchStarted {
         id: id.clone(),
         resolved_path: r"\\?\C:\repos\repo\file".to_owned(),
         size,
     });
-    h.send(DaemonMessage::FileChunk {
+    host.send(DaemonMessage::FileChunk {
         id: id.clone(),
         seq: 0,
         data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
     });
-    h.send(DaemonMessage::FileFetchDone { id });
+    host.send(DaemonMessage::FileFetchDone { id });
     rel.split('/')
         .fold(root.join(HOST).join("repo"), |path, part| path.join(part))
 }
@@ -434,65 +444,6 @@ fn on_a_remote_host_the_button_takes_the_fetched_route_and_refuses_a_path_outsid
         "the refusal says why: {:?}",
         toasts(&mut h)
     );
-}
-
-#[gpui::test]
-fn on_a_remote_host_a_local_path_link_is_still_refused(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let fixture = Fixture::single(session("s1").worktree("r1").build());
-    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOST, None), &fixture);
-    h.answer_scrollback("s1", b"");
-    let at = h.cell_center("p1", 0, 0);
-    h.click(at, Modifiers::none());
-    h.sent();
-    h.pty("s1", br"wrote C:\wt\x\docs\notes.md");
-    ctrl_click_cell(&mut h, 9, 0);
-
-    assert_eq!(h.opened(), [], "a host path never opens on this PC");
-    let sent = h.sent();
-    assert!(
-        !sent
-            .iter()
-            .any(|msg| matches!(msg, ClientMessage::OpenViewerTab { .. })),
-        "no viewer tab: {sent:?}"
-    );
-    let fetches: Vec<String> = sent
-        .into_iter()
-        .filter_map(|msg| match msg {
-            ClientMessage::FetchFile { path, .. } => Some(path),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        fetches,
-        ["docs/notes.md".to_owned()],
-        "the host's file is fetched instead"
-    );
-}
-
-#[gpui::test]
-fn on_a_remote_host_a_local_viewer_tabs_buttons_open_nothing(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let file = write_file(dir.path(), "docs/notes.txt", b"local\n");
-    let mut fixture = Fixture::single(session("s1").worktree("r1").build());
-    fixture.tabs.push(viewer_tab("v1", &file));
-    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOST, None), &fixture);
-    h.click_on("tab-v1");
-    h.sent();
-
-    assert_eq!(
-        shown(&mut h),
-        Some((ViewerOrigin::NotAvailable, ViewerLoad::NotAvailable, None))
-    );
-    assert!(
-        drawn(&mut h, "viewer-banner-v1"),
-        "the remote-host note shows"
-    );
-    assert!(!drawn(&mut h, "viewer-line-v1-1"), "nothing is read");
-    h.click_on("viewer-open-default-v1");
-    h.click_on("viewer-reveal-v1");
-    assert_eq!(h.opened(), [], "the disabled buttons open nothing");
-    assert!(h.sent().is_empty(), "and ask nothing of the host");
 }
 
 #[gpui::test]
@@ -1120,27 +1071,6 @@ fn a_file_deleted_before_activation_shows_the_last_read_banner(cx: &mut TestAppC
     assert!(drawn(&mut h, "viewer-banner-v1"));
     assert!(drawn(&mut h, "viewer-line-v1-2"), "the last read stays");
     assert_eq!(copied_all(&mut h).as_deref(), Some("first\nsecond\n"));
-}
-
-#[gpui::test]
-fn a_not_available_tab_does_not_reload_on_activation(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let file = write_file(dir.path(), "docs/notes.txt", b"local\n");
-    let mut fixture = Fixture::single(session("s1").worktree("r1").build());
-    fixture.tabs.push(viewer_tab("v1", &file));
-    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOST, None), &fixture);
-    h.click_on("tab-v1");
-    h.click_on("tab-t1");
-    fs::write(&file, b"local\nchanged\n").expect("change the file");
-    h.click_on("tab-v1");
-
-    assert_eq!(
-        shown(&mut h),
-        Some((ViewerOrigin::NotAvailable, ViewerLoad::NotAvailable, None))
-    );
-    assert_eq!(line_count(&mut h), Some(0));
-    assert!(!drawn(&mut h, "viewer-line-v1-1"), "nothing is read");
-    assert!(drawn(&mut h, "viewer-banner-v1"));
 }
 
 #[gpui::test]

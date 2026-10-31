@@ -1,5 +1,5 @@
-//! Remote file fetch specs: on a remote host the client asks the daemon for
-//! a file, saves its chunks into the host's download folder on this PC,
+//! Remote file fetch specs: for a repo of a remote host held beside This
+//! PC the client asks that host's daemon for a file, saves its chunks into the host's download folder on this PC,
 //! opens the saved copy by the `:line` rule, and leaves no part file behind
 //! when the fetch fails or the connection goes. The local daemon fetches
 //! nothing.
@@ -17,11 +17,11 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext};
-use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
+use protocol::{ClientMessage, DaemonMessage};
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetEvent};
-use support::{Fixture, Harness, Opened, TestDir, session};
+use support::{Fixture, Harness, HostHandle, Opened, TestDir, repo, session};
 
 const HOST: &str = "box.tail1234.ts.net";
 
@@ -81,25 +81,31 @@ fn names_in(dir: &Path) -> Vec<String> {
     names
 }
 
-/// A harness on the remote host [`HOST`], its downloads under `dir`; returns
-/// the download root.
-fn on_remote<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBuf) {
-    on_remote_with(cx, dir, session("s1").worktree("r1").build())
-}
-
-/// [`on_remote`] with `s` alone in pane `p1`. Text files open externally,
-/// as these specs pin the external route; `ui_viewer` covers the viewer's.
-fn on_remote_with<'a>(
+/// The window on This PC with `target` held beside it, that host's daemon
+/// listing the repo `r1` and a session on its worktree; the downloads go
+/// under `dir`, and the download root is returned. Text files open
+/// externally, as these specs pin the external route; `ui_viewer` covers
+/// the viewer's.
+fn on_host<'a>(
     cx: &'a mut TestAppContext,
     dir: &TestDir,
-    s: SessionSnapshot,
+    target: &Target,
 ) -> (Harness<'a>, PathBuf) {
     fs::write(
         dir.path().join("native-ui.json"),
         serde_json::json!({ "general": { "open_text_externally": true } }).to_string(),
     )
     .expect("seed native-ui.json");
-    let mut h = Harness::on_target(cx, dir, remote_target(), &Fixture::single(s));
+    let mut h = Harness::with(cx, dir, &Fixture::default());
+    let mut host = h.host(target);
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/repos/repo")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").worktree("r1").build()],
+    });
+    host.sent();
     let root = dir.path().join("remote-files");
     let set = root.clone();
     h.root_update(move |view, _, _| view.set_remote_files_root(set));
@@ -107,13 +113,33 @@ fn on_remote_with<'a>(
     (h, root)
 }
 
+/// [`on_host`] on the remote host [`HOST`].
+fn on_remote<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, PathBuf) {
+    on_host(cx, dir, &remote_target())
+}
+
+/// The remote host [`HOST`], as a spec drives its fake daemon.
+fn remote<'h, 'a>(h: &'h mut Harness<'a>) -> HostHandle<'h, 'a> {
+    h.host(&remote_target())
+}
+
+/// Reports [`HOST`]'s connection lost.
+fn lose(h: &mut Harness<'_>) {
+    remote(h).event(NetEvent::State(Connection::for_target(remote_target())));
+}
+
 /// Starts fetching `request`; returns the id the `FetchFile` it sent carries.
 fn start(h: &mut Harness<'_>, request: FetchRequest) -> String {
+    start_on(h, &remote_target(), request)
+}
+
+/// [`start`] on the host `target`.
+fn start_on(h: &mut Harness<'_>, target: &Target, request: FetchRequest) -> String {
     let rel = request.rel_path.clone();
     let returned = h
         .root_update(move |view, _, cx| view.fetch_remote_file(request, cx))
         .expect("a fetch on a remote host starts");
-    let sent = h.sent();
+    let sent = h.host(target).sent();
     let [
         ClientMessage::FetchFile {
             id,
@@ -151,11 +177,17 @@ fn started(id: &str, size: u64) -> DaemonMessage {
 /// Streams `first` then `second` as the daemon would, ending with
 /// `FileFetchDone`.
 fn stream(h: &mut Harness<'_>, id: &str, first: &[u8], second: &[u8]) {
+    stream_on(h, &remote_target(), id, first, second);
+}
+
+/// [`stream`] from the host `target`.
+fn stream_on(h: &mut Harness<'_>, target: &Target, id: &str, first: &[u8], second: &[u8]) {
     let size = u64::try_from(first.len() + second.len()).expect("a small file");
-    h.send(started(id, size));
-    h.send(chunk(id, 0, first));
-    h.send(chunk(id, 1, second));
-    h.send(DaemonMessage::FileFetchDone { id: id.to_owned() });
+    let mut host = h.host(target);
+    host.send(started(id, size));
+    host.send(chunk(id, 0, first));
+    host.send(chunk(id, 1, second));
+    host.send(DaemonMessage::FileFetchDone { id: id.to_owned() });
 }
 
 #[gpui::test]
@@ -191,15 +223,10 @@ fn a_fetched_file_with_a_line_opens_in_vscode(cx: &mut TestAppContext) {
 fn a_file_fetched_from_an_ssh_host_lands_under_its_folder(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let ssh = Target::parse_ssh("Me@DevBox:2222", None).expect("an SSH host");
-    let s = session("s1").worktree("r1").build();
-    let mut h = Harness::on_target(cx, &dir, ssh, &Fixture::single(s));
-    let root = dir.path().join("remote-files");
-    let set = root.clone();
-    h.root_update(move |view, _, _| view.set_remote_files_root(set));
-    h.sent();
+    let (mut h, root) = on_host(cx, &dir, &ssh);
 
-    let id = start(&mut h, request("src/main.rs", Some(1), None));
-    stream(&mut h, &id, b"fn main() {\n", b"}\n");
+    let id = start_on(&mut h, &ssh, request("src/main.rs", Some(1), None));
+    stream_on(&mut h, &ssh, &id, b"fn main() {\n", b"}\n");
 
     let saved = root
         .join("ssh-me@devbox_2222")
@@ -235,9 +262,9 @@ fn a_daemon_error_leaves_no_part_file(cx: &mut TestAppContext) {
     let (mut h, root) = on_remote(cx, &dir);
 
     let id = start(&mut h, request("src/a.txt", None, None));
-    h.send(started(&id, 10));
-    h.send(chunk(&id, 0, b"half"));
-    h.send(DaemonMessage::FileFetchError {
+    remote(&mut h).send(started(&id, 10));
+    remote(&mut h).send(chunk(&id, 0, b"half"));
+    remote(&mut h).send(DaemonMessage::FileFetchError {
         id: id.clone(),
         error: "reading the file: access denied".to_owned(),
     });
@@ -267,8 +294,8 @@ fn a_lost_connection_deletes_the_part_file(cx: &mut TestAppContext) {
     let (mut h, root) = on_remote(cx, &dir);
 
     let id = start(&mut h, request("src/a.txt", None, None));
-    h.send(started(&id, 10));
-    h.send(chunk(&id, 0, b"half"));
+    remote(&mut h).send(started(&id, 10));
+    remote(&mut h).send(chunk(&id, 0, b"half"));
     let folder = root.join(HOST).join("repo").join("src");
     assert_eq!(
         names_in(&folder).len(),
@@ -276,7 +303,7 @@ fn a_lost_connection_deletes_the_part_file(cx: &mut TestAppContext) {
         "the part file is written while the fetch runs"
     );
 
-    h.lose_connection();
+    lose(&mut h);
 
     assert!(
         names_in(&folder).is_empty(),
@@ -303,7 +330,7 @@ fn a_file_already_fetching_is_not_fetched_twice(cx: &mut TestAppContext) {
         h.root_update(|view, _, cx| view.fetch_remote_file(request("src/a.txt", None, None), cx));
 
     assert_eq!(again, None, "the second fetch does not start");
-    assert!(h.sent().is_empty(), "nothing more is sent");
+    assert!(remote(&mut h).sent().is_empty(), "nothing more is sent");
     assert!(
         toasts(&mut h).contains(&("Already fetching a.txt".to_owned(), None)),
         "a toast says so: {:?}",
@@ -351,42 +378,16 @@ fn a_fetched_file_falls_back_when_vscode_is_missing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_link_open_under_the_download_root_is_still_refused(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let (mut h, root) = on_remote(cx, &dir);
-    let file = root.join(HOST).join("repo").join("run.bat");
-    fs::create_dir_all(file.parent().expect("a parent")).expect("make the folder");
-    fs::write(&file, "@echo off\r\n").expect("write the file");
-
-    let asked = file.clone();
-    h.root_update(move |view, window, cx| view.ask_to_run(asked, window, cx));
-    press(&mut h, "run-confirm-run");
-
-    assert_eq!(
-        h.opened(),
-        [],
-        "a path's place does not make it a fetched file"
-    );
-    assert!(
-        toasts(&mut h)
-            .iter()
-            .any(|(title, _)| title == "Couldn't open"),
-        "the remote host's refusal shows: {:?}",
-        toasts(&mut h)
-    );
-}
-
-#[gpui::test]
 fn a_disconnect_after_done_lets_the_file_save_and_open(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, root) = on_remote(cx, &dir);
 
     let id = start(&mut h, request("docs/notes.txt", None, None));
-    h.send(started(&id, 4));
-    h.send(chunk(&id, 0, b"done"));
-    h.events_together(vec![
+    remote(&mut h).send(started(&id, 4));
+    remote(&mut h).send(chunk(&id, 0, b"done"));
+    remote(&mut h).events_together(vec![
         NetEvent::Message(Box::new(DaemonMessage::FileFetchDone { id: id.clone() })),
-        NetEvent::State(Connection::new()),
+        NetEvent::State(Connection::for_target(remote_target())),
     ]);
 
     let saved = root.join(HOST).join("repo").join("docs").join("notes.txt");
@@ -404,24 +405,11 @@ fn a_disconnect_after_done_lets_the_file_save_and_open(cx: &mut TestAppContext) 
 /// The member worktree of `session("s1").worktree("r1")`.
 const WORKTREE: &str = "C:/wt/x";
 
-/// Writes `text` to `s1`'s pane and Ctrl+clicks column `col` of its first
-/// row.
-fn click_link(h: &mut Harness<'_>, text: &str, col: usize) {
-    h.pty("s1", text.as_bytes());
-    let on = h.cell_center("p1", col, 0);
-    h.click(on, Modifiers::secondary_key());
-}
-
-/// Ctrl+clicks column `col` of the first row again.
-fn click_again(h: &mut Harness<'_>, col: usize) {
-    let on = h.cell_center("p1", col, 0);
-    h.click(on, Modifiers::secondary_key());
-}
-
 /// The `FetchFile`s sent since the last look, as `(id, worktree, path)`;
 /// every one names the repo `r1`.
 fn fetches_sent(h: &mut Harness<'_>) -> Vec<(String, Option<String>, String)> {
-    h.sent()
+    remote(h)
+        .sent()
         .into_iter()
         .filter_map(|msg| match msg {
             ClientMessage::FetchFile {
@@ -438,18 +426,6 @@ fn fetches_sent(h: &mut Harness<'_>) -> Vec<(String, Option<String>, String)> {
         .collect()
 }
 
-/// The one `FetchFile` sent since the last look, checked to read `path` in
-/// [`WORKTREE`]; returns its id.
-fn one_fetch(h: &mut Harness<'_>, path: &str) -> String {
-    let sent = fetches_sent(h);
-    let [(id, worktree, sent_path)] = sent.as_slice() else {
-        panic!("one FetchFile is sent, got {sent:?}");
-    };
-    assert_eq!(worktree.as_deref(), Some(WORKTREE));
-    assert_eq!(sent_path, path);
-    id.clone()
-}
-
 fn missing(id: &str, rel: &str) -> DaemonMessage {
     DaemonMessage::FileFetchError {
         id: id.to_owned(),
@@ -460,142 +436,6 @@ fn missing(id: &str, rel: &str) -> DaemonMessage {
 /// How many toasts are titled `title`.
 fn titled(h: &mut Harness<'_>, title: &str) -> usize {
     toasts(h).iter().filter(|(t, _)| t == title).count()
-}
-
-/// A shell in `C:/wt/x/sub` on the member worktree [`WORKTREE`], so a
-/// relative link reads under `sub` first, then under the worktree.
-fn shell_in_worktree() -> SessionSnapshot {
-    session("s1").shell("C:/wt/x/sub").worktree("r1").build()
-}
-
-#[gpui::test]
-fn a_link_fetch_tries_the_next_reading_after_a_missing_file(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let (mut h, root) = on_remote_with(cx, &dir, shell_in_worktree());
-
-    click_link(&mut h, "wrote docs/notes.md", 9);
-    let first = one_fetch(&mut h, "sub/docs/notes.md");
-    h.send(missing(&first, "sub/docs/notes.md"));
-    let second = one_fetch(&mut h, "docs/notes.md");
-    assert!(
-        !toasts(&mut h)
-            .iter()
-            .any(|(title, _)| title.starts_with("Couldn't")),
-        "a missed reading is not a failure: {:?}",
-        toasts(&mut h)
-    );
-    stream(&mut h, &second, b"# Notes", b"\n");
-
-    let saved = root.join(HOST).join("r1").join("docs").join("notes.md");
-    assert_eq!(fs::read(&saved).expect("the file is saved"), b"# Notes\n");
-    assert_eq!(h.opened(), [Opened::DefaultApp(saved)]);
-    assert_eq!(
-        titled(&mut h, &format!("Fetching notes.md from {HOST}")),
-        1,
-        "one toast says the link is fetching: {:?}",
-        toasts(&mut h)
-    );
-}
-
-#[gpui::test]
-fn a_link_fetch_with_a_line_opens_in_vscode_at_the_line(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let (mut h, root) = on_remote(cx, &dir);
-
-    click_link(&mut h, r"at C:\wt\x\src\main.rs:12:3 here", 6);
-    let id = one_fetch(&mut h, "src/main.rs");
-    stream(&mut h, &id, b"fn main() {\n", b"}\n");
-
-    let saved = root.join(HOST).join("r1").join("src").join("main.rs");
-    assert_eq!(
-        h.opened(),
-        [Opened::VsCode {
-            path: saved,
-            line: 12,
-            column: 3
-        }]
-    );
-}
-
-#[gpui::test]
-fn a_link_without_a_line_opens_in_the_default_app(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let (mut h, root) = on_remote(cx, &dir);
-
-    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
-    let id = one_fetch(&mut h, "docs/notes.txt");
-    stream(&mut h, &id, b"first, ", b"second");
-
-    let saved = root.join(HOST).join("r1").join("docs").join("notes.txt");
-    assert_eq!(h.opened(), [Opened::DefaultApp(saved)]);
-}
-
-#[gpui::test]
-fn every_reading_missing_shows_one_toast(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let (mut h, root) = on_remote_with(cx, &dir, shell_in_worktree());
-
-    click_link(&mut h, "wrote docs/notes.md", 9);
-    let first = one_fetch(&mut h, "sub/docs/notes.md");
-    h.send(missing(&first, "sub/docs/notes.md"));
-    let second = one_fetch(&mut h, "docs/notes.md");
-    h.send(missing(&second, "docs/notes.md"));
-
-    assert!(fetches_sent(&mut h).is_empty(), "no reading is left to try");
-    let failures: Vec<(String, Option<String>)> = toasts(&mut h)
-        .into_iter()
-        .filter(|(title, _)| title.starts_with("Couldn't"))
-        .collect();
-    assert_eq!(
-        failures,
-        [(
-            "Couldn't fetch notes.md".to_owned(),
-            Some(format!(
-                "path \"docs/notes.md\" does not exist under {WORKTREE}"
-            ))
-        )],
-        "one toast names the last reading's error"
-    );
-    assert_eq!(titled(&mut h, &format!("Fetching notes.md from {HOST}")), 1);
-    assert!(h.opened().is_empty(), "nothing opens");
-    assert!(names_in(&root).is_empty(), "nothing is written");
-}
-
-#[gpui::test]
-fn a_path_outside_every_root_toasts_without_sending(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let (mut h, _) = on_remote(cx, &dir);
-
-    click_link(&mut h, r"see D:\elsewhere\a.rs", 6);
-
-    assert!(
-        fetches_sent(&mut h).is_empty(),
-        "nothing is asked of the host"
-    );
-    assert_eq!(
-        toasts(&mut h),
-        [(
-            "Couldn't fetch a.rs".to_owned(),
-            Some("Not inside a repo or worktree of this session.".to_owned())
-        )]
-    );
-    assert!(h.opened().is_empty(), "nothing opens");
-}
-
-#[gpui::test]
-fn a_second_click_on_a_fetching_file_says_already_fetching(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let (mut h, _) = on_remote(cx, &dir);
-
-    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
-    one_fetch(&mut h, "docs/notes.txt");
-    click_again(&mut h, 6);
-
-    assert!(
-        fetches_sent(&mut h).is_empty(),
-        "the file is not asked for twice"
-    );
-    assert_eq!(titled(&mut h, "Already fetching notes.txt"), 1);
 }
 
 /// What the fake host has at a path, for [`serve`].
@@ -623,24 +463,24 @@ fn serve(h: &mut Harness<'_>, files: &[(&str, Remote<'_>)]) -> Served {
     let mut served = Served::default();
     let mut paths: Vec<(String, String)> = Vec::new();
     loop {
-        let sent = h.sent();
+        let sent = remote(h).sent();
         if sent.is_empty() {
             return served;
         }
         for msg in sent {
             match msg {
                 ClientMessage::FetchFile { id, path, .. } => {
-                    let remote = files
+                    let held = files
                         .iter()
                         .find(|(rel, _)| *rel == path)
-                        .map_or(Remote::Missing, |(_, remote)| *remote);
-                    match remote {
+                        .map_or(Remote::Missing, |(_, held)| *held);
+                    match held {
                         Remote::File(bytes) => {
                             let (first, second) = bytes.split_at(bytes.len() / 2);
                             stream(h, &id, first, second);
                         }
-                        Remote::Missing => h.send(missing(&id, &path)),
-                        Remote::Sized(size) => h.send(started(&id, size)),
+                        Remote::Missing => remote(h).send(missing(&id, &path)),
+                        Remote::Sized(size) => remote(h).send(started(&id, size)),
                     }
                     served.asked.push(path.clone());
                     paths.push((id, path));
@@ -939,7 +779,7 @@ fn a_second_click_on_a_page_whose_media_is_fetching_says_already_fetching(cx: &m
     });
 
     assert_eq!(again, None, "the page does not fetch again");
-    assert!(h.sent().is_empty(), "nothing more is sent");
+    assert!(remote(&mut h).sent().is_empty(), "nothing more is sent");
     assert_eq!(titled(&mut h, "Already fetching page.html"), 1);
 }
 
@@ -960,13 +800,13 @@ fn a_disconnect_during_media_fetch_leaves_no_part_files_and_does_not_open_the_pa
         panic!("two media fetches are sent, got {sent:?}");
     };
     for id in [a, b] {
-        h.send(started(id, 10));
-        h.send(chunk(id, 0, b"half"));
+        remote(&mut h).send(started(id, 10));
+        remote(&mut h).send(chunk(id, 0, b"half"));
     }
     let images = landed(&root, "docs/a/img");
     assert_eq!(names_in(&images).len(), 2, "both part files are written");
 
-    h.lose_connection();
+    lose(&mut h);
 
     assert!(
         names_in(&images).is_empty(),
@@ -1004,14 +844,14 @@ fn a_page_saved_after_a_disconnect_opens_without_fetching_media(cx: &mut TestApp
 
     let id = start(&mut h, request("docs/a/page.html", None, None));
     let html = br#"<img src="x.png">"#;
-    h.send(started(
+    remote(&mut h).send(started(
         &id,
         u64::try_from(html.len()).expect("a small file"),
     ));
-    h.send(chunk(&id, 0, html));
-    h.events_together(vec![
+    remote(&mut h).send(chunk(&id, 0, html));
+    remote(&mut h).events_together(vec![
         NetEvent::Message(Box::new(DaemonMessage::FileFetchDone { id: id.clone() })),
-        NetEvent::State(Connection::new()),
+        NetEvent::State(Connection::for_target(remote_target())),
     ]);
 
     assert!(
