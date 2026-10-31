@@ -34,6 +34,11 @@ pub struct ThemeEntry {
     pub built_in: bool,
     /// Why a user theme's file does not load.
     pub error: Option<String>,
+    /// The theme it was made from; `None` for a built-in and for an entry
+    /// whose file cannot be read.
+    pub base: Option<String>,
+    /// The theme its terminal colours came from; `None` likewise.
+    pub terminal_source: Option<String>,
 }
 
 /// Why a theme could not be loaded, saved or deleted.
@@ -49,6 +54,11 @@ pub enum ThemeError {
     },
     /// A built-in can be neither saved over nor deleted.
     BuiltIn {
+        id: String,
+    },
+    /// A user theme's file is named after a built-in's id, which the built-in
+    /// keeps: the file is listed, never read.
+    ShadowsBuiltIn {
         id: String,
     },
     Io {
@@ -72,6 +82,10 @@ impl fmt::Display for ThemeError {
                 "{id:?} is not a theme id: only a-z, 0-9 and - are allowed"
             ),
             Self::BuiltIn { id } => write!(f, "{id:?} is a built-in theme and cannot be changed"),
+            Self::ShadowsBuiltIn { id } => write!(
+                f,
+                "themes/{id}.json has the id of a built-in theme; rename the file to use it"
+            ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Parse { path, source } => {
                 write!(f, "{} is not a whole theme: {source}", path.display())
@@ -86,7 +100,10 @@ impl std::error::Error for ThemeError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Parse { source, .. } | Self::Serialize(source) => Some(source),
-            Self::NotFound { .. } | Self::InvalidId { .. } | Self::BuiltIn { .. } => None,
+            Self::NotFound { .. }
+            | Self::InvalidId { .. }
+            | Self::BuiltIn { .. }
+            | Self::ShadowsBuiltIn { .. } => None,
         }
     }
 }
@@ -139,6 +156,8 @@ impl ThemeStore {
                 name: (*name).to_owned(),
                 built_in: true,
                 error: None,
+                base: None,
+                terminal_source: None,
             })
             .collect();
         let mut users = self.user_entries();
@@ -177,12 +196,11 @@ impl ThemeStore {
             let id = path.file_stem()?.to_str()?.to_owned();
             if !valid_id(&id) {
                 let error = ThemeError::InvalidId { id: id.clone() }.to_string();
-                return Some(ThemeEntry {
-                    name: id.clone(),
-                    id,
-                    built_in: false,
-                    error: Some(error),
-                });
+                return Some(broken_entry(id, error));
+            }
+            if built_in(&id).is_some() {
+                let error = ThemeError::ShadowsBuiltIn { id: id.clone() }.to_string();
+                return Some(broken_entry(id, error));
             }
             Some(match read_file(&path) {
                 Ok(file) => ThemeEntry {
@@ -190,13 +208,10 @@ impl ThemeStore {
                     name: file.name,
                     built_in: false,
                     error: None,
+                    base: file.base,
+                    terminal_source: file.terminal_source,
                 },
-                Err(err) => ThemeEntry {
-                    name: id.clone(),
-                    id,
-                    built_in: false,
-                    error: Some(err.to_string()),
-                },
+                Err(err) => broken_entry(id, err.to_string()),
             })
         })
         .collect()
@@ -303,6 +318,19 @@ impl ThemeStore {
     }
 }
 
+/// The entry for a user theme file that cannot be listed as a theme: its
+/// error, under the id its name gives it.
+fn broken_entry(id: String, error: String) -> ThemeEntry {
+    ThemeEntry {
+        name: id.clone(),
+        id,
+        built_in: false,
+        error: Some(error),
+        base: None,
+        terminal_source: None,
+    }
+}
+
 /// The theme a saved selection draws, from the user themes in
 /// `themes_dir` when there is one; see [`ThemeStore::resolve`].
 #[must_use]
@@ -319,6 +347,15 @@ pub fn resolve_selection(themes_dir: Option<&Path>, id: Option<&str>) -> UiTheme
                 DEFAULT_THEME
             }
         },
+    }
+}
+
+/// The theme `id` names: [`ThemeStore::load`]'s answer from the user themes
+/// in `themes_dir` when there is one, else a built-in's, else no theme.
+pub fn load_selection(themes_dir: Option<&Path>, id: &str) -> Result<UiTheme, ThemeError> {
+    match themes_dir {
+        Some(dir) => ThemeStore::new(dir.to_path_buf()).load(id),
+        None => built_in(id).ok_or_else(|| ThemeError::NotFound { id: id.to_owned() }),
     }
 }
 
@@ -848,5 +885,68 @@ mod tests {
         assert_eq!(file["ui"]["transparent"], "#00000000");
         assert_eq!(file["ui"]["ground"], "#08070a");
         assert_eq!(store.load(&id).expect("load"), t);
+    }
+
+    #[test]
+    fn a_file_named_after_a_built_in_lists_with_an_error() {
+        let dir = TestDir::new("shadows-built-in");
+        let store = dir.store();
+        let id = store
+            .save("Mine", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        std::fs::copy(dir.file(&id), dir.0.join("nord.json")).expect("copy");
+        let entries = store.list();
+        assert_eq!(entries[1].id, "nord");
+        assert!(entries[1].built_in);
+        assert_eq!(
+            entries[1].error, None,
+            "the built-in lists as it always did"
+        );
+        let shadow = users(&entries)
+            .iter()
+            .find(|entry| entry.id == "nord")
+            .expect("the file's row");
+        assert!(!shadow.built_in);
+        assert_eq!(shadow.name, "nord", "its name is its id, the file unread");
+        let error = shadow.error.as_deref().expect("its error");
+        assert!(error.contains("nord.json"), "{error}");
+        assert!(error.contains("built-in"), "{error}");
+        assert_eq!(
+            store.load("nord").expect("load"),
+            crate::builtin_themes::NORD,
+            "the built-in is the theme the id loads"
+        );
+    }
+
+    #[test]
+    fn a_listed_user_theme_carries_its_base_and_terminal_source() {
+        let dir = TestDir::new("provenance");
+        let store = dir.store();
+        let id = store
+            .save(
+                "Mine",
+                &UiTheme::CONTRAST,
+                Some("contrast"),
+                Some("dracula"),
+            )
+            .expect("save");
+        let entries = store.list();
+        let mine = users(&entries)
+            .iter()
+            .find(|entry| entry.id == id)
+            .expect("the saved theme");
+        assert_eq!(mine.base.as_deref(), Some("contrast"));
+        assert_eq!(mine.terminal_source.as_deref(), Some("dracula"));
+    }
+
+    #[test]
+    fn a_built_in_lists_no_base_or_terminal_source() {
+        let dir = TestDir::new("built-in-provenance");
+        let store = dir.store();
+        let entries = store.list();
+        for entry in &entries[..BUILT_INS.len()] {
+            assert_eq!(entry.base, None, "{}", entry.id);
+            assert_eq!(entry.terminal_source, None, "{}", entry.id);
+        }
     }
 }

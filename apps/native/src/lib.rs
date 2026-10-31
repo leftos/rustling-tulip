@@ -135,6 +135,7 @@ mod term_view;
 mod text_input;
 mod theme;
 pub mod theme_store;
+pub mod themes;
 pub mod toast_activation;
 pub mod ui_theme;
 mod undo;
@@ -731,6 +732,9 @@ pub struct RootView {
     /// Where the sidebar layout is saved; `None` when the config dir could
     /// not be resolved.
     ui_dir: Option<PathBuf>,
+    /// The folder the user's themes live in; `None` when the config dir
+    /// could not be resolved.
+    themes_dir: Option<PathBuf>,
     drag: Option<Drag>,
     /// The pane of the shown tab a drag-and-drop gesture is over, and the
     /// edge of it a drop there takes, while the drop would be accepted.
@@ -1304,6 +1308,7 @@ impl RootView {
             overlays: OverlayOwners::new(window.window_handle().window_id()),
             renaming: None,
             ui_dir,
+            themes_dir,
             drag: None,
             pane_drop: None,
             pane_drag: None,
@@ -2398,6 +2403,21 @@ impl RootView {
             .set_theme_base(appearance::ThemeBase::of(&theme));
         self.apply_pane_fonts(false, cx);
         cx.refresh_windows();
+    }
+
+    /// Makes the theme `id` names the one the interface draws in, and saves
+    /// the selection here so the next launch boots in it. An id that loads
+    /// nothing returns its error and changes nothing.
+    pub fn select_theme(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), theme_store::ThemeError> {
+        let theme = theme_store::load_selection(self.themes_dir.as_deref(), id)?;
+        self.sidebar.set_theme_id(Some(id.to_owned()));
+        self.set_theme(theme, cx);
+        self.save_ui();
+        Ok(())
     }
 
     /// Sets the app level's colours, below every repo's, workspace's and

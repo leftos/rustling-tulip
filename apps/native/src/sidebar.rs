@@ -1448,6 +1448,11 @@ impl SidebarModel {
         self.ui.ui_text_size = crate::fonts::clamped_ui_text_size(i64::from(offset));
     }
 
+    /// Sets the theme the interface draws in; `None` is the built-in theme.
+    pub fn set_theme_id(&mut self, id: Option<String>) {
+        self.ui.theme = id;
+    }
+
     /// Whether the diff tabs show whitespace-only changes.
     pub fn set_diff_include_whitespace(&mut self, include: bool) {
         self.ui.diff_include_whitespace = include;
