@@ -5,6 +5,7 @@ use crate::support;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
@@ -2135,6 +2136,43 @@ fn a_reconnecting_host_attaches_nothing_before_its_list(cx: &mut TestAppContext)
         h.host(&saved_remote()).scrollback_requests("b1").len(),
         before + 1,
         "its fresh list attaches both panes with one request"
+    );
+}
+
+#[gpui::test]
+fn a_scrollback_retry_waits_for_the_reconnected_hosts_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &mixed_fixture());
+    h.answer_scrollback("a1", b"");
+    let mut host = h.host(&saved_remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+    // b1's scrollback reply is lost as the connection blips.
+    let before = host.scrollback_requests("b1").len();
+    host.event(NetEvent::State(dropped(saved_remote())));
+    host.connect();
+
+    h.advance(Duration::from_secs(8));
+    h.advance(Duration::from_secs(2));
+    assert_eq!(
+        h.host(&saved_remote()).scrollback_requests("b1").len(),
+        before,
+        "the timed-out request is not retried before the host lists again"
+    );
+
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+    assert_eq!(
+        h.host(&saved_remote()).scrollback_requests("b1").len(),
+        before + 1,
+        "the fresh list asks for b1's scrollback exactly once"
     );
 }
 

@@ -799,6 +799,15 @@ impl RootView {
                     tracing::debug!(%slot_id, "a gone terminal's scrollback retry; not sent");
                     return;
                 };
+                // A remote host that said `Welcome` again and has not
+                // listed yet attaches its panes afresh with that list.
+                if host != HostKey::Local && !self.listed_since_welcome(&host) {
+                    tracing::debug!(
+                        %slot_id,
+                        "the reconnected host has not listed its sessions; retry not sent"
+                    );
+                    return;
+                }
                 let session = SessionRef::new(host, session_id.clone());
                 if let Some(request_id) =
                     self.retries
