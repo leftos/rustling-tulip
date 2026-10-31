@@ -7,6 +7,9 @@ meta.json
 remote.json
 hook-settings.json
 day-ledger.json
+# The updater's result file under the updates dir
+last-result.json
+updates/last-result.json
 # Upstream gpui source the docs cite
 elements/text.rs
 # Spike scratch files, kept outside the repo
