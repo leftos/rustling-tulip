@@ -16,12 +16,13 @@ use std::sync::Arc;
 
 use daemon_client::device_tokens::MemoryTokens;
 use gpui::TestAppContext;
-use protocol::{ClientMessage, DaemonMessage, InitLayoutKind};
+use protocol::{ClientMessage, DaemonMessage};
 use rustling_tulip_native::Connection;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use support::live::{
-    FakeSsh, LiveClient, LiveDaemon, commit_all, kill_tree, processes_under, spawn_shell,
+    FakeSsh, LiveClient, LiveDaemon, LiveHostSpec, LiveHosts, commit_all, kill_tree,
+    processes_under, spawn_shell,
 };
 use support::{Harness, Opened};
 
@@ -59,15 +60,21 @@ fn an_ssh_host_connects_and_lists_its_sessions(
     ssh_cx: &mut TestAppContext,
 ) {
     let daemon = LiveDaemon::start("ssh-list");
+    let home = LiveDaemon::start("ssh-list-home");
     let fake = use_fake_ssh(&daemon, None);
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     wait_open(&mut host, &host_client, "the loopback client to connect");
     host_client.send(spawn_shell(daemon.dir()));
-    wait_for_session(&mut host, "the host's session in its sidebar");
+    wait_for_session(
+        &mut host,
+        &HostKey::Local,
+        "the host's session in its sidebar",
+    );
 
-    let (mut h, client) = open_ssh(ssh_cx, &daemon);
+    let (mut h, hosts) = open_ssh(ssh_cx, &home, &daemon, true);
+    let client = hosts.client(&ssh_key());
     wait_open(&mut h, &client, "the client to connect over ssh");
-    wait_for_session(&mut h, "the host's session listed over ssh");
+    wait_for_session(&mut h, &ssh_key(), "the host's session listed over ssh");
 
     let runs = fake.runs();
     assert_eq!(runs.len(), 1, "one ssh run connected: {runs:?}");
@@ -82,12 +89,16 @@ fn an_ssh_host_connects_and_lists_its_sessions(
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn a_session_over_ssh_echoes_typed_input(cx: &mut TestAppContext) {
     let daemon = LiveDaemon::start("ssh-echo");
+    let home = LiveDaemon::start("ssh-echo-home");
     let _fake = use_fake_ssh(&daemon, None);
-    let (mut h, client) = open_ssh(cx, &daemon);
-    wait_open(&mut h, &client, "the client to connect over ssh");
+    let (mut h, hosts) = open_ssh(cx, &home, &daemon, true);
+    wait_open(
+        &mut h,
+        &hosts.client(&ssh_key()),
+        "the client to connect over ssh",
+    );
 
-    client.send(spawn_shell(daemon.dir()));
-    let pane = place_first_session(&mut h, &client);
+    let pane = h.place_shell_on(&ssh_key());
     h.wait_for_row(&pane, "the shell's prompt", |row| {
         row.trim_end().ends_with('>')
     });
@@ -105,18 +116,20 @@ fn a_session_over_ssh_echoes_typed_input(cx: &mut TestAppContext) {
 fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
     const NOTES: &[u8] = b"rt-e2e notes fetched over ssh\n";
     let daemon = LiveDaemon::start("ssh-fetch");
+    let home = LiveDaemon::start("ssh-fetch-home");
     let repo = daemon.git_fixture();
     std::fs::create_dir_all(repo.join("docs")).expect("create the fixture's docs dir");
     std::fs::write(repo.join("docs").join("notes.txt"), NOTES).expect("write the notes");
     commit_all(&repo, "notes");
     // Text files open externally, so the fetched file's open is recorded.
     std::fs::write(
-        daemon.dir().join("ui").join("native-ui.json"),
+        home.dir().join("ui").join("native-ui.json"),
         serde_json::json!({ "general": { "open_text_externally": true } }).to_string(),
     )
     .expect("seed native-ui.json");
     let _fake = use_fake_ssh(&daemon, None);
-    let (mut h, client) = open_ssh(cx, &daemon);
+    let (mut h, hosts) = open_ssh(cx, &home, &daemon, true);
+    let client = hosts.client(&ssh_key());
     wait_open(&mut h, &client, "the client to connect over ssh");
 
     client.send(ClientMessage::AddRepo {
@@ -133,12 +146,12 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
         .expect("the fixture dir has a name")
         .to_string_lossy()
         .into_owned();
-    let root = daemon.dir().join("remote-files");
+    let root = home.dir().join("remote-files");
     let set = root.clone();
     h.root_update(move |view, _, _| view.set_remote_files_root(set));
 
     let request = FetchRequest {
-        host: HostKey::of(&Target::parse_ssh(HOST, None).expect("devbox is a valid ssh host")),
+        host: ssh_key(),
         repo_id: repo_id.expect("the wait just found it"),
         repo_name: repo_name.clone(),
         worktree_path: None,
@@ -171,11 +184,13 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn a_killed_ssh_reconnects(cx: &mut TestAppContext) {
     let daemon = LiveDaemon::start("ssh-reconnect");
+    let home = LiveDaemon::start("ssh-reconnect-home");
     let fake = use_fake_ssh(&daemon, None);
-    let (mut h, client) = open_ssh(cx, &daemon);
+    let (mut h, hosts) = open_ssh(cx, &home, &daemon, true);
+    let client = hosts.client(&ssh_key());
     wait_open(&mut h, &client, "the client to connect over ssh");
     client.send(spawn_shell(daemon.dir()));
-    wait_for_session(&mut h, "the session in the sidebar");
+    wait_for_session(&mut h, &ssh_key(), "the session in the sidebar");
 
     let first = fake.runs();
     assert_eq!(first.len(), 1, "one ssh run so far: {first:?}");
@@ -208,11 +223,13 @@ fn a_killed_ssh_reconnects(cx: &mut TestAppContext) {
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn the_bridge_starts_a_daemon_that_is_not_running(cx: &mut TestAppContext) {
     let mut daemon = LiveDaemon::start("ssh-cold");
+    let home = LiveDaemon::start("ssh-cold-home");
     let stopped_pid = daemon.handshake().pid;
     daemon.shut_down_by_cli();
     let _fake = use_fake_ssh(&daemon, None);
 
-    let (mut h, client) = open_ssh(cx, &daemon);
+    let (mut h, hosts) = open_ssh(cx, &home, &daemon, true);
+    let client = hosts.client(&ssh_key());
     wait_open(&mut h, &client, "the client to connect over ssh");
     let started = daemon_client::read_handshake_in(&daemon.config_dir())
         .expect("the started daemon wrote its daemon.json in the isolated config dir");
@@ -228,7 +245,7 @@ fn the_bridge_starts_a_daemon_that_is_not_running(cx: &mut TestAppContext) {
     );
 
     client.send(spawn_shell(daemon.dir()));
-    wait_for_session(&mut h, "a session on the started daemon");
+    wait_for_session(&mut h, &ssh_key(), "a session on the started daemon");
 }
 
 /// A login ssh refuses fails the connection with ssh's own stderr at the
@@ -237,8 +254,10 @@ fn the_bridge_starts_a_daemon_that_is_not_running(cx: &mut TestAppContext) {
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn a_refused_ssh_login_shows_its_stderr(cx: &mut TestAppContext) {
     let daemon = LiveDaemon::start("ssh-refused");
+    let home = LiveDaemon::start("ssh-refused-home");
     let fake = use_fake_ssh(&daemon, Some((255, DENIED)));
-    let (mut h, client) = open_ssh(cx, &daemon);
+    let (mut h, hosts) = open_ssh(cx, &home, &daemon, false);
+    let client = hosts.client(&ssh_key());
 
     // The first attempt's reason may be a Hello write that failed before
     // ssh's stderr was read; an attempt that read it ends with it.
@@ -276,10 +295,32 @@ fn use_fake_ssh(daemon: &LiveDaemon, fail: Option<(i32, &str)>) -> FakeSsh {
     fake
 }
 
-/// A client of `daemon` over SSH to [`HOST`], through the fake ssh.
-fn open_ssh<'a>(cx: &'a mut TestAppContext, daemon: &LiveDaemon) -> (Harness<'a>, LiveClient) {
-    let target = Target::parse_ssh(HOST, None).expect("devbox is a valid ssh host");
-    Harness::open_live_on(cx, daemon, target, None, Arc::new(MemoryTokens::default()))
+/// The SSH target [`HOST`].
+fn ssh_target() -> Target {
+    Target::parse_ssh(HOST, None).expect("devbox is a valid ssh host")
+}
+
+/// The host key of [`ssh_target`].
+fn ssh_key() -> HostKey {
+    HostKey::of(&ssh_target())
+}
+
+/// A window whose This PC is `home` and whose one saved host is [`HOST`],
+/// reaching `daemon` through the fake ssh, expected to connect when
+/// `connects`; returned once each host that connects has its layout.
+fn open_ssh<'a>(
+    cx: &'a mut TestAppContext,
+    home: &LiveDaemon,
+    daemon: &LiveDaemon,
+    connects: bool,
+) -> (Harness<'a>, LiveHosts) {
+    let remote = LiveHostSpec {
+        target: ssh_target(),
+        config_dir: daemon.config_dir(),
+        tls: None,
+        connects,
+    };
+    Harness::open_hosts(cx, home, vec![remote], Arc::new(MemoryTokens::default()))
 }
 
 /// Waits until the view's latest state is open, bounded only by
@@ -290,24 +331,13 @@ fn wait_open(h: &mut Harness<'_>, client: &LiveClient, what: &str) {
     });
 }
 
-/// Waits for a session in the sidebar.
-fn wait_for_session(h: &mut Harness<'_>, what: &str) {
+/// Waits for a session in the sidebar under `host`.
+fn wait_for_session(h: &mut Harness<'_>, host: &HostKey, what: &str) {
     h.wait_until(what, |h| {
         h.root(|root, _| {
             root.sidebar_containers()
                 .iter()
-                .any(|c| !c.leaves.is_empty())
+                .any(|c| c.host == *host && !c.leaves.is_empty())
         })
     });
-}
-
-/// Waits for a session in the sidebar, has the daemon lay out every session
-/// for this client, and returns the pane it lands in.
-fn place_first_session(h: &mut Harness<'_>, client: &LiveClient) -> String {
-    wait_for_session(h, "a session in the sidebar");
-    client.send(ClientMessage::InitLayout {
-        kind: InitLayoutKind::AllSessions,
-    });
-    h.wait_until("a pane for the session", |h| h.first_pane().is_some());
-    h.first_pane().expect("a pane was just laid out")
 }

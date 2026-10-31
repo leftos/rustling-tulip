@@ -4,28 +4,31 @@
 //! process only. [`Harness::open_live`] connects the root view to it through
 //! the real network thread.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agent_api::{AgentPlugin, FakeCli};
 use daemon_client::device_tokens::MemoryTokens;
 use futures::StreamExt as _;
-use futures::channel::mpsc::{UnboundedSender, unbounded};
-use gpui::{Modifiers, TestAppContext};
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use gpui::{Modifiers, TestAppContext, px};
 use protocol::{AgentId, ClientMessage, DaemonHandshake, DaemonMessage};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
-use rustling_tulip_native::target::Target;
+use rustling_tulip_native::connection_picker::SavedHost;
+use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
-    Connection, NetCommand, NetDeps, NetEvent, RootDeps, RootView, bind_keys, spawn_net,
+    Connection, NetCommand, NetDeps, NetEvent, RootDeps, RootView, Transport, bind_keys, spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -976,6 +979,7 @@ fn all_pids() -> Vec<u32> {
 
 /// The client side of a live harness: the root view's own command sender and
 /// every connection state the network thread reported to the view.
+#[derive(Clone)]
 pub struct LiveClient {
     tx: UnboundedSender<NetCommand>,
     states: Arc<Mutex<Vec<Connection>>>,
@@ -1125,35 +1129,141 @@ impl<'a> Harness<'a> {
         tls: Option<Arc<rustls::ClientConfig>>,
         tokens: Arc<MemoryTokens>,
     ) -> (Self, LiveClient) {
+        let (client, view_events) = live_client(&daemon.config_dir(), target, tls, tokens.clone());
+        let first = (client.tx.clone(), view_events);
+        let harness = Self::open_live_with(cx, daemon.dir().join("ui"), tokens, |opened| {
+            super::fake_transport(first, opened)
+        });
+        (harness, client)
+    }
+
+    /// Opens the window as production does: This PC's connection goes to
+    /// `home`, and each of `remotes` is saved in `home`'s `native-ui.json`
+    /// first, so the window dials it at start through its saved hosts. Every
+    /// host runs its own real network thread; [`LiveHosts`] holds the client
+    /// side of each. `tokens` are the device tokens the view and every
+    /// connection share.
+    #[expect(
+        clippy::panic,
+        reason = "a window opening a host the spec did not list is a bug in the spec"
+    )]
+    pub fn open_hosts(
+        cx: &'a mut TestAppContext,
+        home: &LiveDaemon,
+        remotes: Vec<LiveHostSpec>,
+        tokens: Arc<MemoryTokens>,
+    ) -> (Self, LiveHosts) {
+        let ui_dir = home.dir().join("ui");
+        seed_saved_hosts(&ui_dir, &remotes);
+        let connecting: Vec<HostKey> = std::iter::once(HostKey::Local)
+            .chain(
+                remotes
+                    .iter()
+                    .filter(|spec| spec.connects)
+                    .map(|spec| HostKey::of(&spec.target)),
+            )
+            .collect();
+        let hosts = LiveHosts::default();
+        let home_config = home.config_dir();
+        let shared_hosts = hosts.clone();
+        let net_tokens = tokens.clone();
+        let mut harness = Self::open_live_with(cx, ui_dir, tokens, move |opened| {
+            let opened = Rc::clone(opened);
+            Rc::new(move |target: &Target| {
+                opened.borrow_mut().push(target.clone());
+                let key = HostKey::of(target);
+                let (config, tls) = if key == HostKey::Local {
+                    (home_config.clone(), None)
+                } else {
+                    let spec = remotes
+                        .iter()
+                        .find(|spec| HostKey::of(&spec.target) == key)
+                        .unwrap_or_else(|| {
+                            panic!("the window opened {target:?}, which the spec did not list")
+                        });
+                    (spec.config_dir.clone(), spec.tls.clone())
+                };
+                let (client, view_events) =
+                    live_client(&config, target.clone(), tls, net_tokens.clone());
+                let tx = client.tx.clone();
+                shared_hosts
+                    .0
+                    .borrow_mut()
+                    .entry(key)
+                    .or_default()
+                    .push(client);
+                (tx, view_events)
+            })
+        });
+        harness.start_empty_layouts(&hosts, &connecting);
+        (harness, hosts)
+    }
+
+    /// Waits until each of `keys`' daemons has sent this client its tab
+    /// layout or asked how to lay out a client it has not seen, presses
+    /// Start empty on the first-connect chooser for each question, and waits
+    /// for the chooser to close, so a spec's clicks reach the window.
+    fn start_empty_layouts(&mut self, hosts: &LiveHosts, keys: &[HostKey]) {
+        let clients: Vec<LiveClient> = keys.iter().map(|key| hosts.client(key)).collect();
+        let has_tabs = |client: &LiveClient| {
+            client
+                .find_message(|msg| matches!(msg, DaemonMessage::Tabs { .. }).then_some(()))
+                .is_some()
+        };
+        let asked = |client: &LiveClient| {
+            client
+                .find_message(|msg| {
+                    matches!(msg, DaemonMessage::LayoutInitRequired { .. }).then_some(())
+                })
+                .is_some()
+        };
+        self.wait_until(
+            &format!("a tab layout or a first-connect question from each of {keys:?}"),
+            |_| {
+                clients
+                    .iter()
+                    .all(|client| has_tabs(client) || asked(client))
+            },
+        );
+        let asking: Vec<&LiveClient> = clients.iter().filter(|client| !has_tabs(client)).collect();
+        if asking.is_empty() {
+            return;
+        }
+        // The chooser asks one host at a time, the next host's question
+        // showing as the last one's closes.
+        for _ in &asking {
+            self.wait_until("the first-connect layout chooser to show", |h| {
+                h.root(|root, _| root.layout_chooser_open())
+            });
+            self.click_on("layout-choose-empty");
+        }
+        self.wait_until("each empty layout and the chooser closed", |h| {
+            asking.iter().all(|client| has_tabs(client))
+                && !h.root(|root, _| root.layout_chooser_open())
+        });
+    }
+
+    /// Opens the window over `open_host`, which `make_transport` builds
+    /// around the list of every target the window opens, with its UI state
+    /// in `ui_dir`.
+    fn open_live_with(
+        cx: &'a mut TestAppContext,
+        ui_dir: PathBuf,
+        tokens: Arc<MemoryTokens>,
+        make_transport: impl FnOnce(&Rc<RefCell<Vec<Target>>>) -> Transport,
+    ) -> Self {
         cx.update(bind_keys);
-        let (tx, net_commands) = unbounded();
-        let (net_events, from_net) = unbounded();
-        let (to_view, view_events) = unbounded();
-        spawn_net(
-            live_deps(&daemon.config_dir(), tls, tokens.clone()),
-            target,
-            net_commands,
-            net_events,
-        );
-        let states = Arc::new(Mutex::new(Vec::new()));
-        let messages = Arc::new(Mutex::new(Vec::new()));
-        tee_states(
-            from_net,
-            to_view,
-            Arc::clone(&states),
-            Arc::clone(&messages),
-        );
         let clock = TestClock::new();
-        let quits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let quits = Rc::new(std::cell::Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
-        let picker = std::rc::Rc::new(PickRecorder::default());
+        let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(super::AutostartRecorder::default());
         let updater = Arc::new(super::UpdaterRecorder::default());
-        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let opened = Rc::new(RefCell::new(Vec::new()));
         let deps = RootDeps {
-            open_host: super::fake_transport((tx.clone(), view_events), &opened),
-            ui_dir: Some(daemon.dir().join("ui")),
+            open_host: make_transport(&opened),
+            ui_dir: Some(ui_dir),
             paths: Err("live specs have no log paths".to_owned()),
             wanted: None,
             now: clock.clock(),
@@ -1169,7 +1279,7 @@ impl<'a> Harness<'a> {
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
-        let harness = Self {
+        Self {
             cx,
             root,
             events: unbounded().0,
@@ -1186,17 +1296,131 @@ impl<'a> Harness<'a> {
             tokens,
             updater,
             extra_hosts: super::ExtraHosts::default(),
-        };
-        (
-            harness,
-            LiveClient {
-                tx,
-                states,
-                messages,
-            },
-        )
+        }
     }
 
+    /// Clicks `+ Shell` on `host`'s header in the sidebar and returns the
+    /// pane its shell lands in, once that pane shows a session listed under
+    /// `host`'s group.
+    pub fn place_shell_on(&mut self, host: &HostKey) -> String {
+        let button = format!("host-shell-{}", host.wire().unwrap_or("local"));
+        self.wait_until(&format!("the {button} button"), |h| {
+            h.bounds(&button).size.height > px(0.0)
+        });
+        self.click_on(&button);
+        let mut placed = None;
+        self.wait_until(&format!("a pane holding the shell {button} spawned"), |h| {
+            placed = h.first_pane().and_then(|pane| {
+                let session = h.root(|root, _| root.pane_session(&pane))?;
+                let listed = h.root(|root, _| {
+                    root.sidebar_containers().iter().any(|container| {
+                        container.host == *host
+                            && container.leaves.iter().any(|leaf| leaf.id == session)
+                    })
+                });
+                listed.then_some(pane)
+            });
+            placed.is_some()
+        });
+        placed.expect("the wait just found it")
+    }
+}
+
+/// A remote host a window opened by [`Harness::open_hosts`] connects to:
+/// its target, the config dir of the daemon it reaches (where the client
+/// keeps its identity), the roots a tailnet dial trusts (`None` for the
+/// OS store) and whether the spec expects the connection to open, which
+/// [`Harness::open_hosts`] then waits for.
+pub struct LiveHostSpec {
+    pub target: Target,
+    pub config_dir: PathBuf,
+    pub tls: Option<Arc<rustls::ClientConfig>>,
+    pub connects: bool,
+}
+
+/// The client side of every connection a window from
+/// [`Harness::open_hosts`] opened, by host; a host opened again keeps each
+/// connection, newest last.
+#[derive(Clone, Default)]
+pub struct LiveHosts(Rc<RefCell<HashMap<HostKey, Vec<LiveClient>>>>);
+
+impl LiveHosts {
+    /// The newest connection the window opened to `host`.
+    #[expect(
+        clippy::panic,
+        reason = "a spec asking for a host the window never opened is a bug in the spec"
+    )]
+    pub fn client(&self, host: &HostKey) -> LiveClient {
+        self.0
+            .borrow()
+            .get(host)
+            .and_then(|clients| clients.last())
+            .cloned()
+            .unwrap_or_else(|| panic!("the window opened no connection to {host:?}"))
+    }
+}
+
+/// Writes `remotes` as the saved hosts of the `native-ui.json` in `ui_dir`,
+/// keeping every other key a spec seeded there first.
+fn seed_saved_hosts(ui_dir: &Path, remotes: &[LiveHostSpec]) {
+    let path = ui_dir.join("native-ui.json");
+    let mut state = match std::fs::read_to_string(&path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => json!({}),
+        read => {
+            let text = read
+                .map_err(|err| format!("{}: {err}", path.display()))
+                .expect("reading the seeded native-ui.json");
+            serde_json::from_str(&text).expect("the seeded native-ui.json is JSON")
+        }
+    };
+    let saved: Vec<Value> = remotes
+        .iter()
+        .map(|spec| {
+            let host = SavedHost::from_target(&spec.target).expect("a remote host is not This PC");
+            serde_json::to_value(host).expect("a saved host serializes")
+        })
+        .collect();
+    state["saved_hosts"] = Value::Array(saved);
+    std::fs::write(&path, state.to_string()).expect("write native-ui.json's saved hosts");
+}
+
+/// A real network thread to the daemon under `config` on `target`, its
+/// events recorded into the returned client on the way to the returned
+/// receiver, which the view reads.
+fn live_client(
+    config: &Path,
+    target: Target,
+    tls: Option<Arc<rustls::ClientConfig>>,
+    tokens: Arc<MemoryTokens>,
+) -> (LiveClient, UnboundedReceiver<NetEvent>) {
+    let (tx, net_commands) = unbounded();
+    let (net_events, from_net) = unbounded();
+    let (to_view, view_events) = unbounded();
+    spawn_net(
+        live_deps(config, tls, tokens),
+        target,
+        net_commands,
+        net_events,
+    );
+    let states = Arc::new(Mutex::new(Vec::new()));
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    tee_states(
+        from_net,
+        to_view,
+        Arc::clone(&states),
+        Arc::clone(&messages),
+    );
+    (
+        LiveClient {
+            tx,
+            states,
+            messages,
+        },
+        view_events,
+    )
+}
+
+impl Harness<'_> {
     /// Lets the view settle and asks `done` until it holds: a wait on the
     /// observation, polled with a real sleep because the daemon and the
     /// network thread run on real clocks the test executor never advances.
