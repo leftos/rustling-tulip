@@ -12,6 +12,7 @@ use crate::support;
 use gpui::{ExternalPaths, FileDropEvent, Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, PaneDropEdge, SplitDirection};
 use rustling_tulip_native::RootView;
+use rustling_tulip_native::target::Target;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 /// Tab `t1`: `p1` showing `s1` beside `p2` showing `s2`.
@@ -537,6 +538,58 @@ fn a_drop_in_another_tab_than_the_source_is_allowed(cx: &mut TestAppContext) {
                 && dst_pane_id == "p4"
         ),
         "sent {sent:?}"
+    );
+    assert_eq!(undo_messages(&mut h), ["Moved pane"]);
+}
+
+#[gpui::test]
+fn a_remote_pane_moves_between_tabs_keeping_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::mixed_tabs(cx, &dir);
+    h.answer_scrollback("a1", b"");
+    let at_a1 = h.cell_center("p1", 0, 0);
+    h.click(at_a1, Modifiers::none());
+    h.sent();
+    let remote = Target::tailnet(support::REMOTE, None);
+    h.host(&remote).sent();
+
+    let from = header_point(&mut h, "p2");
+    h.start_drag(from);
+    h.keys("ctrl-tab");
+    let to = at(&mut h, "p3", 0.8, 0.5);
+    h.drag_to(to);
+    assert_eq!(
+        overlay(&mut h),
+        Some(("p3".to_owned(), PaneDropEdge::Right)),
+        "t2's remote pane takes the remote pane"
+    );
+    h.release(to);
+
+    let sent = moves(&mut h);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::MovePane {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                edge: PaneDropEdge::Right,
+                request_id: Some(_),
+                ..
+            }] if src_tab_id == "t1"
+                && src_pane_id == "p2"
+                && dst_tab_id == "t2"
+                && dst_pane_id == "p3"
+        ),
+        "This PC moves the pane, whose host rides along in the layout: sent {sent:?}"
+    );
+    assert!(
+        !h.host(&remote)
+            .sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::MovePane { .. })),
+        "the remote host is sent no layout"
     );
     assert_eq!(undo_messages(&mut h), ["Moved pane"]);
 }

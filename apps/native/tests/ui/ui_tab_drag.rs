@@ -10,9 +10,10 @@ use protocol::{
     ClientMessage, DaemonMessage, PaneDropEdge, SplitDirection, TabEntry, VscodeWorkspaceFolder,
     VscodeWorkspaceSuggestion,
 };
+use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{RootView, Side, ToastKind};
 use serde_json::json;
-use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
+use support::{Fixture, Harness, REMOTE, TestDir, pane, repo, session, split, tab};
 
 /// Tabs `t1`, `t2` and `t3`, each one empty pane, in that order.
 fn three_tabs() -> Fixture {
@@ -823,4 +824,57 @@ fn modal_release_clears_the_drop_overlay(cx: &mut TestAppContext) {
     );
     h.keys("escape");
     h.release(from);
+}
+
+#[gpui::test]
+fn a_remote_leaf_dropped_on_a_pill_lands_in_that_tab_with_its_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("a1"))),
+            tab("t2", &pane("p2", None)),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let remote = Target::tailnet(REMOTE, None);
+    let mut host = h.host(&remote);
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").in_repo("r2").build()],
+    });
+    host.sent();
+    h.sent();
+
+    let leaf = h.bounds("leaf-b1");
+    assert!(leaf.size.height > Pixels::ZERO, "b1's leaf is on screen");
+    let from = point(leaf.origin.x + leaf.size.width * 0.3, leaf.center().y);
+    let to = on_pill(&mut h, "t2", 0.5);
+    h.start_drag(from);
+    assert!(h.dragging(), "b1's leaf drags");
+    h.drag_to(to);
+    h.release(to);
+
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::ReplacePaneSession {
+                tab_id,
+                pane_id,
+                session_id: Some(session),
+                host: Some(host),
+            }] if tab_id == "t2" && pane_id == "p2" && session == "b1" && host == REMOTE
+        ),
+        "t2's empty pane takes the remote session with its host: sent {sent:?}"
+    );
+    assert!(
+        h.host(&remote).sent().is_empty(),
+        "the layout is This PC's alone"
+    );
+    assert_eq!(active(&mut h).as_deref(), Some("t1"), "the shown tab stays");
 }

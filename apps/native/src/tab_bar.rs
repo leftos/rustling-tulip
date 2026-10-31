@@ -897,11 +897,14 @@ impl RootView {
                     self.reorder_tabs_by_drop(ordered_ids);
                 }
             }
-            DragPayload::Leaf { session_id, .. } => {
+            DragPayload::Leaf {
+                session_id, host, ..
+            } => {
+                let session = crate::tabs::SessionRef::new(host.clone(), session_id.clone());
                 let drop = drag::leaf_pill_drop(
                     &self.tabs,
-                    self.sidebar.local_sessions(),
-                    session_id,
+                    &self.sidebar.sessions_by_host(),
+                    &session,
                     tab_id,
                     Some(crate::new_request_id()),
                 );

@@ -409,8 +409,8 @@ fn dragging_containers_sends_each_host_only_its_own_order(cx: &mut TestAppContex
     );
     assert_eq!(
         container_orders(h.host(&remote()).sent()),
-        [vec![repo_ref("r3"), repo_ref("r4")]],
-        "the remote host gets only its own, in their order"
+        Vec::<Vec<ContainerRef>>::new(),
+        "the remote host's order did not change: it is sent nothing"
     );
 }
 

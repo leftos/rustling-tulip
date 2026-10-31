@@ -2065,16 +2065,20 @@ impl RootView {
         if self.is_pane_popped(&pane_id) {
             return None;
         }
-        if let DragPayload::Leaf { session_id, .. } = payload {
+        if let DragPayload::Leaf {
+            session_id, host, ..
+        } = payload
+        {
             let target = drag::LeafTarget {
                 tab_id: &tab.id,
                 pane_id: &pane_id,
                 edge,
             };
+            let session = SessionRef::new(host.clone(), session_id.clone());
             let (edge, drop) = drag::leaf_drop(
                 &self.tabs,
-                self.sidebar.local_sessions(),
-                session_id,
+                &self.sidebar.sessions_by_host(),
+                &session,
                 &target,
                 request_id,
             )?;
