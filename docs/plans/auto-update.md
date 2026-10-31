@@ -40,15 +40,15 @@ Velopack was considered and not used. It would replace the NSIS installer and ad
    - The client takes the named mutex `Local\rustling-tulip-update`. Another client that holds it means an update is already running, so it refuses with a toast.
    - The client starts the installer detached, outside its job, as `setup.exe /S /UPDATE /RELAUNCH`, then quits by the Keep-sessions-running path, which leaves the daemon and tracers up.
    - No other path starts the installer.
-7. **Installer, in update mode (`/UPDATE`)** (I4 to I8, I11, W3, W4, W8, W11):
-   - It takes the same mutex `Local\rustling-tulip-update`, and also takes it on a normal install, so two installers never run at once (W7).
-   - It waits up to 30 s for `rustling-tulip-native.exe` processes running from `$INSTDIR` to exit.
-   - It stops the daemon first, before writing any file, with `rustling-tulipd shutdown`, and requires success. On failure it writes no file, records the failure, and relaunches the old client.
-   - If any process is still running an exe from `$INSTDIR` (a `bridge` for an SSH client, `--detach`, `pair`, `screen`), it writes no file, records `update: <exe> is still running from the install folder (pid <n>); nothing was changed`, and relaunches the old client.
-   - It copies each exe as `<name>.new`, then renames the old one to `<name>.old` and the new one into place, client last. On any failure it renames the `.old` files back.
-   - It leaves the Run value, the desktop shortcut and the install folder as they are (I11). Only a normal install writes them.
-   - It writes `updates\last-result.json` (`{from, to, ok, message}`), then starts the client once with `--updated-from <old version>` (`/RELAUNCH`).
-   - A normal, non-update install also stops the daemon before writing, and stops with a message when the client is running rather than prompting Abort/Retry/Ignore.
+7. **Applying the files: `rustling-tulipd apply-update`** (I4 to I8, I11, W3, W4, W7, W8, W11). Every install, update or not, extracts its files into `$INSTDIR\.staging\` and then runs the staged daemon's `apply-update --from <staging> --to $INSTDIR [--old-version <v>] [--update] [--relaunch]` (`crates/daemon/src/cli_apply_update.rs`). The steps live in Rust so they can be tested without running an installer. NSIS passes `--old-version` from the uninstall key's `DisplayVersion` and runs no exe from the install folder to learn it. `apply-update`:
+   - Takes the mutex `Local\rustling-tulip-update`, exiting 4 if it is held (W7).
+   - Waits up to 30 s for `rustling-tulip-native.exe` processes running from `$INSTDIR` to exit.
+   - Stops the daemon first, before writing any file, and requires success (exit 2 on failure, nothing changed).
+   - Exits 3 with `<exe> is still running from the install folder (pid <n>); nothing was changed` when any process still runs an exe from `$INSTDIR` (a `bridge` for an SSH client, `--detach`, `pair`, `screen`).
+   - Copies each file as `<name>.new`, then renames the old one to `<name>.old` and the new one into place, client last; on any failure it puts every file back (exit 5).
+   - Writes `updates\last-result.json` (`{from, message, ok, to}`) in every outcome, then with `--relaunch` starts the client once with `--updated-from <old version>`, on success and on failure.
+
+   NSIS removes `.staging` afterwards. Under `/UPDATE` it writes only the uninstall key's `DisplayVersion`, after exit 0, leaving the Run value, the desktop shortcut and PATH as they are (I11). A normal install writes them as before, and on a non-zero exit shows `apply-update`'s message and aborts.
 8. **After the restart.**
    - The client reads `last-result.json` once and deletes it. Success shows the toast `Updated to {version}`. Failure shows `Update to {version} didn't install` with the recorded message as its detail, and the ready update stays offered.
    - `.old` files are deleted at the next launch.
@@ -63,9 +63,9 @@ Velopack was considered and not used. It would replace the NSIS installer and ad
 
 ## Steps
 
-- [ ] U.1 Release side: `rt.ps1 installer` writes the `.sha256`; `docs/release.md` steps 5 and 8; `daemon.json` `build_version`; supervisor retire-if-older and never-retire-newer (decision 9), with tests.
-- [ ] U.2 Updater core, a plain-Rust module in the client: feed parse, semver pick, download into a fresh folder, hash with a held handle, `.sha256` parse, cleanup. Tests against a local HTTP server on the real clock, plus unit tests for parse and pick.
-- [ ] U.3 Installer update mode (decision 7): the mutex, the wait, stop-first, the in-use check, `.new`/`.old` renames with rollback, `last-result.json`, relaunch, the I11 preservation, and the normal-install fixes. Plus `tools/installer/README.md` hand tests.
+- [x] U.1 Release side: `rt.ps1 installer` writes the `.sha256`; `docs/release.md` steps 5 and 8; `daemon.json` `build_version`; supervisor retire-if-older and never-retire-newer (decision 9), with tests.
+- [x] U.2 Updater core, a plain-Rust module in the client: feed parse, semver pick, download into a fresh folder, hash with a held handle, `.sha256` parse, cleanup. Tests against a local HTTP server on the real clock, plus unit tests for parse and pick.
+- [x] U.3 `apply-update` and the staging installer (decision 7), with `rustling-tulipd --version`.
 - [ ] U.4 Client UI and lifecycle: timer, footer notice, Restart to update (mutex, detached start, keep-sessions quit), Settings toggle, Check now and version line, the after-restart toast. Specs in `tests/ui/ui_update.rs`, with the updater injected.
 - [ ] U.5 Live proof: a `tools/e2e/fake-releases` feed shim and a stand-in installer in an isolated `.tmp` dir, an e2e spec for check, download, verify, restart and relaunch, then docs (CLAUDE.md's deferred entry and env table, `docs/architecture.md`, `docs/native-client.md`).
 

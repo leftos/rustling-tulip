@@ -11,6 +11,7 @@ mod binary_cache;
 mod branch_fate;
 mod branch_names;
 mod child_env;
+mod cli_apply_update;
 mod cli_bridge;
 mod cli_pair;
 mod cli_shutdown;
@@ -81,6 +82,9 @@ const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
+    if let Some(code) = run_update_subcommand().await? {
+        return Ok(code);
+    }
     // `rustling-tulipd shutdown` retires a running daemon and exits, before
     // `Dirs::ensure` because that creates the config and session folders, which
     // an uninstall must not leave behind. Like `pair` it takes no instance
@@ -233,6 +237,29 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     info!(?result, "rustling-tulipd main returning");
     result?;
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Run `--version` or `apply-update` when the arguments ask for one and return
+/// its exit code; `None` for every other launch.
+///
+/// `apply-update` puts a staged release in place for the installer. Like
+/// `shutdown` it comes before `Dirs::ensure` and takes no instance lock, no log
+/// and no tracing. It runs on this thread (the runtime's `block_on` future),
+/// which matters because the update mutex it owns must be released by the
+/// thread that took it.
+async fn run_update_subcommand() -> anyhow::Result<Option<std::process::ExitCode>> {
+    if cli_apply_update::version_requested(std::env::args_os().skip(1)) {
+        cli_pair::attach_parent_console();
+        cli_apply_update::write_version(&mut std::io::stdout().lock())?;
+        return Ok(Some(std::process::ExitCode::SUCCESS));
+    }
+    if cli_apply_update::requested(std::env::args_os().skip(1)) {
+        cli_pair::attach_parent_console();
+        let args = std::env::args_os().skip(2);
+        let code = cli_apply_update::run_from_args(args, &mut std::io::stdout().lock()).await;
+        return Ok(Some(std::process::ExitCode::from(code)));
+    }
+    Ok(None)
 }
 
 /// Refresh the activity log's alive stamp and prune it every
