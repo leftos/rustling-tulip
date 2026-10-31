@@ -84,7 +84,7 @@ The goal is each release as soon as possible, through Release 2; this overrides 
 - Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> <base>` from the main checkout, then `branch.<slug>.base` and `branch.<slug>.landOn` recorded as the user-level `nextup` §3 **Base and target** says (`main` and `main` by default).
 - Ceiling: **three** implementers; items inside one wave share files, so parallel items come from different waves or from a wave whose subplan says its steps separate.
 - Depends on, where file lists hide it: the dependencies an issue or its design file names (P4.4b → P4.12c, P4.12b → P4.12c, P4.11 → P4.15b, Wave 2's hook status → Wave 5 and Wave 9); a protocol message one item adds and another item's view consumes.
-- Context: read the status bar's figure at every landing (`<scratchpad>/statusline.json`); past 400K tokens the loop stops refilling, per the user-level `nextup`.
+- Context: read the figure at every landing with `bash ~/.claude/tools/context-usage/context-usage.sh`; refill stops at the user-level `nextup`'s context line.
 
 ## Docs map
 

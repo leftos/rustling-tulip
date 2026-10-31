@@ -38,3 +38,5 @@ GitPanel.tsx
 # Summarizer runtime files under the config dir and session dirs
 summary.json
 summarizer-spend.json
+# User theme files under the config dir
+themes/*.json
