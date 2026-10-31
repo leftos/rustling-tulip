@@ -15,6 +15,7 @@ use crate::shell_dialog::{
 };
 use crate::spawn_view::checkbox_row;
 use crate::spawns::OpenIn;
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{Pick, RootView, tooltip};
@@ -101,6 +102,23 @@ impl RootView {
         let cwd = self.quick_shell_default().map(str::to_owned);
         let open_in = self.open_in_active_tab();
         self.spawn(standalone_shell_request(cwd), open_in, cx);
+    }
+
+    /// `+ Shell` on `host`'s sidebar header: This PC's is [`Self::quick_shell`];
+    /// a remote host's sends a plain shell with no folder, so its daemon picks
+    /// its own default, straight to that host.
+    pub(crate) fn quick_shell_on(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        if *host == HostKey::Local {
+            self.quick_shell(cx);
+            return;
+        }
+        let open_in = self.open_in_active_tab();
+        let request_id = crate::new_request_id();
+        let msg = self
+            .spawns
+            .start(standalone_shell_request(None), request_id, open_in);
+        self.send_to(host, msg);
+        cx.notify();
     }
 
     /// "Shell…": opens the dialog, unless the connection is down or another

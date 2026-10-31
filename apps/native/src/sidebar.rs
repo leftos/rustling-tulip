@@ -22,7 +22,7 @@ use crate::launch_last;
 use crate::popouts::{PopoutKey, SavedPopout};
 use crate::source_control::{Part, ScKey, ScUiState};
 use crate::tabs::collect_panes;
-use crate::target::HostKey;
+use crate::target::{HostKey, Target};
 use crate::window_state::WindowState;
 
 /// The sidebar layout file, in the client's config dir.
@@ -1113,6 +1113,43 @@ pub fn host_container_key(host: &HostKey, key: &str) -> String {
     }
 }
 
+/// The key a host's header folds by in the collapsed set: `host:local` for
+/// This PC, `host:<host key>` for a remote host.
+#[must_use]
+pub fn host_fold_key(host: &HostKey) -> String {
+    format!("host:{}", host.wire().unwrap_or("local"))
+}
+
+/// The name a host's header shows: "This PC", else the remote host's short
+/// name ([`Target::short_name`]), else its key when the key names no host.
+#[must_use]
+pub fn host_label(host: &HostKey) -> String {
+    let HostKey::Remote(key) = host else {
+        return "This PC".to_owned();
+    };
+    let target = match key.strip_prefix("ssh:") {
+        Some(ssh) => Target::parse_ssh(ssh, None).ok(),
+        None => Target::parse_tailnet(key, None).ok(),
+    };
+    target
+        .as_ref()
+        .and_then(Target::short_name)
+        .unwrap_or(key)
+        .to_owned()
+}
+
+/// One host's part of the repos view while host groups show: its header's
+/// host, name and fold, and its containers in the order its rows show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostGroup {
+    pub host: HostKey,
+    pub label: String,
+    /// Whether the header is folded, hiding every row under it; the
+    /// containers keep their own folds.
+    pub collapsed: bool,
+    pub containers: Vec<Container>,
+}
+
 /// Every daemon's registry as the sidebar sees it, one slice per host, plus
 /// the window's own layout.
 #[derive(Debug, Default)]
@@ -1370,19 +1407,23 @@ impl SidebarModel {
     /// order, a remote host's keys carrying its host key
     /// ([`host_container_key`]).
     pub fn containers(&self) -> Vec<Container> {
-        let collapsed = &self.ui.collapsed_containers;
         self.slices()
-            .flat_map(|(host, slice)| {
-                let built = build_containers(&slice.tree_inputs(collapsed));
-                built.into_iter().map(move |mut container| {
-                    if *host != HostKey::Local {
-                        container.key = host_container_key(host, &container.key);
-                        container.collapsed = collapsed.contains(&container.key);
-                    }
-                    container
-                })
-            })
+            .flat_map(|(host, slice)| self.host_containers(host, slice))
             .collect()
+    }
+
+    /// `host`'s containers from its `slice`, a remote host's keys carrying
+    /// its host key.
+    fn host_containers(&self, host: &HostKey, slice: &HostSlice) -> Vec<Container> {
+        let collapsed = &self.ui.collapsed_containers;
+        let mut built = build_containers(&slice.tree_inputs(collapsed));
+        if *host != HostKey::Local {
+            for container in &mut built {
+                container.key = host_container_key(host, &container.key);
+                container.collapsed = collapsed.contains(&container.key);
+            }
+        }
+        built
     }
 
     /// The keys of every host's repo and workspace containers a live
@@ -1404,7 +1445,14 @@ impl SidebarModel {
     /// shows.
     pub fn display_containers(&self) -> Vec<Container> {
         let active = self.active_keys();
-        let sorted = sort_containers(self.containers(), self.repo_sort(), &active);
+        self.arranged(self.containers(), &active)
+    }
+
+    /// `containers` sorted by the chosen [`RepoSort`] and cut down by the
+    /// chosen [`RepoFilter`], `active` being the keys a live session counts
+    /// for.
+    fn arranged(&self, containers: Vec<Container>, active: &HashSet<String>) -> Vec<Container> {
+        let sorted = sort_containers(containers, self.repo_sort(), active);
         if self.repo_filter() == RepoFilter::All {
             return sorted;
         }
@@ -1538,6 +1586,68 @@ impl SidebarModel {
         if !collapsed.remove(key) {
             collapsed.insert(key.to_owned());
         }
+    }
+
+    /// Folds or unfolds `host`'s header ([`host_fold_key`]); the folds of
+    /// the containers under it stay as they are.
+    pub fn toggle_host(&mut self, host: &HostKey) {
+        self.toggle_container(&host_fold_key(host));
+    }
+
+    /// The repos view's rows grouped under a header per host, or none while
+    /// This PC is the only host configured (no saved host, switched on or
+    /// off). Hosts go This PC first, then the saved hosts in saved order,
+    /// then any other host that sent a list, by host key; each group's
+    /// containers are sorted and filtered as [`Self::display_containers`]
+    /// does, within that host only. A host keeps its group when every row
+    /// is filtered out, or when it never sent a list.
+    #[must_use]
+    pub fn host_groups(&self) -> Vec<HostGroup> {
+        if self.ui.saved_hosts.is_empty() {
+            return Vec::new();
+        }
+        let active = self.active_keys();
+        self.grouped_hosts()
+            .into_iter()
+            .map(|host| {
+                let containers = match self.slice(&host) {
+                    Some(slice) => self.arranged(self.host_containers(&host, slice), &active),
+                    None => Vec::new(),
+                };
+                HostGroup {
+                    label: host_label(&host),
+                    collapsed: self.ui.collapsed_containers.contains(&host_fold_key(&host)),
+                    host,
+                    containers,
+                }
+            })
+            .collect()
+    }
+
+    /// The hosts that get a group, in [`Self::host_groups`]' order.
+    fn grouped_hosts(&self) -> Vec<HostKey> {
+        let mut hosts = vec![HostKey::Local];
+        let saved = self
+            .ui
+            .saved_hosts
+            .iter()
+            .filter_map(|saved| saved.target().ok())
+            .map(|target| HostKey::of(&target));
+        for host in saved {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+        let mut unsaved: Vec<HostKey> = self
+            .remote
+            .iter()
+            .map(|(host, _)| host)
+            .filter(|host| !hosts.contains(host))
+            .cloned()
+            .collect();
+        unsaved.sort_by(|a, b| a.wire().cmp(&b.wire()));
+        hosts.extend(unsaved);
+        hosts
     }
 
     pub fn toggle_sidebar(&mut self) {
@@ -6999,6 +7109,198 @@ pub(crate) mod tests {
             leaf_ids(&model.tab_containers(&tabs), "tab:t1"),
             ["a", "b"],
             "the daemon's order applies by tab id"
+        );
+    }
+
+    /// The tailnet host the host-group tests save.
+    const BOX: &str = "box.tail1234.ts.net";
+
+    fn saved(name: &str) -> SavedHost {
+        SavedHost::from_target(&Target::tailnet(name, Some(8787))).expect("a tailnet host")
+    }
+
+    fn group_names(groups: &[HostGroup]) -> Vec<(HostKey, &str)> {
+        groups
+            .iter()
+            .map(|group| (group.host.clone(), group.label.as_str()))
+            .collect()
+    }
+
+    fn repos_msg(ids: &[&str]) -> DaemonMessage {
+        DaemonMessage::Repos {
+            repos: ids.iter().map(|id| repo(id, &format!("C:/{id}"))).collect(),
+        }
+    }
+
+    #[test]
+    fn host_groups_are_empty_with_this_pc_alone() {
+        let mut model = SidebarModel::default();
+        model.apply(&HostKey::Local, &repos_msg(&["r1"]));
+        assert!(model.host_groups().is_empty(), "no saved host: no groups");
+
+        model.apply(&remote_host(BOX), &sessions_msg(&["b1"]));
+        assert!(
+            model.host_groups().is_empty(),
+            "a connected host that is not saved does not make a second configured host"
+        );
+    }
+
+    #[test]
+    fn host_groups_put_this_pc_first_then_saved_order() {
+        let den = "den.tail1234.ts.net";
+        let mut off = saved("off.tail1234.ts.net");
+        off.enabled = false;
+        let mut model = SidebarModel::default();
+        model.set_saved_hosts(vec![saved(den), saved(BOX), off]);
+        model.apply(&remote_host(BOX), &sessions_msg(&["b1"]));
+        model.apply(&remote_host(den), &sessions_msg(&["d1"]));
+
+        let groups = model.host_groups();
+        assert_eq!(
+            group_names(&groups),
+            [
+                (HostKey::Local, "This PC"),
+                (remote_host(den), "den"),
+                (remote_host(BOX), "box"),
+                (remote_host("off.tail1234.ts.net"), "off"),
+            ],
+            "saved order, not the order the hosts first sent a list"
+        );
+        assert!(
+            groups[3].containers.is_empty(),
+            "a switched-off host that never sent a list still has its header"
+        );
+    }
+
+    #[test]
+    fn an_unsaved_connected_host_comes_last_by_key() {
+        let mut model = SidebarModel::default();
+        model.set_saved_hosts(vec![saved(BOX)]);
+        model.apply(&remote_host("zed.tail1234.ts.net"), &sessions_msg(&["z1"]));
+        model.apply(
+            &remote_host("alpha.tail1234.ts.net"),
+            &sessions_msg(&["a1"]),
+        );
+        model.apply(&remote_host(BOX), &sessions_msg(&["b1"]));
+
+        assert_eq!(
+            group_names(&model.host_groups()),
+            [
+                (HostKey::Local, "This PC"),
+                (remote_host(BOX), "box"),
+                (remote_host("alpha.tail1234.ts.net"), "alpha"),
+                (remote_host("zed.tail1234.ts.net"), "zed"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_repo_sort_applies_within_each_host() {
+        let remote = remote_host(BOX);
+        let mut model = SidebarModel::default();
+        model.set_saved_hosts(vec![saved(BOX)]);
+        model.set_repo_sort(RepoSort::Active);
+        model.apply(&HostKey::Local, &repos_msg(&["ra", "rb"]));
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("a1", "rb")],
+            },
+        );
+        model.apply(&remote, &repos_msg(&["rc", "rd"]));
+        model.apply(
+            &remote,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("b1", "rd")],
+            },
+        );
+
+        let groups = model.host_groups();
+        let shown: Vec<Vec<&str>> = groups.iter().map(|group| keys(&group.containers)).collect();
+        let rd = format!("{BOX}::repo:rd");
+        let rc = format!("{BOX}::repo:rc");
+        assert_eq!(
+            shown,
+            [vec!["repo:rb", "repo:ra"], vec![rd.as_str(), rc.as_str()]],
+            "each host's active repo leads its own group; no host's row moves into another's"
+        );
+    }
+
+    #[test]
+    fn a_folded_host_keeps_its_container_folds() {
+        let remote = remote_host(BOX);
+        let detached = format!("{BOX}::detached");
+        let mut model = SidebarModel::default();
+        model.set_saved_hosts(vec![saved(BOX)]);
+        model.apply(
+            &remote,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("b1", "gone")],
+            },
+        );
+        model.toggle_container(&detached);
+
+        model.toggle_host(&remote);
+        let groups = model.host_groups();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.collapsed)
+                .collect::<Vec<_>>(),
+            [false, true],
+            "only the folded host's header folds"
+        );
+        assert!(
+            model
+                .ui_state()
+                .collapsed_containers
+                .contains(&format!("host:{BOX}")),
+            "the fold is kept by the host's key"
+        );
+        assert!(
+            groups[1].containers[0].collapsed,
+            "its container stays folded"
+        );
+
+        model.toggle_host(&remote);
+        let groups = model.host_groups();
+        assert!(!groups[1].collapsed, "unfolded again");
+        assert_eq!(
+            groups[1]
+                .containers
+                .iter()
+                .map(|c| (c.key.as_str(), c.collapsed))
+                .collect::<Vec<_>>(),
+            [(detached.as_str(), true)],
+            "the container's own fold survived the host's"
+        );
+
+        model.toggle_host(&HostKey::Local);
+        assert!(model.ui_state().collapsed_containers.contains("host:local"));
+    }
+
+    #[test]
+    fn the_active_filter_keeps_an_empty_hosts_header() {
+        let remote = remote_host(BOX);
+        let mut model = SidebarModel::default();
+        model.set_saved_hosts(vec![saved(BOX)]);
+        model.apply(&HostKey::Local, &repos_msg(&["r1"]));
+        model.apply(
+            &HostKey::Local,
+            &DaemonMessage::Sessions {
+                sessions: vec![in_repo("a1", "r1")],
+            },
+        );
+        model.apply(&remote, &repos_msg(&["r2"]));
+        model.set_repo_filter(RepoFilter::Active);
+
+        let groups = model.host_groups();
+        assert_eq!(group_names(&groups).len(), 2, "both headers show");
+        assert_eq!(keys(&groups[0].containers), ["repo:r1"]);
+        assert_eq!(groups[1].host, remote);
+        assert!(
+            groups[1].containers.is_empty(),
+            "the remote host's idle repo is filtered out, its header stays"
         );
     }
 }

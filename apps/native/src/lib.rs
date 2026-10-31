@@ -2082,11 +2082,24 @@ impl RootView {
     }
 
     /// The sidebar's containers for the view it shows, in the order it
-    /// shows them.
+    /// shows them; while host groups show, host by host, leaving out the
+    /// rows of a folded host. The keyboard walks these, so it skips the
+    /// host headers.
     #[must_use]
     pub fn sidebar_containers(&self) -> Vec<Container> {
         match self.sidebar.sidebar_view() {
-            SidebarView::Repos => self.sidebar.display_containers(),
+            SidebarView::Repos => {
+                let groups = self.sidebar.host_groups();
+                if groups.is_empty() {
+                    self.sidebar.display_containers()
+                } else {
+                    groups
+                        .into_iter()
+                        .filter(|group| !group.collapsed)
+                        .flat_map(|group| group.containers)
+                        .collect()
+                }
+            }
             SidebarView::Tabs if self.tabs.is_loaded() => {
                 self.sidebar.tab_containers(self.tabs.tabs())
             }

@@ -29,8 +29,8 @@ use crate::session_menu::{
     menu_separator,
 };
 use crate::sidebar::{
-    Activity, Container, ContainerKind, DETACHED_BANNER, Leaf, LeafDensity, RepoFilter, RepoSort,
-    SessionsUnderRepos, SidebarView, can_attach, chip_tip,
+    Activity, Container, ContainerKind, DETACHED_BANNER, HostGroup, Leaf, LeafDensity, RepoFilter,
+    RepoSort, SessionsUnderRepos, SidebarView, can_attach, chip_tip,
 };
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -136,10 +136,40 @@ impl RootView {
         }
     }
 
+    /// The repos view's host groups, none in the tabs view or while This PC
+    /// is the only host configured.
+    fn shown_host_groups(&self) -> Vec<HostGroup> {
+        if self.sidebar.sidebar_view() == SidebarView::Repos {
+            self.sidebar.host_groups()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Where `host`'s header says its connection stands.
+    fn host_header_state(&self, host: &HostKey) -> HostHeaderState {
+        match self.conn_of(host).map(Connection::state) {
+            Some(State::Open { .. }) => HostHeaderState::Online,
+            Some(State::Init | State::Connecting) => HostHeaderState::Connecting,
+            Some(State::NotApproved { .. }) => HostHeaderState::NotPaired,
+            Some(State::Closed { .. } | State::AuthFailed { .. } | State::Error { .. }) | None => {
+                HostHeaderState::Offline
+            }
+        }
+    }
+
+    /// Folds or unfolds `host`'s header and saves it.
+    fn toggle_host(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        self.sidebar.toggle_host(host);
+        self.prune_container_row_focus();
+        self.save_ui();
+        cx.notify();
+    }
+
     fn sidebar_panel(&mut self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
-        let attached = self.focused_session();
         let containers = self.sidebar_containers();
+        let groups = self.shown_host_groups();
         // The chip is the only way to arm, so an arm cannot outlive it.
         if !detached_stop_all_shown(&containers) {
             self.detached_stop_all.disarm();
@@ -159,7 +189,16 @@ impl RootView {
         let no_repos = self.no_repos_yet();
         // The Active filter's line stands where the repo rows would, above the
         // shell, folder and Detached rows it keeps.
-        let filter_empty = self.sidebar.active_filter_empty(&containers);
+        // A folded host's rows still count: the line is about the filter.
+        let filter_empty = if groups.is_empty() {
+            self.sidebar.active_filter_empty(&containers)
+        } else {
+            let listed: Vec<Container> = groups
+                .iter()
+                .flat_map(|group| group.containers.iter().cloned())
+                .collect();
+            self.sidebar.active_filter_empty(&listed)
+        };
         let body = body
             .when(no_repos, |body| {
                 body.child(no_repos_note(
@@ -171,65 +210,15 @@ impl RootView {
             .when(filter_empty, |body| {
                 body.child(body_note(Some("sidebar-filter-empty"), NO_ACTIVE_REPOS, &t))
             });
-        let body = if containers.is_empty() {
+        let body = if containers.is_empty() && groups.is_empty() {
             body.when(!no_repos && !filter_empty, |body| {
                 body.child(body_note(None, "No sessions", &t))
             })
         } else {
-            // The ring and the row keys follow the keyboard: a row the
-            // sidebar no longer holds (a menu or a pane took over) draws
-            // none.
-            let focused_row = self
-                .sidebar_focus
-                .is_focused(window)
-                .then_some(self.row_focus.as_deref())
-                .flatten();
-            let rows = LeafRows {
-                attached: attached.as_deref(),
-                accents: self.sidebar.session_accents(),
-                pills: self.tabs.is_loaded().then(|| tab_pills(self.tabs.tabs())),
-                headless: self
-                    .sidebar
-                    .all_sessions()
-                    .filter(|s| !can_attach(s))
-                    .map(|s| s.id.as_str())
-                    .collect(),
-                density: self.sidebar.leaf_density(),
-                under_repos: self.sidebar.sessions_under_repos(),
-                focused_row,
-                hovered_row: crate::sidebar::shown_hovered_row(
-                    self.hovered_container.as_deref(),
-                    self.window_hover_override
-                        .unwrap_or_else(|| window.is_window_hovered()),
-                ),
-                detached_stop_all: self.detached_stop_all.armed(),
-                dimmed: self.dimmed_rows(&containers),
-                highlighted: &self.launched_highlight,
-                dragged: self.dragged_sidebar_row(cx),
-                drop_mark: self.sidebar_drop_mark(cx),
-                subline_room: width
-                    - 2.0 * BODY_INSET_X
-                    - LEAF_PAD_LEFT
-                    - ROW_PADDING
-                    - SUBLINE_INDENT,
-            };
-            let groups: Vec<AnyElement> = containers
-                .iter()
-                .map(|container| {
-                    let add_workspace = container
-                        .path
-                        .as_deref()
-                        .and_then(|path| {
-                            let host = self.host_of_container(&container.key);
-                            self.cwd_workspace_suggestion_on(&host, path)
-                        })
-                        .map(|suggestion| suggestion.suggested_name.clone());
-                    container_rows(container, add_workspace.as_deref(), &rows, window, cx)
-                })
-                .collect();
-            body.children(groups)
+            body.children(self.sidebar_rows(&containers, &groups, width, window, cx))
         };
-        self.sidebar_frame(width, body, window, cx)
+        let shell_in_toolbar = groups.is_empty();
+        self.sidebar_frame(width, body, shell_in_toolbar, window, cx)
     }
 
     /// The panel `width` wide around `body`: its fill, the header and the
@@ -238,6 +227,7 @@ impl RootView {
         &self,
         width: f32,
         body: Stateful<Div>,
+        shell_in_toolbar: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -258,13 +248,90 @@ impl RootView {
                 self.sidebar.repo_filter(),
                 cx,
             ))
-            .child(self.toolbar(window, cx))
+            .child(self.toolbar(shell_in_toolbar, window, cx))
             .child(body)
     }
 
-    /// The spawns under the header, in one row: Session, Shell and the ⋯
-    /// menu.
-    fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    /// The body's rows: each of `containers` with its leaves, or, while
+    /// host groups show, each host's header followed (unless folded) by its
+    /// containers' rows.
+    fn sidebar_rows(
+        &self,
+        containers: &[Container],
+        groups: &[HostGroup],
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let attached = self.focused_session();
+        // The ring and the row keys follow the keyboard: a row the sidebar
+        // no longer holds (a menu or a pane took over) draws none.
+        let focused_row = self
+            .sidebar_focus
+            .is_focused(window)
+            .then_some(self.row_focus.as_deref())
+            .flatten();
+        let rows = LeafRows {
+            attached: attached.as_deref(),
+            accents: self.sidebar.session_accents(),
+            pills: self.tabs.is_loaded().then(|| tab_pills(self.tabs.tabs())),
+            headless: self
+                .sidebar
+                .all_sessions()
+                .filter(|s| !can_attach(s))
+                .map(|s| s.id.as_str())
+                .collect(),
+            density: self.sidebar.leaf_density(),
+            under_repos: self.sidebar.sessions_under_repos(),
+            focused_row,
+            hovered_row: crate::sidebar::shown_hovered_row(
+                self.hovered_container.as_deref(),
+                self.window_hover_override
+                    .unwrap_or_else(|| window.is_window_hovered()),
+            ),
+            detached_stop_all: self.detached_stop_all.armed(),
+            dimmed: self.dimmed_rows(containers),
+            highlighted: &self.launched_highlight,
+            dragged: self.dragged_sidebar_row(cx),
+            drop_mark: self.sidebar_drop_mark(cx),
+            subline_room: width - 2.0 * BODY_INSET_X - LEAF_PAD_LEFT - ROW_PADDING - SUBLINE_INDENT,
+        };
+        let row_of = |container: &Container, cx: &mut Context<Self>| {
+            let add_workspace = container
+                .path
+                .as_deref()
+                .and_then(|path| {
+                    let host = self.host_of_container(&container.key);
+                    self.cwd_workspace_suggestion_on(&host, path)
+                })
+                .map(|suggestion| suggestion.suggested_name.clone());
+            container_rows(container, add_workspace.as_deref(), &rows, window, cx)
+        };
+        if groups.is_empty() {
+            return containers
+                .iter()
+                .map(|container| row_of(container, cx))
+                .collect();
+        }
+        let mut shown = Vec::new();
+        for (index, group) in groups.iter().enumerate() {
+            let state = self.host_header_state(&group.host);
+            shown.push(host_header(group, state, index == 0, cx));
+            if !group.collapsed {
+                shown.extend(
+                    group
+                        .containers
+                        .iter()
+                        .map(|container| row_of(container, cx)),
+                );
+            }
+        }
+        shown
+    }
+
+    /// The spawns under the header, in one row: Session, Shell (unless host
+    /// headers carry it, `with_shell` false) and the ⋯ menu.
+    fn toolbar(&self, with_shell: bool, window: &Window, cx: &mut Context<Self>) -> Div {
         div()
             .flex()
             .flex_none()
@@ -274,7 +341,9 @@ impl RootView {
             .px(px(10.0))
             .pb(px(8.0))
             .child(add_session(self.has_repos(), cx))
-            .child(add_shell(self.quick_shell_default(), cx))
+            .when(with_shell, |row| {
+                row.child(add_shell(self.quick_shell_default(), cx))
+            })
             .child(self.more_button(window, cx))
     }
 
@@ -683,6 +752,194 @@ fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> State
     .tooltip(tooltip(tip))
     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.quick_shell(cx)))
 }
+
+/// Where a host's header says its connection stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostHeaderState {
+    Online,
+    Connecting,
+    Offline,
+    /// The host has not approved this device.
+    NotPaired,
+}
+
+impl HostHeaderState {
+    /// The text after the host's name; none while online.
+    fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Online => None,
+            Self::Connecting => Some("Connecting…"),
+            Self::Offline => Some("Offline"),
+            Self::NotPaired => Some("Not paired"),
+        }
+    }
+
+    /// The state dot's colour, as the Connections picker colours its rows.
+    fn dot(self) -> u32 {
+        match self {
+            Self::Online => STATUS_OK,
+            Self::Connecting | Self::Offline => STATUS_IDLE,
+            Self::NotPaired => ASKING,
+        }
+    }
+}
+
+/// A host header's height.
+const HOST_HEADER_HEIGHT: f32 = 26.0;
+/// A host header's state dot, across.
+const HOST_DOT_SIZE: f32 = 6.0;
+
+/// `group`'s header: its fold (chevron, state dot, name and, unless online,
+/// its state), then `+ Shell`, or `Pair` on a host that has not approved
+/// this device. Every header but the `first` has a rule above it. It is not
+/// a keyboard stop, has no menu and takes no drop.
+fn host_header(
+    group: &HostGroup,
+    state: HostHeaderState,
+    first: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let key = group.host.wire().unwrap_or("local");
+    let fold_host = group.host.clone();
+    let chevron = if group.collapsed {
+        SIDEBAR_CHEVRON_RIGHT_ICON
+    } else {
+        SIDEBAR_CHEVRON_DOWN_ICON
+    };
+    let fold = div()
+        .id(SharedString::from(format!("host-fold-{key}")))
+        .debug_selector({
+            let selector = format!("host-fold-{key}");
+            move || selector
+        })
+        .flex()
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
+        .items_center()
+        .gap(px(6.0))
+        .cursor_pointer()
+        .child(icon(chevron, 13.0, SUBTLE))
+        .child(
+            div()
+                .flex_none()
+                .size(px(HOST_DOT_SIZE))
+                .rounded_full()
+                .bg(gpui::rgb(state.dot())),
+        )
+        .child(
+            div()
+                .flex_none()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(gpui::rgb(TEXT))
+                .child(group.label.clone()),
+        )
+        .when_some(state.label(), |fold, text| {
+            fold.child(div().flex_none().text_color(gpui::rgb(SUBTLE)).child(text))
+        })
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.toggle_host(&fold_host, cx);
+        }));
+    let action = if state == HostHeaderState::NotPaired {
+        host_pair(key, &group.host, &group.label, cx)
+    } else {
+        host_shell(
+            key,
+            &group.host,
+            &group.label,
+            state == HostHeaderState::Online,
+            cx,
+        )
+    };
+    div()
+        .debug_selector({
+            let selector = format!("host-header-{key}");
+            move || selector
+        })
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(HOST_HEADER_HEIGHT))
+        .pl(px(4.0))
+        .pr(px(4.0))
+        .when(!first, |row| row.border_t_1().border_color(gpui::rgb(LINE)))
+        .child(fold)
+        .child(action)
+        .into_any_element()
+}
+
+/// A host header's small text button, `selector`, reading `label` after
+/// `glyph` when there is one.
+fn host_header_button(
+    selector: String,
+    glyph: Option<&'static str>,
+    label: &'static str,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(20.0))
+        .px(px(6.0))
+        .rounded(px(5.0))
+        .text_color(gpui::rgb(TEXT_2))
+        .when_some(glyph, |button, glyph| {
+            button.child(icon(glyph, 12.0, TEXT_2))
+        })
+        .child(label)
+}
+
+/// `+ Shell` on `host`'s header: a plain shell on that host; disabled, with
+/// "{name} is offline" as its tip, unless the host is `online`.
+fn host_shell(
+    key: &str,
+    host: &HostKey,
+    name: &str,
+    online: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let button = host_header_button(
+        format!("host-shell-{key}"),
+        Some(SIDEBAR_PLUS_ICON),
+        "Shell",
+    );
+    if !online {
+        return button
+            .opacity(DISABLED_HEADER_BUTTON_OPACITY)
+            .tooltip(tooltip(format!("{name} is offline")))
+            .into_any_element();
+    }
+    let host = host.clone();
+    button
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .tooltip(tooltip(format!("Open a shell on {name}")))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.quick_shell_on(&host, cx);
+        }))
+        .into_any_element()
+}
+
+/// `Pair` on the header of a host that has not approved this device, as
+/// its Connections row's `Pair` does.
+fn host_pair(key: &str, host: &HostKey, name: &str, cx: &mut Context<RootView>) -> AnyElement {
+    let host = host.clone();
+    host_header_button(format!("host-pair-{key}"), None, "Pair")
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .tooltip(tooltip(format!("Pair this PC with {name}")))
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.pair_with_host(&host, window, cx);
+        }))
+        .into_any_element()
+}
+
+/// How opaque a disabled header button draws.
+const DISABLED_HEADER_BUTTON_OPACITY: f32 = 0.45;
 
 /// A muted line in the sessions body; `selector` tags it for the specs.
 fn body_note(selector: Option<&'static str>, text: &'static str, t: &UiTheme) -> impl IntoElement {
