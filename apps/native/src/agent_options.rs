@@ -278,18 +278,19 @@ impl AgentOptions {
 }
 
 impl crate::RootView {
-    /// The daemon's agents, in its order, as this connection last heard
-    /// them; empty while disconnected.
+    /// The agents of the host whose pages Settings shows (This PC unless
+    /// the Settings host selector moved), in its daemon's order, as its
+    /// connection last heard them; empty while disconnected.
     #[must_use]
     pub fn agents(&self) -> &[AgentDescriptor] {
-        self.sidebar.agents(&crate::target::HostKey::Local)
+        self.sidebar.agents(self.settings_host())
     }
 
-    /// Each agent's Settings page values as this connection last heard
-    /// them; empty while disconnected.
+    /// Each agent's Settings page values on the host whose pages Settings
+    /// shows, as its connection last heard them; empty while disconnected.
     #[must_use]
     pub fn agent_settings(&self) -> &BTreeMap<AgentId, OptionValues> {
-        &self.mirrors().agent_settings
+        &self.settings_mirrors().agent_settings
     }
 
     /// Keeps `host`'s agents or their Settings values: each message
@@ -330,28 +331,25 @@ impl crate::RootView {
         mirrors.agent_setting_applies.clear();
     }
 
-    /// Whether this connection has heard the agents' Settings values.
-    pub(crate) fn agent_settings_received(&self) -> bool {
-        self.mirrors().agent_settings_received
-    }
-
-    /// `agent`'s Settings values with `key` set to `value`, built on its
-    /// page's pending change, else on the daemon's last broadcast; kept as
-    /// the agent's pending change until a broadcast names it.
+    /// `host`'s agent `agent`'s Settings values with `key` set to `value`,
+    /// built on its page's pending change, else on that daemon's last
+    /// broadcast; kept as the agent's pending change until a broadcast
+    /// names it. `None` when the window holds no connection to `host`.
     pub(crate) fn merge_agent_setting(
         &mut self,
+        host: &crate::target::HostKey,
         agent: &AgentId,
         key: &str,
         value: OptionValue,
-    ) -> OptionValues {
-        let mirrors = self.mirrors_mut();
-        merge_setting(
+    ) -> Option<OptionValues> {
+        let mirrors = self.mirrors_of_mut(host)?;
+        Some(merge_setting(
             &mut mirrors.agent_settings_pending,
             &mirrors.agent_settings,
             agent,
             key,
             value,
-        )
+        ))
     }
 }
 

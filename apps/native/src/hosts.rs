@@ -301,7 +301,8 @@ impl RootView {
     /// `host`'s connection closed or the window let it go: its agents,
     /// daemon settings, daemon id, fetches, the Fetch file… dialog fetching
     /// from it and remote access status go with it, a remote host's spawns and duplicates in flight end with their
-    /// spawning toasts. Once the window holds no connection to it, a Pair
+    /// spawning toasts, and its Settings agent pages go, the Settings host
+    /// selector returning to This PC when it showed `host`. Once the window holds no connection to it, a Pair
     /// armed for it is forgotten and its pairing dialog closes. The hosts
     /// dropped as its duplicates stay dropped: they are freed only once its
     /// connection ends ([`Self::release_duplicates_if_ended`]) or the
@@ -338,6 +339,7 @@ impl RootView {
         if self.hosts.get(host).is_none() {
             self.forget_device_pairing(host, window, cx);
         }
+        self.settings_host_closed(host);
     }
 
     /// `host`'s connection reported `state`: once it has ended (closed,
@@ -566,6 +568,19 @@ impl RootView {
     /// This PC's daemon settings, to update.
     pub(crate) fn mirrors_mut(&mut self) -> &mut HostMirrors {
         &mut self.hosts.local_mut().mirrors
+    }
+
+    /// `host`'s daemon settings; `None` when the window has no connection
+    /// to it.
+    pub(crate) fn mirrors_of(&self, host: &HostKey) -> Option<&HostMirrors> {
+        self.hosts.get(host).map(|entry| &entry.mirrors)
+    }
+
+    /// The daemon settings of the host whose agent pages Settings shows;
+    /// This PC's once the window holds no connection to that host.
+    pub(crate) fn settings_mirrors(&self) -> &HostMirrors {
+        self.mirrors_of(self.settings_host())
+            .unwrap_or_else(|| self.mirrors())
     }
 
     /// `host`'s daemon settings, to update; `None` when the window has no
