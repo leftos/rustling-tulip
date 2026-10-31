@@ -41,7 +41,7 @@ The goal is each release as soon as possible, through Release 2; this overrides 
 - **Full suite:** only at milestones: the end of a Release 1 milestone (or a wave), a push, a feature-branch merge and the release step. A red milestone run becomes the next item.
 - **Commits:** prek runs only hygiene and `cargo fmt --check` at commit; clippy runs at pre-push, so a commit is cheap and items commit often.
 - **Mocks:** only for a big visual choice (a new view or layout). Small looks are decided by the orchestrator from the existing palette and shown as a `native-shot` at landing.
-- **Saved user data survives every update** (CLAUDE.md): a change to a saved file's shape migrates the last release's shape on load, with a test that loads it; every brief that touches a saved format says how the old shape reads.
+- **Saved user data survives every update** (CLAUDE.md): a change to a saved file's shape migrates every released shape from `v0.5.1-alpha` on at load, with a test that loads it; every brief that touches a saved format says how the old shape reads.
 
 ## Rulings every brief carries
 
