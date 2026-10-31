@@ -13,14 +13,15 @@ use crate::support;
 use std::time::Duration;
 
 use gpui::{Modifiers, TestAppContext, px};
-use protocol::{DaemonMessage, RepoEntry, SessionSnapshot, WorktreeCleanupFailure};
+use protocol::{ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, WorktreeCleanupFailure};
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{Connection, NetCommand, NetEvent};
 use serde_json::json;
-use support::{Fixture, Harness, TestDir, pane, session, tab};
+use support::{Fixture, Harness, Opened, TestDir, pane, remote_in_pane, session, tab};
 
 const HOST: &str = "box.tail1234.ts.net";
 const LOCAL_FILES: &str = "Not available on a remote host: this opens files on this PC";
+const URL: &str = "https://example.com/docs";
 
 /// A connection to `target` open on `port`, welcomed with the fake daemon's
 /// features.
@@ -134,6 +135,76 @@ fn reveal_disabled_on_remote(cx: &mut TestAppContext) {
     );
     h.click_on("session-menu-reveal");
     assert_eq!(h.opened(), [], "the dimmed row opens nothing");
+}
+
+/// `s` in pane `p2` beside This PC's `a1`, on the saved host [`HOST`]
+/// listing the repo `r1`, its scrollback answered and `p2` focused; no
+/// other host is saved.
+fn attached_remote<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    s: SessionSnapshot,
+) -> Harness<'a> {
+    remote_in_pane(cx, dir, &json!({}), &["r1"], s)
+}
+
+#[gpui::test]
+fn path_link_fetches_instead_of_opening_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_remote(cx, &dir, session("s1").worktree("r1").build());
+    h.host(&saved_target())
+        .pty("s1", br"wrote C:\wt\x\docs\notes.md");
+    let on = h.cell_center("p2", 9, 0);
+    h.click(on, Modifiers::secondary_key());
+    assert_eq!(h.opened(), [], "a host path never opens on this PC");
+    let fetches: Vec<(String, Option<String>, String)> = h
+        .host(&saved_target())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::FetchFile {
+                repo_id,
+                worktree_path,
+                path,
+                ..
+            } => Some((repo_id, worktree_path, path)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fetches,
+        [(
+            "r1".to_owned(),
+            Some("C:/wt/x".to_owned()),
+            "docs/notes.md".to_owned()
+        )],
+        "the link's file is fetched from the member's worktree"
+    );
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::FetchFile { .. })),
+        "nothing is fetched from This PC"
+    );
+    assert!(
+        !toasts(&mut h)
+            .iter()
+            .any(|(title, _)| title == "Couldn't open"),
+        "nothing is refused: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn url_link_opens_on_remote(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_remote(cx, &dir, session("s1").build());
+    h.host(&saved_target())
+        .pty("s1", format!("see {URL} here").as_bytes());
+    let on = h.cell_center("p2", 10, 0);
+    h.click(on, Modifiers::secondary_key());
+    assert_eq!(h.opened(), [Opened::Url(URL.to_owned())]);
+    assert_eq!(toasts(&mut h), []);
 }
 
 #[gpui::test]
