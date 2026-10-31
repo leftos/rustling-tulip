@@ -9,7 +9,7 @@ use protocol::{
     VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
 };
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, HeaderChipKind, NetEvent};
+use rustling_tulip_native::{Connection, HeaderChipKind, NetEvent, OpenOutcome, PopoutKey};
 use support::{
     Fixture, Harness, PROTOCOL, TestDir, pane, remote_in_pane, remote_pane, repo, saved_remote,
     seed_ui, session, split, tab,
@@ -784,5 +784,48 @@ fn an_offline_hosts_leaf_neither_drags_nor_binds(cx: &mut TestAppContext) {
     assert!(
         h.root(|root, _| root.pane_header_parts("p2")).is_none(),
         "the pane stays empty"
+    );
+}
+
+#[gpui::test]
+fn a_remote_session_popouts_orphan_banner_names_its_own_hosts_agent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // Both hosts list `s1`, tagged apart; only the remote one's is an
+    // orphan, shown in a window of its own.
+    let fixture = Fixture {
+        sessions: vec![session("s1").agent("agent-x").build()],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.send(DaemonMessage::Agents {
+        agents: vec![described("agent-x", "local-x")],
+    });
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Agents {
+        agents: vec![described("agent-x", "remote-x")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").agent("agent-x").orphan().build()],
+    });
+    host.sent();
+    h.sent();
+
+    let key = PopoutKey::session(&HostKey::Remote(REMOTE.to_owned()), "s1");
+    assert_eq!(
+        h.root_update(move |root, window, cx| root.open_popout(key, window, cx)),
+        OpenOutcome::Opened,
+        "the remote session's window opens"
+    );
+
+    let line = h.root(|root, _| root.orphan_banner_line(&HostKey::Remote(REMOTE.to_owned()), "s1"));
+    let line = line.expect("the remote host's orphan shows its banner");
+    assert!(
+        line.contains("remote-x"),
+        "the window's orphan banner names the remote host's agent: {line}"
+    );
+    assert!(
+        !line.contains("local-x"),
+        "This PC's descriptor stays off it: {line}"
     );
 }
