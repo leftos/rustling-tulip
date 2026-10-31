@@ -4256,9 +4256,9 @@ impl RootView {
     /// request: a launch-command refusal of an apply, by its `code`, shows
     /// under its row with no toast; a preset list's failure shows in the
     /// container menu's preset row with no toast; refused Settings values
-    /// end their apply and toast; any other takes the generic path. The
-    /// Settings modal edits This PC's daemon only, so another host's
-    /// refusal ends none of its saves.
+    /// end their apply and toast; any other takes the generic path. A
+    /// refused Settings save is ended on the host that replied, never on
+    /// another host's page.
     fn on_refusal(
         &mut self,
         host: &HostKey,
