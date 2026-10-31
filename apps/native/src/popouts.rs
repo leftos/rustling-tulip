@@ -7,7 +7,7 @@ use protocol::{AgentDescriptor, SessionSnapshot, TabEntry};
 use serde::{Deserialize, Serialize};
 
 use crate::sidebar::display_label;
-use crate::tabs::{Pane, TabsModel, collect_panes};
+use crate::tabs::{Pane, SessionRef, TabsModel, collect_panes};
 use crate::target::HostKey;
 use crate::window_state::WindowState;
 
@@ -185,12 +185,14 @@ impl Popouts {
         })
     }
 
-    /// The sessions open in session pop-outs.
-    pub(crate) fn popped_sessions(&self) -> Vec<&str> {
+    /// The sessions, host and id, open in session pop-outs.
+    pub(crate) fn popped_sessions(&self) -> Vec<SessionRef> {
         self.keys
             .iter()
             .filter_map(|key| match key {
-                PopoutKey::Session { session_id, .. } => Some(session_id.as_str()),
+                PopoutKey::Session { session_id, .. } => {
+                    Some(SessionRef::new(key.host(), session_id.clone()))
+                }
                 PopoutKey::Pane { .. } | PopoutKey::Tab { .. } => None,
             })
             .collect()
@@ -317,16 +319,27 @@ pub(crate) fn follow_saved_moves(saved: Vec<SavedPopout>, tabs: &[TabEntry]) -> 
         .collect()
 }
 
-/// The id of the terminal a session pop-out of `session_id` draws.
+/// The id of the terminal a session pop-out of `session_id` on `host`
+/// draws: `popout:<host key>:<id>` for a remote host's session,
+/// `popout:<id>` for This PC's.
 #[must_use]
-pub(crate) fn session_slot_id(session_id: &str) -> String {
-    format!("{SESSION_SLOT_PREFIX}{session_id}")
+pub(crate) fn session_slot_id(host: &HostKey, session_id: &str) -> String {
+    match host.wire() {
+        Some(key) => format!("{SESSION_SLOT_PREFIX}{key}:{session_id}"),
+        None => format!("{SESSION_SLOT_PREFIX}{session_id}"),
+    }
 }
 
-/// The session whose pop-out terminal `slot_id` names; `None` for a pane's.
+/// The session, host and id, whose pop-out terminal `slot_id` names;
+/// `None` for a pane's. The id follows the last `:`, since an SSH host's
+/// key holds colons of its own.
 #[must_use]
-pub(crate) fn slot_session(slot_id: &str) -> Option<&str> {
-    slot_id.strip_prefix(SESSION_SLOT_PREFIX)
+pub(crate) fn slot_session(slot_id: &str) -> Option<SessionRef> {
+    let rest = slot_id.strip_prefix(SESSION_SLOT_PREFIX)?;
+    Some(match rest.rsplit_once(':') {
+        Some((host, id)) => SessionRef::new(HostKey::Remote(host.to_owned()), id),
+        None => SessionRef::new(HostKey::Local, rest),
+    })
 }
 
 /// The id of the terminal `key`'s window draws: a pane pop-out's pane, a
@@ -335,7 +348,7 @@ pub(crate) fn slot_session(slot_id: &str) -> Option<&str> {
 pub(crate) fn terminal_slot(key: &PopoutKey) -> Option<String> {
     match key {
         PopoutKey::Pane { pane_id, .. } => Some(pane_id.clone()),
-        PopoutKey::Session { session_id, .. } => Some(session_slot_id(session_id)),
+        PopoutKey::Session { session_id, .. } => Some(session_slot_id(&key.host(), session_id)),
         PopoutKey::Tab { .. } => None,
     }
 }
@@ -493,6 +506,22 @@ mod tests {
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
         }
+    }
+
+    #[test]
+    fn slot_session_reads_the_id_after_the_last_colon_of_an_ssh_key() {
+        let host = HostKey::Remote("ssh:me@devbox:2222".to_owned());
+        let slot = session_slot_id(&host, "u1");
+        assert_eq!(slot, "popout:ssh:me@devbox:2222:u1");
+        assert_eq!(slot_session(&slot), Some(SessionRef::new(host, "u1")));
+
+        let local = session_slot_id(&HostKey::Local, "s1");
+        assert_eq!(local, "popout:s1", "This PC's slot id names no host");
+        assert_eq!(
+            slot_session(&local),
+            Some(SessionRef::new(HostKey::Local, "s1"))
+        );
+        assert_eq!(slot_session("p1"), None, "a pane's slot is no session's");
     }
 
     /// A tab holding two panes, `p1` on session `s1` and `p2` on `s2`.

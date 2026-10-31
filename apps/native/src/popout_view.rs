@@ -411,11 +411,12 @@ impl RootView {
         match self.slot_window(slot_id) {
             Some(drawn_in) if drawn_in != window.window_handle().window_id() => {
                 let event = event.clone();
+                let slot_id = slot_id.to_owned();
                 Self::in_window(drawn_in, cx, move |root, window, cx| {
-                    root.on_pane_event(&event, window, cx);
+                    root.on_pane_event(&slot_id, &event, window, cx);
                 });
             }
-            _ => self.on_pane_event(event, window, cx),
+            _ => self.on_pane_event(slot_id, event, window, cx),
         }
     }
 
@@ -423,7 +424,10 @@ impl RootView {
     /// session's, its pane's, or its tab's.
     pub(crate) fn slot_window(&self, slot_id: &str) -> Option<WindowId> {
         let key = match popouts::slot_session(slot_id) {
-            Some(session_id) => self.popouts.session_key(session_id)?.clone(),
+            Some(session) => {
+                let key = PopoutKey::session(&session.host, &session.id);
+                self.popouts.is_open(&key).then_some(key)?
+            }
             None => match self.popouts.popped_key(slot_id) {
                 Some(key) => key.clone(),
                 None => self.tab_popout_of_pane(slot_id)?,

@@ -13,6 +13,7 @@ use crate::links::{LinkKind, TerminalLink, TerminalLinkCandidate};
 use crate::notice_view::modal_panel;
 use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{self, JobOutcome, OpenAction, OpenFailure, OpenJob, Resolution};
+use crate::remote_mode::Capabilities;
 use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::target::HostKey;
@@ -22,6 +23,13 @@ use crate::{RootView, file_fetch};
 
 /// The title of every toast about a link that did not open.
 pub(crate) const COULD_NOT_OPEN: &str = "Couldn't open";
+
+/// The terminal a link was Ctrl+clicked in: the host its slot sends to,
+/// and the session it shows.
+pub(crate) struct LinkSource<'a> {
+    pub(crate) host: &'a HostKey,
+    pub(crate) session: Option<&'a str>,
+}
 
 /// The toast of a file over the viewer's size cap, sent out instead.
 const TOO_LARGE_FOR_VIEWER: &str = "Too large for the viewer, opened externally";
@@ -100,17 +108,23 @@ impl RootView {
     }
 
     /// A pane's Ctrl+click picked `link`; a path in it resolves against
-    /// `base_dirs`, the folders of `session`, the pane's session. On a
-    /// remote host the path is fetched from `session`'s repos instead.
+    /// `base_dirs`, the folders of the pane's session. A path in a pane of
+    /// a remote host is fetched from its session's repos instead, never
+    /// opened on This PC, whether or not the window holds that host's
+    /// connection.
     pub(crate) fn open_link(
         &mut self,
         link: &TerminalLink,
         base_dirs: Vec<String>,
-        session: Option<&str>,
+        source: &LinkSource<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let host = session.map_or(HostKey::Local, |id| self.host_of_session(id));
+        let (host, session) = (source.host.clone(), source.session);
+        let opens_here = match self.conn_of(&host) {
+            Some(conn) => Capabilities::for_target(conn.target()).opens_local_files(),
+            None => host == HostKey::Local,
+        };
         match link.kind {
             LinkKind::Url => match open::validate_http_url(&link.target) {
                 Ok(url) => {
@@ -129,7 +143,7 @@ impl RootView {
             },
             // A host path is not on this PC; resolving it here could open
             // a local file of the same name, so it is fetched instead.
-            LinkKind::Path if !self.capabilities_of(&host).opens_local_files() => {
+            LinkKind::Path if !opens_here => {
                 self.fetch_path_link(link, session, cx);
             }
             LinkKind::Path => {

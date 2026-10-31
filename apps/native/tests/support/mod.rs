@@ -1469,6 +1469,12 @@ pub struct ExtraHost {
     commands: UnboundedReceiver<NetCommand>,
     unread: Vec<ClientMessage>,
     other_commands: Vec<NetCommand>,
+    /// The ids of each session's `LoadScrollback`s so far, oldest first.
+    scrollback_ids: HashMap<String, Vec<String>>,
+    /// The sessions whose scrollback a spec has answered.
+    answered: HashSet<String>,
+    /// Whether every sender of the command channel has gone.
+    released: bool,
 }
 
 /// The connections a window opened after its first, in order.
@@ -1506,6 +1512,9 @@ pub fn fake_transport_sharing(
             commands,
             unread: Vec::new(),
             other_commands: Vec::new(),
+            scrollback_ids: HashMap::new(),
+            answered: HashSet::new(),
+            released: false,
         });
         (tx, rx)
     })
@@ -1611,17 +1620,99 @@ impl<'h, 'a> HostHandle<'h, 'a> {
         self.wire(|host| std::mem::take(&mut host.other_commands))
     }
 
+    /// The ids of `session`'s scrollback requests on this connection so
+    /// far, oldest first.
+    pub fn scrollback_requests(&mut self, session: &str) -> Vec<String> {
+        self.drain();
+        self.wire(|host| {
+            host.scrollback_ids
+                .get(session)
+                .cloned()
+                .unwrap_or_default()
+        })
+    }
+
+    /// The input bytes sent to `session` on this connection since the last
+    /// drain.
+    pub fn sent_input(&mut self, session: &str) -> Vec<u8> {
+        input_to(&self.sent(), session)
+    }
+
+    /// Answers `session`'s latest scrollback request on this connection with
+    /// `history`, echoing its id, its forwarder restarted.
+    pub fn answer_scrollback(&mut self, session: &str, history: &[u8]) {
+        let latest = self.scrollback_requests(session).pop();
+        self.wire(|host| host.answered.insert(session.to_owned()));
+        self.send(DaemonMessage::Scrollback {
+            session_id: session.to_owned(),
+            data_b64: B64.encode(history),
+            truncated: false,
+            request_id: latest,
+            forwarder_restarted: true,
+        });
+    }
+
+    /// Live output for `session` from this host, its (empty) scrollback
+    /// answered first.
+    pub fn pty(&mut self, session: &str, bytes: &[u8]) {
+        if !self.wire(|host| host.answered.contains(session)) {
+            self.answer_scrollback(session, b"");
+        }
+        self.send(DaemonMessage::PtyOutput {
+            session_id: session.to_owned(),
+            data_b64: B64.encode(bytes),
+        });
+    }
+
+    /// Whether every sender of this connection's command channel has gone,
+    /// so its network thread would quit.
+    pub fn is_released(&mut self) -> bool {
+        self.drain();
+        self.wire(|host| host.released)
+    }
+
     fn drain(&mut self) {
         self.harness.cx.run_until_parked();
         self.wire(|host| {
-            while let Ok(command) = host.commands.try_recv() {
-                match command {
-                    NetCommand::Send(msg) => host.unread.push(*msg),
-                    other => host.other_commands.push(other),
+            loop {
+                match host.commands.try_recv() {
+                    Ok(NetCommand::Send(msg)) => {
+                        if let ClientMessage::LoadScrollback {
+                            session_id,
+                            request_id: Some(id),
+                        } = msg.as_ref()
+                        {
+                            host.scrollback_ids
+                                .entry(session_id.clone())
+                                .or_default()
+                                .push(id.clone());
+                        }
+                        host.unread.push(*msg);
+                    }
+                    Ok(other) => host.other_commands.push(other),
+                    Err(err) => {
+                        host.released = err.is_closed();
+                        break;
+                    }
                 }
             }
         });
     }
+}
+
+/// The input bytes `sent` carries to `session`, in order.
+fn input_to(sent: &[ClientMessage], session: &str) -> Vec<u8> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SendInput {
+                session_id,
+                data_b64,
+                ..
+            } if session_id == session => Some(B64.decode(data_b64).expect("input base64")),
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 impl<'a> Harness<'a> {

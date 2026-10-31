@@ -12,7 +12,6 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use futures::channel::mpsc::UnboundedSender;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler,
     EntityInputHandler, EventEmitter, FocusHandle, Font, FontFeatures, FontStyle, FontWeight,
@@ -25,6 +24,7 @@ use protocol::{AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot};
 
 use crate::Clock;
 use crate::fonts::{self, FontSettings};
+use crate::hosts::HostSender;
 use crate::links::TerminalLink;
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
@@ -56,7 +56,8 @@ pub struct TerminalPane {
     pane_id: String,
     term: Terminal,
     focus: FocusHandle,
-    tx: UnboundedSender<NetCommand>,
+    /// Where everything the terminal sends goes: its session's host.
+    tx: HostSender,
     /// The time the scrollback load's timeouts and retries count from.
     now: Clock,
     attachment: Attachment,
@@ -311,9 +312,15 @@ impl TerminalPane {
         self.pane_id = pane_id;
     }
 
+    /// The terminal now shows a session of another host: what it sends goes
+    /// to `tx` from now on.
+    pub(crate) fn set_sender(&mut self, tx: HostSender) {
+        self.tx = tx;
+    }
+
     pub fn new(
         pane_id: String,
-        tx: UnboundedSender<NetCommand>,
+        tx: HostSender,
         now: Clock,
         font: FontSettings,
         cx: &mut Context<Self>,
@@ -1053,9 +1060,7 @@ impl TerminalPane {
     }
 
     fn send(&self, msg: ClientMessage) {
-        // Fails only once the network thread has exited, which it does only
-        // after every sender has dropped.
-        let _ = self.tx.unbounded_send(NetCommand::Send(Box::new(msg)));
+        self.tx.send(NetCommand::Send(Box::new(msg)));
     }
 
     /// Sends what the user typed or pasted, and scrolls to the live screen.

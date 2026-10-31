@@ -1,7 +1,9 @@
 //! The window's connections, one per host, and the routing that picks which
 //! host a message goes to.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::rc::Rc;
 
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{Context, Window};
@@ -77,6 +79,41 @@ impl HostConn {
     }
 }
 
+/// What a host's terminals send through: one per host, handed to every
+/// terminal showing one of its sessions, forwarding to the connection the
+/// window holds to that host now. While the window holds none (the host
+/// switched off, forgotten or dropped as a duplicate) what is sent is
+/// dropped, and no terminal keeps a dropped connection's network thread
+/// alive.
+#[derive(Clone)]
+pub struct HostSender(Rc<RefCell<Option<UnboundedSender<NetCommand>>>>);
+
+impl HostSender {
+    fn new(tx: Option<UnboundedSender<NetCommand>>) -> Self {
+        Self(Rc::new(RefCell::new(tx)))
+    }
+
+    /// Forwards to `tx` from now on; to nothing for `None`.
+    fn point_at(&self, tx: Option<UnboundedSender<NetCommand>>) {
+        *self.0.borrow_mut() = tx;
+    }
+
+    /// Hands `command` to the host's current connection; with none it is
+    /// logged and dropped.
+    pub(crate) fn send(&self, command: NetCommand) {
+        let Some(tx) = self.0.borrow().clone() else {
+            tracing::debug!(
+                "the terminal's host has no connection; dropped {}",
+                command_name(&command)
+            );
+            return;
+        };
+        // Fails only once the network thread has exited, which it does only
+        // after the window let its connection go.
+        let _ = tx.unbounded_send(command);
+    }
+}
+
 /// The window's connections: This PC's, always present because it is the
 /// layout home, and one per remote host by its host key, in the order
 /// they joined.
@@ -85,6 +122,9 @@ pub(crate) struct Hosts {
     remote: Vec<(String, HostConn)>,
     /// The generation the next connection added gets.
     next_generation: u64,
+    /// Each host's terminal sender, made on first ask and kept across its
+    /// connections.
+    senders: HashMap<HostKey, HostSender>,
 }
 
 impl Hosts {
@@ -96,7 +136,19 @@ impl Hosts {
             local,
             remote: Vec::new(),
             next_generation: 1,
+            senders: HashMap::new(),
         }
+    }
+
+    /// The sender `key`'s terminals send through, forwarding to the
+    /// connection the window holds to it, if any.
+    pub(crate) fn sender(&mut self, key: &HostKey) -> HostSender {
+        if let Some(sender) = self.senders.get(key) {
+            return sender.clone();
+        }
+        let sender = HostSender::new(self.get(key).map(|conn| conn.tx.clone()));
+        self.senders.insert(key.clone(), sender.clone());
+        sender
     }
 
     /// Whether `generation` is that of the connection the window holds to
@@ -162,6 +214,9 @@ impl Hosts {
         let generation = self.next_generation;
         self.next_generation += 1;
         conn.generation = generation;
+        if let Some(sender) = self.senders.get(&HostKey::Remote(name.clone())) {
+            sender.point_at(Some(conn.tx.clone()));
+        }
         self.remote.push((name, conn));
         Some(generation)
     }
@@ -174,6 +229,9 @@ impl Hosts {
             return None;
         };
         let index = self.remote.iter().position(|(held, _)| held == name)?;
+        if let Some(sender) = self.senders.get(key) {
+            sender.point_at(None);
+        }
         Some(self.remote.remove(index).1)
     }
 }
@@ -251,6 +309,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.lists_since_welcome.remove(host);
         self.forget_agents(host);
         self.forget_daemon_settings(host);
         self.forget_daemon_id(host);
@@ -532,12 +591,6 @@ impl RootView {
         if let Some(entry) = self.hosts.get_mut(host) {
             entry.handshake = None;
         }
-    }
-
-    /// The sender `host`'s commands go to, for a terminal pane to keep;
-    /// `None` when the window has no connection to it.
-    pub(crate) fn host_tx(&self, host: &HostKey) -> Option<UnboundedSender<NetCommand>> {
-        self.hosts.get(host).map(|entry| entry.tx.clone())
     }
 
     /// Sends `command` to `host`'s network thread; with no connection to

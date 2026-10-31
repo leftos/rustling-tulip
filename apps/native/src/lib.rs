@@ -816,6 +816,9 @@ pub struct RootView {
     popouts_awaiting_hosts: Vec<SavedPopout>,
     /// The remote hosts whose session list has arrived this launch.
     remote_lists_in: HashSet<HostKey>,
+    /// The hosts that have sent their session list since their latest
+    /// `Welcome`, on a connection still open.
+    lists_since_welcome: HashSet<HostKey>,
     /// Each host whose connection was dropped because another host's had
     /// reached the same daemon first, with that other host.
     duplicate_of: HashMap<HostKey, HostKey>,
@@ -1359,6 +1362,7 @@ impl RootView {
             popout_restore: PopoutRestore::Waiting,
             popouts_awaiting_hosts: Vec::new(),
             remote_lists_in: HashSet::new(),
+            lists_since_welcome: HashSet::new(),
             duplicate_of: HashMap::new(),
             remembers_window_places: false,
             root_focus: cx.focus_handle(),
@@ -1602,7 +1606,8 @@ impl RootView {
         match &outcome {
             OpenOutcome::Opened => {
                 if let PopoutKey::Session { session_id, .. } = &key {
-                    self.open_session_slot(session_id, window, cx);
+                    let session = SessionRef::new(key.host(), session_id.clone());
+                    self.open_session_slot(&session, window, cx);
                 }
                 let saved_place = match place {
                     PopoutPlace::Restored(saved) => saved.clone(),
@@ -1761,11 +1766,9 @@ impl RootView {
     /// while that pane, its tab or that session is still popped out.
     fn popout_focused_session(&self) -> Option<String> {
         let pane_id = self.popout_focused.as_deref()?;
-        if let Some(session_id) = popouts::slot_session(pane_id) {
-            return self
-                .popouts
-                .session_key(session_id)
-                .map(|_| session_id.to_owned());
+        if let Some(session) = popouts::slot_session(pane_id) {
+            let key = PopoutKey::session(&session.host, &session.id);
+            return self.popouts.is_open(&key).then_some(session.id);
         }
         if self.tab_popout_of_pane(pane_id).is_some() {
             return self.panes.get(pane_id)?.session().map(str::to_owned);
@@ -1854,7 +1857,7 @@ impl RootView {
         let closed = self.popouts.close(key);
         if closed {
             if let PopoutKey::Session { session_id, .. } = key {
-                self.drop_session_slot(session_id, cx);
+                self.drop_session_slot(&SessionRef::new(key.host(), session_id.clone()), cx);
             }
             self.update_pane_roles(cx);
             self.mark_popout_resized(key, cx);
@@ -1960,7 +1963,7 @@ impl RootView {
             }
             self.popout_windows.insert(new_key.clone(), popout);
         }
-        self.rekey_session_slot(old, new, cx);
+        self.rekey_session_slot(&old_key.host(), old, new, cx);
         self.update_pane_roles(cx);
         self.mark_popout_resized(&new_key, cx);
         self.refresh_popout_titles(cx);
@@ -2023,7 +2026,7 @@ impl RootView {
         for key in keys {
             self.popouts.close(&key);
             if let PopoutKey::Session { session_id, .. } = &key {
-                self.drop_session_slot(session_id, cx);
+                self.drop_session_slot(&SessionRef::new(key.host(), session_id.clone()), cx);
             }
             if let Some(handle) = self.take_popout_window(&key) {
                 close_popout_window(&key, handle, cx);
@@ -3980,6 +3983,7 @@ impl RootView {
                 request_id,
                 forwarder_restarted,
             } => self.feed_scrollback(
+                host,
                 &ScrollbackReply {
                     session_id,
                     data_b64,
@@ -3992,7 +3996,7 @@ impl RootView {
             DaemonMessage::PtyOutput {
                 session_id,
                 data_b64,
-            } => self.feed_output(&session_id, &data_b64, cx),
+            } => self.feed_output(&SessionRef::new(host.clone(), session_id), &data_b64, cx),
             DaemonMessage::SessionUpdated {
                 session,
                 request_id,
@@ -4239,6 +4243,7 @@ impl RootView {
     /// and notice of the old one closed, and the session history asked for
     /// afresh.
     fn on_welcome(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.lists_since_welcome.remove(host);
         self.reset_host(host, window, cx);
         if *host != HostKey::Local {
             self.ask_history(host);
@@ -4248,6 +4253,12 @@ impl RootView {
         self.reset_devices(window, cx);
         self.ask_pending_devices();
         self.ask_devices();
+    }
+
+    /// Whether `host` has sent its session list since its latest `Welcome`,
+    /// on a connection still open.
+    pub(crate) fn listed_since_welcome(&self, host: &HostKey) -> bool {
+        self.lists_since_welcome.contains(host)
     }
 
     /// Forgets everything remote host `host`'s daemon sent: its sessions,
@@ -4263,6 +4274,7 @@ impl RootView {
         self.sidebar.clear_host(host);
         self.seen_sessions.remove(host);
         self.remote_lists_in.remove(host);
+        self.lists_since_welcome.remove(host);
         self.reset_dashboard_for_target(host);
         self.forget_sc_host(host);
         self.session_history.forget(host);
@@ -4401,9 +4413,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let session = reply.session;
-        for view in self.pane_views(Some(&session.id)) {
+        let shown = SessionRef::new(reply.host.clone(), session.id.clone());
+        for view in self.pane_views_of(&shown) {
             view.update(cx, |pane, _| {
-                pane.update_session(session, self.sidebar.session_agents(&session.id));
+                pane.update_session(session, self.sidebar.agents(reply.host));
             });
         }
         let own_change = request_id
@@ -4419,9 +4432,12 @@ impl RootView {
         self.scan_unseen_cwd_paths();
     }
 
-    /// The daemon's whole session list: every pane refreshes from it, the
-    /// panes whose session it names attach, each pane re-applies the size it
+    /// `host`'s whole session list: its panes refresh from it, the panes
+    /// whose session it names attach, each pane re-applies the size it
     /// resolves to, and the session named on the command line is focused.
+    /// A remote host's first list since its `Welcome` attaches every
+    /// terminal of that host again, on the new connection; a later list on
+    /// the same connection re-attaches none.
     fn on_sessions(
         &mut self,
         host: &HostKey,
@@ -4429,13 +4445,17 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let fresh = self.lists_since_welcome.insert(host.clone());
         // The layout home's list gates the wanted session and the pop-outs.
         if *host == HostKey::Local {
             self.sessions_loaded = true;
         } else {
             self.remote_lists_in.insert(host.clone());
+            if fresh {
+                self.reset_host_panes(host, cx);
+            }
         }
-        for view in self.pane_views(None) {
+        for view in self.pane_views_on(host) {
             view.update(cx, |pane, _| {
                 pane.refresh_sessions(sessions, self.sidebar.agents(host));
             });

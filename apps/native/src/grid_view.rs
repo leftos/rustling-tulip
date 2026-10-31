@@ -23,6 +23,7 @@ use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
+use crate::open_view::LinkSource;
 use crate::popouts::{self, PopoutKey};
 use crate::session_actions::StopPlace;
 use crate::session_menu::{BorderedButton, bordered_button};
@@ -33,7 +34,7 @@ use crate::sidebar::{
 use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
 use crate::spawns::{OpenIn, PaneAim};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
-use crate::tabs::{self, PaneBinding, TabsModel};
+use crate::tabs::{self, PaneBinding, SessionRef, TabsModel};
 use crate::target::{HostKey, Target};
 use crate::term::prompt_nav::Dir;
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
@@ -85,7 +86,10 @@ const ACCENT_LINE_WIDTH: f32 = 3.0;
 pub(crate) struct PaneSlot {
     view: Entity<TerminalPane>,
     tab_id: String,
-    /// The pane's session; attached once the session list names it.
+    /// The host of the pane's session, from the pane itself (or a session
+    /// pop-out's key); everything the terminal sends goes there.
+    host: HostKey,
+    /// The pane's session; attached once its host's session list names it.
     session: Option<String>,
     /// The session a new connection unbound the pane from, until the next
     /// tab list binds it again.
@@ -108,6 +112,18 @@ impl PaneSlot {
     pub(crate) fn session(&self) -> Option<&str> {
         self.session.as_deref()
     }
+
+    /// The session the pane shows, with its host.
+    fn session_ref(&self) -> Option<SessionRef> {
+        self.session
+            .as_ref()
+            .map(|id| SessionRef::new(self.host.clone(), id.clone()))
+    }
+
+    /// Whether the pane shows `session`, host and id both.
+    fn shows(&self, session: &SessionRef) -> bool {
+        self.host == session.host && self.session.as_deref() == Some(session.id.as_str())
+    }
 }
 
 /// One scrollback retry per session and attempt, and a fresh request id for
@@ -116,7 +132,7 @@ impl PaneSlot {
 /// only the first report goes out.
 #[derive(Debug, Default)]
 pub(crate) struct RetryGate {
-    rounds: HashMap<String, Round>,
+    rounds: HashMap<SessionRef, Round>,
 }
 
 /// A session's latest `LoadScrollback`.
@@ -131,10 +147,10 @@ struct Round {
 impl RetryGate {
     /// A fresh attach of the session: counts its retries from the start and
     /// returns the id for its first request.
-    pub(crate) fn start(&mut self, session_id: &str) -> String {
+    pub(crate) fn start(&mut self, session: &SessionRef) -> String {
         let request_id = new_request_id();
         self.rounds.insert(
-            session_id.to_owned(),
+            session.clone(),
             Round {
                 request_id: request_id.clone(),
                 attempt: 0,
@@ -148,11 +164,11 @@ impl RetryGate {
     /// request, and no pane has reported this attempt yet.
     pub(crate) fn claim(
         &mut self,
-        session_id: &str,
+        session: &SessionRef,
         request_id: Option<&str>,
         attempt: usize,
     ) -> Option<String> {
-        let round = self.rounds.get_mut(session_id)?;
+        let round = self.rounds.get_mut(session)?;
         if request_id != Some(round.request_id.as_str()) || round.attempt >= attempt {
             return None;
         }
@@ -201,13 +217,13 @@ fn grid_rect(bounds: Bounds<Pixels>) -> tabs::Rect {
 /// each answer reaches the child as input, so only one pane answers.
 fn query_answerers(
     bindings: &[PaneBinding],
-    drivers: &HashMap<String, String>,
-) -> HashMap<String, String> {
+    drivers: &HashMap<SessionRef, String>,
+) -> HashMap<SessionRef, String> {
     let mut answerers = drivers.clone();
     for binding in bindings {
         if let Some(session_id) = &binding.session_id {
             answerers
-                .entry(session_id.clone())
+                .entry(SessionRef::new(binding.host.clone(), session_id.clone()))
                 .or_insert_with(|| binding.pane_id.clone());
         }
     }
@@ -221,29 +237,27 @@ impl RootView {
     /// showing a session that lost one re-attach. The session the focused
     /// pane now shows has its finished turn seen, as a focus would.
     pub(crate) fn reconcile_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let before = tabs::view_counts(
-            self.panes
-                .values()
-                .filter_map(|slot| slot.session.as_deref()),
-        );
+        let before = tabs::view_counts(self.panes.values().filter_map(PaneSlot::session_ref));
         let bindings = self.tabs.bindings();
         self.drop_removed_panes(&bindings, cx);
         let mut to_sync = self.bind_panes(bindings, window, cx);
         // A session pop-out's terminal shows its session beside the panes.
         let mut after = self.tabs.view_counts();
-        for session_id in self.popouts.popped_sessions() {
-            *after.entry(session_id.to_owned()).or_insert(0) += 1;
+        for session in self.popouts.popped_sessions() {
+            *after.entry(session).or_insert(0) += 1;
         }
         let changes = tabs::session_changes(&before, &after);
-        for session_id in changes.detach {
+        for session in changes.detach {
             self.send_to(
-                &self.host_of_session(&session_id),
-                ClientMessage::Detach { session_id },
+                &session.host,
+                ClientMessage::Detach {
+                    session_id: session.id,
+                },
             );
         }
         to_sync.extend(changes.resync);
-        for session_id in to_sync {
-            self.sync_session(&session_id, cx);
+        for session in to_sync {
+            self.sync_session(&session, cx);
         }
         if let Some(id) = self.shown_session() {
             self.sidebar.mark_seen(&id);
@@ -266,59 +280,66 @@ impl RootView {
         });
     }
 
-    /// Gives every pane a terminal and records its session; returns the
+    /// Gives every pane a terminal and records its session with its host;
+    /// a pane whose session or host changed lets its terminal go, and one
+    /// that moved to another host sends there from now on. Returns the
     /// sessions a pane newly shows.
     fn bind_panes(
         &mut self,
         bindings: Vec<PaneBinding>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> BTreeSet<String> {
+    ) -> BTreeSet<SessionRef> {
         let mut shown = BTreeSet::new();
         for binding in bindings {
             if !self.panes.contains_key(&binding.pane_id) {
-                let slot =
-                    self.new_slot(&binding.pane_id, binding.session_id.as_deref(), window, cx);
+                let slot = self.new_slot(&binding.pane_id, &binding.host, window, cx);
                 self.panes.insert(binding.pane_id.clone(), slot);
             }
+            let sender = self.hosts.sender(&binding.host);
             let Some(slot) = self.panes.get_mut(&binding.pane_id) else {
                 continue;
             };
             slot.tab_id = binding.tab_id;
             let unbound_from = slot.unbound_from.take();
-            if slot.session != binding.session_id {
-                // A pane that newly shows a session opens in that session's
-                // remembered view; one a new connection unbound keeps its
-                // view when it is bound to the same session again.
-                let before = slot.session.as_ref().or(unbound_from.as_ref());
-                let rebound = before.is_some() && before == binding.session_id.as_ref();
-                slot.view.update(cx, |pane, _| pane.release());
-                slot.attached = false;
-                slot.session = binding.session_id;
-                shown.extend(slot.session.clone());
-                if !rebound {
-                    let session_id = slot.session.clone();
-                    self.open_pane_view(&binding.pane_id, session_id.as_deref());
+            if slot.session == binding.session_id && slot.host == binding.host {
+                continue;
+            }
+            // A pane that newly shows a session opens in that session's
+            // remembered view; one a new connection unbound keeps its view
+            // when it is bound to the same session again.
+            let before = slot.session.clone().or(unbound_from);
+            let rebound =
+                before.is_some() && before == binding.session_id && slot.host == binding.host;
+            let rehosted = slot.host != binding.host;
+            slot.view.update(cx, |pane, _| {
+                pane.release();
+                if rehosted {
+                    pane.set_sender(sender);
                 }
+            });
+            slot.attached = false;
+            slot.host = binding.host;
+            slot.session = binding.session_id;
+            shown.extend(slot.session_ref());
+            if !rebound {
+                let session_id = slot.session.clone();
+                self.open_pane_view(&binding.pane_id, session_id.as_deref());
             }
         }
         shown
     }
 
-    /// A terminal slot for `pane_id`, its input going to the host of
-    /// `session` (Local for a pane with no session yet).
+    /// A terminal slot for `pane_id`, showing a session of `host`: its
+    /// input goes to that host's connection, whichever one it is.
     fn new_slot(
-        &self,
+        &mut self,
         pane_id: &str,
-        session: Option<&str>,
+        host: &HostKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PaneSlot {
-        let host = session.map_or(HostKey::Local, |id| self.host_of_session(id));
-        let tx = self.host_tx(&host).unwrap_or_else(|| {
-            tracing::warn!("no connection for host {host:?}; the pane's input goes nowhere");
-            futures::channel::mpsc::unbounded().0
-        });
+        let tx = self.hosts.sender(host);
         let now = self.now.clone();
         let font = self.sidebar.ui_state().terminal_font.clone();
         let view = cx.new(|cx| TerminalPane::new(pane_id.to_owned(), tx, now, font, cx));
@@ -336,6 +357,7 @@ impl RootView {
         PaneSlot {
             view,
             tab_id: String::new(),
+            host: host.clone(),
             session: None,
             unbound_from: None,
             attached: false,
@@ -464,46 +486,56 @@ impl RootView {
         }
     }
 
-    /// Attaches every pane showing the session afresh and asks for its
-    /// scrollback once: the daemon keeps one output stream per session for
-    /// this connection, restarted by each request, so the panes share one.
-    fn sync_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    /// Attaches every pane showing the session (host and id) afresh, once
+    /// its host's list names it, and asks that host for its scrollback
+    /// once: the daemon keeps one output stream per session for this
+    /// connection, restarted by each request, so the panes share one.
+    fn sync_session(&mut self, target: &SessionRef, cx: &mut Context<Self>) {
+        // A remote host's list from before its latest `Welcome` names what
+        // its old connection served; its panes wait for the fresh one.
+        if target.host != HostKey::Local && !self.listed_since_welcome(&target.host) {
+            return;
+        }
         let Some(session) = self
             .sidebar
-            .session(session_id)
+            .sessions_of(&target.host)
+            .iter()
+            .find(|s| s.id == target.id)
             .filter(|s| can_attach(s))
             .cloned()
         else {
             return;
         };
-        let request_id = self.retries.start(session_id);
+        let request_id = self.retries.start(target);
         let mut attached = false;
-        for slot in self
-            .panes
-            .values_mut()
-            .filter(|slot| slot.session.as_deref() == Some(session_id))
-        {
+        for slot in self.panes.values_mut().filter(|slot| slot.shows(target)) {
             slot.view.update(cx, |pane, cx| {
-                pane.attach(&session, self.sidebar.session_agents(session_id), cx);
+                pane.attach(&session, self.sidebar.agents(&target.host), cx);
             });
             slot.attached = true;
             attached = true;
         }
         if attached {
-            self.request_scrollback(session_id, request_id, cx);
+            self.request_scrollback(target, request_id, cx);
         }
     }
 
-    /// Sends `LoadScrollback` for the session under `request_id`, and tells
-    /// every pane showing it that only this request's reply counts.
-    fn request_scrollback(&mut self, session_id: &str, request_id: String, cx: &mut Context<Self>) {
-        for view in self.pane_views(Some(session_id)) {
+    /// Sends `LoadScrollback` for the session to its host under
+    /// `request_id`, and tells every pane showing it that only this
+    /// request's reply counts.
+    fn request_scrollback(
+        &mut self,
+        session: &SessionRef,
+        request_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        for view in self.pane_views_of(session) {
             view.update(cx, |pane, _| pane.expect_scrollback(&request_id));
         }
         self.send_to(
-            &self.host_of_session(session_id),
+            &session.host,
             ClientMessage::LoadScrollback {
-                session_id: session_id.to_owned(),
+                session_id: session.id.clone(),
                 request_id: Some(request_id),
             },
         );
@@ -537,10 +569,9 @@ impl RootView {
         );
         let answerers = query_answerers(&bindings, &drivers);
         for (pane_id, slot) in &self.panes {
-            let holds = |roles: &HashMap<String, String>| {
-                slot.session
-                    .as_ref()
-                    .is_some_and(|session| roles.get(session) == Some(pane_id))
+            let holds = |roles: &HashMap<SessionRef, String>| {
+                slot.session_ref()
+                    .is_some_and(|session| roles.get(&session) == Some(pane_id))
             };
             let (drives, answers) = (holds(&drivers), holds(&answerers));
             slot.view.update(cx, |pane, _| {
@@ -747,29 +778,36 @@ impl RootView {
         view.cell_foreground(row, col).map(appearance::packed)
     }
 
-    /// A pane's scrollback retry, sent once per session and attempt; a
-    /// pane's copy, which the root's clipboard write and chip answer; or a
-    /// pane's Ctrl+clicked link, which opens.
+    /// Terminal `slot_id`'s scrollback retry, sent once per session and
+    /// attempt to the slot's host; its copy, which the root's clipboard
+    /// write and chip answer; or its Ctrl+clicked link, which opens.
     pub(crate) fn on_pane_event(
         &mut self,
+        slot_id: &str,
         event: &PaneEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let host = self.panes.get(slot_id).map(|slot| slot.host.clone());
         match event {
             PaneEvent::ScrollbackRetry {
                 session_id,
                 attempt,
                 request_id,
             } => {
+                let Some(host) = host else {
+                    tracing::debug!(%slot_id, "a gone terminal's scrollback retry; not sent");
+                    return;
+                };
+                let session = SessionRef::new(host, session_id.clone());
                 if let Some(request_id) =
                     self.retries
-                        .claim(session_id, request_id.as_deref(), *attempt)
+                        .claim(&session, request_id.as_deref(), *attempt)
                 {
                     tracing::warn!(
                         "scrollback request for session {session_id} timed out; retry {attempt}"
                     );
-                    self.request_scrollback(session_id, request_id, cx);
+                    self.request_scrollback(&session, request_id, cx);
                 }
             }
             PaneEvent::Copied { text } => self.copy_to_clipboard(text, cx),
@@ -778,7 +816,15 @@ impl RootView {
                 base_dirs,
                 session,
             } => {
-                self.open_link(link, base_dirs.clone(), session.as_deref(), window, cx);
+                let Some(host) = host else {
+                    tracing::debug!(%slot_id, "a gone terminal's link click; not opened");
+                    return;
+                };
+                let source = LinkSource {
+                    host: &host,
+                    session: session.as_deref(),
+                };
+                self.open_link(link, base_dirs.clone(), &source, window, cx);
             }
             PaneEvent::ShellDotMenu { pane_id, index, at } => {
                 self.open_shell_menu(pane_id, *index, *at, window, cx);
@@ -786,27 +832,33 @@ impl RootView {
         }
     }
 
-    /// Attaches panes whose session the session list did not name before.
+    /// Attaches panes whose session their host's session list did not name
+    /// before.
     pub(crate) fn attach_waiting_panes(&mut self, cx: &mut Context<Self>) {
-        let waiting: BTreeSet<String> = self
+        let waiting: BTreeSet<SessionRef> = self
             .panes
             .values()
             .filter(|slot| !slot.attached)
-            .filter_map(|slot| slot.session.clone())
+            .filter_map(PaneSlot::session_ref)
             .collect();
-        for session_id in waiting {
-            self.sync_session(&session_id, cx);
+        for session in waiting {
+            self.sync_session(&session, cx);
         }
     }
 
-    /// A new connection starts with nothing attached; the next tab list
-    /// attaches every pane again. A session pop-out's terminal, which no tab
-    /// list names, keeps its session and attaches with the next session
-    /// list. Its chats are loaded afresh too: each chat pane keeps its view
-    /// and asks again once bound.
+    /// This PC's new connection starts with nothing of its own attached;
+    /// the next tab list attaches every pane of This PC again. A session
+    /// pop-out's terminal, which no tab list names, keeps its session and
+    /// attaches with the next session list. Its chats are loaded afresh too:
+    /// each chat pane keeps its view and asks again once bound. A remote
+    /// host's terminals stay as they are: their connection did not change.
     pub(crate) fn reset_panes(&mut self, cx: &mut Context<Self>) {
         self.chat.reset_connection();
-        for (pane_id, slot) in &mut self.panes {
+        let local = self
+            .panes
+            .iter_mut()
+            .filter(|(_, slot)| slot.host == HostKey::Local);
+        for (pane_id, slot) in local {
             slot.view.update(cx, |pane, cx| {
                 pane.reset_for_reconnect();
                 cx.notify();
@@ -818,37 +870,54 @@ impl RootView {
         }
     }
 
-    /// Gives session `session_id`'s pop-out a terminal of its own, outside
-    /// every grid, and attaches it as a pane attaches: scrollback first.
+    /// `host`'s first session list on a new connection: every terminal
+    /// showing one of its sessions, panes and session pop-outs alike,
+    /// keeps its session and attaches again, on that connection.
+    pub(crate) fn reset_host_panes(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        for slot in self.panes.values_mut().filter(|slot| slot.host == *host) {
+            slot.view.update(cx, |pane, cx| {
+                pane.reset_for_reconnect();
+                cx.notify();
+            });
+            slot.attached = false;
+        }
+    }
+
+    /// Gives `session`'s pop-out a terminal of its own, outside every grid,
+    /// sending to the session's host, and attaches it as a pane attaches:
+    /// scrollback first.
     pub(crate) fn open_session_slot(
         &mut self,
-        session_id: &str,
+        session: &SessionRef,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let slot_id = popouts::session_slot_id(session_id);
-        let mut slot = self.new_slot(&slot_id, Some(session_id), window, cx);
-        slot.session = Some(session_id.to_owned());
+        let slot_id = popouts::session_slot_id(&session.host, &session.id);
+        let mut slot = self.new_slot(&slot_id, &session.host, window, cx);
+        slot.session = Some(session.id.clone());
         self.panes.insert(slot_id.clone(), slot);
-        self.open_pane_view(&slot_id, Some(session_id));
-        self.apply_fonts_where(
-            |slot| slot.session.as_deref() == Some(session_id),
-            false,
-            cx,
-        );
-        self.sync_session(session_id, cx);
+        self.open_pane_view(&slot_id, Some(&session.id));
+        self.apply_fonts_where(|slot| slot.shows(session), false, cx);
+        self.sync_session(session, cx);
         self.sync_chat_loads();
         self.update_pane_roles(cx);
     }
 
-    /// Moves session `old`'s pop-out terminal to its restart `new`: the same
-    /// terminal, emptied and attached afresh to `new`.
-    pub(crate) fn rekey_session_slot(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
-        let old_id = popouts::session_slot_id(old);
+    /// Moves `host`'s session `old`'s pop-out terminal to its restart `new`
+    /// on the same host: the same terminal, emptied and attached afresh to
+    /// `new`.
+    pub(crate) fn rekey_session_slot(
+        &mut self,
+        host: &HostKey,
+        old: &str,
+        new: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let old_id = popouts::session_slot_id(host, old);
         let Some(mut slot) = self.panes.remove(&old_id) else {
             return;
         };
-        let new_id = popouts::session_slot_id(new);
+        let new_id = popouts::session_slot_id(host, new);
         slot.view.update(cx, |pane, cx| {
             pane.release();
             pane.set_pane_id(new_id.clone());
@@ -861,16 +930,17 @@ impl RootView {
         if self.popout_focused.as_deref() == Some(old_id.as_str()) {
             self.popout_focused = Some(new_id);
         }
-        self.apply_fonts_where(|slot| slot.session.as_deref() == Some(new), false, cx);
-        self.sync_session(new, cx);
+        let new = SessionRef::new(host.clone(), new);
+        self.apply_fonts_where(|slot| slot.shows(&new), false, cx);
+        self.sync_session(&new, cx);
         self.sync_chat_loads();
     }
 
-    /// Drops session `session_id`'s pop-out terminal as its window closes;
-    /// a session no other terminal shows is detached while the daemon still
-    /// lists it.
-    pub(crate) fn drop_session_slot(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        let slot_id = popouts::session_slot_id(session_id);
+    /// Drops `session`'s pop-out terminal as its window closes; a session
+    /// no other terminal shows is detached on its host while that host
+    /// still lists it.
+    pub(crate) fn drop_session_slot(&mut self, session: &SessionRef, cx: &mut Context<Self>) {
+        let slot_id = popouts::session_slot_id(&session.host, &session.id);
         let Some(slot) = self.panes.remove(&slot_id) else {
             return;
         };
@@ -880,12 +950,16 @@ impl RootView {
         if self.popout_focused.as_deref() == Some(slot_id.as_str()) {
             self.popout_focused = None;
         }
-        let listed = self.sidebar.session(session_id).is_some();
-        if listed && self.pane_views(Some(session_id)).is_empty() {
+        let listed = self
+            .sidebar
+            .sessions_of(&session.host)
+            .iter()
+            .any(|s| s.id == session.id);
+        if listed && self.pane_views_of(session).is_empty() {
             self.send_to(
-                &self.host_of_session(session_id),
+                &session.host,
                 ClientMessage::Detach {
-                    session_id: session_id.to_owned(),
+                    session_id: session.id.clone(),
                 },
             );
         }
@@ -908,38 +982,57 @@ impl RootView {
             .map(|(pane_id, _)| (*pane_id).clone())
     }
 
-    /// The terminals showing `session_id`, or every terminal.
-    pub(crate) fn pane_views(&self, session_id: Option<&str>) -> Vec<Entity<TerminalPane>> {
+    /// The terminals showing `session`, host and id both.
+    pub(crate) fn pane_views_of(&self, session: &SessionRef) -> Vec<Entity<TerminalPane>> {
         self.panes
             .values()
-            .filter(|slot| session_id.is_none() || slot.session.as_deref() == session_id)
+            .filter(|slot| slot.shows(session))
             .map(|slot| slot.view.clone())
             .collect()
     }
 
-    /// Hands a session's scrollback reply to every pane showing it.
-    pub(crate) fn feed_scrollback(&mut self, reply: &ScrollbackReply, cx: &mut Context<Self>) {
-        self.feed_panes(&reply.session_id, cx, |pane, cx| {
-            pane.on_scrollback(reply, cx)
-        });
+    /// The terminals showing a session of `host`.
+    pub(crate) fn pane_views_on(&self, host: &HostKey) -> Vec<Entity<TerminalPane>> {
+        self.panes
+            .values()
+            .filter(|slot| slot.host == *host)
+            .map(|slot| slot.view.clone())
+            .collect()
     }
 
-    /// Hands live output for `session_id` to every pane showing it.
-    pub(crate) fn feed_output(&mut self, session_id: &str, data_b64: &str, cx: &mut Context<Self>) {
-        self.feed_panes(session_id, cx, |pane, cx| pane.on_pty_output(data_b64, cx));
+    /// Hands a session's scrollback reply from `host` to every pane showing
+    /// that host's session.
+    pub(crate) fn feed_scrollback(
+        &mut self,
+        host: &HostKey,
+        reply: &ScrollbackReply,
+        cx: &mut Context<Self>,
+    ) {
+        let session = SessionRef::new(host.clone(), reply.session_id.clone());
+        self.feed_panes(&session, cx, |pane, cx| pane.on_scrollback(reply, cx));
     }
 
-    /// Hands daemon output for `session_id` to every pane showing it.
+    /// Hands live output for `session` to every pane showing it.
+    pub(crate) fn feed_output(
+        &mut self,
+        session: &SessionRef,
+        data_b64: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.feed_panes(session, cx, |pane, cx| pane.on_pty_output(data_b64, cx));
+    }
+
+    /// Hands daemon output for `session` to every pane showing it.
     pub(crate) fn feed_panes(
         &mut self,
-        session_id: &str,
+        session: &SessionRef,
         cx: &mut Context<Self>,
         mut feed: impl FnMut(
             &mut TerminalPane,
             &mut Context<TerminalPane>,
         ) -> Result<(), base64::DecodeError>,
     ) {
-        for view in self.pane_views(Some(session_id)) {
+        for view in self.pane_views_of(session) {
             let fed = view.update(cx, |pane, cx| {
                 cx.notify();
                 feed(pane, cx)
@@ -1593,7 +1686,9 @@ impl RootView {
     ) -> Option<AnyElement> {
         match key {
             PopoutKey::Pane { tab_id, pane_id } => self.popped_pane(key, tab_id, pane_id, cx),
-            PopoutKey::Session { session_id, .. } => Some(self.popped_session(session_id, cx)),
+            PopoutKey::Session { session_id, .. } => {
+                Some(self.popped_session(&key.host(), session_id, cx))
+            }
             PopoutKey::Tab { tab_id } => self.popped_tab(tab_id, here, cx),
         }
     }
@@ -1636,10 +1731,20 @@ impl RootView {
     /// note, the banner and the overlays a pane would draw for it; once the
     /// daemon has dropped the session, the not-found note under a toolbar
     /// holding only Close window.
-    fn popped_session(&self, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn popped_session(
+        &self,
+        host: &HostKey,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
-        let slot_id = popouts::session_slot_id(session_id);
-        let Some(session) = self.sidebar.session(session_id) else {
+        let slot_id = popouts::session_slot_id(host, session_id);
+        let Some(session) = self
+            .sidebar
+            .sessions_of(host)
+            .iter()
+            .find(|s| s.id == session_id)
+        else {
             let toolbar = popout_toolbar_row(
                 &slot_id,
                 Vec::new(),
@@ -2104,7 +2209,7 @@ impl RootView {
         header_parts(
             session,
             self.sidebar.is_unseen(&session.id),
-            self.sidebar.agents(&crate::target::HostKey::Local),
+            self.sidebar.session_agents(&session.id),
             host.as_ref(),
         )
     }
@@ -3032,6 +3137,8 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
 )]
 mod tests {
     use super::{HeaderChip, HeaderChipKind, RetryGate, header_parts, status_label};
+    use crate::tabs::SessionRef;
+    use crate::target::HostKey;
     use protocol::{AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
 
@@ -3050,37 +3157,43 @@ mod tests {
         assert_eq!(status_label(SessionStatus::Error, false), "error");
     }
 
+    /// Session `id` of This PC.
+    fn on_this_pc(id: &str) -> SessionRef {
+        SessionRef::new(HostKey::Local, id)
+    }
+
     #[test]
     fn grid_retry_goes_out_once_per_session_and_attempt() {
         let mut gate = RetryGate::default();
-        let first = gate.start("s1");
+        let (s1, s2) = (on_this_pc("s1"), on_this_pc("s2"));
+        let first = gate.start(&s1);
         let retry = gate
-            .claim("s1", Some(&first), 2)
+            .claim(&s1, Some(&first), 2)
             .expect("the first report of a round");
         assert_ne!(retry, first, "every request gets its own id");
         assert_eq!(
-            gate.claim("s1", Some(&first), 2),
+            gate.claim(&s1, Some(&first), 2),
             None,
             "a second pane of the same session, still waiting on the first id"
         );
         assert_eq!(
-            gate.claim("s1", Some(&retry), 2),
+            gate.claim(&s1, Some(&retry), 2),
             None,
             "a second pane of the same session, already told the retry's id"
         );
-        let other = gate.start("s2");
-        assert!(gate.claim("s2", Some(&other), 2).is_some());
-        let next = gate.claim("s1", Some(&retry), 3).expect("the next round");
+        let other = gate.start(&s2);
+        assert!(gate.claim(&s2, Some(&other), 2).is_some());
+        let next = gate.claim(&s1, Some(&retry), 3).expect("the next round");
         assert_ne!(next, retry);
         assert_eq!(
-            gate.claim("s1", Some(&next), 2),
+            gate.claim(&s1, Some(&next), 2),
             None,
             "a late report of an earlier round"
         );
-        let again = gate.start("s1");
+        let again = gate.start(&s1);
         assert_ne!(again, first);
         assert!(
-            gate.claim("s1", Some(&again), 2).is_some(),
+            gate.claim(&s1, Some(&again), 2).is_some(),
             "a fresh attach counts again"
         );
     }
@@ -3088,12 +3201,13 @@ mod tests {
     #[test]
     fn a_retry_from_before_a_reattach_is_ignored() {
         let mut gate = RetryGate::default();
-        let before = gate.start("s1");
-        let current = gate.start("s1");
-        assert_eq!(gate.claim("s1", Some(&before), 2), None);
-        assert_eq!(gate.claim("s1", None, 2), None, "a pane that knows no id");
+        let s1 = on_this_pc("s1");
+        let before = gate.start(&s1);
+        let current = gate.start(&s1);
+        assert_eq!(gate.claim(&s1, Some(&before), 2), None);
+        assert_eq!(gate.claim(&s1, None, 2), None, "a pane that knows no id");
         assert!(
-            gate.claim("s1", Some(&current), 2).is_some(),
+            gate.claim(&s1, Some(&current), 2).is_some(),
             "the ignored retry left the expected id alone"
         );
     }
