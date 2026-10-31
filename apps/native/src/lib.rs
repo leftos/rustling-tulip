@@ -3195,9 +3195,11 @@ impl RootView {
             .collect()
     }
 
-    /// Whether `key` is a pane pop-out whose pane is in no tab, or whose
-    /// session a forget of its panes is on its way for: restoring it would
-    /// open a window the forget closes again.
+    /// Whether `key` is a pane pop-out whose pane is in no tab, whose remote
+    /// host has listed since its latest `Welcome` without the pane's
+    /// session, or whose session a forget of its panes is on its way for:
+    /// restoring it would open a window the pane's forget closes again,
+    /// whatever This PC's state.
     fn popout_pane_forgotten(&self, key: &PopoutKey) -> bool {
         let PopoutKey::Pane { tab_id, pane_id } = key else {
             return false;
@@ -3211,19 +3213,35 @@ impl RootView {
         else {
             return true;
         };
-        pane.session
-            .is_some_and(|id| self.forget_in_flight(&SessionRef::new(pane.host.clone(), id)))
+        let Some(id) = pane.session else {
+            return false;
+        };
+        let unlisted = pane.host != HostKey::Local
+            && self.listed_since_welcome(&pane.host)
+            && !self
+                .sidebar
+                .sessions_of(&pane.host)
+                .iter()
+                .any(|session| session.id == id);
+        unlisted || self.forget_in_flight(&SessionRef::new(pane.host.clone(), id))
+    }
+
+    /// `entry` as it stands in the layout now: a pane pop-out whose pane
+    /// moved to another tab is keyed under that tab.
+    fn followed_popout(&self, entry: &SavedPopout) -> SavedPopout {
+        popouts::follow_saved_moves(vec![entry.clone()], self.tabs.tabs())
+            .pop()
+            .unwrap_or_else(|| entry.clone())
     }
 
     /// A remote host's session list arrived: the saved pop-outs no longer
     /// waiting for any host's list reopen in the main window, and one whose
     /// content is gone is dropped.
     fn restore_awaited_popouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self
-            .popouts_awaiting_hosts
-            .iter()
-            .any(|entry| self.unlisted_hosts(&entry.key).is_empty())
-        {
+        if !self.popouts_awaiting_hosts.iter().any(|entry| {
+            self.unlisted_hosts(&self.followed_popout(entry).key)
+                .is_empty()
+        }) {
             return;
         }
         if self.is_main_window(window) {
@@ -3233,18 +3251,24 @@ impl RootView {
         }
     }
 
-    /// Reopens each awaited pop-out whose hosts have all listed, a moved
-    /// pane under its new tab; a pane pop-out whose pane is gone or being
-    /// forgotten, or one that does not open, is dropped and un-saved.
+    /// Reopens each awaited pop-out whose hosts, read under its current key
+    /// (a moved pane under its new tab), have all listed; a pane pop-out
+    /// whose pane is gone or being forgotten, or one that does not open, is
+    /// dropped and un-saved.
     fn reopen_awaited_popouts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (due, rest): (Vec<SavedPopout>, Vec<SavedPopout>) =
-            std::mem::take(&mut self.popouts_awaiting_hosts)
-                .into_iter()
-                .partition(|entry| self.unlisted_hosts(&entry.key).is_empty());
+        let awaiting = std::mem::take(&mut self.popouts_awaiting_hosts);
+        let (mut due, mut rest) = (Vec::new(), Vec::new());
+        for was in awaiting {
+            let entry = self.followed_popout(&was);
+            if self.unlisted_hosts(&entry.key).is_empty() {
+                due.push((was, entry));
+            } else {
+                rest.push(was);
+            }
+        }
         self.popouts_awaiting_hosts = rest;
-        let followed = popouts::follow_saved_moves(due.clone(), self.tabs.tabs());
         let mut changed = false;
-        for (was, entry) in due.iter().zip(followed) {
+        for (was, entry) in due {
             if entry.key != was.key {
                 changed |= self.sidebar.forget_saved_popout(&was.key);
             }
