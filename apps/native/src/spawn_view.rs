@@ -25,14 +25,15 @@ use crate::overlay_owner::Overlay;
 use crate::remote_mode::spawn_no_repos_note;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_form::{
-    Control, EnvRow, EnvRowNote, FormInputs, ListField, Lock, OpenChoice, Outcome, Prefill,
-    ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
+    Control, EnvRow, EnvRowNote, FormInputs, HostInputs, ListField, Lock, OpenChoice, Outcome,
+    Prefill, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
     staleness_notice,
 };
 use crate::spawns::PaneAim;
+use crate::target::HostKey;
 use crate::text_input::{NavKey, TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::{RootView, tagged_text, tooltip};
@@ -432,6 +433,13 @@ impl RootView {
         )
     }
 
+    /// The env section's note after a move to another host dropped secret
+    /// rows, while the dialog is open and shows it.
+    #[must_use]
+    pub fn spawn_dialog_env_section_note(&self) -> Option<&'static str> {
+        self.form_dialog()?.form.env_section_note()
+    }
+
     /// The note env row `index` shows about where its value is kept, while
     /// the dialog is open and the row has one.
     #[must_use]
@@ -530,7 +538,58 @@ impl RootView {
         {
             return Some("another dialog is open");
         }
-        lock.and_then(|lock| lock.unregistered(self.sidebar.repos(), self.sidebar.workspaces()))
+        let lock = lock?;
+        let host = lock
+            .target()
+            .map_or(HostKey::Local, |target| target.host().clone());
+        lock.unregistered(
+            self.sidebar.repos_of(&host),
+            self.sidebar.workspaces_of(&host),
+        )
+    }
+
+    /// `host` as the spawn dialog lists it: its registry, its agents and
+    /// their Settings values on that host.
+    fn spawn_host_inputs(&self, host: &HostKey) -> HostInputs {
+        HostInputs {
+            host: host.clone(),
+            label: self.host_name(host),
+            repos: self.sidebar.repos_of(host).to_vec(),
+            workspaces: self.sidebar.workspaces_of(host).to_vec(),
+            agents: self.sidebar.agents(host).to_vec(),
+            agent_settings: self
+                .hosts
+                .get(host)
+                .map(|conn| conn.mirrors.agent_settings.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Every connected host as the spawn dialog lists them, This PC first.
+    fn spawn_hosts(&self) -> Vec<HostInputs> {
+        self.held_hosts()
+            .iter()
+            .filter(|host| !self.is_remote_offline(host))
+            .map(|host| self.spawn_host_inputs(host))
+            .collect()
+    }
+
+    /// The session the dialog opens next to, with its host: `preselect` on
+    /// the host that lists it, else the focused pane's session on that
+    /// pane's own host.
+    fn spawn_focus(
+        &self,
+        preselect: Option<String>,
+    ) -> Option<(HostKey, protocol::SessionSnapshot)> {
+        let (host, id) = if let Some(id) = preselect {
+            (self.host_of_session(&id), id)
+        } else {
+            let tab = self.tabs.active_tab()?;
+            let pane = self.tabs.focused_pane(&tab.id)?;
+            (self.tabs.pane_host(&tab.id, &pane), self.focused_session()?)
+        };
+        let session = self.sidebar.session_on(&host, &id)?.clone();
+        Some((host, session))
     }
 
     /// Opens the spawn dialog held on `lock`, prefilled from `prefill`, for
@@ -596,15 +655,14 @@ impl RootView {
         if self.spawn_dialog_blocker(lock.as_ref(), false).is_some() {
             return false;
         }
-        let focused = preselect.or_else(|| self.focused_session());
+        let focused = self.spawn_focus(preselect);
         let inputs = FormInputs {
-            repos: self.sidebar.repos(),
-            workspaces: self.sidebar.workspaces(),
-            focused: focused.as_deref().and_then(|id| self.sidebar.session(id)),
+            hosts: self.spawn_hosts(),
+            focused: focused
+                .as_ref()
+                .map(|(host, session)| (host.clone(), session)),
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
-            agents: self.sidebar.agents(&crate::target::HostKey::Local),
-            agent_settings: &self.hosts.local().mirrors.agent_settings,
             lock,
         };
         let now = (self.now)();
@@ -920,9 +978,24 @@ impl RootView {
         }
     }
 
+    /// Sends the dialog's requests to the host its target is on; the env
+    /// name list is This PC's.
     fn send_all(&self, messages: Vec<protocol::ClientMessage>) {
+        let host = self.spawn_form_host();
         for msg in messages {
-            self.send_to(&self.host_of_request(&msg), msg);
+            let to = match msg {
+                protocol::ClientMessage::ListEnvNames { .. } => HostKey::Local,
+                _ => host.clone(),
+            };
+            self.send_to(&to, msg);
+        }
+    }
+
+    /// The host the open dialog's target is on; This PC with no form open.
+    fn spawn_form_host(&self) -> HostKey {
+        match &self.spawn_dialog {
+            Some(SpawnModal::Form(dialog)) => dialog.form.host().clone(),
+            _ => HostKey::Local,
         }
     }
 
@@ -972,8 +1045,9 @@ impl RootView {
                 cx.notify();
             }
             Outcome::Spawn(submission) => {
+                let host = self.spawn_form_host();
                 if let Some(msg) = submission.default_change {
-                    self.send_to(&self.host_of_request(&msg), msg);
+                    self.send_to(&host, msg);
                 }
                 let aim = match &mut self.spawn_dialog {
                     Some(SpawnModal::Form(dialog)) => dialog.aim.take(),
@@ -984,7 +1058,7 @@ impl RootView {
                     None => submission.open_in,
                 };
                 self.close_spawn_dialog(window, cx);
-                self.spawn(submission.request, open_in, cx);
+                self.spawn_on(&host, submission.request, open_in, cx);
             }
         }
     }
@@ -1063,7 +1137,7 @@ impl RootView {
             _ => None,
         };
         if let Some(msg) = msg {
-            self.send_to(&self.host_of_request(&msg), msg);
+            self.send_to(&self.spawn_form_host(), msg);
         }
         cx.notify();
     }
@@ -1202,12 +1276,12 @@ impl RootView {
         }
     }
 
-    /// A daemon message the dialog follows. Suggestions are cached whether
-    /// or not it is open. The dialog lists This PC's registry, so another
-    /// host's repo or workspace list is not for it.
+    /// A daemon message from `host` the dialog follows. Suggestions are
+    /// cached whether or not it is open. A host's repo or workspace list
+    /// replaces that host's targets in the dialog.
     pub(crate) fn on_spawn_dialog_message(
         &mut self,
-        host: &crate::target::HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1217,9 +1291,6 @@ impl RootView {
             msg,
             DaemonMessage::Repos { .. } | DaemonMessage::Workspaces { .. }
         );
-        if registry && *host != crate::target::HostKey::Local {
-            return;
-        }
         let suggestion = matches!(msg, DaemonMessage::BranchNameSuggestion { .. });
         // The dialog asks without a request id, so a reply carrying one
         // answers a launch-last wait instead.
@@ -1229,7 +1300,7 @@ impl RootView {
             request_id,
         } = msg
             && request_id.is_none()
-            && let Some(target) = Target::from_suggest(target)
+            && let Some(target) = Target::from_suggest(host, target)
         {
             self.branch_cache.insert(target.clone(), name.clone());
             if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
@@ -1246,16 +1317,19 @@ impl RootView {
             return;
         };
         let messages = if registry {
-            let (repos, workspaces) = (self.sidebar.repos(), self.sidebar.workspaces());
+            let inputs = self.spawn_host_inputs(host);
+            let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
+                return;
+            };
             match dialog
                 .form
-                .set_registry(repos, workspaces, &mut self.branch_cache, now)
+                .set_registry(inputs, &mut self.branch_cache, now)
             {
                 Some(messages) => messages,
                 None => return self.close_spawn_dialog(window, cx),
             }
         } else {
-            match dialog.form.on_message(msg) {
+            match dialog.form.on_message(host, msg) {
                 Some(messages) => messages,
                 None if suggestion => Vec::new(),
                 None => return,
@@ -2659,6 +2733,7 @@ fn env_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) 
         .map(|(index, inputs)| env_row(dialog, index, inputs, focus, cx))
         .collect();
     let empty = rows.is_empty().then(|| muted(NO_ENV, &t));
+    let dropped = dialog.form.env_section_note().map(|text| muted(text, &t));
     let add = spawn_button(&Control::EnvAdd, OUTLINED, "+ Add env var", true, focus, cx);
     field(
         crate::fonts::ui_text_size(cx),
@@ -2666,6 +2741,7 @@ fn env_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) 
         "Extra environment variables",
         &t,
     )
+    .children(dropped)
     .children(empty)
     .children(rows)
     .child(div().flex().child(add))

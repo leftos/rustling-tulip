@@ -2887,14 +2887,21 @@ impl RootView {
         {
             return;
         }
+        let host = match container {
+            launch_last::Container::Repo(id) => self.host_of_repo(id),
+            launch_last::Container::Workspace(id) => self.host_of_workspace(id),
+        };
         let Some(config) = self.sidebar.last_spawn_config(container) else {
             let target = match container {
-                launch_last::Container::Repo(id) => Target::Repo(id.to_owned()),
-                launch_last::Container::Workspace(id) => Target::Workspace(id.to_owned()),
+                launch_last::Container::Repo(id) => Target::repo(&host, id),
+                launch_last::Container::Workspace(id) => Target::workspace(&host, id),
             };
             let lock = Lock::for_target(target);
             if lock
-                .unregistered(self.sidebar.repos(), self.sidebar.workspaces())
+                .unregistered(
+                    self.sidebar.repos_of(&host),
+                    self.sidebar.workspaces_of(&host),
+                )
                 .is_none()
             {
                 self.open_spawn_dialog(
@@ -2912,7 +2919,7 @@ impl RootView {
             self.push_toast(ToastKind::Warning, HEADLESS_UNSUPPORTED_TIP, None, cx);
             return;
         }
-        let Some(target) = Target::from_spawn(&config.target) else {
+        let Some(target) = Target::from_spawn(&host, &config.target) else {
             return;
         };
         let placement = self.launch_last_placement(placement);
@@ -2941,7 +2948,7 @@ impl RootView {
             let (generation, request_id) =
                 self.launch_last.begin(config, placement, target.clone());
             self.send_to(
-                &self.host_of_suggest_target(&target),
+                &host,
                 ClientMessage::SuggestBranchName {
                     target,
                     request_id: Some(request_id),
@@ -2952,7 +2959,7 @@ impl RootView {
         }
         let request = launch_last::replay_request(&config, None);
         let open_in = placement.open_in();
-        self.spawn(request, open_in, cx);
+        self.spawn_on(&host, request, open_in, cx);
     }
 
     /// The placement a click resolved, with the tab on screen read now.
@@ -3001,7 +3008,7 @@ impl RootView {
     /// finishes it, so the spawn dialog's suggestion does not.
     fn on_launch_last_message(
         &mut self,
-        _host: &HostKey,
+        host: &HostKey,
         msg: &DaemonMessage,
         cx: &mut Context<Self>,
     ) {
@@ -3018,12 +3025,12 @@ impl RootView {
         };
         // The name just went to this launch, so a spawn dialog opened later
         // must not prefill it as free.
-        if let Some(target) = Target::from_suggest(target) {
+        if let Some(target) = Target::from_suggest(host, target) {
             self.branch_cache.remove(&target);
         }
         let request = launch_last::replay_request(&pending.config, Some(name.clone()));
         let open_in = pending.placement.open_in();
-        self.spawn(request, open_in, cx);
+        self.spawn_on(host, request, open_in, cx);
     }
 
     /// Drops the row focus when its container is no longer listed.

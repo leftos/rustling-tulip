@@ -1155,10 +1155,13 @@ impl RootView {
         self.send_to(&HostKey::Local, msg);
     }
 
-    /// Whether any repo is registered, which a repo-tied spawn needs.
+    /// Whether any connected host has a repo registered, which a repo-tied
+    /// spawn needs.
     #[must_use]
     pub fn has_repos(&self) -> bool {
-        !self.sidebar.repos().is_empty()
+        self.held_hosts()
+            .iter()
+            .any(|host| !self.is_remote_offline(host) && !self.sidebar.repos_of(host).is_empty())
     }
 
     /// The panes of the tab on screen that show no session.
@@ -1168,14 +1171,15 @@ impl RootView {
     }
 
     /// Whether the main area with no tab open offers its spawn choices: only
-    /// once the connection is open and the tab list and the repo list have
-    /// arrived, so a repo-less hint never flashes before the repos do.
+    /// once the connection is open and the tab list has arrived, and This
+    /// PC's repo list has too or another host already holds a repo, so a
+    /// repo-less hint never flashes before the repos do.
     #[must_use]
     pub fn no_tab_choices_shown(&self) -> bool {
         self.tabs.active_tab().is_none()
             && self.conn().is_open()
             && self.tabs.is_loaded()
-            && self.sidebar.repos_loaded()
+            && (self.sidebar.repos_loaded() || self.has_repos())
     }
 
     fn active_panes(&self, keep: impl Fn(Option<&str>) -> bool) -> Vec<String> {

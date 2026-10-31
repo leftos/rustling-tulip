@@ -325,7 +325,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(lock) = Lock::from_group(entry) else {
+        let Some(lock) = Lock::from_group(&HostKey::Local, entry) else {
             tracing::warn!(path = %entry.path, "worktrees manager: the group has no launch target");
             return;
         };

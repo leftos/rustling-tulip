@@ -70,6 +70,7 @@ mod ui_source_control;
 mod ui_spawn;
 mod ui_spawn_combobox;
 mod ui_spawn_dialog;
+mod ui_spawn_hosts;
 mod ui_spawn_preview;
 mod ui_stashes;
 mod ui_summary;

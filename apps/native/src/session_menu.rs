@@ -666,12 +666,12 @@ impl MenuContainer {
         }
     }
 
-    /// The spawn target the container names, for the two kinds that have
-    /// one.
-    fn target(&self) -> Option<Target> {
+    /// The spawn target on `host` the container names, for the two kinds
+    /// that have one.
+    fn target(&self, host: &HostKey) -> Option<Target> {
         match self {
-            Self::Repo(id) => Some(Target::Repo(id.clone())),
-            Self::Workspace(id) => Some(Target::Workspace(id.clone())),
+            Self::Repo(id) => Some(Target::repo(host, id)),
+            Self::Workspace(id) => Some(Target::workspace(host, id)),
             Self::Tab(_) => None,
         }
     }
@@ -1464,7 +1464,7 @@ impl RootView {
         let (lock, preselect) = match container {
             MenuContainer::Tab(id) => (Lock::for_tab(id.clone()), self.tab_preselect(id)),
             MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
-                let Some(target) = container.target() else {
+                let Some(target) = container.target(&self.host_of_menu_container(container)) else {
                     return;
                 };
                 (Lock::for_target(target), None)
@@ -1589,7 +1589,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = container.target() else {
+        let Some(target) = container.target(&self.host_of_menu_container(container)) else {
             return;
         };
         let Some(config) = self.container_launch_config(container) else {
@@ -1999,7 +1999,7 @@ impl RootView {
             .sidebar
             .session_on(&host, session_id)
             .filter(|_| shift)
-            .map(|session| PendingPrefill::of(session, target.clone()))
+            .map(|session| PendingPrefill::of(&host, session, target.clone()))
             .filter(|pending| pending.source.is_some());
         let request = if let Some(pending) = prefill {
             Some(self.prefills.request(pending))
@@ -2048,7 +2048,7 @@ impl RootView {
         };
         let lock = config
             .as_ref()
-            .and_then(|config| Target::from_spawn(&config.target))
+            .and_then(|config| Target::from_spawn(&pending.host, &config.target))
             .or_else(|| pending.source.clone())
             .map(Lock::for_target);
         let prefill = Prefill {
