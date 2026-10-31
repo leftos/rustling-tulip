@@ -34,7 +34,7 @@ use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
 use crate::spawns::{OpenIn, PaneAim};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{self, PaneBinding, TabsModel};
-use crate::target::HostKey;
+use crate::target::{HostKey, Target};
 use crate::term::prompt_nav::Dir;
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
 use crate::ui_theme::{UiTheme, theme};
@@ -1653,11 +1653,7 @@ impl RootView {
             .debug_selector(|| name);
             return popout_column(toolbar, note.into_any_element());
         };
-        let parts = header_parts(
-            session,
-            self.sidebar.is_unseen(session_id),
-            self.sidebar.agents(&crate::target::HostKey::Local),
-        );
+        let parts = self.session_header_parts(session);
         let title = header_title(&slot_id, Some(&parts), cx);
         let mut controls = self.header_stop(&slot_id, Some(session_id), StopPlace::Popout, cx);
         controls.push(Self::popout_close_window(&slot_id, cx));
@@ -1787,13 +1783,7 @@ impl RootView {
         let t = theme(cx);
         let parts = session_id
             .and_then(|id| self.sidebar.session(id))
-            .map(|session| {
-                header_parts(
-                    session,
-                    self.sidebar.is_unseen(&session.id),
-                    self.sidebar.agents(&crate::target::HostKey::Local),
-                )
-            });
+            .map(|session| self.session_header_parts(session));
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
         let name = format!("pane-header-{pane_id}");
@@ -2101,13 +2091,49 @@ impl RootView {
     /// session; `None` for an empty pane.
     #[must_use]
     pub fn pane_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
-        self.active_pane_session(pane_id).map(|session| {
-            header_parts(
-                session,
-                self.sidebar.is_unseen(&session.id),
-                self.sidebar.agents(&crate::target::HostKey::Local),
-            )
-        })
+        self.active_pane_session(pane_id)
+            .map(|session| self.session_header_parts(session))
+    }
+
+    /// What a pane header shows of `session`, with its host's chip when a
+    /// remote host lists it.
+    fn session_header_parts(&self, session: &SessionSnapshot) -> PaneHeaderParts {
+        let host = self.host_chip_label(&self.host_of_session(&session.id));
+        header_parts(
+            session,
+            self.sidebar.is_unseen(&session.id),
+            self.sidebar.agents(&crate::target::HostKey::Local),
+            host.as_ref(),
+        )
+    }
+
+    /// The label of `host`'s chip; `None` for This PC. The target comes
+    /// from the host's connection, else its saved entry; a host known by
+    /// neither shows its key.
+    pub(crate) fn host_chip_label(&self, host: &HostKey) -> Option<HostLabel> {
+        let HostKey::Remote(key) = host else {
+            return None;
+        };
+        let target = self
+            .conn_of(host)
+            .map(|conn| conn.target().clone())
+            .or_else(|| {
+                self.sidebar
+                    .ui_state()
+                    .saved_hosts
+                    .iter()
+                    .filter_map(|saved| saved.target().ok())
+                    .find(|target| HostKey::of(target) == *host)
+            });
+        Some(
+            target
+                .as_ref()
+                .and_then(HostLabel::of)
+                .unwrap_or_else(|| HostLabel {
+                    short: key.clone(),
+                    full: key.clone(),
+                }),
+        )
     }
 
     /// What the toolbar of pane `pane_id`'s pop-out shows of its session,
@@ -2116,13 +2142,8 @@ impl RootView {
     #[must_use]
     pub fn popout_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
         self.popouts.popped_key(pane_id)?;
-        self.popped_pane_session(pane_id).map(|session| {
-            header_parts(
-                session,
-                self.sidebar.is_unseen(&session.id),
-                self.sidebar.agents(&crate::target::HostKey::Local),
-            )
-        })
+        self.popped_pane_session(pane_id)
+            .map(|session| self.session_header_parts(session))
     }
 
     /// The pop-out toolbar's "in {tab name}": the tab pane `pane_id` is
@@ -2235,6 +2256,8 @@ pub enum HeaderChipKind {
     Trusted,
     /// The provider endpoint an agent session is routed to.
     Provider,
+    /// The remote host the session runs on; This PC's sessions have none.
+    Host,
 }
 
 impl HeaderChipKind {
@@ -2246,7 +2269,31 @@ impl HeaderChipKind {
             Self::More => "more",
             Self::Trusted => "trusted",
             Self::Provider => "provider",
+            Self::Host => "host",
         }
+    }
+}
+
+/// How a host chip names a remote host: its short name, and its full name
+/// on hover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostLabel {
+    pub short: String,
+    pub full: String,
+}
+
+impl HostLabel {
+    /// `target`'s label; `None` for This PC.
+    fn of(target: &Target) -> Option<Self> {
+        let full = match target {
+            Target::Local => return None,
+            Target::Tailnet(host) => host.name(),
+            Target::Ssh(host) => host.name(),
+        };
+        Some(Self {
+            short: target.short_name().unwrap_or(full).to_owned(),
+            full: full.to_owned(),
+        })
     }
 }
 
@@ -2278,19 +2325,23 @@ impl HeaderChip {
     }
 }
 
+/// What a pane header shows of `session`; `host` labels the remote host it
+/// runs on, `None` for This PC.
 fn header_parts(
     session: &SessionSnapshot,
     unseen: bool,
     agents: &[AgentDescriptor],
+    host: Option<&HostLabel>,
 ) -> PaneHeaderParts {
-    let mut chips: Vec<HeaderChip> = runtime_label(session, agents)
-        .map(|runtime| {
-            let tip = format!("Running {runtime}");
-            let accent = runtime_accent(session, Some(&runtime), agents);
-            HeaderChip::new(HeaderChipKind::Runtime, runtime, tip).accented(accent)
-        })
+    let mut chips: Vec<HeaderChip> = host
+        .map(|host| HeaderChip::new(HeaderChipKind::Host, &host.short, &host.full))
         .into_iter()
         .collect();
+    chips.extend(runtime_label(session, agents).map(|runtime| {
+        let tip = format!("Running {runtime}");
+        let accent = runtime_accent(session, Some(&runtime), agents);
+        HeaderChip::new(HeaderChipKind::Runtime, runtime, tip).accented(accent)
+    }));
     chips.extend(session.agent_chips.iter().map(|agent_chip| {
         HeaderChip::new(
             HeaderChipKind::Provider,
@@ -2470,7 +2521,7 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
             .bg(gpui::rgba(t.transparent))
             .border_color(gpui::rgb(t.line_strong))
             .child(text),
-        HeaderChipKind::More | HeaderChipKind::Provider => base.child(text),
+        HeaderChipKind::More | HeaderChipKind::Provider | HeaderChipKind::Host => base.child(text),
     }
     .into_any_element()
 }
@@ -3091,6 +3142,7 @@ mod tests {
             &session_with("claude", &deepseek),
             false,
             &[claude_descriptor()],
+            None,
         );
         assert_eq!(
             parts.chips,
@@ -3107,6 +3159,7 @@ mod tests {
             &session_with("claude", &json!([])),
             false,
             &[claude_descriptor()],
+            None,
         );
         assert_eq!(parts.chips, [runtime("claude")]);
     }
@@ -3117,6 +3170,7 @@ mod tests {
             &session_with("claude", &json!([{ "text": "mistral", "tip": null }])),
             false,
             &[claude_descriptor()],
+            None,
         );
         assert_eq!(
             parts.chips,
@@ -3133,7 +3187,7 @@ mod tests {
         shell.mode = SessionMode::PlainShell;
         shell.program_name = Some("pwsh".to_owned());
         assert_eq!(
-            header_parts(&shell, false, &[claude_descriptor()]).chips,
+            header_parts(&shell, false, &[claude_descriptor()], None).chips,
             [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")],
             "a plain shell says no provider and wears no accent"
         );

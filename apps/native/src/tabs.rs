@@ -10,6 +10,7 @@ use protocol::{
 };
 
 use crate::sidebar::CountMode;
+use crate::target::HostKey;
 
 /// The divider ratios the daemon accepts; it clamps to the same range.
 pub const MIN_RATIO: f32 = 0.05;
@@ -559,6 +560,17 @@ impl TabPill {
             }
         }
     }
+}
+
+/// The remote host every one of `hosts` names, for a tab pill's host chip;
+/// `None` for no hosts, any This PC host, or two different hosts.
+pub fn sole_remote_host(hosts: impl IntoIterator<Item = HostKey>) -> Option<HostKey> {
+    let mut hosts = hosts.into_iter();
+    let first = hosts.next()?;
+    if first == HostKey::Local {
+        return None;
+    }
+    hosts.all(|host| host == first).then_some(first)
 }
 
 /// Every session a pane shows, with its pill, counting every pane that
@@ -3512,6 +3524,38 @@ pub(crate) mod tests {
                 ("e".to_owned(), auto_grid(Some(wide))),
             ],
             "the two automatic tabs, in order; never-picked, fixed, and diff tabs stay"
+        );
+    }
+
+    fn remote(key: &str) -> HostKey {
+        HostKey::Remote(key.to_owned())
+    }
+
+    #[test]
+    fn sole_remote_host_is_none_with_no_panes() {
+        assert_eq!(sole_remote_host(Vec::new()), None);
+    }
+
+    #[test]
+    fn sole_remote_host_is_none_when_a_pane_is_local() {
+        assert_eq!(
+            sole_remote_host([remote("box"), HostKey::Local, remote("box")]),
+            None
+        );
+        assert_eq!(sole_remote_host([HostKey::Local]), None);
+    }
+
+    #[test]
+    fn sole_remote_host_is_none_for_two_remote_hosts() {
+        assert_eq!(sole_remote_host([remote("box"), remote("lab")]), None);
+    }
+
+    #[test]
+    fn sole_remote_host_names_the_one_remote_host() {
+        assert_eq!(sole_remote_host([remote("box")]), Some(remote("box")));
+        assert_eq!(
+            sole_remote_host([remote("box"), remote("box")]),
+            Some(remote("box"))
         );
     }
 }
