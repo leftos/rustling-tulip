@@ -196,7 +196,7 @@ use crate::fetch_dialog_view::FetchDialog;
 use crate::footer::{CountSpan, StopConfirm, flyout_rows, log_paths, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::host_path_prompt_view::HostPathDialog;
-use crate::hosts::{HostConn, Hosts};
+use crate::hosts::{HostConn, Hosts, PaneForgets};
 use crate::needs_you_view::moves_needs_you;
 use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
@@ -801,6 +801,9 @@ pub struct RootView {
     /// The hosts that have sent their session list since their latest
     /// `Welcome`, on a connection still open.
     lists_since_welcome: HashSet<HostKey>,
+    /// The forgets of remote hosts' panes sent to This PC, and those
+    /// waiting for it.
+    pane_forgets: PaneForgets,
     /// Each host whose connection was dropped because another host's had
     /// reached the same daemon first, with that other host.
     duplicate_of: HashMap<HostKey, HostKey>,
@@ -1328,6 +1331,7 @@ impl RootView {
             popouts_awaiting_hosts: Vec::new(),
             remote_lists_in: HashSet::new(),
             lists_since_welcome: HashSet::new(),
+            pane_forgets: PaneForgets::default(),
             duplicate_of: HashMap::new(),
             remembers_window_places: false,
             root_focus: cx.focus_handle(),
@@ -3538,6 +3542,10 @@ impl RootView {
         if folded {
             self.pane_drop = None;
             self.drop_stale_pill_drag(window, cx);
+            if matches!(msg, DaemonMessage::Tabs { .. }) {
+                self.after_this_pc_tabs();
+            }
+            self.prune_remote_panes();
         }
         self.end_dead_pane_drag(window, cx);
         folded
@@ -3975,6 +3983,12 @@ impl RootView {
             msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(host, &msg),
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(host, msg, cx),
             msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(host, msg, cx),
+            // The sidebar has already dropped the session from the host's
+            // list, so a pane still showing it is pruned.
+            msg @ DaemonMessage::SessionRemoved { .. } if *host != HostKey::Local => {
+                self.fold_chat_or_agents(host, msg, cx);
+                self.prune_remote_panes();
+            }
             other => self.fold_chat_or_agents(host, other, cx),
         }
     }
@@ -4207,6 +4221,7 @@ impl RootView {
             self.ask_history(host);
             return;
         }
+        self.pane_forgets.reset_connection();
         self.reset_recover(window, cx);
         self.reset_devices(window, cx);
         self.ask_pending_devices();
@@ -4424,6 +4439,7 @@ impl RootView {
         self.try_restore_popouts(window, cx);
         if *host != HostKey::Local {
             self.restore_awaited_popouts(host, window, cx);
+            self.prune_remote_panes();
         }
         self.scan_unseen_cwd_paths();
     }

@@ -502,16 +502,20 @@ impl RootView {
     }
 
     /// Folds a viewer message in; returns whether nothing else is owed it.
+    /// Only This PC's `Welcome` resets the opens, since viewer tabs live
+    /// in its layout.
     pub(crate) fn on_viewer_message(
         &mut self,
-        _host: &crate::target::HostKey,
+        host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         match msg {
             DaemonMessage::Welcome { .. } => {
-                self.viewer_opens.reset();
+                if *host == HostKey::Local {
+                    self.viewer_opens.reset();
+                }
                 false
             }
             DaemonMessage::ViewerTabOpened { id, tab_id } => {

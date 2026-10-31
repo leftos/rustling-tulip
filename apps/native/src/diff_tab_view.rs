@@ -774,15 +774,20 @@ impl RootView {
     }
 
     /// Folds a diff message in; returns whether nothing else is owed it.
+    /// Only This PC's `Welcome` resets the opens, since diff tabs live in
+    /// its layout.
     pub(crate) fn on_diff_message(
         &mut self,
-        _host: &crate::target::HostKey,
+        host: &crate::target::HostKey,
         msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         match msg {
             DaemonMessage::Welcome { .. } => {
+                if *host != crate::target::HostKey::Local {
+                    return false;
+                }
                 self.diff_opens.reset();
                 for view in self.diff_views() {
                     if view.update(cx, |tab, _| tab.state.reset_connection()) {

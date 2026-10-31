@@ -2,7 +2,7 @@
 //! host a message goes to.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use futures::channel::mpsc::UnboundedSender;
@@ -19,6 +19,7 @@ use crate::net::{HandshakeInfo, NetCommand};
 use crate::remote_access::RemoteStatusView;
 use crate::remote_mode::Capabilities;
 use crate::settings_view::{KeepAwake, SettingApply};
+use crate::tabs::{PaneBinding, SessionRef};
 use crate::target::{HostKey, Target};
 
 /// One host's daemon settings as its daemon last reported them: each is
@@ -718,6 +719,176 @@ impl RootView {
             ClientMessage::SuggestBranchName { target, .. } => self.host_of_suggest_target(target),
             _ => HostKey::Local,
         }
+    }
+}
+
+/// The forgets of remote hosts' panes sent to This PC on its current
+/// connection, and the host forgets waiting for it to come back.
+#[derive(Default)]
+pub(crate) struct PaneForgets {
+    /// The sessions a forget of their panes went out for, kept while a pane
+    /// still shows one.
+    sessions: HashSet<SessionRef>,
+    /// The hosts a forget of every pane went out for, kept while a pane
+    /// still names one.
+    hosts: HashSet<HostKey>,
+    /// The hosts forgotten while This PC was offline, in order, sent after
+    /// its next tab list.
+    queued: Vec<HostKey>,
+    /// Whether This PC's tab list has arrived on its current connection.
+    tabs_in: bool,
+    /// Whether the current connection's sweep of unsaved hosts has run.
+    swept: bool,
+}
+
+impl PaneForgets {
+    /// This PC's new connection: what went out on the old one may be lost,
+    /// so nothing counts as in flight; the queued host forgets stay.
+    pub(crate) fn reset_connection(&mut self) {
+        self.sessions.clear();
+        self.hosts.clear();
+        self.tabs_in = false;
+        self.swept = false;
+    }
+}
+
+impl RootView {
+    /// This PC's tab list arrived: the host forgets queued while it was
+    /// offline go out, then, once per connection, each host a pane names
+    /// that is no longer saved has every pane forgotten.
+    pub(crate) fn after_this_pc_tabs(&mut self) {
+        self.pane_forgets.tabs_in = true;
+        for host in std::mem::take(&mut self.pane_forgets.queued) {
+            self.send_host_forget(host);
+        }
+        if std::mem::replace(&mut self.pane_forgets.swept, true) {
+            return;
+        }
+        let mut stale: Vec<HostKey> = Vec::new();
+        for binding in self.tabs.bindings() {
+            let host = binding.host;
+            if host != HostKey::Local
+                && !self.is_saved_host(&host)
+                && !self.pane_forgets.hosts.contains(&host)
+                && !stale.contains(&host)
+            {
+                stale.push(host);
+            }
+        }
+        for host in stale {
+            self.send_host_forget(host);
+        }
+    }
+
+    /// Forget in Connections on remote host `host`: every pane of it on
+    /// This PC is forgotten, now, or after This PC's next tab list while
+    /// This PC is offline.
+    pub(crate) fn forget_host_panes(&mut self, host: HostKey) {
+        if self.conn().is_open() {
+            self.send_host_forget(host);
+        } else if !self.pane_forgets.queued.contains(&host) {
+            self.pane_forgets.queued.push(host);
+        }
+    }
+
+    /// Asks This PC to forget every pane of `host`, which then counts as in
+    /// flight.
+    fn send_host_forget(&mut self, host: HostKey) {
+        let Some(wire) = host.wire().map(str::to_owned) else {
+            return;
+        };
+        tracing::info!(?host, "forgetting every pane of the host on This PC");
+        self.send_to(
+            &HostKey::Local,
+            ClientMessage::ForgetHostSessions {
+                host: wire,
+                session_ids: Vec::new(),
+                all: true,
+                request_id: None,
+            },
+        );
+        self.pane_forgets.hosts.insert(host);
+    }
+
+    /// Asks This PC to forget each pane whose remote session its host's
+    /// fresh list no longer names, one message per host, ids sorted; a
+    /// session or host whose forget is in flight is not asked again.
+    /// Nothing is pruned until This PC is open with its tab list in.
+    pub(crate) fn prune_remote_panes(&mut self) {
+        let bindings = self.tabs.bindings();
+        self.pane_forgets
+            .sessions
+            .retain(|session| bindings.iter().any(|binding| binding.shows(session)));
+        self.pane_forgets
+            .hosts
+            .retain(|host| bindings.iter().any(|binding| binding.host == *host));
+        if !(self.conn().is_open() && self.pane_forgets.tabs_in) {
+            return;
+        }
+        for host in self.held_hosts() {
+            if !self.prunable(&host) {
+                continue;
+            }
+            let missing = self.missing_sessions(&host, &bindings);
+            let Some(wire) = host
+                .wire()
+                .map(str::to_owned)
+                .filter(|_| !missing.is_empty())
+            else {
+                continue;
+            };
+            tracing::info!(
+                ?host,
+                ?missing,
+                "forgetting the panes of sessions the host no longer lists"
+            );
+            for id in &missing {
+                self.pane_forgets
+                    .sessions
+                    .insert(SessionRef::new(host.clone(), id.clone()));
+            }
+            self.send_to(
+                &HostKey::Local,
+                ClientMessage::ForgetHostSessions {
+                    host: wire,
+                    session_ids: missing,
+                    all: false,
+                    request_id: None,
+                },
+            );
+        }
+    }
+
+    /// Whether `host`'s panes may be pruned: a remote host held, open, and
+    /// listed since its latest `Welcome`, with no forget of all its panes
+    /// in flight.
+    fn prunable(&self, host: &HostKey) -> bool {
+        *host != HostKey::Local
+            && self.conn_of(host).is_some_and(Connection::is_open)
+            && self.listed_since_welcome(host)
+            && !self.pane_forgets.hosts.contains(host)
+    }
+
+    /// The ids, sorted, of `host`'s sessions a pane in `bindings` shows
+    /// that the host's list does not name, and whose forget is not in
+    /// flight.
+    fn missing_sessions(&self, host: &HostKey, bindings: &[PaneBinding]) -> Vec<String> {
+        let listed = self.sidebar.sessions_of(host);
+        let mut missing: Vec<String> = bindings
+            .iter()
+            .filter(|binding| binding.host == *host)
+            .filter_map(|binding| binding.session_id.clone())
+            .filter(|id| !listed.iter().any(|session| session.id == *id))
+            .filter(|id| {
+                !self
+                    .pane_forgets
+                    .sessions
+                    .contains(&SessionRef::new(host.clone(), id.clone()))
+            })
+            .collect();
+        missing.sort();
+        missing.dedup();
+        missing
     }
 }
 
