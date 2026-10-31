@@ -916,6 +916,7 @@ impl RootView {
                     &session,
                     tab_id,
                     Some(crate::new_request_id()),
+                    !self.is_remote_offline(host),
                 );
                 if let Some(drop) = drop {
                     self.send_leaf_drop(drop, cx);

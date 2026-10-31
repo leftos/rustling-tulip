@@ -5,11 +5,11 @@ use crate::support;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
-    ClientMessage, DaemonMessage, InitLayoutKind, SplitDirection, VscodeWorkspaceFolder,
-    VscodeWorkspaceSuggestion,
+    AgentDescriptor, AgentId, ClientMessage, DaemonMessage, InitLayoutKind, SplitDirection,
+    VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
 };
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{Connection, NetEvent};
+use rustling_tulip_native::{Connection, HeaderChipKind, NetEvent};
 use support::{
     Fixture, Harness, PROTOCOL, TestDir, pane, remote_in_pane, remote_pane, repo, saved_remote,
     seed_ui, session, split, tab,
@@ -653,5 +653,136 @@ fn a_layout_picked_for_a_remote_host_is_not_laid_over_this_pcs_tabs(cx: &mut Tes
     assert!(
         sent.is_empty(),
         "no arrangement goes to This PC: sent {sent:?}"
+    );
+}
+
+/// A descriptor with `id` and `tag`, otherwise the test agent's own.
+fn described(id: &str, tag: &str) -> AgentDescriptor {
+    let mut descriptor = agent_api::test_agent::DESCRIPTOR.clone();
+    descriptor.id = AgentId(id.to_owned());
+    tag.clone_into(&mut descriptor.tag);
+    descriptor
+}
+
+/// The text of the runtime chip `pane_id`'s header carries, if any.
+fn runtime_chip(h: &mut Harness<'_>, pane_id: &str) -> Option<String> {
+    h.root(|root, _| root.pane_header_parts(pane_id))
+        .and_then(|parts| {
+            parts
+                .chips
+                .into_iter()
+                .find(|chip| chip.kind == HeaderChipKind::Runtime)
+                .map(|chip| chip.text)
+        })
+}
+
+#[gpui::test]
+fn a_remote_panes_header_names_the_agent_its_own_host_lists(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // Both hosts list `s1`, each tagging its agent its own way: a header
+    // resolved by the first host listing the id would read This PC's tag.
+    let fixture = Fixture {
+        sessions: vec![session("s1").agent("agent-x").build()],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                remote_pane("p2", "s1"),
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.send(DaemonMessage::Agents {
+        agents: vec![described("agent-x", "local-x")],
+    });
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Agents {
+        agents: vec![described("agent-x", "remote-x")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").agent("agent-x").build()],
+    });
+    host.sent();
+    h.sent();
+
+    assert_eq!(
+        runtime_chip(&mut h, "p1").as_deref(),
+        Some("local-x"),
+        "This PC's pane names the agent its own host lists"
+    );
+    assert_eq!(
+        runtime_chip(&mut h, "p2").as_deref(),
+        Some("remote-x"),
+        "the remote pane names the descriptor its own host lists, not This PC's"
+    );
+}
+
+/// The point `fx` across pane `pane_id`'s frame, `fy` down it.
+fn at(h: &mut Harness<'_>, pane_id: &str, fx: f32, fy: f32) -> Point<Pixels> {
+    let frame = h.bounds(&format!("pane-frame-{pane_id}"));
+    assert!(frame.origin.x >= px(0.0), "{pane_id} is on screen");
+    point(
+        frame.origin.x + frame.size.width * fx,
+        frame.origin.y + frame.size.height * fy,
+    )
+}
+
+#[gpui::test]
+fn an_offline_hosts_leaf_neither_drags_nor_binds(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // This PC's tab holds one empty pane; the tailnet host lists `b1` in a
+    // repo of its own, shown in no pane.
+    let fixture = Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![tab("t1", &pane("p2", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").in_repo("r2").build()],
+    });
+    host.sent();
+    h.sent();
+    close_host(&mut h, &remote());
+
+    let key = h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .find(|container| container.key.ends_with("repo:r2"))
+            .map(|container| container.key)
+            .expect("the remote host's repo row shows while it is offline")
+    });
+    assert!(
+        h.root(move |root, _| root.container_dimmed(&key)),
+        "the offline host's rows dim"
+    );
+
+    let from = on_row(&mut h, "leaf-b1", 0.5);
+    h.start_drag(from);
+    assert!(!h.dragging(), "the offline host's leaf does not drag");
+    let to = at(&mut h, "p2", 0.5, 0.5);
+    h.drag_to(to);
+    assert_eq!(
+        h.root(rustling_tulip_native::RootView::pane_drop_overlay),
+        None,
+        "no drop overlay shows over the pane"
+    );
+    h.release(to);
+    let sent = h.sent();
+    assert!(
+        sent.is_empty(),
+        "the offline leaf binds nothing and sends nothing: sent {sent:?}"
+    );
+    assert!(
+        h.root(|root, _| root.pane_header_parts("p2")).is_none(),
+        "the pane stays empty"
     );
 }
