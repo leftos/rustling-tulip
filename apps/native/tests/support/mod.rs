@@ -31,6 +31,7 @@ use rustling_tulip_native::{
     remote_access::Autostart,
     spawn_net,
     target::{TailnetHost, Target},
+    ui_theme::UiTheme,
     update::{AlreadyRunning, LastResult, Ready, Updater},
 };
 use serde_json::{Value, json};
@@ -1393,7 +1394,37 @@ impl<'a> Harness<'a> {
 
     /// Opens the window as [`Self::open_wanting`] does, over `updater`, so a
     /// spec sets what the launch reads from it first.
+    ///
+    /// The window then draws in [`UiTheme::CONTRAST`], whatever theme the
+    /// boot resolved: the specs assert the palette's colours, which are
+    /// Contrast's. [`Self::with_saved_theme`] keeps the boot's theme.
     pub fn open_with_updater(
+        cx: &'a mut TestAppContext,
+        dir: &TestDir,
+        wanted: Option<&str>,
+        updater: Arc<UpdaterRecorder>,
+    ) -> Self {
+        let mut harness = Self::boot(cx, dir, wanted, updater);
+        harness.pin_contrast();
+        harness
+    }
+
+    /// Opens the window as [`Self::with`] does, but drawing the theme the
+    /// boot resolved from `native-ui.json`, not the pinned Contrast.
+    pub fn with_saved_theme(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -> Self {
+        let mut harness = Self::boot(cx, dir, None, Arc::new(UpdaterRecorder::default()));
+        harness.load(fixture);
+        harness
+    }
+
+    /// Draws the window in [`UiTheme::CONTRAST`].
+    fn pin_contrast(&mut self) {
+        self.root_update(|root, _, cx| root.set_theme(UiTheme::CONTRAST, cx));
+    }
+
+    /// Opens the window over `updater` and connects it, in the theme the
+    /// boot resolved.
+    fn boot(
         cx: &'a mut TestAppContext,
         dir: &TestDir,
         wanted: Option<&str>,
@@ -1505,6 +1536,7 @@ impl<'a> Harness<'a> {
             updater,
         };
         harness.count_the_window_hovered();
+        harness.pin_contrast();
         harness
     }
 

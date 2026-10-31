@@ -2,8 +2,9 @@
 //!
 //! A [`UiTheme`] holds one field per [`crate::palette`] token, aliases and
 //! derived tokens included. The window's theme is an app global read with
-//! [`theme`]; until one is set it is [`UiTheme::CONTRAST`], the built-in
-//! look whose values are the palette's. A function with no `cx` takes the
+//! [`theme`]; until one is set it is the default built-in,
+//! [`crate::theme_store::DEFAULT_THEME`]. [`UiTheme::CONTRAST`] is the
+//! built-in whose values are the palette's. A function with no `cx` takes the
 //! theme as `&UiTheme`. Its `terminal` part is the palette a terminal pane
 //! paints with when no appearance level overrides its background.
 
@@ -359,12 +360,12 @@ struct ActiveTheme(UiTheme);
 
 impl Global for ActiveTheme {}
 
-/// The theme the interface draws in; [`UiTheme::CONTRAST`] until
-/// [`set_theme`] has run.
+/// The theme the interface draws in; the default built-in,
+/// [`crate::theme_store::DEFAULT_THEME`], until [`set_theme`] has run.
 #[must_use]
 pub fn theme(cx: &App) -> UiTheme {
     cx.try_global::<ActiveTheme>()
-        .map_or(UiTheme::CONTRAST, |active| active.0)
+        .map_or(crate::theme_store::DEFAULT_THEME, |active| active.0)
 }
 
 /// Makes `theme` the one the interface draws in. The caller refreshes the

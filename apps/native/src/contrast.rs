@@ -34,7 +34,8 @@ const fn pair(fg: &'static str, bg: &'static str, minimum: f32) -> Pair {
 }
 
 /// Every pair a theme is checked on. Each names an opaque token: a token
-/// carrying alpha has no single colour to measure.
+/// carrying alpha has no single colour to measure. `selection` is the
+/// selected row's fill, the accent already washed into the surface.
 pub const PAIRS: &[Pair] = &[
     pair("text", "ground", TEXT),
     pair("text", "surface", TEXT),
@@ -54,7 +55,11 @@ pub const PAIRS: &[Pair] = &[
     pair("subtle", "row_hover", TEXT),
     pair("subtle", "popover", TEXT),
     pair("subtle", "modal", TEXT),
+    pair("text", "selection", TEXT),
+    pair("text_2", "selection", TEXT),
+    pair("subtle", "selection", TEXT),
     pair("on_accent", "accent", TEXT),
+    pair("on_accent", "primary", TEXT),
     pair("on_asking", "asking", TEXT),
     pair("danger_text", "ground", TEXT),
     pair("faint", "ground", GLYPH),
@@ -73,6 +78,8 @@ pub fn token(t: &UiTheme, name: &str) -> Option<u32> {
         "row_hover" => t.row_hover,
         "popover" => t.popover,
         "modal" => t.modal,
+        "selection" => t.selection,
+        "primary" => t.primary,
         "text" => t.text,
         "text_2" => t.text_2,
         "subtle" => t.subtle,
@@ -177,5 +184,33 @@ mod tests {
             }
         }
         assert_eq!(check(&t).len(), PAIRS.len(), "every pair is measured");
+    }
+
+    /// The selected row's text is measured on the selection, the accent
+    /// washed into the surface, and the accent's label on the primary fill.
+    #[test]
+    fn selected_row_pairs_composite_the_wash() {
+        let mut t = UiTheme::CONTRAST;
+        t.selection = 0x404060;
+        let results = check(&t);
+        for (fg, bg) in [
+            ("text", "selection"),
+            ("text_2", "selection"),
+            ("subtle", "selection"),
+            ("on_accent", "primary"),
+        ] {
+            let found = results
+                .iter()
+                .find(|r| r.fg == fg && r.bg == bg)
+                .expect("the selected row's pair is checked");
+            let want = ratio(
+                token(&t, fg).expect("a token"),
+                token(&t, bg).expect("a token"),
+            );
+            assert!((found.ratio - want).abs() < 1e-6, "{fg} on {bg}");
+            assert!((found.minimum - TEXT).abs() < f32::EPSILON, "{fg} on {bg}");
+        }
+        assert_eq!(token(&t, "selection"), Some(0x404060));
+        assert_eq!(token(&t, "primary"), Some(t.primary));
     }
 }

@@ -228,6 +228,16 @@ fn seed_layout(daemon: &LiveDaemon) {
     let _ = ws.flush();
 }
 
+/// Selects the Contrast theme in the client's `native-ui.json`, so the
+/// window draws the palette's colours the probes read.
+fn pin_contrast(daemon: &LiveDaemon) {
+    std::fs::write(
+        daemon.config_dir().join("native-ui.json"),
+        serde_json::json!({ "theme": "contrast" }).to_string(),
+    )
+    .expect("write the smoke client's native-ui.json");
+}
+
 fn send(ws: &mut Socket, msg: &ClientMessage) {
     let text = serde_json::to_string(msg).expect("encode a client message");
     ws.send(Message::Text(text.into()))
@@ -499,6 +509,7 @@ fn open(test: &str) -> Smoke {
     let daemon = LiveDaemon::start(test);
     let session = seed_shell(&daemon);
     seed_layout(&daemon);
+    pin_contrast(&daemon);
     let client = launch_client(&daemon);
     let hwnd = find_window(client.0.id());
     assert_out_of_the_way(hwnd);

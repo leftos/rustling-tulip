@@ -15,8 +15,14 @@ use crate::ui_theme::UiTheme;
 /// The folder under the config dir that holds the user's themes.
 pub const THEMES_DIR: &str = "themes";
 
-/// The built-in themes, in the order they are listed: id, name, theme.
-pub const BUILT_INS: &[(&str, &str, UiTheme)] = &[("contrast", "Contrast", UiTheme::CONTRAST)];
+pub use crate::builtin_themes::BUILT_INS;
+
+/// The id of the theme drawn when none is saved or the saved one does not
+/// load.
+pub const DEFAULT_ID: &str = "nord";
+
+/// The theme [`DEFAULT_ID`] names.
+pub const DEFAULT_THEME: UiTheme = crate::builtin_themes::NORD;
 
 /// One theme the store can load.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +175,15 @@ impl ThemeStore {
                 return None;
             }
             let id = path.file_stem()?.to_str()?.to_owned();
+            if !valid_id(&id) {
+                let error = ThemeError::InvalidId { id: id.clone() }.to_string();
+                return Some(ThemeEntry {
+                    name: id.clone(),
+                    id,
+                    built_in: false,
+                    error: Some(error),
+                });
+            }
             Some(match read_file(&path) {
                 Ok(file) => ThemeEntry {
                     id,
@@ -226,11 +241,7 @@ impl ThemeStore {
         })?;
         let path = self.dir.join(format!("{id}.json"));
         let tmp = self.dir.join(format!(".{id}.json.tmp"));
-        std::fs::write(&tmp, json).map_err(|source| ThemeError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
-        std::fs::rename(&tmp, &path).map_err(|source| ThemeError::Io { path, source })?;
+        write_then_rename(&tmp, &path, &json)?;
         Ok(id)
     }
 
@@ -249,28 +260,24 @@ impl ThemeStore {
         })
     }
 
-    /// The theme a saved selection draws: the built-in when `id` is `None`;
-    /// the built-in, with a warning, when `id` names nothing or its file
-    /// does not load.
+    /// The theme a saved selection draws: the default built-in,
+    /// [`DEFAULT_THEME`], when `id` is `None`; the default, with a warning,
+    /// when `id` names nothing or its file does not load.
     #[must_use]
     pub fn resolve(&self, id: Option<&str>) -> UiTheme {
         let Some(id) = id else {
-            return UiTheme::CONTRAST;
+            return DEFAULT_THEME;
         };
         self.load(id).unwrap_or_else(|err| {
             tracing::warn!(
-                "the saved theme {id:?} does not load: {err}; drawing the built-in theme"
+                "the saved theme {id:?} does not load: {err}; drawing the built-in theme {DEFAULT_ID:?}"
             );
-            UiTheme::CONTRAST
+            DEFAULT_THEME
         })
     }
 
     fn path_of(&self, id: &str) -> Result<PathBuf, ThemeError> {
-        let valid = !id.is_empty()
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-        if valid {
+        if valid_id(id) {
             Ok(self.dir.join(format!("{id}.json")))
         } else {
             Err(ThemeError::InvalidId { id: id.to_owned() })
@@ -303,16 +310,24 @@ pub fn resolve_selection(themes_dir: Option<&Path>, id: Option<&str>) -> UiTheme
     match themes_dir {
         Some(dir) => ThemeStore::new(dir.to_path_buf()).resolve(id),
         None => match id.map(|id| (id, built_in(id))) {
-            None => UiTheme::CONTRAST,
+            None => DEFAULT_THEME,
             Some((_, Some(theme))) => theme,
             Some((id, None)) => {
                 tracing::warn!(
-                    "the saved theme {id:?} does not load: no config dir; drawing the built-in theme"
+                    "the saved theme {id:?} does not load: no config dir; drawing the built-in theme {DEFAULT_ID:?}"
                 );
-                UiTheme::CONTRAST
+                DEFAULT_THEME
             }
         },
     }
+}
+
+/// Whether `id` can name a user theme file: only `a-z`, `0-9` and `-`.
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn built_in(id: &str) -> Option<UiTheme> {
@@ -320,6 +335,35 @@ fn built_in(id: &str) -> Option<UiTheme> {
         .iter()
         .find(|(built_in, _, _)| *built_in == id)
         .map(|(_, _, theme)| *theme)
+}
+
+/// Writes `bytes` to `tmp`, then renames it to `path`. A failed write or
+/// rename removes `tmp`.
+fn write_then_rename(tmp: &Path, path: &Path, bytes: &[u8]) -> Result<(), ThemeError> {
+    let result = std::fs::write(tmp, bytes)
+        .map_err(|source| ThemeError::Io {
+            path: tmp.to_path_buf(),
+            source,
+        })
+        .and_then(|()| {
+            std::fs::rename(tmp, path).map_err(|source| ThemeError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        });
+    if result.is_err() {
+        remove_temp(tmp);
+    }
+    result
+}
+
+/// Removes a failed save's temp file, logging why when it cannot.
+fn remove_temp(tmp: &Path) {
+    match std::fs::remove_file(tmp) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => tracing::warn!("removing {} after a failed save: {err}", tmp.display()),
+    }
 }
 
 fn read_file(path: &Path) -> Result<ThemeFile, ThemeError> {
@@ -624,23 +668,83 @@ mod tests {
         assert!(err.to_string().contains("16"), "{err}");
     }
 
+    /// The eight built-ins' ids, in list order.
+    const BUILT_IN_IDS: [&str; 8] = [
+        "contrast",
+        "nord",
+        "catppuccin-mocha",
+        "catppuccin-latte",
+        "rose-pine",
+        "dracula",
+        "tokyonight",
+        "one-half-dark",
+    ];
+
+    /// The user entries of `entries`, after the built-ins.
+    fn users(entries: &[ThemeEntry]) -> &[ThemeEntry] {
+        &entries[BUILT_INS.len()..]
+    }
+
+    #[test]
+    fn list_puts_the_eight_built_ins_first_in_order() {
+        let dir = TestDir::new("built-ins");
+        let store = dir.store();
+        store
+            .save("Aardvark", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        let entries = store.list();
+        assert_eq!(ids(&entries[..8]), BUILT_IN_IDS);
+        let names: Vec<&str> = entries[..8].iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Contrast",
+                "Nord",
+                "Catppuccin Mocha",
+                "Catppuccin Latte",
+                "Rose Pine",
+                "Dracula",
+                "TokyoNight",
+                "One Half Dark",
+            ]
+        );
+        assert!(entries[..8].iter().all(|e| e.built_in && e.error.is_none()));
+        assert_eq!(ids(&entries[8..]), ["aardvark"], "user themes come after");
+        for id in BUILT_IN_IDS {
+            assert!(store.path_of(id).is_ok(), "{id} is a valid id");
+            assert!(store.load(id).is_ok(), "{id} loads");
+        }
+    }
+
+    #[test]
+    fn every_built_in_round_trips_through_the_file_format() {
+        let dir = TestDir::new("built-in-round-trip");
+        let store = dir.store();
+        for (id, name, theme) in BUILT_INS {
+            let saved = store.save(name, theme, Some(id), Some(id)).expect("save");
+            assert_ne!(&saved, id, "a built-in's id is never a file's");
+            assert_eq!(&store.load(&saved).expect("load"), theme, "{id}");
+        }
+    }
+
     #[test]
     fn list_puts_built_ins_first_then_user_themes_by_name() {
         let dir = TestDir::new("list");
         let store = dir.store();
-        assert_eq!(ids(&store.list()), ["contrast"], "no folder yet");
+        assert_eq!(ids(&store.list()), BUILT_IN_IDS, "no folder yet");
         let t = UiTheme::CONTRAST;
         for name in ["beta", "Alpha", "gamma"] {
             store.save(name, &t, None, None).expect("save");
         }
         std::fs::write(dir.0.join("notes.txt"), "not a theme").expect("write");
         let entries = store.list();
-        assert_eq!(ids(&entries), ["contrast", "alpha", "beta", "gamma"]);
+        assert_eq!(ids(&entries[..8]), BUILT_IN_IDS);
+        assert_eq!(ids(users(&entries)), ["alpha", "beta", "gamma"]);
         assert_eq!(entries[0].name, "Contrast");
         assert!(entries[0].built_in);
-        assert_eq!(entries[1].name, "Alpha");
+        assert_eq!(users(&entries)[0].name, "Alpha");
         assert!(
-            entries[1..]
+            users(&entries)
                 .iter()
                 .all(|e| !e.built_in && e.error.is_none())
         );
@@ -655,13 +759,52 @@ mod tests {
             .expect("save");
         std::fs::write(dir.file("broken"), "{").expect("write");
         let entries = store.list();
-        assert_eq!(ids(&entries), ["contrast", "broken", "fine"]);
-        let broken = &entries[1];
+        let users = users(&entries);
+        assert_eq!(ids(users), ["broken", "fine"]);
+        let broken = &users[0];
         assert_eq!(broken.name, "broken");
         assert!(!broken.built_in);
         let error = broken.error.as_deref().expect("its error");
         assert!(error.contains("broken.json"), "{error}");
-        assert_eq!(entries[2].error, None);
+        assert_eq!(users[1].error, None);
+    }
+
+    #[test]
+    fn a_file_with_an_invalid_id_is_listed_with_its_error() {
+        let dir = TestDir::new("invalid-id");
+        let store = dir.store();
+        let id = store
+            .save("Fine", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        std::fs::copy(dir.file(&id), dir.0.join("Dark Mode.json")).expect("copy");
+        let entries = store.list();
+        let users = users(&entries);
+        assert_eq!(ids(users), ["Dark Mode", "fine"]);
+        let dark = &users[0];
+        assert_eq!(
+            dark.name, "Dark Mode",
+            "its name is its id, the file unread"
+        );
+        assert!(!dark.built_in);
+        let error = dark.error.as_deref().expect("its error");
+        assert!(error.contains("is not a theme id"), "{error}");
+        assert_eq!(users[1].error, None);
+        assert!(matches!(
+            store.load("Dark Mode"),
+            Err(ThemeError::InvalidId { .. })
+        ));
+    }
+
+    #[test]
+    fn a_failed_save_leaves_no_temp_file() {
+        let dir = TestDir::new("failed-save");
+        std::fs::create_dir_all(dir.0.join("mine.json")).expect("a folder where the file goes");
+        let tmp = dir.0.join(".mine.json.tmp");
+        let err =
+            write_then_rename(&tmp, &dir.file("mine"), b"{}").expect_err("a folder is in the way");
+        assert!(matches!(err, ThemeError::Io { .. }), "{err}");
+        assert!(!tmp.exists(), "the temp file is removed");
+        assert!(dir.file("mine").is_dir(), "the folder is left alone");
     }
 
     #[test]

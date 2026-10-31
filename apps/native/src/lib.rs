@@ -13,6 +13,7 @@ mod appearance_stops;
 mod appearance_view;
 mod assets;
 mod branch_fate;
+pub mod builtin_themes;
 mod buttons;
 mod changes_view;
 mod cleanup_failed;

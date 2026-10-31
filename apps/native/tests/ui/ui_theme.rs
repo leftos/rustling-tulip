@@ -1,6 +1,6 @@
 //! Theme specs: the theme `native-ui.json` names is the one the window
 //! draws in from boot, and the sidebar's appearance cascade sits on the same
-//! theme; a name that loads nothing boots the built-in theme.
+//! theme; no name, or a name that loads nothing, boots the default, Nord.
 
 #![expect(
     clippy::expect_used,
@@ -12,6 +12,7 @@ use crate::support;
 
 use gpui::TestAppContext;
 use rustling_tulip_native::appearance::ThemeBase;
+use rustling_tulip_native::builtin_themes::NORD;
 use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::{self, UiTheme};
 use support::{Fixture, Harness, TestDir, repo, session};
@@ -43,7 +44,7 @@ fn a_saved_user_theme_is_drawn_at_boot(cx: &mut TestAppContext) {
         .save("Mine", &mine, Some("contrast"), None)
         .expect("save the user theme");
     select_theme(&dir, &id);
-    let mut h = Harness::with(cx, &dir, &fixture());
+    let mut h = Harness::with_saved_theme(cx, &dir, &fixture());
 
     let drawn = h.root(|_, cx| ui_theme::theme(cx));
     assert_eq!(drawn.ground, 0x102030, "the window draws the user theme");
@@ -62,16 +63,24 @@ fn a_saved_user_theme_is_drawn_at_boot(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn an_unknown_saved_theme_boots_the_built_in(cx: &mut TestAppContext) {
+fn a_fresh_start_draws_nord(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with_saved_theme(cx, &dir, &fixture());
+
+    assert_eq!(h.root(|_, cx| ui_theme::theme(cx)), NORD);
+    assert_eq!(h.root(|_, cx| ui_theme::theme(cx)).ground, 0x2e3440);
+    assert_eq!(h.root(|root, _| root.theme_base()), ThemeBase::of(&NORD));
+    assert_eq!(h.root(|root, _| root.theme_base().accent), 0xb48ead);
+}
+
+#[gpui::test]
+fn an_unknown_saved_theme_boots_the_default(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     select_theme(&dir, "no-such-theme");
-    let mut h = Harness::with(cx, &dir, &fixture());
+    let mut h = Harness::with_saved_theme(cx, &dir, &fixture());
 
-    assert_eq!(h.root(|_, cx| ui_theme::theme(cx)), UiTheme::CONTRAST);
-    assert_eq!(
-        h.root(|root, _| root.theme_base()),
-        ThemeBase::of(&UiTheme::CONTRAST)
-    );
+    assert_eq!(h.root(|_, cx| ui_theme::theme(cx)), NORD);
+    assert_eq!(h.root(|root, _| root.theme_base()), ThemeBase::of(&NORD));
     let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("the layout");
     let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
     assert_eq!(saved["theme"], "no-such-theme", "the selection is kept");
