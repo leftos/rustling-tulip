@@ -21,6 +21,7 @@ use protocol::{
 };
 use rustling_tulip_native::diff_view::{DiffView, Half};
 use rustling_tulip_native::fonts;
+use rustling_tulip_native::target::Target;
 use rustling_tulip_native::{
     BINARY_TEXT, DIFF_OPEN_FAILED_TITLE, DiffTabBody, DiffTabHeader, EMPTY_TEXT, ToastKind,
 };
@@ -288,6 +289,58 @@ fn a_history_open_answered_after_its_tab_arrives_activates_the_tab(cx: &mut Test
     );
     h.send(opened(&id, "d1"));
     assert_eq!(active(&mut h).as_deref(), Some("d1"));
+}
+
+/// The id of the one `OpenViewerTab` sent since the last look.
+fn one_viewer_open(h: &mut Harness<'_>) -> String {
+    let ids: Vec<String> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenViewerTab { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    let [id] = ids.as_slice() else {
+        panic!("one OpenViewerTab is sent, got {ids:?}");
+    };
+    id.clone()
+}
+
+#[gpui::test]
+fn a_remote_welcome_keeps_this_pcs_pending_diff_and_viewer_opens(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    let (diff_id, ..) = open_from_history(&mut h);
+    h.root_update(|root, _, _| root.open_viewer("C:/notes/a.md", None));
+    let viewer_id = one_viewer_open(&mut h);
+
+    h.host(&Target::tailnet(support::REMOTE, None)).connect();
+
+    h.send(updated(&diff_tab("d1", "src/main.rs", Some(SHA))));
+    h.send(opened(&diff_id, "d1"));
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("d1"),
+        "the diff open still activates its tab"
+    );
+    let viewer: TabEntry = serde_json::from_value(json!({
+        "id": "v1",
+        "name": "a.md",
+        "content": { "kind": "viewer", "path": "C:/notes/a.md" },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("viewer tab fixture");
+    h.send(updated(&viewer));
+    h.send(DaemonMessage::ViewerTabOpened {
+        id: viewer_id,
+        tab_id: "v1".to_owned(),
+    });
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("v1"),
+        "the viewer open still activates its tab"
+    );
 }
 
 // --- The changes tree ----------------------------------------------------

@@ -1700,6 +1700,25 @@ impl<'h, 'a> HostHandle<'h, 'a> {
     }
 }
 
+/// A `ForgetHostSessions` the client sent: the host it names, the session
+/// ids it forgets and whether it forgets every pane of that host.
+pub type Forget = (String, Vec<String>, bool);
+
+/// The `ForgetHostSessions` messages among `sent`, in order.
+pub fn forgets(sent: &[ClientMessage]) -> Vec<Forget> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ForgetHostSessions {
+                host,
+                session_ids,
+                all,
+                ..
+            } => Some((host.clone(), session_ids.clone(), *all)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The input bytes `sent` carries to `session`, in order.
 fn input_to(sent: &[ClientMessage], session: &str) -> Vec<u8> {
     sent.iter()

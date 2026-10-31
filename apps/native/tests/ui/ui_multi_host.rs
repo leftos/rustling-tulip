@@ -20,8 +20,8 @@ use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, toast_action_selector};
 use support::{
-    Fixture, Harness, PROTOCOL, TestDir, facts, facts_message, history_item, pane, remote_pane,
-    repo, session, split, tab, welcome,
+    Fixture, Forget, Harness, PROTOCOL, TestDir, facts, facts_message, forgets, history_item, pane,
+    remote_pane, repo, session, split, tab, welcome,
 };
 
 #[gpui::test]
@@ -2307,5 +2307,374 @@ fn an_unapproved_reconnect_keeps_a_remote_panes_last_frame(cx: &mut TestAppConte
         h.grid_text("p2")[0],
         "hello",
         "a reconnect that never lists keeps the pane's last frame"
+    );
+}
+
+/// This PC lists `a1`; tab `t1` splits it (pane `p1`) beside [`REMOTE`]'s
+/// `b1` (pane `p2`), and tab `t2` holds [`REMOTE`]'s `b2` (pane `p3`).
+fn two_tab_fixture() -> Fixture {
+    Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: two_tabs(),
+        ..Fixture::default()
+    }
+}
+
+/// The tabs of [`two_tab_fixture`].
+fn two_tabs() -> Vec<TabEntry> {
+    vec![
+        tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("a1")),
+                remote_pane("p2", "b1"),
+            ),
+        ),
+        tab("t2", &remote_pane("p3", "b2")),
+    ]
+}
+
+/// [`REMOTE`] saved and connected beside This PC over `fixture`, listing
+/// `remote_sessions`; nothing sent is left unread on either host.
+fn saved_remote_over<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    fixture: &Fixture,
+    remote_sessions: &[&str],
+) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, dir, fixture);
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, remote_sessions);
+    h.sent();
+    h.host(&saved_remote()).sent();
+    h
+}
+
+/// [`REMOTE`]'s daemon lists `ids`.
+fn remote_lists(h: &mut Harness<'_>, ids: &[&str]) {
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: ids.iter().map(|id| session(id).build()).collect(),
+    });
+}
+
+/// The forgets This PC was sent since the last look.
+fn this_pc_forgets(h: &mut Harness<'_>) -> Vec<Forget> {
+    forgets(&h.sent())
+}
+
+/// A forget of [`REMOTE`]'s sessions `ids`.
+fn forget_of(ids: &[&str]) -> Forget {
+    (
+        REMOTE.to_owned(),
+        ids.iter().map(|id| (*id).to_owned()).collect(),
+        false,
+    )
+}
+
+/// A forget of every pane of `host`.
+fn forget_all(host: &str) -> Forget {
+    (host.to_owned(), Vec::new(), true)
+}
+
+#[gpui::test]
+fn a_remote_list_omitting_a_paned_session_forgets_it_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+
+    remote_lists(&mut h, &["b1"]);
+
+    let sent = h.sent();
+    assert_eq!(
+        forgets(&sent),
+        [forget_of(&["b2"])],
+        "the pane of the session the list omits is forgotten on This PC"
+    );
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::ForgetHostSessions {
+                request_id: None,
+                ..
+            }
+        )),
+        "the forget answers no request"
+    );
+    assert!(
+        forgets(&h.host(&saved_remote()).sent()).is_empty(),
+        "nothing goes to the remote host"
+    );
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: two_tabs().remove(0),
+    });
+    remote_lists(&mut h, &["b1"]);
+    assert!(
+        this_pc_forgets(&mut h).is_empty(),
+        "a forget in flight is not sent again"
+    );
+}
+
+#[gpui::test]
+fn a_remote_list_before_the_tabs_prunes_when_the_tabs_arrive(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::open(cx, &dir);
+    h.host(&saved_remote()).connect();
+    remote_lists(&mut h, &["b1"]);
+    assert!(this_pc_forgets(&mut h).is_empty(), "no layout to prune yet");
+
+    h.load(&two_tab_fixture());
+
+    assert_eq!(
+        this_pc_forgets(&mut h),
+        [forget_of(&["b2"])],
+        "the layout's pane of a session the list omits is forgotten"
+    );
+}
+
+#[gpui::test]
+fn a_session_removed_while_its_drop_is_in_flight_is_forgotten_when_the_pane_lands(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(
+        cx,
+        &dir,
+        &Fixture::single(session("a1").build()),
+        &["b1", "b2"],
+    );
+
+    h.host(&saved_remote()).send(DaemonMessage::SessionRemoved {
+        session_id: "b1".to_owned(),
+    });
+    assert!(this_pc_forgets(&mut h).is_empty(), "no pane shows b1 yet");
+    h.send(DaemonMessage::TabUpdated {
+        tab: two_tabs().remove(0),
+    });
+    assert_eq!(
+        this_pc_forgets(&mut h),
+        [forget_of(&["b1"])],
+        "the pane landing on the removed session is forgotten"
+    );
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: two_tabs().remove(1),
+    });
+    assert!(this_pc_forgets(&mut h).is_empty(), "b2 is still listed");
+    h.host(&saved_remote()).send(DaemonMessage::SessionRemoved {
+        session_id: "b2".to_owned(),
+    });
+    assert_eq!(
+        this_pc_forgets(&mut h),
+        [forget_of(&["b2"])],
+        "a removal of a paned session forgets its pane, and only its"
+    );
+}
+
+#[gpui::test]
+fn a_tab_list_between_a_remote_welcome_and_its_list_forgets_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+
+    h.host(&saved_remote()).send(welcome(PROTOCOL));
+    let grid = split(
+        SplitDirection::Horizontal,
+        split(
+            SplitDirection::Vertical,
+            pane("p1", Some("a1")),
+            remote_pane("p4", "b7"),
+        ),
+        remote_pane("p2", "b1"),
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &grid),
+    });
+    assert!(
+        this_pc_forgets(&mut h).is_empty(),
+        "the host's list from before its Welcome is not compared against"
+    );
+
+    remote_lists(&mut h, &["b1", "b2", "b7"]);
+    assert!(
+        this_pc_forgets(&mut h).is_empty(),
+        "its fresh list names every paned session"
+    );
+}
+
+/// This PC's layout with [`REMOTE`]'s `b2` paned beside the rest.
+fn tabs_with_b2() -> DaemonMessage {
+    DaemonMessage::Tabs { tabs: two_tabs() }
+}
+
+#[gpui::test]
+fn nothing_is_pruned_while_a_host_is_offline_switched_off_or_unapproved(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = two_tab_fixture();
+    fixture.tabs.truncate(1);
+    let mut h = saved_remote_over(cx, &dir, &fixture, &["b1"]);
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+    h.send(tabs_with_b2());
+    assert!(this_pc_forgets(&mut h).is_empty(), "offline");
+
+    h.host(&saved_remote()).connect();
+    h.send(tabs_with_b2());
+    assert!(this_pc_forgets(&mut h).is_empty(), "welcomed, not listed");
+
+    h.host(&saved_remote())
+        .event(NetEvent::State(not_approved(saved_remote())));
+    h.send(tabs_with_b2());
+    assert!(this_pc_forgets(&mut h).is_empty(), "not approved");
+
+    flip_remote_switch(&mut h);
+    h.send(tabs_with_b2());
+    assert!(this_pc_forgets(&mut h).is_empty(), "switched off");
+}
+
+#[gpui::test]
+fn a_dropped_duplicates_panes_are_not_pruned(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": REMOTE, "port": 8787 },
+            { "kind": "ssh", "name": "me@devbox" },
+        ] }),
+    );
+    let ssh_pane = protocol::GridNode::Pane {
+        pane_id: "p9".to_owned(),
+        session_id: Some("d1".to_owned()),
+        host: HostKey::of(&ssh_box()).wire().map(str::to_owned),
+    };
+    let fixture = Fixture {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                remote_pane("p2", "b1"),
+                ssh_pane,
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+    remote_lists(&mut h, &["b1"]);
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    assert_eq!(
+        duplicate_of(&mut h, &ssh_box()),
+        Some(HostKey::of(&saved_remote()))
+    );
+
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+
+    assert!(
+        this_pc_forgets(&mut h).is_empty(),
+        "the dropped key's pane stays for the daemon its owner serves"
+    );
+}
+
+#[gpui::test]
+fn a_forget_lost_while_this_pc_reconnects_is_sent_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+
+    h.set_connection(dropped(Target::Local));
+    remote_lists(&mut h, &["b1"]);
+    assert!(this_pc_forgets(&mut h).is_empty(), "This PC is offline");
+    h.set_connection(this_pc_open());
+    h.send_welcome(PROTOCOL);
+    h.load(&two_tab_fixture());
+    assert_eq!(
+        this_pc_forgets(&mut h),
+        [forget_of(&["b2"])],
+        "the prune runs once This PC's layout is back"
+    );
+
+    open_connections(&mut h);
+    h.set_connection(dropped(Target::Local));
+    h.click_on(&format!("connections-forget-{REMOTE}"));
+    assert!(this_pc_forgets(&mut h).is_empty(), "This PC is offline");
+    h.set_connection(this_pc_open());
+    h.send_welcome(PROTOCOL);
+    h.load(&two_tab_fixture());
+    assert_eq!(
+        this_pc_forgets(&mut h),
+        [forget_all(REMOTE)],
+        "the forgotten host's panes are forgotten once, after This PC's layout"
+    );
+}
+
+#[gpui::test]
+fn forgetting_a_host_forgets_all_its_panes_on_this_pc(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_over(cx, &dir, &two_tab_fixture(), &["b1", "b2"]);
+    open_connections(&mut h);
+
+    h.click_on(&format!("connections-forget-{REMOTE}"));
+
+    assert_eq!(this_pc_forgets(&mut h), [forget_all(REMOTE)]);
+    assert!(
+        forgets(&h.host(&saved_remote()).sent()).is_empty(),
+        "nothing goes to the forgotten host"
+    );
+    h.send(tabs_with_b2());
+    assert!(
+        this_pc_forgets(&mut h).is_empty(),
+        "the host's forget is in flight"
+    );
+}
+
+#[gpui::test]
+fn panes_of_a_host_no_longer_saved_are_forgotten_after_this_pcs_tabs(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": REMOTE, "port": 8787, "enabled": false },
+        ] }),
+    );
+    let other_pane = protocol::GridNode::Pane {
+        pane_id: "p5".to_owned(),
+        session_id: Some("c1".to_owned()),
+        host: Some(OTHER.to_owned()),
+    };
+    let mut fixture = two_tab_fixture();
+    fixture.tabs.push(tab("t3", &other_pane));
+    let mut h = Harness::open(cx, &dir);
+    h.sent();
+
+    h.load(&fixture);
+    assert_eq!(
+        this_pc_forgets(&mut h),
+        [forget_all(OTHER)],
+        "the unsaved host's panes go; the switched-off saved host's stay"
+    );
+
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+    assert!(
+        this_pc_forgets(&mut h).is_empty(),
+        "once per This PC connection"
+    );
+
+    h.send_welcome(PROTOCOL);
+    h.load(&fixture);
+    assert_eq!(
+        this_pc_forgets(&mut h),
+        [forget_all(OTHER)],
+        "a new This PC connection sweeps again"
     );
 }
