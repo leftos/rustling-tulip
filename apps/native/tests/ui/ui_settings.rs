@@ -792,8 +792,15 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     );
 
     h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-general-check-updates")
+    );
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-general-check-now"));
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
-    h.keys("shift-tab");
+    h.keys("shift-tab shift-tab shift-tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-terminal-copy-on-selection"),

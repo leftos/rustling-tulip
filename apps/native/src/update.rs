@@ -395,6 +395,304 @@ pub fn clean_old(updates_root: &Path, keep: Option<&Path>) {
     }
 }
 
+/// The named mutex an update holds while it starts or applies; the
+/// installer's `apply-update` takes the same one.
+pub const UPDATE_MUTEX: &str = r"Local\rustling-tulip-update";
+
+/// The arguments the installer runs with for an update.
+const INSTALLER_ARGS: [&str; 3] = ["/S", "/UPDATE", "/RELAUNCH"];
+
+/// The outcome `apply-update` recorded in `updates/last-result.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LastResult {
+    /// The version replaced; `None` on a first install.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// The version the update installs.
+    pub to: String,
+    /// Whether the update is in place.
+    pub ok: bool,
+    /// The line that says what happened.
+    pub message: String,
+}
+
+/// What a start fails with while another update holds [`UPDATE_MUTEX`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlreadyRunning;
+
+impl std::fmt::Display for AlreadyRunning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("another update holds the update lock")
+    }
+}
+
+impl std::error::Error for AlreadyRunning {}
+
+/// What the client's window checks, installs and reads back through, so the
+/// specs replace it.
+pub trait Updater {
+    /// Checks the feed for a release newer than `current` and, when there is
+    /// one, downloads and verifies it.
+    fn check(
+        &self,
+        current: &semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<Ready>>>;
+
+    /// Starts `ready`'s installer for an update.
+    ///
+    /// # Errors
+    ///
+    /// [`AlreadyRunning`] while another update holds the update lock, or why
+    /// the installer did not start.
+    fn start_installer(&self, ready: &Ready) -> anyhow::Result<()>;
+
+    /// The outcome the last update recorded, read once: the file is deleted.
+    fn read_last_result(&self) -> Option<LastResult>;
+}
+
+/// Whether this build checks the feed: a build without debug assertions
+/// always does, a dev build only with [`FEED_BASE_VAR`] set.
+#[must_use]
+pub fn checks_allowed() -> bool {
+    !cfg!(debug_assertions) || std::env::var_os(FEED_BASE_VAR).is_some_and(|v| !v.is_empty())
+}
+
+/// The updater against the real feed, the real updates folder and a real
+/// installer launch.
+pub struct SystemUpdater {
+    /// The updates folder, or why it could not be resolved.
+    updates_root: Result<PathBuf, String>,
+    /// Whether checks and the last result are this client's: off in a dev
+    /// build without [`FEED_BASE_VAR`] and in the cloaked smoke window.
+    active: bool,
+}
+
+impl SystemUpdater {
+    /// The updater over `updates_root`; an inactive one never checks and
+    /// reads no last result.
+    #[must_use]
+    pub fn new(updates_root: Result<PathBuf, String>, active: bool) -> Self {
+        Self {
+            updates_root,
+            active,
+        }
+    }
+}
+
+impl Updater for SystemUpdater {
+    fn check(
+        &self,
+        current: &semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<Ready>>> {
+        use futures::FutureExt as _;
+        if !self.active {
+            return futures::future::ready(Err(anyhow!(
+                "this build does not check for updates (a dev build needs {FEED_BASE_VAR})"
+            )))
+            .boxed();
+        }
+        let root = match &self.updates_root {
+            Ok(root) => root.clone(),
+            Err(err) => {
+                return futures::future::ready(Err(anyhow!("{err}"))).boxed();
+            }
+        };
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let current = current.clone();
+        let spawned = std::thread::Builder::new()
+            .name("update-check".to_owned())
+            .spawn(move || {
+                // The receiver is gone only when the window closed.
+                let _ = tx.send(check_and_download(&current, &root, &feed_base()));
+            });
+        async move {
+            spawned.context("spawning the update check")?;
+            rx.await
+                .map_err(|_| anyhow!("the update check ended without an answer"))?
+        }
+        .boxed()
+    }
+
+    fn start_installer(&self, ready: &Ready) -> anyhow::Result<()> {
+        let hold = lock::try_lock(UPDATE_MUTEX)?.ok_or(AlreadyRunning)?;
+        let args: Vec<std::ffi::OsString> = INSTALLER_ARGS.iter().map(Into::into).collect();
+        launch_detached(&ready.path, &args)?;
+        info!(path = %ready.path.display(), "update: installer started");
+        // The installer's `apply-update` takes the lock next.
+        drop(hold);
+        Ok(())
+    }
+
+    fn read_last_result(&self) -> Option<LastResult> {
+        if !self.active {
+            return None;
+        }
+        let root = self.updates_root.as_ref().ok()?;
+        take_last_result(&root.join("last-result.json"))
+    }
+}
+
+/// Reads `path` as a [`LastResult`] and deletes it; a missing file is
+/// `None`, and any other failure is logged at warn.
+#[must_use]
+pub fn take_last_result(path: &Path) -> Option<LastResult> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            warn!(path = %path.display(), "update: could not read the last result: {err}");
+            return None;
+        }
+    };
+    if let Err(err) = std::fs::remove_file(path) {
+        warn!(path = %path.display(), "update: could not delete the last result: {err}");
+    }
+    match serde_json::from_slice(&bytes) {
+        Ok(result) => Some(result),
+        Err(err) => {
+            warn!(path = %path.display(), "update: the last result did not decode: {err}");
+            None
+        }
+    }
+}
+
+/// Launch housekeeping: deletes the old downloads under `updates_root` and
+/// the `*.old` files an update left beside the client exe. Best-effort; each
+/// failure is logged at warn.
+pub fn clean_at_launch(updates_root: anyhow::Result<PathBuf>) {
+    match updates_root {
+        Ok(root) => clean_old(&root, None),
+        Err(err) => warn!("update: no updates folder to clean: {err:#}"),
+    }
+    let folder = std::env::current_exe().map(|exe| exe.parent().map(Path::to_path_buf));
+    match folder {
+        Ok(Some(folder)) => remove_old_files(&folder),
+        Ok(None) => warn!("update: the client exe has no folder"),
+        Err(err) => warn!("update: could not find the client exe: {err}"),
+    }
+}
+
+/// Deletes every `*.old` file directly in `folder`.
+fn remove_old_files(folder: &Path) {
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn!(folder = %folder.display(), "update: could not list the install folder: {err}");
+            return;
+        }
+    };
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "old") {
+            match std::fs::remove_file(&path) {
+                Ok(()) => info!(path = %path.display(), "update: deleted a replaced file"),
+                Err(err) => {
+                    warn!(path = %path.display(), "update: could not delete a replaced file: {err}");
+                }
+            }
+        }
+    }
+}
+
+/// Starts `program` with no console and no std handles, breaking away from
+/// this process's job when the job allows it, as `apply-update`'s relaunch
+/// does.
+fn launch_detached(program: &Path, args: &[std::ffi::OsString]) -> anyhow::Result<()> {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        /// What `CreateProcess` returns when the caller's job forbids breakaway.
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+        match command.spawn() {
+            Ok(_) => return Ok(()),
+            Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                warn!("update: the job forbids breakaway; starting the installer inside it");
+                command.creation_flags(DETACHED_PROCESS);
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("starting {}", program.display()));
+            }
+        }
+    }
+    command
+        .spawn()
+        .with_context(|| format!("starting {}", program.display()))?;
+    Ok(())
+}
+
+/// The update lock: a named Windows mutex owned without waiting.
+mod lock {
+    /// Holds the lock until dropped.
+    pub(super) type Hold = Box<dyn std::any::Any>;
+
+    /// `Ok(None)` when another process holds the mutex `name`.
+    #[cfg(windows)]
+    pub(super) fn try_lock(name: &str) -> anyhow::Result<Option<Hold>> {
+        use anyhow::Context as _;
+        use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        use windows::core::PCWSTR;
+
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` is NUL-terminated UTF-16 that outlives the call.
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) }
+            .with_context(|| format!("creating the mutex {name}"))?;
+        let handle = MutexHandle(handle);
+        // SAFETY: `handle.0` is the live mutex handle just created.
+        let waited = unsafe { WaitForSingleObject(handle.0, 0) };
+        if waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED {
+            Ok(Some(Box::new(OwnedMutex(handle))))
+        } else if waited == WAIT_TIMEOUT {
+            Ok(None)
+        } else {
+            anyhow::bail!("waiting on the mutex {name} returned {}", waited.0)
+        }
+    }
+
+    /// No update lock where there is no installer.
+    #[cfg(not(windows))]
+    pub(super) fn try_lock(_name: &str) -> anyhow::Result<Option<Hold>> {
+        Ok(Some(Box::new(())))
+    }
+
+    /// A mutex handle, closed on drop.
+    #[cfg(windows)]
+    struct MutexHandle(windows::Win32::Foundation::HANDLE);
+
+    #[cfg(windows)]
+    impl Drop for MutexHandle {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from `CreateMutexW`, and this value owns
+            // it alone and closes it once.
+            if let Err(err) = unsafe { windows::Win32::Foundation::CloseHandle(self.0) } {
+                tracing::warn!("update: closing the update mutex: {err}");
+            }
+        }
+    }
+
+    /// A mutex this thread owns, released on drop before its handle closes.
+    #[cfg(windows)]
+    struct OwnedMutex(MutexHandle);
+
+    #[cfg(windows)]
+    impl Drop for OwnedMutex {
+        fn drop(&mut self) {
+            // SAFETY: this thread owns the mutex behind the live handle.
+            if let Err(err) = unsafe { windows::Win32::System::Threading::ReleaseMutex(self.0.0) } {
+                tracing::warn!("update: releasing the update mutex: {err}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,

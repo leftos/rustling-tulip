@@ -279,6 +279,8 @@ pub(crate) enum SettingsControl {
     RepoSort(RepoSort),
     OpenTextExternally,
     CopyOnSelect,
+    CheckUpdates,
+    CheckNow,
     CountMode(CountMode),
     TitleCount,
     TitleSuffix,
@@ -348,6 +350,8 @@ impl SettingsControl {
             Self::RepoSort(RepoSort::NeedsYou) => "settings-repo-sort-needs-you",
             Self::OpenTextExternally => "settings-general-open-text-externally",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
+            Self::CheckUpdates => "settings-general-check-updates",
+            Self::CheckNow => "settings-general-check-now",
             Self::CountMode(CountMode::NeedsYou) => "settings-count-needs-you",
             Self::CountMode(CountMode::Busy) => "settings-count-busy",
             Self::CountMode(CountMode::Idle) => "settings-count-idle",
@@ -1777,6 +1781,8 @@ impl RootView {
             SettingsControl::RepoSort(sort) => self.set_repo_sort(sort, cx),
             SettingsControl::OpenTextExternally => self.toggle_open_text_externally(cx),
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
+            SettingsControl::CheckUpdates => self.toggle_check_updates(cx),
+            SettingsControl::CheckNow => self.check_for_updates_now(cx),
             SettingsControl::CountMode(mode) => self.set_count_mode(mode, window, cx),
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
@@ -2600,6 +2606,13 @@ impl RootView {
         cx.notify();
     }
 
+    fn toggle_check_updates(&mut self, cx: &mut Context<Self>) {
+        let on = !self.sidebar.ui_state().general.check_updates;
+        self.sidebar.set_check_updates(on);
+        self.save_ui();
+        cx.notify();
+    }
+
     fn toggle_open_text_externally(&mut self, cx: &mut Context<Self>) {
         let on = !self.sidebar.ui_state().general.open_text_externally;
         self.sidebar.set_open_text_externally(on);
@@ -3321,7 +3334,36 @@ impl RootView {
             sidebar,
             files.into_any_element(),
             terminal.into_any_element(),
+            self.updates_section(focused, cx).into_any_element(),
         ]
+    }
+
+    /// The Updates section: the automatic-check toggle, the client's version
+    /// and the last check's result, and Check now.
+    fn updates_section(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
+        let check = toggle(
+            SettingsControl::CheckUpdates,
+            ToggleState {
+                checked: self.sidebar.ui_state().general.check_updates,
+                enabled: true,
+            },
+            "Check for updates",
+            focused,
+            cx,
+        );
+        let [version, last] = self.update_settings_lines();
+        let check_now = settings_button(
+            SettingsControl::CheckNow,
+            "Check now",
+            !self.update_check_running(),
+            focused,
+            cx,
+        );
+        section("Updates")
+            .child(check)
+            .child(hint(version).debug_selector(|| "settings-update-version".to_owned()))
+            .child(hint(last).debug_selector(|| "settings-update-last-check".to_owned()))
+            .child(div().flex().child(check_now))
     }
 
     /// The Sidebar section: the default view, how much room a leaf takes, how
@@ -3580,6 +3622,8 @@ fn general_controls(keep_awake: bool) -> Vec<SettingsControl> {
         .chain([
             SettingsControl::OpenTextExternally,
             SettingsControl::CopyOnSelect,
+            SettingsControl::CheckUpdates,
+            SettingsControl::CheckNow,
         ])
         .collect()
 }

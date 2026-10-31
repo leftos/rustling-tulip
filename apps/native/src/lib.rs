@@ -130,6 +130,7 @@ pub mod toast_activation;
 mod undo;
 mod undo_view;
 pub mod update;
+mod update_view;
 mod viewer_find;
 mod viewer_md_view;
 mod viewer_tab;
@@ -391,6 +392,9 @@ pub struct RootDeps {
     /// network thread dials with. The host picker reads it for its "Not
     /// paired" tags and Forget deletes from it.
     pub tokens: Arc<dyn DeviceTokenStore>,
+    /// Checks for, starts and reads back updates: the footer's notice,
+    /// Settings' update rows and the toast after an update.
+    pub updater: Arc<dyn update::Updater>,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -1099,6 +1103,8 @@ pub struct RootView {
     /// The folder fetched files are saved under, or why it could not be
     /// resolved.
     remote_files_root: Result<PathBuf, String>,
+    /// The updater, the update ready to install and the last check.
+    update: update_view::UpdateUi,
 }
 
 impl RootView {
@@ -1149,6 +1155,12 @@ impl RootView {
             pick_file: folder_picker::system_file_picker(window),
             autostart: Arc::new(remote_access::SystemAutostart),
             tokens,
+            // The cloaked smoke window neither checks nor takes the last
+            // update's result, which belongs to the user's own client.
+            updater: Arc::new(update::SystemUpdater::new(
+                daemon_client::updates_dir().map_err(|err| format!("{err:#}")),
+                update::checks_allowed() && !offscreen::requested(),
+            )),
         };
         let mut root = Self::with_transport(deps, window, cx);
         // Presses the toast activator receives, those that arrived before
@@ -1247,6 +1259,7 @@ impl RootView {
             pick_file,
             autostart,
             tokens,
+            updater,
         } = deps;
         Self::watch_window(window, cx);
         Self::watch_close_request(window, cx);
@@ -1438,8 +1451,10 @@ impl RootView {
             remote_files_root: daemon_client::remote_files_dir()
                 .map(file_fetch_view::absolute_root)
                 .map_err(|err| format!("{err:#}")),
+            update: update_view::UpdateUi::new(updater),
         };
         view.arm_needs_you_repaint(cx);
+        view.start_update_checks(cx);
         view
     }
 
@@ -4703,6 +4718,7 @@ impl RootView {
                     .flex_1()
                     .text_right(),
             )
+            .children(self.update_footer(cx))
     }
 
     /// The troubleshooting flyout above the pill: details, files, control.
