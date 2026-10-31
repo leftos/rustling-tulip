@@ -1,6 +1,6 @@
 # fake-ssh
 
-A deterministic stand-in for the `ssh` client the native client runs for an SSH host (`apps/native/src/ssh.rs`), so the live tier can connect over the SSH transport without an sshd, a key or a second machine. `FakeSsh` (`apps/native/tests/support/live.rs`) writes its state for a test daemon, and `apps/native/tests/e2e_ssh.rs` points the client at it through `RUSTLING_TULIP_SSH`.
+A deterministic stand-in for the `ssh` client the native client runs for an SSH host (`apps/native/src/ssh.rs`), so the live tier can connect over the SSH transport without an sshd, a key or a second machine. `FakeSsh` (`apps/native/tests/support/live.rs`) writes its state for a test daemon, and `apps/native/tests/e2e_ssh.rs` points the client at it through `RUSTLING_TULIP_SSH`. The state names one daemon, so every host string the client passes reaches that one, and a spec has one fake ssh per process.
 
 It reads a JSON state file named by `RUSTLING_TULIP_FAKE_SSH_STATE` on every run:
 

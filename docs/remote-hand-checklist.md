@@ -1,6 +1,6 @@
 # Remote access hand checklist
 
-This checklist verifies remote access over a real tailnet, which the automated tests cannot reach: the live e2e tier (`.\rt.ps1 native-e2e`) runs the real daemon against a fake `tailscale` on loopback, so it never meets a real `tailscale cert`, real `whois` answers, other Tailscale users or a firewall.
+This checklist verifies remote access over a real tailnet, which the automated tests cannot reach: the live e2e tier (`.\rt.ps1 native-e2e`) runs the real daemon against a fake `tailscale` on loopback, so it never meets a real `tailscale cert`, real `whois` answers, other Tailscale users or a firewall. Likewise its multi-host specs reach the second host through a fake `ssh` on one machine, so section 12 checks several real hosts in one window.
 
 Run it by hand before a release that touches remote access (the daemon's tailnet listener, pairing, devices, the host picker, file fetch or autostart), and note each failure on the release's Linear issue. The design and its rulings are in [plans/remote-access.md](plans/remote-access.md).
 
@@ -53,12 +53,12 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 
 ## 4. Driving the host from the device
 
-- [ ] On the device, press `Shell` in the sidebar and run `hostname`. **Expect:** the host's computer name; the host's window shows the same session in its sidebar.
+- [ ] On the device, press `+ Shell` on the host's header in the sidebar and run `hostname`. **Expect:** the host's computer name; the host's window shows the same session in its sidebar.
 - [ ] Attach on the device to a Claude session started on the host and type a prompt. **Expect:** the output appears on both PCs, and the session's status moves to Working and back as on the host.
 - [ ] On the device, open a session's menu. **Expect:** `Reveal worktree` and `Open in Explorer` are shown disabled, with the tooltip `Not available on a remote host: this opens files on this PC`.
-- [ ] On the device, open the footer daemon flyout. **Expect:** `Reconnect now` in place of `Restart daemon`, and no Stop, Handshake file or Open daemon.log rows.
-- [ ] On the device, open Settings. **Expect:** no `Remote access` tab: it configures the PC the client manages.
-- [ ] Close the device's window. **Expect:** it quits at once with no Quit dialog, and the host's sessions keep running.
+- [ ] On the device, look at the host's sidebar header dot and its `Connections` row. **Expect:** the state shows there, with `Reconnect now` on the row in place of a restart and no Stop; the footer pill and daemon flyout are the device's own (This PC's).
+- [ ] On the device, open Settings and choose the host in its `Host` selector. **Expect:** the host's agent pages, launch command, worktrees root and keep-awake mode, and no `Remote access` tab while the host is chosen: it configures This PC only.
+- [ ] Close the device's window. **Expect:** the device's own quit flow runs, which concerns the device's daemon only, and the host's sessions keep running.
 
 ## 5. Block, forget and pair again
 
@@ -73,13 +73,13 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 
 ## 6. Turning remote access off while connected
 
-- [ ] With the device connected, turn the host's switch off. **Expect:** the device's connection drops at once and its pill reads `<short> · disconnected` and then `<short> · connecting…` as it retries; nothing listens on 8787.
+- [ ] With the device connected, turn the host's switch off. **Expect:** the device's connection drops at once and the host's sidebar header reads `Offline` and then `Connecting…` as it retries, its rows dimmed and the device's own sessions unaffected; nothing listens on 8787.
 - [ ] Turn the host's switch back on. **Expect:** the device reconnects by itself, with no Pair dialog.
 - [ ] Change the host's port to `8788` and `Apply` while the device is connected. **Expect:** the device drops and keeps retrying 8787. On the device, add `<host>` with Port `8788` under `+ Add host` (Tailnet). **Expect:** it connects. Set the host's port back to 8787 afterwards.
 
 ## 7. A device removed from the tailnet
 
-- [ ] With the device connected and a shell running on it, remove the device (or expire its key) in the Tailscale admin console and time how long the device's pill keeps showing `<short> · <n> sessions` and the host's row keeps showing `Connected`. **Expect:** both drop; record the seconds each took on the release issue. Add the device back to the tailnet afterwards.
+- [ ] With the device connected and a shell running on it, remove the device (or expire its key) in the Tailscale admin console and time how long the host's sidebar header keeps its online dot and the host's row keeps showing `Connected`. **Expect:** both drop; record the seconds each took on the release issue. Add the device back to the tailnet afterwards.
 
 ## 8. Peers that are refused
 
@@ -117,8 +117,22 @@ These need Windows OpenSSH Server running on the host and key login from the dev
 - [ ] Within 30 s of that, on the host: `Get-Process rustling-tulipd-*`. **Expect:** the daemon the bridge started is still running once the SSH session has ended, and so are any `rt-tracer-*` of the sessions it hosts; with no session and no client it exits by itself 30 s after the client left (`idle for the full grace period` in `daemon.log`).
 - [ ] Run setup again and pick another folder. **Expect:** the old folder is gone from the user PATH and the new one is on it.
 - [ ] Uninstall. **Expect:** the install folder is gone from the user PATH and every other entry is as it was.
-- [ ] From the native client on the device, open Connections, press `+ Add host`, switch to SSH, type the host and press Test connection. **Expect:** `Connected: <short name>`; then press `Add and connect`. **Expect:** the client switches to the host with no pairing prompt, and its row reads `SSH · …` and never `Not paired`.
+- [ ] From the native client on the device, open Connections, press `+ Add host`, switch to SSH, type the host and press Test connection. **Expect:** `Connected: <short name>`; then press `Add and connect`. **Expect:** the client connects the host beside This PC with no pairing prompt, and its row reads `SSH · …` and never `Not paired`.
 - [ ] In the same form, test a host whose key the device's ssh does not offer or the host does not authorize. **Expect:** ssh's own `Permission denied (publickey).` text under the form, and no row added until you press `Add and connect`.
+
+## 12. Several hosts in one window
+
+These need the device paired with the tailnet host (section 3) and the SSH host reachable by key login (section 11), so that This PC, one tailnet host and one SSH host are all saved and switched on.
+
+- [ ] Open the client on the device. **Expect:** the sidebar's Repos view groups by host under a header each: This PC, then the SSH host and the tailnet host in saved order, each with a state dot and a `+ Shell` button.
+- [ ] Press `+ Shell` on each header in turn and run `hostname` in each. **Expect:** each shell shows its own host's computer name, and each lands in a pane whose header carries the host's chip (none for This PC).
+- [ ] Drag a remote session's sidebar leaf into a tab that holds a This PC pane, then drag the other host's leaf into the same tab. **Expect:** one tab with panes of two or three hosts, its pill showing no host chip, and typing in each pane reaching only its own host.
+- [ ] Kill one host's connection (turn the tailnet host's remote access off, or end the SSH host's `ssh` process). **Expect:** only that host's header reads `Offline`, its rows and panes dim with their last frame frozen, and the other hosts' panes keep working.
+- [ ] Bring that host's connection back. **Expect:** the header returns to online, the panes resume with no pane rebuilt, and nothing was pruned from the tab.
+- [ ] Save the tailnet host a second time as an SSH alias that reaches the same machine, with the SSH name saved after it. **Expect:** the later row's chip reads `Same daemon as <short>`, and only the first-saved host shows the sessions.
+- [ ] Press `Forget` on the owner of such a pair. **Expect:** the tab's panes of that machine stay and move to the remaining name instead of closing.
+- [ ] Restart the client with a remote pane popped out. **Expect:** the pop-out reopens once that host's session list arrives.
+- [ ] Press `Forget` on a host that has panes in a tab and no other name. **Expect:** its panes leave the tab and its rows leave the sidebar.
 
 ## iPhone and PWA
 
