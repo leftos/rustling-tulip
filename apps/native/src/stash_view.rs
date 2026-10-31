@@ -11,7 +11,7 @@ use gpui::{
 use protocol::{ClientMessage, DaemonMessage, GitStash};
 use std::collections::{HashMap, HashSet};
 
-use crate::buttons::{ButtonSize, outlined_button};
+use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::changes_view::{HEAD_HEIGHT, LOADING_TEXT, caret, count_pill, head_title};
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
@@ -677,14 +677,19 @@ fn push_row(
         .when(!push.enabled, |field| field.opacity(0.5))
         .children(input);
     let key = key.clone();
-    let button = outlined_button(&push.selector, ButtonSize::Compact, push.enabled)
-        .flex_none()
-        .child(push.label)
-        .when(push.enabled, |button| {
-            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.push_stash(&key, cx);
-            }))
-        });
+    let button = outlined_button(
+        &push.selector,
+        ButtonSize::Compact,
+        push.enabled,
+        Layer::Base,
+    )
+    .flex_none()
+    .child(push.label)
+    .when(push.enabled, |button| {
+        button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.push_stash(&key, cx);
+        }))
+    });
     div()
         .flex()
         .items_center()

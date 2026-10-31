@@ -20,7 +20,7 @@ use crate::assets::{
     DIFF_FIRST_ICON, DIFF_HIGHLIGHT_ICON, DIFF_LAST_ICON, DIFF_NEXT_ICON, DIFF_PREV_ICON,
     DIFF_WHITESPACE_ICON,
 };
-use crate::buttons::{ButtonSize, outlined_button};
+use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::diff_model::{DiffModel, DiffOptions};
 use crate::diff_tab::{
     Built, DiffTabBody, DiffTabHeader, DiffTabState, DiffTarget, HIGHLIGHT_LABEL, HIGHLIGHT_TIP,
@@ -599,7 +599,7 @@ fn nav_button(
     enabled: bool,
     cx: &mut Context<DiffTabView>,
 ) -> Stateful<Div> {
-    outlined_button(selector, ButtonSize::Compact, enabled)
+    outlined_button(selector, ButtonSize::Compact, enabled, Layer::Base)
         .flex_none()
         .size(px(NAV_BUTTON_SIZE))
         .min_h(px(NAV_BUTTON_SIZE))

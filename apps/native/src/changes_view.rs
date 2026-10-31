@@ -13,7 +13,7 @@ use gpui::{
 use protocol::{ClientMessage, DaemonMessage, GitFileChange};
 use std::collections::HashMap;
 
-use crate::buttons::{ButtonSize, primary_button};
+use crate::buttons::{ButtonSize, Layer, primary_button};
 use crate::discard_confirm::{DiscardButton, DiscardConfirm};
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
@@ -1158,15 +1158,20 @@ fn commit_box(
         .when(commit.committing, |field| field.opacity(0.5))
         .children(input);
     let key = key.clone();
-    let button = primary_button(&commit.selector, ButtonSize::Regular, commit.enabled)
-        .w_full()
-        .child(commit.label)
-        .when(commit.enabled, |button| {
-            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                cx.stop_propagation();
-                this.commit_changes(&key, cx);
-            }))
-        });
+    let button = primary_button(
+        &commit.selector,
+        ButtonSize::Regular,
+        commit.enabled,
+        Layer::Base,
+    )
+    .w_full()
+    .child(commit.label)
+    .when(commit.enabled, |button| {
+        button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.commit_changes(&key, cx);
+        }))
+    });
     div()
         .flex()
         .flex_col()

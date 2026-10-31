@@ -28,7 +28,9 @@ use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
-use crate::palette::{CARD_EDGE, CHIP, HOVER, MODAL_INSET, SELECTION, SUBTLE, TEXT_2, TRANSPARENT};
+use crate::palette::{
+    CARD_EDGE, CHIP, MODAL_INSET, POPOVER_HOVER, SELECTION, SUBTLE, TEXT_2, TRANSPARENT,
+};
 use crate::remote_access::{
     PortError, RemoteStatusView, address, apply_port_message, autostart_failure_line,
     autostart_read_failure_line, cert_line, controls_enabled, parse_port, state_line,
@@ -2781,7 +2783,11 @@ impl RootView {
             .cursor_pointer()
             .when(shown, |row| row.bg(gpui::rgb(SELECTION)))
             .when(!shown, |row| {
-                row.hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
+                row.hover(|style| {
+                    style
+                        .bg(gpui::rgb(POPOVER_HOVER))
+                        .text_color(gpui::rgb(TEXT))
+                })
             })
             .when(shown && list_focused, |row| {
                 row.child(focus_ring(TAB_ROW_RADIUS))
@@ -3171,7 +3177,11 @@ impl RootView {
             .border_color(gpui::rgba(TRANSPARENT))
             .text_color(gpui::rgb(appearance::BUILTIN_ACCENT))
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER)))
+            .hover(|style| {
+                style
+                    .bg(gpui::rgb(POPOVER_HOVER))
+                    .text_color(gpui::rgb(crate::palette::TEXT))
+            })
             .on_click(press(link, cx))
             .when(focused == Some(link), |open| {
                 open.child(focus_ring(LINK_RADIUS))

@@ -12,7 +12,7 @@ use crate::assets::{
     SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON, SIDEBAR_PLAY_ICON, SIDEBAR_PLUS_ICON,
     SIDEBAR_SHELL_ICON, SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
-use crate::buttons::{ButtonSize, focus_ring, outlined_button, primary_button};
+use crate::buttons::{ButtonSize, Layer, focus_ring, outlined_button, primary_button};
 use crate::drag::{self, DragPayload, Side, SidebarRow};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
@@ -584,20 +584,25 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .text_size(px(10.0))
         .opacity(0.7)
         .child("Ctrl N");
-    primary_button("sidebar-add-session", ButtonSize::Toolbar, has_repos)
-        .flex_1()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .gap(px(6.0))
-        .child(icon(SIDEBAR_PLUS_ICON, 14.0, ON_ACCENT))
-        .child("Session")
-        .child(hint)
-        .tooltip(tooltip(tip))
-        .when(has_repos, |button| {
-            button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.open_spawn_dialog(SpawnEntry::Toolbar, window, cx);
-            }))
-        })
+    primary_button(
+        "sidebar-add-session",
+        ButtonSize::Toolbar,
+        has_repos,
+        Layer::Base,
+    )
+    .flex_1()
+    .min_w(px(0.0))
+    .overflow_hidden()
+    .gap(px(6.0))
+    .child(icon(SIDEBAR_PLUS_ICON, 14.0, ON_ACCENT))
+    .child("Session")
+    .child(hint)
+    .tooltip(tooltip(tip))
+    .when(has_repos, |button| {
+        button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.open_spawn_dialog(SpawnEntry::Toolbar, window, cx);
+        }))
+    })
 }
 
 /// Shell, a standalone shell in the remembered folder; enabled even with no
@@ -607,7 +612,7 @@ fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> State
         Some(dir) => format!("Open a standalone shell in {dir}"),
         None => "Open a standalone shell in your home folder".to_owned(),
     };
-    outlined_button("sidebar-add-shell", ButtonSize::Toolbar, true)
+    outlined_button("sidebar-add-shell", ButtonSize::Toolbar, true, Layer::Base)
         .flex_none()
         .gap(px(6.0))
         .child(icon(SIDEBAR_SHELL_ICON, 14.0, TEXT))

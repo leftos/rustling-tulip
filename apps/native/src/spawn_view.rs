@@ -17,14 +17,14 @@ use protocol::{DaemonMessage, OptionValue, SpawnPlacement};
 use crate::agent_options::{FieldEditor, FieldView};
 use crate::agent_options_view;
 use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
-use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
+use crate::buttons::{ButtonKind, ButtonSize, Layer, button, field_frame, focus_ring};
 use crate::combobox::{ComboRow, list_placement};
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::notices;
 use crate::overlay_owner::Overlay;
 use crate::palette::{
-    ACCENT, CHIP, HOVER, LINE, LINE_STRONG, MODAL_INSET, ON_ACCENT, SPAWN_BADGE_OK, SUBTLE, TEXT_2,
-    TRANSPARENT,
+    ACCENT, LINE, LINE_STRONG, MODAL_INSET, ON_ACCENT, POPOVER, POPOVER_EDGE, POPOVER_HOVER,
+    SPAWN_BADGE_OK, SUBTLE, TEXT_2, TRANSPARENT,
 };
 use crate::remote_mode::spawn_no_repos_note;
 use crate::session_menu::{backdrop, dialog_button};
@@ -1365,15 +1365,21 @@ impl RootView {
             cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
         );
         let gate = self.add_repo_gate();
-        let add = button("spawn-add-repo", OUTLINED.0, OUTLINED.1, gate.enabled)
-            .flex_none()
-            .child("Add repo")
-            .tooltip(tooltip(gate.tip))
-            .when(gate.enabled, |add| {
-                add.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    this.add_repo(window, cx);
-                }))
-            });
+        let add = button(
+            "spawn-add-repo",
+            OUTLINED.0,
+            OUTLINED.1,
+            gate.enabled,
+            Layer::Floating,
+        )
+        .flex_none()
+        .child("Add repo")
+        .tooltip(tooltip(gate.tip))
+        .when(gate.enabled, |add| {
+            add.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.add_repo(window, cx);
+            }))
+        });
         let body = div()
             .debug_selector(|| "spawn-no-repos".to_owned())
             .flex()
@@ -1395,6 +1401,7 @@ impl RootView {
             ButtonKind::Outlined,
             ButtonSize::Large,
             true,
+            Layer::Floating,
         )
         .flex_none()
         .child("Cancel")
@@ -1406,6 +1413,7 @@ impl RootView {
             ButtonKind::Primary,
             ButtonSize::Large,
             false,
+            Layer::Floating,
         )
         .flex_none()
         .child("Spawn");
@@ -1536,7 +1544,11 @@ pub(crate) fn close_button(selector: &str, focused: bool) -> Stateful<Div> {
         .border_color(gpui::rgba(TRANSPARENT))
         .text_color(gpui::rgb(TEXT_2))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
+        .hover(|style| {
+            style
+                .bg(gpui::rgb(POPOVER_HOVER))
+                .text_color(gpui::rgb(TEXT))
+        })
         .child("✕")
         .when(focused, |close| close.child(focus_ring(CLOSE_RADIUS)))
 }
@@ -1629,7 +1641,9 @@ pub(crate) fn choice_button(
         .text_size(px(SEGMENT_TEXT_SIZE))
         .font_weight(weight)
         .text_color(gpui::rgb(text))
-        .when(look.selected, |segment| segment.bg(gpui::rgb(HOVER)))
+        .when(look.selected, |segment| {
+            segment.bg(gpui::rgb(POPOVER_HOVER))
+        })
         .when(look.enabled, |segment| {
             segment
                 .cursor_pointer()
@@ -1752,7 +1766,7 @@ fn spawn_button(
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let focused = focus == control;
-    let base = button(&control.selector(), kind, size, enabled)
+    let base = button(&control.selector(), kind, size, enabled, Layer::Floating)
         .flex_none()
         .child(label)
         .when(focused, |button| button.child(focus_ring(size.radius())));
@@ -2165,9 +2179,9 @@ fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>
         .flex()
         .flex_col()
         .p(px(4.0))
-        .bg(gpui::rgb(CHIP))
+        .bg(gpui::rgb(POPOVER))
         .border_1()
-        .border_color(gpui::rgb(LINE_STRONG))
+        .border_color(gpui::rgb(POPOVER_EDGE))
         .rounded(px(LIST_RADIUS))
         .occlude()
         .children(items);
@@ -2200,7 +2214,7 @@ fn list_row(
         .py(px(4.0))
         .rounded(px(SEGMENT_RADIUS))
         .cursor_pointer()
-        .when(highlighted, |row| row.bg(gpui::rgb(HOVER)))
+        .when(highlighted, |row| row.bg(gpui::rgb(POPOVER_HOVER)))
         .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
             this.hover_spawn_list(list, index, cx);
         }))

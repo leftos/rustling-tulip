@@ -19,7 +19,9 @@ use protocol::{
 use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
 use crate::appearance_view::Level;
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
-use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, outlined_button};
+use crate::buttons::{
+    ButtonKind, ButtonSize, Layer, button, field_frame, focus_ring, outlined_button,
+};
 use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP, TAB_DOCK_BACK_TIP};
 use crate::launch_last;
 use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
@@ -1820,7 +1822,9 @@ impl RootView {
                 // frame's press-outside.
                 let remove = row.action == ContainerAction::Remove;
                 let item = menu_item(&row.selector, row.label.clone(), remove)
-                    .when(highlighted, |item| item.bg(gpui::rgb(HOVER_BG)));
+                    .when(highlighted, |item| {
+                        item.bg(gpui::rgb(crate::palette::POPOVER_HOVER))
+                    });
                 let item = if remove {
                     item.on_mouse_down(
                         MouseButton::Left,
@@ -2565,7 +2569,8 @@ impl RootView {
             ButtonKind::Outlined
         };
         let ready = self.action_ready(session_id, action);
-        let button = button(selector, kind, ButtonSize::Compact, ready).child(label);
+        let button =
+            button(selector, kind, ButtonSize::Compact, ready, Layer::Floating).child(label);
         if ready {
             on_action_press(button, session_id, action, cx)
         } else {
@@ -3338,7 +3343,7 @@ pub(crate) fn dialog_button(
         ButtonKind::Outlined
     };
     let size = ButtonSize::Regular;
-    button(selector, kind, size, enabled)
+    button(selector, kind, size, enabled, Layer::Floating)
         .when(focused, |button| button.child(focus_ring(size.radius())))
         .child(label)
 }
@@ -3408,7 +3413,7 @@ pub(crate) fn bordered_button(
         tip,
         enabled,
     } = button;
-    let base = outlined_button(&selector, ButtonSize::Compact, enabled)
+    let base = outlined_button(&selector, ButtonSize::Compact, enabled, Layer::Floating)
         .tooltip(tooltip(tip))
         .child(label);
     if enabled {
@@ -3444,8 +3449,12 @@ pub(crate) fn menu_item(
         .py(px(3.0))
         .rounded(px(4.0))
         .cursor_pointer()
-        .text_color(gpui::rgb(if danger { DANGER } else { TEXT }))
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .text_color(gpui::rgb(if danger {
+            crate::palette::DANGER_TEXT
+        } else {
+            TEXT
+        }))
+        .hover(|style| style.bg(gpui::rgb(crate::palette::POPOVER_HOVER)))
         .child(label)
 }
 
@@ -3520,7 +3529,7 @@ fn slot_row(selector: &str, slot: Div, label: &'static str) -> Stateful<Div> {
         .py(px(3.0))
         .rounded(px(4.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(crate::palette::POPOVER_HOVER)))
         .child(slot)
         .child(label)
 }
