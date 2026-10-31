@@ -396,7 +396,7 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 
   The built-in is the Contrast look, chosen in `docs/design/ui-language/README.md`: a near-black ground, floating layers well above it, session rows as cards, ruled menu groups; contrast floors pinned by its tests, every text step at WCAG AA or better, and quiet text lifted to secondary on a hovered row.
 
-  The terminal uses a fixed palette with ANSI colours contrast-adjusted against the background (`theme.rs`), on a built-in ground of #070609; the built-in session accent is Coral #F07A62, with six accent presets (Coral, Rose, Ochre, Periwinkle, Sky, Lilac); a program's OSC 11 background and OSC 12 caret colour win.
+  The terminal's palette is the active theme's `terminal` part (`UiTheme.terminal`, a `TerminalPalette`: foreground, background, caret, selection and 16 ANSI colours), drawn as given; a background override at the session, container or app level instead builds a palette whose ANSI colours are contrast-adjusted against that background (`theme.rs` `resolve_palette`, `build_theme`). Setting a theme repaints open terminals in place. The built-in theme's terminal ground is #070609; the built-in session accent is Coral #F07A62, with six accent presets (Coral, Rose, Ochre, Periwinkle, Sky, Lilac); a program's OSC 11 background and OSC 12 caret colour win.
 
   The interface draws in Geist by default (`fonts::DEFAULT_UI_FAMILY`); `fonts::ui_family(cx)` is the current choice, set on the root view and the tooltip view, and the terminal font pickers never list Geist, Inter or Schibsted Grotesk.
 
