@@ -269,13 +269,15 @@ When adding a message, update both directions (`ClientMessage` + `DaemonMessage`
 
 **App code never names an agent.** The daemon, protocol, native client and tracer ask the registry and the plugin's descriptor; agent-specific behaviour lives in `crates/agents/<agent>/`. `tools/check-agent-names.ps1` (a prek hook and the first step of `.\rt.ps1 clippy`) fails on `claude`, `anthropic` or `deepseek` elsewhere, apart from test code and the hits listed in `tools/agent-names-allow.txt`.
 
-**No backward compatibility before the first release.** The app is unreleased: build as if from scratch. A breaking change to the wire, `state.json`, presets, sidecars or history is simply made, with no migration, legacy decoder, tolerant decode or backup; data that no longer decodes is ignored, and live sessions or history from an older build need not survive an upgrade. The bump rules below still apply to the version number.
+**Saved user data survives every update.** The app is released and used by more than its owner. A change to the shape of anything a user set or saved (`native-ui.json`, `state.json`, presets, themes, history, `devices.json`, `remote.json`, the Credential Manager entries) still reads the last release's shape: a renamed or removed field is migrated on load to where its value now lives, never dropped, and the change carries a test that loads a file in the last release's shape. Data a released build never wrote (a format added since the last release tag) needs no migration.
+
+Runtime state may be lost on an update across a breaking change: live sessions over a tracer-ABI or sidecar break, scrollback, activity logs and summary rings. The release notes say so when a release breaks them (`docs/auto-update.md`).
 
 **When to bump `protocol-version.json`.** *Additive* changes (new variant on a tagged enum, new `#[serde(default)]` field on a struct, new message type) are NOT a protocol bump. The range-based handshake (`SUPPORTED_PROTOCOL_VERSIONS`) + the `InboundClientMessage::Unknown` / `InboundDaemonMessage::Unknown` parse wrappers absorb unknown top-level types.
 
 Nested enums that grow over time (`TabLayout`, `RearrangeLayout`, `InjectorStep`, `PresetVariableKind`, `TabContent`) each carry a `#[serde(other)] Unknown` unit variant that absorbs unrecognized values *in place* — the containing message keeps decoding. New nested enums should follow the same `#[serde(other)]` pattern from day one.
 
-*Breaking* changes — renaming a field, removing a variant, changing semantics — DO require a bump. There is no older client to keep, so a bump sets `version` to the new number and `supported` to only the versions the new daemon can serve, normally just the new one (`[25]`, not `[25, 24]`).
+*Breaking* changes — renaming a field, removing a variant, changing semantics — DO require a bump. The installer updates the client and its local daemon together, and the handshake refuses a remote host that shares no version with the client, so a bump sets `version` to the new number and `supported` to only the versions the new daemon can serve, normally just the new one (`[25]`, not `[25, 24]`).
 
 Before every breaking bump, verify that `daemon_client::ensure_running` retires the old healthy daemon through the HTTP `/shutdown` path and spawns the new daemon, so tracer-backed sessions reattach instead of leaving the client stuck at `auth_failed` (`crates/daemon-client/src/supervisor.rs`: `classify_existing_daemon`, `retire_daemon`, and the test `native_client_retires_daemon_that_speaks_only_an_older_version`).
 

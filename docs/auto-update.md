@@ -65,7 +65,7 @@ Velopack was considered and not used. It would replace the NSIS installer and ad
    - `daemon_client::ensure_running` retires a protocol-compatible daemon whose `build_version` is older than the client's own (reason `older build`).
    - `ensure_running` never retires a daemon whose `build_version` is newer. An older client facing a newer daemon reports `daemon is newer ({daemon}) than this client ({client}); update the client` and does not start its own.
    - A missing version counts as older.
-10. **Sessions.** Tracers keep running across the daemon stop, and the new daemon reattaches them as after any daemon restart. The cache keeps tracer copies that sidecars name, so live sessions keep their hook shim. An update across a breaking tracer-ABI or sidecar change does not promise session survival. Before the first release the app keeps no backward compatibility, and the release notes say so when a release breaks it.
+10. **Sessions.** Tracers keep running across the daemon stop, and the new daemon reattaches them as after any daemon restart. The cache keeps tracer copies that sidecars name, so live sessions keep their hook shim. An update across a breaking tracer-ABI or sidecar change does not promise session survival, and the release notes say so when a release breaks it. Saved user data always survives an update (CLAUDE.md, "Saved user data survives every update").
 11. **Only this PC.** The updater lives in the native client only. No daemon message, tailnet peer or SSH host triggers or feeds it.
 12. **Release procedure.** After the installer is built, `rt.ps1 installer` writes `target/installer/rustling-tulip-<version>-setup.exe.sha256` (`<hex>  <file name>`), and the publish step attaches both files ([release.md](./release.md)).
 
