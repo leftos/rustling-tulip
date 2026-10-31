@@ -5,8 +5,8 @@ use crate::support;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
-    AgentDescriptor, AgentId, ClientMessage, DaemonMessage, InitLayoutKind, SessionMode,
-    SessionSnapshot, SpawnRequest, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
+    AgentDescriptor, AgentId, CheckoutStrategy, ClientMessage, DaemonMessage, InitLayoutKind,
+    SessionMode, SessionSnapshot, SpawnRequest, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
     VscodeWorkspaceSuggestion, WorktreeReusePolicy,
 };
 use rustling_tulip_native::target::{HostKey, Target};
@@ -878,14 +878,14 @@ fn this_pc_reconnects(h: &mut Harness<'_>) {
 }
 
 /// A claude spawn on branch `feature` of [`REMOTE`]'s repo `r2`.
-fn remote_request() -> SpawnRequest {
+fn remote_request(use_worktree: bool) -> SpawnRequest {
     SpawnRequest {
         label: None,
         target: SpawnTarget::Single {
             repo_id: "r2".to_owned(),
             branch_name: "feature".to_owned(),
             base_branch: None,
-            use_worktree: true,
+            use_worktree,
             checkout_strategy: None,
             worktree_reuse: WorktreeReusePolicy::default(),
             existing_worktree: None,
@@ -1022,7 +1022,7 @@ fn a_remote_spawns_toast_survives_this_pcs_reconnect(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_hosts(cx, &dir, session("b1").build());
 
-    let id = h.root_update(|root, _, cx| root.spawn(remote_request(), OpenIn::NewTab, cx));
+    let id = h.root_update(|root, _, cx| root.spawn(remote_request(true), OpenIn::NewTab, cx));
     assert_eq!(
         spawn_ids(&h.host(&remote()).sent()),
         [Some(id.clone())],
@@ -1049,5 +1049,106 @@ fn a_remote_spawns_toast_survives_this_pcs_reconnect(cx: &mut TestAppContext) {
         placements(&h.sent()),
         [placed_on_remote("b2")],
         "the spawn is placed though This PC reconnected"
+    );
+}
+
+/// The request id and checkout strategy of every spawn among `sent`.
+fn resends(sent: &[ClientMessage]) -> Vec<(Option<String>, Option<CheckoutStrategy>)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SpawnSession(request) => {
+                let strategy = match &request.target {
+                    SpawnTarget::Single {
+                        checkout_strategy, ..
+                    } => *checkout_strategy,
+                    _ => None,
+                };
+                Some((request.request_id.clone(), strategy))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The selector of the shown checkout prompt's focused button, if one shows.
+fn checkout_focus(h: &mut Harness<'_>) -> Option<&'static str> {
+    h.root(|root, _| root.checkout_focus())
+}
+
+/// The dirty-tree prompt of [`REMOTE`]'s in-place spawn `request_id`.
+fn dirty_remote(request_id: &str) -> DaemonMessage {
+    DaemonMessage::CheckoutConfirmRequired {
+        repo_id: "r2".to_owned(),
+        branch: "feature".to_owned(),
+        dirty_count: 1,
+        request_id: Some(request_id.to_owned()),
+    }
+}
+
+#[gpui::test]
+fn a_remote_checkout_prompt_survives_this_pcs_reconnect(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").build());
+
+    let id = h.root_update(|root, _, cx| root.spawn(remote_request(false), OpenIn::NewTab, cx));
+    h.host(&remote()).sent();
+    h.host(&remote()).send(dirty_remote(&id));
+    assert_eq!(
+        checkout_focus(&mut h),
+        Some("checkout-cancel"),
+        "the remote spawn's prompt shows"
+    );
+
+    this_pc_reconnects(&mut h);
+
+    assert_eq!(
+        checkout_focus(&mut h),
+        Some("checkout-cancel"),
+        "the prompt stays shown across This PC's reconnect"
+    );
+
+    h.click_on("checkout-stash");
+    assert_eq!(
+        resends(&h.host(&remote()).sent()),
+        [(Some(id.clone()), Some(CheckoutStrategy::Stash))],
+        "the answer resends the spawn to the remote host"
+    );
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SpawnSession(_))),
+        "This PC is not asked"
+    );
+    assert_eq!(checkout_focus(&mut h), None, "the answer closes the prompt");
+}
+
+#[gpui::test]
+fn a_remote_hosts_disconnect_closes_its_checkout_prompt(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").build());
+
+    let id = h.root_update(|root, _, cx| root.spawn(remote_request(false), OpenIn::NewTab, cx));
+    h.host(&remote()).sent();
+    h.host(&remote()).send(dirty_remote(&id));
+    assert!(checkout_focus(&mut h).is_some(), "the prompt shows");
+
+    close_host(&mut h, &remote());
+    h.sent();
+
+    assert_eq!(
+        checkout_focus(&mut h),
+        None,
+        "the dropped host's prompt closes"
+    );
+
+    h.host(&remote()).connect();
+    h.host(&remote()).send(DaemonMessage::SessionUpdated {
+        session: session("b2").in_repo("r2").build(),
+        request_id: Some(id),
+    });
+    assert_eq!(
+        placements(&h.sent()),
+        [],
+        "the reply to the ended spawn is placed nowhere"
     );
 }

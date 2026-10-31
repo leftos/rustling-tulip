@@ -651,16 +651,31 @@ impl Notices {
         self.reask.is_some()
     }
 
-    /// Closes both modal notices, the checkout prompt on screen, the re-ask
-    /// on its way and every prompt waiting; returns whether anything was open.
-    pub fn close_modals(&mut self) -> bool {
-        let failed = self.close_action_failed();
-        let checkout = self.checkout.take().is_some();
-        let reask = self.reask.take().is_some();
-        let waiting = !self.waiting.is_empty();
-        self.waiting.clear();
-        self.answered = 0;
-        failed || checkout || reask || waiting
+    /// Closes the checkout prompts `closes` claims — the one on screen, the
+    /// re-ask on its way and those waiting — leaving the rest in place and in
+    /// order; returns whether any closed. A prompt with no request id is a
+    /// prompt no pending spawn answers, and `closes` is asked with None.
+    pub fn close_checkouts(&mut self, mut closes: impl FnMut(Option<&str>) -> bool) -> bool {
+        let mut closed = false;
+        if self
+            .checkout
+            .as_ref()
+            .is_some_and(|ask| closes(ask.request_id.as_deref()))
+        {
+            self.checkout = None;
+            closed = true;
+        }
+        if self.reask.as_deref().is_some_and(|id| closes(Some(id))) {
+            self.reask = None;
+            closed = true;
+        }
+        let before = self.waiting.len();
+        self.waiting.retain(|id| !closes(Some(id)));
+        closed |= self.waiting.len() != before;
+        if closed && !self.has_modal() {
+            self.answered = 0;
+        }
+        closed
     }
 }
 
@@ -1258,7 +1273,7 @@ mod tests {
                 .starts_with("This repo has 3 uncommitted changes and isn't on main.")
         );
         assert_eq!(prompt.focused(), CheckoutChoice::Cancel);
-        assert!(notices.close_modals());
+        assert!(notices.close_checkouts(|_| true));
         assert!(notices.checkout().is_none());
     }
 
@@ -1463,15 +1478,18 @@ mod tests {
     }
 
     #[test]
-    fn close_modals_clears_the_queue_and_the_reask() {
+    fn close_checkouts_clears_the_queue_and_the_reask() {
         let mut notices = Notices::default();
         ask(&mut notices, "a");
         ask(&mut notices, "b");
         notices.close_checkout();
         assert_eq!(pump_all(&mut notices).as_deref(), Some("b"));
         ask(&mut notices, "c");
-        assert!(notices.close_modals(), "a re-ask on its way counts as open");
-        assert!(!notices.close_modals(), "nothing is open now");
+        assert!(
+            notices.close_checkouts(|_| true),
+            "a re-ask on its way counts as open"
+        );
+        assert!(!notices.close_checkouts(|_| true), "nothing is open now");
 
         let mut asked = Vec::new();
         let sent = notices.pump(|id| {

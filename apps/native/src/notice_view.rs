@@ -102,16 +102,32 @@ impl RootView {
 
     /// `host`'s connection closed: its spawns in flight end, with their
     /// spawning toasts, its duplicates and its recoveries in flight are
-    /// forgotten.
-    pub(crate) fn drop_pending_of(&mut self, host: &HostKey, cx: &mut Context<Self>) {
-        for request_id in self.spawns.drop_host(host) {
+    /// forgotten, and its checkout prompts close, the other hosts' staying
+    /// where they sit.
+    pub(crate) fn drop_pending_of(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ended = self.spawns.drop_host(host);
+        for request_id in &ended {
             tracing::info!(?host, request_id, "the host closed; its pending spawn ends");
-            self.clear_spawning_toast(&request_id, cx);
+            self.clear_spawning_toast(request_id, cx);
         }
         if self.duplicates.drop_host(host) {
             tracing::info!(?host, "the host closed; its pending duplicates end");
         }
         self.forget_recoveries_of(host);
+        let had_modal = self.notices.has_modal();
+        if self.notices.close_checkouts(|request_id| {
+            request_id.is_some_and(|id| ended.iter().any(|ended| ended == id))
+        }) {
+            self.pump_checkout(cx);
+        }
+        if had_modal && !self.notices.has_modal() {
+            self.after_notice_closed(window, cx);
+        }
     }
 
     /// The toasts on screen, oldest first.
@@ -479,14 +495,22 @@ impl RootView {
         }
     }
 
-    /// Ends This PC's spawns in flight with their spawning toasts, its
-    /// duplicates and its recoveries too, and closes both modal notices, as
-    /// a new or lost connection must. A remote host's pending entries stay:
-    /// its connection did not change.
+    /// Ends This PC's spawns in flight, with their spawning toasts and their
+    /// checkout prompts, and its duplicates and recoveries too; closes the
+    /// action-failed notice and any checkout prompt no spawn answers, as a
+    /// new or lost connection must. A remote host's pending entries and
+    /// their prompts stay: its connection did not change.
     pub(crate) fn reset_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.drop_pending_of(&HostKey::Local, cx);
+        self.drop_pending_of(&HostKey::Local, window, cx);
         self.quick_shell_saves.clear();
-        if self.notices.close_modals() {
+        let stale = self
+            .notices
+            .close_checkouts(|request_id| request_id.is_none());
+        if stale {
+            self.pump_checkout(cx);
+        }
+        let failed = self.notices.close_action_failed();
+        if stale || failed {
             self.after_notice_closed(window, cx);
         }
     }
