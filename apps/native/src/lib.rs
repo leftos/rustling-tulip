@@ -1022,6 +1022,8 @@ pub struct RootView {
     quit_focus: FocusHandle,
     /// The first-connect layout chooser, while open.
     layout_chooser: Option<layout_chooser::LayoutChooser>,
+    /// The host whose daemon asked for the open layout chooser's answer.
+    layout_chooser_host: HostKey,
     /// The layout chooser's keyboard focus.
     chooser_focus: FocusHandle,
     /// The arrangement the chooser picked, applied to the daemon's next tab
@@ -1447,6 +1449,7 @@ impl RootView {
             exit: None,
             quit_focus: cx.focus_handle(),
             layout_chooser: None,
+            layout_chooser_host: HostKey::Local,
             chooser_focus: cx.focus_handle(),
             pending_arrangement: None,
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
@@ -2196,7 +2199,7 @@ impl RootView {
             let Some(path) = container.path else {
                 continue;
             };
-            let host = self.host_of_container(&container.key);
+            let host = container.host;
             if !self.conn_of(&host).is_some_and(Connection::is_open) {
                 continue;
             }
@@ -3897,7 +3900,9 @@ impl RootView {
             self.end_fetches_on_disconnect(host, window, cx);
             self.set_remote_status(host, None, cx);
         }
+        let state = conn.state().clone();
         self.set_conn(host, conn);
+        self.release_duplicates_if_ended(host, &state, window, cx);
         if *host == HostKey::Local {
             self.follow_settings_target();
         }
@@ -4083,7 +4088,14 @@ impl RootView {
                 has_legacy,
                 active_session_count,
                 clonable,
-            } => self.open_layout_chooser(has_legacy, active_session_count, clonable, window, cx),
+            } => self.open_layout_chooser(
+                host,
+                has_legacy,
+                active_session_count,
+                clonable,
+                window,
+                cx,
+            ),
             DaemonMessage::Sessions { sessions } => self.on_sessions(host, &sessions, window, cx),
             DaemonMessage::Scrollback {
                 session_id,

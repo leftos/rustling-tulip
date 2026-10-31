@@ -176,6 +176,26 @@ mod dir_tests {
     }
 
     #[test]
+    fn daemon_id_file_is_data_local_unless_the_config_dir_is_overridden() {
+        let data_local = std::env::temp_dir().join("rt-data-local");
+        let config = std::env::temp_dir().join("rt-roaming-config");
+        let from_data_local = || Ok(data_local.clone());
+        assert_eq!(
+            daemon_id_file_from(false, &config, from_data_local).expect("resolve by default"),
+            data_local.join("daemon-id"),
+            "the id stays on this machine, out of the roaming config dir"
+        );
+        assert_eq!(
+            daemon_id_file_from(true, &config, || Err(anyhow!(
+                "data-local dir not consulted"
+            )))
+            .expect("resolve with the config dir overridden"),
+            config.join("daemon-id"),
+            "an overridden config dir keeps the id inside it"
+        );
+    }
+
+    #[test]
     fn summarizer_dir_is_data_local_summarizer_and_is_created() {
         let data_local =
             std::env::temp_dir().join(format!("rt-summarizer-data-local-{}", std::process::id()));
@@ -319,11 +339,38 @@ pub fn devices_file(dirs: &Dirs) -> PathBuf {
     dirs.config.join("devices.json")
 }
 
-/// This daemon's stable id: `<config>/daemon-id`, a bare UUID with no newline
-/// (see [`crate::daemon_id`]).
-#[must_use]
-pub fn daemon_id_file(dirs: &Dirs) -> PathBuf {
-    dirs.config.join("daemon-id")
+/// This daemon's stable id file, a bare UUID with no newline (see
+/// [`crate::daemon_id`]): `<data_local>/daemon-id`, machine-local, so two
+/// machines sharing a roaming profile never report one id. While
+/// `RUSTLING_TULIP_CONFIG_DIR` overrides the config dir it is
+/// `<config>/daemon-id`, so an isolated daemon keeps its id in its own tree.
+///
+/// # Errors
+///
+/// The data-local dir could not be resolved.
+pub fn resolve_daemon_id_file(dirs: &Dirs) -> anyhow::Result<PathBuf> {
+    let config_overridden =
+        std::env::var_os("RUSTLING_TULIP_CONFIG_DIR").is_some_and(|value| !value.is_empty());
+    daemon_id_file_from(config_overridden, &dirs.config, || {
+        let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
+            .ok_or_else(|| anyhow!("could not resolve the daemon id directory"))?;
+        Ok(pd.data_local_dir().to_path_buf())
+    })
+}
+
+/// `daemon-id` under `config` when the config dir is overridden, else under
+/// the data-local dir.
+fn daemon_id_file_from(
+    config_overridden: bool,
+    config: &Path,
+    data_local: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    let dir = if config_overridden {
+        config.to_path_buf()
+    } else {
+        data_local()?
+    };
+    Ok(dir.join("daemon-id"))
 }
 
 /// The summarizer's spend ledger: `<config>/summarizer-spend.json`, the
