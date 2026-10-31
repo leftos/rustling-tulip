@@ -271,13 +271,17 @@ impl RootView {
             .when(!processes.is_empty(), |list| {
                 list.child(div().flex().flex_col().gap(px(6.0)).children(processes))
             });
-        let panel = modal_panel("cleanup-failed-panel", &theme(cx))
-            .track_focus(&self.cleanup_focus)
-            .child(header)
-            .child(div().child(dialog.body()))
-            .child(list)
-            .children(dialog.no_lockers_note().map(|note| muted(note, &t)))
-            .child(footer);
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "cleanup-failed-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.cleanup_focus)
+        .child(header)
+        .child(div().child(dialog.body()))
+        .child(list)
+        .children(dialog.no_lockers_note().map(|note| muted(note, &t)))
+        .child(footer);
         Some(backdrop("cleanup-failed", panel, &theme(cx)))
     }
 }
@@ -303,7 +307,12 @@ fn cleanup_button(
     let button = dialog_button(
         &control.selector(),
         label,
-        dialog_look(danger, refusal.is_none(), &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            danger,
+            refusal.is_none(),
+            &theme(cx),
+        ),
         control == dialog.focused(),
     );
     match refusal {

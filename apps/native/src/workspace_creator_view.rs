@@ -486,7 +486,7 @@ impl RootView {
         let cancel = dialog_button(
             CreatorControl::Cancel.selector(),
             "Cancel".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             focus == CreatorControl::Cancel,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -496,7 +496,12 @@ impl RootView {
         let create = dialog_button(
             CreatorControl::Create.selector(),
             "Create".to_owned(),
-            dialog_look(false, can_submit, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                false,
+                can_submit,
+                &theme(cx),
+            ),
             focus == CreatorControl::Create,
         )
         .when(can_submit, |button| {
@@ -504,20 +509,24 @@ impl RootView {
                 this.press_workspace_control(CreatorControl::Create, window, cx);
             }))
         });
-        let panel = modal_panel("workspace-creator-panel", &theme(cx))
-            .track_focus(&self.workspace_creator_focus)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
-            .child(tabs)
-            .child(body)
-            .children(error)
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .child(cancel)
-                    .child(create),
-            );
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "workspace-creator-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.workspace_creator_focus)
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+        .child(tabs)
+        .child(body)
+        .children(error)
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(6.0))
+                .child(cancel)
+                .child(create),
+        );
         Some(backdrop("workspace-creator", panel, &theme(cx)))
     }
 
@@ -741,9 +750,17 @@ fn repos_body(
                 .strip_prefix("workspace-creator-member-")
                 .unwrap_or_default()
                 .to_owned();
-            checkbox_row(&selector, checked, false, name, &theme(cx)).on_click(cx.listener(
-                move |this, _: &ClickEvent, _, cx| this.toggle_workspace_member(&repo_id, cx),
-            ))
+            checkbox_row(
+                crate::fonts::ui_text_size(cx),
+                &selector,
+                checked,
+                false,
+                name,
+                &theme(cx),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.toggle_workspace_member(&repo_id, cx);
+            }))
         }))
 }
 
@@ -817,7 +834,12 @@ fn browse_row(
     let browse = dialog_button(
         CreatorControl::Browse.selector(),
         "Browse…".to_owned(),
-        dialog_look(false, browse_enabled, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            false,
+            browse_enabled,
+            &theme(cx),
+        ),
         focus == CreatorControl::Browse,
     )
     .when(browse_enabled, |button| {

@@ -584,7 +584,12 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    dialog_look(button == RunButton::Run, true, &theme(cx)),
+                    dialog_look(
+                        crate::fonts::ui_text_size(cx),
+                        button == RunButton::Run,
+                        true,
+                        &theme(cx),
+                    ),
                     confirm.focused() == button,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -593,22 +598,26 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("run-confirm-panel", &theme(cx))
-            .track_focus(&self.run_focus)
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(confirm.title()),
-            )
-            .child(div().text_color(gpui::rgb(t.muted)).child(confirm.detail()))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .children(buttons),
-            );
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "run-confirm-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.run_focus)
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(confirm.title()),
+        )
+        .child(div().text_color(gpui::rgb(t.muted)).child(confirm.detail()))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .gap(px(6.0))
+                .children(buttons),
+        );
         Some(backdrop("run-confirm-dialog", panel, &theme(cx)))
     }
 }

@@ -19,7 +19,7 @@ use gpui::{
 };
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
-use crate::fonts;
+use crate::fonts::{self, ui_px_at};
 use crate::links::TerminalLinkCandidate;
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
@@ -523,12 +523,12 @@ fn line_highlights(
         .collect()
 }
 
-/// A task item's box, filled when it is checked.
-fn task_box(checked: bool, t: &UiTheme) -> Div {
+/// A task item's box at UI text `offset`, filled when it is checked.
+fn task_box(offset: i8, checked: bool, t: &UiTheme) -> Div {
     let color = if checked { t.accent } else { t.line_strong };
     div()
-        .mt(px(TASK_BOX_TOP))
-        .size(px(TASK_BOX))
+        .mt(ui_px_at(offset, TASK_BOX_TOP))
+        .size(ui_px_at(offset, TASK_BOX))
         .rounded(px(2.0))
         .border_1()
         .border_color(gpui::rgb(color))
@@ -539,6 +539,8 @@ fn task_box(checked: bool, t: &UiTheme) -> Div {
 /// the document in its rows' selectors and the links it follows, which
 /// `route` picks.
 pub(crate) struct Painter {
+    /// The whole pixels added to headings, task boxes and list markers.
+    offset: i8,
     tab_id: String,
     route: LinkRoute,
     mono: SharedString,
@@ -550,17 +552,19 @@ pub(crate) struct Painter {
 }
 
 impl Painter {
-    /// A painter for document `tab_id`, following the links `route` picks,
-    /// whose code draws in the terminal font `family` (the bundled one when
-    /// `None`) at `size`, coloured as the source view colours a file in `t`.
+    /// A painter for document `tab_id` at UI text `offset`, following the
+    /// links `route` picks, whose code draws in the terminal font `code`, a
+    /// family (the bundled one when `None`) and a size, coloured as the
+    /// source view colours a file in `t`.
     pub(crate) fn new(
+        offset: i8,
         tab_id: String,
         route: LinkRoute,
-        family: Option<&str>,
-        size: f32,
+        (family, size): (Option<&str>, f32),
         t: &UiTheme,
     ) -> Self {
         Self {
+            offset,
             tab_id,
             route,
             mono: SharedString::from(family.unwrap_or(fonts::DEFAULT_FAMILY).to_owned()),
@@ -583,7 +587,7 @@ impl Painter {
         let t = &self.theme;
         match &row.kind {
             RowKind::Heading { level, spans } => div()
-                .text_size(px(heading_size(*level)))
+                .text_size(ui_px_at(self.offset, heading_size(*level)))
                 .font_weight(FontWeight::BOLD)
                 .child(self.inline(spans, ix, 0)),
             RowKind::Text(spans) => div().child(self.inline(spans, ix, 0)),
@@ -664,7 +668,7 @@ impl Painter {
     fn item(&self, marker: &Marker, spans: &[Span], ix: usize) -> Div {
         let t = &self.theme;
         let marker = match marker {
-            Marker::Task(checked) => task_box(*checked, t),
+            Marker::Task(checked) => task_box(self.offset, *checked, t),
             Marker::Text(text) => div().child(text.clone()),
         };
         div()
@@ -673,7 +677,7 @@ impl Painter {
             .child(
                 div()
                     .flex_none()
-                    .w(px(MARKER_WIDTH))
+                    .w(ui_px_at(self.offset, MARKER_WIDTH))
                     .pr(px(MARKER_PAD))
                     .flex()
                     .justify_end()
@@ -775,7 +779,7 @@ pub(crate) fn render_row(
         return div().into_any_element();
     };
     let mut framed = div()
-        .pl(px(steps(row.indent, MARKER_WIDTH)))
+        .pl(ui_px_at(painter.offset, MARKER_WIDTH) * steps(row.indent, 1.0))
         .pb(px(row.gap))
         .child(painter.row(row, ix));
     for _ in 0..row.quote {
@@ -970,10 +974,10 @@ impl RootView {
     ) -> Div {
         let font = &self.sidebar.ui_state().terminal_font;
         let painter = Painter::new(
+            0,
             tab_id.to_owned(),
             LinkRoute::ViewerTab,
-            font.family.as_deref(),
-            font.size,
+            (font.family.as_deref(), font.size),
             t,
         );
         let doc = Arc::clone(doc);
@@ -982,6 +986,7 @@ impl RootView {
             .debug_selector(move || selector)
             .flex_1()
             .min_h(px(0.0))
+            .text_size(px(UI_TEXT_SIZE))
             .child(
                 list(rows.clone(), move |ix, _, _| {
                     render_row(&doc, &painter, ix, BODY_PAD_X, BODY_PAD_TOP)
@@ -1013,6 +1018,7 @@ pub(crate) fn markdown_toggle(
         let selector = format!("viewer-md-{name}-{tab_id}");
         let button = if mode == shown {
             primary_button(
+                crate::fonts::ui_text_size(cx),
                 &selector,
                 ButtonSize::Compact,
                 enabled,
@@ -1021,6 +1027,7 @@ pub(crate) fn markdown_toggle(
             )
         } else {
             outlined_button(
+                crate::fonts::ui_text_size(cx),
                 &selector,
                 ButtonSize::Compact,
                 enabled,

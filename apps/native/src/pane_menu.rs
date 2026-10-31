@@ -436,6 +436,7 @@ impl RootView {
             })
             .collect();
         let frame = menu_frame(
+            crate::fonts::ui_text_size(cx),
             "empty-pane-menu",
             &self.pane_ui.menu_focus,
             menu.max_height,

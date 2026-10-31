@@ -15,6 +15,7 @@ use crate::changes_view::{
     HEAD_HEIGHT, ScBucketRow, ScChanges, ScCommit, caret, changes_body, count_pill, head_title,
 };
 use crate::ellipsis::truncating;
+use crate::fonts::ui_px;
 use crate::session_menu::MENU_MAX_SHARE;
 use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
@@ -498,7 +499,7 @@ impl RootView {
             .debug_selector(|| "sc-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(t.panel_bg))
-            .text_size(px(UI_TEXT_SIZE))
+            .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
             .child(self.sc_header(&panel, window, cx))
             .when_some(panel.context.clone(), |view, context| {
@@ -524,7 +525,7 @@ impl RootView {
             .items_center()
             .justify_between()
             .gap(px(6.0))
-            .h(px(HEADER_HEIGHT))
+            .h(ui_px(cx, HEADER_HEIGHT))
             .pl(px(HEADER_PAD_LEFT))
             .pr(px(ROW_PADDING))
             .border_b_1()
@@ -533,7 +534,7 @@ impl RootView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(HEADER_TEXT_SIZE))
+                    .text_size(ui_px(cx, HEADER_TEXT_SIZE))
                     .font_weight(FontWeight::BOLD)
                     .text_color(gpui::rgb(t.text))
                     .child(SC_TITLE),
@@ -550,7 +551,7 @@ impl RootView {
             .flex()
             .min_w(px(0.0))
             .items_center()
-            .h(px(PICKER_HEIGHT))
+            .h(ui_px(cx, PICKER_HEIGHT))
             .px(px(6.0))
             .rounded(px(4.0))
             .border_1()
@@ -567,6 +568,7 @@ impl RootView {
             }));
         let menu = self.sc_picker_open.then(|| {
             let frame = menu_frame(
+                crate::fonts::ui_text_size(cx),
                 "sc-picker-menu",
                 &self.menu_focus,
                 window.viewport_size().height * MENU_MAX_SHARE,
@@ -582,7 +584,7 @@ impl RootView {
                     .map(|row| picker_row(row, cx)),
             );
             let panel = anchored()
-                .offset(point(px(0.0), px(PICKER_HEIGHT + 2.0)))
+                .offset(point(px(0.0), ui_px(cx, PICKER_HEIGHT) + px(2.0)))
                 .snap_to_window()
                 .child(frame);
             deferred(panel).with_priority(1)
@@ -618,7 +620,7 @@ fn refresh_button(cx: &mut Context<RootView>) -> Stateful<Div> {
         .flex()
         .items_center()
         .justify_center()
-        .size(px(PICKER_HEIGHT))
+        .size(ui_px(cx, PICKER_HEIGHT))
         .rounded(px(4.0))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
@@ -665,16 +667,17 @@ fn section_view(
     let t = theme(cx);
     let name = format!("sc-section-{}", row.id);
     let body_name = format!("sc-section-body-{}", row.id);
+    let offset = crate::fonts::ui_text_size(cx);
     let title = div()
         .flex()
         .flex_col()
         .flex_1()
         .min_w(px(0.0))
-        .child(head_title(&format!("{name}-repo"), &row.repo, &t))
+        .child(head_title(offset, &format!("{name}-repo"), &row.repo, &t))
         .children(
             row.branch
                 .as_deref()
-                .map(|branch| head_title(&format!("{name}-branch"), branch, &t)),
+                .map(|branch| head_title(offset, &format!("{name}-branch"), branch, &t)),
         );
     let key = row.key.clone();
     let header = div()
@@ -683,7 +686,7 @@ fn section_view(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .min_h(px(HEAD_HEIGHT))
+        .min_h(ui_px(cx, HEAD_HEIGHT))
         .py(px(HEAD_PAD_Y))
         .px(px(ROW_PADDING))
         .cursor_pointer()
@@ -706,7 +709,7 @@ fn section_view(
         .child(caret(row.collapsed, &t))
         .child(title)
         .when_some(row.count, |header, count| {
-            header.child(count_pill(count, &t))
+            header.child(count_pill(offset, count, &t))
         });
     let body = (!row.collapsed || row.stashes.is_some()).then(|| {
         div()

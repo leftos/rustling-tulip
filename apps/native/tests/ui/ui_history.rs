@@ -297,6 +297,35 @@ fn a_failed_load_shows_the_text_with_no_toast(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn history_rows_grow_with_the_ui_text_size_and_clicks_still_hit_them(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &browsing());
+    open_panel(&mut h);
+    list_reads(&mut h);
+    h.send(commits(None, 0, 1, 3));
+    let row = format!("sc-commit-{BROWSED}-{}", commit(3).sha);
+    let base = h.bounds(&row).size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    let third = h.bounds(&row);
+    assert_eq!(
+        third.size.height,
+        base + px(3.0),
+        "three pixels taller at +3"
+    );
+    h.sent();
+    h.click(third.center(), Modifiers::none());
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::GetCommit { sha, .. } if *sha == commit(3).sha
+        )),
+        "a click at the third row's drawn centre asks for the third commit: {sent:?}"
+    );
+}
+
+#[gpui::test]
 fn clicking_a_commit_sends_get_commit_and_the_detail_shows_files(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &browsing());

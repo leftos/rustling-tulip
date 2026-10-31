@@ -120,6 +120,21 @@ fn ctrl_shift_n_opens_dialog_from_a_terminal(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_spawn_segments_grow_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    let base = h.bounds("spawn-agent-plain-shell").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    assert_eq!(
+        h.bounds("spawn-agent-plain-shell").size.height,
+        base + px(3.0),
+        "three pixels taller at +3"
+    );
+}
+
+#[gpui::test]
 fn ctrl_n_in_a_terminal_reaches_the_pty(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());

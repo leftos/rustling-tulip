@@ -298,6 +298,7 @@ impl RootView {
                     ))
                 });
             let frame = menu_frame(
+                crate::fonts::ui_text_size(cx),
                 "sidebar-more-menu",
                 &self.menu_focus,
                 window.viewport_size().height * MENU_MAX_SHARE,
@@ -608,6 +609,7 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .opacity(0.7)
         .child("Ctrl N");
     primary_button(
+        crate::fonts::ui_text_size(cx),
         "sidebar-add-session",
         ButtonSize::Toolbar,
         has_repos,
@@ -638,6 +640,7 @@ fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> State
         None => "Open a standalone shell in your home folder".to_owned(),
     };
     outlined_button(
+        crate::fonts::ui_text_size(cx),
         "sidebar-add-shell",
         ButtonSize::Toolbar,
         true,

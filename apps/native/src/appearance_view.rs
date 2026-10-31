@@ -743,15 +743,25 @@ impl RootView {
             .px(px(BODY_PAD_X))
             .py(px(BODY_PAD_Y))
             .children(self.appearance_body(focus, cx));
-        let panel = dialog_card("appearance-panel", EDITOR_WIDTH, &theme(cx))
-            .track_focus(&self.appearance_focus)
-            .child(dialog_title_bar(title, close, &t))
-            .child(body)
-            .child(close_footer(
-                AppearanceStop::Close.selector(),
-                focus == Some(AppearanceStop::Close),
-                cx,
-            ));
+        let panel = dialog_card(
+            crate::fonts::ui_text_size(cx),
+            "appearance-panel",
+            EDITOR_WIDTH,
+            &theme(cx),
+        )
+        .track_focus(&self.appearance_focus)
+        .child(dialog_title_bar(
+            crate::fonts::ui_text_size(cx),
+            title,
+            close,
+            &t,
+        ))
+        .child(body)
+        .child(close_footer(
+            AppearanceStop::Close.selector(),
+            focus == Some(AppearanceStop::Close),
+            cx,
+        ));
         Some(backdrop("appearance-editor", panel, &theme(cx)))
     }
 
@@ -831,7 +841,7 @@ impl RootView {
             let button = dialog_button(
                 stop.selector(),
                 label.to_owned(),
-                dialog_look(false, enabled, &t),
+                dialog_look(crate::fonts::ui_text_size(cx), false, enabled, &t),
                 focus == Some(stop),
             );
             let button = if enabled {
@@ -852,7 +862,11 @@ impl RootView {
             .flex()
             .flex_col()
             .gap(px(7.0))
-            .child(field_label("UI text size", &t))
+            .child(field_label(
+                crate::fonts::ui_text_size(cx),
+                "UI text size",
+                &t,
+            ))
             .child(stepper)
     }
 
@@ -909,7 +923,7 @@ impl RootView {
             FontList::Ui => ("UI font", "appearance-ui-family-hint"),
         };
         Some(
-            field_column(label, &t)
+            field_column(crate::fonts::ui_text_size(cx), label, &t)
                 .child(input_box(
                     list.filter_stop(),
                     editor.filter(list),
@@ -1086,7 +1100,7 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let label = field_label(row.label(), &t);
+        let label = field_label(crate::fonts::ui_text_size(cx), row.label(), &t);
         div()
             .flex()
             .flex_col()
@@ -1603,10 +1617,15 @@ fn hex_line(
             |swatch, color| swatch.bg(gpui::rgb(color)),
         );
     let apply_stop = AppearanceStop::Apply(row);
-    let apply = apply_button(apply_stop.selector(), ready, &theme(cx))
-        .when(focus == Some(apply_stop), |apply| {
-            apply.child(focus_ring(ButtonSize::Regular.radius(), &theme(cx)))
-        });
+    let apply = apply_button(
+        crate::fonts::ui_text_size(cx),
+        apply_stop.selector(),
+        ready,
+        &theme(cx),
+    )
+    .when(focus == Some(apply_stop), |apply| {
+        apply.child(focus_ring(ButtonSize::Regular.radius(), &theme(cx)))
+    });
     let apply = if ready {
         apply.on_click(click_stop(apply_stop, Aim::Stop, cx))
     } else {
@@ -1634,10 +1653,17 @@ fn hex_line(
 
 /// Apply, an outlined dialog button; a disabled one is dimmed, with the
 /// default cursor and no hover.
-fn apply_button(selector: &str, enabled: bool, t: &UiTheme) -> Stateful<Div> {
-    outlined_button(selector, ButtonSize::Regular, enabled, Layer::Floating, t)
-        .flex_none()
-        .child("Apply")
+fn apply_button(offset: i8, selector: &str, enabled: bool, t: &UiTheme) -> Stateful<Div> {
+    outlined_button(
+        offset,
+        selector,
+        ButtonSize::Regular,
+        enabled,
+        Layer::Floating,
+        t,
+    )
+    .flex_none()
+    .child("Apply")
 }
 
 /// A line of colour swatches that wraps.
@@ -1757,6 +1783,7 @@ fn list_row(
             div()
                 .flex_none()
                 .w(px(12.0))
+                .text_size(px(11.0))
                 .child(if chosen { "✓" } else { "" }),
         )
         .child(label.into())
@@ -1784,14 +1811,14 @@ fn size_section(
     let down = dialog_button(
         AppearanceStop::SizeDown.selector(),
         "−".to_owned(),
-        dialog_look(false, true, &theme(cx)),
+        dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
         focused(AppearanceStop::SizeDown),
     )
     .on_click(click_stop(AppearanceStop::SizeDown, Aim::Stop, cx));
     let up = dialog_button(
         AppearanceStop::SizeUp.selector(),
         "+".to_owned(),
-        dialog_look(false, true, &theme(cx)),
+        dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
         focused(AppearanceStop::SizeUp),
     )
     .on_click(click_stop(AppearanceStop::SizeUp, Aim::Stop, cx));
@@ -1807,7 +1834,7 @@ fn size_section(
                 .child(value),
         )
         .child(up);
-    let label = field_label("Font size", &t);
+    let label = field_label(crate::fonts::ui_text_size(cx), "Font size", &t);
     div()
         .flex()
         .flex_col()
@@ -1835,6 +1862,7 @@ fn bold_section(
 ) -> Div {
     let t = theme(cx);
     let checkbox = checkbox_row(
+        crate::fonts::ui_text_size(cx),
         AppearanceStop::Bold.selector(),
         view.resolved.font_bold.value,
         focus == Some(AppearanceStop::Bold),
@@ -1930,7 +1958,7 @@ pub(crate) fn close_footer(
         dialog_button(
             selector,
             "Close".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             false,
         )
         .when(focused, |close| close.child(ring))

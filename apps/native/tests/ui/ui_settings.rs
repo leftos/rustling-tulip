@@ -2921,6 +2921,45 @@ fn ui_text_size_plus_raises_every_ui_text_and_saves(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_dialog_button_grows_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    let base = h.bounds("settings-footer-close").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    assert_eq!(
+        h.bounds("settings-footer-close").size.height,
+        base + px(3.0),
+        "the Close button is three pixels taller at +3"
+    );
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(-2, cx));
+    assert_eq!(
+        h.bounds("settings-footer-close").size.height,
+        base - px(2.0)
+    );
+}
+
+#[gpui::test]
+fn the_settings_tabs_grow_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = appearance_tab(cx, &dir);
+    let base = h.bounds("settings-tab-general").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    let first = h.bounds("settings-tab-general");
+    assert_eq!(
+        first.size.height,
+        base + px(3.0),
+        "three pixels taller at +3"
+    );
+    assert!(
+        first.bottom() <= h.bounds("settings-tab-notifications").top(),
+        "the tabs do not overlap"
+    );
+}
+
+#[gpui::test]
 fn ui_text_size_buttons_stop_at_the_ends_of_the_range(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = appearance_tab(cx, &dir);

@@ -510,7 +510,12 @@ impl RootView {
                 let element = dialog_button(
                     button.selector(),
                     model.label(button, counts),
-                    dialog_look(button.is_danger(), enabled, &theme(cx)),
+                    dialog_look(
+                        crate::fonts::ui_text_size(cx),
+                        button.is_danger(),
+                        enabled,
+                        &theme(cx),
+                    ),
                     focused == Some(button),
                 );
                 if enabled {
@@ -534,29 +539,33 @@ impl RootView {
                     .orphan_note()
                     .map(|note| div().text_color(gpui::rgb(t.muted)).child(note)),
             );
-        let panel = modal_panel("exit-confirm-panel", &theme(cx))
-            .track_focus(&self.quit_focus)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
-            .child(div().child(BODY))
-            .child(active)
-            .children(
-                counts
-                    .worktree_note()
-                    .map(|note| div().text_color(gpui::rgb(t.muted)).child(note)),
-            )
-            .children(
-                model
-                    .warning()
-                    .map(|warning| div().text_color(gpui::rgb(t.danger)).child(warning)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .children(buttons),
-            );
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "exit-confirm-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.quit_focus)
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+        .child(div().child(BODY))
+        .child(active)
+        .children(
+            counts
+                .worktree_note()
+                .map(|note| div().text_color(gpui::rgb(t.muted)).child(note)),
+        )
+        .children(
+            model
+                .warning()
+                .map(|warning| div().text_color(gpui::rgb(t.danger)).child(warning)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .gap(px(6.0))
+                .children(buttons),
+        );
         Some(backdrop("exit-confirm-dialog", panel, &theme(cx)))
     }
 }

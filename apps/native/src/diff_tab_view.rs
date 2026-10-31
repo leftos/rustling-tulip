@@ -29,7 +29,7 @@ use crate::diff_tab::{
 };
 use crate::diff_view::{DiffView, Nav};
 use crate::ellipsis::ellipsized;
-use crate::fonts::FontSettings;
+use crate::fonts::{FontSettings, ui_px};
 use crate::notices::ToastKind;
 use crate::popouts::PopoutKey;
 use crate::source_control::ScKey;
@@ -470,7 +470,7 @@ impl DiffTabView {
             .flex_none()
             .items_center()
             .gap(px(8.0))
-            .h(px(HEADER_HEIGHT))
+            .h(ui_px(cx, HEADER_HEIGHT))
             .pl(px(HEADER_PAD_LEFT))
             .pr(px(HEADER_PAD_RIGHT))
             .bg(gpui::rgb(t.surface))
@@ -603,6 +603,7 @@ fn nav_button(
 ) -> Stateful<Div> {
     let t = theme(cx);
     outlined_button(
+        crate::fonts::ui_text_size(cx),
         selector,
         ButtonSize::Compact,
         enabled,
@@ -610,8 +611,8 @@ fn nav_button(
         &theme(cx),
     )
     .flex_none()
-    .size(px(NAV_BUTTON_SIZE))
-    .min_h(px(NAV_BUTTON_SIZE))
+    .size(ui_px(cx, NAV_BUTTON_SIZE))
+    .min_h(ui_px(cx, NAV_BUTTON_SIZE))
     .p(px(0.0))
     .child(
         svg()
@@ -667,7 +668,7 @@ impl Render for DiffTabView {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .h_full()
-            .text_size(px(UI_TEXT_SIZE))
+            .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
             .child(Self::header_bar(&header, narrow, cx))
             .child(body)

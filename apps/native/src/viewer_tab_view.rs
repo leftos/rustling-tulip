@@ -954,7 +954,7 @@ impl RootView {
                 .flex_col()
                 .flex_1()
                 .size_full()
-                .text_size(px(UI_TEXT_SIZE))
+                .text_size(fonts::ui_px(cx, UI_TEXT_SIZE))
                 .text_color(gpui::rgb(t.text))
                 .child(viewer_header(tab_id, tab, cx))
                 .children(viewer_find_bar(tab_id, tab, cx))
@@ -1114,7 +1114,7 @@ fn viewer_find_bar(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) ->
             .flex_none()
             .items_center()
             .gap(px(8.0))
-            .h(px(FIND_BAR_HEIGHT))
+            .h(fonts::ui_px(cx, FIND_BAR_HEIGHT))
             .pl(px(HEADER_PAD_LEFT))
             .pr(px(HEADER_PAD_RIGHT))
             .bg(gpui::rgb(t.surface))
@@ -1153,6 +1153,7 @@ fn find_button(
     let selector = action.selector(tab_id);
     let button = if action == FindAction::MatchCase && case_on {
         primary_button(
+            crate::fonts::ui_text_size(cx),
             &selector,
             ButtonSize::Compact,
             true,
@@ -1161,6 +1162,7 @@ fn find_button(
         )
     } else {
         outlined_button(
+            crate::fonts::ui_text_size(cx),
             &selector,
             ButtonSize::Compact,
             true,
@@ -1192,12 +1194,14 @@ fn viewer_header(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) -> D
         };
         header_button(tab_id, action, enabled, cx)
     });
+    let selector = format!("viewer-header-{tab_id}");
     div()
+        .debug_selector(move || selector)
         .flex()
         .flex_none()
         .items_center()
         .gap(px(8.0))
-        .h(px(HEADER_HEIGHT))
+        .h(fonts::ui_px(cx, HEADER_HEIGHT))
         .pl(px(HEADER_PAD_LEFT))
         .pr(px(HEADER_PAD_RIGHT))
         .bg(gpui::rgb(t.surface))
@@ -1217,6 +1221,7 @@ fn header_button(
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let button = outlined_button(
+        crate::fonts::ui_text_size(cx),
         &action.selector(tab_id),
         ButtonSize::Compact,
         enabled,

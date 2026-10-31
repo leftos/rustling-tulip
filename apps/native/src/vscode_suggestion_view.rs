@@ -149,7 +149,7 @@ impl RootView {
         let dismiss = dialog_button(
             "vscode-prompt-dismiss",
             "✕".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             false,
         )
         .tooltip(tooltip(DISMISS_LABEL))
@@ -211,7 +211,7 @@ impl RootView {
                 let element = dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    dialog_look(false, true, &theme(cx)),
+                    dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
                     focus == button,
                 )
                 .when_some(tip, |element, tip| element.tooltip(tooltip(tip)))
@@ -221,11 +221,15 @@ impl RootView {
                 element.into_any_element()
             })
             .collect();
-        let panel = modal_panel("vscode-prompt-panel", &theme(cx))
-            .track_focus(&self.vscode_prompt_focus)
-            .child(header)
-            .child(body)
-            .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "vscode-prompt-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.vscode_prompt_focus)
+        .child(header)
+        .child(body)
+        .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         Some(backdrop("vscode-prompt", panel, &theme(cx)))
     }
 

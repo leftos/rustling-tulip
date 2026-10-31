@@ -21,7 +21,7 @@ use protocol::{
     WorkSubagent,
 };
 use rustling_tulip_native::ui_theme::UiTheme;
-use rustling_tulip_native::{OpenOutcome, PopoutKey, RootView};
+use rustling_tulip_native::{OpenOutcome, PopoutKey};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 
 const TO_TERMINAL: &str = "pane-view-terminal-p1";
@@ -1621,12 +1621,87 @@ fn a_chat_pane_redraws_in_a_new_theme(cx: &mut TestAppContext) {
 
     h.root_update(|root, _, cx| root.set_theme(mine, cx));
     assert_eq!(
-        h.root(RootView::main_area_fill),
+        h.root(|root, cx| root.chat_row_theme("p1", "s1", cx).ground),
         mine.ground,
-        "the gutter around the chat pane paints the new ground"
+        "the chat's rows are drawn in the new theme"
     );
     assert!(
         painted(&mut h, "chat-row-p1-u1"),
         "the chat's rows are still drawn"
     );
+}
+
+#[gpui::test]
+fn a_chat_row_grows_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_with(
+        cx,
+        &dir,
+        vec![user("u1"), answer("a1", "#### Title", false)],
+    );
+    let question = h.bounds("chat-row-p1-u1").size.height;
+    let heading = h.bounds("chat-row-p1-a1").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+    assert!(
+        h.bounds("chat-row-p1-u1").size.height > question,
+        "a question grows at +4"
+    );
+    assert!(
+        h.bounds("chat-row-p1-a1").size.height > heading,
+        "an answer's heading grows at +4"
+    );
+}
+
+#[gpui::test]
+fn a_prompt_card_grows_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, permission("p1"));
+    let card = h.bounds("chat-card").size.height;
+    let button = h.bounds("chat-card-1").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+    let grown = h.bounds("chat-card-1").size.height;
+    assert!(
+        grown >= button + px(4.0),
+        "its buttons are at least four pixels taller at +4: {button:?} to {grown:?}"
+    );
+    assert!(
+        h.bounds("chat-card").size.height > card,
+        "the card grows around its text and buttons"
+    );
+}
+
+#[gpui::test]
+fn the_composer_grows_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let field = h.bounds("chat-composer").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(4, cx));
+    assert!(
+        h.bounds("chat-composer").size.height > field,
+        "the input's text grows at +4"
+    );
+}
+
+#[gpui::test]
+fn a_chat_heading_stays_above_its_paragraph_at_every_offset(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_with(
+        cx,
+        &dir,
+        vec![answer("a1", "#### Title\n\nBody\n\nMore", false)],
+    );
+
+    for offset in [4, -2] {
+        h.root_update(|root, _, cx| root.set_ui_text_size(offset, cx));
+        let heading = h.bounds("viewer-md-block-chat-a1-0").size.height;
+        let paragraph = h.bounds("viewer-md-block-chat-a1-1").size.height;
+        assert!(
+            heading > paragraph,
+            "at {offset:+}: heading {heading:?}, paragraph {paragraph:?}"
+        );
+    }
 }

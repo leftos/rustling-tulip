@@ -79,11 +79,19 @@ fn row(
             .opacity(DISABLED_OPACITY)
             .child(muted(UPDATE_CLIENT, &theme(cx))),
     };
-    field(view.label.clone(), &theme(cx))
-        .child(body)
-        .children(view.help.clone().map(|text| note(text, &theme(cx))))
-        .children(locked.then(|| muted(LOCKED, &theme(cx))))
-        .into_any_element()
+    field(
+        crate::fonts::ui_text_size(cx),
+        view.label.clone(),
+        &theme(cx),
+    )
+    .child(body)
+    .children(
+        view.help
+            .clone()
+            .map(|text| note(crate::fonts::ui_text_size(cx), text, &theme(cx))),
+    )
+    .children(locked.then(|| muted(LOCKED, &theme(cx))))
+    .into_any_element()
 }
 
 /// A toggle field: a checkbox with the field's help under its label.
@@ -93,9 +101,18 @@ fn toggle_row(view: &FieldView, focus: &Control, cx: &mut Context<RootView>) -> 
     let checked = view.value == OptionValue::Bool(true);
     let label = check_label(
         view.label.clone(),
-        view.help.clone().map(|text| note(text, &theme(cx))),
+        view.help
+            .clone()
+            .map(|text| note(crate::fonts::ui_text_size(cx), text, &theme(cx))),
     );
-    let row = checkbox_row(&control.selector(), checked, focused, label, &theme(cx));
+    let row = checkbox_row(
+        crate::fonts::ui_text_size(cx),
+        &control.selector(),
+        checked,
+        focused,
+        label,
+        &theme(cx),
+    );
     let row = if view.disabled {
         row.opacity(DISABLED_OPACITY)
     } else {

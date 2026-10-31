@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::changes_view::{HEAD_HEIGHT, LOADING_TEXT, caret, count_pill, head_title};
 use crate::ellipsis::truncating;
-use crate::fonts::DEFAULT_FAMILY;
+use crate::fonts::{DEFAULT_FAMILY, ui_px};
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
@@ -557,7 +557,7 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     label.to_owned(),
-                    dialog_look(danger, true, &theme(cx)),
+                    dialog_look(crate::fonts::ui_text_size(cx), danger, true, &theme(cx)),
                     confirm.focused() == button,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -569,7 +569,7 @@ impl RootView {
         let close = dialog_button(
             "stash-drop-confirm-close",
             "✕".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             false,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -585,11 +585,15 @@ impl RootView {
                     .child(confirm.title()),
             )
             .child(close);
-        let panel = modal_panel("stash-drop-confirm-panel", &theme(cx))
-            .track_focus(&self.stash.drop_focus)
-            .child(header)
-            .child(div().text_color(gpui::rgb(t.muted)).child(confirm.body()))
-            .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "stash-drop-confirm-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.stash.drop_focus)
+        .child(header)
+        .child(div().text_color(gpui::rgb(t.muted)).child(confirm.body()))
+        .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         Some(backdrop("stash-drop-confirm-dialog", panel, &theme(cx)))
     }
 }
@@ -638,14 +642,14 @@ fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> 
         .flex()
         .items_center()
         .gap(px(6.0))
-        .h(px(HEAD_HEIGHT))
+        .h(ui_px(cx, HEAD_HEIGHT))
         .px(px(ROW_PADDING))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(t.hover_bg)))
         .child(caret(part.collapsed, &t))
-        .child(head_title(&title_id, STASHES_TITLE, &t).flex_1())
+        .child(head_title(crate::fonts::ui_text_size(cx), &title_id, STASHES_TITLE, &t).flex_1())
         .when_some(part.count, |header, count| {
-            header.child(count_pill(count, &t))
+            header.child(count_pill(crate::fonts::ui_text_size(cx), count, &t))
         })
         .on_mouse_down(MouseButton::Left, {
             let key = key.clone();
@@ -683,6 +687,7 @@ fn push_row(
         .children(input);
     let key = key.clone();
     let button = outlined_button(
+        crate::fonts::ui_text_size(cx),
         &push.selector,
         ButtonSize::Compact,
         push.enabled,
@@ -729,7 +734,7 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
         .flex()
         .items_center()
         .gap(px(4.0))
-        .h(px(ROW_HEIGHT))
+        .h(ui_px(cx, ROW_HEIGHT))
         .pl(px(ROW_PADDING * 2.0))
         .pr(px(ROW_PADDING))
         .bg(gpui::rgb(t.surface))
@@ -739,7 +744,7 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
             div()
                 .flex_none()
                 .font_family(DEFAULT_FAMILY)
-                .text_size(px(ID_TEXT_SIZE))
+                .text_size(ui_px(cx, ID_TEXT_SIZE))
                 .text_color(gpui::rgb(t.subtle))
                 .group_hover(group, |style| style.text_color(gpui::rgb(t.text_2)))
                 .child(stash.id.clone()),

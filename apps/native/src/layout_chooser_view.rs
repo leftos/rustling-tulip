@@ -199,11 +199,15 @@ impl RootView {
                 _ => {}
             }
         }
-        let panel = modal_panel("layout-chooser-panel", &theme(cx))
-            .track_focus(&self.chooser_focus)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
-            .child(div().text_color(gpui::rgb(t.muted)).child(INTRO))
-            .child(div().flex().flex_col().gap(px(6.0)).children(options));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "layout-chooser-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.chooser_focus)
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+        .child(div().text_color(gpui::rgb(t.muted)).child(INTRO))
+        .child(div().flex().flex_col().gap(px(6.0)).children(options));
         Some(backdrop("layout-chooser", panel, &theme(cx)))
     }
 
@@ -446,7 +450,7 @@ impl RootView {
             .gap(px(8.0))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(IMPORT_TITLE))
             .child(close);
-        let panel = modal_panel("import-panel", &theme(cx))
+        let panel = modal_panel(crate::fonts::ui_text_size(cx), "import-panel", &theme(cx))
             .track_focus(&self.chooser_focus)
             .child(header)
             .child(
@@ -534,7 +538,7 @@ fn picker_button(
     dialog_button(
         &control.selector(),
         chooser.label(control, aspect),
-        dialog_look(false, true, &theme(cx)),
+        dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
         focused == Some(control),
     )
     .when(chooser.is_selected(control), |button| {

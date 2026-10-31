@@ -571,7 +571,7 @@ pub fn prompt_card(offset: i8, view: &CardView<'_>, on_press: &OnPress, t: &UiTh
             .children(
                 buttons
                     .iter()
-                    .map(|button| card_button(button, prompt, view.busy, on_press, t)),
+                    .map(|button| card_button(offset, button, view, on_press, t)),
             )
             .into_any_element()
     };
@@ -612,12 +612,13 @@ pub fn prompt_card(offset: i8, view: &CardView<'_>, on_press: &OnPress, t: &UiTh
 
 /// One button of a card; a selected multi-select option is filled.
 fn card_button(
+    offset: i8,
     button: &CardButton,
-    prompt: &ChatPrompt,
-    busy: bool,
+    view: &CardView<'_>,
     on_press: &OnPress,
     t: &UiTheme,
 ) -> AnyElement {
+    let (prompt, busy) = (view.prompt, view.busy);
     let selector = format!("chat-card-{}", button.id);
     let selected = prompt.multi
         && prompt
@@ -625,9 +626,23 @@ fn card_button(
             .iter()
             .any(|option| option.selected && option.number.to_string() == button.id);
     let base = if selected {
-        primary_button(&selector, ButtonSize::Compact, !busy, Layer::Base, t)
+        primary_button(
+            offset,
+            &selector,
+            ButtonSize::Compact,
+            !busy,
+            Layer::Base,
+            t,
+        )
     } else {
-        outlined_button(&selector, ButtonSize::Compact, !busy, Layer::Base, t)
+        outlined_button(
+            offset,
+            &selector,
+            ButtonSize::Compact,
+            !busy,
+            Layer::Base,
+            t,
+        )
     };
     let answer = button.answer.clone();
     let on_press = Rc::clone(on_press);

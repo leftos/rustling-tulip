@@ -923,7 +923,13 @@ impl RootView {
             .flex_col()
             .gap(px(2.0));
         for (n, section) in dialog.picker.sections().iter().enumerate() {
-            list = list.child(section_header(section, n == 0, scan_failed, &t));
+            list = list.child(section_header(
+                crate::fonts::ui_text_size(cx),
+                section,
+                n == 0,
+                scan_failed,
+                &t,
+            ));
             for &index in &section.rows {
                 if let Some(row) = rows.get(index) {
                     let facts = self.row_facts(dialog, row);
@@ -936,16 +942,20 @@ impl RootView {
             .as_ref()
             .map(|form| add_form(form, dialog.error.as_deref(), &draw, cx));
         let footer = footer(dialog.add.is_some(), &draw, cx);
-        let panel = modal_panel("connections-panel", &theme(cx))
-            .p_0()
-            .gap_0()
-            .max_h(relative(1.0))
-            .debug_selector(|| "connections-panel".to_owned())
-            .track_focus(&self.connection_picker_focus)
-            .child(header(cx))
-            .child(list)
-            .children(form)
-            .child(footer);
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "connections-panel",
+            &theme(cx),
+        )
+        .p_0()
+        .gap_0()
+        .max_h(relative(1.0))
+        .debug_selector(|| "connections-panel".to_owned())
+        .track_focus(&self.connection_picker_focus)
+        .child(header(cx))
+        .child(list)
+        .children(form)
+        .child(footer);
         let frame = div()
             .id("connections-frame")
             .size_full()
@@ -975,7 +985,14 @@ fn control_button(
 ) -> Stateful<Div> {
     button(
         &control.selector(draw.rows),
-        button_look(kind, size, true, Layer::Floating, &theme(cx)),
+        button_look(
+            crate::fonts::ui_text_size(cx),
+            kind,
+            size,
+            true,
+            Layer::Floating,
+            &theme(cx),
+        ),
     )
     .relative()
     .when(draw.focus == control, |button| {
@@ -1020,7 +1037,7 @@ fn header(cx: &mut Context<RootView>) -> Div {
         .pl(px(16.0))
         .child(
             div()
-                .text_size(px(14.0))
+                .text_size(crate::fonts::ui_px(cx, 14.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(TITLE),
         )
@@ -1038,7 +1055,13 @@ const fn section_slug(section: Section) -> &'static str {
 
 /// A section's header: its title and, at the right, its note; the tailnet
 /// note is the scan's wait, its count, or its error in the danger colour.
-fn section_header(section: &PickerSection, first: bool, scan_failed: bool, t: &UiTheme) -> Div {
+fn section_header(
+    offset: i8,
+    section: &PickerSection,
+    first: bool,
+    scan_failed: bool,
+    t: &UiTheme,
+) -> Div {
     let selector = format!("connections-section-{}", section_slug(section.section));
     let tailnet = section.section == Section::Tailnet;
     let note = section.note.clone().map(|note| {
@@ -1052,7 +1075,7 @@ fn section_header(section: &PickerSection, first: bool, scan_failed: bool, t: &U
                 note.debug_selector(|| "connections-scan".to_owned())
             })
             .font_weight(FontWeight::NORMAL)
-            .text_size(px(11.0))
+            .text_size(crate::fonts::ui_px_at(offset, 11.0))
             .text_color(gpui::rgb(color))
             .child(note)
     });
@@ -1064,7 +1087,7 @@ fn section_header(section: &PickerSection, first: bool, scan_failed: bool, t: &U
         .pt(px(if first { 2.0 } else { 10.0 }))
         .px(px(10.0))
         .pb(px(4.0))
-        .text_size(px(11.5))
+        .text_size(crate::fonts::ui_px_at(offset, 11.5))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(gpui::rgb(t.text_2))
         .child(section.section.title())
@@ -1093,13 +1116,13 @@ fn host_row(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(px(11.5))
+        .text_size(crate::fonts::ui_px(cx, 11.5))
         .text_color(gpui::rgb(t.text_2))
         .children(
             detail
                 .state
                 .as_ref()
-                .map(|state| state_chip(row, state, &t)),
+                .map(|state| state_chip(crate::fonts::ui_text_size(cx), row, state, &t)),
         )
         .when(saved && forget_shown, |trail| trail.opacity(0.0))
         .when(saved && !forget_shown, |trail| {
@@ -1110,8 +1133,9 @@ fn host_row(
         .min_w_0()
         .flex()
         .flex_col()
-        .child(name_line(row, &t))
+        .child(name_line(crate::fonts::ui_text_size(cx), row, &t))
         .child(detail_line(
+            crate::fonts::ui_text_size(cx),
             &row.key(),
             facts.host,
             &detail.line,
@@ -1214,13 +1238,13 @@ fn kind_tile(host: RowHost, t: &UiTheme) -> Div {
 }
 
 /// The row's name, a tailnet host's suffix greyed.
-fn name_line(row: &Row, t: &UiTheme) -> Div {
+fn name_line(offset: i8, row: &Row, t: &UiTheme) -> Div {
     let (name, suffix) = row.name_parts();
     div()
         .flex()
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_size(px(12.5))
+        .text_size(crate::fonts::ui_px_at(offset, 12.5))
         .font_weight(FontWeight::MEDIUM)
         .line_height(relative(1.25))
         .child(name)
@@ -1276,7 +1300,14 @@ fn detail_pieces(host: RowHost, line: &str) -> Vec<DetailPiece> {
 
 /// A row's second line, its pieces split by faint dots, lifted from quiet to
 /// secondary text while its row, the hover `group`, is hovered.
-fn detail_line(key: &str, host: RowHost, line: &str, group: SharedString, t: &UiTheme) -> Div {
+fn detail_line(
+    offset: i8,
+    key: &str,
+    host: RowHost,
+    line: &str,
+    group: SharedString,
+    t: &UiTheme,
+) -> Div {
     let selector = format!("connections-detail-{key}");
     let mut drawn = div()
         .debug_selector(move || selector)
@@ -1286,19 +1317,19 @@ fn detail_line(key: &str, host: RowHost, line: &str, group: SharedString, t: &Ui
         .mt(px(2.0))
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_size(px(11.0))
+        .text_size(crate::fonts::ui_px_at(offset, 11.0))
         .text_color(gpui::rgb(t.subtle))
         .group_hover(group, |style| style.text_color(gpui::rgb(t.text_2)));
     for (index, piece) in detail_pieces(host, line).into_iter().enumerate() {
         if index > 0 {
             drawn = drawn.child(div().text_color(gpui::rgb(t.faint)).child("·"));
         }
-        drawn = drawn.child(detail_piece(piece, t));
+        drawn = drawn.child(detail_piece(offset, piece, t));
     }
     drawn
 }
 
-fn detail_piece(piece: DetailPiece, t: &UiTheme) -> Div {
+fn detail_piece(offset: i8, piece: DetailPiece, t: &UiTheme) -> Div {
     match piece {
         DetailPiece::Text(text) => div().child(text),
         DetailPiece::Online(text) => div()
@@ -1315,7 +1346,7 @@ fn detail_piece(piece: DetailPiece, t: &UiTheme) -> Div {
             .child(
                 div()
                     .font_family(DEFAULT_FAMILY)
-                    .text_size(px(10.5))
+                    .text_size(crate::fonts::ui_px_at(offset, 10.5))
                     .child(value),
             ),
     }
@@ -1332,12 +1363,17 @@ fn dot(size: f32, color: u32) -> Div {
 
 /// The chip at a row's trail: a dot and the state for the current row, an
 /// amber tag for one that needs pairing.
-fn state_chip(row: &Row, state: &RowState, t: &UiTheme) -> Div {
+fn state_chip(offset: i8, row: &Row, state: &RowState, t: &UiTheme) -> Div {
     let label = state.label();
     let selector = format!("connections-state-{}", row.key());
     match state {
-        RowState::NotPaired => tag(format!("connections-not-paired-{}", row.label), label, t),
-        RowState::NeedsPairing => tag(selector, label, t),
+        RowState::NotPaired => tag(
+            offset,
+            format!("connections-not-paired-{}", row.label),
+            label,
+            t,
+        ),
+        RowState::NeedsPairing => tag(offset, selector, label, t),
         RowState::Connected => dotted(selector, t.status_ok, label),
         RowState::Disconnected { .. } => dotted(selector, t.status_idle, label),
         RowState::Connecting => div().debug_selector(move || selector).child(label),
@@ -1356,15 +1392,15 @@ fn dotted(selector: String, color: u32, label: &'static str) -> Div {
 }
 
 /// An amber tag reading `label`.
-fn tag(selector: String, label: &'static str, t: &UiTheme) -> Div {
+fn tag(offset: i8, selector: String, label: &'static str, t: &UiTheme) -> Div {
     div()
         .debug_selector(move || selector)
         .flex()
         .items_center()
-        .h(px(18.0))
+        .h(crate::fonts::ui_px_at(offset, 18.0))
         .px(px(6.0))
         .rounded(px(5.0))
-        .text_size(px(10.5))
+        .text_size(crate::fonts::ui_px_at(offset, 10.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(gpui::rgb(t.asking))
         .bg(gpui::rgba(t.ask_wash))
@@ -1405,7 +1441,7 @@ fn footer(form_open: bool, draw: &Draw<'_>, cx: &mut Context<RootView>) -> Div {
     .gap(px(6.0))
     .child(
         div()
-            .text_size(px(15.0))
+            .text_size(crate::fonts::ui_px(cx, 15.0))
             .text_color(gpui::rgb(t.text_2))
             .child("+"),
     )
@@ -1438,8 +1474,16 @@ fn add_form(
     let [first, second] = form.mode.fields();
     let [first_control, second_control] = PickerControl::fields(form.mode);
     let field = |field: AddField, control: PickerControl| {
-        form.input(control)
-            .map(|input| field_row(field, input, control, draw.focus, &theme(cx)))
+        form.input(control).map(|input| {
+            field_row(
+                crate::fonts::ui_text_size(cx),
+                field,
+                input,
+                control,
+                draw.focus,
+                &theme(cx),
+            )
+        })
     };
     let result = (form.mode == AddMode::Ssh)
         .then(|| form.test.text())
@@ -1501,7 +1545,7 @@ fn form_top(mode: AddMode, draw: &Draw<'_>, cx: &mut Context<RootView>) -> Div {
         .justify_between()
         .child(
             div()
-                .text_size(px(12.5))
+                .text_size(crate::fonts::ui_px(cx, 12.5))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("Add host"),
         )
@@ -1526,7 +1570,7 @@ fn segment(
         .px(px(12.0))
         .py(px(4.0))
         .rounded(px(6.0))
-        .text_size(px(12.0))
+        .text_size(crate::fonts::ui_px(cx, 12.0))
         .cursor_pointer()
         .when(on, |segment| {
             segment
@@ -1573,6 +1617,7 @@ fn add_button(
 /// A field of the form with its label before it; a mono field draws its
 /// text in the mono face.
 fn field_row(
+    offset: i8,
     field: AddField,
     input: &Entity<TextInput>,
     control: PickerControl,
@@ -1584,9 +1629,11 @@ fn field_row(
         .debug_selector(move || selector)
         .flex_1()
         .min_w_0()
-        .text_size(px(12.0))
+        .text_size(crate::fonts::ui_px_at(offset, 12.0))
         .when(field.mono, |frame| {
-            frame.font_family(DEFAULT_FAMILY).text_size(px(11.5))
+            frame
+                .font_family(DEFAULT_FAMILY)
+                .text_size(crate::fonts::ui_px_at(offset, 11.5))
         })
         .child(input.clone());
     div()

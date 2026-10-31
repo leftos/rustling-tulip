@@ -289,15 +289,19 @@ impl RootView {
                     .text_color(gpui::rgb(t.danger))
                     .child(error.to_owned())
             }));
-        let panel = modal_panel("host-path-panel", &theme(cx))
-            .track_focus(&self.host_path_focus)
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(prompt.title()),
-            )
-            .child(field)
-            .child(footer(focus, cx));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "host-path-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.host_path_focus)
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(prompt.title()),
+        )
+        .child(field)
+        .child(footer(focus, cx));
         Some(backdrop("host-path-prompt", panel, &theme(cx)))
     }
 }
@@ -326,7 +330,7 @@ fn footer(focus: PromptControl, cx: &mut Context<RootView>) -> Div {
         dialog_button(
             control.selector(),
             label.to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             focus == control,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {

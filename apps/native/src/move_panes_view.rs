@@ -282,19 +282,23 @@ impl RootView {
             .child(button(Control::Cancel, false))
             .child(button(Control::Confirm, false));
         let row = || div().flex().flex_wrap().gap(px(6.0));
-        let panel = modal_panel("move-panes-panel", &theme(cx))
-            .track_focus(&self.pane_ui.dialog_focus)
-            .child(header)
-            .child(muted(model.hint(), &t))
-            .child(div().flex().flex_col().gap(px(4.0)).children(checks))
-            .child(muted("Layout", &t))
-            .child(row().children(layouts))
-            .when(!shapes.is_empty(), |panel| {
-                panel.child(row().children(shapes))
-            })
-            .child(muted(NAME_LABEL, &t))
-            .child(Self::move_panes_name_field(dialog, cx))
-            .child(footer);
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "move-panes-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.pane_ui.dialog_focus)
+        .child(header)
+        .child(muted(model.hint(), &t))
+        .child(div().flex().flex_col().gap(px(4.0)).children(checks))
+        .child(muted("Layout", &t))
+        .child(row().children(layouts))
+        .when(!shapes.is_empty(), |panel| {
+            panel.child(row().children(shapes))
+        })
+        .child(muted(NAME_LABEL, &t))
+        .child(Self::move_panes_name_field(dialog, cx))
+        .child(footer);
         Some(backdrop("move-panes", panel, &theme(cx)))
     }
 
@@ -333,7 +337,7 @@ fn move_panes_button(
     let button = dialog_button(
         &model.selector(control),
         label,
-        dialog_look(false, enabled, &theme(cx)),
+        dialog_look(crate::fonts::ui_text_size(cx), false, enabled, &theme(cx)),
         control == model.focused(),
     )
     .when(selected, |button| button.bg(gpui::rgb(t.popover_hover)));

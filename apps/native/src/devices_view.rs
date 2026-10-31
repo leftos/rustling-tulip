@@ -234,22 +234,31 @@ impl RootView {
             dialog_button(
                 pressed.selector(),
                 pressed.label().to_owned(),
-                dialog_look(pressed == ConfirmButton::Block, true, &theme(cx)),
+                dialog_look(
+                    crate::fonts::ui_text_size(cx),
+                    pressed == ConfirmButton::Block,
+                    true,
+                    &theme(cx),
+                ),
                 confirm.focused() == pressed,
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.press_device_block_button(pressed, window, cx);
             }))
         });
-        let panel = modal_panel("device-block-panel", &theme(cx))
-            .track_focus(&self.devices.focus)
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(confirm.title()),
-            )
-            .child(div().text_color(gpui::rgb(t.muted)).child(CONFIRM_BODY))
-            .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "device-block-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.devices.focus)
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(confirm.title()),
+        )
+        .child(div().text_color(gpui::rgb(t.muted)).child(CONFIRM_BODY))
+        .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
         Some(backdrop("device-block-confirm", panel, &theme(cx)))
     }
 }
@@ -264,6 +273,7 @@ fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
     let press = button(
         &action.selector(&id),
         button_look(
+            crate::fonts::ui_text_size(cx),
             match action {
                 RowAction::Block => ButtonKind::Danger,
                 RowAction::Forget => ButtonKind::Outlined,

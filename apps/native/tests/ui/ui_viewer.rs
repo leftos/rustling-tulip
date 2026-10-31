@@ -510,6 +510,52 @@ fn the_gutter_numbers_every_line(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_viewer_header_grows_but_its_body_text_does_not(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "src/lib.rs", b"one\ntwo\n");
+    let mut h = showing(cx, &dir, &file);
+    let header = h.bounds("viewer-header-v1").size.height;
+    let line = h.bounds("viewer-line-v1-1").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    assert_eq!(
+        h.bounds("viewer-header-v1").size.height,
+        header + px(3.0),
+        "three pixels taller at +3"
+    );
+    assert_eq!(
+        h.bounds("viewer-line-v1-1").size.height,
+        line,
+        "the body keeps the terminal font's size"
+    );
+}
+
+#[gpui::test]
+fn a_markdown_tab_keeps_its_body_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(
+        dir.path(),
+        "docs/notes.md",
+        b"# Title\n\nA paragraph of body text.\n",
+    );
+    let mut h = showing(cx, &dir, &file);
+    let heading = h.bounds("viewer-md-block-v1-0").size.height;
+    let row = h.bounds("viewer-md-block-v1-1").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    assert_eq!(
+        h.bounds("viewer-md-block-v1-0").size.height,
+        heading,
+        "a rendered heading keeps its size"
+    );
+    assert_eq!(
+        h.bounds("viewer-md-block-v1-1").size.height,
+        row,
+        "rendered body text keeps its size"
+    );
+}
+
+#[gpui::test]
 fn copy_path_copies_the_full_path(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let file = write_file(dir.path(), "docs/notes.txt", b"alpha\nbeta\n");

@@ -180,6 +180,37 @@ fn open_panel<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> (Harness<'a>, Op
 }
 
 #[gpui::test]
+fn changes_rows_grow_with_the_ui_text_size_and_clicks_still_hit_them(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = open_panel(cx, &dir);
+    h.send(status(vec![], modified(&["a.rs", "b.rs", "c.rs"])));
+    let row = "sc-row-changes-r1::|c.rs";
+    let base = h.bounds(row).size.height;
+    let head = h.bounds("sc-bucket-changes-r1::").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    let third = h.bounds(row);
+    assert_eq!(
+        third.size.height,
+        base + px(3.0),
+        "three pixels taller at +3"
+    );
+    assert!(
+        h.bounds("sc-bucket-changes-r1::").size.height > head,
+        "the bucket grows with its head and rows"
+    );
+    h.sent();
+    h.click(third.center(), Modifiers::none());
+    let sent = h.sent();
+    assert!(
+        sent.iter()
+            .any(|msg| matches!(msg, ClientMessage::OpenDiffTab { .. })
+                && format!("{msg:?}").contains("c.rs")),
+        "a click at the third row's drawn centre opens the third file: {sent:?}"
+    );
+}
+
+#[gpui::test]
 fn a_failed_status_shows_its_reason_and_raises_no_toast(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, id) = open_panel(cx, &dir);

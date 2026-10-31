@@ -549,17 +549,21 @@ impl RootView {
             Stage::Variables => variables_body(dialog, pick_refusal, cx),
             Stage::Preview => preview_body(dialog, &t),
         };
-        let panel = modal_panel("preset-wizard-panel", &theme(cx))
-            .track_focus(&self.preset_wizard_focus)
-            .child(
-                div()
-                    .debug_selector(|| "preset-wizard-title".to_owned())
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(wizard.title()),
-            )
-            .children(description)
-            .child(body)
-            .child(wizard_footer(wizard, cx));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "preset-wizard-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.preset_wizard_focus)
+        .child(
+            div()
+                .debug_selector(|| "preset-wizard-title".to_owned())
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(wizard.title()),
+        )
+        .children(description)
+        .child(body)
+        .child(wizard_footer(wizard, cx));
         Some(backdrop("preset-wizard", panel, &theme(cx)))
     }
 
@@ -1001,7 +1005,12 @@ fn pick_button(selector: &str, button: PickButton, cx: &mut Context<RootView>) -
     dialog_button(
         &format!("{selector}-pick"),
         PICK_LABEL.to_owned(),
-        dialog_look(false, pick_enabled, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            false,
+            pick_enabled,
+            &theme(cx),
+        ),
         false,
     )
     .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)))
@@ -1041,7 +1050,7 @@ fn picked_path_row(
         dialog_button(
             &format!("{selector}-clear"),
             CLEAR_LABEL.to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             false,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_clear(this, cx)))
@@ -1247,11 +1256,18 @@ fn variable_field(
         )
         .into_any_element()
     } else if matches!(variable.kind, PresetVariableKind::Toggle { .. }) {
-        checkbox_row(&selector, wizard.toggle_on(&name), false, "", &theme(cx))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.with_preset_wizard(cx, |wizard| wizard.toggle(&name));
-            }))
-            .into_any_element()
+        checkbox_row(
+            crate::fonts::ui_text_size(cx),
+            &selector,
+            wizard.toggle_on(&name),
+            false,
+            "",
+            &theme(cx),
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.with_preset_wizard(cx, |wizard| wizard.toggle(&name));
+        }))
+        .into_any_element()
     } else {
         match dialog.text_inputs.iter().find(|(n, _)| *n == variable.name) {
             Some((_, input)) => input_box(selector.clone(), input, &t).into_any_element(),
@@ -1282,7 +1298,7 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
     let cancel = dialog_button(
         "preset-cancel",
         "Cancel".to_owned(),
-        dialog_look(false, idle, &theme(cx)),
+        dialog_look(crate::fonts::ui_text_size(cx), false, idle, &theme(cx)),
         false,
     )
     .when(idle, |button| {
@@ -1294,7 +1310,7 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
         dialog_button(
             "preset-back",
             "Back".to_owned(),
-            dialog_look(false, idle, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, idle, &theme(cx)),
             false,
         )
         .when(idle, |button| {
@@ -1310,7 +1326,12 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
         dialog_button(
             "preset-launch",
             state.label,
-            dialog_look(false, state.enabled, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                false,
+                state.enabled,
+                &theme(cx),
+            ),
             false,
         )
         .when_some(state.tip, |button, tip| button.tooltip(tooltip(tip)))
@@ -1324,7 +1345,12 @@ fn wizard_footer(wizard: &PresetWizard, cx: &mut Context<RootView>) -> Div {
         dialog_button(
             "preset-next",
             "Next".to_owned(),
-            dialog_look(false, state.enabled, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                false,
+                state.enabled,
+                &theme(cx),
+            ),
             false,
         )
         .when_some(state.tip, |button, tip| button.tooltip(tooltip(tip)))

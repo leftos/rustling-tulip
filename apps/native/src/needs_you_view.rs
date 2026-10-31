@@ -15,6 +15,7 @@ use protocol::{DaemonMessage, SessionMode, SessionStatus};
 
 use crate::activity_bar::badge_text;
 use crate::ellipsis::{ellipsized, truncating};
+use crate::fonts::{ui_px, ui_px_at};
 use crate::needs_you::{self, NeedsYouRow, Reason};
 use crate::sidebar::Activity;
 use crate::sidebar_view::{ROW_HEIGHT, ROW_PADDING};
@@ -168,9 +169,13 @@ impl RootView {
             .debug_selector(|| "needs-you-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(t.panel_bg))
-            .text_size(px(UI_TEXT_SIZE))
+            .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
-            .child(header(header_text(rows.len()), &t))
+            .child(header(
+                crate::fonts::ui_text_size(cx),
+                header_text(rows.len()),
+                &t,
+            ))
             .child(body)
     }
 
@@ -219,12 +224,12 @@ impl RootView {
     }
 }
 
-fn header(text: String, t: &UiTheme) -> Div {
+fn header(offset: i8, text: String, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_none()
         .items_center()
-        .h(px(HEADER_HEIGHT))
+        .h(ui_px_at(offset, HEADER_HEIGHT))
         .px(px(ROW_PADDING))
         .border_b_1()
         .border_color(gpui::rgb(t.border))
@@ -263,7 +268,7 @@ fn needs_you_row(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .h(px(ROW_HEIGHT))
+        .h(ui_px(cx, ROW_HEIGHT))
         .child(glyph_view(
             mark,
             GlyphSize::Leaf,

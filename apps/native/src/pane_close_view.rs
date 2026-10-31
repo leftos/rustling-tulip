@@ -170,7 +170,12 @@ impl RootView {
             dialog_button(
                 control.selector(),
                 dialog.label(control),
-                dialog_look(control.danger(), true, &theme(cx)),
+                dialog_look(
+                    crate::fonts::ui_text_size(cx),
+                    control.danger(),
+                    true,
+                    &theme(cx),
+                ),
                 control == dialog.focused(),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -189,19 +194,23 @@ impl RootView {
             .filter(|control| *control != Control::Dismiss)
             .map(&mut button)
             .collect();
-        let panel = modal_panel("pane-close-panel", &theme(cx))
-            .track_focus(&self.pane_ui.dialog_focus)
-            .child(header)
-            .child(div().child(dialog.body()))
-            .child(div().text_color(gpui::rgb(t.muted)).child(NOTE))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .children(footer),
-            );
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "pane-close-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.pane_ui.dialog_focus)
+        .child(header)
+        .child(div().child(dialog.body()))
+        .child(div().text_color(gpui::rgb(t.muted)).child(NOTE))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .gap(px(8.0))
+                .children(footer),
+        );
         Some(backdrop("pane-close", panel, &theme(cx)))
     }
 }

@@ -623,11 +623,15 @@ impl RootView {
                 let enabled = button_enabled(model, *pressed);
                 device_button(*pressed, focused, enabled, cx)
             }));
-        let panel = modal_panel("device-pairing-panel", &theme(cx))
-            .track_focus(&self.device_pairing.focus)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(model.title()))
-            .child(body)
-            .child(footer);
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "device-pairing-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.device_pairing.focus)
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(model.title()))
+        .child(body)
+        .child(footer);
         Some(backdrop("device-pairing", panel, &theme(cx)))
     }
 }
@@ -697,7 +701,14 @@ fn device_button(
     };
     let drawn = button(
         pressed.selector(),
-        button_look(kind, size, enabled, Layer::Floating, &theme(cx)),
+        button_look(
+            crate::fonts::ui_text_size(cx),
+            kind,
+            size,
+            enabled,
+            Layer::Floating,
+            &theme(cx),
+        ),
     )
     .when(focused, |button| {
         button.child(focus_ring(size.radius(), &theme(cx)))

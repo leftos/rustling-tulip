@@ -12,6 +12,7 @@ use protocol::DaemonMessage;
 
 use crate::changes_view::{HEAD_HEIGHT, count_pill, head_title};
 use crate::ellipsis::{ellipsized, truncating};
+use crate::fonts::ui_px;
 use crate::history::{
     Applied, CommitRow, DetailPane, ForgeButton, HistoryBlock, HistoryBody, MIN_CHANGES_SIDE,
     MIN_LIST_SIDE, MoreRow, ScLayout, changes_height, clamp_split, list_height,
@@ -380,7 +381,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
                 .text_color(gpui::rgb(t.muted))
                 .child(caret),
         )
-        .child(head_title(&label_id, HISTORY_LABEL, &t).flex_none())
+        .child(head_title(crate::fonts::ui_text_size(cx), &label_id, HISTORY_LABEL, &t).flex_none())
         .when_some(block.title.clone(), |toggle, title| {
             toggle.child(
                 div()
@@ -397,7 +398,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
             )
         })
         .when_some(block.count, |toggle, count| {
-            toggle.child(count_pill(count, &t))
+            toggle.child(count_pill(crate::fonts::ui_text_size(cx), count, &t))
         })
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.toggle_history(&toggle_key);
@@ -408,7 +409,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
         .flex_none()
         .items_center()
         .gap(px(6.0))
-        .h(px(HEAD_HEIGHT))
+        .h(ui_px(cx, HEAD_HEIGHT))
         .px(px(ROW_PADDING))
         .child(toggle)
         .child(forge_button(&block.id, block.forge.clone(), cx))
@@ -423,7 +424,7 @@ fn forge_button(id: &str, forge: ForgeButton, cx: &mut Context<RootView>) -> Sta
         .flex()
         .flex_none()
         .items_center()
-        .h(px(BUTTON_HEIGHT))
+        .h(ui_px(cx, BUTTON_HEIGHT))
         .px(px(6.0))
         .rounded(px(4.0))
         .border_1()
@@ -459,7 +460,7 @@ fn commit_row(key: &ScKey, id: &str, row: CommitRow, cx: &mut Context<RootView>)
         .flex_none()
         .items_center()
         .gap(px(6.0))
-        .h(px(ROW_HEIGHT))
+        .h(ui_px(cx, ROW_HEIGHT))
         .pl(px(ROW_PADDING * 2.0))
         .pr(px(ROW_PADDING))
         .cursor_pointer()
@@ -504,7 +505,7 @@ fn more_row(key: &ScKey, id: &str, more: &MoreRow, cx: &mut Context<RootView>) -
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
         .flex_none()
-        .h(px(ROW_HEIGHT))
+        .h(ui_px(cx, ROW_HEIGHT))
         .pl(px(ROW_PADDING * 2.0))
         .pr(px(ROW_PADDING))
         .text_color(gpui::rgb(t.muted))
@@ -567,7 +568,7 @@ fn detail_pane(
             .flex_none()
             .items_center()
             .gap(px(6.0))
-            .h(px(ROW_HEIGHT))
+            .h(ui_px(cx, ROW_HEIGHT))
             .px(px(4.0))
             .cursor_pointer()
             .hover(move |style| style.bg(gpui::rgb(t.hover_bg)))

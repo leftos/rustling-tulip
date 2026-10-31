@@ -162,7 +162,12 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    dialog_look(button.is_danger(), true, &theme(cx)),
+                    dialog_look(
+                        crate::fonts::ui_text_size(cx),
+                        button.is_danger(),
+                        true,
+                        &theme(cx),
+                    ),
                     dialog.focused() == button,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -171,11 +176,15 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("repo-remove-panel", &theme(cx))
-            .track_focus(&self.repo_remove_focus)
-            .child(header)
-            .child(body)
-            .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "repo-remove-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.repo_remove_focus)
+        .child(header)
+        .child(body)
+        .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         Some(backdrop("repo-remove-dialog", panel, &theme(cx)))
     }
 

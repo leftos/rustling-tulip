@@ -215,15 +215,16 @@ impl RootView {
     pub(crate) fn update_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let text = self.update_footer_text()?;
         let button = outlined_button(
+            crate::fonts::ui_text_size(cx),
             "footer-update",
             ButtonSize::Compact,
             true,
             Layer::Base,
             &theme(cx),
         )
-        .min_h(px(FOOTER_PILL_HEIGHT))
+        .min_h(crate::fonts::ui_px(cx, FOOTER_PILL_HEIGHT))
         .py(px(0.0))
-        .text_size(px(FOOTER_PILL_TEXT_SIZE))
+        .text_size(crate::fonts::ui_px(cx, FOOTER_PILL_TEXT_SIZE))
         .child(RESTART_LABEL)
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             this.restart_to_update(cx);

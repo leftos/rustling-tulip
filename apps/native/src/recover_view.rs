@@ -481,7 +481,7 @@ impl RootView {
             .child(control_button(dialog, Control::SelectAll, cx))
             .child(control_button(dialog, Control::Cancel, cx))
             .child(control_button(dialog, Control::Recover, cx));
-        let panel = modal_panel("recover-panel", &theme(cx))
+        let panel = modal_panel(crate::fonts::ui_text_size(cx), "recover-panel", &theme(cx))
             .track_focus(&self.recover_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
             .child(list)
@@ -603,7 +603,12 @@ fn control_button(
     let button = dialog_button(
         &selector(&control),
         control_label(dialog, &control),
-        dialog_look(false, enabled(dialog, &control), &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            false,
+            enabled(dialog, &control),
+            &theme(cx),
+        ),
         dialog.focus() == Some(&control),
     );
     if !enabled(dialog, &control) {

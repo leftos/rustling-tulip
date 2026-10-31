@@ -4,6 +4,7 @@
 
 use gpui::{Div, FontWeight, SharedString, div, prelude::*, px};
 
+use crate::fonts::ui_px_at;
 use crate::spawn_view::field_label;
 use crate::ui_theme::UiTheme;
 
@@ -11,22 +12,22 @@ use crate::ui_theme::UiTheme;
 const SECTION_HEAD_SIZE: f32 = 14.0;
 
 /// A Settings page's group of rows: a bold heading, the rows under it.
-pub(crate) fn section(title: impl Into<SharedString>) -> Div {
+pub(crate) fn section(offset: i8, title: impl Into<SharedString>) -> Div {
     div().flex().flex_col().gap(px(10.0)).pb(px(18.0)).child(
         div()
-            .text_size(px(SECTION_HEAD_SIZE))
+            .text_size(ui_px_at(offset, SECTION_HEAD_SIZE))
             .font_weight(FontWeight::BOLD)
             .child(title.into()),
     )
 }
 
 /// A form-field column: its label, then what the caller adds under it.
-pub(crate) fn field_column(label: &'static str, t: &UiTheme) -> Div {
+pub(crate) fn field_column(offset: i8, label: &'static str, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
         .gap(px(7.0))
-        .child(field_label(label, t))
+        .child(field_label(offset, label, t))
 }
 
 /// A flyout section in `t`: a top border and a muted heading.

@@ -657,7 +657,7 @@ impl RootView {
     }
 
     /// The Remote access tab's count of waiting requests, when there is one.
-    pub(crate) fn remote_access_tab_badge(&self, t: &UiTheme) -> Option<AnyElement> {
+    pub(crate) fn remote_access_tab_badge(&self, offset: i8, t: &UiTheme) -> Option<AnyElement> {
         let text = self.pairing_badge()?;
         let badge = div()
             .debug_selector(|| "settings-tab-remote-access-badge".to_owned())
@@ -666,13 +666,13 @@ impl RootView {
             .flex_none()
             .items_center()
             .justify_center()
-            .min_w(px(BADGE_SIZE))
-            .h(px(BADGE_SIZE))
+            .min_w(crate::fonts::ui_px_at(offset, BADGE_SIZE))
+            .h(crate::fonts::ui_px_at(offset, BADGE_SIZE))
             .px(px(4.0))
             .rounded_full()
             .bg(gpui::rgb(t.asking))
             .text_color(gpui::rgb(t.on_asking))
-            .text_size(px(BADGE_TEXT_SIZE))
+            .text_size(crate::fonts::ui_px_at(offset, BADGE_TEXT_SIZE))
             .font_weight(FontWeight::BOLD)
             .child(text);
         Some(badge.into_any_element())
@@ -686,7 +686,9 @@ impl RootView {
         let focused = self.pairing_focused_button();
         let body = match dialog.phase {
             DialogPhase::Confirm => confirm_body(&dialog, &t),
-            DialogPhase::Code { .. } => code_body(&dialog, (self.now)(), &t),
+            DialogPhase::Code { .. } => {
+                code_body(crate::fonts::ui_text_size(cx), &dialog, (self.now)(), &t)
+            }
         };
         let footer = div().flex().justify_end().gap(px(8.0)).children(
             dialog
@@ -698,7 +700,7 @@ impl RootView {
                     dialog_button(pressed, &dialog.request_id, focused, enabled, cx)
                 }),
         );
-        let panel = modal_panel("pairing-panel", &theme(cx))
+        let panel = modal_panel(crate::fonts::ui_text_size(cx), "pairing-panel", &theme(cx))
             .track_focus(&self.pairing.focus)
             .child(
                 div()
@@ -845,12 +847,12 @@ fn confirm_body(dialog: &DialogView, t: &UiTheme) -> AnyElement {
 }
 
 /// The code phase: the QR code beside the code and its countdown.
-fn code_body(dialog: &DialogView, now: std::time::Instant, t: &UiTheme) -> AnyElement {
+fn code_body(offset: i8, dialog: &DialogView, now: std::time::Instant, t: &UiTheme) -> AnyElement {
     let code = dialog.code_groups().map(|code| {
         div()
             .debug_selector(|| "pairing-code".to_owned())
             .font_family(DEFAULT_FAMILY)
-            .text_size(px(CODE_SIZE))
+            .text_size(crate::fonts::ui_px_at(offset, CODE_SIZE))
             .font_weight(FontWeight::BOLD)
             .child(code)
     });
@@ -883,6 +885,7 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
     let deny = button(
         &format!("settings-waiting-deny-{id}"),
         button_look(
+            crate::fonts::ui_text_size(cx),
             ButtonKind::Danger,
             ButtonSize::Compact,
             true,
@@ -899,6 +902,7 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
         button(
             &format!("settings-waiting-approve-{id}"),
             button_look(
+                crate::fonts::ui_text_size(cx),
                 ButtonKind::Primary,
                 ButtonSize::Compact,
                 true,
@@ -935,7 +939,14 @@ fn dialog_button(
     let request_id = request_id.to_owned();
     let drawn = button(
         pressed.selector(),
-        button_look(pressed.kind(), size, enabled, Layer::Floating, &theme(cx)),
+        button_look(
+            crate::fonts::ui_text_size(cx),
+            pressed.kind(),
+            size,
+            enabled,
+            Layer::Floating,
+            &theme(cx),
+        ),
     )
     .when(focused == Some(pressed.label()), |button| {
         button.child(focus_ring(size.radius(), &theme(cx)))

@@ -593,7 +593,7 @@ impl RootView {
         let ok = dialog_button(
             "action-failed-dismiss",
             "OK".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             true,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -607,7 +607,7 @@ impl RootView {
             .hint
             .clone()
             .map(|hint| div().text_color(gpui::rgb(t.muted)).child(hint));
-        let panel = modal_panel("action-failed-panel", &t)
+        let panel = modal_panel(crate::fonts::ui_text_size(cx), "action-failed-panel", &t)
             .track_focus(&self.notice_focus)
             .child(
                 div()
@@ -631,7 +631,7 @@ impl RootView {
         let close = dialog_button(
             "checkout-close",
             "✕".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             false,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -656,7 +656,7 @@ impl RootView {
                 dialog_button(
                     choice.selector(),
                     choice.label().to_owned(),
-                    dialog_look(false, true, &theme(cx)),
+                    dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
                     prompt.focused() == choice,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -665,7 +665,7 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("checkout-panel", &t)
+        let panel = modal_panel(crate::fonts::ui_text_size(cx), "checkout-panel", &t)
             .when(focused_layer, |panel| panel.track_focus(&self.notice_focus))
             .child(header)
             .child(div().child(prompt.message()))
@@ -682,6 +682,7 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
     let t = theme(cx);
     let id = toast.id;
     let close = outlined_button(
+        crate::fonts::ui_text_size(cx),
         &format!("toast-close-{id}"),
         ButtonSize::Compact,
         true,
@@ -766,6 +767,7 @@ fn toast_actions(toast: &Toast, cx: &mut Context<RootView>) -> Option<Div> {
     let buttons = toast.actions.iter().map(|action| {
         let action_id = action.id;
         outlined_button(
+            crate::fonts::ui_text_size(cx),
             &toast_action_selector(id, action_id),
             ButtonSize::Compact,
             true,
@@ -812,7 +814,7 @@ pub(crate) fn drop_shadow(color: u32, drop: f32, blur: f32) -> BoxShadow {
 }
 
 /// A modal's card in `t`.
-pub(crate) fn modal_panel(id: &'static str, t: &UiTheme) -> Stateful<Div> {
+pub(crate) fn modal_panel(offset: i8, id: &'static str, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -825,7 +827,7 @@ pub(crate) fn modal_panel(id: &'static str, t: &UiTheme) -> Stateful<Div> {
         .border_color(gpui::rgb(t.modal_edge))
         .rounded(px(MODAL_RADIUS))
         .shadow(vec![drop_shadow(t.dialog_shadow, 30.0, 80.0)])
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.text))
 }
 

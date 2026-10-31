@@ -345,6 +345,7 @@ impl RootView {
             .map(|line| tab_menu_line(line, &menu.tab_id, cx))
             .collect();
         menu_frame(
+            crate::fonts::ui_text_size(cx),
             "tab-menu",
             &self.tab_menu_focus,
             menu.max_height,
@@ -1426,7 +1427,10 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
         .tooltip(tooltip(tip))
         .map(|button| {
             if armed {
-                button.text_color(gpui::rgb(t.danger)).child("✓")
+                button
+                    .text_size(px(11.0))
+                    .text_color(gpui::rgb(t.danger))
+                    .child("✓")
             } else {
                 button.child(
                     svg()

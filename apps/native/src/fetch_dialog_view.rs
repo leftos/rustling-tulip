@@ -368,7 +368,12 @@ impl RootView {
         let close = dialog_button(
             &FetchControl::Close.selector(),
             "✕".to_owned(),
-            dialog_look(false, dismissable, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                false,
+                dismissable,
+                &theme(cx),
+            ),
             focus == FetchControl::Close,
         )
         .when(dismissable, |button| {
@@ -403,7 +408,7 @@ impl RootView {
                     .text_color(gpui::rgb(t.danger))
                     .child(error.to_owned())
             }));
-        let panel = modal_panel("fetch-panel", &theme(cx))
+        let panel = modal_panel(crate::fonts::ui_text_size(cx), "fetch-panel", &theme(cx))
             .track_focus(&self.fetch_focus)
             .child(header)
             .child(scope_row(form, focus, cx))
@@ -442,7 +447,7 @@ fn scope_row(form: &FetchForm, focus: FetchControl, cx: &mut Context<RootView>) 
         dialog_button(
             &control.selector(),
             root.repo_name.clone(),
-            dialog_look(false, enabled, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, enabled, &theme(cx)),
             focus == control,
         )
         .when(chosen.as_deref() == Some(root.repo_id.as_str()), |button| {
@@ -507,7 +512,12 @@ fn footer(
     let cancel = dialog_button(
         &FetchControl::Cancel.selector(),
         "Cancel".to_owned(),
-        dialog_look(false, dismissable, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            false,
+            dismissable,
+            &theme(cx),
+        ),
         focus == FetchControl::Cancel,
     )
     .when(dismissable, |button| {
@@ -518,7 +528,12 @@ fn footer(
     let submit = dialog_button(
         &FetchControl::Submit.selector(),
         "Fetch".to_owned(),
-        dialog_look(false, can_submit, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            false,
+            can_submit,
+            &theme(cx),
+        ),
         focus == FetchControl::Submit,
     )
     .when(can_submit, |button| {

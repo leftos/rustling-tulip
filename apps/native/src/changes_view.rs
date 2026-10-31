@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use crate::buttons::{ButtonSize, Layer, primary_button};
 use crate::discard_confirm::{DiscardButton, DiscardConfirm};
 use crate::ellipsis::truncating;
-use crate::fonts::DEFAULT_FAMILY;
+use crate::fonts::{DEFAULT_FAMILY, ui_px, ui_px_at};
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::sc_writes::{
@@ -386,26 +386,27 @@ fn status_color(status: &str, t: &UiTheme) -> u32 {
 /// A section head's title, uppercased: 11 px bold in the secondary text
 /// colour, ending in `…` when its head narrows it. The caller sizes it in
 /// its head; `id` names it for the ellipsis probe.
-pub(crate) fn head_title(id: &str, title: &str, t: &UiTheme) -> Div {
+pub(crate) fn head_title(offset: i8, id: &str, title: &str, t: &UiTheme) -> Div {
     truncating(id, StyledText::new(title.to_uppercase()))
-        .text_size(px(HEAD_TEXT_SIZE))
+        .text_size(ui_px_at(offset, HEAD_TEXT_SIZE))
         .font_weight(FontWeight::BOLD)
         .text_color(gpui::rgb(t.text_2))
 }
 
 /// A section head's count, in a pill.
-pub(crate) fn count_pill(count: usize, t: &UiTheme) -> Div {
+pub(crate) fn count_pill(offset: i8, count: usize, t: &UiTheme) -> Div {
+    let size = ui_px_at(offset, PILL_SIZE);
     div()
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .min_w(px(PILL_SIZE))
-        .h(px(PILL_SIZE))
+        .min_w(size)
+        .h(size)
         .px(px(PILL_PAD))
-        .rounded(px(PILL_SIZE / 2.0))
+        .rounded(size / 2.0)
         .bg(gpui::rgb(t.chip))
-        .text_size(px(PILL_TEXT_SIZE))
+        .text_size(ui_px_at(offset, PILL_TEXT_SIZE))
         .text_color(gpui::rgb(t.text_2))
         .child(count.to_string())
 }
@@ -733,6 +734,7 @@ impl RootView {
         let items = self.sc_file_menu_items()?;
         let backdrop = div().absolute().top_0().left_0().size_full().occlude();
         let mut frame = menu_frame(
+            crate::fonts::ui_text_size(cx),
             "sc-file-menu",
             &self.menu_focus,
             menu.max_height,
@@ -845,7 +847,7 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     label,
-                    dialog_look(danger, true, &theme(cx)),
+                    dialog_look(crate::fonts::ui_text_size(cx), danger, true, &theme(cx)),
                     confirm.focused() == button,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -857,7 +859,7 @@ impl RootView {
         let close = dialog_button(
             "discard-confirm-close",
             "✕".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             false,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -881,12 +883,16 @@ impl RootView {
             .border_color(gpui::rgb(t.border))
             .rounded(px(4.0))
             .children(confirm.paths().iter().map(|path| div().child(path.clone())));
-        let panel = modal_panel("discard-confirm-panel", &theme(cx))
-            .track_focus(&self.changes.discard_focus)
-            .child(header)
-            .child(div().text_color(gpui::rgb(t.muted)).child(DISCARD_BODY))
-            .child(paths)
-            .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "discard-confirm-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.changes.discard_focus)
+        .child(header)
+        .child(div().text_color(gpui::rgb(t.muted)).child(DISCARD_BODY))
+        .child(paths)
+        .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         Some(backdrop("discard-confirm-dialog", panel, &theme(cx)))
     }
 }
@@ -932,6 +938,8 @@ fn action_button(
         (false, true) => (4.0, 3.0, t.danger),
         (false, false) => (4.0, 3.0, t.text),
     };
+    let head_button_height = ui_px(cx, HEAD_BUTTON_HEIGHT);
+    let head_button_text = ui_px(cx, HEAD_TEXT_SIZE);
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -942,8 +950,8 @@ fn action_button(
         .when(head, |base| {
             base.flex()
                 .items_center()
-                .h(px(HEAD_BUTTON_HEIGHT))
-                .text_size(px(HEAD_TEXT_SIZE))
+                .h(head_button_height)
+                .text_size(head_button_text)
         })
         .child(button.label)
         .when_some(button.tooltip, |base, tip| base.tooltip(tooltip(tip)));
@@ -1168,6 +1176,7 @@ fn commit_box(
         .children(input);
     let key = key.clone();
     let button = primary_button(
+        crate::fonts::ui_text_size(cx),
         &commit.selector,
         ButtonSize::Regular,
         commit.enabled,
@@ -1281,11 +1290,11 @@ fn bucket_header(key: &ScKey, bucket: &ScBucketRow, cx: &mut Context<RootView>) 
         .flex()
         .items_center()
         .gap(px(6.0))
-        .h(px(HEAD_HEIGHT))
+        .h(ui_px(cx, HEAD_HEIGHT))
         .px(px(ROW_PADDING))
-        .child(head_title(&title_id, bucket.title, &t).flex_1())
+        .child(head_title(crate::fonts::ui_text_size(cx), &title_id, bucket.title, &t).flex_1())
         .children(actions)
-        .child(count_pill(bucket.count, &t))
+        .child(count_pill(crate::fonts::ui_text_size(cx), bucket.count, &t))
 }
 
 fn tree_row(
@@ -1317,7 +1326,7 @@ fn folder_row(
         .flex()
         .items_center()
         .gap(px(4.0))
-        .h(px(ROW_HEIGHT))
+        .h(ui_px(cx, ROW_HEIGHT))
         .pl(indent(folder.depth))
         .pr(px(ROW_PADDING))
         .cursor_pointer()
@@ -1362,7 +1371,7 @@ fn file_row_view(
         .flex()
         .items_center()
         .gap(px(4.0))
-        .h(px(ROW_HEIGHT))
+        .h(ui_px(cx, ROW_HEIGHT))
         .pl(indent(file.depth))
         .pr(px(ROW_PADDING))
         .cursor_pointer()
@@ -1376,10 +1385,10 @@ fn file_row_view(
         .child(
             div()
                 .flex_none()
-                .w(px(STATUS_WIDTH))
+                .w(ui_px(cx, STATUS_WIDTH))
                 .text_center()
                 .font_family(DEFAULT_FAMILY)
-                .text_size(px(STATUS_TEXT_SIZE))
+                .text_size(ui_px(cx, STATUS_TEXT_SIZE))
                 .font_weight(FontWeight::BOLD)
                 .text_color(gpui::rgb(status_color(&file.status, &t)))
                 .child(file.status.clone()),

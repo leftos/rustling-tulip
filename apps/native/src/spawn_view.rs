@@ -1310,15 +1310,25 @@ impl RootView {
         let close = close_button("spawn-close", focus == Control::Close, &theme(cx)).on_click(
             cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
         );
-        let panel = dialog_card("spawn-panel", DIALOG_WIDTH, &theme(cx))
-            .max_h(relative(PANEL_MAX_HEIGHT))
-            .when(form.share_confirm().is_none(), |panel| {
-                panel.track_focus(&self.spawn_focus)
-            })
-            .child(dialog_title_bar(DIALOG_TITLE, close, &t))
-            .child(body)
-            .child(footer(form, &focus, cx))
-            .child(measurer(Measured::Panel, cx));
+        let panel = dialog_card(
+            crate::fonts::ui_text_size(cx),
+            "spawn-panel",
+            DIALOG_WIDTH,
+            &theme(cx),
+        )
+        .max_h(relative(PANEL_MAX_HEIGHT))
+        .when(form.share_confirm().is_none(), |panel| {
+            panel.track_focus(&self.spawn_focus)
+        })
+        .child(dialog_title_bar(
+            crate::fonts::ui_text_size(cx),
+            DIALOG_TITLE,
+            close,
+            &t,
+        ))
+        .child(body)
+        .child(footer(form, &focus, cx))
+        .child(measurer(Measured::Panel, cx));
         let mut layers = vec![backdrop("spawn-dialog", panel, &theme(cx))];
         if let Some(button) = form.share_confirm() {
             layers.push(self.share_layer(button, cx));
@@ -1367,6 +1377,7 @@ impl RootView {
         let add = button(
             "spawn-add-repo",
             button_look(
+                crate::fonts::ui_text_size(cx),
                 OUTLINED.0,
                 OUTLINED.1,
                 gate.enabled,
@@ -1401,6 +1412,7 @@ impl RootView {
         let cancel = button(
             "spawn-cancel",
             button_look(
+                crate::fonts::ui_text_size(cx),
                 ButtonKind::Outlined,
                 ButtonSize::Large,
                 true,
@@ -1416,6 +1428,7 @@ impl RootView {
         let submit = button(
             "spawn-submit",
             button_look(
+                crate::fonts::ui_text_size(cx),
                 ButtonKind::Primary,
                 ButtonSize::Large,
                 false,
@@ -1425,11 +1438,21 @@ impl RootView {
         )
         .flex_none()
         .child("Spawn");
-        let panel = dialog_card("spawn-panel", DIALOG_WIDTH, &theme(cx))
-            .track_focus(&self.spawn_focus)
-            .child(dialog_title_bar(DIALOG_TITLE, close, &t))
-            .child(body)
-            .child(dialog_footer(&t).child(cancel).child(submit));
+        let panel = dialog_card(
+            crate::fonts::ui_text_size(cx),
+            "spawn-panel",
+            DIALOG_WIDTH,
+            &theme(cx),
+        )
+        .track_focus(&self.spawn_focus)
+        .child(dialog_title_bar(
+            crate::fonts::ui_text_size(cx),
+            DIALOG_TITLE,
+            close,
+            &t,
+        ))
+        .child(body)
+        .child(dialog_footer(&t).child(cancel).child(submit));
         backdrop("spawn-dialog", panel, &theme(cx))
     }
 
@@ -1440,7 +1463,7 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     button.label().to_owned(),
-                    dialog_look(false, true, &theme(cx)),
+                    dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
                     focused == button,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1449,11 +1472,15 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("spawn-share-panel", &theme(cx))
-            .track_focus(&self.spawn_focus)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(SHARE_TITLE))
-            .child(div().child(SHARE_BODY))
-            .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "spawn-share-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.spawn_focus)
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(SHARE_TITLE))
+        .child(div().child(SHARE_BODY))
+        .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         backdrop("spawn-share-worktree-confirm", panel, &theme(cx))
     }
 }
@@ -1485,8 +1512,8 @@ pub(crate) fn now_unix() -> i64 {
 
 /// A dialog's card, `width` wide and tagged `id`: the modal card, its
 /// header, body and footer bands drawn edge to edge.
-pub(crate) fn dialog_card(id: &'static str, width: f32, t: &UiTheme) -> Stateful<Div> {
-    modal_panel(id, t)
+pub(crate) fn dialog_card(offset: i8, id: &'static str, width: f32, t: &UiTheme) -> Stateful<Div> {
+    modal_panel(offset, id, t)
         .debug_selector(move || id.to_owned())
         .w(px(width))
         .p(px(0.0))
@@ -1496,6 +1523,7 @@ pub(crate) fn dialog_card(id: &'static str, width: f32, t: &UiTheme) -> Stateful
 /// A dialog's header band: the bold title, then `close` at the right, over
 /// a divider.
 pub(crate) fn dialog_title_bar(
+    offset: i8,
     title: impl Into<SharedString>,
     close: impl IntoElement,
     t: &UiTheme,
@@ -1514,7 +1542,7 @@ pub(crate) fn dialog_title_bar(
             div()
                 .flex_1()
                 .min_w(px(0.0))
-                .text_size(px(TITLE_SIZE))
+                .text_size(crate::fonts::ui_px_at(offset, TITLE_SIZE))
                 .font_weight(FontWeight::BOLD)
                 .child(title.into()),
         )
@@ -1578,21 +1606,21 @@ fn divided(t: &UiTheme) -> Div {
 }
 
 /// A field's label: small, semibold and secondary.
-pub(crate) fn field_label(label: impl Into<SharedString>, t: &UiTheme) -> Div {
+pub(crate) fn field_label(offset: i8, label: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
-        .text_size(px(LABEL_SIZE))
+        .text_size(crate::fonts::ui_px_at(offset, LABEL_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(gpui::rgb(t.text_2))
         .child(label.into())
 }
 
 /// A labelled field.
-pub(crate) fn field(label: impl Into<SharedString>, t: &UiTheme) -> Div {
+pub(crate) fn field(offset: i8, label: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
         .flex()
         .flex_col()
         .gap(px(7.0))
-        .child(field_label(label, t))
+        .child(field_label(offset, label, t))
 }
 
 /// A segmented control: its segments in a well a step lighter than the
@@ -1615,9 +1643,9 @@ pub(crate) fn muted(text: impl Into<SharedString>, t: &UiTheme) -> Div {
 }
 
 /// A note under a checkbox's or a radio's label.
-pub(crate) fn note(text: impl Into<SharedString>, t: &UiTheme) -> Div {
+pub(crate) fn note(offset: i8, text: impl Into<SharedString>, t: &UiTheme) -> Div {
     div()
-        .text_size(px(NOTE_SIZE))
+        .text_size(crate::fonts::ui_px_at(offset, NOTE_SIZE))
         .text_color(gpui::rgb(t.subtle))
         .child(text.into())
 }
@@ -1626,6 +1654,7 @@ pub(crate) fn note(text: impl Into<SharedString>, t: &UiTheme) -> Div {
 /// ringed when focused, dimmed and inert when disabled. The Settings
 /// modal's choice rows are built from it too, so both places look the same.
 pub(crate) fn choice_button(
+    offset: i8,
     name: String,
     label: impl IntoElement,
     look: Look,
@@ -1645,12 +1674,12 @@ pub(crate) fn choice_button(
         .items_center()
         .justify_center()
         .gap(px(6.0))
-        .min_h(px(SEGMENT_HEIGHT))
+        .min_h(crate::fonts::ui_px_at(offset, SEGMENT_HEIGHT))
         .px(px(12.0))
         .rounded(px(SEGMENT_RADIUS))
         .border_1()
         .border_color(gpui::rgba(t.transparent))
-        .text_size(px(SEGMENT_TEXT_SIZE))
+        .text_size(crate::fonts::ui_px_at(offset, SEGMENT_TEXT_SIZE))
         .font_weight(weight)
         .text_color(gpui::rgb(text))
         .when(look.selected, |segment| {
@@ -1675,6 +1704,7 @@ pub(crate) fn choice_button(
 /// `checked` and a strong outline when not, ringed while `focused`, then
 /// `label`. The caller adds the handler.
 pub(crate) fn checkbox_row(
+    offset: i8,
     selector: &str,
     checked: bool,
     focused: bool,
@@ -1713,7 +1743,7 @@ pub(crate) fn checkbox_row(
         .flex()
         .items_start()
         .gap(px(10.0))
-        .text_size(px(CHECK_LABEL_SIZE))
+        .text_size(crate::fonts::ui_px_at(offset, CHECK_LABEL_SIZE))
         .cursor_pointer()
         .child(mark)
         .child(label)
@@ -1782,7 +1812,14 @@ fn spawn_button(
     let focused = focus == control;
     let base = button(
         &control.selector(),
-        button_look(kind, size, enabled, Layer::Floating, &theme(cx)),
+        button_look(
+            crate::fonts::ui_text_size(cx),
+            kind,
+            size,
+            enabled,
+            Layer::Floating,
+            &theme(cx),
+        ),
     )
     .flex_none()
     .child(label)
@@ -1831,6 +1868,7 @@ pub(crate) fn option_button(
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let button = choice_button(
+        crate::fonts::ui_text_size(cx),
         control.selector(),
         label,
         look,
@@ -1909,7 +1947,7 @@ fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
             option_button(&control, label, look, cx).into_any_element()
         })
         .collect();
-    field("Target", &t).child(segmented(buttons, &t))
+    field(crate::fonts::ui_text_size(cx), "Target", &t).child(segmented(buttons, &t))
 }
 
 fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
@@ -1923,7 +1961,7 @@ fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
             choice(&Control::Runtime(runtime), label, selected, focus, cx)
         })
         .collect();
-    field("Runtime", &t).child(segmented(buttons, &t))
+    field(crate::fonts::ui_text_size(cx), "Runtime", &t).child(segmented(buttons, &t))
 }
 
 fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
@@ -1939,7 +1977,8 @@ fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
             enabled: false,
         };
         let chip = option_button(&control, name, look, cx);
-        return field("Open in", &t).child(segmented(vec![chip.into_any_element()], &t));
+        return field(crate::fonts::ui_text_size(cx), "Open in", &t)
+            .child(segmented(vec![chip.into_any_element()], &t));
     }
     let chosen = form.open_in();
     let tabs = form.tabs();
@@ -1980,7 +2019,7 @@ fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
             cx,
         ));
     }
-    field("Open in", &t).child(segmented(buttons, &t))
+    field(crate::fonts::ui_text_size(cx), "Open in", &t).child(segmented(buttons, &t))
 }
 
 /// A checkbox of the dialog: its box and `label`, pressing its control.
@@ -1992,8 +2031,15 @@ fn checkbox(
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let focused = focus == control;
-    let row = checkbox_row(&control.selector(), checked, focused, label, &theme(cx))
-        .on_click(press_control(control, cx));
+    let row = checkbox_row(
+        crate::fonts::ui_text_size(cx),
+        &control.selector(),
+        checked,
+        focused,
+        label,
+        &theme(cx),
+    )
+    .on_click(press_control(control, cx));
     div()
         .flex()
         .child(reveal_when_focused(row, control, focused, cx))
@@ -2008,7 +2054,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
     let label = check_label(
         "Trusted launch",
         form.trusted_detail()
-            .map(|detail| note(detail.to_owned(), &t)),
+            .map(|detail| note(crate::fonts::ui_text_size(cx), detail.to_owned(), &t)),
     );
     let mut rows = vec![checkbox(
         &Control::Trusted,
@@ -2045,7 +2091,10 @@ fn worktree_checkbox(form: &SpawnForm, focus: &Control, cx: &mut Context<RootVie
             "Unchecked: run the agent in the repo's main directory",
         )
     };
-    let label = check_label(text, Some(note(unchecked, &t)));
+    let label = check_label(
+        text,
+        Some(note(crate::fonts::ui_text_size(cx), unchecked, &t)),
+    );
     checkbox(&Control::UseWorktree, form.use_worktree(), focus, label, cx)
 }
 
@@ -2063,7 +2112,7 @@ fn mode_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> 
     .into_iter()
     .map(|(mode, text)| choice(&Control::Mode(mode), text, form.mode() == mode, focus, cx))
     .collect();
-    field(label, &t)
+    field(crate::fonts::ui_text_size(cx), label, &t)
         .child(segmented(buttons, &t))
         .into_any_element()
 }
@@ -2093,7 +2142,7 @@ fn existing_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>)
     let warning = form
         .existing_warning()
         .map(|text| div().text_color(gpui::rgb(t.warning)).child(text));
-    field(label, &t)
+    field(crate::fonts::ui_text_size(cx), label, &t)
         .children(placeholder)
         .when(!options.is_empty(), |field| {
             field.child(segmented(options, &t).flex_col())
@@ -2299,7 +2348,7 @@ fn branch_field(
     });
     let pending =
         (form.use_worktree() && form.suggestion_pending(now)).then(|| muted(SUGGESTING, &t));
-    field(label, &t)
+    field(crate::fonts::ui_text_size(cx), label, &t)
         .child(div().flex().gap(px(8.0)).child(input).children(random))
         .children(pending)
         .into_any_element()
@@ -2310,7 +2359,7 @@ fn base_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>)
     let form = &dialog.form;
     let input = list_input(dialog, ListField::Base, focus, cx);
     let failed = (form.fetch_failed() && !form.is_workspace()).then(|| muted(FETCH_FAILED, &t));
-    field("Base branch (optional)", &t)
+    field(crate::fonts::ui_text_size(cx), "Base branch (optional)", &t)
         .child(input)
         .children(failed)
         .into_any_element()
@@ -2491,7 +2540,7 @@ fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<Root
         .rounded(px(CHECK_RADIUS))
         .border_1()
         .border_color(gpui::rgba(t.transparent))
-        .text_size(px(SEGMENT_TEXT_SIZE))
+        .text_size(crate::fonts::ui_px(cx, SEGMENT_TEXT_SIZE))
         .text_color(gpui::rgb(t.text_2))
         .cursor_pointer()
         .hover(move |style| style.text_color(gpui::rgb(t.text)))
@@ -2537,10 +2586,14 @@ fn env_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) 
         .collect();
     let empty = rows.is_empty().then(|| muted(NO_ENV, &t));
     let add = spawn_button(&Control::EnvAdd, OUTLINED, "+ Add env var", true, focus, cx);
-    field("Extra environment variables", &t)
-        .children(empty)
-        .children(rows)
-        .child(div().flex().child(add))
+    field(
+        crate::fonts::ui_text_size(cx),
+        "Extra environment variables",
+        &t,
+    )
+    .children(empty)
+    .children(rows)
+    .child(div().flex().child(add))
 }
 
 fn env_row(

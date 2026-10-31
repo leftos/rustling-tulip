@@ -393,7 +393,7 @@ impl RootView {
         let close = dialog_button(
             ShellControl::Close.selector(),
             "✕".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             focus == ShellControl::Close,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -410,7 +410,12 @@ impl RootView {
         let browse = dialog_button(
             ShellControl::Browse.selector(),
             "Browse…".to_owned(),
-            dialog_look(false, browse_enabled, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                false,
+                browse_enabled,
+                &theme(cx),
+            ),
             focus == ShellControl::Browse,
         )
         .when_some(refusal, |button, tip| button.tooltip(tooltip(tip)))
@@ -444,7 +449,7 @@ impl RootView {
                 this.press_shell_control(ShellControl::ClearDefault, window, cx);
             }))
         });
-        let panel = modal_panel("shell-panel", &theme(cx))
+        let panel = modal_panel(crate::fonts::ui_text_size(cx), "shell-panel", &theme(cx))
             .track_focus(&self.shell_focus)
             .child(header)
             .child(field)
@@ -498,6 +503,7 @@ fn save_default_row(
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     checkbox_row(
+        crate::fonts::ui_text_size(cx),
         ShellControl::SaveDefault.selector(),
         form.save_default(),
         focus == ShellControl::SaveDefault,
@@ -537,7 +543,7 @@ fn footer(can_submit: bool, focus: ShellControl, cx: &mut Context<RootView>) -> 
     let cancel = dialog_button(
         ShellControl::Cancel.selector(),
         "Cancel".to_owned(),
-        dialog_look(false, true, &theme(cx)),
+        dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
         focus == ShellControl::Cancel,
     )
     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -546,7 +552,12 @@ fn footer(can_submit: bool, focus: ShellControl, cx: &mut Context<RootView>) -> 
     let submit = dialog_button(
         ShellControl::Submit.selector(),
         "Open shell".to_owned(),
-        dialog_look(false, can_submit, &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            false,
+            can_submit,
+            &theme(cx),
+        ),
         focus == ShellControl::Submit,
     )
     .when(can_submit, |button| {

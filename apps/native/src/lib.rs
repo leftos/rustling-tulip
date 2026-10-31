@@ -4872,7 +4872,7 @@ impl RootView {
             .when(manages_daemon, |details| {
                 details.child(self.handshake_row(cx))
             });
-        popover_frame("daemon-flyout", &theme(cx))
+        popover_frame(crate::fonts::ui_text_size(cx), "daemon-flyout", &theme(cx))
             .absolute()
             .left(px(PADDING))
             .bottom(ui_px(cx, FOOTER_HEIGHT) + px(4.0))

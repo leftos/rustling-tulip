@@ -393,14 +393,18 @@ impl RootView {
             focused,
             cx,
         ));
-        let panel = modal_panel("worktrees-manager-panel", &theme(cx))
-            .track_focus(&self.worktrees_focus)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
-            .child(muted(root, &t))
-            .child(toolbar)
-            .children(lines.map(|line| div().child(line)))
-            .child(list)
-            .child(footer);
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "worktrees-manager-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.worktrees_focus)
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(TITLE))
+        .child(muted(root, &t))
+        .child(toolbar)
+        .children(lines.map(|line| div().child(line)))
+        .child(list)
+        .child(footer);
         let confirm = manager.confirm().map(|confirm| confirm_layer(confirm, cx));
         Some(
             div()
@@ -488,7 +492,12 @@ fn manager_button(
     let button = dialog_button(
         &manager.selector(&control),
         manager.label(&control),
-        dialog_look(danger, manager.enabled(&control), &theme(cx)),
+        dialog_look(
+            crate::fonts::ui_text_size(cx),
+            danger,
+            manager.enabled(&control),
+            &theme(cx),
+        ),
         focused == Some(&control),
     );
     let button = match manager.tooltip(&control) {
@@ -511,22 +520,31 @@ fn confirm_layer(confirm: &Confirm, cx: &mut Context<RootView>) -> AnyElement {
         dialog_button(
             confirm.selector(button),
             confirm.label(button).to_owned(),
-            dialog_look(button == ConfirmButton::Ok, true, &theme(cx)),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                button == ConfirmButton::Ok,
+                true,
+                &theme(cx),
+            ),
             confirm.focused() == button,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.answer_worktrees_confirm(button, window, cx);
         }))
     });
-    let panel = modal_panel("worktrees-manager-confirm-panel", &theme(cx))
-        .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(confirm.title()),
-        )
-        .child(div().child(confirm.body()))
-        .child(muted(confirm.hint(), &t))
-        .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
+    let panel = modal_panel(
+        crate::fonts::ui_text_size(cx),
+        "worktrees-manager-confirm-panel",
+        &theme(cx),
+    )
+    .child(
+        div()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(confirm.title()),
+    )
+    .child(div().child(confirm.body()))
+    .child(muted(confirm.hint(), &t))
+    .child(div().flex().justify_end().gap(px(8.0)).children(buttons));
     backdrop("worktrees-manager-confirm", panel, &theme(cx))
 }
 

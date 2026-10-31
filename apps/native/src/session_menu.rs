@@ -84,7 +84,7 @@ const POPOVER_RADIUS: f32 = 10.0;
 
 /// The card a popover sits in, tagged `id`: the popover fill with its edge
 /// and shadow, taking the pointer from whatever is under it.
-pub(crate) fn popover_frame(id: &'static str, t: &UiTheme) -> Stateful<Div> {
+pub(crate) fn popover_frame(offset: i8, id: &'static str, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -93,7 +93,7 @@ pub(crate) fn popover_frame(id: &'static str, t: &UiTheme) -> Stateful<Div> {
         .border_color(gpui::rgb(t.popover_edge))
         .rounded(px(POPOVER_RADIUS))
         .shadow(vec![drop_shadow(t.popover_shadow, 8.0, 24.0)])
-        .text_size(px(UI_TEXT_SIZE))
+        .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.text))
         .occlude()
 }
@@ -103,13 +103,14 @@ pub(crate) fn popover_frame(id: &'static str, t: &UiTheme) -> Stateful<Div> {
 /// `max_height`, scrolling its rows instead, so a long menu stays inside the
 /// window.
 pub(crate) fn menu_frame(
+    offset: i8,
     id: &'static str,
     focus: &FocusHandle,
     max_height: Pixels,
     on_out: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     t: &UiTheme,
 ) -> Stateful<Div> {
-    popover_frame(id, t)
+    popover_frame(offset, id, t)
         .track_focus(focus)
         .flex()
         .flex_col()
@@ -1888,6 +1889,7 @@ impl RootView {
         let max_height = menu.max_height;
         let backdrop = div().absolute().top_0().left_0().size_full().occlude();
         let frame = menu_frame(
+            crate::fonts::ui_text_size(cx),
             "container-menu",
             &self.menu_focus,
             max_height,
@@ -2290,6 +2292,7 @@ impl RootView {
         let choosing_stop =
             menu.rename.is_none() && self.rows().iter().any(|row| row.entry == MenuEntry::Cancel);
         menu_frame(
+            crate::fonts::ui_text_size(cx),
             "session-menu",
             &self.menu_focus,
             menu.max_height,
@@ -2370,17 +2373,11 @@ impl RootView {
     fn busy_exclusion_row(session_id: &str, row: SessionRow, cx: &mut Context<Self>) -> AnyElement {
         let checked = matches!(row, SessionRow::BusyExcluded { excluded: true });
         let session_id = session_id.to_owned();
-        check_row(
-            crate::fonts::ui_text_size(cx),
-            row.selector(),
-            row.label(),
-            checked,
-            &theme(cx),
-        )
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.choose_row(&session_id, row, window, cx);
-        }))
-        .into_any_element()
+        check_row(row.selector(), row.label(), checked, &theme(cx))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.choose_row(&session_id, row, window, cx);
+            }))
+            .into_any_element()
     }
 
     /// A line of a submenu of tabs for `session_id`; a choice runs `pick`,
@@ -2623,6 +2620,7 @@ impl RootView {
         let button = button(
             selector,
             button_look(
+                crate::fonts::ui_text_size(cx),
                 kind,
                 ButtonSize::Compact,
                 ready,
@@ -3344,7 +3342,7 @@ impl RootView {
         let close = dialog_button(
             "delete-worktree-dialog-close",
             "✕".to_owned(),
-            dialog_look(false, true, &theme(cx)),
+            dialog_look(crate::fonts::ui_text_size(cx), false, true, &theme(cx)),
             false,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -3378,7 +3376,12 @@ impl RootView {
                 dialog_button(
                     button.selector(),
                     confirm.label(button),
-                    dialog_look(button.is_danger(), true, &theme(cx)),
+                    dialog_look(
+                        crate::fonts::ui_text_size(cx),
+                        button.is_danger(),
+                        true,
+                        &theme(cx),
+                    ),
                     focused,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -3387,11 +3390,15 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = modal_panel("delete-worktree-panel", &theme(cx))
-            .track_focus(&self.dialog_focus)
-            .child(header)
-            .child(self.delete_dialog_body(confirm, &theme(cx)))
-            .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
+        let panel = modal_panel(
+            crate::fonts::ui_text_size(cx),
+            "delete-worktree-panel",
+            &theme(cx),
+        )
+        .track_focus(&self.dialog_focus)
+        .child(header)
+        .child(self.delete_dialog_body(confirm, &theme(cx)))
+        .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
         Some(backdrop("delete-worktree-dialog", panel, &theme(cx)))
     }
 
@@ -3454,7 +3461,7 @@ pub(crate) struct DialogLook {
 
 /// The look of a dialog's button in `t`: outlined, or outlined with the
 /// danger colour's text, on the floating layer; dimmed unless `enabled`.
-pub(crate) fn dialog_look(danger: bool, enabled: bool, t: &UiTheme) -> DialogLook {
+pub(crate) fn dialog_look(offset: i8, danger: bool, enabled: bool, t: &UiTheme) -> DialogLook {
     let kind = if danger {
         ButtonKind::Danger
     } else {
@@ -3462,7 +3469,7 @@ pub(crate) fn dialog_look(danger: bool, enabled: bool, t: &UiTheme) -> DialogLoo
     };
     let size = ButtonSize::Regular;
     DialogLook {
-        button: button_look(kind, size, enabled, Layer::Floating, t),
+        button: button_look(offset, kind, size, enabled, Layer::Floating, t),
         ring: focus_ring(size.radius(), t),
     }
 }
@@ -3533,6 +3540,7 @@ pub(crate) fn bordered_button(
         enabled,
     } = button;
     let base = outlined_button(
+        crate::fonts::ui_text_size(cx),
         &selector,
         ButtonSize::Compact,
         enabled,
@@ -3628,13 +3636,7 @@ fn swatch_row(
 
 /// A clickable menu row with a ✓ in the swatch's slot while `checked`,
 /// tagged `<selector>-check`; unchecked leaves the slot empty.
-fn check_row(
-    offset: i8,
-    selector: &str,
-    label: &'static str,
-    checked: bool,
-    t: &UiTheme,
-) -> Stateful<Div> {
+fn check_row(selector: &str, label: &'static str, checked: bool, t: &UiTheme) -> Stateful<Div> {
     let check = format!("{selector}-check");
     let slot = div()
         .flex()
@@ -3642,8 +3644,8 @@ fn check_row(
         .items_center()
         .justify_center()
         .size(px(12.0))
-        .text_size(ui_px_at(offset, 12.0))
-        .line_height(ui_px_at(offset, 12.0));
+        .text_size(px(11.0))
+        .line_height(px(11.0));
     let slot = if checked {
         slot.debug_selector(|| check).child("✓")
     } else {
@@ -3852,6 +3854,7 @@ impl RootView {
             format!("{}\n{}", menu.command, menu.output)
         };
         menu_frame(
+            crate::fonts::ui_text_size(cx),
             "shell-menu",
             &self.menu_focus,
             menu.max_height,

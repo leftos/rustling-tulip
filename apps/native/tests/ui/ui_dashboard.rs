@@ -499,6 +499,28 @@ fn agent_tree() -> serde_json::Value {
 }
 
 #[gpui::test]
+fn dashboard_rows_grow_with_the_ui_text_size(cx: &mut TestAppContext) {
+    let fixture = on_dashboard(vec![working("w1")]);
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    h.send(facts_message(vec![
+        facts("w1").agents(agent_tree()).build(),
+    ]));
+    let sub = format!("dashboard-sub-w1-{}", cells(&mut h, "w1").nested[0].key);
+    let row = h.bounds(&sub).size.height;
+    let columns = h.bounds("dashboard-columns").size.height;
+
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+    assert_eq!(h.bounds(&sub).size.height, row + px(3.0), "the nested row");
+    assert_eq!(
+        h.bounds("dashboard-columns").size.height,
+        columns + px(3.0),
+        "the column header"
+    );
+}
+
+#[gpui::test]
 fn nested_rows_show_under_working_rows_only(cx: &mut TestAppContext) {
     let fixture = on_dashboard(vec![working("w1"), session("i1").in_repo("r1").build()]);
     let dir = TestDir::new();

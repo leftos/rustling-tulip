@@ -1408,6 +1408,12 @@ impl RootView {
         }
     }
 
+    /// The theme pane `pane_id` draws session `session_id`'s rows in.
+    #[must_use]
+    pub fn chat_row_theme(&self, pane_id: &str, session_id: &str, cx: &App) -> UiTheme {
+        self.row_look(pane_id, session_id, cx).theme
+    }
+
     /// Session `session_id`'s card and the cards behind it, under an
     /// "Answered elsewhere" line while one shows; none while neither does.
     pub(crate) fn card_area(
@@ -1491,6 +1497,7 @@ impl RootView {
                     let enabled = !blank && !disabled && !sending;
                     let id = session_id.to_owned();
                     primary_button(
+                        offset,
                         action.selector(),
                         ButtonSize::Compact,
                         enabled,
@@ -1532,6 +1539,7 @@ impl RootView {
                 .px(px(BODY_PAD_X))
                 .pt(px(6.0))
                 .pb(px(BODY_PAD_Y))
+                .text_size(ui_px_at(offset, UI_TEXT_SIZE))
                 .children(note.map(|note| {
                     muted_line(offset, note.text(), &t)
                         .debug_selector(|| "chat-composer-note".to_owned())
@@ -1567,6 +1575,7 @@ impl RootView {
             prompt,
         } = ride;
         outlined_button(
+            fonts::ui_text_size(cx),
             selector,
             ButtonSize::Compact,
             !busy,
@@ -1795,10 +1804,10 @@ fn answer_row(
     let body = match doc {
         Some(AnswerDoc { doc, .. }) => {
             let painter = Painter::new(
+                look.text_offset,
                 format!("chat-{id}"),
                 LinkRoute::WebOnly,
-                look.mono_family,
-                look.mono_size,
+                (look.mono_family, look.mono_size),
                 &look.theme,
             )
             .for_answer(look.session_id, id);
