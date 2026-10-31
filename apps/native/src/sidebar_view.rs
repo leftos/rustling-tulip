@@ -432,12 +432,24 @@ impl RootView {
         div().relative().flex_none().child(button).children(menu)
     }
 
-    /// The ⋯ menu's Add workspace row: muted, with why, below two repos on
-    /// the focused session's host (This PC with none focused), which the
-    /// creator it opens acts on.
+    /// The ⋯ menu's Add workspace row: muted, with why, while the focused
+    /// session's host (This PC with none focused), which the creator it
+    /// opens acts on, is offline or holds fewer than two repos.
     fn more_add_workspace_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
-        if self.sidebar.repos_of(&self.focused_host()).len() < 2 {
+        let host = self.focused_host();
+        if self.is_remote_offline(&host) {
+            return div()
+                .id(MORE_ADD_WORKSPACE_ROW)
+                .debug_selector(|| MORE_ADD_WORKSPACE_ROW.to_owned())
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(4.0))
+                .text_color(gpui::rgb(t.muted))
+                .child("Add workspace…")
+                .tooltip(tooltip(format!("{} is offline", self.host_name(&host))));
+        }
+        if self.sidebar.repos_of(&host).len() < 2 {
             div()
                 .id(MORE_ADD_WORKSPACE_ROW)
                 .debug_selector(|| MORE_ADD_WORKSPACE_ROW.to_owned())

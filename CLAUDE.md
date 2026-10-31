@@ -55,7 +55,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 native           # build daemon + tracer, then run the native client (extra args: a session id to focus)
 .\rt.ps1 native-e2e       # native client specs (e2e_live, e2e_recover, e2e_remote, e2e_ssh) against a real daemon, built with the e2e-loopback-peers feature, isolated under .tmp/ (fake-claude, fake-tailscale and fake-ssh need node); then the sealed-secret spec again on this PC in its own gate call (it needs Credential Manager and skips when GATE_BOX_JOB is set; .gate/local.toml keeps its -SealedSecretOnly re-entry here)
 .\rt.ps1 native-smoke     # launch the native client exe in a cloaked, never-focused window; check it connects and takes keys
-.\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, connections, connections-ssh, menu, update, chat, summary, themes, themes-edit, multi-host) in .tmp\shots\
+.\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, connections, connections-ssh, menu, update, chat, summary, themes, themes-edit, multi-host, spawn-hosts) in .tmp\shots\
 .\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against (needs NSIS 3; tools/installer/README.md)
 .\rt.ps1 help             # usage summary
 ```

@@ -1429,6 +1429,25 @@ fn workspace_file_browse_leaves_the_tab_ring_on_remote(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn add_workspace_is_disabled_while_the_focused_host_is_offline(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = creator_on_remote(cx, &dir, &json!({}));
+    h.host(&saved_target())
+        .event(NetEvent::State(Connection::for_target(saved_target())));
+    h.click_on("sidebar-more");
+
+    assert!(
+        tooltip_on(&mut h, "sidebar-more-add-workspace", "box is offline"),
+        "the row says why it is off"
+    );
+    h.click_on("sidebar-more-add-workspace");
+    assert!(
+        !h.root(|root, _| root.workspace_creator_open()),
+        "no creator opens on an offline host"
+    );
+}
+
+#[gpui::test]
 fn workspace_creator_no_repos_note_names_the_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = creator_on_remote(cx, &dir, &json!({}));
