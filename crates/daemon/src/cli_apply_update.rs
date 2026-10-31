@@ -498,7 +498,7 @@ fn write_result(path: &Path, request: &Request, outcome: &Outcome) -> anyhow::Re
         std::fs::create_dir_all(folder)
             .with_context(|| format!("creating {}", folder.display()))?;
     }
-    crate::atomic_file::write_atomic(path, &serde_json::to_vec(&record)?)
+    crate::orphan::write_atomic(path, &serde_json::to_vec(&record)?)
 }
 
 /// Start the installed client once, telling it which version it replaced.
