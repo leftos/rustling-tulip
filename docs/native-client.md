@@ -166,7 +166,25 @@ This doc records the decisions a change to the client needs to know; what each f
 
   `native.log` records at info "device pairing: the dialog opens" (fields `host`, `had_token`), "… asking the host", "… sending the code", "… withdrawing the request" and "… paired; the dialog closes", and warns "device pairing: the token was lost with no dialog open".
 
-  **Launch and daemon-id dedupe** (`hosts.rs`: `connect_saved_hosts`, `connect_host`, `disconnect_host`, `on_host_closed`): launch connects This PC (always local, always connected, with no switch) and then each enabled saved host in saved order. The first host to say `Welcome` with a daemon id owns it until it disconnects; This PC always owns its own. A later host on that id is disconnected and its rows cleared, its row reads "Same daemon as {owner}", and it redials when its owner goes. `native.log` records at info `two connections reach one daemon; dropping the later one`.
+  **Launch and daemon-id dedupe** (`hosts.rs`: `connect_saved_hosts`, `connect_host`, `disconnect_host`, `on_host_closed`): launch connects This PC (always local, always connected, with no switch) and then each enabled saved host in saved order.
+
+  Two keys that reach one daemon are ranked (`hosts.rs` `rank`, `drop_if_duplicate`): This PC first, then a saved host by its index in `saved_hosts` (switched on or off), then any other key by its text. The lower rank owns the daemon, whichever said `Welcome` first, and a key whose connection is not open (a pairing connection) never owns.
+
+  The other key is disconnected and its rows cleared, its row reads "Same daemon as {owner}", and it redials when its owner goes; a lower-ranked key that welcomes later takes the daemon back and drops the owner the same way.
+
+  When This PC's connection drops, its remote alias is not redialled. `native.log` records at info `two connections reach one daemon; keeping the first by saved order` (fields `owner`, `duplicate`).
+
+  **Rehost** (`hosts.rs` `rehost_target`, `rehost_stranded_panes`): panes keep a fixed owner. When a dedupe drops a key, when This PC's tab list arrives and before each prune, the client sends `RehostPanes { from, to, session_ids }` to This PC, which rewrites the host of each pane in this client's layout only whose host is still `from` and whose session is in `session_ids` (`to` absent is This PC).
+
+  A changed tab answers with its `TabUpdated`. No match sends nothing, and a failed layout write answers `Error` code `tab_refused`.
+
+  `session_ids` holds only sessions the owner currently lists, so a pane of an ended session stays on its old key and is pruned there.
+
+  Forget in Connections on a host whose daemon another saved, switched-on host reaches moves its panes to that host instead of closing them, and switching such a host off moves them the same way and back when it is switched on and takes the daemon again.
+
+  The stale-host sweep skips a host with a rehost target or a rehost in flight.
+
+  A saved session pop-out of such a host reopens at launch on the owner (its `native-ui.json` `popouts` entry is rewritten to that key), an open one keeps its window and re-attaches on the owner's connection, and undo restores such a pane on the owner instead of empty.
 
   **Per-host state** (`hosts.rs`, `sidebar.rs`; design in `docs/plans/multi-host.md`): sessions, repos, workspaces, agent descriptors, daemon-settings mirrors and capabilities are kept per host, and notifications, held toasts and Needs You are keyed by (host, session) across every host. A remote host's Welcome runs `reset_host` for that host alone, and its disconnect clears nothing. The Dashboard watches every connected host and its rows show together; the header's day figures are This PC's. Source control keeps one model per host and shows the focused session's host when that session names repos, else the pinned repo's host, else This PC; reads and writes go to the shown host, and a message from another host never touches the commit box. File fetches record their host, and a host's disconnect ends only its own. Recover lists history per host (a muted host name heads each host's rows when there are several), sends `RecoverSessions` per host, closes once every host answered, and fails a silent host's rows with "Recovery did not answer". A remote host's `Devices` and `PendingDevices` lists are ignored, and the cleanup-failed dialog keeps its failure's host (Retry goes there; Open folder is off for a remote host).
 
@@ -182,7 +200,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   A pane's input, resize and query replies go to its own host through that host's `HostSender`, a handle the host's connection fills and clears, so a reconnect needs no pane rebuilt. A remote host's panes re-attach once, at its first `Sessions` after `Welcome`. A remote host's `Welcome` leaves This PC's pending diff and viewer opens alone, and the Fetch file dialog closes and deletes its part when the host it fetches from drops.
 
-  **Pruning** (`hosts.rs` `prune_remote_panes`, `forget_host_panes`): on a remote host's `Sessions` or `SessionRemoved` and on any This PC tab fold, the client first looks for a session whose `resumed_from` holds a pane's id and, when one is listed, sends `RebindHostSessions` to This PC, which replaces the id in every layout, compare-and-set on (host, old id); a refusal is retried by the next prune. It then sends `ForgetHostSessions` to This PC with the ids that are missing and have no successor. It is level-triggered and sent once per (host, id) pair per This PC connection, and never for a host that is offline, switched off, a duplicate or not approved.
+  **Pruning** (`hosts.rs` `prune_remote_panes`, `forget_host_panes`): on a remote host's `Sessions` or `SessionRemoved` and on any This PC tab fold, the client first looks for a session whose `resumed_from` holds a pane's id and, when one is listed, sends `RebindHostSessions` to This PC, which replaces the id in every layout, compare-and-set on (host, old id); a refusal is retried by the next prune. It then sends `ForgetHostSessions` to This PC with the ids that are missing and have no successor. It is level-triggered and sent once per (host, id) pair per This PC connection, and never for a host that is offline, switched off, a duplicate (its panes are rehosted, see above) or not approved.
 
   Forget in Connections sends `ForgetHostSessions` with `all: true` (queued while This PC is offline), and a sweep once per This PC connection forgets every host that is no longer saved. `native.log` records at info "forgetting every pane of the host on This PC" (field `host`) and "forgetting the panes of sessions the host no longer lists" (fields `host`, `missing`).
 
