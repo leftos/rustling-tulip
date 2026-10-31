@@ -1376,10 +1376,12 @@ fn row_switch(
     controls.saved.then(|| {
         let control = PickerControl::Switch(index);
         checkbox_row(
+            crate::fonts::ui_text_size(cx),
             &control.selector(draw.rows),
             enabled,
             draw.focus == control,
-            div().text_size(px(11.5)).child("On"),
+            div().text_size(crate::fonts::ui_px(cx, 11.5)).child("On"),
+            &theme(cx),
         )
         .flex_none()
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1598,7 +1600,7 @@ fn state_chip(offset: i8, row: &Row, state: &RowState, t: &UiTheme) -> Div {
         RowState::Connecting => div().debug_selector(move || selector).child(label),
         RowState::Off | RowState::SameDaemonAs { .. } => div()
             .debug_selector(move || selector)
-            .text_color(gpui::rgb(FAINT))
+            .text_color(gpui::rgb(t.faint))
             .child(label),
     }
 }

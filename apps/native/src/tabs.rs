@@ -3913,7 +3913,8 @@ pub(crate) mod tests {
             ),
         );
         assert_eq!(
-            tab_session_counts(&tab("t", &grid), &sessions),
+            tab_session_counts(&tab("t", &grid), &sessions)
+                .map(|counts| (counts.busy, counts.total)),
             Some((2, 3)),
             "the remote panes count with their own host's status"
         );

@@ -12,7 +12,6 @@ use crate::RootView;
 use crate::layout_chooser::{Control, FALLBACK_ASPECT, LayoutChooser, Mode, arrangement_messages};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
-use crate::spawn_view::close_button;
 use crate::tabs::collect_panes;
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};

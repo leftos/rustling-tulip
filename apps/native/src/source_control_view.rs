@@ -16,6 +16,8 @@ use crate::changes_view::{
 };
 use crate::ellipsis::truncating;
 use crate::fonts::ui_px;
+use crate::history::HistoryModel;
+use crate::sc_writes::ScWrites;
 use crate::session_menu::MENU_MAX_SHARE;
 use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;

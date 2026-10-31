@@ -358,6 +358,13 @@ pub(crate) async fn bind_loopback() -> anyhow::Result<tokio::net::TcpListener> {
         .context("binding loopback listener")
 }
 
+/// The approved tailnet devices stored under `dirs`.
+fn load_devices(dirs: &Dirs) -> Arc<std::sync::Mutex<crate::devices::DeviceStore>> {
+    Arc::new(std::sync::Mutex::new(crate::devices::DeviceStore::load(
+        &crate::paths::devices_file(dirs),
+    )))
+}
+
 pub async fn run(
     state: Arc<AppState>,
     dirs: Dirs,
@@ -452,9 +459,7 @@ pub async fn run(
         pending_hooks: crate::hook_status::PendingHooks::default(),
         live_lines,
         chat_mirror: outlets.chat,
-        devices: Arc::new(std::sync::Mutex::new(crate::devices::DeviceStore::load(
-            &crate::paths::devices_file(&dirs),
-        ))),
+        devices: load_devices(&dirs),
         pairing: Arc::new(std::sync::Mutex::new(crate::devices::PairingBook::new())),
         pairing_waiters: pairing::PairingWaiters::default(),
         live_devices: live_devices::LiveDevices::default(),

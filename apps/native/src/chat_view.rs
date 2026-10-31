@@ -36,9 +36,10 @@ use crate::chat_cards::{
 };
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::scrollbar::Scrollbar;
-use crate::sidebar::LOCAL_HOST_KEY;
+use crate::sidebar::session_view_key;
 use crate::stretchtext;
 use crate::summary::{SummaryLog, wanted_loads};
+use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::viewer_md_view::{LinkRoute, MdDoc, Painter, prepare_answer, render_row};
@@ -295,6 +296,9 @@ pub(crate) struct ChatPanes {
     /// The request ids of loads forgotten when the session's other load was
     /// refused, whose own refusal is taken without a word.
     refused_loads: BTreeSet<String>,
+    /// The host of each session with a chat or summary loaded, so its
+    /// requests reach that host even once its list has dropped the session.
+    hosts: HashMap<String, HostKey>,
     wall: WallClock,
     /// Repaints the running-work strips while one shows, so their ages and
     /// countdowns keep counting.
@@ -344,15 +348,11 @@ impl ChatPanes {
             scrolls: HashMap::new(),
             notes: HashMap::new(),
             refused_loads: BTreeSet::new(),
+            hosts: HashMap::new(),
             wall,
             work_strip_timer: None,
             work_strip_repaints: 0,
         }
-    }
-
-    /// The wall clock the strips read, for a fresh set of chat panes.
-    pub(crate) fn wall_clock(&self) -> WallClock {
-        self.wall
     }
 
     /// The session `session_id`'s loaded chat.
@@ -379,15 +379,40 @@ impl ChatPanes {
         }
     }
 
-    /// A new connection has loaded no chat: every chat pane asks again once
-    /// its pane is bound to its session.
-    pub(crate) fn reset_connection(&mut self) {
-        self.loads.clear();
-        self.sessions.clear();
-        self.summary_loads.clear();
-        self.summaries.clear();
+    /// `host`'s new connection has loaded no chat: every chat pane of that
+    /// host asks again once its pane is bound to its session.
+    pub(crate) fn reset_connection(&mut self, host: &HostKey) {
+        let gone: Vec<String> = self
+            .hosts
+            .iter()
+            .filter(|(_, session_host)| *session_host == host)
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in gone {
+            self.forget_chat_load(&session_id);
+            self.forget_summary_load(&session_id);
+            self.hosts.remove(&session_id);
+        }
         self.refused_loads.clear();
-        self.work_strip_timer = None;
+        if self.sessions.is_empty() {
+            self.work_strip_timer = None;
+        }
+    }
+
+    /// The host whose connection session `session_id`'s chat requests take.
+    fn host_of(&self, session_id: &str) -> HostKey {
+        self.hosts
+            .get(session_id)
+            .cloned()
+            .unwrap_or(HostKey::Local)
+    }
+
+    /// Forgets the host of each session with nothing loaded any more.
+    fn retain_loaded_hosts(&mut self) {
+        let (sessions, summaries) = (&self.sessions, &self.summaries);
+        self.hosts.retain(|session_id, _| {
+            sessions.contains_key(session_id) || summaries.contains_key(session_id)
+        });
     }
 
     /// The daemon refused session `session_id`'s chat load (`chat_refused`)
@@ -647,13 +672,12 @@ impl RootView {
         }
     }
 
-    /// The key `session_views` files the connected host's sessions under:
-    /// [`LOCAL_HOST_KEY`] for this PC, else the host's session-count key.
-    pub(crate) fn view_host(&self) -> String {
-        self.conn
-            .target()
-            .session_count_key()
-            .unwrap_or_else(|| LOCAL_HOST_KEY.to_owned())
+    /// The key `session_views` files the session pane `pane_id` shows under.
+    fn pane_view_key(&self, pane_id: &str) -> String {
+        self.panes.get(pane_id).map_or_else(
+            || session_view_key(&HostKey::Local),
+            |slot| session_view_key(slot.host()),
+        )
     }
 
     /// Whether the session pane `pane_id` shows offers its chat, which is
@@ -669,7 +693,7 @@ impl RootView {
     /// Keeps `view` as the last view of the session pane `pane_id` shows,
     /// and saves the layout when that changed it.
     fn remember_pane_view(&mut self, pane_id: &str, view: PaneView) {
-        let host = self.view_host();
+        let host = self.pane_view_key(pane_id);
         let Some(session_id) = self.panes.get(pane_id).and_then(|slot| slot.session()) else {
             return;
         };
@@ -682,7 +706,7 @@ impl RootView {
     /// in the view that session was last switched to, with no scroll or
     /// note of what it showed before.
     pub(crate) fn open_pane_view(&mut self, pane_id: &str, session_id: Option<&str>) {
-        let host = self.view_host();
+        let host = self.pane_view_key(pane_id);
         let view = session_id.map_or(PaneView::Terminal, |id| {
             self.sidebar.session_view(&host, id)
         });
@@ -744,6 +768,13 @@ impl RootView {
                     .then(|| (pane_id.clone(), session_id.to_owned(), view))
             })
             .collect();
+        for (pane_id, session_id, _) in &shown {
+            if let Some(slot) = self.panes.get(pane_id) {
+                self.chat
+                    .hosts
+                    .insert(session_id.clone(), slot.host().clone());
+            }
+        }
         let shown_panes: BTreeSet<&str> = shown
             .iter()
             .map(|(pane_id, _, _)| pane_id.as_str())
@@ -770,7 +801,8 @@ impl RootView {
         let changes = self.chat.loads.diff(wanted.chat);
         for session_id in changes.unload {
             self.chat.sessions.remove(&session_id);
-            self.send(ClientMessage::UnloadChat { session_id });
+            let host = self.chat.host_of(&session_id);
+            self.send_to(&host, ClientMessage::UnloadChat { session_id });
         }
         for session_id in changes.load {
             let request_id = new_request_id();
@@ -779,11 +811,16 @@ impl RootView {
                 ..SessionChat::default()
             };
             self.chat.sessions.insert(session_id.clone(), chat);
-            self.send(ClientMessage::LoadChat {
-                session_id,
-                request_id: Some(request_id),
-            });
+            let host = self.chat.host_of(&session_id);
+            self.send_to(
+                &host,
+                ClientMessage::LoadChat {
+                    session_id,
+                    request_id: Some(request_id),
+                },
+            );
         }
+        self.chat.retain_loaded_hosts();
     }
 
     /// The summaries some summary pane shows are now `wanted`: unloads the
@@ -792,17 +829,22 @@ impl RootView {
         let changes = self.chat.summary_loads.diff(wanted);
         for session_id in changes.unload {
             self.chat.summaries.remove(&session_id);
-            self.send(ClientMessage::UnloadSummary { session_id });
+            let host = self.chat.host_of(&session_id);
+            self.send_to(&host, ClientMessage::UnloadSummary { session_id });
         }
         for session_id in changes.load {
             let request_id = new_request_id();
             self.chat
                 .summaries
                 .insert(session_id.clone(), SummaryLog::asked(request_id.clone()));
-            self.send(ClientMessage::LoadSummary {
-                session_id,
-                request_id: Some(request_id),
-            });
+            let host = self.chat.host_of(&session_id);
+            self.send_to(
+                &host,
+                ClientMessage::LoadSummary {
+                    session_id,
+                    request_id: Some(request_id),
+                },
+            );
         }
     }
 
@@ -894,6 +936,7 @@ impl RootView {
     /// error answered a `LoadChat`.
     pub(crate) fn on_chat_refused(
         &mut self,
+        host: &HostKey,
         message: &str,
         request_id: Option<&str>,
         code: Option<&str>,
@@ -929,11 +972,11 @@ impl RootView {
         };
         let note = if code == Some(UNSUPPORTED_MESSAGE) {
             tracing::info!(%session_id, "the daemon offers no chat for this session; its chat panes show the terminal");
-            let host = self.view_host();
-            if self
-                .sidebar
-                .remember_session_view(&host, &session_id, PaneView::Terminal)
-            {
+            if self.sidebar.remember_session_view(
+                &session_view_key(host),
+                &session_id,
+                PaneView::Terminal,
+            ) {
                 self.save_ui();
             }
             UNSUPPORTED_NOTE.to_owned()
@@ -1085,12 +1128,11 @@ impl RootView {
             chat.sends.took(request_id.clone(), text);
             chat.set_composer_text("", cx);
         }
-        self.send(card_answer_message(
-            session_id,
-            &prompt.id,
-            answer,
-            Some(request_id),
-        ));
+        let host = self.chat.host_of(session_id);
+        self.send_to(
+            &host,
+            card_answer_message(session_id, &prompt.id, answer, Some(request_id)),
+        );
         cx.notify();
     }
 
@@ -1159,14 +1201,18 @@ impl RootView {
         chat.sends.sent(request_id, text, now);
         chat.send_error = None;
         chat.set_composer_text("", cx);
-        self.send(msg);
+        let host = self.chat.host_of(session_id);
+        self.send_to(&host, msg);
         cx.notify();
     }
 
     /// The note `chat`'s composer shows: why it cannot send.
-    fn composer_note_of(&self, chat: &SessionChat) -> Option<ComposerNote> {
+    fn composer_note_of(&self, session_id: &str, chat: &SessionChat) -> Option<ComposerNote> {
+        let open = self
+            .conn_of(&self.chat.host_of(session_id))
+            .is_some_and(crate::connection::Connection::is_open);
         chat::composer_note(
-            self.conn.is_open(),
+            open,
             chat.composer_state.as_ref(),
             chat.sends.in_flight((self.now)()),
         )
@@ -1180,7 +1226,7 @@ impl RootView {
             .session(session_id)
             .and_then(|session| session.agent.as_ref());
         self.sidebar
-            .agents()
+            .session_agents(session_id)
             .iter()
             .find(|descriptor| Some(&descriptor.id) == agent)
             .map_or_else(
@@ -1203,7 +1249,8 @@ impl RootView {
     #[must_use]
     pub fn chat_composer_note(&self, session_id: &str) -> Option<String> {
         let chat = self.chat.sessions.get(session_id)?;
-        self.composer_note_of(chat).map(|note| note.text())
+        self.composer_note_of(session_id, chat)
+            .map(|note| note.text())
     }
 
     /// The daemon's reason for refusing session `session_id`'s last send.
@@ -1480,7 +1527,7 @@ impl RootView {
     ) -> Option<AnyElement> {
         let composer = chat.composer.as_ref()?;
         let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
-        let note = self.composer_note_of(chat);
+        let note = self.composer_note_of(session_id, chat);
         let disabled = note.as_ref().is_some_and(ComposerNote::disables);
         let text = composer.input.read(cx).text().to_owned();
         let blank = text.trim().is_empty();

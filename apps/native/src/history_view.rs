@@ -21,7 +21,7 @@ use crate::notices::ToastKind;
 use crate::open::{self, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Then};
 use crate::sidebar::Activity;
-use crate::source_control::{Part, ScKey, Section, sections};
+use crate::source_control::{Part, ScKey, Section};
 use crate::ui_theme::theme;
 use crate::{Drag, RootView, drag_handle, tooltip};
 

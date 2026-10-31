@@ -2646,8 +2646,18 @@ impl RootView {
         };
         // Before the session list arrives every session looks ended.
         if self.sessions_loaded {
-            let host = self.view_host();
-            self.sidebar.drop_ended_session_views(&host);
+            self.sidebar.drop_ended_session_views(&HostKey::Local);
+        }
+        let remote: Vec<HostKey> = self
+            .lists_since_welcome
+            .iter()
+            .filter(|host| {
+                **host != HostKey::Local && self.conn_of(host).is_some_and(Connection::is_open)
+            })
+            .cloned()
+            .collect();
+        for host in &remote {
+            self.sidebar.drop_ended_session_views(host);
         }
         match save_ui_state(dir, self.sidebar.ui_state()) {
             Ok(()) => self.sidebar.popouts_written(),
@@ -4200,7 +4210,7 @@ impl RootView {
         if let Some(id) = failure.request_id {
             let _ = self.launch_last.take_request(id);
         }
-        if self.on_chat_refused(failure.message, failure.request_id, failure.code, cx) {
+        if self.on_chat_refused(host, &failure.message, failure.request_id, failure.code, cx) {
             return;
         }
         self.on_refusal(host, failure, window, cx);
@@ -5389,13 +5399,14 @@ fn flyout_backdrop(cx: &mut Context<RootView>) -> Stateful<Div> {
 /// The footer's muted `{n}/{m} hosts online` item beside This PC's pill;
 /// a click opens Connections.
 fn hosts_online_item(text: String, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let t = theme(cx);
     div()
         .id("footer-hosts")
         .debug_selector(|| "footer-hosts".to_owned())
         .flex_none()
-        .text_color(gpui::rgb(MUTED))
+        .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
-        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .hover(move |style| style.text_color(gpui::rgb(t.text)))
         .child(tagged_text("footer-hosts", text))
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.open_connection_picker(window, cx);
