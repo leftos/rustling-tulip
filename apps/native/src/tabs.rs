@@ -61,6 +61,19 @@ impl SessionRef {
     }
 }
 
+/// By the host's wire key, This PC first, then by id.
+impl Ord for SessionRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.host.wire(), &self.id).cmp(&(other.host.wire(), &other.id))
+    }
+}
+
+impl PartialOrd for SessionRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// A session snapshot with the host that lists it, as placement reads it.
 #[derive(Debug, Clone, Copy)]
 pub struct HostedSession<'a> {
@@ -185,9 +198,9 @@ pub enum Placement {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SessionChanges {
     /// No pane shows these any more.
-    pub detach: Vec<String>,
+    pub detach: Vec<SessionRef>,
     /// Fewer panes show these, but some still do.
-    pub resync: Vec<String>,
+    pub resync: Vec<SessionRef>,
 }
 
 /// The two-click close of a tab worth keeping: one armed tab at a time.
@@ -764,11 +777,11 @@ fn same_parent_target(
     }))
 }
 
-/// How many panes show each session.
-pub fn view_counts<'a>(sessions: impl IntoIterator<Item = &'a str>) -> HashMap<String, usize> {
+/// How many panes show each session, host and id both.
+pub fn view_counts(sessions: impl IntoIterator<Item = SessionRef>) -> HashMap<SessionRef, usize> {
     let mut counts = HashMap::new();
-    for id in sessions {
-        *counts.entry(id.to_owned()).or_insert(0) += 1;
+    for session in sessions {
+        *counts.entry(session).or_insert(0) += 1;
     }
     counts
 }
@@ -776,18 +789,18 @@ pub fn view_counts<'a>(sessions: impl IntoIterator<Item = &'a str>) -> HashMap<S
 /// The sessions that lost every pane (detach them) or some panes (resync
 /// the rest), sorted.
 pub fn session_changes(
-    before: &HashMap<String, usize>,
-    after: &HashMap<String, usize>,
+    before: &HashMap<SessionRef, usize>,
+    after: &HashMap<SessionRef, usize>,
 ) -> SessionChanges {
-    let mut ids: Vec<(&String, usize)> = before.iter().map(|(id, n)| (id, *n)).collect();
-    ids.sort();
+    let mut sessions: Vec<(&SessionRef, usize)> = before.iter().map(|(s, n)| (s, *n)).collect();
+    sessions.sort();
     let mut changes = SessionChanges::default();
-    for (id, was) in ids {
-        let now = after.get(id).copied().unwrap_or(0);
+    for (session, was) in sessions {
+        let now = after.get(session).copied().unwrap_or(0);
         if now == 0 && was > 0 {
-            changes.detach.push(id.clone());
+            changes.detach.push(session.clone());
         } else if now < was {
-            changes.resync.push(id.clone());
+            changes.resync.push(session.clone());
         }
     }
     changes
@@ -908,22 +921,29 @@ pub fn needs_confirm(tab: &TabEntry) -> bool {
     })
 }
 
-/// The terminal that sizes each session's PTY, by session: a pane open in a
-/// pop-out window of its own (one of `popped_panes`), whichever tab it is
-/// in, else the terminal of the session's own pop-out (one of
-/// `popout_sessions`, named by [`crate::popouts::session_slot_id`]), else
-/// the focused pane when it shows the session, else the first pane of the
-/// active tab that does. Other hidden tabs drive nothing.
+/// The terminal that sizes each session's PTY, by session (host and id): a
+/// pane open in a pop-out window of its own (one of `popped_panes`),
+/// whichever tab it is in, else the terminal of the session's own pop-out
+/// (one of `popout_sessions`, named by
+/// [`crate::popouts::session_slot_id`]), else the focused pane when it
+/// shows the session, else the first pane of the active tab that does.
+/// Other hidden tabs drive nothing.
 pub fn size_drivers(
     bindings: &[PaneBinding],
     active_tab: Option<&str>,
     focused_pane: Option<&str>,
     popped_panes: &[&str],
-    popout_sessions: &[&str],
-) -> HashMap<String, String> {
+    popout_sessions: &[SessionRef],
+) -> HashMap<SessionRef, String> {
     let mut drivers = HashMap::new();
-    let mut drive = |session_id: &str, view: String| {
-        drivers.entry(session_id.to_owned()).or_insert(view);
+    let mut drive = |session: SessionRef, view: String| {
+        drivers.entry(session).or_insert(view);
+    };
+    let shown = |binding: &PaneBinding| {
+        binding
+            .session_id
+            .as_ref()
+            .map(|id| SessionRef::new(binding.host.clone(), id.clone()))
     };
     let visible: Vec<&PaneBinding> = bindings
         .iter()
@@ -933,20 +953,21 @@ pub fn size_drivers(
         .iter()
         .filter(|b| popped_panes.contains(&b.pane_id.as_str()));
     for binding in popped {
-        if let Some(session_id) = &binding.session_id {
-            drive(session_id, binding.pane_id.clone());
+        if let Some(session) = shown(binding) {
+            drive(session, binding.pane_id.clone());
         }
     }
-    for session_id in popout_sessions {
-        drive(session_id, crate::popouts::session_slot_id(session_id));
+    for session in popout_sessions {
+        let slot = crate::popouts::session_slot_id(&session.host, &session.id);
+        drive(session.clone(), slot);
     }
     let focused = visible
         .iter()
         .copied()
         .filter(|b| Some(b.pane_id.as_str()) == focused_pane);
     for binding in focused.chain(visible.iter().copied()) {
-        if let Some(session_id) = &binding.session_id {
-            drive(session_id, binding.pane_id.clone());
+        if let Some(session) = shown(binding) {
+            drive(session, binding.pane_id.clone());
         }
     }
     drivers
@@ -1661,10 +1682,14 @@ impl TabsModel {
             .map_or(HostKey::Local, |pane| pane.host)
     }
 
-    /// How many panes, across every tab, show each session.
-    pub fn view_counts(&self) -> HashMap<String, usize> {
-        let bindings = self.bindings();
-        view_counts(bindings.iter().filter_map(|b| b.session_id.as_deref()))
+    /// How many panes, across every tab, show each session, host and id
+    /// both.
+    pub fn view_counts(&self) -> HashMap<SessionRef, usize> {
+        view_counts(
+            self.bindings()
+                .into_iter()
+                .filter_map(|b| b.session_id.map(|id| SessionRef::new(b.host, id))),
+        )
     }
 
     /// Sets a split's ratio locally, ahead of the daemon's echo.
@@ -2075,7 +2100,7 @@ pub(crate) mod tests {
         ];
         let driver = |active: Option<&str>, focused: Option<&str>, session: &str| {
             size_drivers(&bindings, active, focused, &[], &[])
-                .get(session)
+                .get(&on_this_pc(session))
                 .cloned()
         };
         assert_eq!(driver(Some("t1"), Some("c"), "s1").as_deref(), Some("c"));
@@ -2113,24 +2138,24 @@ pub(crate) mod tests {
         let drivers = size_drivers(&bindings, Some("t1"), Some("a"), &["d", "e", "f"], &[]);
 
         assert_eq!(
-            drivers.get("s1").map(String::as_str),
+            drivers.get(&on_this_pc("s1")).map(String::as_str),
             Some("d"),
             "the popped pane drives its session over the active tab's focused pane"
         );
         assert_eq!(
-            drivers.get("s3").map(String::as_str),
+            drivers.get(&on_this_pc("s3")).map(String::as_str),
             Some("f"),
             "a popped pane in a hidden tab drives"
         );
         assert_eq!(
-            drivers.get("s2").map(String::as_str),
+            drivers.get(&on_this_pc("s2")).map(String::as_str),
             Some("b"),
             "a session no pop-out shows keeps its active-tab driver"
         );
         assert_eq!(drivers.len(), 3, "an empty popped pane drives nothing");
         assert_eq!(
             size_drivers(&bindings, Some("t1"), Some("a"), &["gone"], &[])
-                .get("s1")
+                .get(&on_this_pc("s1"))
                 .map(String::as_str),
             Some("a"),
             "a popped pane no binding names changes nothing"
@@ -2150,26 +2175,57 @@ pub(crate) mod tests {
             binding("t1", "b", Some("s2")),
             binding("t2", "d", Some("s3")),
         ];
-        let drivers = size_drivers(&bindings, Some("t1"), Some("a"), &[], &["s4", "s1"]);
+        let popped = [on_this_pc("s4"), on_this_pc("s1")];
+        let drivers = size_drivers(&bindings, Some("t1"), Some("a"), &[], &popped);
 
         assert_eq!(
-            drivers.get("s4").map(String::as_str),
+            drivers.get(&on_this_pc("s4")).map(String::as_str),
             Some("popout:s4"),
             "a session no pane shows is driven by its pop-out's terminal"
         );
         assert_eq!(
-            drivers.get("s1").map(String::as_str),
+            drivers.get(&on_this_pc("s1")).map(String::as_str),
             Some("popout:s1"),
             "a session pop-out drives over the active tab's focused pane"
         );
-        assert_eq!(drivers.get("s2").map(String::as_str), Some("b"));
-        assert_eq!(drivers.get("s3"), None, "a hidden tab still drives nothing");
         assert_eq!(
-            size_drivers(&bindings, None, None, &[], &["s4"])
-                .get("s4")
+            drivers.get(&on_this_pc("s2")).map(String::as_str),
+            Some("b")
+        );
+        assert_eq!(
+            drivers.get(&on_this_pc("s3")),
+            None,
+            "a hidden tab still drives nothing"
+        );
+        assert_eq!(
+            size_drivers(&bindings, None, None, &[], &[on_this_pc("s4")])
+                .get(&on_this_pc("s4"))
                 .map(String::as_str),
             Some("popout:s4"),
             "a session pop-out drives with no tab on screen"
+        );
+    }
+
+    /// Session `id` of This PC.
+    fn on_this_pc(id: &str) -> SessionRef {
+        SessionRef::new(HostKey::Local, id)
+    }
+
+    #[test]
+    fn size_drivers_name_a_remote_session_popouts_slot() {
+        let remote = SessionRef::new(HostKey::Remote("box".to_owned()), "b1");
+        let local = SessionRef::new(HostKey::Local, "b1");
+        let drivers = size_drivers(&[], None, None, &[], &[remote.clone(), local.clone()]);
+
+        assert_eq!(
+            drivers.get(&remote).map(String::as_str),
+            Some("popout:box:b1"),
+            "the remote session's pop-out terminal, named with its host, drives it"
+        );
+        assert_eq!(
+            drivers.get(&local).map(String::as_str),
+            Some("popout:b1"),
+            "This PC's session of the same id keeps its own driver"
         );
     }
 
@@ -3083,17 +3139,17 @@ pub(crate) mod tests {
         let two = split(H, 0.5, pane("a", Some("s1")), pane("b", Some("s1")));
         let mut model = model_with(&[tab("t1", &two), tab("t2", &pane("c", Some("s2")))]);
         let before = model.view_counts();
-        assert_eq!(before.get("s1"), Some(&2));
-        assert_eq!(before.get("s2"), Some(&1));
+        assert_eq!(before.get(&on_this_pc("s1")), Some(&2));
+        assert_eq!(before.get(&on_this_pc("s2")), Some(&1));
 
         model.apply(&updated(&tab("t1", &pane("a", Some("s1")))));
         let after = model.view_counts();
-        assert_eq!(after.get("s1"), Some(&1));
+        assert_eq!(after.get(&on_this_pc("s1")), Some(&1));
         assert_eq!(
             session_changes(&before, &after),
             SessionChanges {
                 detach: Vec::new(),
-                resync: vec!["s1".to_owned()],
+                resync: vec![on_this_pc("s1")],
             }
         );
 
@@ -3102,11 +3158,11 @@ pub(crate) mod tests {
             tab_id: "t1".to_owned(),
         });
         let after = model.view_counts();
-        assert_eq!(after.get("s1"), None);
+        assert_eq!(after.get(&on_this_pc("s1")), None);
         assert_eq!(
             session_changes(&before, &after),
             SessionChanges {
-                detach: vec!["s1".to_owned()],
+                detach: vec![on_this_pc("s1")],
                 resync: Vec::new(),
             }
         );

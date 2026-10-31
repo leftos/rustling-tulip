@@ -10,15 +10,16 @@
 use crate::support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::TestAppContext;
+use gpui::{Modifiers, TestAppContext};
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, SessionMode, SessionSnapshot, SpawnRequest,
     SpawnTarget, SplitDirection, WorktreeReusePolicy,
 };
 use rustling_tulip_native::connection_picker::PeerSource;
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, NetEvent, OpenIn, PaneAim};
+use rustling_tulip_native::{Connection, NetEvent, OpenIn, OpenOutcome, PaneAim, PopoutKey};
 use support::{
     Fixture, Harness, PROTOCOL, REMOTE, TestDir, mixed_tabs, pane, remote_pane, repo, session,
     split, tab,
@@ -546,5 +547,192 @@ fn switching_a_remote_host_off_ends_its_pending_spawn(cx: &mut TestAppContext) {
         duplicated(&h.host(&saved_remote()).sent()),
         ["b1"],
         "the ended restart no longer holds b1: a new one is sent"
+    );
+}
+
+/// Clicks cell (0, 0) of `pane`, giving it the keyboard.
+fn click_pane(h: &mut Harness<'_>, pane: &str) {
+    let at = h.cell_center(pane, 0, 0);
+    h.click(at, Modifiers::none());
+}
+
+/// Whether `sent` resizes `session`.
+fn resizes(sent: &[ClientMessage], session: &str) -> bool {
+    sent.iter()
+        .any(|msg| matches!(msg, ClientMessage::Resize { session_id, .. } if session_id == session))
+}
+
+/// The input bytes `sent` carries to `session`, in order.
+fn input_in(sent: &[ClientMessage], session: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SendInput {
+                session_id,
+                data_b64,
+                ..
+            } if session_id == session => Some(
+                base64::engine::general_purpose::STANDARD
+                    .decode(data_b64)
+                    .expect("input base64"),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[gpui::test]
+fn typing_in_a_remote_pane_laid_out_before_its_hosts_list_goes_to_that_host(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = mixed_tabs(cx, &dir);
+    h.host(&remote()).answer_scrollback("b1", b"");
+    click_pane(&mut h, "p2");
+    h.sent();
+    h.host(&remote()).sent();
+
+    h.keys("x");
+
+    assert_eq!(h.host(&remote()).sent_input("b1"), b"x");
+    assert!(
+        h.sent_input("b1").is_empty(),
+        "nothing typed in p2 goes to This PC"
+    );
+}
+
+#[gpui::test]
+fn typing_in_an_empty_pane_filled_by_a_remote_session_goes_to_that_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = hosts_over(cx, &dir, &pane("p1", None), Vec::new());
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &remote_pane("p1", "b9")),
+    });
+    let mut host = h.host(&remote());
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b9").build()],
+    });
+    host.answer_scrollback("b9", b"");
+    click_pane(&mut h, "p1");
+    h.sent();
+    h.host(&remote()).sent();
+
+    h.keys("x");
+
+    assert_eq!(h.host(&remote()).sent_input("b9"), b"x");
+    assert!(h.sent_input("b9").is_empty(), "nothing goes to This PC");
+}
+
+#[gpui::test]
+fn a_pane_rebound_from_a_local_to_a_remote_session_switches_its_sender(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = mixed_tabs(cx, &dir);
+    h.answer_scrollback("a1", b"");
+    h.host(&remote()).answer_scrollback("b1", b"");
+    h.sent();
+    h.host(&remote()).sent();
+
+    // p1 now shows b1 of the remote host, p2 a1 of This PC.
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                remote_pane("p1", "b1"),
+                pane("p2", Some("a1")),
+            ),
+        ),
+    });
+    h.host(&remote()).answer_scrollback("b1", b"");
+    h.answer_scrollback("a1", b"");
+    click_pane(&mut h, "p1");
+    h.advance(Duration::from_secs(6));
+    h.keys("x");
+
+    let remote_sent = h.host(&remote()).sent();
+    assert_eq!(input_in(&remote_sent, "b1"), b"x", "{remote_sent:?}");
+    assert!(
+        resizes(&remote_sent, "b1"),
+        "p1 sizes b1 on its host: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        input_in(&local_sent, "b1").is_empty() && !resizes(&local_sent, "b1"),
+        "nothing for b1 goes to This PC: {local_sent:?}"
+    );
+}
+
+#[gpui::test]
+fn output_reaches_only_the_panes_of_the_host_that_sent_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        remote_pane("p2", "s1"),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+    h.answer_scrollback("s1", b"");
+
+    h.host(&remote()).pty("s1", b"B!");
+    assert_eq!(
+        h.grid_text("p2")[0],
+        "B!",
+        "the remote host's pane shows it"
+    );
+    assert_eq!(h.grid_text("p1")[0], "", "This PC's pane does not");
+
+    h.pty("s1", b"A!");
+    assert_eq!(h.grid_text("p1")[0], "A!", "This PC's pane shows its own");
+    assert_eq!(h.grid_text("p2")[0], "B!", "the remote pane does not");
+}
+
+#[gpui::test]
+fn a_remote_session_popout_answers_its_cursor_query_and_sizes_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = mixed_tabs(cx, &dir);
+    let mut host = h.host(&remote());
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![
+            session("b1").build(),
+            session("b2").build(),
+            session("b5").build(),
+        ],
+    });
+    host.sent();
+    let key = PopoutKey::Session {
+        session_id: "b5".to_owned(),
+        host: Some(REMOTE.to_owned()),
+    };
+    let outcome = h.root_update(move |root, window, cx| root.open_popout(key, window, cx));
+    assert_eq!(outcome, OpenOutcome::Opened);
+    h.host(&remote()).answer_scrollback("b5", b"");
+
+    h.host(&remote()).pty("b5", b"\x1b[6n");
+
+    let remote_sent = h.host(&remote()).sent();
+    let reply = input_in(&remote_sent, "b5");
+    assert!(
+        reply.starts_with(b"\x1b[") && reply.ends_with(b"R"),
+        "the pop-out answers b5's cursor query on its host: {remote_sent:?}"
+    );
+    assert!(
+        resizes(&remote_sent, "b5"),
+        "the pop-out sizes b5 on its host: {remote_sent:?}"
+    );
+    assert!(
+        input_in(&h.sent(), "b5").is_empty(),
+        "nothing for b5 goes to This PC"
     );
 }

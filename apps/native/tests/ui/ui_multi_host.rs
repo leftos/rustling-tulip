@@ -9,8 +9,8 @@ use std::sync::Arc;
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
     AgentId, AttentionReason, ClientMessage, ContainerRef, DaemonMessage, DeviceInfo,
-    KeepAwakeMode, OptionValue, RecoverItemResult, RemoteState, SessionSnapshot, TabEntry,
-    VscodeWorkspaceFolder, VscodeWorkspaceSuggestion, WorktreeCleanupFailure,
+    KeepAwakeMode, OptionValue, RecoverItemResult, RemoteState, SessionSnapshot, SplitDirection,
+    TabEntry, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion, WorktreeCleanupFailure,
     WorktreeLockingProcess,
 };
 use rustling_tulip_native::ScKey;
@@ -19,8 +19,8 @@ use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetCommand, NetEvent, toast_action_selector};
 use support::{
-    Fixture, Harness, PROTOCOL, TestDir, facts, facts_message, history_item, pane, repo, session,
-    tab, welcome,
+    Fixture, Harness, PROTOCOL, TestDir, facts, facts_message, history_item, pane, remote_pane,
+    repo, session, split, tab, welcome,
 };
 
 #[gpui::test]
@@ -1998,5 +1998,276 @@ fn a_pair_armed_while_dialling_is_forgotten_when_the_host_is_switched_off(cx: &m
     assert!(
         !h.root(|root, _| root.device_pairing_open()),
         "the Pair asked before the switch-off is forgotten"
+    );
+}
+
+/// A window on This PC with [`REMOTE`] saved and connected: tab `t1`
+/// splits This PC's `a1` (pane `p1`) beside the remote host's `b1` (pane
+/// `p2`), laid out before the remote host's list, and `p2` has the
+/// keyboard.
+fn saved_remote_mixed<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    seed_ui(
+        dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, dir, &mixed_fixture());
+    h.answer_scrollback("a1", b"");
+    list_saved_remote(&mut h);
+    h
+}
+
+/// This PC lists `a1`; tab `t1` splits it (pane `p1`) beside [`REMOTE`]'s
+/// `b1` (pane `p2`).
+fn mixed_fixture() -> Fixture {
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("a1")),
+        remote_pane("p2", "b1"),
+    );
+    Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    }
+}
+
+/// Connects [`REMOTE`]'s newest connection, lists `b1` on it, answers its
+/// scrollback and clicks `p2`; drains what both hosts were sent.
+fn list_saved_remote(h: &mut Harness<'_>) {
+    let mut host = h.host(&saved_remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+    host.answer_scrollback("b1", b"");
+    let at = h.cell_center("p2", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    h.host(&saved_remote()).sent();
+}
+
+/// Flips [`REMOTE`]'s Connected switch in Connections, then closes it.
+fn flip_remote_switch(h: &mut Harness<'_>) {
+    open_connections(h);
+    h.click_on(&remote_switch());
+    h.keys("escape");
+}
+
+#[gpui::test]
+fn a_switched_off_hosts_panes_release_its_connection(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_mixed(cx, &dir);
+
+    flip_remote_switch(&mut h);
+
+    assert!(
+        h.host(&saved_remote()).is_released(),
+        "no pane keeps the switched-off host's connection"
+    );
+    let at = h.cell_center("p2", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    h.keys("x");
+    assert!(
+        h.sent_input("b1").is_empty(),
+        "a key typed in p2 goes nowhere, This PC included"
+    );
+    assert!(
+        h.host(&saved_remote()).sent_input("b1").is_empty(),
+        "nor on the switched-off host's connection"
+    );
+
+    flip_remote_switch(&mut h);
+    list_saved_remote(&mut h);
+    h.keys("y");
+
+    assert_eq!(
+        h.host(&saved_remote()).sent_input("b1"),
+        b"y",
+        "keys go out on the newest connection"
+    );
+    assert!(
+        h.host(&saved_remote())
+            .old_connection()
+            .sent_input("b1")
+            .is_empty(),
+        "and never on the old one"
+    );
+    assert!(h.sent_input("b1").is_empty(), "nor to This PC");
+}
+
+#[gpui::test]
+fn a_reconnecting_host_attaches_nothing_before_its_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_mixed(cx, &dir);
+    let before = h.host(&saved_remote()).scrollback_requests("b1").len();
+    h.host(&saved_remote())
+        .event(NetEvent::State(dropped(saved_remote())));
+    h.host(&saved_remote()).connect();
+
+    // In the gap a new pane shows b1, and This PC's session moves.
+    let grid = split(
+        SplitDirection::Horizontal,
+        split(
+            SplitDirection::Vertical,
+            pane("p1", Some("a1")),
+            remote_pane("p4", "b1"),
+        ),
+        remote_pane("p2", "b1"),
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &grid),
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("a1").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        h.host(&saved_remote()).scrollback_requests("b1").len(),
+        before,
+        "nothing attaches from the list the host sent before it reconnected"
+    );
+
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build()],
+    });
+    assert_eq!(
+        h.host(&saved_remote()).scrollback_requests("b1").len(),
+        before + 1,
+        "its fresh list attaches both panes with one request"
+    );
+}
+
+/// The second tailnet host the reconnect specs connect.
+const LAB: &str = "lab.tail1234.ts.net";
+
+fn lab() -> Target {
+    Target::tailnet(LAB, None)
+}
+
+/// A window on This PC listing `a1` in pane `p1`, with [`REMOTE`] listing
+/// `b1` (pane `p2`) and `b2` (pane `p3`), and [`LAB`] listing `c1` (pane
+/// `p5`), every pane attached.
+fn three_hosts<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let lab_pane = protocol::GridNode::Pane {
+        pane_id: "p5".to_owned(),
+        session_id: Some("c1".to_owned()),
+        host: Some(LAB.to_owned()),
+    };
+    let fixture = Fixture {
+        sessions: vec![session("a1").build()],
+        tabs: vec![
+            tab(
+                "t1",
+                &split(
+                    SplitDirection::Horizontal,
+                    pane("p1", Some("a1")),
+                    remote_pane("p2", "b1"),
+                ),
+            ),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Horizontal,
+                    remote_pane("p3", "b2"),
+                    lab_pane,
+                ),
+            ),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build(), session("b2").build()],
+    });
+    let mut other = h.host(&lab());
+    other.connect();
+    other.send(DaemonMessage::Sessions {
+        sessions: vec![session("c1").build()],
+    });
+    h
+}
+
+/// How many scrollback requests each pane's session has had: This PC's
+/// `a1`, [`REMOTE`]'s `b1` and `b2`, [`LAB`]'s `c1`.
+fn scrollback_counts(h: &mut Harness<'_>) -> [usize; 4] {
+    let a1 = h.scrollback_requests("a1").len();
+    let mut host = h.host(&remote());
+    let (b1, b2) = (
+        host.scrollback_requests("b1").len(),
+        host.scrollback_requests("b2").len(),
+    );
+    let c1 = h.host(&lab()).scrollback_requests("c1").len();
+    [a1, b1, b2, c1]
+}
+
+#[gpui::test]
+fn a_remote_reconnect_reattaches_only_that_hosts_panes_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = three_hosts(cx, &dir);
+    let [a1, b1, b2, c1] = scrollback_counts(&mut h);
+    assert!(b1 > 0 && b2 > 0 && c1 > 0, "every remote pane attached");
+
+    let mut host = h.host(&remote());
+    host.event(NetEvent::State(dropped(remote())));
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build(), session("b2").build()],
+    });
+    assert_eq!(
+        scrollback_counts(&mut h),
+        [a1, b1 + 1, b2 + 1, c1],
+        "one request per session of the reconnected host, none elsewhere"
+    );
+
+    h.host(&remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build(), session("b2").build()],
+    });
+    assert_eq!(
+        scrollback_counts(&mut h),
+        [a1, b1 + 1, b2 + 1, c1],
+        "a second list on the same connection re-attaches nothing"
+    );
+}
+
+#[gpui::test]
+fn a_this_pc_reconnect_does_not_reattach_remote_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_mixed(cx, &dir);
+    let a1 = h.scrollback_requests("a1").len();
+    let b1 = h.host(&saved_remote()).scrollback_requests("b1").len();
+
+    h.send_welcome(PROTOCOL);
+    h.load(&mixed_fixture());
+
+    assert_eq!(
+        h.scrollback_requests("a1").len(),
+        a1 + 1,
+        "This PC's pane attaches again"
+    );
+    assert_eq!(
+        h.host(&saved_remote()).scrollback_requests("b1").len(),
+        b1,
+        "the remote pane stays attached"
+    );
+}
+
+#[gpui::test]
+fn an_unapproved_reconnect_keeps_a_remote_panes_last_frame(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = saved_remote_mixed(cx, &dir);
+    h.host(&saved_remote()).pty("b1", b"hello");
+    assert_eq!(h.grid_text("p2")[0], "hello");
+
+    let mut host = h.host(&saved_remote());
+    host.send(welcome(PROTOCOL));
+    host.event(NetEvent::State(not_approved(saved_remote())));
+
+    assert_eq!(
+        h.grid_text("p2")[0],
+        "hello",
+        "a reconnect that never lists keeps the pane's last frame"
     );
 }
