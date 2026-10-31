@@ -2110,7 +2110,7 @@ impl RootView {
             }
             SessionRow::AddToNewTab => {
                 self.close_session_menu(window, cx);
-                self.open_in_new_tab(session_id);
+                self.open_in_new_tab(&host, session_id);
             }
             SessionRow::PopOut => {
                 let shown = SessionRef::new(host, session_id);
