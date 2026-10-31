@@ -135,6 +135,7 @@ mod term_view;
 mod text_input;
 mod theme;
 pub mod theme_store;
+pub mod theme_tokens;
 pub mod themes;
 mod themes_view;
 pub mod toast_activation;

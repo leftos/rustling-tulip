@@ -15,6 +15,12 @@ use crate::ui_theme::UiTheme;
 /// The folder under the config dir that holds the user's themes.
 pub const THEMES_DIR: &str = "themes";
 
+/// The largest theme text the store reads or imports: 1 MiB.
+pub const MAX_THEME_BYTES: usize = 1_048_576;
+
+/// What a parse error names when the theme came from text rather than a file.
+const THEME_TEXT: &str = "the theme text";
+
 pub use crate::builtin_themes::BUILT_INS;
 
 /// The id of the theme drawn when none is saved or the saved one does not
@@ -70,6 +76,10 @@ pub enum ThemeError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    /// The text is longer than [`MAX_THEME_BYTES`], so it is not read.
+    TooLarge {
+        bytes: usize,
+    },
     Serialize(serde_json::Error),
 }
 
@@ -90,6 +100,9 @@ impl fmt::Display for ThemeError {
             Self::Parse { path, source } => {
                 write!(f, "{} is not a whole theme: {source}", path.display())
             }
+            Self::TooLarge { bytes } => {
+                write!(f, "the theme file is {bytes} bytes; the limit is 1 MiB")
+            }
             Self::Serialize(source) => write!(f, "serializing the theme: {source}"),
         }
     }
@@ -103,7 +116,8 @@ impl std::error::Error for ThemeError {
             Self::NotFound { .. }
             | Self::InvalidId { .. }
             | Self::BuiltIn { .. }
-            | Self::ShadowsBuiltIn { .. } => None,
+            | Self::ShadowsBuiltIn { .. }
+            | Self::TooLarge { .. } => None,
         }
     }
 }
@@ -129,6 +143,54 @@ impl ThemeFile {
             ..self.ui
         }
     }
+}
+
+/// The file `theme` is stored as: `name`, the theme it was made from and the
+/// theme its terminal colours came from.
+fn theme_file(
+    name: &str,
+    theme: &UiTheme,
+    base: Option<&str>,
+    terminal_source: Option<&str>,
+) -> ThemeFile {
+    ThemeFile {
+        name: name.to_owned(),
+        base: base.map(str::to_owned),
+        terminal_source: terminal_source.map(str::to_owned),
+        ui: *theme,
+        terminal: theme.terminal,
+    }
+}
+
+/// `theme` as the text a theme file holds, under `name`: the stored shape,
+/// pretty-printed, ending in a newline.
+pub fn export_json(
+    name: &str,
+    theme: &UiTheme,
+    base: Option<&str>,
+    terminal_source: Option<&str>,
+) -> Result<String, ThemeError> {
+    let file = theme_file(name, theme, base, terminal_source);
+    let mut json = serde_json::to_string_pretty(&file).map_err(ThemeError::Serialize)?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// What `text` holds when it is a whole theme file: its name, theme, base and
+/// terminal source. A text over [`MAX_THEME_BYTES`], a missing token or a
+/// malformed colour is refused.
+pub fn parse_theme_json(
+    text: &str,
+) -> Result<(String, UiTheme, Option<String>, Option<String>), ThemeError> {
+    if text.len() > MAX_THEME_BYTES {
+        return Err(ThemeError::TooLarge { bytes: text.len() });
+    }
+    let file: ThemeFile = serde_json::from_str(text).map_err(|source| ThemeError::Parse {
+        path: PathBuf::from(THEME_TEXT),
+        source,
+    })?;
+    let theme = file.theme();
+    Ok((file.name, theme, file.base, file.terminal_source))
 }
 
 /// The themes in one folder, with the built-ins before them.
@@ -250,13 +312,7 @@ impl ThemeStore {
         terminal_source: Option<&str>,
     ) -> Result<String, ThemeError> {
         let id = self.free_slug(&slug(name));
-        let file = ThemeFile {
-            name: name.to_owned(),
-            base: base.map(str::to_owned),
-            terminal_source: terminal_source.map(str::to_owned),
-            ui: *theme,
-            terminal: theme.terminal,
-        };
+        let file = theme_file(name, theme, base, terminal_source);
         let json = serde_json::to_vec_pretty(&file).map_err(ThemeError::Serialize)?;
         std::fs::create_dir_all(&self.dir).map_err(|source| ThemeError::Io {
             path: self.dir.clone(),
@@ -268,11 +324,49 @@ impl ThemeStore {
         Ok(id)
     }
 
+    /// Writes `theme` over the user theme `id`, under `name`: the same file,
+    /// so the id keeps naming it. A rename is an update under a new name.
+    pub fn update(
+        &self,
+        id: &str,
+        name: &str,
+        theme: &UiTheme,
+        base: Option<&str>,
+        terminal_source: Option<&str>,
+    ) -> Result<(), ThemeError> {
+        if built_in(id).is_some() {
+            return Err(ThemeError::BuiltIn { id: id.to_owned() });
+        }
+        let path = self.path_of(id)?;
+        let file = theme_file(name, theme, base, terminal_source);
+        let json = serde_json::to_vec_pretty(&file).map_err(ThemeError::Serialize)?;
+        std::fs::create_dir_all(&self.dir).map_err(|source| ThemeError::Io {
+            path: self.dir.clone(),
+            source,
+        })?;
+        let tmp = self.dir.join(format!(".{id}.json.tmp"));
+        write_then_rename(&tmp, &path, &json)
+    }
+
+    /// Saves the theme `text` holds as a new user theme, under a free name and
+    /// a free file name; returns its id.
+    pub fn import(&self, text: &str) -> Result<String, ThemeError> {
+        let (name, theme, base, terminal_source) = parse_theme_json(text)?;
+        let name = self.free_name(&name);
+        self.save(&name, &theme, base.as_deref(), terminal_source.as_deref())
+    }
+
     /// Deletes the user theme `id`.
     pub fn delete(&self, id: &str) -> Result<(), ThemeError> {
         if built_in(id).is_some() {
             return Err(ThemeError::BuiltIn { id: id.to_owned() });
         }
+        self.delete_file(id)
+    }
+
+    /// Deletes the file `<id>.json` whatever it holds, a built-in's shadow
+    /// file included; only an id no file can be named after is refused.
+    pub fn delete_file(&self, id: &str) -> Result<(), ThemeError> {
         let path = self.path_of(id)?;
         std::fs::remove_file(&path).map_err(|source| {
             if source.kind() == ErrorKind::NotFound {
@@ -281,6 +375,40 @@ impl ThemeStore {
                 ThemeError::Io { path, source }
             }
         })
+    }
+
+    /// Whether a built-in or a listed user theme is called `name`, ignoring
+    /// case, leaving out the theme `except` names.
+    #[must_use]
+    pub fn name_taken(&self, name: &str, except: Option<&str>) -> bool {
+        let wanted = name.to_lowercase();
+        self.list()
+            .iter()
+            .any(|entry| Some(entry.id.as_str()) != except && entry.name.to_lowercase() == wanted)
+    }
+
+    /// `base` when no theme is called that, else `base 2`, `base 3`, and so
+    /// on.
+    #[must_use]
+    pub fn free_name(&self, base: &str) -> String {
+        if !self.name_taken(base, None) {
+            return base.to_owned();
+        }
+        let mut n = 2_u32;
+        loop {
+            let candidate = format!("{base} {n}");
+            if !self.name_taken(&candidate, None) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// The name a copy of the theme called `name` takes: `name copy`, with a
+    /// number when that is taken.
+    #[must_use]
+    pub fn copy_name(&self, name: &str) -> String {
+        self.free_name(&format!("{name} copy"))
     }
 
     /// The theme a saved selection draws: the default built-in,
@@ -971,5 +1099,286 @@ mod tests {
         assert_eq!(store.name_of("broken"), None, "a file that does not load");
         assert_eq!(store.name_of("missing"), None, "no file");
         assert_eq!(store.name_of("../escape"), None, "not an id");
+    }
+
+    #[test]
+    fn update_replaces_a_user_theme_in_place() {
+        let dir = TestDir::new("update");
+        let store = dir.store();
+        let id = store
+            .save("Mine", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        let mut changed = UiTheme::CONTRAST;
+        changed.ground = 0x0012_3456;
+        store
+            .update(&id, "Mine", &changed, Some("contrast"), Some("nord"))
+            .expect("update");
+        assert_eq!(store.load(&id).expect("load"), changed);
+        assert_eq!(
+            std::fs::read_dir(&dir.0).expect("the folder").count(),
+            1,
+            "the same file, written over"
+        );
+        let file = dir.read(&id);
+        assert_eq!(file["name"], "Mine");
+        assert_eq!(file["base"], "contrast");
+        assert_eq!(file["terminal_source"], "nord");
+        assert_eq!(file["ui"]["ground"], "#123456");
+    }
+
+    #[test]
+    fn update_refuses_a_built_in() {
+        let dir = TestDir::new("update-built-in");
+        let store = dir.store();
+        let err = store
+            .update("contrast", "X", &UiTheme::CONTRAST, None, None)
+            .expect_err("a built-in");
+        assert!(matches!(err, ThemeError::BuiltIn { .. }), "{err}");
+        assert!(!dir.file("contrast").exists());
+        assert!(matches!(
+            store.update("../escape", "X", &UiTheme::CONTRAST, None, None),
+            Err(ThemeError::InvalidId { .. })
+        ));
+    }
+
+    #[test]
+    fn a_rename_keeps_the_id() {
+        let dir = TestDir::new("rename");
+        let store = dir.store();
+        let id = store
+            .save("Old name", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        store
+            .update(&id, "New name", &UiTheme::CONTRAST, None, None)
+            .expect("rename");
+        assert_eq!(id, "old-name");
+        assert_eq!(store.name_of(&id).as_deref(), Some("New name"));
+        assert!(!dir.file("new-name").exists(), "a rename keeps the file");
+        let entries = store.list();
+        assert_eq!(ids(users(&entries)), [id.as_str()]);
+    }
+
+    #[test]
+    fn name_taken_ignores_case_and_covers_built_ins() {
+        let dir = TestDir::new("name-taken");
+        let store = dir.store();
+        assert!(store.name_taken("Nord", None), "a built-in");
+        assert!(store.name_taken("nord", None), "ignoring case");
+        assert!(!store.name_taken("Harbour", None));
+        store
+            .save("Harbour", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        assert!(store.name_taken("harbour", None));
+        assert!(store.name_taken("HARBOUR", None));
+        assert!(!store.name_taken("Harbour 2", None));
+    }
+
+    #[test]
+    fn name_taken_leaves_out_the_row_being_edited() {
+        let dir = TestDir::new("name-taken-except");
+        let store = dir.store();
+        let id = store
+            .save("Harbour", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        assert!(!store.name_taken("harbour", Some(&id)), "its own row");
+        assert!(store.name_taken("harbour", Some("other")));
+        assert!(
+            store.name_taken("Nord", Some(&id)),
+            "a built-in stays taken"
+        );
+    }
+
+    #[test]
+    fn free_name_counts_up() {
+        let dir = TestDir::new("free-name");
+        let store = dir.store();
+        assert_eq!(store.free_name("Harbour"), "Harbour");
+        store
+            .save("Harbour", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        assert_eq!(store.free_name("Harbour"), "Harbour 2");
+        store
+            .save("Harbour 2", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        assert_eq!(store.free_name("harbour"), "harbour 3");
+        assert_eq!(store.free_name("Nord"), "Nord 2");
+    }
+
+    #[test]
+    fn copy_name_starts_at_copy() {
+        let dir = TestDir::new("copy-name");
+        let store = dir.store();
+        store
+            .save("Harbour", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        assert_eq!(store.copy_name("Harbour"), "Harbour copy");
+        store
+            .save("Harbour copy", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        assert_eq!(store.copy_name("Harbour"), "Harbour copy 2");
+    }
+
+    #[test]
+    fn delete_file_removes_a_shadow_file_and_keeps_the_built_in() {
+        let dir = TestDir::new("delete-file");
+        let store = dir.store();
+        let id = store
+            .save("Mine", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        std::fs::copy(dir.file(&id), dir.file("nord")).expect("copy");
+        store.delete_file("nord").expect("the shadow file");
+        assert!(!dir.file("nord").exists());
+        assert_eq!(
+            store.load("nord").expect("load"),
+            crate::builtin_themes::NORD,
+            "the built-in is kept"
+        );
+        assert!(matches!(
+            store.delete("nord"),
+            Err(ThemeError::BuiltIn { .. })
+        ));
+        assert!(matches!(
+            store.delete_file("../escape"),
+            Err(ThemeError::InvalidId { .. })
+        ));
+        assert!(matches!(
+            store.delete_file("missing"),
+            Err(ThemeError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn delete_removes_a_broken_file() {
+        let dir = TestDir::new("delete-broken");
+        let store = dir.store();
+        let id = store
+            .save("Fine", &UiTheme::CONTRAST, None, None)
+            .expect("save");
+        std::fs::write(dir.file("broken"), "{").expect("write");
+        let entries = store.list();
+        assert!(
+            users(&entries)
+                .iter()
+                .any(|entry| entry.id == "broken" && entry.error.is_some()),
+            "listed with its error"
+        );
+        store.delete("broken").expect("a broken file deletes");
+        assert!(!dir.file("broken").exists());
+        let entries = store.list();
+        assert_eq!(ids(users(&entries)), vec![id.as_str()]);
+    }
+
+    #[test]
+    fn export_then_parse_round_trips_a_theme() {
+        let dir = TestDir::new("export");
+        let store = dir.store();
+        let text = export_json(
+            "Harbour",
+            &UiTheme::CONTRAST,
+            Some("contrast"),
+            Some("dracula"),
+        )
+        .expect("export");
+        assert!(text.ends_with('\n'), "a trailing newline");
+        let (name, theme, base, terminal_source) = parse_theme_json(&text).expect("parse");
+        assert_eq!(name, "Harbour");
+        assert_eq!(theme, UiTheme::CONTRAST);
+        assert_eq!(base.as_deref(), Some("contrast"));
+        assert_eq!(terminal_source.as_deref(), Some("dracula"));
+
+        let id = store
+            .save(
+                "Harbour",
+                &UiTheme::CONTRAST,
+                Some("contrast"),
+                Some("dracula"),
+            )
+            .expect("save");
+        let saved = std::fs::read_to_string(dir.file(&id)).expect("the saved file");
+        assert_eq!(text, format!("{saved}\n"), "the shape save writes");
+    }
+
+    #[test]
+    fn parse_refuses_a_text_over_the_limit() {
+        let text = "x".repeat(MAX_THEME_BYTES + 1);
+        let err = parse_theme_json(&text).expect_err("over the limit");
+        assert!(
+            matches!(err, ThemeError::TooLarge { bytes } if bytes == MAX_THEME_BYTES + 1),
+            "{err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "the theme file is 1048577 bytes; the limit is 1 MiB"
+        );
+        let at_the_limit = "x".repeat(MAX_THEME_BYTES);
+        assert!(matches!(
+            parse_theme_json(&at_the_limit),
+            Err(ThemeError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_refuses_a_malformed_theme() {
+        assert!(matches!(
+            parse_theme_json("{"),
+            Err(ThemeError::Parse { .. })
+        ));
+        let whole = export_json("Mine", &UiTheme::CONTRAST, None, None).expect("export");
+        let no_ground = whole.replacen("\"ground\"", "\"not_ground\"", 1);
+        assert!(
+            matches!(parse_theme_json(&no_ground), Err(ThemeError::Parse { .. })),
+            "a field missing"
+        );
+        let short_colour = whole.replacen("\"#08070a\"", "\"#08070\"", 1);
+        assert!(
+            matches!(
+                parse_theme_json(&short_colour),
+                Err(ThemeError::Parse { .. })
+            ),
+            "a malformed colour"
+        );
+    }
+
+    #[test]
+    fn import_takes_a_free_name_and_slug() {
+        let dir = TestDir::new("import");
+        let store = dir.store();
+        let text =
+            export_json("Nord", &crate::builtin_themes::NORD, Some("nord"), None).expect("export");
+        let first = store.import(&text).expect("import");
+        assert_eq!(first, "nord-2");
+        assert_eq!(store.name_of(&first).as_deref(), Some("Nord 2"));
+        assert_eq!(
+            store.load(&first).expect("load"),
+            crate::builtin_themes::NORD
+        );
+        assert_eq!(store.import(&text).expect("import"), "nord-3");
+        let entries = store.list();
+        let names: Vec<&str> = users(&entries)
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["Nord 2", "Nord 3"]);
+    }
+
+    #[test]
+    fn import_keeps_an_unknown_base() {
+        let dir = TestDir::new("import-base");
+        let store = dir.store();
+        let text = export_json(
+            "Mine",
+            &UiTheme::CONTRAST,
+            Some("no-such-theme"),
+            Some("also-missing"),
+        )
+        .expect("export");
+        let id = store.import(&text).expect("import");
+        let entries = store.list();
+        let mine = users(&entries)
+            .iter()
+            .find(|entry| entry.id == id)
+            .expect("the imported theme");
+        assert_eq!(mine.base.as_deref(), Some("no-such-theme"));
+        assert_eq!(mine.terminal_source.as_deref(), Some("also-missing"));
     }
 }
