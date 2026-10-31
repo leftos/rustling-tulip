@@ -406,6 +406,12 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 
   A pick applies to every window at once (`fonts::set_ui_family`, `RootView::set_ui_font`) and is saved in `native-ui.json` as `ui_font_family` (null or absent is Inter; a saved "Geist" still loads as Geist); a stored family that is no longer installed falls back to Inter with a log line (`fonts::resolve_ui_family`).
 
+  Under the font list, Settings → Appearance (App level only) has a "UI text size" row: a − button, the value (`Default` at 0, else `+N px` or `−N px`) and a + button, each dimmed, unclickable and out of the Tab ring at its end of the range (−2 to +4); the Tab stops are `appearance-ui-text-size-down` and `-up`, after `appearance-ui-family-list`.
+
+  The offset is a GPUI global, `UiText`, beside `UiFont` (`fonts::ui_text_size`, `set_ui_text_size`, `clamped_ui_text_size`, `UI_TEXT_SIZE_OFFSETS`), set live by `RootView::set_ui_text_size` and at boot, and saved as `ui_text_size` in `native-ui.json` (absent is 0; out of range clamps on load; a value that is not a whole number loads as 0 with the warning `ui_text_size <value> is not a whole number; drawing at no offset`). `fonts::ui_px` and `ui_px_at` add it to a base size.
+
+  It applies to the footer, tooltip, flyout and overlay, tab bar, sidebar, pane headers and chips, activity rail badges, toasts, session menu rows and pop-out text, and the tab bar, footer and its pill, busy and ghost pills, pane header, chip, compact leaf and badge heights grow by the same amount. Terminal, viewer and diff-gutter text keep the terminal font size. Modals, popovers and context-menu frames do not scale.
+
   Geist Mono, Fira Code, JetBrains Mono and Cascadia Code are bundled for terminals, and Inter, Geist and Schibsted Grotesk at 400 to 700 for the interface (OFL, `assets/fonts/`); a family resolves against the installed list, falling back to Geist Mono, Cascadia Mono, Consolas, then Courier New.
 - **Status glyphs**: a session's status draws as a shape as well as a colour (`status_glyph.rs`, tinted SVG layers in `assets/icons/status-*.svg`) in sidebar leaves, pane headers, Needs You rows, the tab bar's busy pill and the footer.
 
