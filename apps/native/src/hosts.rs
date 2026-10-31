@@ -332,7 +332,7 @@ impl RootView {
         // A remote host's spawns and duplicates in flight end with its
         // connection; This PC's end with its reset.
         if *host != HostKey::Local {
-            self.drop_pending_of(host, cx);
+            self.drop_pending_of(host, window, cx);
         }
         if self.hosts.get(host).is_none() {
             self.forget_device_pairing(host, window, cx);
