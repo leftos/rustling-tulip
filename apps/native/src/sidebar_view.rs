@@ -892,7 +892,7 @@ fn host_header(
         .child(
             div()
                 .flex_none()
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(t.text))
                 .child(group.label.clone()),
         )

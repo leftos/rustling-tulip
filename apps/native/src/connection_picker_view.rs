@@ -1388,6 +1388,7 @@ fn row_switch(
         let control = PickerControl::Switch(index);
         checkbox_row(
             crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
             &control.selector(draw.rows),
             enabled,
             draw.focus == control,

@@ -423,7 +423,9 @@ fn the_contrast_summary_names_failing_pairs(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_theme_row_works_on_a_remote_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let mut h = Harness::on_target(cx, &dir, Target::tailnet(HOST, None), &fixture());
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.host(&Target::tailnet(HOST, None)).connect();
+    h.sent();
     open_dialog(&mut h);
     cursor_to(&mut h, "dracula", true);
 

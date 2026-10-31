@@ -557,6 +557,7 @@ impl RootView {
 fn shell_host_row(selected: &HostKey, hosts: Vec<HostKey>, cx: &mut Context<RootView>) -> Div {
     let t = theme(cx);
     let offset = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
     let buttons = hosts
         .into_iter()
         .map(|host| {
@@ -569,6 +570,7 @@ fn shell_host_row(selected: &HostKey, hosts: Vec<HostKey>, cx: &mut Context<Root
             let label = crate::sidebar::host_label(&host);
             choice_button(
                 offset,
+                shift,
                 selector,
                 label,
                 look,

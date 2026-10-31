@@ -3098,6 +3098,7 @@ impl RootView {
         }
         let t = theme(cx);
         let size = crate::fonts::ui_text_size(cx);
+        let shown_weight = crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD);
         let rows: Vec<AnyElement> = choices
             .into_iter()
             .map(|(host, open)| {
@@ -3120,8 +3121,7 @@ impl RootView {
                     .rounded(px(TAB_ROW_RADIUS))
                     .text_color(gpui::rgb(text))
                     .when(shown, |row| {
-                        row.bg(gpui::rgb(t.selection))
-                            .font_weight(FontWeight::SEMIBOLD)
+                        row.bg(gpui::rgb(t.selection)).font_weight(shown_weight)
                     })
                     .when(!shown && open, |row| {
                         row.cursor_pointer()
@@ -3141,7 +3141,12 @@ impl RootView {
                 .flex_col()
                 .gap(px(2.0))
                 .pb(px(8.0))
-                .child(group_row(size, "Host", &t))
+                .child(group_row(
+                    size,
+                    crate::fonts::ui_weight_shift(cx),
+                    "Host",
+                    &t,
+                ))
                 .children(rows),
         )
     }

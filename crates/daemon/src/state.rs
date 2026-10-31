@@ -977,7 +977,7 @@ mod tests {
             matches!(
                 &tab.content,
                 protocol::TabContent::Grid {
-                    grid: protocol::GridNode::Pane { pane_id, session_id }
+                    grid: protocol::GridNode::Pane { pane_id, session_id, .. }
                 } if pane_id == "pane-1" && session_id.as_deref() == Some("sess-1")
             ),
             "the tab's pane and session are kept: {:?}",
