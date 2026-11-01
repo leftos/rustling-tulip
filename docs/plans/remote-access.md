@@ -11,7 +11,7 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 
   The native client's views of that request live in `apps/native/src/pairing_view.rs` over the model in `pairing.rs`. Settings → Remote access shows a `Waiting devices · {n}` section (name and Tailscale login, a `m:ss left` countdown, Approve… and Deny; an approved row reads `Approved · waiting for the device` with only Deny), and the Remote access tab carries an amber count badge (`99+` cap, approved requests included).
 
-  Approve… opens an approval dialog that sends nothing until Approve is pressed, then shows the QR code, the code as `735 160` and `expires in m:ss · this request only`, and closes by itself when the code runs out. Disconnecting or switching target closes it and forgets the waiting requests.
+  Approve… opens an approval dialog that sends nothing until Approve is pressed, then shows the QR code, the code as `735 160` and `expires in m:ss · this request only`, and closes by itself when the code runs out. Disconnecting from This PC's daemon closes it and forgets the waiting requests.
 
   On each connect to this PC's daemon whose `Welcome` lists `device_pairing` the client asks `ListPendingDevices` (local only, never on a tailnet or SSH host), and the daemon's `PendingDevices` and `DevicePairCode` feed the rows, the badge and the dialog. Each new unapproved request raises a Windows toast, "A device asks for remote access", with Approve… and Deny (`notify.rs`, raised from `pairing_view.rs`): Approve… brings the window forward and opens the dialog without opening Settings, Deny sends `DenyDevice`.
 
@@ -42,7 +42,7 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 4. **The listener decides how a connection authenticates.** Loopback connections compare the `daemon.json` token; tailnet connections never look at it, and they present their device token instead. The loopback listener serves `build_loopback_router`; the tailnet listener has its own `build_tailnet_router`, and `/shutdown` is never on it.
 
    No router serves `/pair`. Site: `server/connection.rs` `AuthKind`, `server/handshake.rs` `handshake`, `server/remote.rs` `tailnet_ws_handler` and `build_tailnet_router`, `server.rs` `ws_handler` and `build_loopback_router`.
-5. **A credential never goes to another host.** The native client sends the `daemon.json` token only to the loopback daemon; on a tailnet target it sends its device token for that host, or an empty one when none is stored, and lands in "not paired" when the host has not approved the device. No status message carries a token. Site: `apps/native/src/net.rs` (`attempt`).
+5. **A credential never goes to another host.** The native client sends the `daemon.json` token only to the loopback daemon; to each tailnet host it sends that host's device token, or an empty one when none is stored, and lands in "not paired" when the host has not approved the device. No status message carries a token. Site: `apps/native/src/net.rs` (`attempt`).
 6. **Browsers cannot act for an attacker.** The host's `*.ts.net` name is public in Certificate Transparency logs, so the tailnet `/ws` upgrade requires `Origin` absent (native) or exactly `https://{name}:{port}` (the PWA), on the configured port (default 8787), and `Host` equal to the own name. No CORS layer on the tailnet router; any future state-changing HTTP route requires same-origin.
 7. **TLS only, with the `tailscale cert` certificate.** No plaintext path, no self-signed fallback; with HTTPS disabled in the admin console the listener stays down and the status says why.
 8. **Tailscale's state never touches loopback.** All Tailscale work runs off the boot path; loopback serving never waits on it.
@@ -67,7 +67,7 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 | P6.1 | Transport seam: `Target::{Local, Tailnet(host)}` in `net.rs` over public-CA TLS. Landed on main | no | TS.1 |
 | P6.2a | Remote-mode rules: local-file actions disabled with a reason, quit only disconnects, Stop, handshake and `daemon.log` hidden, Reconnect label, the capability table. Landed on main (RT-151) | no | P6.1 |
 | P6.2b | The typed host path in place of the pickers on a remote host. Landed on main (RT-257) | no | P6.2a |
-| P6.3 | Host picker from the tailnet's machines, a typed-name fallback, boot reconnect | no | P6.1, P6.2a |
+| P6.3 | Host manager from the tailnet's machines, a typed-name fallback, every enabled saved host connected at launch | no | P6.1, P6.2a |
 | P6.4 | Host Settings: Remote access (Tailscale) panel. Landed on main (RT-154) | no | TS.4 |
 | P6.5 | Autostart: start the daemon on login | no | none |
 | P6.6 | Remote tests over a fake Tailscale, the hand checklist, and the docs pass. Part A landed (RT-158): the `e2e-loopback-peers` seam, the `tools/e2e/fake-tailscale/` shim and the smoke spec `remote_listener_comes_up_for_the_fake_tailnet`; the hand checklist is [docs/remote-hand-checklist.md](../remote-hand-checklist.md) (part C); part B, the eight specs of `e2e_remote.rs`, and part D, the docs pass, have landed | no | all of the above |
@@ -75,59 +75,14 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 
 File fetch (RT-35 to RT-37) follows P6.1 to P6.3; a host's download folder is keyed by its MagicDNS name, lower-cased.
 
-### P6.3 parts (RT-350 to RT-354)
+### P6.3: the host manager (RT-350 to RT-354)
 
-A1 is RT-350, A2a RT-351, A2b RT-352, B RT-353, C RT-354; the orchestrator decisions on RT-152 settle the open choices. Line numbers are at ec89ea15.
+Landed on main. One window connects This PC and every enabled saved host at once, one connection per host (`docs/native-client.md` and `docs/architecture.md`, "Several hosts"); there is no target switch, no remembered last target and no boot target.
 
-#### P6.3 part A1: DNS-name check (small, 1 file + docs). Landed on main
-- Files: apps/native/src/target.rs (test-map row exists at tools/test-map.json:36, no change needed).
-- Steps: add `HostNameError` (Display = the message the picker shows) and `Target::parse_tailnet(&str, Option<u16>)` (reuse by `Target::tailnet` is NOT wanted: keep that infallible for test fixtures); table tests.
-- Red-first tests (target.rs `mod tests`): `parse_tailnet_accepts_a_magicdns_name`, `parse_tailnet_trims_one_trailing_dot_and_lowercases`, `parse_tailnet_refuses_userinfo`, `parse_tailnet_refuses_path_query_and_fragment`, `parse_tailnet_refuses_a_port`.
-
-  Then come `parse_tailnet_refuses_whitespace_and_percent`, `parse_tailnet_refuses_empty_and_empty_labels`, `parse_tailnet_refuses_bad_label_edges` (leading/trailing hyphen, 64-char label, 254-char name), `parse_tailnet_refuses_ip_literals`, `parse_tailnet_refuses_a_bare_label` (only if OPEN DECISION 5 rules so).
-- Gate: `cargo nextest run -p rustling-tulip-native --cargo-profile test-release target::`; full suite last (stable mode).
-
-#### P6.3 part A2a: specs load after the switch (test-only refactor, lands green before A2b). Landed on main
-- Files (6): apps/native/tests/support/mod.rs (central in the test map: full suite), apps/native/tests/ui/ui_remote.rs, ui_remote_access.rs, ui_file_fetch.rs, ui_fetch_dialog.rs, plus tools/test-map.json only if a row needs a new key (none expected).
-- Steps: add `Harness::on_target(cx, dir, target, &fixture)` (opens, reports `State` for `target` via `NetEvent::State(open_on(target, port))`, `Handshake`, `Welcome`, then `load(fixture)`) and a `Harness::switch_to(conn, &fixture)` for specs that start Local; migrate the 40+ sites listed in section 2.4 so each loads its fixture after the switch. Behaviour-neutral today, so it passes before and after A2b.
-- Tests: no new names; the migrated specs must stay green. Red-first concern: none (refactor), prove it by running `ui_remote|ui_remote_access|ui_file_fetch|ui_fetch_dialog` before/after.
-- Note `ui_remote.rs` is also in the `settings_view.rs`, `grid_view.rs` (concurrent item), `file_fetch_view.rs`, `quit_view.rs`, `connection.rs` rows' filters: no map edit.
-
-#### P6.3 part A2b: the reset and the exit dialog (hotspot: lib.rs, central). Landed on main
-- Files (6): apps/native/src/lib.rs, apps/native/src/sidebar.rs, apps/native/src/tabs.rs, apps/native/src/quit_view.rs, apps/native/tests/ui/ui_target_switch.rs (new) + apps/native/tests/ui/main.rs (`mod ui_target_switch;`, central) + tools/test-map.json (new spec's row; sidebar.rs/tabs.rs/quit_view.rs rows' filters gain `ui_target_switch`).
-
-  That is 7 files counting main.rs; main.rs and test-map.json are one-line edits. If it must be 6, put the new spec inside ui_remote.rs (already a module) and skip main.rs and the new test-map row.
-- Steps: (1) `SidebarModel::clear_daemon_state`, `TabsModel::clear_for_switch`; (2) `RootView::reset_for_target`, factoring the send-free part out of `on_welcome` (lib.rs:2554-2587) so both call it; (3) call it from the State arm (lib.rs:2235) before `self.conn = conn`; (4) close the exit dialog there (quit_view.rs:131/:187) and, for robustness, check `manages_daemon()` before `exit.is_some()` at quit_view.rs:131-136; (5) decide pruning/persistence of daemon-id keyed ui state (OPEN DECISION 3).
-- Red-first tests (UI specs, names): `target_switch_clears_the_old_hosts_sessions_repos_and_tabs`, `remote_to_local_switch_with_ensure_error_leaves_no_clickable_rows` (use `Connection` in `State::Error` for Local after remote rows), `reveal_and_path_ctrl_click_are_gone_after_remote_to_local_error`.
-
-  Then come `target_switch_sends_nothing_to_the_daemon` (assert `h.sent()` is empty: no Detach, no GetFileSnapshot, no ListSessionHistory), `target_switch_does_not_save_native_ui_json` (read the file before/after: `active_tab_id` unchanged), `same_target_reconnect_keeps_the_rows`.
-
-  Then come `target_switch_clears_sc_history_diff_tabs_and_worktrees_root`, `target_switch_closes_the_exit_dialog` and `stop_keep_after_a_switch_to_remote_sends_no_shutdown` (put these two in ui_quit.rs only if the file budget allows; ui_quit.rs is in the quit_view.rs row). The unit tests are `clear_daemon_state_keeps_the_ui_state` (sidebar.rs), `clear_for_switch_empties_tabs_and_marks_unloaded` (tabs.rs).
-- Gate: ui_target_switch|ui_remote|ui_remote_access|ui_quit|ui_file_fetch|ui_fetch_dialog|ui_tabs|ui_sidebar; lib.rs is central so the last gate is the full suite.
-
-#### P6.3 part B: peers, saved hosts, boot target (model, no UI). Landed on main
-- Files (6): apps/native/Cargo.toml (+ Cargo.lock, both central: full suite), apps/native/src/connection_picker.rs (new, plain Rust + tests), apps/native/src/sidebar.rs (`UiState` fields `last_target`, `saved_hosts`; accessors/setters; defaults :535; the round-trip literal near sidebar.rs:2992).
-
-  The other three are apps/native/src/net.rs (central; `spawn`/`spawn_with` take the boot `Target`), apps/native/src/lib.rs (`pub mod connection_picker;`, read ui state first in `new`, `conn: Connection::for_target` at :891), tools/test-map.json (rows for connection_picker.rs, widen target.rs/sidebar.rs rows).
-
-  7 with test-map.json; drop Cargo.lock from the count (generated).
-- Red-first tests: connection_picker.rs: `rows_list_local_then_saved_then_online_peers`, `peer_rows_use_the_dns_name_without_the_trailing_dot`, `offline_tagged_and_shared_peers_are_not_offered` (per OPEN DECISION 4), `typed_name_goes_through_the_dns_check_and_names_the_refusal`.
-
-  Then come `forget_removes_a_saved_host`, `resolve_boot_target_uses_a_saved_host`, `missing_saved_host_falls_back_to_local` (ruling: saved name absent from the saved list falls back; unreachable host does not), `tailscale_errors_show_their_display_text`.
-
-  In sidebar.rs: `last_target_and_saved_hosts_round_trip`, `a_hand_edited_bad_saved_host_is_dropped_on_load` (goes through `parse_tailnet`). In net.rs: `net_starts_on_the_boot_target` (no `ensure_running` call for a tailnet boot target; fake `ensure` panics if called, in the style of net.rs tests at :1281). UI spec `boot_on_a_saved_host_starts_on_that_target` in a new or existing module (support/mod.rs seeds native-ui.json).
-- Tailscale seam: `PeerSource` trait object with a system impl that runs `tailnet::Cli::locate().status()` on a one-shot `std::thread` + current-thread tokio runtime (needs a reactor; see OPEN DECISION 6).
-
-#### P6.3 part C: the picker view. Landed on main
-
-The typed-host entry has a Port field beside the name, prefilled with 8787; a saved host keeps the port it was added with, and a listed peer dials 8787 unless a saved host of that name records another (RT-152 decision, since the Remote access page lets a host change its port). Part B's saved-host model stores and round-trips that port.
-- Files (6): apps/native/src/connection_picker_view.rs (new), apps/native/src/lib.rs (field + focus handle + layer in the chain + key routing + `footer_bar` Connections button at :3234 + keep the layer above the first-connect `overlay` at :3200, + `overlay_open` :1222), apps/native/tests/ui/ui_connections.rs (new), apps/native/tests/ui/main.rs (`mod ui_connections;`), apps/native/tests/support/mod.rs (peer-source recorder, switch accessor), tools/test-map.json.
-
-  Add apps/native/examples/shot.rs only if a `connections` shot view is wanted (shot.rs:261 builds RootDeps; avoid by using the setter approach).
-- Red-first UI specs: `connections_button_opens_the_picker`, `picker_lists_saved_hosts_and_peers`, `selecting_a_host_sends_switch_target` (assert via `h.commands()`, support/mod.rs:1265), `typed_name_with_a_slash_shows_the_message_and_sends_nothing`, `forget_removes_a_saved_host_and_the_row`, `picker_is_reachable_while_the_first_connect_overlay_shows`, `escape_closes_the_picker`, `switching_host_saves_last_target`, `picker_shows_tailscale_not_running_text`, `picking_this_pc_switches_to_local`.
-- Also: docs pass (section DOC DRIFT), CLAUDE.md native-ui.json bullet (new keys), native-client.md picker paragraph, architecture.md Task Index row, native-client-parity.md:196 tick.
-
-File sets: `apps/native/src/lib.rs` (RootView hotspot, central in the test map, so each edit runs the full suite) is touched by A2b, B and C, so they run one at a time. `apps/native/src/net.rs` only by B. `apps/native/tests/support/**` and `tests/ui/main.rs` by A2a, A2b and C. A2b clears the pane map in `lib.rs` and does not edit `grid_view.rs`.
+- **DNS-name check.** `Target::parse_tailnet(&str, Option<u16>)` in `apps/native/src/target.rs` accepts a MagicDNS name, trims one trailing dot, lowercases it, and refuses userinfo, a path, query or fragment, a port in the name, whitespace, percent signs, empty labels, bad label edges, IP literals and a bare label; `HostNameError`'s Display is the message the host manager shows. `Target::tailnet` stays infallible for test fixtures.
+- **Saved hosts and peers.** `connection_picker.rs` holds the model: rows list This PC, then the saved hosts, then the online tailnet peers (offline, tagged and shared peers are not offered), over a `PeerSource` that runs `tailnet::Cli::locate().status()`. A typed name goes through the DNS check, and Forget removes a saved host. `saved_hosts` in `native-ui.json` stores each host's name and port, and a name that fails the check is dropped on load.
+- **The view.** `connection_picker_view.rs` is the Connections host manager, drawn above the first-connect overlay. The typed-host entry has a Port field beside the name, prefilled with 8787; a saved host keeps the port it was added with, and a listed peer dials 8787 unless a saved host of that name records another, since the Remote access page lets a host change its port.
+- **Connecting.** Each enabled saved host connects at launch and stays connected; its on/off switch is remembered in `saved_hosts`.
 
 ## Facts relied on
 

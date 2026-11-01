@@ -20,7 +20,7 @@ Linear: RT-530 (Connect remote clients over OpenSSH without Tailscale, with a si
 4. **Prompts.** `BatchMode=yes` means no prompt is ever shown. An unknown host key, a key with a passphrase and no agent, or a denied login fails the connection with the `ssh` stderr shown in the dialog. There is no `StrictHostKeyChecking=accept-new`.
 5. **The remote command default** is `rustling-tulipd bridge`. The installer adds its folder to the user PATH (and uninstall removes it) through `tools/installer/user-path.ps1`, since the install folder is not on PATH otherwise. A saved SSH host may carry its own `remote_command`.
 6. **v1 hosts are Windows only.** Linux and macOS hosts are not claimed. **Owner ruling (2026-10-30):** Linux and macOS hosts are planned for vNext+1, as RT-536.
-7. **Saved hosts.** `saved_hosts` and `last_target` in `native-ui.json` gain `kind` (`"tailnet"` default, or `"ssh"`). An SSH entry stores its host string and an optional `remote_command`, and no port. Aliases are typed, not listed from `~/.ssh/config`.
+7. **Saved hosts.** `saved_hosts` in `native-ui.json` carries a `kind` (`"tailnet"` default, or `"ssh"`); every enabled saved host, SSH ones included, has its own connection from launch. An SSH entry stores its host string and an optional `remote_command`, and no port. Aliases are typed, not listed from `~/.ssh/config`.
 8. **Device approval stays local.** The pairing and device-approval UI (`ListPendingDevices`, the pending-device prompts) shows only on `Target::Local`, never on an SSH or tailnet target. The daemon sends `PendingDevices` to every loopback connection, so the client must ignore it there.
 9. **The daemon outlives the SSH session.** Win32-OpenSSH runs a session's command in a job with `KILL_ON_JOB_CLOSE` and `BREAKAWAY_OK` (measured `LimitFlags=0x2800`), so `spawn_daemon` creates the daemon with `CREATE_BREAKAWAY_FROM_JOB`, and when a job forbids breakaway (error 5) launches it through WMI `Win32_Process.Create`, outside the job (`crates/daemon-client/src/wmi_launch.rs`), falling back to the old flags only if that fails. Its tracers start outside every job too. **Accepted as they are:** the daemon's idle exit on an SSH-only host, and a slow SSH link's output, which the per-session queue budget bounds by resyncing (loopback sends are never timed out).
 10. **No feature branch.** Each step lands on `main`. SSH.1 adds a subcommand nothing calls yet, and SSH.3's target stays unreachable until SSH.4's picker offers it.
@@ -115,9 +115,9 @@ If the owner later wants per-client revoke, the least bad path is `command="rust
 
 ## Q3. Host picker
 
-Today `saved_hosts` is `[{name, port}]` and `last_target` is `{name, port}` or absent for this PC (`connection_picker.rs:18-21`, `sidebar.rs` UiState, CLAUDE.md native-ui.json bullet). A name that fails the DNS check is dropped on load.
+A tailnet entry of `saved_hosts` is `{name, port}` (`connection_picker.rs`, `sidebar.rs` UiState, CLAUDE.md native-ui.json bullet). A name that fails the DNS check is dropped on load.
 
-- Add a `kind` field to both, `"tailnet"` (default when missing) or `"ssh"`. A saved SSH host is `{kind: "ssh", name: "<alias or user@host>", remote_command: <optional>}` with no port. An unknown kind is dropped on load, like a bad name.
+- Add a `kind` field, `"tailnet"` (default when missing) or `"ssh"`. A saved SSH host is `{kind: "ssh", name: "<alias or user@host>", remote_command: <optional>}` with no port. An unknown kind is dropped on load, like a bad name.
 - `Target::Ssh(SshHost)` with `name()` (the exact string handed to ssh), `short_name()` (the alias, or the part after `@`) and `address()` for display.
 - Generalise the sites that use `tailnet_host()` to a `remote_name()`. Lists of sites: `connection_picker.rs:45,60,291,310`, `connection_picker_view.rs:388`, `device_pairing_view.rs:221`, `file_fetch.rs:130`, `layout_chooser_view.rs:282`, `target.rs:168-287`. Also `host_session_counts` is keyed by lower-cased MagicDNS name, so SSH keys must not collide (prefix `ssh:`).
 - Picker row: the row keeps the host's label and carries an "SSH" tag, with "Add SSH host…" next to the tailnet typed entry. Validation lives in a new `parse_ssh`: no leading `-`, no whitespace, non-empty.
@@ -192,8 +192,8 @@ Client:
 - `apps/native/src/net.rs` (`attempt_ssh`, generic socket, child spawn, `NetDeps` gains an ssh spawner seam like `open_local`).
 - `apps/native/src/ssh.rs` (new: locate ssh, argv, line adapter).
 - `apps/native/src/connection_picker.rs`, `connection_picker_view.rs`.
-- `apps/native/src/sidebar.rs` (`UiState` saved hosts and `last_target` with `kind`).
-- `remote_mode.rs`, `file_fetch.rs`, `lib.rs` (the `ListPendingDevices` gate and boot target), `device_pairing_view.rs`, `layout_chooser_view.rs`.
+- `apps/native/src/sidebar.rs` (`UiState` saved hosts with `kind`).
+- `remote_mode.rs`, `file_fetch.rs`, `lib.rs` (the `ListPendingDevices` gate), `device_pairing_view.rs`, `layout_chooser_view.rs`.
 - `tools/test-map.json` rows for new files.
 
 Tests: `tools/e2e/fake-ssh/`, `apps/native/tests/support/live.rs`, `apps/native/tests/e2e_ssh.rs`, `apps/native/tests/ui/*`, `.config/nextest.toml`, `rt.ps1` (`native-e2e`).
@@ -232,7 +232,7 @@ SSH.1 and SSH.3 can overlap only in review: they touch disjoint files.
 
 - `docs/plans/remote-access.md`: title and intro ("Tailscale-first" becomes "two ways in"), add an SSH section with the invariants (SSH arrives as `Local`, bridge holds the token, no listener, fixed remote command, option-injection rule), retire "attach from outside the tailnet" and the P6 item list gets SSH.n.
 - `docs/architecture.md:289` non-goal: delete the "SSH tunnelling" part ("internet exposure or a relay" stay non-goals). Add a "Remote (SSH) access" bullet near `:118-144` and a Task Index row. Also line 23 ("The daemon binds only loopback and ... tailnet") is still true but add the bridge.
-- `CLAUDE.md`: the last bullet ("Things that are deferred") and the project-shape line for `crates/tailnet`; the `rustling-tulipd bridge` command beside `pair`/`shutdown`; the env var table (`RUSTLING_TULIP_SSH`); the `native-ui.json` bullet (`saved_hosts`/`last_target` `kind`); the E2E tier bullet (fake-ssh).
+- `CLAUDE.md`: the last bullet ("Things that are deferred") and the project-shape line for `crates/tailnet`; the `rustling-tulipd bridge` command beside `pair`/`shutdown`; the env var table (`RUSTLING_TULIP_SSH`); the `native-ui.json` bullet (`saved_hosts` `kind`); the E2E tier bullet (fake-ssh).
 - `docs/native-client.md` (picker, fetched files host folder), `docs/remote-hand-checklist.md`, `CHANGELOG.md` (Unreleased bullet), `README.md` (feature showcase at release).
 
 ## DEPENDS ON
@@ -266,7 +266,7 @@ SSH.1 and SSH.3 can overlap only in review: they touch disjoint files.
 
 The answer needed about 25 reads and searches beyond the Task Index row. Row that should exist:
 
-"Add or change a way for a client to reach a daemon on another machine (a connection target such as tailnet or SSH)" → `docs/plans/remote-access.md` → `apps/native/src/target.rs` (`Target`) → `apps/native/src/net.rs` (`attempt`, `attempt_local`, `attempt_tailnet`, `pump`, `Socket`) → `apps/native/src/remote_mode.rs` (`Capabilities`) → `apps/native/src/connection_picker.rs`, `connection_picker_view.rs`, `sidebar.rs` (`saved_hosts`, `last_target`) → `crates/daemon/src/server/connection.rs` (`AuthKind`) → `server/handshake.rs` (`check_hello_auth`) → `server/remote.rs` (`host_only_refusal`) → `crates/daemon/src/main.rs` (subcommands: `cli_pair.rs`, `cli_shutdown.rs`) → `apps/native/tests/e2e_remote.rs`.
+"Add or change a way for a client to reach a daemon on another machine (a connection target such as tailnet or SSH)" → `docs/plans/remote-access.md` → `apps/native/src/target.rs` (`Target`) → `apps/native/src/net.rs` (`attempt`, `attempt_local`, `attempt_tailnet`, `pump`, `Socket`) → `apps/native/src/remote_mode.rs` (`Capabilities`) → `apps/native/src/connection_picker.rs`, `connection_picker_view.rs`, `sidebar.rs` (`saved_hosts`) → `crates/daemon/src/server/connection.rs` (`AuthKind`) → `server/handshake.rs` (`check_hello_auth`) → `server/remote.rs` (`host_only_refusal`) → `crates/daemon/src/main.rs` (subcommands: `cli_pair.rs`, `cli_shutdown.rs`) → `apps/native/tests/e2e_remote.rs`.
 
 ## MISSING ENTRY POINT
 

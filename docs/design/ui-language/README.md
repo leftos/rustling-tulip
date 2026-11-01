@@ -21,10 +21,12 @@ Every direction kept body text at WCAG AA (4.5:1) or better on each surface it c
 
 ## Rebuild
 
-The shots are not committed (about 1.5 MB). The commit that adds this file also holds the mock scaffolding: `apps/native/src/palette.rs` selects each direction's token values at compile time from `RT_MOCK_THEME` (`current`, `a`, `b`, `c`), and `apps/native/examples/shot.rs` has the `menu` view. To rebuild the shots, check out that commit and run, from the repo root:
+The shots are not committed (about 1.5 MB). The mock scaffolding exists only in commit `b960eff8`: there `apps/native/src/palette.rs` selects each direction's token values at compile time from `RT_MOCK_THEME` (`current`, `a`, `b`, `c`), and `docs/design/ui-language/shoot.sh` shoots each theme and view. The commit after it builds C as the only theme and removes the selector, so `palette.rs` on `main` holds C's tokens alone and `shoot.sh` no longer varies anything.
+
+To rebuild the shots, check out `b960eff8` and run, from the repo root:
 
 ```bash
 bash docs/design/ui-language/shoot.sh "current a b c" "menu main connections settings"
 ```
 
-It writes `.tmp/shots/<direction>-<view>.png`. The commit after it builds C as the only theme and removes the selector.
+It writes `.tmp/shots/<direction>-<view>.png`. The four views are among the many `apps/native/examples/shot.rs` draws today; the current list is the `native-shot` line under "Common commands" in `CLAUDE.md`, and `.\rt.ps1 native-shot <view>` shoots one at the current look.
