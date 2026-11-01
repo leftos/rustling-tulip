@@ -24,6 +24,7 @@ agent-api = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }
 protocol = { workspace = true }
+regex = "1.11"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -31,4 +32,3 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 agent-api = { workspace = true, features = ["test-support"] }
-regex = "1.11"

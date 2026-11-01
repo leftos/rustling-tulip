@@ -8,6 +8,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - The coloured frame round a session's terminal is 1 px wide by default instead of 6 px, and the text keeps its place.
 
+### Fixed
+
+- A Claude session working on a task-list item no longer shows as idle mid-turn or sends a false Finished notification.
+
 ## v0.6.0-alpha
 
 ### Added
