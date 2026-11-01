@@ -529,6 +529,37 @@ fn launch_last_with_a_trusted_config_prefills_the_dialog_and_warns(cx: &mut Test
 }
 
 #[gpui::test]
+fn a_trusted_launch_last_spawns_at_once_when_trusted_is_the_default(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::json!({ "spawn": { "trusted": true } }).to_string(),
+    )
+    .unwrap_or_else(|err| panic!("seed native-ui.json: {err}"));
+    let mut stored = config(single_target(false));
+    stored.dangerously_skip_permissions = true;
+    let mut h = harness(cx, &dir, stored);
+
+    let row = h.center("container-repo:r1");
+    h.double_click(row);
+
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_open()),
+        "the Settings default already granted trust: no review dialog"
+    );
+    assert!(!warned_trusted(&mut h), "and no review warning");
+    let sent = h.sent();
+    let trusted: Vec<bool> = sent
+        .iter()
+        .filter_map(|message| match message {
+            ClientMessage::SpawnSession(request) => Some(request.dangerously_skip_permissions),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(trusted, [true], "one trusted replay is sent: {sent:?}");
+}
+
+#[gpui::test]
 fn launch_last_of_a_headless_config_launches_nothing_and_warns(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut stored = config(single_target(false));

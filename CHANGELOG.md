@@ -7,6 +7,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - Sessions show their program as an icon (Claude, PowerShell, cmd, bash) in the sidebar, pane headers and spawn dialog, and Trusted as a shield.
+- The New session dialog remembers your last Trusted launch choice.
+- With Trusted launch by default on, the New session dialog skips its trusted warning and Launch last of a trusted session no longer asks for review.
 
 ## v0.6.1-alpha
 

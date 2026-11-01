@@ -51,7 +51,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   A double-click on the row replays into the current tab too: its first click still folds or unfolds the row, and its second replays instead of folding again. Two launch gestures for one container within 500 ms count as one, so a double-click or a repeated ▶ launches once.
 
-  With no stored config, both open the spawn dialog locked to the container; a trusted config opens the dialog prefilled, after the `Review trusted launch` warning toast; a worktree config waits for the daemon's fresh `SuggestBranchName`, replaying with that name (a reply is matched by its `request_id`, and a timeout raises `Couldn't pick a branch name for launch-last`), while an in-place config replays at once.
+  With no stored config, both open the spawn dialog locked to the container; a trusted config opens the dialog prefilled, after the `Review trusted launch` warning toast, unless "Trusted launch by default" is on, when it spawns at once with neither toast nor dialog; a worktree config waits for the daemon's fresh `SuggestBranchName`, replaying with that name (a reply is matched by its `request_id`, and a timeout raises `Couldn't pick a branch name for launch-last`), while an in-place config replays at once.
 
   A stored config that is headless (`SessionMode::Headless`) is never replayed: the row gesture (double-click or ▶) launches nothing, opens no dialog and raises a Warning toast `Headless runs aren't supported in this client` with no detail, and `Launch last again ▸` is dimmed with that text as its tip, its click doing nothing.
 
@@ -371,7 +371,7 @@ Approve and Deny presses that arrive before the pending-devices list are held (`
 
 `Start the daemon when I log in` registers the HKCU Run value (a LaunchAgent on macOS) through `daemon_client::autostart`, behind the `Autostart` seam in `remote_access.rs` (`RootDeps.autostart`). The controls are inert until the first `RemoteStatus` arrives, and a new connection forgets it.
 
-Spawn defaults holds "Trusted launch by default" (hint: "When enabled, new agent sessions skip their approval prompts."), the only Settings value saved in `native-ui.json`'s `spawn`.
+Spawn defaults holds "Trusted launch by default" (hint: "When enabled, new agent sessions skip their approval prompts."), the only Settings value saved in `native-ui.json`'s `spawn.trusted`. The same object holds `spawn.last_trusted`, the Trusted choice of the last Spawn from a dialog the user filled in for an agent (not a prefilled one: duplicate, Edit first or launch-last review; not a Shell spawn); the New session dialog opens Trusted on it, falling back to `spawn.trusted` while it is absent.
 
 An agent page's first section, titled with the descriptor's label (Claude's reads "Claude"), draws one row per descriptor field marked `settings: true`, in descriptor order, with the descriptor's choice labels (Claude: "Permission mode", then "Provider").
 
@@ -519,13 +519,13 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
   With no stored config the dialog opens on the source's repo with the defaults; a standalone source duplicates as a plain click does, since the dialog has no bare-folder target; a dialog that can't open when the reply arrives says why ("Duplicate failed"). The pending request is a slot keyed by session id (`session_actions.rs` `Prefills`). The model is `session_actions.rs`, the view `session_menu.rs`.
 - **Spawn dialog agent fields** (`spawn_form.rs`, `spawn_view.rs`, `agent_options.rs`, `agent_options_view.rs`): the Runtime row is the daemon's agents from `DaemonMessage::Agents`, each labelled by its descriptor's `tag`, then `Plain shell`; with none listed, or before `Agents` arrives, only `Plain shell`. Main fields draw under Runtime in descriptor order, and Advanced fields sit above the env rows in descriptor order. A plain shell shows no agent fields.
 
-  Choice fields draw segmented or as a dropdown by their style, toggles are checkboxes, and text and model fields are inputs (a model field adds suggestion chips). A field of unknown kind is a disabled row reading `Update the client to change this`. Help text shows as a note under the field.
+  Choice fields draw segmented whatever their style (`ChoiceStyle::Dropdown` included), toggles are checkboxes, and text and model fields are inputs (a model field adds suggestion chips). A field of unknown kind is a disabled row reading `Update the client to change this`. Help text shows as a note under the field.
 
   A Choice whose default is no value gets a first choice `CLI default`, and a Text or Model field with no default shows the placeholder `CLI default`. Selectors are `spawn-opt-<field>-<choice>` (`spawn-opt-permission-mode-plan`, `spawn-opt-provider-deepseek`, `spawn-opt-permission-mode-cli-default`), `spawn-opt-<field>` for a toggle or input, and `spawn-opt-model-sonnet` for a chip.
 
   A field locked on a trusted launch carries the note `Ignored while trusted launch is on. The chosen value is kept for when you turn trusted launch off.` and is disabled, showing its kept value (a text or model one is read-only).
 
-  The Trusted launch checkbox's detail line is the agent's `trust_note` (Claude: `Trusted launch passes --dangerously-skip-permissions.`), and none shows for an agent without one. The warning reads `Approval prompts are bypassed for this session.` The worktree checkbox note reads `Unchecked: run the agent in the repo's main directory`.
+  The Trusted launch checkbox's detail line is the agent's `trust_note` (Claude: `Trusted launch passes --dangerously-skip-permissions.`), and none shows for an agent without one. The warning reads `Approval prompts are bypassed for this session.` and is not shown while "Trusted launch by default" is on. The worktree checkbox note reads `Unchecked: run the agent in the repo's main directory`.
 
   A field's initial value is the first that exists of: the agent's Settings value (`DaemonMessage::AgentSettings`), the target's last spawn of that agent, a Shift-duplicate source's value, then the user's edits. After a target switch the fields the user set keep their values and every other field follows the new target's last spawn.
 

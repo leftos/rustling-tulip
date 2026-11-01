@@ -888,6 +888,9 @@ pub(crate) struct SpawnForm {
     tabs: TabChoices,
     open_in: OpenChoice,
     trusted: bool,
+    /// The Settings default launches trusted, so a trusted launch needs no
+    /// warning.
+    trusted_by_default: bool,
     use_worktree: bool,
     /// The user changed the worktree checkbox since the target loaded.
     worktree_chosen: bool,
@@ -1091,7 +1094,8 @@ impl SpawnForm {
             options: BTreeMap::new(),
             tabs: inputs.tabs,
             open_in,
-            trusted: defaults.trusted,
+            trusted: defaults.opening_trusted(),
+            trusted_by_default: defaults.trusted,
             use_worktree: true,
             worktree_chosen: false,
             mode: WorktreeMode::New,
@@ -2552,6 +2556,12 @@ impl SpawnForm {
         self.trusted && self.trusted_shown()
     }
 
+    /// Whether the trusted-launch warning shows: Trusted is ticked and the
+    /// Settings default does not already launch trusted.
+    pub(crate) fn trusted_warning_shown(&self) -> bool {
+        self.trusted() && !self.trusted_by_default
+    }
+
     /// The trusted-launch row's detail: the chosen agent's trust note.
     pub(crate) fn trusted_detail(&self) -> Option<&str> {
         let Runtime::Agent(agent) = self.runtime() else {
@@ -3516,7 +3526,10 @@ mod tests {
 
     /// Every default on, so a case can tell the dialog read them.
     fn all_defaults() -> SpawnDefaults {
-        SpawnDefaults { trusted: true }
+        SpawnDefaults {
+            trusted: true,
+            last_trusted: None,
+        }
     }
 
     fn press(form: &mut SpawnForm, control: &Control) -> Outcome {

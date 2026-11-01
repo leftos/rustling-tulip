@@ -155,6 +155,10 @@ pub(crate) struct SpawnDialog {
     panel_bounds: Option<Bounds<Pixels>>,
     /// Where the field whose list shows was last laid out.
     list_anchor: Option<Bounds<Pixels>>,
+    /// The dialog opened filled from a stored config (a duplicate, a
+    /// launch-last review), so its submit is not the user's own Trusted
+    /// choice.
+    prefilled: bool,
 }
 
 /// The spawn dialog while open: its form, or the state it opens in while no
@@ -697,6 +701,7 @@ impl RootView {
             reveal: true,
             panel_bounds: None,
             list_anchor: None,
+            prefilled: prefill.is_some(),
         })));
         self.sync_env_inputs(window, cx);
         self.sync_option_inputs(window, cx);
@@ -1055,6 +1060,7 @@ impl RootView {
                     Some(SpawnModal::Form(dialog)) => dialog.aim.take(),
                     _ => None,
                 };
+                self.remember_trusted_choice();
                 let open_in = match aim {
                     Some(aim) => aim.open_in(submission.open_in),
                     None => submission.open_in,
@@ -1062,6 +1068,22 @@ impl RootView {
                 self.close_spawn_dialog(window, cx);
                 self.spawn_on(&host, submission.request, open_in, cx);
             }
+        }
+    }
+
+    /// Saves the Trusted launch choice of a dialog the user filled in, which
+    /// the next fresh dialog opens with; a prefilled dialog or a plain shell
+    /// (no Trusted control) leaves it alone.
+    fn remember_trusted_choice(&mut self) {
+        let Some(SpawnModal::Form(dialog)) = &self.spawn_dialog else {
+            return;
+        };
+        if dialog.prefilled || !dialog.form.trusted_shown() {
+            return;
+        }
+        let trusted = dialog.form.trusted();
+        if self.sidebar.set_spawn_last_trusted(trusted) {
+            self.save_ui();
         }
     }
 
@@ -2256,7 +2278,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
         label,
         cx,
     )];
-    if form.trusted() {
+    if form.trusted_warning_shown() {
         let warning = warning_box(&t)
             .debug_selector(|| "spawn-trusted-launch-warning".to_owned())
             .gap(px(2.0))

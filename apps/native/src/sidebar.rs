@@ -833,6 +833,18 @@ fn json_type(value: &serde_json::Value) -> &'static str {
 pub struct SpawnDefaults {
     /// New agent sessions bypass approval prompts.
     pub trusted: bool,
+    /// The Trusted launch choice of the last dialog the user filled in and
+    /// submitted; a fresh dialog opens with it. `None` until the first such
+    /// submit, and the dialog then opens with `trusted`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_trusted: Option<bool>,
+}
+
+impl SpawnDefaults {
+    /// Whether a fresh spawn dialog opens with trusted launch on.
+    pub fn opening_trusted(self) -> bool {
+        self.last_trusted.unwrap_or(self.trusted)
+    }
 }
 
 /// Which OS notifications fire. Keys this build does not know, such as
@@ -1988,6 +2000,16 @@ impl SidebarModel {
     /// Whether a spawn dialog opens with trusted launch on.
     pub fn set_spawn_trusted(&mut self, on: bool) {
         self.ui.spawn.trusted = on;
+    }
+
+    /// Records the Trusted launch choice of a submitted dialog; returns
+    /// whether it changed.
+    pub fn set_spawn_last_trusted(&mut self, on: bool) -> bool {
+        if self.ui.spawn.last_trusted == Some(on) {
+            return false;
+        }
+        self.ui.spawn.last_trusted = Some(on);
+        true
     }
 
     /// Records the main window's place; returns whether it changed.
@@ -5032,7 +5054,10 @@ pub(crate) mod tests {
                 finished: false,
                 skip_when: NotifySkip::Never,
             },
-            spawn: SpawnDefaults { trusted: true },
+            spawn: SpawnDefaults {
+                trusted: true,
+                last_trusted: None,
+            },
             saved_hosts: Vec::new(),
             host_session_counts: BTreeMap::new(),
             session_views: SessionViews {
@@ -5153,7 +5178,10 @@ pub(crate) mod tests {
                 finished: false,
                 skip_when: NotifySkip::Never,
             },
-            spawn: SpawnDefaults { trusted: true },
+            spawn: SpawnDefaults {
+                trusted: true,
+                last_trusted: None,
+            },
             ..UiState::default()
         }
     }
@@ -5677,7 +5705,10 @@ pub(crate) mod tests {
     #[test]
     fn spawn_defaults_round_trip_and_default_off() {
         let dir = TestDir::new("spawn-defaults");
-        let defaults = SpawnDefaults { trusted: true };
+        let defaults = SpawnDefaults {
+            trusted: true,
+            last_trusted: None,
+        };
         let state = UiState {
             spawn: defaults,
             ..UiState::default()
@@ -5711,7 +5742,71 @@ pub(crate) mod tests {
     fn spawn_defaults_setters_write_each_field() {
         let mut model = SidebarModel::new(UiState::default());
         model.set_spawn_trusted(true);
-        assert_eq!(model.ui_state().spawn, SpawnDefaults { trusted: true });
+        assert_eq!(
+            model.ui_state().spawn,
+            SpawnDefaults {
+                trusted: true,
+                last_trusted: None
+            }
+        );
+        assert!(
+            model.set_spawn_last_trusted(false),
+            "the first choice is a change"
+        );
+        assert!(
+            !model.set_spawn_last_trusted(false),
+            "the same choice is not"
+        );
+        assert_eq!(
+            model.ui_state().spawn,
+            SpawnDefaults {
+                trusted: true,
+                last_trusted: Some(false)
+            },
+            "the last choice leaves the Settings default alone"
+        );
+    }
+
+    #[test]
+    fn spawn_last_trusted_is_absent_from_a_released_file_and_round_trips() {
+        let dir = TestDir::new("spawn-last-trusted");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "sidebar_collapsed": true, "spawn": { "trusted": true } }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0).spawn;
+        assert_eq!(
+            loaded.last_trusted, None,
+            "a v0.5.1-alpha file has no last choice"
+        );
+        assert!(
+            loaded.opening_trusted(),
+            "so a dialog opens with the Settings default"
+        );
+
+        let chosen = SpawnDefaults {
+            trusted: true,
+            last_trusted: Some(false),
+        };
+        let state = UiState {
+            spawn: chosen,
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        let loaded = load_ui_state(&dir.0).spawn;
+        assert_eq!(loaded, chosen, "round trips");
+        assert!(
+            !loaded.opening_trusted(),
+            "the last choice wins over the default"
+        );
+
+        save_ui_state(&dir.0, &UiState::default()).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        assert!(
+            !text.contains("last_trusted"),
+            "no choice yet writes no key: {text}"
+        );
     }
 
     #[test]

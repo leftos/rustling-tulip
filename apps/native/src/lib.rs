@@ -2996,7 +2996,9 @@ impl RootView {
             return;
         };
         let placement = self.launch_last_placement(placement);
-        if config.dangerously_skip_permissions {
+        // With trusted launch the Settings default, trust is already granted
+        // and the replay needs no review.
+        if config.dangerously_skip_permissions && !self.sidebar.ui_state().spawn.trusted {
             let prefill = Prefill {
                 config: Some(config),
                 open_in: Some(placement.open_choice()),
