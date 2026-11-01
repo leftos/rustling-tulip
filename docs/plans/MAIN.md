@@ -110,6 +110,8 @@
 - [ ] RT-653 Add Comfortable and Compact Chat modes and Chat view customization · release vNext
 - [ ] RT-654 Disable Chat and Summary once the agent exits back to its shell · release vNext
 - [ ] RT-680 Show each answer's description and the whole question on the chat's prompt cards · release vNext
+- [ ] RT-681 Tail a log a command writes in a scrolling box under its chat tool card · release vNext
+- [ ] RT-682 Break a chat tool card's command into one statement per line · release vNext
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
