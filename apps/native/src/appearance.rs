@@ -163,7 +163,14 @@ impl Default for ThemeBase {
 pub struct AppLevel<'a> {
     pub font: &'a FontSettings,
     pub theme: ThemeBase,
+    /// The app's terminal frame width: the stored one, else
+    /// [`DEFAULT_FRAME_WIDTH`].
+    pub frame_width: u16,
 }
+
+/// The width in px of the frame band a terminal draws when no level sets
+/// one.
+pub const DEFAULT_FRAME_WIDTH: u16 = 1;
 
 /// The level a resolved value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +211,9 @@ pub struct Resolved {
     pub font_size: Field<f32>,
     /// One of [`fonts::TERMINAL_WEIGHTS`].
     pub font_weight: Field<u16>,
+    /// The frame band's width in px, within
+    /// [`protocol::TERMINAL_FRAME_WIDTHS`].
+    pub frame_width: Field<u16>,
 }
 
 impl Resolved {
@@ -247,6 +257,7 @@ pub enum AppearanceField {
     /// The weight, and with it the older bold switch, which a weight
     /// change clears so a reset falls back to the next level.
     FontWeight,
+    FrameWidth,
 }
 
 impl AppearanceField {
@@ -268,6 +279,7 @@ impl AppearanceField {
                 to.terminal_font_weight = from.terminal_font_weight;
                 to.terminal_font_bold = from.terminal_font_bold;
             }
+            Self::FrameWidth => to.terminal_frame_width = from.terminal_frame_width,
         }
     }
 
@@ -283,6 +295,7 @@ impl AppearanceField {
                 a.terminal_font_weight == b.terminal_font_weight
                     && a.terminal_font_bold == b.terminal_font_bold
             }
+            Self::FrameWidth => a.terminal_frame_width == b.terminal_frame_width,
         }
     }
 }
@@ -357,6 +370,18 @@ impl AppearanceChange {
                 ..AppearanceOverrides::default()
             },
             fields: vec![AppearanceField::FontWeight],
+        }
+    }
+
+    /// The frame band's width set to `width`, or cleared.
+    #[must_use]
+    pub fn frame_width(width: Option<u16>) -> Self {
+        Self {
+            values: AppearanceOverrides {
+                terminal_frame_width: width,
+                ..AppearanceOverrides::default()
+            },
+            fields: vec![AppearanceField::FrameWidth],
         }
     }
 
@@ -538,6 +563,11 @@ fn resolve_levels(levels: &Levels<'_>, app: AppLevel<'_>) -> Resolved {
     } else {
         Source::App
     };
+    let frame_width_source = if app.frame_width == DEFAULT_FRAME_WIDTH {
+        Source::BuiltIn
+    } else {
+        Source::App
+    };
     let family = app.font.family.clone().map_or_else(
         || Field::new(None, Source::BuiltIn),
         |family| Field::new(Some(family), Source::App),
@@ -562,6 +592,11 @@ fn resolve_levels(levels: &Levels<'_>, app: AppLevel<'_>) -> Resolved {
         .unwrap_or_else(|| Field::new(app_size, size_source)),
         font_weight: first(levels, level_weight)
             .unwrap_or_else(|| Field::new(app_weight, weight_source)),
+        frame_width: first(levels, |a| {
+            a.terminal_frame_width
+                .filter(|width| protocol::TERMINAL_FRAME_WIDTHS.contains(width))
+        })
+        .unwrap_or_else(|| Field::new(app.frame_width, frame_width_source)),
     }
 }
 
@@ -659,7 +694,18 @@ pub fn app_overrides(app: AppLevel<'_>) -> AppearanceOverrides {
         terminal_font_bold: None,
         terminal_font_weight: Some(fonts::offered_terminal_weight(app.font.weight))
             .filter(|weight| *weight != fonts::DEFAULT_TERMINAL_WEIGHT),
+        terminal_frame_width: (app.frame_width != DEFAULT_FRAME_WIDTH).then_some(app.frame_width),
     }
+}
+
+/// The app level's frame width `overrides` stands for: its width when it is
+/// within [`protocol::TERMINAL_FRAME_WIDTHS`], else [`DEFAULT_FRAME_WIDTH`].
+#[must_use]
+pub fn app_frame_width_from_overrides(overrides: &AppearanceOverrides) -> u16 {
+    overrides
+        .terminal_frame_width
+        .filter(|width| protocol::TERMINAL_FRAME_WIDTHS.contains(width))
+        .unwrap_or(DEFAULT_FRAME_WIDTH)
 }
 
 /// The app level's font `overrides` stands for: an unset size is the
@@ -806,6 +852,7 @@ mod tests {
             AppLevel {
                 font,
                 theme: ThemeBase::default(),
+                frame_width: DEFAULT_FRAME_WIDTH,
             },
         )
     }
@@ -973,6 +1020,7 @@ mod tests {
         let app = AppLevel {
             font: &font,
             theme: ThemeBase::default(),
+            frame_width: DEFAULT_FRAME_WIDTH,
         };
         let own = overrides(json!({
             "terminal_background_color": REPO_ALL,
@@ -1015,7 +1063,11 @@ mod tests {
             }
         );
         let font = FontSettings::default();
-        let app = AppLevel { font: &font, theme };
+        let app = AppLevel {
+            font: &font,
+            theme,
+            frame_width: DEFAULT_FRAME_WIDTH,
+        };
         let resolved = resolve(None, &[], &[], app);
         assert_eq!(resolved.accent, Field::new(0x123456, Source::BuiltIn));
         assert_eq!(resolved.background, Field::new(0xfaf0e6, Source::BuiltIn));
@@ -1037,6 +1089,7 @@ mod tests {
         let app = AppLevel {
             font: &font,
             theme: ThemeBase::default(),
+            frame_width: DEFAULT_FRAME_WIDTH,
         };
         let resolved = resolve(None, &[], &[], app);
         assert_eq!(
@@ -1063,6 +1116,7 @@ mod tests {
             AppLevel {
                 font: &set,
                 theme: ThemeBase::default(),
+                frame_width: DEFAULT_FRAME_WIDTH,
             },
         );
         assert_eq!(resolved.font_size, Field::new(20.0, Source::App));
@@ -1079,6 +1133,7 @@ mod tests {
         let own = app_overrides(AppLevel {
             font: &font,
             theme: ThemeBase::default(),
+            frame_width: DEFAULT_FRAME_WIDTH,
         });
         assert_eq!(own.terminal_font_size, Some(20));
         assert_eq!(own.terminal_font_weight, Some(500));
@@ -1096,6 +1151,7 @@ mod tests {
         let plain = app_overrides(AppLevel {
             font: &FontSettings::default(),
             theme: ThemeBase::default(),
+            frame_width: DEFAULT_FRAME_WIDTH,
         });
         assert_eq!(
             plain,
@@ -1111,6 +1167,123 @@ mod tests {
             },
             "a cleared size is the default"
         );
+    }
+
+    /// The frame width session `s1` of repo `r1` resolves to with `own`
+    /// overrides, repo `r1`'s `repo` overrides and the app's `app_width`.
+    fn frame_width_over(
+        own: serde_json::Value,
+        repo: serde_json::Value,
+        app_width: u16,
+    ) -> Field<u16> {
+        let mut session = session_with(None, &["r1"]);
+        session.appearance = overrides(own);
+        let repos = [repo_with("r1", repo)];
+        let font = FontSettings::default();
+        resolve(
+            Some(&session),
+            &repos,
+            &[],
+            AppLevel {
+                font: &font,
+                theme: ThemeBase::default(),
+                frame_width: app_width,
+            },
+        )
+        .frame_width
+    }
+
+    #[test]
+    fn frame_width_prefers_the_session_then_the_container_then_the_app() {
+        let own = || json!({ "terminal_frame_width": 4 });
+        let repo = || json!({ "terminal_frame_width": 2 });
+        assert_eq!(
+            frame_width_over(own(), repo(), 5),
+            Field::new(4, Source::Session)
+        );
+        assert_eq!(
+            frame_width_over(json!({}), repo(), 5),
+            Field::new(2, Source::Container)
+        );
+        assert_eq!(
+            frame_width_over(json!({}), json!({}), 5),
+            Field::new(5, Source::App)
+        );
+    }
+
+    #[test]
+    fn frame_width_set_nowhere_is_the_built_in_one_pixel() {
+        assert_eq!(
+            frame_width_over(json!({}), json!({}), DEFAULT_FRAME_WIDTH),
+            Field::new(1, Source::BuiltIn)
+        );
+        let bare = resolve_container(
+            &AppearanceOverrides::default(),
+            AppLevel {
+                font: &FontSettings::default(),
+                theme: ThemeBase::default(),
+                frame_width: DEFAULT_FRAME_WIDTH,
+            },
+        );
+        assert_eq!(bare.frame_width, Field::new(1, Source::BuiltIn));
+    }
+
+    #[test]
+    fn an_app_frame_width_of_three_reports_the_app_level() {
+        assert_eq!(
+            frame_width_over(json!({}), json!({}), 3),
+            Field::new(3, Source::App)
+        );
+    }
+
+    #[test]
+    fn a_stored_frame_width_of_nine_falls_through() {
+        assert_eq!(
+            frame_width_over(
+                json!({ "terminal_frame_width": 9 }),
+                json!({ "terminal_frame_width": 2 }),
+                DEFAULT_FRAME_WIDTH
+            ),
+            Field::new(2, Source::Container),
+            "an out-of-range session width sets nothing"
+        );
+        assert_eq!(
+            frame_width_over(
+                json!({ "terminal_frame_width": 9 }),
+                json!({}),
+                DEFAULT_FRAME_WIDTH
+            ),
+            Field::new(1, Source::BuiltIn)
+        );
+    }
+
+    #[test]
+    fn app_frame_width_round_trips_through_overrides() {
+        let font = FontSettings::default();
+        let app = |frame_width| AppLevel {
+            font: &font,
+            theme: ThemeBase::default(),
+            frame_width,
+        };
+        for width in [0, 4] {
+            let own = app_overrides(app(width));
+            assert_eq!(own.terminal_frame_width, Some(width));
+            assert_eq!(app_frame_width_from_overrides(&own), width);
+        }
+        let plain = app_overrides(app(DEFAULT_FRAME_WIDTH));
+        assert_eq!(
+            plain.terminal_frame_width, None,
+            "the default writes nothing"
+        );
+        assert_eq!(app_frame_width_from_overrides(&plain), DEFAULT_FRAME_WIDTH);
+        let odd = overrides(json!({ "terminal_frame_width": 9 }));
+        assert_eq!(app_frame_width_from_overrides(&odd), DEFAULT_FRAME_WIDTH);
+
+        let set = AppearanceChange::frame_width(Some(4)).apply_to(&plain);
+        assert_eq!(set.terminal_frame_width, Some(4));
+        let cleared = AppearanceChange::frame_width(None).apply_to(&set);
+        assert_eq!(cleared.terminal_frame_width, None);
+        assert!(AppearanceChange::frame_width(None).changes_nothing_in(&cleared));
     }
 
     #[test]
@@ -1165,6 +1338,7 @@ mod tests {
             AppLevel {
                 font: &font,
                 theme: ThemeBase::default(),
+                frame_width: DEFAULT_FRAME_WIDTH,
             },
         );
         assert_eq!(resolved.font_size, Field::new(18.0, Source::App));
@@ -1308,7 +1482,14 @@ mod tests {
     /// level and the theme base `theme`.
     fn resolved_over(own: &AppearanceOverrides, theme: ThemeBase) -> Resolved {
         let font = FontSettings::default();
-        resolve_container(own, AppLevel { font: &font, theme })
+        resolve_container(
+            own,
+            AppLevel {
+                font: &font,
+                theme,
+                frame_width: DEFAULT_FRAME_WIDTH,
+            },
+        )
     }
 
     /// A theme base that is not the built-in theme's.

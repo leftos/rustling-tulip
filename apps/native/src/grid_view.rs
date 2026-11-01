@@ -691,7 +691,7 @@ impl RootView {
             let frame = resolved.frame.value.map(appearance::term_rgb);
             slot.view.update(cx, |pane, cx| {
                 pane.set_font(resolved.font(), by_user, cx);
-                pane.set_colors(palette, frame, cx);
+                pane.set_colors(palette, frame, resolved.frame_width.value, cx);
             });
         }
     }
@@ -758,6 +758,12 @@ impl RootView {
     pub fn pane_fills(&self, pane_id: &str, cx: &App) -> Option<(u32, u32)> {
         let (grid, ring) = self.panes.get(pane_id)?.view.read(cx).fills();
         Some((appearance::packed(grid), appearance::packed(ring)))
+    }
+
+    /// The width in px of the frame band pane `pane_id` draws.
+    #[must_use]
+    pub fn pane_frame_width(&self, pane_id: &str, cx: &App) -> Option<u16> {
+        Some(self.panes.get(pane_id)?.view.read(cx).frame_width())
     }
 
     /// The background and default text colour pane `pane_id`'s terminal

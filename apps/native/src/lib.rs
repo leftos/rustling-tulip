@@ -2548,6 +2548,14 @@ impl RootView {
         self.after_font_change(cx);
     }
 
+    /// Makes `width` (`None`: the default) the app's terminal frame width:
+    /// saved on this machine, and the width every pane whose session and
+    /// container set none draws its frame band at.
+    pub fn set_app_frame_width(&mut self, width: Option<u16>, cx: &mut Context<Self>) {
+        self.sidebar.set_terminal_frame_width(width);
+        self.after_font_change(cx);
+    }
+
     /// Makes `family` (`None`: the default) the family the interface draws
     /// in: saved on this machine and applied to every window at once.
     pub fn set_ui_font(&mut self, family: Option<String>, cx: &mut Context<Self>) {

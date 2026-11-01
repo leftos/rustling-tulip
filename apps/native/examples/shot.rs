@@ -1341,6 +1341,7 @@ fn session_rows() -> Vec<Row> {
                 "has_per_session_worktree": true,
                 "worktree_paths": [PETAL_TREE],
                 "terminal_title": "Petal footer polish",
+                "appearance": { "accent_color": "#a3be8c", "terminal_frame_color": "#a3be8c" },
             }),
         },
         Row {
