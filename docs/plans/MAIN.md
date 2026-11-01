@@ -220,7 +220,10 @@
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
 - [ ] RT-634 Let native-e2e run one e2e file as a routed gated job · release vNext+1
 - [ ] RT-636 Map the multi-host files in tools/test-map.json so -Validate passes · release vNext+1
-- [ ] RT-675 Route the whole rt.ps1 native-e2e over the builder's desktop route
+- [ ] RT-675 Route the whole rt.ps1 native-e2e over the builder's desktop route · release vNext
+- [ ] RT-677 Write the gate census's agent rules into CLAUDE.md: --cd, one gate per step, --env, no hand-set GATE_BOX_JOB · release vNext
+- [ ] RT-678 Give rt.ps1 native-e2e a spec and filter argument · release vNext
+- [ ] RT-679 Gate the pre-push clippy hook and keep the hygiene hooks at pre-commit · release vNext
 
 ## macOS
 
