@@ -358,6 +358,7 @@ pub(super) fn idle_record(id: &str) -> SessionRecord {
         shell_label: None,
         agent_exit_announced: false,
         applied_size: None,
+        size_client: None,
         work: crate::background_work::BackgroundWork::default(),
         hook_agent: None,
         hook_options: protocol::OptionValues::new(),

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use gpui::TestAppContext;
+use gpui::{TestAppContext, px, size};
 use protocol::{
     ChatEntry, ClientMessage, DaemonMessage, InitLayoutKind, PendingInput, PendingQuestion,
     SessionSnapshot, SessionStatus, SplitDirection, SplitPlace,
@@ -680,5 +680,119 @@ fn live_chat_mirror_sends_a_message_allows_the_prompt_and_sees_the_turn_end(
     );
     h.wait_for_row(&terminal, "the turn's answer in the terminal pane", |row| {
         row.contains(TOOL_ANSWER)
+    });
+}
+
+/// The pane the client's layout shows the session in, laying every session
+/// out first when the client has none.
+fn session_pane(h: &mut Harness<'_>, client: &LiveClient) -> String {
+    h.wait_until("a session in the sidebar", |h| {
+        h.root(|root, _| {
+            root.sidebar_containers()
+                .iter()
+                .any(|c| !c.leaves.is_empty())
+        })
+    });
+    if h.first_pane().is_none() {
+        client.send(ClientMessage::InitLayout {
+            kind: InitLayoutKind::AllSessions,
+        });
+    }
+    h.wait_until("a pane for the session", |h| h.first_pane().is_some());
+    h.first_pane().expect("a pane was just laid out")
+}
+
+/// Waits until `session_id`'s PTY has as many rows as `pane` shows, asking
+/// the daemon for a screen dump over `client`'s connection, one at a time,
+/// until one reports them. Returns the rows.
+fn wait_pty_rows_match_pane(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    session_id: &str,
+    pane: &str,
+) -> usize {
+    let mut asked = 0_u32;
+    let mut pending: Option<String> = None;
+    let mut matched = 0;
+    h.wait_until("the PTY's rows to match the relaunched pane's", |h| {
+        let request_id = pending
+            .get_or_insert_with(|| {
+                asked += 1;
+                let request_id = format!("relaunch-size-{asked}");
+                client.send(ClientMessage::DumpScreen {
+                    session_id: session_id.to_owned(),
+                    request_id: Some(request_id.clone()),
+                });
+                request_id
+            })
+            .clone();
+        let Some(pty_rows) = client.take_message(|m| match m {
+            DaemonMessage::ScreenDump {
+                request_id: Some(answered),
+                rows,
+                ..
+            } if *answered == request_id => Some(*rows),
+            _ => None,
+        }) else {
+            return false;
+        };
+        pending = None;
+        matched = h.grid_text(pane).len();
+        matched == usize::from(pty_rows)
+    });
+    matched
+}
+
+/// A client relaunched at a new pane size gets its session's PTY resized to
+/// that pane, so `ConPTY` repaints the screen at the size the pane draws,
+/// instead of the pane showing paints positioned for the previous size.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_a_relaunch_into_a_shorter_pane_sizes_the_pty_to_it(
+    first_cx: &mut TestAppContext,
+    relaunch_cx: &mut TestAppContext,
+) {
+    let daemon = LiveDaemon::start("relaunch-size");
+    let (mut first, first_client) = Harness::open_live(first_cx, &daemon);
+    first.cx.simulate_resize(size(px(1600.0), px(1000.0)));
+    wait_connected(&mut first, &first_client, &daemon);
+    first_client.send(spawn_shell(daemon.dir()));
+    let pane = session_pane(&mut first, &first_client);
+    first.wait_for_row(&pane, "the shell's prompt", |row| {
+        row.trim_end().ends_with('>')
+    });
+    first.type_into(&pane, "echo before-relaunch\n");
+    first.wait_for_row(&pane, "the echoed marker", |row| {
+        row.trim() == "before-relaunch"
+    });
+    let session_id = first
+        .root(|root, _| root.pane_session(&pane))
+        .expect("the pane shows the session");
+    let first_rows = first.grid_text(&pane).len();
+
+    // The client quits, as a relaunch does: its window closes and every
+    // sender to its network thread drops, so it sends nothing more.
+    first.cx.update(|window, _| window.remove_window());
+    first.cx.run_until_parked();
+    drop(first);
+    drop(first_client);
+
+    // The same client again (its id file is shared), in a shorter window,
+    // sized before any pane attaches: nothing this client does claims.
+    let (mut relaunch, relaunch_client) = Harness::open_live(relaunch_cx, &daemon);
+    relaunch.cx.simulate_resize(size(px(1600.0), px(450.0)));
+    wait_connected(&mut relaunch, &relaunch_client, &daemon);
+    let relaunch_pane = session_pane(&mut relaunch, &relaunch_client);
+    relaunch.wait_for_row(&relaunch_pane, "the replayed marker", |row| {
+        row.trim() == "before-relaunch"
+    });
+    let pane_rows =
+        wait_pty_rows_match_pane(&mut relaunch, &relaunch_client, &session_id, &relaunch_pane);
+    assert!(
+        pane_rows < first_rows,
+        "the relaunched pane is shorter: {pane_rows} rows against {first_rows}"
+    );
+    relaunch.wait_for_row(&relaunch_pane, "the prompt line whole, repainted", |row| {
+        row.ends_with(">echo before-relaunch") && !row.starts_with(' ')
     });
 }

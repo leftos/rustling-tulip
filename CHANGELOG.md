@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Text typed in a chat's message box survives a reconnect to its host.
 - Chat question cards show the whole question, each answer's description and the question's header.
+- Panes reopened after quitting with sessions kept running, or moved to another tab, draw at their new size at once instead of garbled until a key is pressed.
 
 ### Changed
 

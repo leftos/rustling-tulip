@@ -347,10 +347,19 @@ pub struct SessionRecord {
     pub resumed_from: Vec<String>,
     /// The cols and rows last applied to this session's PTY. Until a client's
     /// `Resize` has sized this session it is `None`, and any `Resize` applies;
-    /// after that only a claimed one does, so a client without recent input
-    /// cannot take the size from the one typing. Runtime-only: every new or
-    /// rebuilt record starts `None`, and it is never mirrored into the sidecar.
+    /// after that a claimed one does, and an unclaimed one only from
+    /// [`Self::size_client`], so a client without recent input cannot take the
+    /// size from the one typing. Runtime-only: every new or rebuilt record
+    /// starts `None`, and it is never mirrored into the sidecar.
     pub applied_size: Option<(u16, u16)>,
+    /// The id of the client that owns the session's size: the one whose
+    /// `Resize` was last applied to the PTY, or whose claim last found the
+    /// session already at [`Self::applied_size`]. It moves only on one of
+    /// those two and is never cleared, so it lasts for the record's life,
+    /// also after that client disconnects. Runtime-only like `applied_size`.
+    /// A relaunched client keeps its id, so its unclaimed attach size
+    /// replaces the one it left behind.
+    pub size_client: Option<String>,
 }
 
 /// The agent a record names for a session that runs none: a plain shell, the
@@ -1712,6 +1721,7 @@ impl SessionRegistry {
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
             applied_size: None,
+            size_client: None,
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
@@ -1798,6 +1808,7 @@ impl SessionRegistry {
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
             applied_size: None,
+            size_client: None,
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
@@ -1861,6 +1872,7 @@ impl SessionRegistry {
             shell_label: meta.shell_label.clone(),
             agent_exit_announced: false,
             applied_size: None,
+            size_client: None,
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: meta.hook_agent.clone(),
             hook_options: meta.hook_options.clone(),
@@ -1952,6 +1964,7 @@ mod tests {
             shell_label: None,
             agent_exit_announced: false,
             applied_size: None,
+            size_client: None,
             work: crate::background_work::BackgroundWork::default(),
             hook_agent: None,
             hook_options: protocol::OptionValues::new(),

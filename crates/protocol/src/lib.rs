@@ -3105,7 +3105,8 @@ pub enum ClientMessage {
         /// last few seconds, or when this client just resized the pane (its
         /// window, a split divider, the sidebar, or its own font change):
         /// the daemon always applies a claimed size. An unclaimed one
-        /// applies only to a session no client has sized yet.
+        /// applies to a session no client has sized yet, or when it comes
+        /// from the client whose size the daemon last applied.
         #[serde(default)]
         claim: bool,
     },

@@ -187,7 +187,10 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                 // resize is a channel send, and the screen lock is a leaf
                 // that is never held while waiting on the record.
                 let mut guard = crate::sync::lock(&rec);
-                if claim || guard.applied_size.is_none() {
+                // The client that sized the session may resize it unclaimed:
+                // a relaunch keeps its id and attaches without a claim.
+                let from_size_client = guard.size_client.as_deref() == Some(ctx.client_id);
+                if claim || guard.applied_size.is_none() || from_size_client {
                     if guard.applied_size == Some((cols, rows)) {
                         // ConPTY answers every resize, an unchanged one
                         // included, with a full repaint of the screen.
@@ -197,6 +200,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                             rows,
                             "resize skipped: the session is already at this size"
                         );
+                        guard.size_client = Some(ctx.client_id.to_owned());
                     } else {
                         if let Some(pty) = &guard.pty {
                             pty.resize(cols, rows);
@@ -209,6 +213,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                         // the PTY once the spawn attaches it.
                         if guard.pty.is_some() {
                             guard.applied_size = Some((cols, rows));
+                            guard.size_client = Some(ctx.client_id.to_owned());
                         }
                     }
                 } else {
@@ -216,7 +221,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
                         session_id = %session_id,
                         cols,
                         rows,
-                        "resize ignored: unclaimed and the session is already sized"
+                        "resize ignored: unclaimed and the session is already sized by another client"
                     );
                 }
             }
@@ -1830,6 +1835,12 @@ mod tests {
 
     /// Dispatch `msg` against `hub` without expecting a reply.
     async fn dispatch_silently(hub: &Hub, msg: ClientMessage) {
+        dispatch_silently_as(hub, "c1", msg).await;
+    }
+
+    /// Dispatch `msg` against `hub` from the client `client_id` without
+    /// expecting a reply.
+    async fn dispatch_silently_as(hub: &Hub, client_id: &str, msg: ClientMessage) {
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
         let (file_tx, _file_rx) = mpsc::channel(1);
         let pty_lane: Arc<PtyLane> = Arc::default();
@@ -1840,7 +1851,7 @@ mod tests {
             file_tx: &file_tx,
             pty_lane: &pty_lane,
             fetches: &fetches,
-            client_id: "c1",
+            client_id,
             client_name: None,
             connection: 1,
             auth: &local,
@@ -1921,26 +1932,58 @@ mod tests {
         );
     }
 
+    /// A client relaunched at a new size keeps its id and attaches unclaimed;
+    /// the size it left behind is its own, so its new one replaces it.
     #[tokio::test]
-    async fn unclaimed_resize_is_ignored_once_a_client_has_sized_the_session() {
-        let (hub, _scratch) = hub_with_screen("unclaimed-resize");
+    async fn an_unclaimed_resize_from_the_client_that_sized_the_session_applies() {
+        let (hub, _scratch) = hub_with_screen("unclaimed-same-client");
         attach_test_pty(&hub);
         dispatch_silently(&hub, resize(100, 30, false)).await;
         dispatch_silently(&hub, resize(60, 20, false)).await;
         assert_eq!(
             screen_size(&hub),
-            (100, 30),
-            "a second unclaimed resize is ignored"
+            (60, 20),
+            "the sizing client's unclaimed resize applies"
         );
 
-        let (hub, _scratch) = hub_with_screen("unclaimed-after-claim");
+        let (hub, _scratch) = hub_with_screen("unclaimed-after-own-claim");
         attach_test_pty(&hub);
         dispatch_silently(&hub, resize(100, 30, true)).await;
         dispatch_silently(&hub, resize(60, 20, false)).await;
         assert_eq!(
             screen_size(&hub),
+            (60, 20),
+            "an unclaimed resize after the same client's claim applies"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unclaimed_resize_from_another_client_is_still_ignored() {
+        let (hub, _scratch) = hub_with_screen("unclaimed-other-client");
+        attach_test_pty(&hub);
+        dispatch_silently_as(&hub, "c1", resize(100, 30, false)).await;
+        dispatch_silently_as(&hub, "c2", resize(60, 20, false)).await;
+        assert_eq!(
+            screen_size(&hub),
             (100, 30),
-            "an unclaimed resize after a claimed one is ignored"
+            "another client's unclaimed resize is ignored"
+        );
+
+        let (hub, _scratch) = hub_with_screen("unclaimed-other-after-claim");
+        attach_test_pty(&hub);
+        dispatch_silently_as(&hub, "c1", resize(100, 30, true)).await;
+        dispatch_silently_as(&hub, "c2", resize(60, 20, false)).await;
+        assert_eq!(
+            screen_size(&hub),
+            (100, 30),
+            "another client's unclaimed resize after a claim is ignored"
+        );
+        dispatch_silently_as(&hub, "c2", resize(70, 22, true)).await;
+        dispatch_silently_as(&hub, "c1", resize(60, 20, false)).await;
+        assert_eq!(
+            screen_size(&hub),
+            (70, 22),
+            "once another client claims, the first one's unclaimed resize is ignored"
         );
     }
 
@@ -1995,6 +2038,19 @@ mod tests {
         assert!(
             resize_rx.try_recv().is_err(),
             "a claim at the applied size sends no second resize"
+        );
+        dispatch_silently(&hub, resize(77, 27, false)).await;
+        dispatch_silently_as(&hub, "c2", resize(77, 27, true)).await;
+        assert!(
+            resize_rx.try_recv().is_err(),
+            "neither the sizing client's unclaimed resize nor another client's claim \
+             at the applied size sends a resize"
+        );
+        dispatch_silently_as(&hub, "c2", resize(60, 20, false)).await;
+        assert_eq!(
+            resize_rx.try_recv().ok(),
+            Some((60, 20)),
+            "a skipped claim still makes its client the one that sized the session"
         );
         dispatch_silently(&hub, resize(90, 25, true)).await;
         assert_eq!(
