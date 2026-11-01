@@ -570,8 +570,7 @@ fn detached_container_shows_its_banner(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture);
     assert_eq!(
         DETACHED_BANNER,
-        "These sessions are still running, but their repo or workspace is no longer registered. \
-         Resume one from its row, or stop it from its header.",
+        "These sessions are still running, but their repo or workspace is no longer registered.",
         "the owner-ruled wording"
     );
     assert!(h.in_model("detached-banner"), "the bucket's banner");

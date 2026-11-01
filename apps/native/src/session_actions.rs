@@ -425,7 +425,7 @@ pub(crate) fn orphan_banner_text(session: &SessionSnapshot, agents: &[AgentDescr
     format!(
         "PTY stream lost across daemon restart. The underlying {runtime} process is still \
          running, but live input/output is not available. Use Stop to kill the recorded PID and \
-         clean up, then spawn a new session."
+         clean up."
     )
 }
 

@@ -69,7 +69,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   The client sends `ScanVscodeWorkspaces` once for each distinct DIR or SH folder on a connection, keyed by the folder's normalized path (case-folded on Windows): a folder first seen in a session list or update, or regrouped by a repo or workspace registry change, is scanned then, and the same folder is never rescanned. Answers for a folder are dropped on `Welcome` and while the connection overlay is up, so a reconnect scans again.
 
-  An expanded Detached container shows: `These sessions are still running, but their repo or workspace is no longer registered. Resume one from its row, or stop it from its header.` The toolbar's `⋯` menu gains `Resume all abandoned (N)` under a separator when N ≥ 2, sending `ResumeAllAbandoned`.
+  An expanded Detached container shows: `These sessions are still running, but their repo or workspace is no longer registered.` The toolbar's `⋯` menu gains `Resume all abandoned (N)` under a separator when N ≥ 2, sending `ResumeAllAbandoned`.
 
   While one of its leaves still runs, the banner also carries a two-click `Stop all` chip (`detached-stop-all`, hover `Stop every session still running in this container`): the first click arms it to `Confirm: stop all` (`Click again to stop every running session`), the second stops every leaf that still runs, and Esc disarms it.
 
@@ -553,11 +553,7 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 - **Session labels, chips and endings**: every label goes through `display_label`, with the full label in a tooltip. A session's terminal title names it once the agent's title glyph is stripped (the descriptor's title rules), and a title that is only the agent's placeholder falls through to the session label, then the runtime tag, then the id.
 
   The tooltip's "Terminal title:" line shows the stripped title and is left out when the title falls through. Member chips get a second pane-header row only for sessions with members. The orphan banner names the session's own runtime. A worktree-less session that exits on its own is discarded, except headless sessions (still kept on exit) and abandoned ones. The rename field keeps the native seed.
-- **Agent exited into its shell** (`notices.rs`, `notice_view.rs`, `branch_fate.rs`): on `DaemonMessage::AgentExited` the client raises an Info toast `{Label} exited. The pane is a shell now.` (the session agent's descriptor label, so `Claude exited. …` for Claude; `The agent exited. The pane is a shell now.` when the session has no agent or its descriptor is gone).
-
-  The toast has no detail, is timed by `TOAST_LIFETIME` (8 s, no countdown), is keyed `agent-exit-<session id>` so a second exit for the session updates it in place, and has one non-destructive button `Close session`.
-
-  An exit for a session the client does not list raises nothing. `Close session` sends `StopSession { cleanup: [] }` unless the session is already `Stopped` or `Error`, then `DiscardSession { cleanup: [] }` (worktrees stay on disk), and the toast goes; ignoring the toast sends nothing and leaves the shell.
+- **Agent exited into its shell**: `DaemonMessage::AgentExited` raises no toast and sends nothing; the pane is a shell now, which the screen already shows. The session is closed from the pane header's ✕ → Discard or Stop, like any other.
 - **Runtime tag**: the sidebar leaf's tag and the pane header's runtime chip share `runtime_label`: the session's `program_name` when the daemon reports a non-empty one, else the descriptor's `tag`, else the agent id. The label is the tooltip ("Running pwsh"); what shows is an icon (`runtime_icon.rs`): 12 px in the leaf, centred in a 20 px square chip in the header.
 
   While the agent is up (the label is the descriptor's own tag) the icon is the descriptor's `icon`, SVG markup the plugin ships and the client draws in its own colours, or the generic `›_` glyph for a descriptor without one. Since a remote host's daemon sends that markup, the client draws it only when it passes `runtime_icon::icon_is_safe` (at most 8192 bytes, one root `<svg>`, no `<image>`, `<feImage>`, `<foreignObject>` or `<script>` in any case or prefix, every `href` and `url()` exactly `#` and an id of letters, digits, `_`, `-`, `.` or `:`, no `@import`); a refused icon wears the generic glyph and logs one warn per agent. The plugin conformance check (`agent_api::conformance`) refuses the same icons, so the two rule sets change together. Otherwise the label picks a shell family's brand icon, matched without case or `.exe`: `pwsh` blue, `powershell` navy, `cmd` a dark box, and `bash`, `zsh`, `sh` and `wsl` one green `$` square; any other program gets the generic glyph in the theme's `subtle`. These colours are fixed and do not follow the theme.
@@ -629,7 +625,7 @@ A pane showing an interactive agent session that offers a chat has three views: 
 - **Composer**: a multi-line field under the chat ("Send a message (Ctrl+Enter)"); Ctrl+Enter sends, during a turn too, where the message waits in the CLI's own queue. While a card is up and the field holds text, the card offers the ride-on answers "Yes, and tell <agent> this" and "No, and tell <agent> this", and the text goes with the answer. A refused send gives its text back to the field, before anything typed since, with the daemon's reason under the composer. The field's text outlives the chat view: when the session's last chat pane leaves it (switched to Terminal or Summary, closed, its tab hidden), the text is kept in memory and comes back, caret at the end, when the chat loads again; a reconnect to This PC or to a remote host keeps it the same way, the text coming back once the chat reloads.
 
   A note replaces the field's ability to send while the screen cannot take a message: "Not connected", "Sending…", "The prompt box has a draft. Send or clear it in the terminal first.", "<overlay> is open in the terminal. Close it there to send." or "Can't read the prompt box right now.".
-- **Notices**: the daemon's `SessionNotice` raises an info toast: "<agent> is waiting in the main conversation." when the daemon did not return the terminal to main because a stash was already held and the box holds a draft, or "Your draft for <agent> is back in the main conversation: that agent has finished.".
+- **Notices**: the daemon's `SessionNotice` raises an info toast: "<agent> is waiting in the main conversation." when the daemon did not return the terminal to main because a stash was already held and the box holds a draft, or "Your draft for <agent> is back in the main conversation.".
 - **Running-work strip**: a row over the composer of the chat and summary views while the session has subagents, background shells or a wakeup, folded from `ChatWork` (`RunningWork` in `chat.rs`, drawn by `work_strip.rs`). Its present parts are joined with " · ": "1 subagent" or "N subagents", "1 background shell (<command cut to 24 characters>, <age>)" or "N background shells (oldest <age>)", and "wakeup in <time>", or "wakeup due" once the time has passed.
 
   A segment's tooltip lists its items: a shell's full command, "<agent type>: <description>" for a subagent, or "Counted from the screen; no details reported yet" for an item only the screen counted. The strip repaints every second while a figure reads in seconds, when a countdown drops under a minute, and every 30 s otherwise. Nothing in it responds to a click yet.
@@ -793,7 +789,7 @@ A text file a terminal path link's Ctrl+Shift+click, a plain click on a Markdown
 - A reference resolves against the page's folder and must stay inside the repo root; `data:`, `http(s):`, `//` and site-absolute `/x` references are skipped. A stylesheet the page links is read one level for its own `url()` and `@import` (`stylesheet_media`).
 - At most 4 media fetches are in flight. Caps: 200 references per page, 25 MiB per file, 256 MiB per batch. A file over its cap is cancelled with `CancelFetch` and counts as skipped; once the batch cap is hit, the rest and any a later stylesheet names are skipped.
 - A media file another page's batch is already fetching counts as done; a file already on disk is fetched again. Clicking the page again while its media fetch runs toasts `Already fetching <page>`.
-- One toast covers the batch: `Fetching <page> and its media (n of m)`, replaced in place by Info `Fetched <page> and its media`, or by one Warning `Some of <page>'s media didn't load` ("{n} of {total} files failed or were skipped."). A media file never gets its own toast.
+- One toast covers the batch: `Fetching <page> and its media (n of m)`, dismissed when the page opens, or replaced in place by one Warning `Some of <page>'s media didn't load` ("{n} of {total} files failed or were skipped."). A media file never gets its own toast.
 - A lost connection mid-batch deletes the media part files, does not open the page and shows one Error `Couldn't fetch <page>'s media` ("The connection was lost."). A page saved after its connection closed opens without its media, with that message as a Warning.
 
 ## Window
@@ -807,6 +803,12 @@ An entry holds a whole-tab snapshot of every tab it touched, and Undo sends `Res
 Moving the only pane via "Move this pane to a new tab", or via the Move-panes dialog with every pane ticked, marks the source tab closing the same way. A refused `MovePane` or `ExtractToNewTab` clears the mark, so Undo sends `RestoreTabSnapshot` and spawns aimed at the tab go into it. A pane whose session has since gone comes back empty.
 
 The shelf clears when the connection drops or a new `Welcome` arrives.
+
+## Copy and toasts
+
+A toast or a line of copy says only what the screen does not already show. It does not narrate a state change the user caused or can see: a pane that became a shell, a page that opened, a dialog that closed.
+
+A toast is for something that happened out of view, that failed, or that needs an action the user cannot otherwise reach. An error or a refusal always gets one.
 
 ## Windows and pop-outs
 

@@ -293,46 +293,28 @@ fn each_hosts_resume_report_keeps_its_own_toast(cx: &mut TestAppContext) {
     );
 }
 
-/// How many agent-exit toasts show.
-fn exit_toasts(h: &mut Harness<'_>) -> usize {
-    toast_titles(h)
-        .iter()
-        .filter(|title| title.contains("exited. The pane is a shell now."))
-        .count()
-}
-
 #[gpui::test]
-fn an_agent_exit_reads_the_session_on_its_own_host(cx: &mut TestAppContext) {
+fn an_agent_exit_on_either_host_raises_no_toast(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
     let mut host = h.host(&remote());
     host.connect();
     host.send(DaemonMessage::Sessions {
-        sessions: vec![session("s2").build()],
-    });
-
-    h.host(&remote()).send(DaemonMessage::AgentExited {
-        session_id: "s1".to_owned(),
-    });
-    assert_eq!(
-        exit_toasts(&mut h),
-        0,
-        "the remote host does not list s1, so its exit raises nothing"
-    );
-
-    h.host(&remote()).send(DaemonMessage::Sessions {
         sessions: vec![session("s1").build()],
     });
+    let before = toast_titles(&mut h);
+
     h.host(&remote()).send(DaemonMessage::AgentExited {
         session_id: "s1".to_owned(),
     });
     h.send(DaemonMessage::AgentExited {
         session_id: "s1".to_owned(),
     });
+
     assert_eq!(
-        exit_toasts(&mut h),
-        2,
-        "each host's exit of the shared id keeps its own toast"
+        toast_titles(&mut h),
+        before,
+        "each host's pane shows its shell, no toast says so"
     );
 }
 

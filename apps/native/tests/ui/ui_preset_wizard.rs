@@ -1467,7 +1467,7 @@ fn completed_job_replaces_the_sticky_toast(cx: &mut TestAppContext) {
     assert_eq!(shown.len(), 1);
     assert_eq!(shown[0].id, sticky, "the same toast, replaced in place");
     assert_eq!(shown[0].title, "Launched Triage");
-    assert_eq!(shown[0].detail.as_deref(), Some("3 sessions in 2 tabs"));
+    assert_eq!(shown[0].detail, None, "the tabs it filled show the count");
     assert!(!shown[0].sticky, "it goes by itself now");
     let key = shown[0].key.clone().unwrap_or_default();
     assert_eq!(h.root(|root, _| root.preset_launch_progress(&key)), None);

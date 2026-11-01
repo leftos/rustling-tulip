@@ -68,8 +68,8 @@ pub const UNBOUND_HOVER: &str = "Sessions alive but not referenced by any tab. \
      Click the unbound pill on a session to open it in a new tab.";
 
 /// What an expanded Detached container says above its sessions.
-pub const DETACHED_BANNER: &str = "These sessions are still running, but their repo or workspace \
-     is no longer registered. Resume one from its row, or stop it from its header.";
+pub const DETACHED_BANNER: &str =
+    "These sessions are still running, but their repo or workspace is no longer registered.";
 
 /// How the sessions panel groups its sessions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

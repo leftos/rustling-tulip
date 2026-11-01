@@ -1112,7 +1112,8 @@ fn the_progress_toast_does_not_outlive_the_batch(cx: &mut TestAppContext) {
     );
     assert_eq!(
         titled_like(&mut h, "Fetched"),
-        [("Fetched one.html and its media".to_owned(), None)]
+        [],
+        "the page that opened says it fetched"
     );
     assert_eq!(titled_like(&mut h, "Some of"), [summary("two.html", 1, 1)]);
 }

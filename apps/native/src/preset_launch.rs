@@ -692,31 +692,8 @@ impl LaunchJob {
                 self.progress_detail(),
                 true,
             ),
-            JobState::Completed => {
-                let sessions = counted(self.total, "session");
-                let detail = if self.grouped {
-                    format!("{sessions} in {}", counted(self.tabs_created as u64, "tab"))
-                } else {
-                    sessions
-                };
-                (
-                    ToastKind::Info,
-                    format!("Launched {preset}"),
-                    Some(detail),
-                    false,
-                )
-            }
-            JobState::Cancelled => (
-                ToastKind::Info,
-                format!("Cancelled {preset}"),
-                Some(format!(
-                    "after {} of {} {}",
-                    self.launched,
-                    self.total,
-                    noun_for(self.total, "session")
-                )),
-                false,
-            ),
+            JobState::Completed => (ToastKind::Info, format!("Launched {preset}"), None, false),
+            JobState::Cancelled => (ToastKind::Info, format!("Cancelled {preset}"), None, false),
             JobState::Failed(reason) => (
                 ToastKind::Warning,
                 format!("Preset launch failed: {preset}"),
@@ -1222,12 +1199,7 @@ mod tests {
         let spec = launches.on_message(&all_live, &updated(done));
         assert_eq!(
             spec.as_ref().map(texts),
-            Some((
-                ToastKind::Info,
-                "Launched Sweep",
-                Some("6 sessions in 2 tabs"),
-                false
-            ))
+            Some((ToastKind::Info, "Launched Sweep", None, false))
         );
         assert_eq!(launches.progress("preset:j1"), None, "no bar once done");
         assert_eq!(
@@ -1257,12 +1229,13 @@ mod tests {
         assert_eq!(
             flat.on_message(&all_live, &updated(one))
                 .and_then(|spec| spec.detail),
-            Some("1 session".to_owned())
+            None,
+            "the end names no count"
         );
     }
 
     #[test]
-    fn a_cancelled_job_says_how_far_it_got() {
+    fn a_cancelled_job_names_its_preset() {
         let mut launches = PresetLaunches::default();
         launches.start(
             "j1".to_owned(),
@@ -1278,12 +1251,7 @@ mod tests {
                 .on_message(&all_live, &updated(cancelled))
                 .as_ref()
                 .map(texts),
-            Some((
-                ToastKind::Info,
-                "Cancelled Sweep",
-                Some("after 2 of 6 sessions"),
-                false
-            ))
+            Some((ToastKind::Info, "Cancelled Sweep", None, false))
         );
     }
 

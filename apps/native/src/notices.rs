@@ -7,8 +7,6 @@ use std::time::{Duration, Instant};
 
 use protocol::CheckoutStrategy;
 
-use crate::target::HostKey;
-
 /// How long a toast stays before it goes by itself.
 pub const TOAST_LIFETIME: Duration = Duration::from_secs(8);
 /// The most toasts on screen at once; a toast arriving while this many are
@@ -95,60 +93,6 @@ pub fn resume_report_toast(resumed: u32, left: u32) -> ToastSpec {
     }
 }
 
-/// The key prefix of the toast raised when a session's agent exits.
-const AGENT_EXIT_PREFIX: &str = "agent-exit-";
-
-/// The toast button that closes the session whose agent exited.
-pub const CLOSE_SESSION: ToastAction = ToastAction {
-    id: "close-session",
-    label: "Close session",
-    danger: false,
-};
-
-/// The toast for [`protocol::DaemonMessage::AgentExited`]: the session's
-/// agent ended and left its shell in the pane. `label` is the agent's
-/// descriptor label; with none the toast says "The agent". Closing the
-/// session is a click away; letting the toast go keeps the shell.
-#[must_use]
-pub fn agent_exited_toast(host: &HostKey, session_id: &str, label: Option<&str>) -> ToastSpec {
-    let title = match label {
-        Some(label) => format!("{label} exited. The pane is a shell now."),
-        None => "The agent exited. The pane is a shell now.".to_owned(),
-    };
-    ToastSpec {
-        kind: ToastKind::Info,
-        title,
-        detail: None,
-        key: Some(agent_exit_key(host, session_id)),
-        sticky: false,
-        actions: vec![CLOSE_SESSION],
-    }
-}
-
-/// The key of `host`'s session `session_id`'s agent-exit toast: the prefix
-/// and the id, then `@` and the host's key for a remote host's session, so
-/// each host's exit of a shared id keeps its own toast. A session id holds
-/// no `@`.
-fn agent_exit_key(host: &HostKey, session_id: &str) -> String {
-    match host {
-        HostKey::Local => format!("{AGENT_EXIT_PREFIX}{session_id}"),
-        HostKey::Remote(name) => format!("{AGENT_EXIT_PREFIX}{session_id}@{name}"),
-    }
-}
-
-/// The host and session id of a key [`agent_exited_toast`] raised; `None`
-/// for any other toast's key, and for a key with no id or no host name.
-#[must_use]
-pub fn agent_exit_session_of(key: &str) -> Option<(HostKey, &str)> {
-    let rest = key.strip_prefix(AGENT_EXIT_PREFIX)?;
-    let (id, host) = match rest.split_once('@') {
-        Some((id, name)) if !name.is_empty() => (id, HostKey::Remote(name.to_owned())),
-        Some(_) => return None,
-        None => (rest, HostKey::Local),
-    };
-    (!id.is_empty()).then_some((host, id))
-}
-
 /// The toast for [`protocol::DaemonMessage::SessionNotice`]: what the
 /// daemon did, or would not do, to session `session_id`'s terminal. `label`
 /// is the session agent's descriptor label; with none the toast says "The
@@ -164,9 +108,9 @@ pub fn session_notice_toast(
             "{} is waiting in the main conversation.",
             label.unwrap_or("The agent")
         ),
-        protocol::SessionNoticeKind::DraftReturnedToMain { agent } => format!(
-            "Your draft for {agent} is back in the main conversation: that agent has finished."
-        ),
+        protocol::SessionNoticeKind::DraftReturnedToMain { agent } => {
+            format!("Your draft for {agent} is back in the main conversation.")
+        }
         protocol::SessionNoticeKind::Unknown => return None,
     };
     Some(ToastSpec {
@@ -752,39 +696,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_exited_toast_reads_claude_exited_with_a_close_action() {
-        let toast = agent_exited_toast(&HostKey::Local, "s1", Some("Claude"));
-        assert_eq!(toast.kind, ToastKind::Info);
-        assert_eq!(toast.title, "Claude exited. The pane is a shell now.");
-        assert_eq!(toast.detail, None);
-        assert_eq!(
-            toast.key.as_deref(),
-            Some("agent-exit-s1"),
-            "a second exit for the session updates this toast in place"
-        );
-        assert!(!toast.sticky, "it goes by itself");
-        assert_eq!(toast.actions, [CLOSE_SESSION], "one way to close it");
-    }
-
-    #[test]
-    fn agent_exited_toast_names_the_agent() {
-        let toast = agent_exited_toast(&HostKey::Local, "s1", Some("Test agent"));
-        assert_eq!(toast.title, "Test agent exited. The pane is a shell now.");
-        assert_eq!(
-            toast.key.as_deref(),
-            Some("agent-exit-s1"),
-            "the key is still the session's"
-        );
-        assert_eq!(toast.actions, [CLOSE_SESSION]);
-    }
-
-    #[test]
-    fn agent_exited_toast_without_a_label_says_the_agent() {
-        let toast = agent_exited_toast(&HostKey::Local, "s1", None);
-        assert_eq!(toast.title, "The agent exited. The pane is a shell now.");
-    }
-
-    #[test]
     fn session_notice_toast_titles() {
         use protocol::SessionNoticeKind;
         let waiting =
@@ -813,38 +724,12 @@ mod tests {
             )
             .expect("a toast")
             .title,
-            "Your draft for Sleeper A is back in the main conversation: that agent has finished."
+            "Your draft for Sleeper A is back in the main conversation."
         );
         assert_eq!(
             session_notice_toast("s1", Some("Test agent"), &SessionNoticeKind::Unknown),
             None
         );
-    }
-
-    #[test]
-    fn agent_exit_session_of_parses_only_its_own_keys() {
-        assert_eq!(
-            agent_exit_session_of("agent-exit-s1"),
-            Some((HostKey::Local, "s1"))
-        );
-        let remote = HostKey::Remote("ssh:me@box".to_owned());
-        assert_eq!(
-            agent_exit_session_of(&agent_exit_key(&remote, "s1")),
-            Some((remote, "s1")),
-            "a remote host's key, whose name may hold an @, keeps its host"
-        );
-        assert_eq!(
-            agent_exit_session_of("agent-exit-s1@"),
-            None,
-            "no host name"
-        );
-        assert_eq!(agent_exit_session_of("resume-report"), None);
-        assert_eq!(
-            agent_exit_session_of("preset:job1"),
-            None,
-            "a launch job's key"
-        );
-        assert_eq!(agent_exit_session_of("agent-exit-"), None, "no session id");
     }
 
     #[test]
@@ -927,11 +812,6 @@ mod tests {
     fn spawning_key_is_per_request() {
         assert_eq!(spawning_key("r1"), "spawning:r1");
         assert_ne!(spawning_key("r1"), spawning_key("r2"));
-        assert_eq!(
-            agent_exit_session_of(&spawning_key("r1")),
-            None,
-            "not an agent-exit key"
-        );
 
         let now = Instant::now();
         let mut notices = Notices::default();

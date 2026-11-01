@@ -104,7 +104,7 @@ Run it by hand before a release that touches remote access (the daemon's tailnet
 
 - [ ] On the device, connected to the host, Ctrl+click a path such as `src/main.rs:42` in a terminal of a session in a registered repo. **Expect:** the toast `Fetching main.rs from <host>`, then the file opens at line 42, saved under `%LOCALAPPDATA%\leftos\rustling-tulip\data\remote-files\<host>\<repo-name>\src\main.rs`.
 - [ ] Open the sidebar's ⋯ menu → `Fetch file…`. **Expect:** the `Fetch file` dialog with the hint `Relative to <repo>. Add :line to open at a line.` and the placeholder `src/main.rs:42`; a fetch shows `Waiting for <host>…`, then its progress, and opens the file.
-- [ ] Fetch an `.html` page in that repo whose images and stylesheet sit in relative folders. **Expect:** `Fetching <page> and its media (n of m)`, then `Fetched <page> and its media`, and the page opens with its images and styles, each file saved at its repo-relative place under the same folder.
+- [ ] Fetch an `.html` page in that repo whose images and stylesheet sit in relative folders. **Expect:** `Fetching <page> and its media (n of m)`, which goes when the page opens, and the page opens with its images and styles, each file saved at its repo-relative place under the same folder.
 - [ ] Fetch a page that names a missing image. **Expect:** `Some of <page>'s media didn't load`, and the page still opens.
 - [ ] Start a large page fetch and turn the host's switch off mid-fetch. **Expect:** `Couldn't fetch <page>'s media` with `The connection was lost.`, the page does not open, and no `.fetch-*.part` file is left beside the targets.
 

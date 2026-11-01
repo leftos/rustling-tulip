@@ -23,7 +23,6 @@ use rustling_tulip_native::RootView;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 const SPAWNING_TITLE: &str = "Spawning session…";
-const SHELL_DETAIL: &str = "Shell startup may take a few seconds.";
 const PATH_HINT: &str = "Enter a full path, like C:\\Users\\you";
 
 /// `s1` alone in pane `p1` of tab `t1`, and no repo at all.
@@ -555,12 +554,9 @@ fn shell_reply_is_placed_in_the_current_tab_and_focused(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn shell_spawn_toast_says_shell_startup(cx: &mut TestAppContext) {
+fn shell_spawn_toast_says_only_spawning(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
     h.click_on("sidebar-add-shell");
-    assert_eq!(
-        toasts(&mut h),
-        [(SPAWNING_TITLE.to_owned(), Some(SHELL_DETAIL.to_owned()))]
-    );
+    assert_eq!(toasts(&mut h), [(SPAWNING_TITLE.to_owned(), None)]);
 }

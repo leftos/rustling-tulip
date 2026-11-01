@@ -331,8 +331,6 @@ const APPEARANCE_FAILED_TITLE: &str = "Couldn't change the appearance";
 /// The toast a launch-last replay of a trusted config raises before the
 /// spawn dialog opens.
 const TRUSTED_LAUNCH_TITLE: &str = "Review trusted launch";
-const TRUSTED_LAUNCH_DETAIL: &str =
-    "Launch last uses elevated authority, so the full spawn dialog opens before replay.";
 /// The notice a trusted launch shows when its dialog cannot open.
 const TRUSTED_LAUNCH_FAILED_TITLE: &str = "Couldn't review the trusted launch";
 /// The toast a launch-last branch wait raises when the daemon stays silent.
@@ -3050,12 +3048,7 @@ impl RootView {
                 window,
                 cx,
             ) {
-                self.push_toast(
-                    ToastKind::Warning,
-                    TRUSTED_LAUNCH_TITLE,
-                    Some(TRUSTED_LAUNCH_DETAIL.to_owned()),
-                    cx,
-                );
+                self.push_toast(ToastKind::Warning, TRUSTED_LAUNCH_TITLE, None, cx);
             }
             return;
         }
@@ -4319,46 +4312,15 @@ impl RootView {
         true
     }
 
-    /// Shows a session's agent exit as one toast, keyed by the host and the
-    /// session so a second exit updates it in place; an exit for a session
-    /// its host does not list raises nothing. Returns whether `msg` was that
-    /// notice.
-    fn on_agent_exited(
-        &mut self,
-        host: &HostKey,
-        msg: &DaemonMessage,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let DaemonMessage::AgentExited { session_id } = msg else {
-            return false;
-        };
-        let Some(session) = self.sidebar.session_on(host, session_id) else {
-            return true;
-        };
-        let label = session
-            .agent
-            .as_ref()
-            .and_then(|id| crate::agent_options::descriptor_for(self.sidebar.agents(host), id))
-            .map(|descriptor| descriptor.label.clone());
-        self.push_toast_spec(
-            notices::agent_exited_toast(host, session_id, label.as_deref()),
-            cx,
-        );
-        true
-    }
-
     /// Shows the daemon's notices that raise only a toast: the start-up
-    /// resume, an agent's exit and a session notice. Returns whether `msg`
-    /// was one.
+    /// resume and a session notice. Returns whether `msg` was one.
     fn on_notice_message(
         &mut self,
         host: &HostKey,
         msg: &DaemonMessage,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.on_resume_report(host, msg, cx)
-            || self.on_agent_exited(host, msg, cx)
-            || self.on_session_notice(msg, cx)
+        self.on_resume_report(host, msg, cx) || self.on_session_notice(msg, cx)
     }
 
     /// Shows a notice about a session's terminal as one toast, keyed by the
@@ -4383,20 +4345,6 @@ impl RootView {
             self.push_toast_spec(spec, cx);
         }
         true
-    }
-
-    /// The Close session button of an agent-exit toast: stops and discards
-    /// the session, leaving its worktrees on disk; a session this client no
-    /// longer lists sends nothing.
-    fn close_session_after_agent_exit(&mut self, host: &HostKey, session_id: &str) {
-        let messages = self
-            .sidebar
-            .session_on(host, session_id)
-            .map(branch_fate::close_after_agent_exit)
-            .unwrap_or_default();
-        for msg in messages {
-            self.send_to(host, msg);
-        }
     }
 
     /// A daemon `Error`: the launch-last wait it answers ends here, so the

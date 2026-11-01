@@ -696,8 +696,7 @@ fn orphan_pane_shows_banner_naming_runtime(cx: &mut TestAppContext) {
         notice_of(&mut h, "p1"),
         [
             "PTY stream lost across daemon restart. The underlying pwsh process is still running, \
-             but live input/output is not available. Use Stop to kill the recorded PID and clean up, \
-             then spawn a new session."
+             but live input/output is not available. Use Stop to kill the recorded PID and clean up."
         ]
     );
     assert!(!h.in_model("abandoned-p1"), "an orphan is not abandoned");

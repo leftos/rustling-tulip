@@ -338,14 +338,7 @@ impl RootView {
                 cx,
             );
         } else {
-            self.push_page_toast(
-                page_id,
-                page,
-                ToastKind::Info,
-                format!("Fetched {} and its media", page.file_name()),
-                None,
-                cx,
-            );
+            self.dismiss_toast_key(&fetching_toast_key(page_id, page.group()), cx);
         }
         self.open_fetched(batch.saved().to_path_buf(), page.request(), window, cx);
     }

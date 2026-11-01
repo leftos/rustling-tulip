@@ -506,14 +506,14 @@ impl RootView {
             (Ok(JobOutcome::AskFirst(path)), _) => {
                 self.ask_to_run_from(path, route.origin, window, cx);
             }
-            (Ok(JobOutcome::Opened), OpenJob::DefaultApp { path, .. })
+            (Ok(JobOutcome::Opened), OpenJob::DefaultApp { .. })
                 if route.then == Then::SayVsCodeMissing =>
             {
                 self.push_toast_spec(
                     ToastSpec {
                         kind: ToastKind::Warning,
                         title: "VS Code not found".to_owned(),
-                        detail: Some(format!("Opened {} in its default app.", file_name(&path))),
+                        detail: None,
                         key: None,
                         sticky: false,
                         actions: Vec::new(),
@@ -658,12 +658,4 @@ impl RootView {
         );
         Some(backdrop("run-confirm-dialog", panel, &theme(cx)))
     }
-}
-
-/// `path`'s file name, or the whole path when it has none.
-fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || path.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
 }

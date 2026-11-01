@@ -19,9 +19,7 @@ use rustling_tulip_native::ScKey;
 use rustling_tulip_native::connection_picker::PeerSource;
 use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
-use rustling_tulip_native::{
-    Connection, HeaderChipKind, NetCommand, NetEvent, toast_action_selector,
-};
+use rustling_tulip_native::{Connection, HeaderChipKind, NetCommand, NetEvent};
 use support::{
     Fixture, Forget, Harness, PROTOCOL, Rehost, TestDir, facts, facts_message, forgets,
     history_item, pane, rehosts, remote_in_pane, remote_lists, remote_pane, repo, saved_remote,
@@ -177,32 +175,6 @@ fn one_hosts_repos_list_leaves_the_other_hosts_alone(cx: &mut TestAppContext) {
         .send(DaemonMessage::Repos { repos: Vec::new() });
 
     assert_eq!(keys(&mut h), ["repo:r1"], "This PC's repo stays");
-}
-
-#[gpui::test]
-fn a_session_message_routes_to_the_host_that_owns_the_session(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = two_hosts(cx, &dir, vec![session("b1").in_repo("gone").build()]);
-    h.host(&remote()).send(DaemonMessage::AgentExited {
-        session_id: "b1".to_owned(),
-    });
-    let id = h.root(|root, _| root.toasts()[0].id);
-
-    h.click_on(&toast_action_selector(id, "close-session"));
-
-    let remote_sent = h.host(&remote()).sent();
-    assert!(
-        matches!(remote_sent.as_slice(), [
-            ClientMessage::StopSession { session_id: stopped, .. },
-            ClientMessage::DiscardSession { session_id: discarded, .. },
-        ] if stopped == "b1" && discarded == "b1"),
-        "the remote session stops on its own host's connection: {remote_sent:?}"
-    );
-    let local_sent = h.sent();
-    assert!(
-        local_sent.is_empty(),
-        "nothing goes to This PC: {local_sent:?}"
-    );
 }
 
 #[gpui::test]

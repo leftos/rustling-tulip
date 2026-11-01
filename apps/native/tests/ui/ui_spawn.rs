@@ -21,10 +21,7 @@ use protocol::{
 use rustling_tulip_native::{OpenIn, TOAST_LIFETIME, ToastKind, ToastSpec};
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
-const SPAWNING: (&str, Option<&str>) = (
-    "Spawning session…",
-    Some("Worktree creation may take a few seconds."),
-);
+const SPAWNING: (&str, Option<&str>) = ("Spawning session…", None);
 
 /// A claude spawn on branch `feature` of `r1`, in a worktree or in place.
 fn request(use_worktree: bool) -> SpawnRequest {

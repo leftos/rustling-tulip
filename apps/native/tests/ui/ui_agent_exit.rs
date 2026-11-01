@@ -1,12 +1,10 @@
-//! Agent-exit specs: a session whose agent ends keeps its pane as a shell,
-//! the client offers to close it in a timed toast, and the leaf says which
-//! program the pane runs.
+//! Agent-exit specs: a session whose agent ends keeps its pane as a shell
+//! with no toast, and the leaf says which program the pane runs.
 
 use crate::support;
 
 use gpui::TestAppContext;
-use protocol::{ClientMessage, DaemonMessage, SessionNoticeKind};
-use rustling_tulip_native::toast_action_selector;
+use protocol::{DaemonMessage, SessionNoticeKind};
 use support::{Fixture, Harness, TestDir, session};
 
 /// Every toast's title and detail, oldest first.
@@ -34,16 +32,15 @@ fn exited(h: &mut Harness<'_>, id: &str) {
 }
 
 #[gpui::test]
-fn agent_exited_raises_the_shell_toast(cx: &mut TestAppContext) {
+fn agent_exited_raises_no_toast(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
 
     exited(&mut h, "s1");
 
-    assert_eq!(
-        toasts(&mut h),
-        [("Claude exited. The pane is a shell now.".to_owned(), None)],
-        "one toast says the pane is a shell"
+    assert!(
+        toasts(&mut h).is_empty(),
+        "the pane shows the shell, no toast says so"
     );
 }
 
@@ -65,27 +62,6 @@ fn a_session_notice_raises_its_toast(cx: &mut TestAppContext) {
         )],
         "one toast names the agent that waits"
     );
-}
-
-#[gpui::test]
-fn close_session_stops_and_discards_the_session(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = opened(cx, &dir);
-    exited(&mut h, "s1");
-    let id = h.root(|root, _| root.toasts()[0].id);
-
-    h.click_on(&toast_action_selector(id, "close-session"));
-
-    let sent = h.sent();
-    assert!(
-        matches!(sent.as_slice(), [
-            ClientMessage::StopSession { session_id: stopped, cleanup: stop_cleanup },
-            ClientMessage::DiscardSession { session_id: discarded, cleanup },
-        ] if stopped == "s1" && stop_cleanup.is_empty()
-            && discarded == "s1" && cleanup.is_empty()),
-        "the session stops then goes, and its worktrees stay on disk: {sent:?}"
-    );
-    assert!(toasts(&mut h).is_empty(), "the toast goes with the press");
 }
 
 #[gpui::test]

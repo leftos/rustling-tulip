@@ -7,12 +7,12 @@ use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke,
     SharedString, Stateful, Window, WindowId, div, point, prelude::*, px, relative,
 };
-use protocol::{ClientMessage, SpawnRequest, SpawnTarget};
+use protocol::SpawnRequest;
 
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::notices::{
-    ActionFailedNotice, CLOSE_SESSION, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast,
-    ToastKind, ToastSpec, agent_exit_session_of, spawning_key, toast_action_selector,
+    ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind, ToastSpec,
+    spawning_key, toast_action_selector,
 };
 use crate::preset_launch::job_id_of;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
@@ -31,8 +31,6 @@ const TOAST_RADIUS: f32 = 10.0;
 /// The side of a toast's and an undo entry's square close button.
 pub(crate) const CLOSE_SIZE: f32 = 28.0;
 const SPAWNING_TITLE: &str = "Spawning session…";
-const SPAWNING_DETAIL: &str = "Worktree creation may take a few seconds.";
-const SHELL_SPAWNING_DETAIL: &str = "Shell startup may take a few seconds.";
 const DAEMON_ERROR_TITLE: &str = "Daemon error";
 const OFFLINE_TITLE: &str = "Couldn't start the session";
 
@@ -61,7 +59,6 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> String {
         let request_id = crate::new_request_id();
-        let detail = spawning_detail(&request);
         let msg = self
             .spawns
             .start(host.clone(), request, request_id.clone(), open_in);
@@ -71,7 +68,7 @@ impl RootView {
             return request_id;
         }
         self.send_to(host, msg);
-        self.push_spawning_toast(detail, &request_id, cx);
+        self.push_spawning_toast(&request_id, cx);
         request_id
     }
 
@@ -170,11 +167,11 @@ impl RootView {
 
     /// The "Spawning session…" toast of spawn `request_id`, keyed by it so a
     /// resend updates it in place and the daemon's answer clears it.
-    fn push_spawning_toast(&mut self, detail: &str, request_id: &str, cx: &mut Context<Self>) {
+    fn push_spawning_toast(&mut self, request_id: &str, cx: &mut Context<Self>) {
         let spec = ToastSpec {
             kind: ToastKind::Info,
             title: SPAWNING_TITLE.to_owned(),
-            detail: Some(detail.to_owned()),
+            detail: None,
             key: Some(spawning_key(request_id)),
             sticky: false,
             actions: Vec::new(),
@@ -184,7 +181,12 @@ impl RootView {
 
     /// The daemon answered spawn `request_id`: its toast goes.
     fn clear_spawning_toast(&mut self, request_id: &str, cx: &mut Context<Self>) {
-        if self.notices.dismiss_key(&spawning_key(request_id)) {
+        self.dismiss_toast_key(&spawning_key(request_id), cx);
+    }
+
+    /// The toast keyed `key` goes, if one shows.
+    pub(crate) fn dismiss_toast_key(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.notices.dismiss_key(key) {
             self.forget_closed_jobs();
             self.schedule_toast_expiry(cx);
             cx.notify();
@@ -241,8 +243,7 @@ impl RootView {
             .retain_shown(|key| toasts.iter().any(|toast| toast.key.as_deref() == Some(key)));
     }
 
-    /// Button `action` on toast `id`: an agent-exit toast's closes its
-    /// session, a preset job's goes to its registry.
+    /// Button `action` on toast `id`: a preset job's goes to its registry.
     fn press_toast_action(
         &mut self,
         id: u64,
@@ -259,13 +260,6 @@ impl RootView {
         let Some(key) = key else {
             return;
         };
-        if let Some((host, session_id)) = agent_exit_session_of(&key) {
-            if action == CLOSE_SESSION.id {
-                self.close_session_after_agent_exit(&host, session_id);
-                self.dismiss_toast(id, cx);
-            }
-            return;
-        }
         if job_id_of(&key).is_some() {
             self.press_preset_toast_action(&key, action, window, cx);
         }
@@ -580,9 +574,8 @@ impl RootView {
             }
             (Some(request_id), strategy @ Some(_)) => {
                 if let Some(msg) = self.spawns.resend(&request_id, strategy) {
-                    let detail = spawn_detail_of(&msg);
                     self.send_to(&self.host_of_request(&msg), msg);
-                    self.push_spawning_toast(detail, &request_id, cx);
+                    self.push_spawning_toast(&request_id, cx);
                 }
             }
         }
@@ -936,23 +929,4 @@ pub(crate) fn modal_panel(offset: i8, id: &'static str, t: &UiTheme) -> Stateful
         .shadow(vec![drop_shadow(t.dialog_shadow, 30.0, 80.0)])
         .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.text))
-}
-
-/// What the "Spawning session…" toast says under its title, which is what
-/// the spawn's target makes the wait: a shell starts sooner than a worktree.
-fn spawning_detail(request: &SpawnRequest) -> &'static str {
-    match request.target {
-        SpawnTarget::Standalone { .. } => SHELL_SPAWNING_DETAIL,
-        SpawnTarget::Single { .. } | SpawnTarget::Workspace { .. } => SPAWNING_DETAIL,
-    }
-}
-
-/// What the toast says for spawn `msg`, going out again as it first did.
-fn spawn_detail_of(msg: &ClientMessage) -> &'static str {
-    match msg {
-        ClientMessage::SpawnSession(request) => spawning_detail(request),
-        // No other message a spawn goes out as; a worktree is the safe wait
-        // to name.
-        _ => SPAWNING_DETAIL,
-    }
 }
