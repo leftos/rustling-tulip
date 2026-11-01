@@ -1455,11 +1455,12 @@
     {
       "paths": [
         "apps/native/src/driver/**",
-        "apps/native/tests/ui/ui_driver_registry.rs"
+        "apps/native/tests/ui/ui_driver_registry.rs",
+        "apps/native/tests/ui/ui_driver.rs"
       ],
       "package": "rustling-tulip-native",
       "features": "driver",
-      "filter": "test(/^driver::/) | test(/^ui_driver_registry::/)"
+      "filter": "test(/^driver::/) | test(/^ui_driver_registry::/) | test(/^ui_driver::/)"
     }
   ]
 }
