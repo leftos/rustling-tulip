@@ -918,8 +918,8 @@ pub struct GeneralSettings {
     /// Whether text files a link or a fetch opens go to the external app
     /// instead of the built-in viewer.
     pub open_text_externally: bool,
-    /// Whether the client checks for updates 30 s after launch and every
-    /// 24 h; Settings' Check now checks either way.
+    /// Whether the client checks for updates at launch and every 24 h;
+    /// Settings' Check now checks either way.
     pub check_updates: bool,
 }
 

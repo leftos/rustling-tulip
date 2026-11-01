@@ -8,9 +8,12 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Right-clicking a repo or workspace offers a Spawn session submenu: Last, each agent, Shell and your presets.
 - Opening a Bash or PowerShell card in the chat shows the whole command, one statement per line.
+- The footer shows the app's version at its right end; hover it for the daemon's.
 
 ### Fixed
 
+- The app checks for updates as soon as it starts instead of 30 seconds later.
+- The footer's status text shows only problems, not the focused session's name and id.
 - Text typed in a chat's message box survives a reconnect to its host.
 - Chat question cards show the whole question, each answer's description and the question's header.
 - Panes reopened after quitting with sessions kept running, or moved to another tab, draw at their new size at once instead of garbled until a key is pressed.

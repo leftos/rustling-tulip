@@ -1,12 +1,14 @@
 //! The updater on screen: the checks it runs, the footer's notice of a ready
-//! update and its Restart to update button, the Settings → General update
-//! rows, and the toast after an update (`docs/auto-update.md`,
-//! decisions 3, 5, 6 and 8). The checking and the installing are
-//! [`crate::update`]'s.
+//! update and its Restart to update button, the footer's client version, the
+//! Settings → General update rows, and the toast after an update
+//! (`docs/auto-update.md`, decisions 3, 5, 6 and 8). The checking and the
+//! installing are [`crate::update`]'s.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt as _;
+use futures::future::Shared;
 use gpui::{AnyElement, ClickEvent, Context, Task, div, prelude::*, px};
 
 use crate::buttons::{ButtonSize, Layer, outlined_button};
@@ -15,10 +17,15 @@ use crate::ui_theme::theme;
 use crate::update::{AlreadyRunning, LastResult, Ready, Updater};
 use crate::{FOOTER_PILL_HEIGHT, FOOTER_PILL_TEXT_SIZE, RootView, tagged_text};
 
-/// How long after launch the first check runs.
-const FIRST_CHECK_AFTER: Duration = Duration::from_secs(30);
-/// How often the checks repeat after the first.
+/// How often the checks repeat after the one at launch.
 const CHECK_EVERY: Duration = Duration::from_hours(24);
+/// The waits before the retries after scheduled checks that failed in a
+/// row; the last one repeats until a check succeeds.
+const RETRY_AFTER: [Duration; 3] = [
+    Duration::from_mins(5),
+    Duration::from_mins(15),
+    Duration::from_hours(1),
+];
 /// This client's version, the one a check compares the feed against.
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -42,10 +49,11 @@ pub(crate) struct UpdateUi {
     /// until the client quits.
     ready: Option<Ready>,
     last: LastCheck,
-    /// The check under way; at most one runs at a time.
-    checking: Option<Task<()>>,
-    /// The launch's result toast, then the checks 30 s after launch and
-    /// every 24 h.
+    /// The check under way; at most one runs at a time. Shared so the
+    /// schedule can wait for its outcome.
+    checking: Option<Shared<Task<()>>>,
+    /// The launch's result toast, then the checks at launch and every 24 h,
+    /// sooner after a failure.
     schedule: Option<Task<()>>,
 }
 
@@ -63,19 +71,33 @@ impl UpdateUi {
 
 impl RootView {
     /// Starts the launch's update work: the last update's result as a toast
-    /// at once, then a check 30 s after launch and every 24 h.
+    /// at once, then a check straight after it and every 24 h, retried
+    /// after 5, 15 and then every 60 minutes while checks fail.
     pub(crate) fn start_update_checks(&mut self, cx: &mut Context<Self>) {
         self.update.schedule = Some(cx.spawn(async move |this, cx| {
             if this.update(cx, Self::announce_last_update).is_err() {
                 return;
             }
-            let mut delay = FIRST_CHECK_AFTER;
+            let mut failed_in_a_row = 0;
             loop {
-                cx.background_executor().timer(delay).await;
-                if this.update(cx, Self::scheduled_update_check).is_err() {
+                let Ok(pending) = this.update(cx, Self::scheduled_update_check) else {
                     return;
+                };
+                // A skipped check (turned off, or an update ready) counts
+                // as no failure: the schedule returns to the daily cadence.
+                let mut failed = false;
+                if let Some(pending) = pending {
+                    pending.await;
+                    let Ok(outcome) = this.update(cx, |root, _| {
+                        matches!(root.update.last, LastCheck::Failed(_))
+                    }) else {
+                        return;
+                    };
+                    failed = outcome;
                 }
-                delay = CHECK_EVERY;
+                let wait;
+                (failed_in_a_row, wait) = next_check(failed_in_a_row, failed);
+                cx.background_executor().timer(wait).await;
             }
         }));
     }
@@ -101,16 +123,20 @@ impl RootView {
         }
     }
 
-    /// The check 30 s after launch and every 24 h: skipped while automatic
-    /// checks are off or an update is already ready to install.
-    fn scheduled_update_check(&mut self, cx: &mut Context<Self>) {
+    /// The check at launch, every 24 h and on a retry: skipped while
+    /// automatic checks are off or an update is already ready to install.
+    /// Returns the check under way, if any, for the schedule to wait on.
+    fn scheduled_update_check(&mut self, cx: &mut Context<Self>) -> Option<Shared<Task<()>>> {
         if self.update.ready.is_some() {
             tracing::info!("update: an update is ready; skipping the scheduled check");
-        } else if self.sidebar.ui_state().general.check_updates {
-            self.run_update_check(cx);
-        } else {
-            tracing::info!("update: automatic checks are off; skipping");
+            return None;
         }
+        if !self.sidebar.ui_state().general.check_updates {
+            tracing::info!("update: automatic checks are off; skipping");
+            return None;
+        }
+        self.run_update_check(cx);
+        self.update.checking.clone()
     }
 
     /// Settings' Check now: a check whether automatic checks are on or off.
@@ -135,12 +161,13 @@ impl RootView {
                 Box::pin(futures::future::ready(Err(err)))
             }
         };
-        self.update.checking = Some(cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let found = checked.await;
             // Fails only when the view is gone, and the update with it.
             this.update(cx, |root, cx| root.on_update_checked(found, cx))
                 .ok();
-        }));
+        });
+        self.update.checking = Some(task.shared());
         cx.notify();
     }
 
@@ -210,6 +237,28 @@ impl RootView {
         [format!("Version {CLIENT_VERSION}"), last]
     }
 
+    /// The footer's right end: `v{version}` of this client, its tooltip
+    /// naming This PC's daemon version too once the handshake carries one.
+    /// It gives way to the update notice while that shows.
+    pub(crate) fn version_footer(&self) -> Option<AnyElement> {
+        if self.update.ready.is_some() {
+            return None;
+        }
+        let daemon = self
+            .handshake()
+            .map(|handshake| handshake.build_version.as_str());
+        let tip = version_tooltip(CLIENT_VERSION, daemon);
+        Some(
+            div()
+                .id("footer-version")
+                .flex_none()
+                .whitespace_nowrap()
+                .child(tagged_text("footer-version", format!("v{CLIENT_VERSION}")))
+                .tooltip(crate::tooltip(tip))
+                .into_any_element(),
+        )
+    }
+
     /// The footer's notice and its Restart to update button, at the right
     /// edge, once an update is ready.
     pub(crate) fn update_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -240,5 +289,80 @@ impl RootView {
                 .child(button)
                 .into_any_element(),
         )
+    }
+}
+
+/// The schedule's next step after a scheduled check: the failures in a row
+/// counting this one, and the wait before the next check. A success, or a
+/// skipped check, resets the count and returns to the daily cadence.
+fn next_check(failed_before: usize, this_one_failed: bool) -> (usize, Duration) {
+    if !this_one_failed {
+        return (0, CHECK_EVERY);
+    }
+    let failed = failed_before.saturating_add(1);
+    let step = (failed - 1).min(RETRY_AFTER.len() - 1);
+    (failed, RETRY_AFTER[step])
+}
+
+/// The footer version's tooltip: the client's version, then This PC's
+/// daemon's when its handshake carries one (an empty one counts as none).
+fn version_tooltip(client: &str, daemon: Option<&str>) -> String {
+    match daemon.filter(|version| !version.is_empty()) {
+        Some(daemon) => format!("Client v{client}, daemon v{daemon} on This PC"),
+        None => format!("Client v{client}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{CHECK_EVERY, next_check, version_tooltip};
+
+    #[test]
+    fn after_a_failed_check_the_next_waits_5_minutes() {
+        assert_eq!(next_check(0, true), (1, Duration::from_mins(5)));
+    }
+
+    #[test]
+    fn the_retry_backs_off_to_an_hour() {
+        assert_eq!(next_check(1, true), (2, Duration::from_mins(15)));
+        assert_eq!(next_check(2, true), (3, Duration::from_hours(1)));
+        assert_eq!(
+            next_check(3, true),
+            (4, Duration::from_hours(1)),
+            "the hour repeats while checks keep failing"
+        );
+    }
+
+    #[test]
+    fn a_success_returns_to_the_daily_cadence() {
+        assert_eq!(next_check(0, false), (0, CHECK_EVERY));
+        assert_eq!(
+            next_check(3, false),
+            (0, CHECK_EVERY),
+            "a success resets the backoff"
+        );
+    }
+
+    #[test]
+    fn version_tooltip_names_the_daemon_on_this_pc() {
+        assert_eq!(
+            version_tooltip("0.6.1-alpha", Some("0.6.0-alpha")),
+            "Client v0.6.1-alpha, daemon v0.6.0-alpha on This PC"
+        );
+    }
+
+    #[test]
+    fn version_tooltip_without_a_daemon_names_the_client_only() {
+        assert_eq!(version_tooltip("0.6.1-alpha", None), "Client v0.6.1-alpha");
+    }
+
+    #[test]
+    fn version_tooltip_counts_an_empty_daemon_version_as_none() {
+        assert_eq!(
+            version_tooltip("0.6.1-alpha", Some("")),
+            "Client v0.6.1-alpha"
+        );
     }
 }

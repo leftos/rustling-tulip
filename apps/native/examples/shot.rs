@@ -792,6 +792,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         tokens: Arc::new(MemoryTokens::default()),
         updater: Arc::new(ShotUpdater {
             installer: ui_dir.join(SHOT_INSTALLER),
+            offers: view == View::Update,
         }),
     }
 }
@@ -997,14 +998,20 @@ fn drive_update(step: usize, address: usize, window: &mut Window, cx: &mut App) 
     win32::wheel_down(address, SETTINGS_PAGE_POINT, SETTINGS_PAGE_NOTCHES)
 }
 
-/// An updater whose every check finds 0.99.0 ready at `installer`, which
-/// starts nothing and has no last result.
+/// An updater whose every check finds 0.99.0 ready at `installer` in the
+/// `update` shot and nothing in any other, which starts nothing and has no
+/// last result.
 struct ShotUpdater {
     installer: PathBuf,
+    /// Whether a check finds the update: only the `update` shot's does.
+    offers: bool,
 }
 
 impl Updater for ShotUpdater {
     fn check(&self, _current: &semver::Version) -> BoxFuture<'static, Result<Option<Ready>>> {
+        if !self.offers {
+            return futures::future::ready(Ok(None)).boxed();
+        }
         let path = self.installer.clone();
         let ready = std::fs::File::open(&path)
             .with_context(|| format!("opening {}", path.display()))
@@ -1520,6 +1527,7 @@ impl FakeDaemon {
             port: FAKE_PORT,
             pid: FAKE_PID,
             protocol_version: version,
+            build_version: env!("CARGO_PKG_VERSION").to_owned(),
         }))?;
         self.send(DaemonMessage::Welcome {
             protocol_version: version,

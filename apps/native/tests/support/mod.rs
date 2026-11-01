@@ -2256,6 +2256,7 @@ impl<'a> Harness<'a> {
             port: 4242,
             pid: 1,
             protocol_version: PROTOCOL,
+            build_version: String::new(),
         }));
     }
 

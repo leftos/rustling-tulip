@@ -224,7 +224,7 @@ impl fmt::Debug for NetCommand {
 }
 
 /// The running daemon's handshake without its auth token.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct HandshakeInfo {
     /// The daemon's loopback port.
     pub port: u16,
@@ -232,6 +232,9 @@ pub struct HandshakeInfo {
     pub pid: u32,
     /// The protocol version the daemon wrote into `daemon.json`.
     pub protocol_version: u32,
+    /// The daemon's build version; empty when its `daemon.json` predates
+    /// the field.
+    pub build_version: String,
 }
 
 impl From<&DaemonHandshake> for HandshakeInfo {
@@ -240,6 +243,7 @@ impl From<&DaemonHandshake> for HandshakeInfo {
             port: handshake.port,
             pid: handshake.pid,
             protocol_version: handshake.protocol_version,
+            build_version: handshake.build_version.clone(),
         }
     }
 }
@@ -1274,6 +1278,26 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    #[test]
+    fn handshake_info_keeps_the_daemon_build_version() {
+        let handshake = DaemonHandshake {
+            protocol_version: 23,
+            port: 51418,
+            auth_token: "secret".to_owned(),
+            pid: 4242,
+            supported_versions: vec![23],
+            build_version: "0.6.1-alpha".to_owned(),
+        };
+
+        let info = super::HandshakeInfo::from(&handshake);
+
+        assert_eq!(info.build_version, "0.6.1-alpha");
+        assert_eq!(
+            (info.port, info.pid, info.protocol_version),
+            (51418, 4242, 23)
+        );
+    }
 
     /// The hang guard of every wait in these tests: a passing run never
     /// reaches it, and reaching it fails as "hung".

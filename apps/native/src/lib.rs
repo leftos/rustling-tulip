@@ -5104,14 +5104,9 @@ impl RootView {
         }
     }
 
-    /// The footer's text: the last problem, else the focused session.
+    /// The footer's text: the last problem, or nothing when there is none.
     fn footer_status(&self) -> String {
-        if !self.status.is_empty() {
-            return self.status.clone();
-        }
-        self.focused_session()
-            .map(|id| format!("{} · {id}", self.session_label(&id)))
-            .unwrap_or_default()
+        self.status.clone()
     }
 
     /// The name the sidebar shows for a session, or its id when unknown.
@@ -5319,8 +5314,8 @@ fn drag_handle(
 
 impl RootView {
     /// The bottom bar: the Connections button, the daemon pill, the status
-    /// counts, then the attached session's status, right-aligned and the
-    /// first to truncate.
+    /// counts, then the status text (a problem, if any), right-aligned and
+    /// the first to truncate, then the update notice, else the client's version.
     fn footer_bar(&self, footer: &Footer, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let connections = div()
@@ -5394,6 +5389,7 @@ impl RootView {
                     .text_right(),
             )
             .children(self.update_footer(cx))
+            .children(self.version_footer())
     }
 
     /// The troubleshooting flyout above the pill: details, files, control.

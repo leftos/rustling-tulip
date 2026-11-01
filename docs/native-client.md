@@ -583,7 +583,9 @@ Drafts follow another client's `AgentCommands` only while untouched; text typed 
 
   In both densities a leaf carries the same filled chips as its pane header, one per `agent_chips` entry, after the tab pills and before the state tag (element `leaf-provider-<session id>`, `-<n>` for the later ones), counted in Comfortable's fit measurement; hovering a chip shows its tip. A leaf that needs you shows the asking glyph and the `!` badge, with no row wash.
 
-  The footer counts sessions by glyph ("N need you", "N working", "N background", "N waiting", a zero count hidden; `footer.rs`), and a tab's count pill and the window title follow the App title page's "Tab and title count" (`title.count`, `tabs.rs` `TabCounts`): by default the number of the tab's sessions awaiting input, parked ones left out, in amber and hidden at zero; "Busy / total" brings back "busy/total" with the working glyph, grey with no glyph at zero; "Idle / total" counts the sessions idle with no background work, grey. A background session counts as busy, is never listed in Needs You, and its leaf goes unseen only once the background work ends.
+  The footer counts sessions by glyph ("N need you", "N working", "N background", "N waiting", a zero count hidden; `footer.rs`).
+
+  The footer's status text shows only problems, such as a session the window was asked for and cannot find, and is otherwise empty. Its right end shows the client's version, `v{version}`, whose tooltip names the daemon's too ("Client v…, daemon v… on This PC"), and which is dropped while an update notice shows (`update_view.rs` `version_footer`). A tab's count pill and the window title follow the App title page's "Tab and title count" (`title.count`, `tabs.rs` `TabCounts`): by default the number of the tab's sessions awaiting input, parked ones left out, in amber and hidden at zero; "Busy / total" brings back "busy/total" with the working glyph, grey with no glyph at zero; "Idle / total" counts the sessions idle with no background work, grey. A background session counts as busy, is never listed in Needs You, and its leaf goes unseen only once the background work ends.
 - **Busy exclusion**: a session marked "Don't count as busy" (the daemon's `busy_excluded` flag) leaves the busy count of the window title and tab pill in the "Busy / total" mode but stays in the total, and leaves the footer's "working" count; the footer's "need you" still counts it when it waits on the owner. The leaf's `!` attention badge and the repo, workspace and tab-container `!` roll-ups skip it, while Needs You still lists it (asking and ended) and OS notifications and spoken alerts still fire.
 
   The leaf shows a 12 px muted crossed-out pulse in the `!` slot, tooltip "Not counted as busy" (`tabs.rs` `tab_session_counts`, `sidebar.rs` `shows_attention`). Restart and Resume keep the flag (`DuplicateSession.carry_busy_excluded: true`); Duplicate starts the copy counted. The `unseen` mark and the status glyph are unchanged.
@@ -669,7 +671,7 @@ The settings are `notifications.awaiting_input`, `notifications.finished` (on un
 
 The client updates itself from published releases; the mechanism (trust model, feed, verify, file swap, daemon takeover) is in [auto-update.md](./auto-update.md). Updates are for this PC only: no daemon message, tailnet peer or SSH host triggers or feeds it.
 
-It checks 30 s after launch and every 24 h, skipped while an update is ready, and downloads a newer release in the background (`update_view.rs`). A dev build checks only when `RUSTLING_TULIP_UPDATE_FEED` is set.
+It checks at launch and every 24 h, skipped while an update is ready, and downloads a newer release in the background (`update_view.rs`). A dev build checks only when `RUSTLING_TULIP_UPDATE_FEED` is set.
 
 When a verified installer is ready, the footer shows the notice `Update {version} ready` (`footer-update-text`) with a `Restart to update` button (`footer-update`). Nothing installs until that press.
 

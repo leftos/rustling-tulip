@@ -476,6 +476,7 @@ mod tests {
         port: 51418,
         pid: 4242,
         protocol_version: 18,
+        build_version: String::new(),
     };
 
     fn open() -> Connection {

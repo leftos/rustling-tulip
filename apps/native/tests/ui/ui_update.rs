@@ -1,4 +1,4 @@
-//! Auto-update specs: the check 30 s after launch and every 24 h, the
+//! Auto-update specs: the check at launch and every 24 h, the
 //! footer's notice of a ready update and its Restart to update button, the
 //! Settings → General update rows, and the toast after an update. The
 //! updater is the harness's recording fake: no feed, no installer.
@@ -19,7 +19,6 @@ use rustling_tulip_native::NetCommand;
 use rustling_tulip_native::update::LastResult;
 use support::{Fixture, Harness, TestDir, UpdaterRecorder, pane, session, tab};
 
-const FIRST_CHECK: Duration = Duration::from_secs(30);
 const CHECK_EVERY: Duration = Duration::from_hours(24);
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
@@ -107,26 +106,65 @@ fn ready_update<'a>(
 ) -> Harness<'a> {
     updater.offer("0.99.0", &installer(dir));
     let mut h = opened(cx, dir, updater);
-    h.advance(FIRST_CHECK);
+    h.cx.run_until_parked();
     assert_eq!(footer(&mut h).as_deref(), Some("Update 0.99.0 ready"));
     h
+}
+
+#[gpui::test]
+fn a_check_is_requested_right_after_launch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.offer("0.99.0", &installer(&dir));
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+
+    assert_eq!(updater.checks(), 1, "the check at launch");
+    assert_eq!(footer(&mut h).as_deref(), Some("Update 0.99.0 ready"));
+}
+
+#[gpui::test]
+fn no_check_runs_at_launch_with_checks_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    turned_off(&dir);
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.offer("0.99.0", &installer(&dir));
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+
+    assert_eq!(updater.checks(), 0, "no check while turned off");
+    assert_eq!(footer(&mut h), None);
+}
+
+#[gpui::test]
+fn a_failed_launch_check_is_retried_after_five_minutes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.fail_checks("the network is not up yet");
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 1, "the check at launch");
+    assert_eq!(
+        settings_lines(&mut h)[1],
+        "Last check failed: the network is not up yet"
+    );
+
+    updater.offer("0.99.0", &installer(&dir));
+    h.advance(Duration::from_secs(299));
+    assert_eq!(updater.checks(), 1, "no retry before 5 minutes");
+
+    h.advance(Duration::from_secs(1));
+    assert_eq!(updater.checks(), 2, "the retry 5 minutes after the failure");
+    assert_eq!(footer(&mut h).as_deref(), Some("Update 0.99.0 ready"));
 }
 
 #[gpui::test]
 fn a_ready_update_shows_in_the_footer(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let updater = Arc::new(UpdaterRecorder::default());
-    updater.offer("0.99.0", &installer(&dir));
-    let mut h = opened(cx, &dir, &updater);
+    let mut h = ready_update(cx, &dir, &updater);
 
-    h.advance(Duration::from_secs(29));
-    assert_eq!(updater.checks(), 0, "no check before 30 s");
-    assert_eq!(footer(&mut h), None);
-    assert!(!drawn(&mut h, "footer-update"));
-
-    h.advance(Duration::from_secs(1));
-    assert_eq!(updater.checks(), 1, "the check 30 s after launch");
-    assert_eq!(footer(&mut h).as_deref(), Some("Update 0.99.0 ready"));
+    assert_eq!(updater.checks(), 1, "the check at launch");
     assert!(drawn(&mut h, "footer-update"), "Restart to update is drawn");
 
     h.advance(CHECK_EVERY);
@@ -202,8 +240,9 @@ fn a_failed_installer_start_keeps_the_client_and_says_so(cx: &mut TestAppContext
 fn checks_are_skipped_when_turned_off(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let updater = Arc::new(UpdaterRecorder::default());
-    updater.offer("0.99.0", &installer(&dir));
     let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert_eq!(updater.checks(), 1, "the check at launch found nothing");
 
     press_in_settings(&mut h, "settings-general-check-updates");
     assert_eq!(
@@ -213,9 +252,9 @@ fn checks_are_skipped_when_turned_off(cx: &mut TestAppContext) {
     );
     h.keys("escape");
 
-    h.advance(FIRST_CHECK);
+    updater.offer("0.99.0", &installer(&dir));
     h.advance(CHECK_EVERY);
-    assert_eq!(updater.checks(), 0, "no check while turned off");
+    assert_eq!(updater.checks(), 1, "no check while turned off");
     assert_eq!(footer(&mut h), None);
 }
 
@@ -225,7 +264,7 @@ fn check_now_checks_even_when_turned_off(cx: &mut TestAppContext) {
     turned_off(&dir);
     let updater = Arc::new(UpdaterRecorder::default());
     let mut h = opened(cx, &dir, &updater);
-    h.advance(FIRST_CHECK);
+    h.cx.run_until_parked();
     assert_eq!(updater.checks(), 0);
 
     press_in_settings(&mut h, "settings-general-check-now");
@@ -274,9 +313,75 @@ fn a_failed_update_says_it_did_not_install(cx: &mut TestAppContext) {
     );
 }
 
+/// The selector the footer's version text carries.
+fn version_tag() -> String {
+    format!("footer-version=v{CURRENT}")
+}
+
+#[gpui::test]
+fn footer_shows_the_client_version(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+
+    assert!(drawn(&mut h, &version_tag()), "the footer draws v{CURRENT}");
+}
+
+/// gpui keeps an element's last bounds after it goes, so the version's
+/// absence shows as Restart to update ending at the footer's right padding
+/// (12 px) with nothing drawn after it.
+#[gpui::test]
+fn the_version_gives_way_to_the_update_notice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.simulate_resize(gpui::size(px(1200.0), px(700.0)));
+    h.cx.run_until_parked();
+    assert_eq!(footer(&mut h), None, "no update at launch");
+    assert!(
+        drawn(&mut h, &version_tag()),
+        "the version shows with no update"
+    );
+
+    updater.offer("0.99.0", &installer(&dir));
+    press_in_settings(&mut h, "settings-general-check-now");
+    h.keys("escape");
+    assert_eq!(footer(&mut h).as_deref(), Some("Update 0.99.0 ready"));
+
+    let width = h.cx.update(|window, _| window.viewport_size().width);
+    let button = h.bounds("footer-update");
+    assert!(
+        width - button.right() <= px(20.0),
+        "Restart to update is the footer's last item: {button:?} in {width:?}"
+    );
+}
+
+#[gpui::test]
+fn the_status_text_yields_before_the_version(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let missing = format!("gone{}", "-and-then-some-more".repeat(30));
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = Harness::open_with_updater(cx, &dir, Some(&missing), updater);
+    h.load(&Fixture::single(session("s1").build()));
+    h.cx.simulate_resize(gpui::size(px(640.0), px(480.0)));
+    let width = h.cx.update(|window, _| window.viewport_size().width);
+
+    let version = h.bounds(&version_tag());
+    let status = h.bounds("footer-status");
+    assert!(
+        version.origin.x >= px(0.0) && version.right() <= width,
+        "the version stays inside the window: {version:?} in {width:?}"
+    );
+    assert!(
+        status.right() <= version.origin.x,
+        "the status text ends before the version starts: {status:?} then {version:?}"
+    );
+}
+
 #[gpui::test]
 fn settings_shows_the_version_and_last_check(cx: &mut TestAppContext) {
     let dir = TestDir::new();
+    turned_off(&dir);
     let updater = Arc::new(UpdaterRecorder::default());
     let mut h = opened(cx, &dir, &updater);
     h.keys("ctrl-,");

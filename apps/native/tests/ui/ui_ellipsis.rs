@@ -554,18 +554,27 @@ fn undo_view_message_ends_in_an_ellipsis(cx: &mut TestAppContext) {
 #[gpui::test]
 fn footer_status_ends_in_an_ellipsis(cx: &mut TestAppContext) {
     let dir = probed();
-    let label = long("Label");
-    let h = Harness::with(
-        cx,
-        &dir,
-        &Fixture::single(session("s1").label(&label).build()),
-    );
+    let missing = long("gone");
+    let mut h = Harness::open_wanting(cx, &dir, Some(&missing));
+    h.load(&Fixture::single(session("s1").build()));
     h.cx.run_until_parked();
-    assert_ellipsized("footer-status", &format!("{label} · s1"));
+    assert_ellipsized("footer-status", &format!("session {missing} not found"));
 }
 
 #[gpui::test]
 fn footer_status_that_fits_is_drawn_whole(cx: &mut TestAppContext) {
+    let dir = probed();
+    let mut h = Harness::open_wanting(cx, &dir, Some("gone"));
+    h.load(&Fixture::single(session("s1").build()));
+    h.cx.run_until_parked();
+    assert_eq!(
+        drawn_text("footer-status").as_deref(),
+        Some("session gone not found")
+    );
+}
+
+#[gpui::test]
+fn footer_status_is_empty_with_a_session_focused(cx: &mut TestAppContext) {
     let dir = probed();
     let h = Harness::with(
         cx,
@@ -573,5 +582,9 @@ fn footer_status_that_fits_is_drawn_whole(cx: &mut TestAppContext) {
         &Fixture::single(session("s1").label("Short").build()),
     );
     h.cx.run_until_parked();
-    assert_eq!(drawn_text("footer-status").as_deref(), Some("Short · s1"));
+    let drawn = drawn_text("footer-status");
+    assert!(
+        drawn.as_deref().is_none_or(str::is_empty),
+        "the footer names no session, drew {drawn:?}"
+    );
 }
