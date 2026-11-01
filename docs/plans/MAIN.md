@@ -4,25 +4,25 @@
 
 ## Wave 17 — Themes
 
-- [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette
-- [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons
-- [ ] RT-619 Match italic terminal text to the Medium and SemiBold terminal weights
+- [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette · release vNext
+- [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons · release vNext
+- [ ] RT-619 Match italic terminal text to the Medium and SemiBold terminal weights · release vNext
 
 ## Wave 16 — Several hosts in one window
 
-- [ ] RT-584 Give a remote repo's container menu the remote-host refusal, not 'no folder'
-- [ ] RT-580 Drop only the reset host's cleanup-failed entries, and re-arm Recover's timer
-- [ ] RT-579 Fix remote-host labels, Recover names, creator routing and IPv6 SSH keys left by MH.3
-- [ ] RT-578 Register a workspace or repo from a remote folder's banner on that host
-- [ ] RT-620 Route the remaining session and repo lookups by their own host
-- [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline
-- [ ] RT-623 Close three rare gaps in the host-aware spawn dialog: field redraw on a snap, agent refresh, preview key
-- [ ] RT-624 Keep a remote quick shell's remembered folder across This PC's reconnect
-- [ ] RT-625 Close the multi-host spawn and creator gaps left by MH.7 brief D
-- [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host
-- [ ] RT-627 Tell apart two machines that share a daemon id, and check cross-client host sweeps
-- [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts
-- [ ] RT-629 Open Manage worktrees on the host chosen in Settings
+- [ ] RT-584 Give a remote repo's container menu the remote-host refusal, not 'no folder' · release vNext+1
+- [ ] RT-580 Drop only the reset host's cleanup-failed entries, and re-arm Recover's timer · release vNext+1
+- [ ] RT-579 Fix remote-host labels, Recover names, creator routing and IPv6 SSH keys left by MH.3 · release vNext+1
+- [ ] RT-578 Register a workspace or repo from a remote folder's banner on that host · release vNext+1
+- [ ] RT-620 Route the remaining session and repo lookups by their own host · release vNext+1
+- [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline · release vNext+1
+- [ ] RT-623 Close three rare gaps in the host-aware spawn dialog: field redraw on a snap, agent refresh, preview key · release vNext+1
+- [ ] RT-624 Keep a remote quick shell's remembered folder across This PC's reconnect · release vNext+1
+- [ ] RT-625 Close the multi-host spawn and creator gaps left by MH.7 brief D · release vNext+1
+- [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host · release vNext+1
+- [ ] RT-627 Tell apart two machines that share a daemon id, and check cross-client host sweeps · release vNext+1
+- [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts · release vNext+1
+- [ ] RT-629 Open Manage worktrees on the host chosen in Settings · release vNext+1
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -73,13 +73,13 @@
 - [ ] RT-101 Paste an image or drop a file into a remote session
 - [ ] RT-102 Resume a remote connection without replaying scrollback
 - [ ] RT-590 Fail a spawn whose secret Credential Manager refuses, instead of hanging
-- [ ] RT-536 Host SSH remote sessions on Linux and macOS machines · release vNext+1
+- [ ] RT-536 Host SSH remote sessions on Linux and macOS machines · release vNext
 - [ ] RT-539 Start a daemon for an SSH login through an S4U task so it can use Credential Manager
 - [ ] RT-540 Make a one-shot ssh bridge call return after it starts the host's daemon
 
 ## Wave 7 — Pop-out windows
 
-- [ ] RT-440 Check the Shell dialog and spec pane drag inside a tab pop-out · release vNext+1
+- [ ] RT-440 Check the Shell dialog and spec pane drag inside a tab pop-out · release vNext
 
 ## Wave 8 — Chat mirror and phone session views
 
@@ -95,23 +95,23 @@
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
-- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext+1
-  - [ ] RT-498 Send the two-hour tracks to watching Dashboards (DB.20) · release vNext+1
-  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21) · release vNext+1
-  - [ ] RT-492 Answer questions and permissions from the Dashboard (DB.13) · release vNext+1
-  - [ ] RT-493 Open a drawer under a Dashboard row (DB.14) · release vNext+1
-  - [ ] RT-494 Add the Dashboard settings tab (DB.15) · release vNext+1
-  - [ ] RT-456 Draw the two-hour activity track (DB.22) · release vNext+1
-  - [ ] RT-500 Draw the need-you band (DB.23) · release vNext+1
-  - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext+1
-  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext+1
-  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext+1
-  - [ ] RT-487 Show each session's Linear issue (DB.7) · release vNext+1
-  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext+1
-  - [ ] RT-489 Keep a day ledger for the header's figures (DB.9) · release vNext+1
+- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext
+  - [ ] RT-498 Send the two-hour tracks to watching Dashboards (DB.20) · release vNext
+  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21) · release vNext
+  - [ ] RT-492 Answer questions and permissions from the Dashboard (DB.13) · release vNext
+  - [ ] RT-493 Open a drawer under a Dashboard row (DB.14) · release vNext
+  - [ ] RT-494 Add the Dashboard settings tab (DB.15) · release vNext
+  - [ ] RT-456 Draw the two-hour activity track (DB.22) · release vNext
+  - [ ] RT-500 Draw the need-you band (DB.23) · release vNext
+  - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext
+  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext
+  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext
+  - [ ] RT-487 Show each session's Linear issue (DB.7) · release vNext
+  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext
+  - [ ] RT-489 Keep a day ledger for the header's figures (DB.9) · release vNext
   - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time
   - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker
-- [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5) · release vNext+1
+- [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5) · release vNext
 
 ## Wave 10 — Subagent streams
 
@@ -125,8 +125,8 @@
 
 ## Wave 12 — Claude accounts and artifacts by account
 
-- [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap · release vNext+1
-- [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching · release vNext+1
+- [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap · release vNext
+- [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching · release vNext
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-115 Host-approved extra roots for file fetch
@@ -134,9 +134,9 @@
 
 ## Wave 13 — ops-tower views: gates, board and dock
 
-- [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates · release vNext+1
-- [ ] RT-55 Gate dashboard in the client · release vNext+1
-- [ ] RT-56 Plan board and daily briefing in the Dashboard · release vNext+1
+- [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates · release vNext
+- [ ] RT-55 Gate dashboard in the client · release vNext
+- [ ] RT-56 Plan board and daily briefing in the Dashboard · release vNext
 - [ ] RT-159 Corner status window: Needs you, Just finished and a Working ticker
 
 ## Wave 14 — Dictation
@@ -173,8 +173,8 @@
 - [ ] RT-277 Rewrite design files' Codex and Cursor claims for the Claude-only app
 - [ ] RT-376 Re-read docs/release.md and docs/env-secrets.md against their named files' changes since 2026-10-22
 - [ ] RT-602 Describe the Contrast look where the docs still describe Petal
-- [ ] RT-616 Re-read the UI language README and the hook-status spike against their moved files
-- [ ] RT-635 Retire or update the remote-access and ssh-remote design files
+- [ ] RT-616 Re-read the UI language README and the hook-status spike against their moved files · release vNext+1
+- [ ] RT-635 Retire or update the remote-access and ssh-remote design files · release vNext+1
 
 ## Build tooling
 
@@ -201,8 +201,8 @@
   - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
-- [ ] RT-634 Let native-e2e run one e2e file as a routed gated job
-- [ ] RT-636 Map the multi-host files in tools/test-map.json so -Validate passes
+- [ ] RT-634 Let native-e2e run one e2e file as a routed gated job · release vNext+1
+- [ ] RT-636 Map the multi-host files in tools/test-map.json so -Validate passes · release vNext+1
 
 ## macOS
 
@@ -230,7 +230,7 @@
 ## Ideas needing a design pass
 
 - [ ] RT-52 Link a worktree to a GitHub issue or PR at spawn
-- [ ] RT-191 Plan a built-in browser that agents can navigate · release vNext+1
+- [ ] RT-191 Plan a built-in browser that agents can navigate · release vNext
 - [ ] RT-53 Agent CLI: let an agent in one session drive other sessions
 - [ ] RT-131 Design a plugin layer on the agent CLI, then move one event-driven feature onto it
 - [ ] RT-54 Agent skill pack: fan work out to worktrees, then review and merge
@@ -246,7 +246,7 @@
 - [ ] RT-124 Fetch every file a turn touched as one folder
 - [ ] RT-125 Launch a session from the phone: launch last again, a preset, or /nextup in a repo
 - [ ] RT-293 Show a running shell command's live output beside its session
-- [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit · release vNext+1
+- [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit · release vNext
 
 ## Backlog
 
@@ -282,15 +282,15 @@
 - [ ] RT-434 Install the scrollback snapshot sender in attach_lifecycle itself
 - [ ] RT-435 Send the tracer's Exited only after the child's last output
 - [ ] RT-436 Send no Stopped attention for a session discarded before its exit
-- [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user · release vNext+1
+- [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user · release vNext
 - [ ] RT-457 Close a running native client before the installer replaces it
 - [ ] RT-458 Pass a direct-spawned Claude session's initial prompt as its positional prompt, not -p
 - [ ] RT-459 Launch a .cmd agent shim whose path holds a space
-- [ ] RT-462 Plan auto relayout: reorganize every tab's panes by rules, with a preview to adjust before applying · release vNext+1
-- [ ] RT-463 Plan auto tab names from the repos and workspaces in each tab · release vNext+1
-- [ ] RT-464 Absorb all of ops-tower's functionality so ops-tower can be retired · release vNext+1
-  - [ ] RT-479 Add a Costs tab with ops-tower's subscription-share model · release vNext+1
-  - [ ] RT-480 Retire ops-tower once its views ship in rustling-tulip · release vNext+1
+- [ ] RT-462 Plan auto relayout: reorganize every tab's panes by rules, with a preview to adjust before applying · release vNext
+- [ ] RT-463 Plan auto tab names from the repos and workspaces in each tab · release vNext
+- [ ] RT-464 Absorb all of ops-tower's functionality so ops-tower can be retired · release vNext
+  - [ ] RT-479 Add a Costs tab with ops-tower's subscription-share model · release vNext
+  - [ ] RT-480 Retire ops-tower once its views ship in rustling-tulip · release vNext
 - [ ] RT-546 Keep the screen's ownership of the background flag across stamp-only hook events
 - [ ] RT-547 Clear the background flag when an agent typed into the shell ends
 - [ ] RT-548 Read running-subagent rows past an hour in the background rule
@@ -318,7 +318,19 @@
 - [ ] RT-615 Keep a weight difference between chosen and unchosen at UI weight SemiBold
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
-- [ ] RT-630 Open a remote host's preset wizard while This PC is offline
-- [ ] RT-631 Drop only the reconnected host's preset launch jobs
-- [ ] RT-632 Close five edge cases in shared-daemon ownership and pop-out moves
-- [ ] RT-633 Close a remote host's layout question when its tab list arrives
+- [ ] RT-630 Open a remote host's preset wizard while This PC is offline · release vNext+1
+- [ ] RT-631 Drop only the reconnected host's preset launch jobs · release vNext+1
+- [ ] RT-632 Close five edge cases in shared-daemon ownership and pop-out moves · release vNext+1
+- [ ] RT-633 Close a remote host's layout question when its tab list arrives · release vNext+1
+- [ ] RT-639 Repaint panes cleanly after a client relaunch instead of replaying old-size paints · release vNext
+- [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext
+  - [ ] RT-641 Wrap a tailscale CLI error inside the Connections dialog · release vNext
+  - [ ] RT-642 Draw This PC's empty state under its host header · release vNext
+  - [ ] RT-643 Stop the On switch clipping a saved host's session count · release vNext
+  - [ ] RT-644 Name the selected host in Settings' keep-awake label · release vNext
+  - [ ] RT-645 Keep the host header's Connecting… clear of + Repo · release vNext
+  - [ ] RT-646 Keep a reconnecting host's Claude pane titles · release vNext
+  - [ ] RT-647 Fit the sidebar view switcher and pane titles at text size +4 · release vNext
+  - [ ] RT-648 Stop the prompt-box draft note flashing after a successful chat send · release vNext
+  - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext
+- [ ] RT-650 Keep the chat composer's text across a reconnect to its host · release vNext
