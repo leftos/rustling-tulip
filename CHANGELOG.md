@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- Right-clicking a repo or workspace offers a Spawn session submenu: Last, each agent, Shell and your presets.
+
 ### Changed
 
 - Sessions show their program as an icon (Claude, PowerShell, cmd, bash) in the sidebar, pane headers and spawn dialog, and Trusted as a shield.

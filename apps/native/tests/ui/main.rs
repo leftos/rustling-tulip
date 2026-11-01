@@ -73,6 +73,7 @@ mod ui_spawn_combobox;
 mod ui_spawn_dialog;
 mod ui_spawn_hosts;
 mod ui_spawn_preview;
+mod ui_spawn_submenu;
 mod ui_stashes;
 mod ui_summary;
 mod ui_tab_drag;

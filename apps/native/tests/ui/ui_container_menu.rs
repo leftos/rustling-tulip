@@ -292,11 +292,21 @@ fn launch_last_row_is_disabled_for_a_headless_config(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn spawn_on_a_repo_opens_the_dialog_locked_to_it(cx: &mut TestAppContext) {
+fn spawn_on_a_repo_opens_its_submenu_whose_agent_row_opens_the_dialog_locked_to_it(
+    cx: &mut TestAppContext,
+) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     open(&mut h, "container-repo:r1");
     h.click_on("container-menu-spawn");
+    assert!(
+        h.root(|root, _| root.container_menu_groups())
+            .concat()
+            .contains(&"container-spawn-back".to_owned()),
+        "the row swaps in the Spawn session submenu"
+    );
+    assert!(!h.root(|root, _| root.spawn_dialog_open()), "no dialog yet");
+    h.click_on("container-spawn-agent-claude");
 
     assert!(
         !h.root(|root, _| root.container_menu_open()),

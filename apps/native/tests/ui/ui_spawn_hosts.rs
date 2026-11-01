@@ -113,6 +113,7 @@ fn spawn_from_a_remote_containers_menu_goes_to_that_host_with_its_agent(cx: &mut
         "the menu opened"
     );
     h.click_on("container-menu-spawn");
+    h.click_on(&format!("container-spawn-agent-{BOX_AGENT}"));
 
     assert!(
         h.root(|root, _| root.spawn_dialog_open()),

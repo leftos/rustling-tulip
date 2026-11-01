@@ -9,12 +9,12 @@ use crate::fonts::ui_px_at;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
     Focusable as _, FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point,
-    ScrollWheelEvent, SharedString, Stateful, Subscription, Task, Window, WindowId, anchored,
-    deferred, div, prelude::*, px,
+    ScrollWheelEvent, SharedString, Stateful, StyledText, Subscription, Task, Window, WindowId,
+    anchored, deferred, div, prelude::*, px,
 };
 use protocol::{
-    ClientMessage, DaemonMessage, MemberBranchFate, PresetEntry, PresetTarget, SessionMode,
-    SessionSnapshot, SpawnConfig, TabEntry,
+    AgentId, ClientMessage, DaemonMessage, MemberBranchFate, PresetEntry, PresetTarget,
+    SessionMode, SessionSnapshot, SpawnConfig, TabEntry,
 };
 
 use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
@@ -24,6 +24,7 @@ use crate::buttons::{
     ButtonKind, ButtonLook, ButtonSize, Layer, button, button_look, field_frame, focus_ring,
     outlined_button,
 };
+use crate::ellipsis::truncating;
 use crate::grid_view::{DOCK_BACK_TIP, NO_REPOS_TIP, PANE_PENDING_TIP, TAB_DOCK_BACK_TIP};
 use crate::launch_last;
 use crate::notice_view::{MODAL_RADIUS, drop_shadow, modal_panel};
@@ -40,8 +41,9 @@ use crate::session_actions::{
     header_shows_exit_code, menu_entries, move_lines, move_source, orphan_banner_text,
     overlay_actions, pane_shows_exit, plan, rename_message, session_rows, worktree_to_reveal,
 };
+use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::{Container, ContainerKind, can_attach};
-use crate::spawn_form::{Lock, Prefill, Target};
+use crate::spawn_form::{Lock, Prefill, TabChoices, Target, current_tab_open_in};
 use crate::spawn_view::SpawnEntry;
 use crate::tabs::{
     HostedSession, SessionRef, collect_panes, destination, find_tab_containing_session,
@@ -226,9 +228,17 @@ const CONTAINER_LAUNCH_LAST_CURRENT: &str = "container-launch-last-current";
 const CONTAINER_LAUNCH_LAST_NEW: &str = "container-launch-last-new";
 const CONTAINER_LAUNCH_LAST_EDIT: &str = "container-launch-last-edit";
 const CONTAINER_LAUNCH_LAST_TAB_PREFIX: &str = "container-launch-last-tab-";
-/// The container menu's first row: the spawn dialog, held on the container
-/// or, for a tab container, on that tab.
+/// The container menu's first row: the Spawn session submenu on a repo or
+/// workspace, the spawn dialog held on the tab for a tab container.
 const CONTAINER_SPAWN_ROW: &str = "container-menu-spawn";
+const CONTAINER_SPAWN_BACK: &str = "container-spawn-back";
+const CONTAINER_SPAWN_LAST: &str = "container-spawn-last";
+/// An agent row of the Spawn session submenu adds the agent's id.
+const CONTAINER_SPAWN_AGENT_PREFIX: &str = "container-spawn-agent-";
+const CONTAINER_SPAWN_SHELL: &str = "container-spawn-shell";
+/// The Last row reads `Last (<launch summary>)`.
+const SPAWN_LAST_OPEN: &str = "Last (";
+const SPAWN_LAST_CLOSE: &str = ")";
 /// The container menu's single preset row while the list is out, failed or
 /// empty; a listed preset's row adds `-<index>`.
 const CONTAINER_PRESET_ROW: &str = "container-menu-launch-preset";
@@ -259,9 +269,12 @@ impl MenuPresets {
 /// What a container menu row does, whether a click or a key fires it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ContainerAction {
-    /// The spawn dialog, held on the repo or workspace, or for a tab
-    /// container on that tab.
+    /// The spawn dialog held on a tab container's tab.
     Spawn,
+    /// Swaps the rows for the Spawn session submenu.
+    SpawnMenu,
+    /// A Spawn session submenu choice.
+    SpawnWith(SpawnChoice),
     /// Swaps the rows for the Launch last again submenu.
     LaunchLast,
     /// The container's appearance editor.
@@ -424,7 +437,7 @@ fn container_row_groups(facts: &ContainerFacts<'_>) -> Vec<Vec<ContainerRow>> {
     let mut groups = vec![vec![enabled(
         CONTAINER_SPAWN_ROW,
         "Spawn session",
-        ContainerAction::Spawn,
+        ContainerAction::SpawnMenu,
     )]];
     let launch_state = match facts.launch {
         LaunchFact::None => None,
@@ -485,6 +498,108 @@ fn container_row_groups(facts: &ContainerFacts<'_>) -> Vec<Vec<ContainerRow>> {
         ContainerAction::Remove,
     )]);
     groups
+}
+
+/// What a row of the Spawn session submenu does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SpawnChoice {
+    /// Replay the stored config, as Launch last again's Current tab does.
+    Last,
+    /// The spawn dialog held on the container, with this agent chosen.
+    Dialog(AgentId),
+    /// A plain shell in the container's folder, at once.
+    Shell,
+}
+
+/// The container's stored launch, as the Spawn session submenu offers it
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnLast {
+    /// The launch summary the Last row shows.
+    summary: String,
+    /// The agent the launch ran; `None` for a plain shell.
+    agent: Option<AgentId>,
+    /// A headless launch, which this client refuses to replay.
+    headless: bool,
+}
+
+/// What the Spawn session submenu's rows depend on, read from the client
+/// when they are built.
+struct SpawnFacts<'a> {
+    last: Option<SpawnLast>,
+    /// The container's host's agents as `(id, label)`, in registry order.
+    agents: Vec<(AgentId, String)>,
+    /// The container has a folder a shell can start in.
+    has_folder: bool,
+    presets: &'a MenuPresets,
+}
+
+/// The Spawn session submenu's rows in the groups its separators divide:
+/// Back; Last, when a launch is stored; one row per agent, the stored
+/// launch's agent replaying it and any other opening the dialog; Shell;
+/// then the preset rows.
+fn spawn_row_groups(facts: &SpawnFacts<'_>) -> Vec<Vec<ContainerRow>> {
+    let mut groups = vec![vec![ContainerRow::new(
+        CONTAINER_SPAWN_BACK,
+        SUBMENU_BACK,
+        RowState::Enabled,
+        ContainerAction::Back,
+    )]];
+    let replayable = facts.last.as_ref().filter(|last| !last.headless);
+    if let Some(last) = &facts.last {
+        let state = if last.headless {
+            RowState::Disabled(HEADLESS_UNSUPPORTED_TIP.to_owned())
+        } else {
+            RowState::Enabled
+        };
+        groups.push(vec![ContainerRow::new(
+            CONTAINER_SPAWN_LAST,
+            &format!("{SPAWN_LAST_OPEN}{}{SPAWN_LAST_CLOSE}", last.summary),
+            state,
+            ContainerAction::SpawnWith(SpawnChoice::Last),
+        )]);
+    }
+    let agents: Vec<ContainerRow> = facts
+        .agents
+        .iter()
+        .map(|(id, label)| {
+            let choice = if replayable.is_some_and(|last| last.agent.as_ref() == Some(id)) {
+                SpawnChoice::Last
+            } else {
+                SpawnChoice::Dialog(id.clone())
+            };
+            ContainerRow {
+                selector: format!("{CONTAINER_SPAWN_AGENT_PREFIX}{}", id.0),
+                label: label.clone(),
+                state: RowState::Enabled,
+                action: ContainerAction::SpawnWith(choice),
+            }
+        })
+        .collect();
+    if !agents.is_empty() {
+        groups.push(agents);
+    }
+    let shell_state = if facts.has_folder {
+        RowState::Enabled
+    } else {
+        RowState::Disabled(CONTAINER_NO_FOLDER_TIP.to_owned())
+    };
+    groups.push(vec![ContainerRow::new(
+        CONTAINER_SPAWN_SHELL,
+        "Shell",
+        shell_state,
+        ContainerAction::SpawnWith(SpawnChoice::Shell),
+    )]);
+    groups.push(preset_rows(facts.presets));
+    groups
+}
+
+/// The launch summary inside a Last row's label, which its row draws cut
+/// with an ellipsis.
+fn last_row_summary(label: &str) -> Option<&str> {
+    label
+        .strip_prefix(SPAWN_LAST_OPEN)?
+        .strip_suffix(SPAWN_LAST_CLOSE)
 }
 
 /// The Launch last again submenu's rows in the groups its separators
@@ -620,6 +735,7 @@ fn check_applies(targets: &MenuTargets, held: u64, reported: u64) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContainerSubmenu {
     None,
+    Spawn,
     LaunchLast,
 }
 
@@ -1189,6 +1305,50 @@ impl RootView {
         }
     }
 
+    /// What the open menu's Spawn session submenu shows now: the stored
+    /// launch with its summary, the host's agents, and whether a shell has a
+    /// folder to start in.
+    fn container_spawn_facts<'a>(&self, menu: &'a ContainerMenu) -> SpawnFacts<'a> {
+        let container = &menu.container;
+        let descriptors = self.sidebar.agents(&self.host_of_menu_container(container));
+        let last = self.container_launch_config(container).and_then(|config| {
+            let summary = crate::sidebar::launch_summary(Some(&config), descriptors)?;
+            let agent = match config.mode {
+                SessionMode::PlainShell => None,
+                SessionMode::Interactive | SessionMode::Headless => {
+                    config.agent.map(|selection| selection.agent)
+                }
+            };
+            Some(SpawnLast {
+                summary,
+                agent,
+                headless: config.mode == SessionMode::Headless,
+            })
+        });
+        SpawnFacts {
+            last,
+            agents: descriptors
+                .iter()
+                .map(|descriptor| (descriptor.id.clone(), descriptor.label.clone()))
+                .collect(),
+            has_folder: self.container_shell_folder(container).is_some(),
+            presets: &menu.presets,
+        }
+    }
+
+    /// The folder, as its host names it, a Spawn session submenu's Shell
+    /// starts in: a repo's own; none for a workspace.
+    fn container_shell_folder(&self, container: &MenuContainer) -> Option<String> {
+        let MenuContainer::Repo(id) = container else {
+            return None;
+        };
+        self.sidebar
+            .repos_of(&self.host_of_repo(id))
+            .iter()
+            .find(|repo| repo.id == *id)
+            .map(|repo| repo.path.clone())
+    }
+
     /// The container menu's rows as shown now, in the groups its separators
     /// divide; empty while it is closed.
     fn container_menu_rows(&self) -> Vec<Vec<ContainerRow>> {
@@ -1197,6 +1357,7 @@ impl RootView {
         };
         match menu.submenu {
             ContainerSubmenu::None => container_row_groups(&self.container_facts(menu)),
+            ContainerSubmenu::Spawn => spawn_row_groups(&self.container_spawn_facts(menu)),
             ContainerSubmenu::LaunchLast => launch_row_groups(self.container_launch_lines()),
         }
     }
@@ -1421,7 +1582,28 @@ impl RootView {
             return;
         };
         match row.action.clone() {
-            ContainerAction::Spawn => self.container_spawn(&container, window, cx),
+            ContainerAction::Spawn => {
+                self.container_spawn(&container, window, cx);
+            }
+            ContainerAction::SpawnMenu => {
+                self.show_container_submenu(ContainerSubmenu::Spawn, window, cx);
+            }
+            ContainerAction::SpawnWith(SpawnChoice::Last) => {
+                self.choose_container_launch(
+                    &container,
+                    launch_last::Placement::CurrentTab,
+                    window,
+                    cx,
+                );
+            }
+            ContainerAction::SpawnWith(SpawnChoice::Dialog(agent)) => {
+                if self.container_spawn(&container, window, cx) {
+                    self.choose_spawn_agent(agent, window, cx);
+                }
+            }
+            ContainerAction::SpawnWith(SpawnChoice::Shell) => {
+                self.container_shell(&container, window, cx);
+            }
             ContainerAction::LaunchLast => {
                 self.show_container_submenu(ContainerSubmenu::LaunchLast, window, cx);
             }
@@ -1454,24 +1636,43 @@ impl RootView {
     }
 
     /// Closes the container menu and opens the spawn dialog held on the
-    /// repo or workspace, or on the tab for a tab container.
+    /// repo or workspace, or on the tab for a tab container. Returns whether
+    /// a dialog opened.
     fn container_spawn(
         &mut self,
         container: &MenuContainer,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let (lock, preselect) = match container {
             MenuContainer::Tab(id) => (Lock::for_tab(id.clone()), self.tab_preselect(id)),
             MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
                 let Some(target) = container.target(&self.host_of_menu_container(container)) else {
-                    return;
+                    return false;
                 };
                 (Lock::for_target(target), None)
             }
         };
         self.close_container_menu(window, cx);
-        self.open_spawn_dialog(SpawnEntry::Locked { lock, preselect }, window, cx);
+        self.open_spawn_dialog(SpawnEntry::Locked { lock, preselect }, window, cx)
+    }
+
+    /// Closes the container menu and spawns a plain shell in the
+    /// container's folder at once, in the tab on screen.
+    fn container_shell(
+        &mut self,
+        container: &MenuContainer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(folder) = self.container_shell_folder(container) else {
+            return;
+        };
+        let host = self.host_of_menu_container(container);
+        self.close_container_menu(window, cx);
+        let tabs = TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id());
+        let open_in = current_tab_open_in(&tabs);
+        self.spawn_on(&host, standalone_shell_request(Some(folder)), open_in, cx);
     }
 
     /// Closes the container menu and opens the container's appearance
@@ -1907,10 +2108,21 @@ impl RootView {
                 // Remove stays open to arm, so its press must not reach the
                 // frame's press-outside.
                 let remove = row.action == ContainerAction::Remove;
-                let item = menu_item(&row.selector, row.label.clone(), remove, &theme(cx))
-                    .when(highlighted, |item| {
-                        item.bg(gpui::rgb(theme(cx).popover_hover))
-                    });
+                let frame = menu_item_frame(&row.selector, remove, &theme(cx));
+                let item = match last_row_summary(&row.label) {
+                    Some(summary) if row.selector == CONTAINER_SPAWN_LAST => frame
+                        .flex()
+                        .child(SPAWN_LAST_OPEN)
+                        .child(truncating(
+                            &format!("{CONTAINER_SPAWN_LAST}-summary"),
+                            StyledText::new(summary.to_owned()),
+                        ))
+                        .child(SPAWN_LAST_CLOSE),
+                    _ => frame.child(row.label.clone()),
+                };
+                let item = item.when(highlighted, |item| {
+                    item.bg(gpui::rgb(theme(cx).popover_hover))
+                });
                 let item = if remove {
                     item.on_mouse_down(
                         MouseButton::Left,
@@ -3701,8 +3913,14 @@ pub(crate) fn menu_item(
     danger: bool,
     t: &UiTheme,
 ) -> Stateful<Div> {
-    let name = selector.to_owned();
     let label: SharedString = label.into();
+    menu_item_frame(selector, danger, t).child(label)
+}
+
+/// A clickable row of the menu or the overlay with no text yet, for a row
+/// that lays its text out itself.
+fn menu_item_frame(selector: &str, danger: bool, t: &UiTheme) -> Stateful<Div> {
+    let name = selector.to_owned();
     let hover = t.popover_hover;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -3713,7 +3931,6 @@ pub(crate) fn menu_item(
         .cursor_pointer()
         .text_color(gpui::rgb(if danger { t.danger_text } else { t.text }))
         .hover(move |style| style.bg(gpui::rgb(hover)))
-        .child(label)
 }
 
 /// A menu row that is drawn but cannot be pressed: muted, with `tip` as its
@@ -4097,7 +4314,7 @@ mod tests {
     /// The action the row tagged `selector` must carry.
     fn action_of(selector: &str) -> Option<ContainerAction> {
         let action = match selector {
-            CONTAINER_SPAWN_ROW => ContainerAction::Spawn,
+            CONTAINER_SPAWN_ROW => ContainerAction::SpawnMenu,
             CONTAINER_LAUNCH_LAST_ROW => ContainerAction::LaunchLast,
             CONTAINER_APPEARANCE_ROW => ContainerAction::Appearance,
             CONTAINER_PRESET_ROW => ContainerAction::Preset(0),
@@ -4245,6 +4462,191 @@ mod tests {
             container_row_groups(&other),
             Vec::<Vec<ContainerRow>>::new()
         );
+    }
+
+    fn agent(id: &str) -> AgentId {
+        AgentId(id.to_owned())
+    }
+
+    /// A stored launch of `agent`, interactive unless `headless`.
+    fn stored(agent: Option<&str>, headless: bool) -> SpawnLast {
+        SpawnLast {
+            summary: "Alpha · Interactive · main".to_owned(),
+            agent: agent.map(self::agent),
+            headless,
+        }
+    }
+
+    /// The submenu's facts over agents `alpha` and `beta`, a repo folder and
+    /// `presets`.
+    fn spawn_facts(last: Option<SpawnLast>, presets: &MenuPresets) -> SpawnFacts<'_> {
+        SpawnFacts {
+            last,
+            agents: vec![
+                (agent("alpha"), "Alpha".to_owned()),
+                (agent("beta"), "Beta".to_owned()),
+            ],
+            has_folder: true,
+            presets,
+        }
+    }
+
+    /// Each row as its selector, label and action, a group per inner list.
+    fn spawn_rows(facts: &SpawnFacts<'_>) -> Vec<Vec<(String, String, ContainerAction)>> {
+        spawn_row_groups(facts)
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .map(|row| (row.selector, row.label, row.action))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn spawn_row(
+        selector: &str,
+        label: &str,
+        action: ContainerAction,
+    ) -> (String, String, ContainerAction) {
+        (selector.to_owned(), label.to_owned(), action)
+    }
+
+    fn with(choice: SpawnChoice) -> ContainerAction {
+        ContainerAction::SpawnWith(choice)
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the preset fixture is built from JSON; a bad one fails the test with its message"
+    )]
+    fn the_spawn_submenu_offers_last_the_agents_shell_then_the_presets() {
+        let presets = MenuPresets::Listed(vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "p", "name": "Triage", "source_repo_id": "r1",
+                "prompt_sources": [{"kind": "inline"}],
+                "prompt_template": "{prompt}", "branch_template": "tmp/{index}",
+                "tab_grouping": {"kind": "none"},
+                "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+            }))
+            .expect("preset fixture"),
+        ]);
+        let facts = spawn_facts(Some(stored(Some("alpha"), false)), &presets);
+        assert_eq!(
+            spawn_rows(&facts),
+            vec![
+                vec![spawn_row(
+                    CONTAINER_SPAWN_BACK,
+                    SUBMENU_BACK,
+                    ContainerAction::Back
+                )],
+                vec![spawn_row(
+                    CONTAINER_SPAWN_LAST,
+                    "Last (Alpha · Interactive · main)",
+                    with(SpawnChoice::Last)
+                )],
+                vec![
+                    spawn_row(
+                        "container-spawn-agent-alpha",
+                        "Alpha",
+                        with(SpawnChoice::Last)
+                    ),
+                    spawn_row(
+                        "container-spawn-agent-beta",
+                        "Beta",
+                        with(SpawnChoice::Dialog(agent("beta")))
+                    ),
+                ],
+                vec![spawn_row(
+                    CONTAINER_SPAWN_SHELL,
+                    "Shell",
+                    with(SpawnChoice::Shell)
+                )],
+                vec![spawn_row(
+                    "container-menu-launch-preset-0",
+                    "Launch preset · Triage",
+                    ContainerAction::Preset(0)
+                )],
+            ],
+            "the stored agent's row replays it; the other opens the dialog"
+        );
+        assert!(
+            spawn_row_groups(&facts)
+                .iter()
+                .flatten()
+                .all(ContainerRow::enabled),
+            "every row can be pressed"
+        );
+    }
+
+    #[test]
+    fn without_a_stored_launch_there_is_no_last_and_every_agent_opens_the_dialog() {
+        let presets = MenuPresets::Listed(Vec::new());
+        let groups = spawn_row_groups(&spawn_facts(None, &presets));
+        assert_eq!(state(&groups, CONTAINER_SPAWN_LAST), None, "no Last row");
+        for id in ["alpha", "beta"] {
+            let selector = format!("{CONTAINER_SPAWN_AGENT_PREFIX}{id}");
+            assert_eq!(
+                row(&groups, &selector).map(|row| row.action.clone()),
+                Some(with(SpawnChoice::Dialog(agent(id)))),
+                "{selector} opens the dialog"
+            );
+        }
+        assert_eq!(
+            state(&groups, CONTAINER_PRESET_ROW),
+            Some(RowState::Disabled(PRESET_NONE_TIP.to_owned())),
+            "no presets leaves the muted none-defined row"
+        );
+    }
+
+    #[test]
+    fn a_stored_shell_or_headless_launch_matches_no_agent_row() {
+        let presets = MenuPresets::Listed(Vec::new());
+        let shell = spawn_row_groups(&spawn_facts(Some(stored(None, false)), &presets));
+        assert_eq!(
+            state(&shell, CONTAINER_SPAWN_LAST),
+            Some(RowState::Enabled),
+            "a stored shell is replayable"
+        );
+        assert_eq!(
+            row(&shell, "container-spawn-agent-alpha").map(|row| row.action.clone()),
+            Some(with(SpawnChoice::Dialog(agent("alpha"))))
+        );
+
+        let headless = spawn_row_groups(&spawn_facts(Some(stored(Some("alpha"), true)), &presets));
+        assert_eq!(
+            state(&headless, CONTAINER_SPAWN_LAST),
+            Some(RowState::Disabled(HEADLESS_UNSUPPORTED_TIP.to_owned())),
+            "a headless Last is drawn, dimmed"
+        );
+        assert_eq!(
+            row(&headless, "container-spawn-agent-alpha").map(|row| row.action.clone()),
+            Some(with(SpawnChoice::Dialog(agent("alpha")))),
+            "a headless launch is not replayed from its agent's row"
+        );
+    }
+
+    #[test]
+    fn a_container_without_a_folder_dims_shell() {
+        let presets = MenuPresets::Listed(Vec::new());
+        let facts = SpawnFacts {
+            has_folder: false,
+            ..spawn_facts(None, &presets)
+        };
+        assert_eq!(
+            state(&spawn_row_groups(&facts), CONTAINER_SPAWN_SHELL),
+            Some(RowState::Disabled(CONTAINER_NO_FOLDER_TIP.to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_last_rows_summary_is_its_label_between_the_parentheses() {
+        assert_eq!(
+            last_row_summary("Last (Alpha · Interactive · main)"),
+            Some("Alpha · Interactive · main")
+        );
+        assert_eq!(last_row_summary("Shell"), None);
     }
 
     /// Rows `a`, a disabled `b`, an inert `c`, `d`, then a disabled `e`.

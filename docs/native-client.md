@@ -25,7 +25,9 @@ This doc records the decisions a change to the client needs to know; what each f
 
   A workspace's own sessions are those whose `workspace_id` is it; a repo's are those whose first member repo is it, outside any workspace; a plain shell is never listed. A removal is silent and closes the dialog once the daemon's list no longer holds the container, a refusal is the generic "Daemon error" toast with the dialog left open and the arm dropped, and Esc, Enter, Space and Tab drive the dialog without reaching the terminal.
 
-  The menu's first row is `Spawn session`: the spawn dialog held on that container, with the target picker showing it alone and Open in left free.
+  The menu's first row is `Spawn session ▸`: a submenu that replaces the rows with `‹ Back` and, a separator between each group, `Last (<launch summary>)` (only with a stored launch; dimmed with `Headless runs aren't supported in this client` when that launch is headless), one row per agent of the container's host by descriptor label, `Shell` (dimmed with `This container has no folder` on a workspace) and the preset rows as in the top-level menu.
+
+  `Last` and the stored agent's own row replay the stored launch into the tab on screen, exactly as `Launch last again` does; any other agent row opens the spawn dialog held on that container with that agent chosen (the target picker showing the container alone and Open in left free); `Shell` spawns a plain shell in the repo's folder at once, in the tab on screen.
 
   When the container has a stored config, `Launch last again ▸` follows: that submenu replaces the rows with `‹ Back`, `Current tab`, `New tab`, one row per grid tab by name, then `Edit first…` (the spawn dialog prefilled and locked to the container instead of a replay).
 

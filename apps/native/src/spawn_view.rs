@@ -12,7 +12,7 @@ use gpui::{
     Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*, px, relative,
     svg,
 };
-use protocol::{DaemonMessage, OptionValue, SpawnPlacement};
+use protocol::{AgentId, DaemonMessage, OptionValue, SpawnPlacement};
 
 use crate::agent_options::{FieldEditor, FieldView};
 use crate::agent_options_view;
@@ -1025,6 +1025,26 @@ impl RootView {
             return;
         };
         let outcome = dialog.form.press(control, &mut self.branch_cache, now);
+        self.on_spawn_outcome(outcome, window, cx);
+    }
+
+    /// Chooses `agent` in the open spawn dialog, the focus left where the
+    /// dialog put it: a container menu's agent row opens the dialog on that
+    /// agent.
+    pub(crate) fn choose_spawn_agent(
+        &mut self,
+        agent: AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let now = (self.now)();
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
+            return;
+        };
+        let focus = dialog.form.focused();
+        let control = Control::Runtime(Runtime::Agent(agent));
+        let outcome = dialog.form.press(&control, &mut self.branch_cache, now);
+        dialog.form.set_focus(focus);
         self.on_spawn_outcome(outcome, window, cx);
     }
 
