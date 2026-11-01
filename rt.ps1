@@ -364,7 +364,7 @@ function Test-UnderGate {
     return [bool]($env:GATE_SLOT_HELD -or $env:GATE_BOX_JOB)
 }
 
-# Runs a command through tools/gate.ps1, or directly when already under a gate
+# Runs a command through tools/gate.ps1 from this script's checkout, or directly when already under a gate
 # (Test-UnderGate): a nested gate call would queue behind the slot this run already holds.
 function Invoke-Gated([string]$Slot, [string]$Name, [string[]]$Command) {
     if (Test-UnderGate) {
@@ -375,7 +375,9 @@ function Invoke-Gated([string]$Slot, [string]$Name, [string[]]$Command) {
     if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Force -Path $tmp | Out-Null }
     $timeout = if ($Slot -eq 'heavy') { 3600 } else { 900 }
     $log = Join-Path $tmp "rt-$Name.log"
-    & pwsh -NoProfile -File (Join-Path $ScriptDir 'tools/gate.ps1') run --log $log --timeout $timeout --slot $Slot -- @Command
+    # --cd routes from this checkout whatever folder the caller's shell sits in; without it a
+    # worktree's command started from another checkout is judged outside it and runs locally.
+    & pwsh -NoProfile -File (Join-Path $ScriptDir 'tools/gate.ps1') run --cd $ScriptDir --log $log --timeout $timeout --slot $Slot -- @Command
 }
 
 function Stop-DaemonProcesses {
