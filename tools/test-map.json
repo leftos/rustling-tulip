@@ -11,7 +11,6 @@
     "apps/native/src/hosts.rs",
     "apps/native/src/palette.rs",
     "apps/native/src/driver_id.rs",
-    "apps/native/tests/ui/ui_driver_registry.rs",
     "apps/native/src/assets.rs",
     "apps/native/src/offscreen.rs",
     "apps/native/src/ellipsis.rs",
@@ -25,8 +24,7 @@
   "ignore": [
     "**/*.md",
     "docs/**",
-    ".claude/**",
-    "apps/native/src/driver/**"
+    ".claude/**"
   ],
   "rows": [
     {
@@ -1453,6 +1451,15 @@
         "apps/native/src/scrollbar.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^scrollbar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_settings::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/driver/**",
+        "apps/native/tests/ui/ui_driver_registry.rs"
+      ],
+      "package": "rustling-tulip-native",
+      "features": "driver",
+      "filter": "test(/^driver::/) | test(/^ui_driver_registry::/)"
     }
   ]
 }

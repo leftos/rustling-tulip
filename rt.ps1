@@ -28,7 +28,8 @@
                  daemon, tracer or protocol: `launch` and `native` reuse a
                  running compatible daemon even from an older build.
       test       Run the workspace's tests with cargo-nextest
-                 (`cargo nextest run --cargo-profile test-release`).
+                 (`cargo nextest run --cargo-profile test-release`), then
+                 the driver specs with `--features driver`.
                  -Reached runs only the tests the change since -Base
                  reaches, mapped through tools/test-map.json (a central or
                  unmapped file runs the full suite); -PrintOnly prints the
@@ -738,7 +739,26 @@ function Invoke-FullSuite {
     )
     if ($Rest) { $nextestArgs += $Rest }
     Invoke-Gated -Slot heavy -Name test -Command $nextestArgs
-    Test-CargoExitOk 'cargo nextest run'
+    $workspaceExit = $LASTEXITCODE
+    # The driver specs compile only with the off-by-default `driver` feature, which the workspace run leaves off.
+    # A name filter in $Rest that matches no driver test leaves this call empty: not a failure.
+    Invoke-FeatureTest -Name test-driver -Package 'rustling-tulip-native' -Features 'driver' `
+        -Filter 'test(/^driver::/) | test(/^ui_driver_registry::/)' -Extra @('--no-tests', 'warn')
+    $driverExit = $LASTEXITCODE
+    if ($workspaceExit -ne 0) { throw "cargo nextest run failed (exit $workspaceExit)" }
+    if ($driverExit -ne 0) { throw "cargo nextest run --features driver failed (exit $driverExit)" }
+}
+
+# One nextest call for the tests of one package that compile only with a Cargo feature on, which a
+# filterset cannot turn on. The caller reads $LASTEXITCODE.
+function Invoke-FeatureTest([string]$Name, [string]$Package, [string]$Features, [string]$Filter, [string[]]$Extra) {
+    Write-Host "==> cargo nextest run -p $Package --cargo-profile test-release --features $Features..." -ForegroundColor Cyan
+    $nextestArgs = @(
+        'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
+        '-p', $Package, '--cargo-profile', 'test-release', '--features', $Features
+    ) + $Extra + @('-E', $Filter)
+    if ($Rest) { $nextestArgs += $Rest }
+    Invoke-Gated -Slot heavy -Name $Name -Command $nextestArgs
 }
 
 # ---------------------------------------------------------------------------
@@ -802,10 +822,38 @@ function Get-ChangedFile([string]$From) {
     return @($tracked + $untracked | Where-Object { $_ } | Sort-Object -Unique)
 }
 
+function Join-Filter([string[]]$Filters) {
+    return ($Filters | ForEach-Object { "($_)" }) -join ' | '
+}
+
+# Adds a row's filter to the plain set, or, for a row with `features`, to that
+# package and feature set's own call (-p <package> --features <features>).
+function Add-RowFilter(
+    [object]$Row,
+    [System.Collections.Generic.List[string]]$Plain,
+    [System.Collections.Specialized.OrderedDictionary]$Featured
+) {
+    if (-not $Row.features) {
+        if (-not $Plain.Contains($Row.filter)) { $Plain.Add($Row.filter) }
+        return
+    }
+    $key = "$($Row.package)|$($Row.features)"
+    if (-not $Featured.Contains($key)) {
+        $Featured[$key] = [pscustomobject]@{
+            Package = $Row.package; Features = $Row.features; Filters = [System.Collections.Generic.List[string]]::new()
+        }
+    }
+    $filters = $Featured[$key].Filters
+    if (-not $filters.Contains($Row.filter)) { $filters.Add($Row.filter) }
+}
+
 # Maps changed files to one selection: Kind 'full' (a central or unmapped file),
-# 'none' (only ignored files) or 'filter' (the matching rows' filters).
+# 'none' (only ignored files) or 'filter' (the matching rows' filters: Filter for
+# the plain rows, $null when none, and one FeatureRuns entry per package and
+# feature set the rows with `features` name).
 function Resolve-TestSelection([string[]]$Files, [object]$Map) {
     $filters = [System.Collections.Generic.List[string]]::new()
+    $featured = [System.Collections.Specialized.OrderedDictionary]::new()
     foreach ($file in $Files) {
         if (Test-GlobMatch $file $Map.central) {
             return [pscustomobject]@{ Kind = 'full'; Reason = "full suite: $file is central" }
@@ -815,15 +863,19 @@ function Resolve-TestSelection([string[]]$Files, [object]$Map) {
         if ($rows.Count -eq 0) {
             return [pscustomobject]@{ Kind = 'full'; Reason = "full suite: $file is unmapped" }
         }
-        foreach ($row in $rows) {
-            if (-not $filters.Contains($row.filter)) { $filters.Add($row.filter) }
-        }
+        foreach ($row in $rows) { Add-RowFilter -Row $row -Plain $filters -Featured $featured }
     }
-    if ($filters.Count -eq 0) {
+    if ($filters.Count -eq 0 -and $featured.Count -eq 0) {
         return [pscustomobject]@{ Kind = 'none'; Reason = 'no tests reached' }
     }
-    $joined = ($filters | ForEach-Object { "($_)" }) -join ' | '
-    return [pscustomobject]@{ Kind = 'filter'; Reason = "reached: $joined"; Filter = $joined }
+    $runs = @($featured.Values | ForEach-Object {
+            [pscustomobject]@{ Package = $_.Package; Features = $_.Features; Filter = (Join-Filter $_.Filters) }
+        })
+    $joined = if ($filters.Count -gt 0) { Join-Filter $filters } else { $null }
+    $lines = @()
+    if ($joined) { $lines += "reached: $joined" }
+    $lines += @($runs | ForEach-Object { "reached (features $($_.Features)): $($_.Filter)" })
+    return [pscustomobject]@{ Kind = 'filter'; Reason = ($lines -join "`n"); Filter = $joined; FeatureRuns = $runs }
 }
 
 function Invoke-ReachedTest {
@@ -835,13 +887,20 @@ function Invoke-ReachedTest {
     if ($PrintOnly -or $selection.Kind -eq 'none') { return }
     if ($selection.Kind -eq 'full') { Invoke-FullSuite; return }
     # A reached set may hold only ignored tests (the live specs): not a failure.
-    $nextestArgs = @(
-        'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
-        '--workspace', '--cargo-profile', 'test-release', '--no-tests', 'warn', '-E', $selection.Filter
-    )
-    if ($Rest) { $nextestArgs += $Rest }
-    Invoke-Gated -Slot heavy -Name test-reached -Command $nextestArgs
-    Test-CargoExitOk 'cargo nextest run (reached)'
+    if ($selection.Filter) {
+        $nextestArgs = @(
+            'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
+            '--workspace', '--cargo-profile', 'test-release', '--no-tests', 'warn', '-E', $selection.Filter
+        )
+        if ($Rest) { $nextestArgs += $Rest }
+        Invoke-Gated -Slot heavy -Name test-reached -Command $nextestArgs
+        Test-CargoExitOk 'cargo nextest run (reached)'
+    }
+    foreach ($run in $selection.FeatureRuns) {
+        $name = 'test-reached-' + ($run.Features -replace '[^A-Za-z0-9_-]', '-')
+        Invoke-FeatureTest -Name $name -Package $run.Package -Features $run.Features -Filter $run.Filter -Extra @('--no-tests', 'warn')
+        Test-CargoExitOk "cargo nextest run (reached, features $($run.Features))"
+    }
 }
 
 # Fails when a native source or test file has no row and is not central, when a
@@ -897,7 +956,12 @@ function Test-MapFilterName([object]$Map, [System.Collections.Generic.List[strin
     }
     $reuse = @('--binaries-metadata', $binariesPath, '--cargo-metadata', $metadataPath, '--run-ignored', 'all')
     foreach ($row in $Map.rows) {
-        $count = Get-RowTestCount $log ($reuse + @('-E', $row.filter))
+        # A row with `features` lists its package built with them, as its reached call runs it.
+        $source = if ($row.features) {
+            @('--manifest-path', $ManifestPath, '-p', $row.package, '--cargo-profile', 'test-release',
+                '--features', $row.features, '--run-ignored', 'all')
+        } else { $reuse }
+        $count = Get-RowTestCount $log ($source + @('-E', $row.filter))
         if ($count -lt 1) { $Problems.Add("selects no test ($count): $($row.paths -join ', ') -> $($row.filter)") }
     }
 }
@@ -1027,7 +1091,7 @@ function Invoke-NativeE2e {
     if ($Release) {
         throw 'native-e2e builds a test-only daemon (e2e-loopback-peers); it runs in the test-release profile only, so drop -Release.'
     }
-    $testFiles = Get-E2eTestFiles
+    $testFiles = Get-E2eTestFile
     Assert-Nextest
     if (-not (Test-UnderGate)) {
         $reentry = @('pwsh', '-NoProfile', '-File', $PSCommandPath, 'native-e2e')
@@ -1051,7 +1115,7 @@ function Invoke-NativeE2e {
 # The e2e spec files -Test names (each may hold a comma-separated list, since
 # `pwsh -File` passes `a,b` as one string), or all of them; an unknown name
 # throws before anything builds.
-function Get-E2eTestFiles {
+function Get-E2eTestFile {
     [OutputType([string[]])]
     param()
     $valid = @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh', 'e2e_multi_host')
@@ -1082,7 +1146,7 @@ function Invoke-NativeShot {
     } elseif ($positional) {
         [IO.Path]::GetFullPath($positional, (Get-Location).Path)
     } else {
-        Join-Path $ScriptDir '.tmp' 'shots' "$view.png"
+        Join-Path -Path $ScriptDir -ChildPath '.tmp' -AdditionalChildPath 'shots', "$view.png"
     }
     $cargoArgs = @(
         'cargo', 'run', '--manifest-path', $ManifestPath,
@@ -1119,7 +1183,8 @@ Commands:
              open client is left to reconnect instead).
   test [-Reached [-Base <ref>]] [-PrintOnly] [-Validate]
              `cargo nextest run --cargo-profile test-release` across the
-             workspace. -Reached: only the tests the change since <ref>
+             workspace, then the driver specs with `-p rustling-tulip-native
+             --features driver`. -Reached: only the tests the change since <ref>
              reaches (tools/test-map.json; a central or unmapped file
              runs everything). -PrintOnly: print the selection, run
              nothing. -Validate: check the test map.

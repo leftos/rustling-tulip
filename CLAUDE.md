@@ -45,9 +45,9 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 setup            # install/check Windows build prerequisites via winget (Git, Node.js, Rust, C++ Build Tools), plus cargo-sweep and cargo-nextest
 .\rt.ps1 stop             # kill any running daemon and tracers; remove the stale handshake
 .\rt.ps1 restart          # build daemon + tracer, stop the daemon (sessions survive in their tracers), run the native client
-.\rt.ps1 test             # cargo nextest run --workspace --cargo-profile test-release (fails pointing at `setup` without cargo-nextest)
+.\rt.ps1 test             # cargo nextest run --workspace --cargo-profile test-release, then the driver specs (-p rustling-tulip-native --features driver); fails pointing at `setup` without cargo-nextest
 .\rt.ps1 test -Reached    # run only the tests the change reaches: a changed file's row in tools/test-map.json, else the full suite (-Base <ref> sets the diff base: branch.<name>.base, else main's merge-base with HEAD)
-.\rt.ps1 test -Reached -PrintOnly   # print the selection ("full suite: <file> is central" / "is unmapped", "reached: <filter>", or "no tests reached") and run nothing
+.\rt.ps1 test -Reached -PrintOnly   # print the selection ("full suite: <file> is central" / "is unmapped", "reached: <filter>", "reached (features driver): <filter>", or "no tests reached") and run nothing
 .\rt.ps1 test -Validate   # check tools/test-map.json ("test map ok: <n> rows; <m> native source and test files covered")
 .\rt.ps1 clippy           # the agent seam check (tools/check-agent-names.ps1) first, then the strict lint pass (-D warnings)
 .\rt.ps1 fmt              # cargo fmt --all
@@ -77,6 +77,7 @@ cargo deny check          # advisories, licenses, source allowlist (see deny.tom
 # and with incremental builds, so an edit rebuilds in seconds instead of minutes. --release is for shipping builds only.
 # nextest's own --profile picks a config profile, not the build profile: the build profile is --cargo-profile.
 cargo nextest run --workspace --cargo-profile test-release
+cargo nextest run -p rustling-tulip-native --cargo-profile test-release --features driver -E 'test(/^driver::/) | test(/^ui_driver_registry::/)'   # the driver specs, which need the off-by-default driver feature; the full suite runs this after the workspace run
 cargo nextest run -p daemon --cargo-profile test-release <test_name>
 cargo nextest run -p protocol --cargo-profile test-release
 
@@ -90,7 +91,7 @@ Tests run with cargo-nextest although the full suite measured 1.41x slower than 
 
 On a paused tokio clock (`#[tokio::test(start_paused = true)]`) a `timeout` or `wait_until` deadline is a count of timer steps, not a hang guard: tokio skips idle virtual time in microseconds of real time, so any real OS call on the awaited path (a socket bind, a file read) that fails for a few milliseconds fails the test. A test whose wait crosses real I/O runs on the real clock with short intervals and waits on the event, its deadline a hang guard that fails as `hung`; only tests that assert a virtual schedule stay paused, with the OS kept off their path.
 
-The repo is in `test mode: stable`: every landed change's last gate runs the full suite (`cargo nextest run --workspace --cargo-profile test-release`). The **test map**, `tools/test-map.json` (keys `central`, `ignore`, `rows` of source paths to nextest filtersets), still drives `.\rt.ps1 test -Reached` for a quick run while iterating.
+The repo is in `test mode: stable`: every landed change's last gate runs the full suite (`cargo nextest run --workspace --cargo-profile test-release`, then the driver specs with `-p rustling-tulip-native --features driver`; `.\rt.ps1 test` runs both). The **test map**, `tools/test-map.json` (keys `central`, `ignore`, `rows` of source paths to nextest filtersets), still drives `.\rt.ps1 test -Reached` for a quick run while iterating.
 
 The release step is cutting a versioned release from the Linear release pipeline's `vNext`, only after a green full suite (procedure: `docs/release.md`); `v0.1.0-alpha` was the first.
 

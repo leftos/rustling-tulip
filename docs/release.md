@@ -17,6 +17,7 @@ How a versioned release of rustling-tulip is cut, starting with `v0.1.0-alpha`. 
    - `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/release-clippy.log --timeout 3600 --slot heavy -- cargo clippy --workspace --all-targets --all-features -- -D warnings`
    - `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/release-deny.log --timeout 600 --slot light -- cargo deny check`
    - `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/release-suite.log --timeout 3600 --slot heavy -- cargo nextest run --workspace --cargo-profile test-release`
+   - `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/release-driver.log --timeout 2400 --slot heavy -- cargo nextest run -p rustling-tulip-native --cargo-profile test-release --features driver -E "test(/^driver::/) | test(/^ui_driver_registry::/)"` (the driver specs, which compile only with the off-by-default `driver` feature)
    - `.\rt.ps1 native-e2e` and `.\rt.ps1 native-smoke`
 
    A red gate stops the release; its fix lands first.
