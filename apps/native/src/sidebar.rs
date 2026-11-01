@@ -729,9 +729,14 @@ fn offered_frame_width<'de, D: Deserializer<'de>>(
         .and_then(|width| u16::try_from(width).ok())
         .filter(|width| protocol::TERMINAL_FRAME_WIDTHS.contains(width));
     if offered.is_none() {
-        tracing::warn!("terminal_frame_width {value} is not 0 to 6; drawing the default");
+        tracing::warn!(
+            "terminal_frame_width {value} is not {} to {}; drawing the default",
+            protocol::TERMINAL_FRAME_WIDTHS.start(),
+            protocol::TERMINAL_FRAME_WIDTHS.end()
+        );
     }
-    Ok(offered)
+    // The default reads as unset, as `set_terminal_frame_width` stores it.
+    Ok(offered.filter(|width| *width != crate::appearance::DEFAULT_FRAME_WIDTH))
 }
 
 /// Reads `saved_hosts`, keeping each tailnet entry whose name passes the
@@ -1821,11 +1826,14 @@ impl SidebarModel {
         self.ui.terminal_font = font;
     }
 
-    /// Sets the app's terminal frame width; `None`, or a width outside
-    /// [`protocol::TERMINAL_FRAME_WIDTHS`], is the default.
+    /// Sets the app's terminal frame width; `None`, a width outside
+    /// [`protocol::TERMINAL_FRAME_WIDTHS`] or the default width itself
+    /// stores nothing, which reads as the default.
     pub fn set_terminal_frame_width(&mut self, width: Option<u16>) {
-        self.ui.terminal_frame_width =
-            width.filter(|width| protocol::TERMINAL_FRAME_WIDTHS.contains(width));
+        self.ui.terminal_frame_width = width.filter(|width| {
+            protocol::TERMINAL_FRAME_WIDTHS.contains(width)
+                && *width != appearance::DEFAULT_FRAME_WIDTH
+        });
     }
 
     /// The app's terminal frame width: the stored one, else
@@ -4897,6 +4905,32 @@ pub(crate) mod tests {
         let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("the saved layout");
         let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
         assert_eq!(saved["terminal_frame_width"], 2, "saved as a number");
+    }
+
+    #[test]
+    fn set_terminal_frame_width_stores_only_an_offered_width_other_than_the_default() {
+        let mut model = SidebarModel::default();
+        model.set_terminal_frame_width(Some(4));
+        assert_eq!(model.ui_state().terminal_frame_width, Some(4));
+        model.set_terminal_frame_width(Some(0));
+        assert_eq!(
+            model.ui_state().terminal_frame_width,
+            Some(0),
+            "Off is kept"
+        );
+        model.set_terminal_frame_width(Some(appearance::DEFAULT_FRAME_WIDTH));
+        assert_eq!(
+            model.ui_state().terminal_frame_width,
+            None,
+            "the default width stores nothing, so it reads as built-in"
+        );
+        assert_eq!(model.app_frame_width(), appearance::DEFAULT_FRAME_WIDTH);
+        model.set_terminal_frame_width(Some(4));
+        model.set_terminal_frame_width(Some(7));
+        assert_eq!(model.ui_state().terminal_frame_width, None, "out of range");
+        model.set_terminal_frame_width(Some(4));
+        model.set_terminal_frame_width(None);
+        assert_eq!(model.ui_state().terminal_frame_width, None);
     }
 
     #[test]

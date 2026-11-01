@@ -380,7 +380,8 @@ impl TerminalPane {
             self.content_changed();
         }
         self.frame = frame;
-        self.frame_width = frame_width;
+        // The band lives inside the fixed padding, so a width past the range is drawn at its end.
+        self.frame_width = frame_width.min(*protocol::TERMINAL_FRAME_WIDTHS.end());
         cx.notify();
     }
 
@@ -392,10 +393,16 @@ impl TerminalPane {
     /// What the pane fills: the terminal's area with the terminal's
     /// background (a program's `OSC 11` included), and the frame band
     /// round it with the frame colour, which follows that background when
-    /// unset.
+    /// unset. At a width of 0 no band is drawn, so the ring is that
+    /// background too.
     pub fn fills(&self) -> (Rgb, Rgb) {
         let background = self.term.background();
-        (background, self.frame.unwrap_or(background))
+        let ring = if self.frame_width == 0 {
+            background
+        } else {
+            self.frame.unwrap_or(background)
+        };
+        (background, ring)
     }
 
     /// The terminal's background and default text colour as it paints them.
@@ -1755,6 +1762,10 @@ fn report_button(button: MouseButton) -> Option<mouse::Button> {
     }
 }
 
+// The frame band sits inside the padding, so the widest one leaves the
+// render a non-negative inset.
+const _: () = assert!(crate::PADDING >= *protocol::TERMINAL_FRAME_WIDTHS.end() as f32);
+
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let window_id = window.window_handle().window_id();
@@ -1770,7 +1781,7 @@ impl Render for TerminalPane {
         let input_view = view.clone();
         let focus = self.focus.clone();
         let (grid_fill, ring_fill) = self.fills();
-        let band = f32::from(self.frame_width.min(*protocol::TERMINAL_FRAME_WIDTHS.end()));
+        let band = f32::from(self.frame_width);
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window, family, &font_settings);

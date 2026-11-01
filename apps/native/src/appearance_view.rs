@@ -274,8 +274,30 @@ impl LevelView {
         format!("Resolved: {weight} from {}", self.source_name(field.source))
     }
 
+    /// The frame width row's hint: the width it resolves to, `Off` at 0,
+    /// and where that comes from.
+    fn frame_width_hint(&self) -> String {
+        let field = &self.resolved.frame_width;
+        format!(
+            "{} · {}",
+            frame_width_label(field.value),
+            self.source_name(field.source)
+        )
+    }
+
+    /// The frame width one `delta` from the one the level resolves to, or
+    /// `None` past an end of [`protocol::TERMINAL_FRAME_WIDTHS`].
+    fn frame_width_step(&self, delta: i16) -> Option<u16> {
+        self.resolved
+            .frame_width
+            .value
+            .checked_add_signed(delta)
+            .filter(|next| protocol::TERMINAL_FRAME_WIDTHS.contains(next))
+    }
+
     fn hint(&self, row: &str) -> Option<String> {
         match row {
+            "frame-width" => Some(self.frame_width_hint()),
             "family" => Some(self.family_hint()),
             "size" => Some(self.size_hint()),
             "weight" => Some(self.weight_hint()),
@@ -303,8 +325,8 @@ impl RootView {
         }
     }
 
-    /// The hint under row `row` (`accent`, `background`, `family`, `size`
-    /// or `weight`), while the editor is open.
+    /// The hint under row `row` (`accent`, `background`, `frame-width`,
+    /// `family`, `size` or `weight`), while the editor is open.
     #[must_use]
     pub fn appearance_hint(&self, row: &str) -> Option<String> {
         let editor = self.appearance_editor.as_ref()?;
@@ -701,12 +723,29 @@ impl RootView {
         true
     }
 
-    /// Makes `overrides` the app level's font, written only when it changed;
-    /// the app level sets no colour.
+    /// Makes `overrides` the app level's font and frame width, each written
+    /// only when it changed; the app level sets no colour.
     fn set_app_appearance(&mut self, overrides: &AppearanceOverrides, cx: &mut Context<Self>) {
         let font = appearance::app_font_from_overrides(overrides);
         if self.sidebar.ui_state().terminal_font != font {
             self.set_app_font(font, cx);
+        }
+        let width = appearance::app_frame_width_from_overrides(overrides);
+        if self.sidebar.app_frame_width() != width {
+            self.set_app_frame_width(Some(width), cx);
+        }
+    }
+
+    /// Steps the level's frame width one `delta` from what it resolves to;
+    /// at an end of the range nothing changes.
+    fn step_frame_width(&mut self, delta: i16, cx: &mut Context<Self>) {
+        let next = self
+            .appearance_editor
+            .as_ref()
+            .and_then(|editor| self.level_view(&editor.level))
+            .and_then(|view| view.frame_width_step(delta));
+        if let Some(next) = next {
+            self.change_appearance(&AppearanceChange::frame_width(Some(next)), cx);
         }
     }
 
@@ -813,6 +852,7 @@ impl RootView {
             .w(px(COLUMN_WIDTH))
             .children(theme_row)
             .children(color_rows.into_iter().flatten())
+            .child(frame_width_section(&view, reset, focus, cx))
             .children(ui_font)
             .children(ui_text_size)
             .children(ui_weight);
@@ -1106,6 +1146,7 @@ struct ResetLink {
 fn reset_change(row: ResetRow) -> AppearanceChange {
     match row {
         ResetRow::Color(row) => row.change(None),
+        ResetRow::FrameWidth => AppearanceChange::frame_width(None),
         ResetRow::Size => AppearanceChange::font_size(None),
         ResetRow::TermWeight => AppearanceChange::font_weight(None),
     }
@@ -1116,9 +1157,11 @@ fn can_reset(row: ResetRow, own: &AppearanceOverrides) -> bool {
     !reset_change(row).changes_nothing_in(own)
 }
 
-/// The reset row named `name` (`accent`, `background`, `size` or `weight`).
+/// The reset row named `name` (`accent`, `background`, `frame-width`,
+/// `size` or `weight`).
 fn reset_row_named(name: &str) -> Option<ResetRow> {
     match name {
+        "frame-width" => Some(ResetRow::FrameWidth),
         "size" => Some(ResetRow::Size),
         "weight" => Some(ResetRow::TermWeight),
         _ => ColorRow::named(name).map(ResetRow::Color),
@@ -1154,8 +1197,9 @@ fn header_with_reset(
 }
 
 impl RootView {
-    /// Whether row `row`'s reset link (`accent`, `background`, `size` or
-    /// `weight`) acts: the editor's level sets the row's field.
+    /// Whether row `row`'s reset link (`accent`, `background`,
+    /// `frame-width`, `size` or `weight`) acts: the editor's level sets the
+    /// row's field.
     #[must_use]
     pub fn appearance_can_reset(&self, row: &str) -> bool {
         let Some(view) = self
@@ -1319,6 +1363,12 @@ impl RootView {
                 AppearanceStop::Reset(row) => {
                     view.as_ref().is_some_and(|view| can_reset(row, &view.own))
                 }
+                AppearanceStop::FrameWidthDown => view
+                    .as_ref()
+                    .is_some_and(|view| view.frame_width_step(-1).is_some()),
+                AppearanceStop::FrameWidthUp => view
+                    .as_ref()
+                    .is_some_and(|view| view.frame_width_step(1).is_some()),
                 AppearanceStop::UiTextSizeDown => self.ui_text_size_steps(-1).is_some(),
                 AppearanceStop::UiTextSizeUp => self.ui_text_size_steps(1).is_some(),
                 _ => true,
@@ -1536,6 +1586,8 @@ impl RootView {
             | AppearanceStop::UiFamilyFilter => {}
             AppearanceStop::Apply(row) => self.apply_hex(row, cx),
             AppearanceStop::Reset(row) => self.reset_appearance_row(row, cx),
+            AppearanceStop::FrameWidthDown => self.step_frame_width(-1, cx),
+            AppearanceStop::FrameWidthUp => self.step_frame_width(1, cx),
             AppearanceStop::FamilyList => self.pick_highlighted_family(FontList::Terminal, cx),
             AppearanceStop::UiFamilyList => self.pick_highlighted_family(FontList::Ui, cx),
             AppearanceStop::UiTextSizeDown => self.step_ui_text_size(-1, cx),
@@ -1988,6 +2040,84 @@ fn ui_text_size_label(offset: i8) -> String {
         up if up > 0 => format!("+{up} px"),
         down => format!("−{} px", down.unsigned_abs()),
     }
+}
+
+/// What a frame width reads as: `Off` at 0, else its px.
+fn frame_width_label(width: u16) -> String {
+    if width == 0 {
+        "Off".to_owned()
+    } else {
+        format!("{width} px")
+    }
+}
+
+/// The frame width row: `−`, the width the level resolves to, `+`, each
+/// button disabled at its end of the range, and the row's reset link.
+fn frame_width_section(
+    view: &LevelView,
+    reset: &'static str,
+    focus: Option<AppearanceStop>,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let t = theme(cx);
+    let mut stepper = div().flex().items_center().gap(px(8.0));
+    for (stop, label, delta) in [
+        (AppearanceStop::FrameWidthDown, "−", -1),
+        (AppearanceStop::FrameWidthUp, "+", 1),
+    ] {
+        let enabled = view.frame_width_step(delta).is_some();
+        let button = dialog_button(
+            stop.selector(),
+            label.to_owned(),
+            dialog_look(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                false,
+                enabled,
+                &t,
+            ),
+            focus == Some(stop),
+        );
+        let button = if enabled {
+            button.on_click(click_stop(stop, Aim::Stop, cx))
+        } else {
+            button
+        };
+        if delta > 0 {
+            stepper = stepper.child(
+                div()
+                    .debug_selector(|| "appearance-frame-width-value".to_owned())
+                    .child(frame_width_label(view.resolved.frame_width.value)),
+            );
+        }
+        stepper = stepper.child(button);
+    }
+    let label = field_label(
+        crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
+        "Frame width",
+        &t,
+    );
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(header_with_reset(
+            label,
+            ResetLink {
+                row: ResetRow::FrameWidth,
+                label: reset,
+                focused: focus == Some(AppearanceStop::Reset(ResetRow::FrameWidth)),
+            },
+            &view.own,
+            cx,
+        ))
+        .child(stepper)
+        .child(hint_line(
+            "appearance-frame-width-hint",
+            view.frame_width_hint(),
+            &t,
+        ))
 }
 
 /// The size: `−`, the size it resolves to, `+`.

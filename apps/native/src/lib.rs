@@ -2553,7 +2553,9 @@ impl RootView {
     /// container set none draws its frame band at.
     pub fn set_app_frame_width(&mut self, width: Option<u16>, cx: &mut Context<Self>) {
         self.sidebar.set_terminal_frame_width(width);
-        self.after_font_change(cx);
+        self.save_ui();
+        self.apply_pane_fonts(false, cx);
+        cx.notify();
     }
 
     /// Makes `family` (`None`: the default) the family the interface draws
