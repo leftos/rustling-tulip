@@ -100,6 +100,157 @@ fn reply(h: &mut Harness<'_>, request: &SpawnRequest) {
     });
 }
 
+fn target_list_open(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.spawn_target_list_open())
+}
+
+fn target_highlight(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.spawn_target_highlight())
+}
+
+/// [`fixture`] with workspace `w1` of `r0` and `r1` beside the repos.
+fn with_workspace() -> Fixture {
+    let mut fixture = fixture();
+    fixture.workspaces = vec![support::workspace("w1", &["r0", "r1"])];
+    fixture
+}
+
+#[gpui::test]
+fn the_target_field_opens_a_dropdown_of_repos_and_workspaces(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_workspace());
+    h.keys("ctrl-shift-n");
+    assert!(is_open(&mut h));
+    assert!(painted(&mut h, "spawn-target"), "the closed field is drawn");
+    assert!(
+        painted(&mut h, "spawn-target-chosen=[REPO]  r1"),
+        "showing the chosen repo"
+    );
+    assert!(!target_list_open(&mut h));
+    assert!(
+        !painted(&mut h, "spawn-target-repo-r0"),
+        "no target is listed while it is closed"
+    );
+
+    h.click_on("spawn-target");
+    assert!(target_list_open(&mut h), "a click opens the list");
+    assert_eq!(
+        target_highlight(&mut h).as_deref(),
+        Some("spawn-target-repo-r1"),
+        "on the chosen target"
+    );
+    assert!(painted(&mut h, "spawn-target-list"));
+    let r0 = h.bounds("spawn-target-repo-r0").origin.y;
+    let r1 = h.bounds("spawn-target-repo-r1").origin.y;
+    let w1 = h.bounds("spawn-target-workspace-w1").origin.y;
+    assert!(
+        r0 < r1 && r1 < w1,
+        "the repos, then the workspaces: {r0:?} {r1:?} {w1:?}"
+    );
+    assert!(
+        !painted(&mut h, "spawn-target-host-local"),
+        "no host header with one host"
+    );
+}
+
+#[gpui::test]
+fn picking_a_target_from_the_dropdown_retargets_the_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_workspace());
+    open(&mut h);
+
+    h.click_on("spawn-target");
+    h.click_on("spawn-target-repo-r0");
+    assert!(
+        selected(&mut h).contains(&"spawn-target-repo-r0".to_owned()),
+        "a click picks the row: {:?}",
+        selected(&mut h)
+    );
+    assert!(!target_list_open(&mut h), "and closes the list");
+    assert!(is_open(&mut h), "the dialog stays");
+    let sent = h.sent();
+    assert!(lists_branches(&sent, "r0"), "r0's branches are asked for");
+    assert_eq!(suggestions(&sent, "r0"), 1, "and a branch name for r0");
+    assert_eq!(focus(&mut h).as_deref(), Some("spawn-target"));
+
+    h.keys("enter");
+    assert!(
+        target_list_open(&mut h),
+        "Enter on the field opens the list"
+    );
+    h.keys("down down enter");
+    assert!(
+        selected(&mut h).contains(&"spawn-target-workspace-w1".to_owned()),
+        "Down twice and Enter pick the workspace: {:?}",
+        selected(&mut h)
+    );
+    assert!(!target_list_open(&mut h));
+    assert!(is_open(&mut h), "Enter picked the row, not the dialog");
+    assert_eq!(spawns(&h.sent()), [] as [SpawnRequest; 0]);
+}
+
+#[gpui::test]
+fn esc_closes_the_target_dropdown_and_keeps_the_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_workspace());
+    open(&mut h);
+    h.click_on("spawn-target");
+    h.keys("down");
+    assert_eq!(
+        target_highlight(&mut h).as_deref(),
+        Some("spawn-target-workspace-w1")
+    );
+
+    h.keys("escape");
+    assert!(!target_list_open(&mut h), "the first Esc closes the list");
+    assert!(is_open(&mut h), "and keeps the dialog");
+    assert!(
+        selected(&mut h).contains(&"spawn-target-repo-r1".to_owned()),
+        "on the target it had: {:?}",
+        selected(&mut h)
+    );
+
+    h.click_on("spawn-target");
+    assert!(target_list_open(&mut h));
+    let panel = h.bounds("spawn-panel");
+    h.click(
+        point(panel.origin.x + px(6.0), panel.origin.y + px(6.0)),
+        Modifiers::none(),
+    );
+    assert!(!target_list_open(&mut h), "a click outside closes the list");
+    assert!(is_open(&mut h));
+
+    h.keys("escape");
+    assert!(
+        !is_open(&mut h),
+        "Esc with the list closed closes the dialog"
+    );
+}
+
+#[gpui::test]
+fn a_locked_target_shows_a_chip_not_a_dropdown(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.right_click_on("container-repo:r1");
+    h.click_on("container-menu-spawn");
+    assert!(is_open(&mut h), "the dialog opened locked to r1");
+
+    assert!(painted(&mut h, "spawn-target-repo-r1"), "the chip is drawn");
+    assert!(!painted(&mut h, "spawn-target"), "no dropdown field");
+    h.click_on("spawn-target-repo-r1");
+    assert!(!target_list_open(&mut h), "the chip opens nothing");
+    assert!(!painted(&mut h, "spawn-target-list"));
+    assert!(
+        !painted(&mut h, "spawn-target-repo-r0"),
+        "the locked target shows alone"
+    );
+    assert!(
+        selected(&mut h).contains(&"spawn-target-repo-r1".to_owned()),
+        "still on r1: {:?}",
+        selected(&mut h)
+    );
+}
+
 #[gpui::test]
 fn ctrl_shift_n_opens_dialog_from_a_terminal(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -654,7 +805,7 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
     h.keys("shift-tab");
     assert_eq!(focus(&mut h).as_deref(), Some("spawn-cancel"), "and back");
 
-    h.keys("tab tab tab tab tab");
+    h.keys("tab tab tab tab");
     assert_eq!(focus(&mut h).as_deref(), Some("spawn-agent-plain-shell"));
     h.keys("space");
     assert!(

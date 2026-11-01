@@ -181,6 +181,7 @@ fn picking_the_remote_target_of_a_shared_repo_id_spawns_on_that_host(cx: &mut Te
     );
     h.sent();
 
+    h.click_on("spawn-target");
     h.click_on(&format!("spawn-target-repo-r1@{REMOTE}"));
     assert_eq!(
         selected_targets(&mut h),
@@ -208,6 +209,73 @@ fn shows(h: &mut Harness<'_>, selector: &str, text: &str) -> bool {
     drawn(h, &format!("{selector}={text}"))
 }
 
+fn target_highlight(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.spawn_target_highlight())
+}
+
+#[gpui::test]
+fn the_dropdown_groups_targets_by_host_with_two_hosts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    h.click_on("sidebar-add-session");
+    assert!(
+        !drawn(&mut h, "spawn-target-host-local"),
+        "no header while the list is closed"
+    );
+    assert!(
+        drawn(&mut h, "spawn-target-chosen=[REPO]  r1"),
+        "the closed field shows the chosen repo"
+    );
+
+    h.click_on("spawn-target");
+    assert!(shows(&mut h, "spawn-target-host-local", "This PC"));
+    assert!(shows(&mut h, &format!("spawn-target-host-{REMOTE}"), "box"));
+    let list = h.bounds("spawn-target-list");
+    let header = h.bounds(&format!("spawn-target-host-{REMOTE}"));
+    assert!(
+        list.contains(&header.origin),
+        "the headers are inside the list: {list:?} {header:?}"
+    );
+    assert_eq!(
+        target_highlight(&mut h).as_deref(),
+        Some("spawn-target-repo-r1")
+    );
+    h.keys("down");
+    assert_eq!(
+        target_highlight(&mut h),
+        Some(format!("spawn-target-repo-r2@{REMOTE}")),
+        "Down steps over the remote host's header"
+    );
+    h.keys("enter");
+    assert_eq!(
+        selected_targets(&mut h),
+        [format!("spawn-target-repo-r2@{REMOTE}")]
+    );
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "Enter picked, not submitted"
+    );
+}
+
+#[gpui::test]
+fn the_closed_target_field_names_a_remote_targets_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    h.click_on("sidebar-add-session");
+    assert!(
+        drawn(&mut h, "spawn-target-chosen=[REPO]  r1"),
+        "This PC's target carries no host"
+    );
+
+    h.click_on("spawn-target");
+    h.click_on(&format!("spawn-target-repo-r2@{REMOTE}"));
+    assert!(!h.root(|root, _| root.spawn_target_list_open()));
+    assert!(
+        drawn(&mut h, "spawn-target-chosen=[REPO]  r2 · box"),
+        "the closed field names the remote host"
+    );
+}
+
 /// The remote host's connection drops back to its first state: offline.
 fn take_remote_offline(h: &mut Harness<'_>) {
     h.host(&remote())
@@ -219,6 +287,7 @@ fn the_picker_lists_this_pc_then_the_remote_host_each_under_its_header(cx: &mut 
     let dir = TestDir::new();
     let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
     h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
 
     assert!(shows(&mut h, "spawn-target-host-local", "This PC"));
     assert!(shows(&mut h, &format!("spawn-target-host-{REMOTE}"), "box"));
@@ -253,6 +322,7 @@ fn with_this_pc_alone_the_picker_draws_no_host_header(cx: &mut TestAppContext) {
     fixture.repos = vec![repo("r1", "C:/r1"), repo("r2", "C:/r2")];
     let mut h = Harness::with(cx, &dir, &fixture);
     h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
 
     assert!(drawn(&mut h, "spawn-target-repo-r1"), "the picker is drawn");
     assert!(
@@ -267,6 +337,7 @@ fn an_offline_hosts_targets_are_drawn_but_cannot_be_picked(cx: &mut TestAppConte
     let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
     take_remote_offline(&mut h);
     h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
     let offline = format!("spawn-target-repo-r2@{REMOTE}");
 
     assert!(drawn(&mut h, &offline), "the offline host's repo is listed");
@@ -283,12 +354,19 @@ fn an_offline_hosts_targets_are_drawn_but_cannot_be_picked(cx: &mut TestAppConte
         reached.extend(h.root(|root, _| root.spawn_dialog_focus()));
     }
     assert!(
-        reached.iter().any(|focus| focus == "spawn-target-repo-r1"),
-        "Tab reaches This PC's repo: {reached:?}"
+        reached.iter().any(|focus| focus == "spawn-target"),
+        "Tab reaches the Target field: {reached:?}"
     );
     assert!(
         !reached.contains(&offline),
         "Tab skips the offline host's repo: {reached:?}"
+    );
+    h.click_on("spawn-target");
+    h.keys("down");
+    assert_eq!(
+        target_highlight(&mut h).as_deref(),
+        Some("spawn-target-repo-r1"),
+        "Down skips the offline host's repo"
     );
 }
 
@@ -297,6 +375,7 @@ fn spawn_dialog_no_repos_note_names_the_remote_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_hosts(cx, &dir, &["r1"], &[]);
     h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
 
     assert!(
         !h.root(|root, _| root.spawn_dialog_no_repos()),

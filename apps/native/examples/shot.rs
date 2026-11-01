@@ -8,7 +8,8 @@
 //!
 //! Views: `main` (the default: the sidebar and a split tab), `main-compact`
 //! (the same window with the sidebar's leaves one line each),
-//! `source-control`, `diff`, `settings`, `spawn`, `viewer` (a viewer tab
+//! `source-control`, `diff`, `settings`, `spawn` (the spawn dialog with its
+//! Target dropdown open), `viewer` (a viewer tab
 //! over a small Rust file, scrolled to a line) and `viewer-md` (a viewer tab
 //! over a Markdown file, rendered), `dashboard`, `connections` (the host
 //! picker with a saved tailnet host and a saved SSH host) and
@@ -16,7 +17,7 @@
 //! passing Test connection), `multi-host` (the main window with the
 //! tailnet host "box" online, one of its sessions in a pane of the first
 //! tab, and the tailnet host "lab" offline), `spawn-hosts` (the spawn
-//! dialog over those hosts, its picker grouped by host), `settings-hosts`
+//! dialog over those hosts, its Target dropdown closed), `settings-hosts`
 //! (Settings on the Claude page over those hosts, the host selector showing
 //! This PC), `menu` (the sessions panel's ⋯
 //! menu open over the repo rows, with a toast over the panes), `chat` (the
@@ -892,7 +893,16 @@ fn drive(
             }
             Ok(())
         }
-        View::Spawn | View::SpawnHosts => press("ctrl-shift-n", window, cx),
+        View::Spawn => {
+            press("ctrl-shift-n", window, cx)?;
+            let root = window
+                .root::<RootView>()
+                .flatten()
+                .context("the window has no root view")?;
+            root.update(cx, |root, cx| root.open_spawn_target_list(window, cx));
+            Ok(())
+        }
+        View::SpawnHosts => press("ctrl-shift-n", window, cx),
         View::Dashboard => {
             let y = (DASHBOARD_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(

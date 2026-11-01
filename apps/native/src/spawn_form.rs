@@ -423,6 +423,9 @@ fn scopes_label(scopes: &[EnvScope]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Control {
     Close,
+    /// The Target dropdown's closed field, which opens its list.
+    TargetField,
+    /// A row of the Target dropdown's list, or a locked target's chip.
     Target(Target),
     Runtime(Runtime),
     OpenIn(OpenChoice),
@@ -472,6 +475,7 @@ impl Control {
     pub(crate) fn selector(&self) -> String {
         match self {
             Self::Close => "spawn-close".to_owned(),
+            Self::TargetField => "spawn-target".to_owned(),
             Self::Target(target) => format!("spawn-target-{}", target.selector_part()),
             Self::Runtime(runtime) => format!("spawn-agent-{}", runtime.selector_part()),
             Self::OpenIn(OpenChoice::CurrentTab) => "spawn-placement-current-tab".to_owned(),
@@ -875,6 +879,8 @@ pub(crate) struct SpawnForm {
     target: Target,
     /// The target cannot be changed.
     locked: bool,
+    /// The Target dropdown's list.
+    target_list: TargetList,
     /// The tab the placement is fixed to, when a tab container's menu opened
     /// the dialog.
     tab_lock: Option<String>,
@@ -990,6 +996,15 @@ fn online_host_in<'a>(hosts: &'a [HostInputs], host: &HostKey) -> Option<&'a Hos
     host_in(hosts, host).filter(|inputs| !inputs.offline)
 }
 
+/// The Target dropdown's list: whether it shows, and the target its
+/// highlight is on, held as the target so a registry change that moves the
+/// rows never moves the highlight to another one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TargetList {
+    open: bool,
+    highlight: Option<Target>,
+}
+
 /// One host's part of the grouped picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TargetGroup {
@@ -1083,6 +1098,7 @@ impl SpawnForm {
             hosts: inputs.hosts,
             target: target.clone(),
             locked,
+            target_list: TargetList::default(),
             tab_lock: None,
             runtime: RuntimeChoice {
                 agent: None,
@@ -1129,7 +1145,7 @@ impl SpawnForm {
         form.focus = if form.controls().contains(&Control::Branch) {
             Control::Branch
         } else {
-            Control::Target(form.target.clone())
+            Control::TargetField
         };
         if let Some(option) = pin {
             messages.extend(form.pin(option));
@@ -1149,7 +1165,6 @@ impl SpawnForm {
     }
 
     /// Whether the target cannot be changed.
-    #[cfg(test)]
     pub(crate) fn target_locked(&self) -> bool {
         self.locked
     }
@@ -2081,6 +2096,7 @@ impl SpawnForm {
             }
             None => self.hosts.push(inputs),
         }
+        self.target_list.highlight = self.resolved_highlight();
         let targets = self.targets();
         if targets.contains(&self.target) {
             return Some(Vec::new());
@@ -2172,10 +2188,136 @@ impl SpawnForm {
         &self.target
     }
 
+    /// Whether the Target dropdown's list shows.
+    pub(crate) fn target_list_open(&self) -> bool {
+        self.target_list.open
+    }
+
+    /// The target the open list's highlight is on; `None` while it is
+    /// closed.
+    pub(crate) fn target_highlight(&self) -> Option<Target> {
+        if !self.target_list.open {
+            return None;
+        }
+        self.resolved_highlight()
+    }
+
+    /// The highlighted target while it is still listed; once it has left
+    /// the list, the chosen target, else the first one that can be picked.
+    fn resolved_highlight(&self) -> Option<Target> {
+        let targets = self.targets();
+        [self.target_list.highlight.as_ref(), Some(&self.target)]
+            .into_iter()
+            .flatten()
+            .find(|target| targets.contains(target))
+            .cloned()
+            .or_else(|| targets.into_iter().next())
+    }
+
+    /// Opens the list on the chosen target; a locked target has no list.
+    fn open_target_list(&mut self) {
+        if self.locked || self.targets().is_empty() {
+            return;
+        }
+        self.target_list = TargetList {
+            open: true,
+            highlight: Some(self.target.clone()),
+        };
+    }
+
+    /// Closes the list; returns whether it was open.
+    pub(crate) fn close_target_list(&mut self) -> bool {
+        let was_open = self.target_list.open;
+        self.target_list.open = false;
+        was_open
+    }
+
+    /// Up or Down (`down`) on the Target field: Down opens a closed list,
+    /// and in an open one the highlight moves a row, stopping at either
+    /// end. Only targets that can be picked are rows the highlight lands
+    /// on, never a host header or an offline host's target.
+    pub(crate) fn target_list_nav(&mut self, down: bool) {
+        if !self.target_list.open {
+            if down {
+                self.open_target_list();
+            }
+            return;
+        }
+        let targets = self.targets();
+        let at = self
+            .resolved_highlight()
+            .and_then(|current| targets.iter().position(|t| *t == current))
+            .unwrap_or(0);
+        let next = if down {
+            (at + 1).min(targets.len().saturating_sub(1))
+        } else {
+            at.saturating_sub(1)
+        };
+        self.target_list.highlight = targets.into_iter().nth(next);
+    }
+
+    /// The pointer is over pickable target `index`; returns whether that
+    /// moved the highlight.
+    pub(crate) fn hover_target(&mut self, index: usize) -> bool {
+        let Some(target) = self.targets().into_iter().nth(index) else {
+            return false;
+        };
+        let moved = self.target_list.highlight.as_ref() != Some(&target);
+        self.target_list.highlight = Some(target);
+        moved
+    }
+
+    /// Esc on the Target field: closes the list if it shows, and says
+    /// whether it did, so Esc goes no further.
+    pub(crate) fn escape_target_list(&mut self) -> bool {
+        self.close_target_list()
+    }
+
+    /// Enter while the list shows: picks the highlighted target. `None`
+    /// while it is closed, leaving Enter to the dialog.
+    pub(crate) fn enter_target_list(
+        &mut self,
+        cache: &mut BranchCache,
+        now: Instant,
+    ) -> Option<Vec<ClientMessage>> {
+        let target = self.target_highlight()?;
+        Some(self.pick_target(&target, cache, now))
+    }
+
+    /// Picks `target` from the list: the list closes, the field keeps the
+    /// focus, and another target that can be picked becomes the dialog's,
+    /// with its host, agents, branches and suggestion.
+    fn pick_target(
+        &mut self,
+        target: &Target,
+        cache: &mut BranchCache,
+        now: Instant,
+    ) -> Vec<ClientMessage> {
+        self.target_list.open = false;
+        self.focus = Control::TargetField;
+        if *target != self.target && self.target_enabled(target) {
+            self.load_target(target.clone(), cache, now)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// A target's picker label; outside a grouped picker, whose header
     /// names the host, a remote host's target ends in ` · ` and the host's
     /// name.
     pub(crate) fn target_label(&self, target: &Target) -> String {
+        self.labelled(target, !self.grouped())
+    }
+
+    /// The closed Target field's label: the chosen target, a remote host's
+    /// always ending in ` · ` and the host's name, as no header shows there.
+    pub(crate) fn chosen_target_label(&self) -> String {
+        self.labelled(&self.target, true)
+    }
+
+    /// `target`'s label, a remote host's ending in ` · ` and the host's name
+    /// when `name_host`.
+    fn labelled(&self, target: &Target, name_host: bool) -> String {
         let host = host_in(&self.hosts, target.host());
         let label = match target {
             Target::Repo { id, .. } => {
@@ -2191,7 +2333,7 @@ impl SpawnForm {
             }
         };
         match (target.host(), host) {
-            (HostKey::Remote(_), Some(host)) if !self.grouped() => {
+            (HostKey::Remote(_), Some(host)) if name_host => {
                 format!("{label} · {}", host.label)
             }
             _ => label,
@@ -2729,7 +2871,7 @@ impl SpawnForm {
     pub(crate) fn controls(&self) -> Vec<Control> {
         let mut ring = vec![Control::Close];
         if !self.locked {
-            ring.extend(self.targets().into_iter().map(Control::Target));
+            ring.push(Control::TargetField);
         }
         ring.extend(self.runtimes().into_iter().map(Control::Runtime));
         ring.extend(self.field_controls(SpawnPlacement::Main));
@@ -2883,9 +3025,13 @@ impl SpawnForm {
         let messages = match control {
             Control::Close | Control::Cancel => return Outcome::Close,
             Control::Submit => return self.submit(cache),
-            Control::Target(target) if *target != self.target && self.target_enabled(target) => {
-                self.load_target(target.clone(), cache, now)
+            Control::TargetField => {
+                if !self.close_target_list() {
+                    self.open_target_list();
+                }
+                Vec::new()
             }
+            Control::Target(target) => self.pick_target(target, cache, now),
             Control::Runtime(runtime) => {
                 self.select_runtime(runtime.clone());
                 Vec::new()
@@ -2914,7 +3060,6 @@ impl SpawnForm {
             }
             Control::Branch
             | Control::Base
-            | Control::Target(_)
             | Control::FieldText(_)
             | Control::EnvKey(_)
             | Control::EnvValue(_) => Vec::new(),
@@ -4376,7 +4521,7 @@ mod tests {
             ring,
             [
                 Control::Close,
-                Control::Target(Target::repo(&HostKey::Local, "r1")),
+                Control::TargetField,
                 Control::Runtime(Runtime::Agent(claude_id())),
                 Control::Runtime(Runtime::PlainShell),
                 choice("provider", "anthropic"),
@@ -4401,6 +4546,177 @@ mod tests {
         assert_eq!(form.focused(), Control::Close, "wraps forward");
         form.move_focus(false);
         assert_eq!(form.focused(), Control::Cancel, "and back");
+    }
+
+    /// A form on This PC's `r0` of repos `r0`, `r1` and `r2`.
+    fn three_repos() -> SpawnForm {
+        Setup::repos(vec![repo("r0"), repo("r1"), repo("r2")])
+            .open(&mut BranchCache::default())
+            .0
+    }
+
+    fn local(id: &str) -> Target {
+        Target::repo(&HostKey::Local, id)
+    }
+
+    #[test]
+    fn the_target_list_opens_on_the_chosen_target_and_clamps_up_and_down() {
+        let mut form = three_repos();
+        assert!(!form.target_list_open(), "closed until pressed");
+        assert_eq!(form.target_highlight(), None);
+
+        press(&mut form, &Control::TargetField);
+        assert!(form.target_list_open());
+        assert_eq!(
+            form.target_highlight(),
+            Some(local("r0")),
+            "on the chosen one"
+        );
+        form.target_list_nav(false);
+        assert_eq!(
+            form.target_highlight(),
+            Some(local("r0")),
+            "Up stops at the first"
+        );
+        form.target_list_nav(true);
+        form.target_list_nav(true);
+        form.target_list_nav(true);
+        assert_eq!(
+            form.target_highlight(),
+            Some(local("r2")),
+            "Down stops at the last"
+        );
+        assert_eq!(form.target(), &local("r0"), "moving picks nothing");
+
+        press(&mut form, &Control::TargetField);
+        assert!(!form.target_list_open(), "a second press closes it");
+        form.target_list_nav(true);
+        assert!(form.target_list_open(), "Down opens a closed list");
+        assert_eq!(form.target_highlight(), Some(local("r0")));
+    }
+
+    #[test]
+    fn the_target_highlight_follows_its_target_when_the_list_changes() {
+        let mut form = three_repos();
+        let mut cache = BranchCache::default();
+        press(&mut form, &Control::TargetField);
+        form.target_list_nav(true);
+        assert_eq!(form.target_highlight(), Some(local("r1")));
+
+        let ahead = this_pc(
+            vec![repo("a0"), repo("r0"), repo("r1"), repo("r2")],
+            Vec::new(),
+        );
+        form.set_registry(ahead, &mut cache, Instant::now());
+        assert_eq!(
+            form.target_highlight(),
+            Some(local("r1")),
+            "a repo added ahead of it leaves the highlight on r1"
+        );
+        let picked = form
+            .enter_target_list(&mut cache, Instant::now())
+            .map(|_| form.target().clone());
+        assert_eq!(
+            picked,
+            Some(local("r1")),
+            "Enter picks what was highlighted"
+        );
+    }
+
+    #[test]
+    fn a_highlighted_target_that_leaves_the_list_gives_way_to_the_chosen_one() {
+        let mut form = three_repos();
+        let mut cache = BranchCache::default();
+        press(&mut form, &Control::TargetField);
+        form.target_list_nav(true);
+        form.target_list_nav(true);
+        assert_eq!(form.target_highlight(), Some(local("r2")));
+
+        let without = this_pc(vec![repo("r0"), repo("r1")], Vec::new());
+        form.set_registry(without, &mut cache, Instant::now());
+        assert_eq!(
+            form.target_highlight(),
+            Some(local("r0")),
+            "back on the chosen target, not on whatever took r2's place"
+        );
+        form.target_list_nav(true);
+        assert_eq!(form.target_highlight(), Some(local("r1")));
+    }
+
+    #[test]
+    fn enter_picks_the_highlighted_target_as_its_button_did() {
+        let mut form = three_repos();
+        let mut cache = BranchCache::default();
+        assert!(
+            form.enter_target_list(&mut cache, Instant::now()).is_none(),
+            "Enter with the list closed is the dialog's"
+        );
+        press(&mut form, &Control::TargetField);
+        form.target_list_nav(true);
+        let messages = form
+            .enter_target_list(&mut cache, Instant::now())
+            .expect("Enter picks while the list shows");
+
+        assert_eq!(form.target(), &local("r1"));
+        assert!(!form.target_list_open(), "a pick closes the list");
+        assert_eq!(
+            form.focused(),
+            Control::TargetField,
+            "the field keeps the focus"
+        );
+        assert!(
+            messages.iter().any(
+                |msg| matches!(msg, ClientMessage::ListBranches { repo_id } if repo_id == "r1")
+            ),
+            "the new target's branches are asked for: {messages:?}"
+        );
+
+        press(&mut form, &Control::Target(local("r2")));
+        assert_eq!(form.target(), &local("r2"), "a row press picks too");
+        assert_eq!(form.focused(), Control::TargetField);
+    }
+
+    #[test]
+    fn esc_closes_the_target_list_and_keeps_the_target() {
+        let mut form = three_repos();
+        press(&mut form, &Control::TargetField);
+        form.target_list_nav(true);
+        assert!(form.escape_target_list(), "Esc closes the open list");
+        assert!(!form.target_list_open());
+        assert_eq!(
+            form.target(),
+            &local("r0"),
+            "the highlighted row is not picked"
+        );
+        assert!(
+            !form.escape_target_list(),
+            "a closed list leaves Esc to the dialog"
+        );
+    }
+
+    #[test]
+    fn the_target_list_steps_over_host_headers_and_offline_hosts() {
+        let mut setup = Setup::repos(vec![repo("r1")]);
+        let mut offline = box_inputs(&["r2"], agent_registry::descriptors(), BTreeMap::new());
+        offline.offline = true;
+        let mut lab = box_inputs(&["r3"], agent_registry::descriptors(), BTreeMap::new());
+        lab.host = HostKey::Remote("lab".to_owned());
+        lab.label = "lab".to_owned();
+        setup.others = vec![offline, lab];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        let lab_r3 = Target::repo(&HostKey::Remote("lab".to_owned()), "r3");
+
+        press(&mut form, &Control::TargetField);
+        form.target_list_nav(true);
+        assert_eq!(
+            form.target_highlight(),
+            Some(lab_r3.clone()),
+            "Down goes from This PC's repo past the headers and the offline host"
+        );
+        form.target_list_nav(true);
+        assert_eq!(form.target_highlight(), Some(lab_r3));
+        form.target_list_nav(false);
+        assert_eq!(form.target_highlight(), Some(local("r1")));
     }
 
     /// Claude on repo `r1` with a branch name, so Spawn can go.
@@ -5172,6 +5488,8 @@ mod tests {
                 .any(|c| matches!(c, Control::Target(_))),
             "the locked chip is out of the ring"
         );
+        press(&mut form, &Control::TargetField);
+        assert!(!form.target_list_open(), "a locked target opens no list");
         press(
             &mut form,
             &Control::Target(Target::repo(&HostKey::Local, "r1")),

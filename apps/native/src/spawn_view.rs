@@ -155,6 +155,8 @@ pub(crate) struct SpawnDialog {
     panel_bounds: Option<Bounds<Pixels>>,
     /// Where the field whose list shows was last laid out.
     list_anchor: Option<Bounds<Pixels>>,
+    /// Where the Target field was last laid out while its list showed.
+    target_anchor: Option<Bounds<Pixels>>,
     /// The dialog opened filled from a stored config (a duplicate, a
     /// launch-last review), so its submit is not the user's own Trusted
     /// choice.
@@ -187,6 +189,7 @@ impl SpawnEntry {
 enum Measured {
     Panel,
     ListAnchor,
+    TargetAnchor,
 }
 
 impl SpawnDialog {
@@ -478,6 +481,31 @@ impl RootView {
         Some(dialog.base_input.read(cx).text().to_owned())
     }
 
+    /// Whether the Target dropdown's list shows.
+    #[must_use]
+    pub fn spawn_target_list_open(&self) -> bool {
+        self.form_dialog()
+            .is_some_and(|dialog| dialog.form.target_list_open())
+    }
+
+    /// The selector of the Target list's highlighted row, or `None` while
+    /// the list is closed.
+    #[must_use]
+    pub fn spawn_target_highlight(&self) -> Option<String> {
+        let target = self.form_dialog()?.form.target_highlight()?;
+        Some(Control::Target(target).selector())
+    }
+
+    /// Opens the Target dropdown's list, as a click on the field does.
+    pub fn open_spawn_target_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .form_dialog()
+            .is_some_and(|dialog| !dialog.form.target_list_open())
+        {
+            self.press_spawn_control(&Control::TargetField, window, cx);
+        }
+    }
+
     /// The rows the branch field's list shows, or `None` while it is closed.
     #[must_use]
     pub fn spawn_branch_rows(&self) -> Option<Vec<String>> {
@@ -701,6 +729,7 @@ impl RootView {
             reveal: true,
             panel_bounds: None,
             list_anchor: None,
+            target_anchor: None,
             prefilled: prefill.is_some(),
         })));
         self.sync_env_inputs(window, cx);
@@ -939,6 +968,65 @@ impl RootView {
         }
     }
 
+    fn close_spawn_target_list(&mut self, cx: &mut Context<Self>) {
+        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog
+            && dialog.form.close_target_list()
+        {
+            cx.notify();
+        }
+    }
+
+    fn hover_spawn_target(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog
+            && dialog.form.hover_target(index)
+        {
+            cx.notify();
+        }
+    }
+
+    /// A key on the Target field or its open list; returns whether it was
+    /// the list's. Up and Down move through the list (Down opens it), Enter
+    /// and Space pick the highlighted row while it shows, Esc closes it, and
+    /// Tab closes it on the way to the next control.
+    fn on_target_list_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let now = (self.now)();
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
+            return false;
+        };
+        let form = &mut dialog.form;
+        match key {
+            "up" | "down" => {
+                form.target_list_nav(key == "down");
+                cx.notify();
+                true
+            }
+            "escape" => {
+                let closed = form.escape_target_list();
+                if closed {
+                    cx.notify();
+                }
+                closed
+            }
+            "enter" | "space" => match form.enter_target_list(&mut self.branch_cache, now) {
+                Some(messages) => {
+                    self.on_spawn_outcome(Outcome::Stay(messages), window, cx);
+                    true
+                }
+                None => false,
+            },
+            "tab" => {
+                form.close_target_list();
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn hover_spawn_list(&mut self, list: ListField, index: usize, cx: &mut Context<Self>) {
         if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog
             && dialog.form.hover_list(list, index)
@@ -970,6 +1058,7 @@ impl RootView {
         let slot = match what {
             Measured::Panel => &mut dialog.panel_bounds,
             Measured::ListAnchor => &mut dialog.list_anchor,
+            Measured::TargetAnchor => &mut dialog.target_anchor,
         };
         if *slot != Some(bounds) {
             *slot = Some(bounds);
@@ -1273,6 +1362,10 @@ impl RootView {
             return true;
         }
         let focused = form.focused();
+        let on_target = form.target_list_open() || focused == Control::TargetField;
+        if on_target && self.on_target_list_key(key, window, cx) {
+            return true;
+        }
         match key {
             "tab" => {
                 if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
@@ -1403,7 +1496,7 @@ impl RootView {
         let form = &dialog.form;
         let focus = form.focused();
         let placement = group()
-            .child(target_field(form, &focus, cx))
+            .child(target_field(dialog, &focus, cx))
             .child(runtime_field(form, &focus, cx))
             .children(agent_options_view::rows(
                 form,
@@ -2078,10 +2171,10 @@ fn choice(
     option_button(control, label, look, cx).into_any_element()
 }
 
-/// The Target field: one segmented row of every target, or, with two or
-/// more hosts listed, a header row per host over its own targets (an
-/// offline host's dimmed and disabled, an empty host's no-repos line).
-fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
+/// The Target field: a dropdown showing the chosen repo or workspace, or a
+/// locked target's chip alone.
+fn target_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    let form = &dialog.form;
     let t = theme(cx);
     let label = field(
         crate::fonts::ui_text_size(cx),
@@ -2089,35 +2182,181 @@ fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
         "Target",
         &t,
     );
-    if !form.grouped() {
-        let buttons = target_buttons(form, form.shown_targets(), focus, cx);
-        return label.child(segmented(buttons, &t));
+    if form.target_locked() {
+        let chip = target_buttons(form, form.shown_targets(), focus, cx);
+        return label.child(segmented(chip, &t));
     }
-    let groups = form.target_groups().into_iter().map(|group| {
-        let key = group.host.wire().unwrap_or("local").to_owned();
-        let header = labelled_text(format!("spawn-target-host-{key}"), group.label.clone())
-            .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-            .text_color(gpui::rgb(t.text_2))
-            .when(group.offline, |header| header.opacity(DISABLED_OPACITY));
-        let body = if group.targets.is_empty() {
-            labelled_text(
-                format!("spawn-target-no-repos-{key}"),
-                group.no_repos_note(),
-            )
-            .text_color(gpui::rgb(t.muted))
-            .when(group.offline, |note| note.opacity(DISABLED_OPACITY))
-            .into_any_element()
-        } else {
-            segmented(target_buttons(form, group.targets, focus, cx), &t).into_any_element()
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(header)
-            .child(body)
-    });
-    label.child(div().flex().flex_col().gap(px(8.0)).children(groups))
+    label.child(target_dropdown(dialog, focus, cx))
+}
+
+/// The closed Target field, with its list while open: under the field (over
+/// it when there is more room there), inside the dialog. A click on the
+/// field opens or closes the list, and a press outside both closes it.
+fn target_dropdown(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Div {
+    let form = &dialog.form;
+    let t = theme(cx);
+    let control = Control::TargetField;
+    let focused = *focus == control;
+    let selector = control.selector();
+    let chosen = labelled_text("spawn-target-chosen".to_owned(), form.chosen_target_label())
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden();
+    let chevron = svg()
+        .path(SIDEBAR_CHEVRON_DOWN_ICON)
+        .flex_none()
+        .size(px(12.0))
+        .text_color(gpui::rgb(t.text_2));
+    let trigger = field_frame(focused, &t)
+        .id(ElementId::Name(SharedString::from(selector.clone())))
+        .debug_selector(move || selector)
+        .w_full()
+        .justify_between()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .child(chosen)
+        .child(chevron)
+        .on_click(press_control(&control, cx));
+    let trigger = reveal_when_focused(trigger, &control, focused, cx);
+    div()
+        .relative()
+        .w_full()
+        .child(trigger)
+        .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+            this.close_spawn_target_list(cx);
+        }))
+        .when(form.target_list_open(), |field| {
+            field
+                .child(measurer(Measured::TargetAnchor, cx))
+                .child(target_list(dialog, cx))
+        })
+}
+
+/// The open Target list: every target, repos then workspaces; with two or
+/// more hosts listed, a header row per host over its own targets (an
+/// offline host's dimmed and disabled, an empty host's no-repos line).
+fn target_list(dialog: &SpawnDialog, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
+    let form = &dialog.form;
+    let pickable = form.targets();
+    let highlight = form.target_highlight();
+    let mut items = Vec::new();
+    if form.grouped() {
+        for group in form.target_groups() {
+            let key = group.host.wire().unwrap_or("local").to_owned();
+            let header = labelled_text(format!("spawn-target-host-{key}"), group.label.clone())
+                .px(px(8.0))
+                .py(px(4.0))
+                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                .text_color(gpui::rgb(t.text_2))
+                .when(group.offline, |header| header.opacity(DISABLED_OPACITY));
+            items.push(header.into_any_element());
+            if group.targets.is_empty() {
+                let note = labelled_text(
+                    format!("spawn-target-no-repos-{key}"),
+                    group.no_repos_note(),
+                )
+                .px(px(8.0))
+                .py(px(4.0))
+                .text_color(gpui::rgb(t.muted))
+                .when(group.offline, |note| note.opacity(DISABLED_OPACITY));
+                items.push(note.into_any_element());
+            }
+            for target in group.targets {
+                items.push(target_row(form, &pickable, highlight.as_ref(), target, cx));
+            }
+        }
+    } else {
+        for target in pickable.clone() {
+            items.push(target_row(form, &pickable, highlight.as_ref(), target, cx));
+        }
+    }
+    let placement = match (dialog.panel_bounds, dialog.target_anchor) {
+        (Some(panel), Some(anchor)) => list_placement(
+            panel.top()..panel.bottom(),
+            anchor.top()..anchor.bottom(),
+            px(LIST_MAX_HEIGHT),
+        ),
+        _ => (false, px(LIST_MAX_HEIGHT)),
+    };
+    popup_panel("spawn-target-list".to_owned(), placement, items, &t)
+}
+
+/// One row of the Target list: a target that can be picked follows the
+/// pointer and is picked by a press; an offline host's is dimmed and
+/// inert. The chosen target carries a check.
+fn target_row(
+    form: &SpawnForm,
+    pickable: &[Target],
+    highlight: Option<&Target>,
+    target: Target,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let index = pickable.iter().position(|p| *p == target);
+    let chosen = target == *form.target();
+    let highlighted = highlight == Some(&target);
+    let label = form.target_label(&target);
+    let control = Control::Target(target);
+    let name = control.selector();
+    let row = div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex()
+        .justify_between()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(SEGMENT_RADIUS))
+        .when(highlighted, move |row| row.bg(gpui::rgb(t.popover_hover)))
+        .child(label)
+        .when(chosen, |row| row.child("✓"));
+    let Some(index) = index else {
+        return row.opacity(DISABLED_OPACITY).into_any_element();
+    };
+    row.cursor_pointer()
+        .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+            this.hover_spawn_target(index, cx);
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.press_spawn_control(&control, window, cx);
+            }),
+        )
+        .into_any_element()
+}
+
+/// A dialog list's panel tagged `name`, drawn over the dialog above or
+/// below its field (`above`) up to `max_height`, scrolling past it.
+fn popup_panel(
+    name: String,
+    (above, max_height): (bool, Pixels),
+    items: Vec<AnyElement>,
+    t: &UiTheme,
+) -> AnyElement {
+    let panel = div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .absolute()
+        .left(px(0.0))
+        .w_full()
+        .when(above, |list| list.bottom(relative(1.0)).mb(px(2.0)))
+        .when(!above, |list| list.top(relative(1.0)).mt(px(2.0)))
+        .max_h(max_height)
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .p(px(4.0))
+        .bg(gpui::rgb(t.popover))
+        .border_1()
+        .border_color(gpui::rgb(t.popover_edge))
+        .rounded(px(LIST_RADIUS))
+        .occlude()
+        .children(items);
+    deferred(panel).with_priority(1).into_any_element()
 }
 
 /// `text` tagged `selector`, with its text tagged `<selector>=<text>`.
@@ -2471,7 +2710,7 @@ fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>
     let current = form.current_branch();
     let prefix = list.control().selector();
     let wanted = px(LIST_MAX_HEIGHT);
-    let (above, max_height) = match (dialog.panel_bounds, dialog.list_anchor) {
+    let placement = match (dialog.panel_bounds, dialog.list_anchor) {
         (Some(panel), Some(anchor)) => list_placement(
             panel.top()..panel.bottom(),
             anchor.top()..anchor.bottom(),
@@ -2495,27 +2734,7 @@ fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>
             )
         })
         .collect();
-    let name = format!("{prefix}-list");
-    let panel = div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
-        .absolute()
-        .left(px(0.0))
-        .w_full()
-        .when(above, |list| list.bottom(relative(1.0)).mb(px(2.0)))
-        .when(!above, |list| list.top(relative(1.0)).mt(px(2.0)))
-        .max_h(max_height)
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .p(px(4.0))
-        .bg(gpui::rgb(t.popover))
-        .border_1()
-        .border_color(gpui::rgb(t.popover_edge))
-        .rounded(px(LIST_RADIUS))
-        .occlude()
-        .children(items);
-    deferred(panel).with_priority(1).into_any_element()
+    popup_panel(format!("{prefix}-list"), placement, items, &t)
 }
 
 /// One row of a branch list; `(highlighted, current)` say how it looks.

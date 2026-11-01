@@ -484,6 +484,7 @@ fn dirty_worktree_shows_danger_note(cx: &mut TestAppContext) {
 fn open_workspace(h: &mut Harness<'_>) {
     h.click_on("sidebar-add-session");
     assert!(is_open(h), "the dialog opened");
+    h.click_on("spawn-target");
     h.click_on("spawn-target-workspace-w1");
     assert!(selected(h).contains(&"spawn-target-workspace-w1".to_owned()));
     h.sent();
