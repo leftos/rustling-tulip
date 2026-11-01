@@ -17,11 +17,17 @@ pub fn requested() -> bool {
     std::env::var_os(OFFSCREEN_ENV).is_some_and(|value| !value.is_empty())
 }
 
+/// The exit code of a process whose window could not be cloaked.
+pub const CLOAK_FAILED_EXIT: i32 = 3;
+
 /// Places `window` at the primary display's work-area origin at `size` in
-/// logical pixels (gpui applies neither to a window it opens hidden), cloaks
-/// it and shows it without activating it. The compositor still renders a
+/// logical pixels (gpui applies neither to a window it opens hidden), marks
+/// it never to be activated, puts it at the bottom of the Z order, cloaks it
+/// and shows it without activating it. The compositor still renders a
 /// cloaked window, so its pixels can be read, but the user never sees it. A
-/// window that cannot be cloaked stays hidden.
+/// window that cannot be cloaked is never shown: the process exits with
+/// [`CLOAK_FAILED_EXIT`], unless the window closed first, which leaves
+/// nothing to show.
 #[cfg(windows)]
 pub fn show_cloaked(window: &Window, size: (u16, u16)) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -53,14 +59,20 @@ fn cloak_and_show(address: usize, size: (u16, u16)) {
     use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
-        SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
+        HWND_BOTTOM, SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
         SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, ShowWindow, SystemParametersInfoW,
     };
     use windows::core::BOOL;
     let hwnd = HWND(std::ptr::with_exposed_provenance_mut(address));
     let mut work_area = RECT::default();
     let cloak = BOOL::from(true);
-    let flags = SWP_NOZORDER | SWP_NOACTIVATE;
+    let flags = SWP_NOACTIVATE;
+    if !never_activate(hwnd) {
+        if window_closed(hwnd) {
+            return;
+        }
+        tracing::error!("{OFFSCREEN_ENV}: the window did not take WS_EX_NOACTIVATE");
+    }
     // SAFETY: a plain query on this live window; 0 means it has no DPI.
     let dpi = match unsafe { GetDpiForWindow(hwnd) } {
         0 => 96,
@@ -77,18 +89,107 @@ fn cloak_and_show(address: usize, size: (u16, u16)) {
             tracing::warn!("{OFFSCREEN_ENV}: reading the primary work area: {err}");
         }
         let (left, top) = (work_area.left, work_area.top);
-        if let Err(err) = SetWindowPos(hwnd, None, left, top, width, height, flags) {
-            tracing::error!("{OFFSCREEN_ENV}: moving the window onto the work area: {err}");
+        let bottom = Some(HWND_BOTTOM);
+        if let Err(err) = SetWindowPos(hwnd, bottom, left, top, width, height, flags) {
+            if window_closed(hwnd) {
+                return;
+            }
+            tracing::error!(
+                "{OFFSCREEN_ENV}: moving the window onto the work area, at the bottom: {err}"
+            );
         }
         let cloak_ptr = (&raw const cloak).cast();
         let cloak_size = u32::try_from(size_of::<BOOL>()).unwrap_or(4);
         if let Err(err) = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, cloak_ptr, cloak_size) {
-            tracing::error!("{OFFSCREEN_ENV}: cloaking the window, so it stays hidden: {err}");
-            return;
+            match cloak_failure_action(!window_closed(hwnd)) {
+                CloakFailure::Exit => exit_uncloaked(&err),
+                CloakFailure::Ignore => return,
+            }
         }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
     tracing::info!("{OFFSCREEN_ENV}: the window is cloaked, never activated");
+}
+
+/// Gives the window `WS_EX_NOACTIVATE`, so neither a click nor the system
+/// makes it the foreground window, and returns whether it took it. A window
+/// left without it is still kept out of sight by the cloak.
+#[cfg(windows)]
+fn never_activate(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
+    };
+    let noactivate = isize::try_from(WS_EX_NOACTIVATE.0).unwrap_or(0);
+    // SAFETY: reads and writes the extended style of this live window; the
+    // window is still hidden, so the change activates nothing.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | noactivate);
+        GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & noactivate != 0
+    }
+}
+
+/// Ends the process before a window that could not be cloaked is shown on
+/// the owner's desktop.
+#[cfg(windows)]
+#[expect(
+    clippy::exit,
+    reason = "a cloak that fails must not show a window on the owner's desktop"
+)]
+fn exit_uncloaked(err: &windows::core::Error) -> ! {
+    tracing::error!(
+        "{OFFSCREEN_ENV}: cloaking the window failed, so it is never shown and the process \
+         exits with code {CLOAK_FAILED_EXIT}: {err}"
+    );
+    std::process::exit(CLOAK_FAILED_EXIT)
+}
+
+/// What a failed cloak calls for.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloakFailure {
+    /// The window still exists and would be shown uncloaked: end the process.
+    Exit,
+    /// The window closed before it could be cloaked, so nothing was shown.
+    Ignore,
+}
+
+/// What to do when cloaking a window fails, given whether it still exists.
+#[cfg(windows)]
+fn cloak_failure_action(window_alive: bool) -> CloakFailure {
+    if window_alive {
+        CloakFailure::Exit
+    } else {
+        CloakFailure::Ignore
+    }
+}
+
+/// Whether the window is gone, logged at debug when it is: a window opened
+/// and closed at once, or by a quitting app, makes every call on it fail.
+#[cfg(windows)]
+fn window_closed(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+    // SAFETY: a plain query; a destroyed handle answers false.
+    let closed = !unsafe { IsWindow(Some(hwnd)) }.as_bool();
+    if closed {
+        tracing::debug!("{OFFSCREEN_ENV}: the window closed before it could be cloaked");
+    }
+    closed
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::{CloakFailure, cloak_failure_action};
+
+    #[test]
+    fn a_failed_cloak_on_a_live_window_exits() {
+        assert_eq!(cloak_failure_action(true), CloakFailure::Exit);
+    }
+
+    #[test]
+    fn a_failed_cloak_on_a_closed_window_is_ignored() {
+        assert_eq!(cloak_failure_action(false), CloakFailure::Ignore);
+    }
 }
 
 #[cfg(not(windows))]

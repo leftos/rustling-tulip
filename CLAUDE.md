@@ -13,7 +13,7 @@ crates/protocol/        shared wire types (serde JSON over WS) — the contract 
 crates/daemon/          binary = rustling-tulipd: WS server, PTY pool, registry, git/scrollback/orphan logic
 crates/tracer/          binary = rt-tracer.exe: per-session ConPTY supervisor that survives daemon restarts
 crates/tracer-protocol/ stable ABI between daemon and tracer (additive-only; see docs/tracer-abi.md)
-crates/daemon-client/   client-side daemon supervision (ensure-running, handshake, config dir, client identity, stop) shared by the clients
+crates/daemon-client/   client-side daemon supervision (ensure-running, handshake, config dir, client identity, stop, and the `isolation` check that a driven run's config, binaries and worktrees dirs are absolute and under a `.tmp` folder) shared by the clients
 crates/agents/api/      package agent-api: the typed Agent trait (type Options) and its blanket AgentPlugin adapter, SpawnContext, HeadlessEvent, validate, workspace_prelude, and the conformance check (feature test-support)
 crates/agents/claude/   package agent-claude: the Claude plugin (ClaudeOptions and descriptor, argv, hook settings document, stream-json parsing, default_model, the DeepSeek provider table, the conversation transcripts it finds)
 crates/agents/registry/ package agent-registry: the compiled-in plugin list (plugin(&AgentId), all(), descriptors(), default_agent())
@@ -180,7 +180,7 @@ Its JSON state file, named by `RUSTLING_TULIP_FAKE_SSH_STATE`, holds `bridge`, `
 | `RUSTLING_TULIP_SSH` | Native client: path to the `ssh` binary it runs for an SSH host; an empty value counts as unset | `ssh` (PATH lookup), else `%SystemRoot%\System32\OpenSSH\ssh.exe` |
 | `RUSTLING_TULIP_UPDATE_FEED` | Native client: base URL of the releases feed the updater reads, the `/repos/leftos/rustling-tulip/releases` path being appended (tests point it at a local server); a dev build checks for updates only when it is set (`apps/native/src/update.rs`, `docs/auto-update.md`) | `https://api.github.com` |
 | `RUSTLING_TULIP_UPDATES_DIR` | Native client: download root for update installers and `last-result.json`; a non-empty value is used as given, an empty one counts as unset | `%LOCALAPPDATA%\leftos\rustling-tulip\data\updates\` |
-| `RUSTLING_TULIP_OFFSCREEN_WINDOW` | Native client: open the window cloaked and never activate it (the smoke tier sets it) | unset |
+| `RUSTLING_TULIP_OFFSCREEN_WINDOW` | Native client: open the window cloaked and never activate it: it carries `WS_EX_NOACTIVATE`, opens at the bottom of the Z order, and the process exits with code 3 if the cloak fails, so it is never shown (the smoke tier sets it; `shot` and `diff_bench` honour it the same way) | unset |
 
 ## Where things live on disk
 

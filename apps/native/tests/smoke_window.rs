@@ -50,9 +50,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MAPVK_VK_TO_VSC, MapVirtualKeyW, VIRTUAL_KEY, VK_OEM_MINUS, VK_OEM_PERIOD, VK_RETURN, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
-    PW_RENDERFULLCONTENT, PostMessageW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE,
+    EnumWindows, GW_HWNDPREV, GWL_EXSTYLE, GetClientRect, GetForegroundWindow, GetWindow,
+    GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible, PW_RENDERFULLCONTENT,
+    PostMessageW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WS_EX_NOACTIVATE,
 };
 use windows::core::BOOL;
 
@@ -445,6 +446,53 @@ fn assert_out_of_the_way(hwnd: HWND) {
         foreground != hwnd,
         "the smoke window became the foreground window"
     );
+}
+
+/// The window must carry `WS_EX_NOACTIVATE`, so nothing can make it the
+/// foreground window.
+fn assert_never_activates(hwnd: HWND) {
+    // SAFETY: a plain query on a live window.
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    let noactivate = isize::try_from(WS_EX_NOACTIVATE.0).expect("an extended style bit");
+    assert!(
+        style & noactivate != 0,
+        "the smoke window lacks WS_EX_NOACTIVATE (extended style {style:#x})"
+    );
+}
+
+/// The window must not be the foreground window and must sit below it in
+/// the Z order: walking up from the window through the windows above it
+/// reaches the foreground window. With no foreground window at all (a
+/// locked or disconnected session) there is nothing to sit below.
+fn assert_below_foreground(hwnd: HWND) {
+    // SAFETY: a plain query.
+    let foreground = unsafe { GetForegroundWindow() };
+    assert!(
+        foreground != hwnd,
+        "the smoke window became the foreground window"
+    );
+    if foreground.is_invalid() {
+        return;
+    }
+    assert!(
+        is_above(foreground, hwnd),
+        "the smoke window sits above the foreground window {foreground:?} in the Z order"
+    );
+}
+
+/// Whether `upper` is among the windows above `lower` in the Z order.
+fn is_above(upper: HWND, lower: HWND) -> bool {
+    // SAFETY: plain queries on window handles; one that has just closed
+    // ends the walk with an error.
+    let mut above = unsafe { GetWindow(lower, GW_HWNDPREV) };
+    while let Ok(window) = above {
+        if window == upper {
+            return true;
+        }
+        // SAFETY: as above.
+        above = unsafe { GetWindow(window, GW_HWNDPREV) };
+    }
+    false
 }
 
 fn client_size(hwnd: HWND) -> (i32, i32) {
@@ -951,6 +999,16 @@ fn smoke_window_opens_cloaked_unfocused_and_connects() {
     wait_connected(&smoke);
     wait_painted(smoke.hwnd);
     assert_no_layout_chooser(&smoke);
+    assert_out_of_the_way(smoke.hwnd);
+}
+
+#[test]
+#[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+fn smoke_window_has_noactivate_and_sits_below_foreground() {
+    let smoke = open("smoke-z-order");
+    wait_connected(&smoke);
+    assert_never_activates(smoke.hwnd);
+    assert_below_foreground(smoke.hwnd);
     assert_out_of_the_way(smoke.hwnd);
 }
 

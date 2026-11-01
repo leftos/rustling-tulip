@@ -13,6 +13,7 @@
 pub mod autostart;
 pub mod capped_log;
 pub mod device_tokens;
+pub mod isolation;
 #[cfg(windows)]
 mod pinned_process;
 mod proof;
