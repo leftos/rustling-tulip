@@ -98,7 +98,7 @@ It is alpha software, Windows only for now.
 - A page per agent: Claude's permission mode, its provider (Anthropic, or DeepSeek with your own `DEEPSEEK_API_KEY`), and its launch command, so you can run another program, an alias or extra arguments.
 - Trusted launch by default, which notifications to show and when to skip them, and whether to keep the PC awake (off, while a session is busy, or always).
 - Start the daemon at login, the folder worktrees go in, and Manage worktrees to clean up old ones.
-- Appearance: themes for the whole window and its terminals (built-in ones, Nord by default, or your own), session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), the interface's text size and weight, the terminal's weight per app, repo, workspace or session, font sizes per session or per tab, and the window title.
+- Appearance: themes for the whole window and its terminals (built-in ones, Nord by default, or your own), session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), the interface's text size and weight, the terminal's weight and frame width per app, repo, workspace or session, font sizes per session or per tab, and the window title.
 - The Themes window previews every theme with its contrast check, edits any colour of your own copy, and exports or imports theme files.
 
 ![The Settings window on its General page](docs/images/settings.png)
@@ -112,6 +112,13 @@ It is alpha software, Windows only for now.
 3. The installer is not code-signed yet, so Windows SmartScreen warns on first run: choose More info, then Run anyway.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.6.1-alpha
+
+- The coloured frame round a session's terminal is 1 px by default, and a Frame width setting sets it from off to 6 px for the app, a repo, a workspace or one session.
+- A Claude session working on a task-list item no longer shows as idle mid-turn or sends a false Finished notification.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.6.1-alpha).
 
 ## What's new in v0.6.0-alpha
 
