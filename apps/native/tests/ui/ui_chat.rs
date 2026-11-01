@@ -6,23 +6,31 @@
 //! Ctrl+Shift+M switch the view too; each session's last view is saved in
 //! `native-ui.json` and a new pane on it opens there, a new session on its
 //! terminal, and a pop-out keeps its view. The running-work strip under the
-//! chat shows the daemon's `ChatWork`, counts down and takes no click.
+//! chat shows the daemon's `ChatWork`, counts down and takes no click. A
+//! tool card's Tail button, on a daemon that follows files, opens a box
+//! under the card showing the file's chunks from the follow's first
+//! (`reset`) one; a second press, the card leaving the chat or the chat
+//! unloading closes it with `UntailFile`, a reconnect asks again, and a
+//! refusal shows in the box.
 
 use crate::support;
 
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, TimeDelta, Utc};
-use gpui::{TestAppContext, px};
-use protocol::error_codes::CHAT_REFUSED;
+use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
+use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, GridNode, SplitDirection, ToolOutcome, WorkShell,
-    WorkSubagent,
+    ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_FILE_TAIL,
+    GridNode, SplitDirection, ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::chat::PaneView;
+use rustling_tulip_native::target::Target;
 use rustling_tulip_native::ui_theme::UiTheme;
-use rustling_tulip_native::{OpenOutcome, PopoutKey};
+use rustling_tulip_native::{Connection, NetEvent, OpenOutcome, PopoutKey};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 
 const TO_TERMINAL: &str = "pane-view-terminal-p1";
@@ -2300,4 +2308,273 @@ fn the_pane_menu_disables_chat_and_summary_while_the_agent_is_down(cx: &mut Test
         "the row asks for nothing: {sent:?}"
     );
     assert!(!shows_chat(&mut h));
+}
+
+/// The file the tailing tool call writes.
+const LOG: &str = "C:/work/build.log";
+const TAIL_BUTTON: &str = "chat-tail-t1-0";
+const TAIL_BOX: &str = "chat-tail-box-t1-0";
+
+/// A shell call that writes `LOG`.
+fn tailing_tool(id: &str) -> ChatEntry {
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: "Bash".to_owned(),
+        summary: "cargo build > build.log".to_owned(),
+        input: "{\"command\": \"cargo build > build.log\"}".to_owned(),
+        result: None,
+        parent_id: None,
+        tail_paths: vec![LOG.to_owned()],
+    }
+}
+
+/// Reports the connection as a daemon that follows files.
+fn file_tail_daemon(h: &mut Harness<'_>) {
+    let mut conn = Connection::for_target(Target::Local);
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    let features = vec![
+        FEATURE_AGENT_COMMANDS.to_owned(),
+        FEATURE_FILE_TAIL.to_owned(),
+    ];
+    conn.on_welcome(support::PROTOCOL, features);
+    h.event(NetEvent::State(conn));
+}
+
+/// `p1` on its chat over a daemon that follows files, the chat holding a
+/// tool card that writes `LOG`.
+fn tail_offered<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let (mut h, id) = opened(cx, dir);
+    file_tail_daemon(&mut h);
+    h.send(reply(Some(&id), vec![user("u1"), tailing_tool("t1")]));
+    h.sent();
+    h
+}
+
+/// The request ids of the `TailFile`s for `LOG` among `sent`.
+fn tail_requests(sent: &[ClientMessage]) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::TailFile {
+                session_id,
+                path,
+                request_id,
+            } if session_id == "s1" && path == LOG => Some(request_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn untails(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| {
+            matches!(msg, ClientMessage::UntailFile { session_id, path }
+                if session_id == "s1" && path == LOG)
+        })
+        .count()
+}
+
+/// The Tail button pressed: the request id its `TailFile` went out under.
+fn press_tail(h: &mut Harness<'_>) -> String {
+    h.click_on(TAIL_BUTTON);
+    let sent = h.sent();
+    let requests = tail_requests(&sent);
+    assert_eq!(requests.len(), 1, "one TailFile: {sent:?}");
+    requests.into_iter().flatten().next().unwrap_or_default()
+}
+
+fn file_tail(data: &[u8], reset: bool) -> DaemonMessage {
+    DaemonMessage::FileTail {
+        session_id: "s1".to_owned(),
+        path: LOG.to_owned(),
+        data_b64: B64.encode(data),
+        offset: 0,
+        reset,
+    }
+}
+
+/// The lines `LOG`'s box draws; none while it is closed.
+fn tail_lines(h: &mut Harness<'_>) -> Option<Vec<String>> {
+    h.root(|root, _| root.chat_tail_lines("s1", LOG))
+}
+
+#[gpui::test]
+fn pressing_tail_sends_tail_file_and_shows_the_chunks(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_offered(cx, &dir);
+    assert!(painted(&mut h, TAIL_BUTTON), "the card offers its file");
+    assert_eq!(tail_lines(&mut h), None, "no box before the press");
+    let request = press_tail(&mut h);
+    assert!(!request.is_empty(), "the TailFile carries a request id");
+    assert_eq!(tail_lines(&mut h), Some(vec!["No output yet".to_owned()]));
+    assert!(painted(&mut h, TAIL_BOX), "the box opens under the card");
+    h.send(file_tail(b"\x1b[32mone\x1b[0m\r\ntwo\n", true));
+    h.send(file_tail(b"three\n", false));
+    assert_eq!(
+        tail_lines(&mut h),
+        Some(vec!["one".to_owned(), "two".to_owned(), "three".to_owned()])
+    );
+    assert!(
+        h.root(|root, _| root.chat_tool_lines("s1", "t1"))
+            .is_empty(),
+        "the press leaves the card folded"
+    );
+}
+
+#[gpui::test]
+fn a_second_press_closes_the_box_and_sends_untail_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_offered(cx, &dir);
+    press_tail(&mut h);
+    h.send(file_tail(b"one\n", true));
+    assert!(painted(&mut h, TAIL_BOX));
+    h.click_on(TAIL_BUTTON);
+    let sent = h.sent();
+    assert_eq!(untails(&sent), 1, "the follow stops: {sent:?}");
+    assert_eq!(tail_lines(&mut h), None);
+    assert!(!drawn_now(&mut h, TAIL_BOX), "the box is gone");
+}
+
+#[gpui::test]
+fn chunks_before_a_reset_are_dropped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_offered(cx, &dir);
+    press_tail(&mut h);
+    h.send(file_tail(b"queued before the follow\n", false));
+    assert_eq!(tail_lines(&mut h), Some(vec!["No output yet".to_owned()]));
+    h.send(file_tail(b"fresh\n", true));
+    assert_eq!(tail_lines(&mut h), Some(vec!["fresh".to_owned()]));
+}
+
+#[gpui::test]
+fn a_reconnect_asks_for_open_tails_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_offered(cx, &dir);
+    let first = press_tail(&mut h);
+    h.send(file_tail(b"before\n", true));
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s1").build()));
+    let sent = h.sent();
+    let load = load_request(&sent).expect("the new connection asks for the chat");
+    let again: Vec<String> = tail_requests(&sent).into_iter().flatten().collect();
+    assert_eq!(again.len(), 1, "the open box asks again: {sent:?}");
+    assert!(
+        again.iter().all(|id| *id != first),
+        "under a fresh request id"
+    );
+    assert_eq!(untails(&sent), 0, "a new connection untails nothing");
+    h.send(reply(Some(&load), vec![user("u1"), tailing_tool("t1")]));
+    h.send(file_tail(b"late from the old follow\n", false));
+    assert_eq!(tail_lines(&mut h), Some(vec!["before".to_owned()]));
+    h.send(file_tail(b"after\n", true));
+    assert_eq!(tail_lines(&mut h), Some(vec!["after".to_owned()]));
+}
+
+#[gpui::test]
+fn no_tail_button_without_the_file_tail_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1"), tailing_tool("t1")]));
+    assert!(painted(&mut h, "chat-row-p1-t1"), "the card is drawn");
+    assert!(!painted(&mut h, TAIL_BUTTON), "but offers no Tail");
+}
+
+#[gpui::test]
+fn a_refused_tail_shows_the_error_in_its_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_offered(cx, &dir);
+    let request = press_tail(&mut h);
+    let message = "refusing to follow \"C:/work/build.log\": outside the session's folders";
+    h.send(DaemonMessage::Error {
+        message: message.to_owned(),
+        code: Some(INVALID_REQUEST.to_owned()),
+        request_id: Some(request),
+    });
+    assert_eq!(tail_lines(&mut h), Some(vec![message.to_owned()]));
+    assert!(painted(&mut h, TAIL_BOX), "the box stays open");
+    assert!(
+        tail_requests(&h.sent()).is_empty(),
+        "nothing is asked again"
+    );
+}
+
+#[gpui::test]
+fn the_box_closes_when_its_card_leaves_the_chat(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_offered(cx, &dir);
+    press_tail(&mut h);
+    h.send(file_tail(b"one\n", true));
+    h.send(reply(None, vec![user("u2")]));
+    assert_eq!(tail_lines(&mut h), None, "the box closed with its card");
+    assert_eq!(untails(&h.sent()), 1, "and its follow stopped");
+}
+
+#[gpui::test]
+fn toggling_to_the_terminal_closes_the_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_offered(cx, &dir);
+    press_tail(&mut h);
+    h.click_on(TO_TERMINAL);
+    let sent = h.sent();
+    assert_eq!(unloads(&sent), 1);
+    assert_eq!(
+        untails(&sent),
+        1,
+        "the unloaded chat's box closes: {sent:?}"
+    );
+    assert_eq!(tail_lines(&mut h), None);
+}
+
+#[gpui::test]
+fn a_reconnect_keeps_an_open_tail_when_the_reload_reply_is_empty(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = tail_offered(cx, &dir);
+    press_tail(&mut h);
+    h.send(file_tail(b"before\n", true));
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s1").build()));
+    let load = load_request(&h.sent()).expect("the new connection asks for the chat");
+    h.send(reply(Some(&load), Vec::new()));
+    assert_eq!(untails(&h.sent()), 0, "the follow just asked for stays");
+    assert!(tail_lines(&mut h).is_some(), "the box stays open");
+    h.send(reply(None, vec![user("u1"), tailing_tool("t1")]));
+    h.send(file_tail(b"after\n", true));
+    assert_eq!(tail_lines(&mut h), Some(vec!["after".to_owned()]));
+}
+
+#[gpui::test]
+fn a_wheel_over_a_tail_box_leaves_the_chat_still(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    file_tail_daemon(&mut h);
+    let mut rows: Vec<ChatEntry> = (0..30).map(|n| user(&format!("u{n}"))).collect();
+    rows.push(tailing_tool("t1"));
+    h.send(reply(Some(&id), rows));
+    press_tail(&mut h);
+    let lines: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+    let log = lines.join("\n") + "\n";
+    h.send(file_tail(log.as_bytes(), true));
+    let chat_before = h.root(|root, _| root.chat_scroll_offset("p1"));
+    assert_eq!(
+        h.root(|root, _| root.chat_tail_following("s1", LOG)),
+        Some(true)
+    );
+    let at = h.bounds(TAIL_BOX).center();
+    h.cx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(60.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    h.cx.run_until_parked();
+    assert_eq!(
+        h.root(|root, _| root.chat_tail_following("s1", LOG)),
+        Some(false),
+        "the box stops following"
+    );
+    assert_eq!(
+        h.root(|root, _| root.chat_scroll_offset("p1")),
+        chat_before,
+        "the chat keeps its place"
+    );
 }

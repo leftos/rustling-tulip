@@ -2,8 +2,10 @@
 //! follows the bottom until the owner scrolls up, the Terminal / Chat
 //! toggle's work (from the header, the pane menu or Ctrl+Shift+M) with each
 //! session's remembered view, the `LoadChat` / `UnloadChat` bookkeeping, and the folds
-//! of the daemon's chat messages. The rows' model, which panes show a chat
-//! and which chats are loaded live in [`crate::chat`].
+//! of the daemon's chat messages, and the Tail boxes under tool cards with
+//! their `TailFile` / `UntailFile` bookkeeping. The rows' model, which panes
+//! show a chat and which chats are loaded live in [`crate::chat`]; the Tail
+//! boxes' state in [`crate::chat_tail`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -15,13 +17,13 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, KeyDownEvent, Keystroke,
-    ScrollHandle, SharedString, Subscription, Task, Window, WindowId, div, prelude::*, px,
-    relative,
+    ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window, WindowId, div,
+    prelude::*, px, relative,
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
     AgentDescriptor, ChatAnswerKind, ChatEntry, ChatPrompt, ChatScreen, ClientMessage,
-    ComposerState, DaemonMessage, SessionMode, SessionSnapshot, ToolOutcome,
+    ComposerState, DaemonMessage, FEATURE_FILE_TAIL, SessionMode, SessionSnapshot, ToolOutcome,
 };
 
 use crate::agent_options::descriptor_for;
@@ -35,6 +37,8 @@ use crate::chat_cards::{
     OnPress, card_answer_message, composer_actions, key_action, prompt_card, ride_no_label,
     ride_yes_label,
 };
+use crate::chat_tail::{ChatTails, NO_OUTPUT, Tail, TailCard, TailShows};
+use crate::connection::Connection;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::scrollbar::Scrollbar;
 use crate::shell_lines;
@@ -97,6 +101,10 @@ const CURSOR_HEIGHT: f32 = 14.0;
 /// A system row's pill padding.
 const PILL_PAD_X: f32 = 10.0;
 const PILL_PAD_Y: f32 = 2.0;
+/// How many lines tall a Tail box is, and its line height over its text
+/// size.
+const TAIL_ROWS: f32 = 12.0;
+const TAIL_LINE_RATIO: f32 = 1.4;
 
 /// Whether `session` offers its chat: an interactive agent session, not a
 /// plain shell or a headless run.
@@ -319,6 +327,10 @@ pub(crate) struct ChatPanes {
     /// The host of each session with a chat or summary loaded, so its
     /// requests reach that host even once its list has dropped the session.
     hosts: HashMap<String, HostKey>,
+    /// The open Tail boxes under the chats' tool cards, and each one's
+    /// scroll by session id and path.
+    tails: ChatTails,
+    tail_scrolls: HashMap<(String, String), ScrollHandle>,
     wall: WallClock,
     /// Repaints the running-work strips while one shows, so their ages and
     /// countdowns keep counting.
@@ -370,6 +382,8 @@ impl ChatPanes {
             notes: HashMap::new(),
             refused_loads: BTreeSet::new(),
             hosts: HashMap::new(),
+            tails: ChatTails::default(),
+            tail_scrolls: HashMap::new(),
             wall,
             work_strip_timer: None,
             work_strip_repaints: 0,
@@ -402,8 +416,10 @@ impl ChatPanes {
 
     /// `host`'s new connection has loaded no chat: every chat pane of that
     /// host asks again once its pane is bound to its session, its composer
-    /// text kept as the draft.
+    /// text kept as the draft, and so does each of its open Tail boxes once
+    /// its chat loads again.
     pub(crate) fn reset_connection(&mut self, host: &HostKey, cx: &App) {
+        self.tails.reset_host(host);
         let gone: Vec<String> = self
             .hosts
             .iter()
@@ -514,6 +530,12 @@ pub(crate) struct RowLook<'a> {
     /// The whole pixels added to the UI text sizes.
     pub(crate) text_offset: i8,
     pub(crate) theme: UiTheme,
+    /// Whether the session's host follows files, so its tool cards offer
+    /// Tail buttons.
+    pub(crate) can_tail: bool,
+    /// The open Tail boxes, and each one's scroll.
+    pub(crate) tails: &'a ChatTails,
+    pub(crate) tail_scrolls: &'a HashMap<(String, String), ScrollHandle>,
 }
 
 /// The parts of a tool call a card draws.
@@ -523,6 +545,8 @@ struct ToolRow<'a> {
     summary: &'a str,
     input: &'a str,
     result: Option<&'a ToolOutcome>,
+    /// The files it offers a Tail of; none where its card draws no Tail.
+    tail_paths: &'a [String],
 }
 
 impl RootView {
@@ -585,6 +609,33 @@ impl RootView {
             .get(session_id)?
             .work
             .strip(self.wall_now())
+    }
+
+    /// The lines the Tail box of `path` in session `session_id` draws; none
+    /// while it is closed.
+    #[must_use]
+    pub fn chat_tail_lines(&self, session_id: &str, path: &str) -> Option<Vec<String>> {
+        let tail = self.chat.tails.get(session_id, path)?;
+        Some(match tail.shows() {
+            TailShows::Nothing => vec![NO_OUTPUT.to_owned()],
+            TailShows::Error(message) => vec![message.to_owned()],
+            TailShows::Lines(lines) => lines.into_iter().map(str::to_owned).collect(),
+        })
+    }
+
+    /// Whether the open Tail box of `path` in session `session_id` follows
+    /// its bottom; none while it is closed.
+    #[must_use]
+    pub fn chat_tail_following(&self, session_id: &str, path: &str) -> Option<bool> {
+        self.chat.tails.get(session_id, path).map(Tail::following)
+    }
+
+    /// How far, in pixels, chat pane `pane_id`'s rows are scrolled from
+    /// their top; none while it shows no chat.
+    #[must_use]
+    pub fn chat_scroll_offset(&self, pane_id: &str) -> Option<f32> {
+        let scroll = self.chat.scrolls.get(pane_id)?;
+        Some(-scroll.handle().offset().y / px(1.0))
     }
 
     /// How many times the running-work strips' timer has repainted them.
@@ -899,6 +950,8 @@ impl RootView {
         for session_id in changes.unload {
             self.chat.stash_draft(&session_id, cx);
             self.chat.sessions.remove(&session_id);
+            let untails = self.chat.tails.close_session(&session_id);
+            self.send_untails(untails);
             let host = self.chat.host_of(&session_id);
             self.send_to(&host, ClientMessage::UnloadChat { session_id });
         }
@@ -918,7 +971,91 @@ impl RootView {
                 },
             );
         }
+        let ChatPanes {
+            tails, sessions, ..
+        } = &mut self.chat;
+        let asks = tails.resend(
+            |session_id| sessions.contains_key(session_id),
+            new_request_id,
+        );
+        for (host, msg) in asks {
+            self.send_to(&host, msg);
+        }
         self.chat.retain_loaded_hosts();
+    }
+
+    /// Sends each of `untails` to its host while that host's connection is
+    /// open, and forgets the scroll of every closed Tail box.
+    fn send_untails(&mut self, untails: Vec<(HostKey, ClientMessage)>) {
+        for (host, msg) in untails {
+            if self.conn_of(&host).is_some_and(Connection::is_open) {
+                self.send_to(&host, msg);
+            }
+        }
+        let ChatPanes {
+            tails,
+            tail_scrolls,
+            ..
+        } = &mut self.chat;
+        tail_scrolls.retain(|(session_id, path), _| tails.is_open(session_id, path));
+    }
+
+    /// A press on a tool card's Tail button for `path`, the `index`th file
+    /// of tool call `tool_id` in session `session_id`'s chat: opens its box
+    /// under the card and asks the session's host to follow the file, or
+    /// closes the open box and stops the follow.
+    pub fn toggle_chat_tail(
+        &mut self,
+        session_id: &str,
+        tool_id: &str,
+        index: usize,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chat.tails.is_open(session_id, path) {
+            let untail = self.chat.tails.close(session_id, path);
+            self.send_untails(untail.into_iter().collect());
+        } else {
+            let host = self.chat.host_of(session_id);
+            let card = TailCard {
+                tool_id: tool_id.to_owned(),
+                index,
+            };
+            let ask = self
+                .chat
+                .tails
+                .open(host.clone(), session_id, path, card, new_request_id());
+            self.chat.tail_scrolls.insert(
+                (session_id.to_owned(), path.to_owned()),
+                ScrollHandle::new(),
+            );
+            self.send_to(&host, ask);
+        }
+        cx.notify();
+    }
+
+    /// A `FileTail` from `host`: the open box of its file takes it, else it
+    /// is dropped.
+    fn on_file_tail(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        let DaemonMessage::FileTail {
+            session_id,
+            path,
+            data_b64,
+            reset,
+            ..
+        } = msg
+        else {
+            return;
+        };
+        if self
+            .chat
+            .tails
+            .on_file_tail(host, session_id, path, data_b64, *reset)
+        {
+            cx.notify();
+        } else {
+            tracing::debug!(%session_id, path, reset, "FileTail for a closed box, or queued before its follow's reset: dropped");
+        }
     }
 
     /// The summaries some summary pane shows are now `wanted`: unloads the
@@ -947,7 +1084,9 @@ impl RootView {
     }
 
     /// A message no earlier fold took: a chat message updates its chat, a
-    /// summary message its summary, anything else goes to the agents' fold.
+    /// summary message its summary, a file's tail its Tail box, a removed
+    /// session closes its Tail boxes, and anything else goes to the agents'
+    /// fold.
     pub(crate) fn fold_chat_or_agents(
         &mut self,
         host: &crate::target::HostKey,
@@ -979,6 +1118,12 @@ impl RootView {
                 }
                 self.summary_folded(&session_id, applied, cx);
             }
+            msg @ DaemonMessage::FileTail { .. } => self.on_file_tail(host, &msg, cx),
+            DaemonMessage::SessionRemoved { session_id } => {
+                let untails = self.chat.tails.close_session(&session_id);
+                self.send_untails(untails);
+                self.fold_agents(host, DaemonMessage::SessionRemoved { session_id }, cx);
+            }
             other => self.fold_agents(host, other, cx),
         }
     }
@@ -1008,6 +1153,15 @@ impl RootView {
             _ => return,
         };
         let work = matches!(msg, DaemonMessage::ChatWork { .. });
+        // Only an unasked reset says a card left: the reply to a load, after
+        // a reconnect, may be empty while the transcript is read again.
+        let full = matches!(
+            msg,
+            DaemonMessage::Chat {
+                request_id: None,
+                ..
+            }
+        );
         let applied = self
             .chat
             .sessions
@@ -1017,6 +1171,9 @@ impl RootView {
             if work {
                 self.arm_work_strip_repaint(cx);
             }
+            if full {
+                self.close_tails_without_cards(&session_id);
+            }
             self.follow_summary_panes(&session_id);
             self.ensure_composer(&session_id, cx);
             cx.notify();
@@ -1025,13 +1182,30 @@ impl RootView {
         }
     }
 
+    /// After a `Chat` that replaced session `session_id`'s rows: each Tail
+    /// box whose tool card is no longer among them closes.
+    fn close_tails_without_cards(&mut self, session_id: &str) {
+        let ChatPanes {
+            tails, sessions, ..
+        } = &mut self.chat;
+        let Some(chat) = sessions.get(session_id) else {
+            return;
+        };
+        let untails = tails.close_missing_cards(session_id, |tool_id| {
+            matches!(chat.log.get(tool_id), Some(ChatEntry::Tool { .. }))
+        });
+        self.send_untails(untails);
+    }
+
     /// A daemon `Error` that answers one of this connection's pending
-    /// `LoadChat`s or `LoadSummary`s: every chat and summary pane of that
+    /// `TailFile`s shows in that file's Tail box. One that answers a pending
+    /// `LoadChat` or `LoadSummary`: every chat and summary pane of that
     /// session snaps back to its terminal with a note, nothing is unloaded
     /// and a later toggle asks again. The session's other load, still
     /// pending, is forgotten with it, and its own refusal is taken silently. An `unsupported_message` refusal says the session offers no
     /// chat; any other carries the daemon's `message`. Returns whether the
-    /// error answered a `LoadChat`.
+    /// error answered a `TailFile`, a `LoadChat` or one of the chat's own
+    /// requests.
     pub(crate) fn on_chat_refused(
         &mut self,
         host: &HostKey,
@@ -1043,6 +1217,16 @@ impl RootView {
         let Some(request_id) = request_id else {
             return false;
         };
+        if self.chat.tails.on_refused(host, request_id, message) {
+            tracing::info!(
+                request_id,
+                ?code,
+                message,
+                "the daemon refused to follow a file; its Tail box shows why"
+            );
+            cx.notify();
+            return true;
+        }
         if self.chat.refused_loads.remove(request_id) {
             tracing::debug!(
                 request_id,
@@ -1580,6 +1764,11 @@ impl RootView {
             mono_size: font.size,
             text_offset: fonts::ui_text_size(cx),
             theme: theme(cx),
+            can_tail: self
+                .conn_of(&self.chat.host_of(session_id))
+                .is_some_and(|conn| conn.supports(FEATURE_FILE_TAIL)),
+            tails: &self.chat.tails,
+            tail_scrolls: &self.chat.tail_scrolls,
         }
     }
 
@@ -1919,6 +2108,7 @@ pub(crate) fn chat_row(
             summary,
             input,
             result,
+            tail_paths,
             ..
         } => {
             let tool = ToolRow {
@@ -1927,6 +2117,7 @@ pub(crate) fn chat_row(
                 summary,
                 input,
                 result: result.as_ref(),
+                tail_paths: if prefix == CHAT_ROW { tail_paths } else { &[] },
             };
             tool_card(look, &tool, chat.log.is_expanded(id), cx)
         }
@@ -2035,7 +2226,8 @@ fn answer_row(
 /// A tool call's card: its name, one-line summary and status mark (tagged
 /// `chat-tool-<running|done|error>-<pane>-<id>`); a click opens it to a
 /// shell tool's whole command, one statement per line, then its input and
-/// result.
+/// result. On a host that follows files it offers a Tail button per file
+/// the call names, and draws each file's open Tail box under it.
 fn tool_card(
     look: &RowLook<'_>,
     tool: &ToolRow<'_>,
@@ -2093,6 +2285,9 @@ fn tool_card(
             this.toggle_chat_card(&session_id, &id, cx);
         }))
         .child(header)
+        .when(look.can_tail && !tool.tail_paths.is_empty(), |card| {
+            card.child(tail_buttons(look, tool, cx))
+        })
         .when(open, |card| {
             let statements = shell_lines::tool_statements(tool.name, tool.summary, tool.input);
             card.when(!statements.is_empty(), |card| {
@@ -2104,7 +2299,161 @@ fn tool_card(
                 tool_detail(label, &outcome.text, t)
             }))
         });
-    div().child(card)
+    let boxes: Vec<AnyElement> = tool
+        .tail_paths
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            let tail = look.tails.get(look.session_id, path)?;
+            let card = tail.card();
+            (card.tool_id == tool.id && card.index == index).then(|| {
+                tail_box(
+                    look,
+                    &TailPlace {
+                        tool: tool.id,
+                        index,
+                        path,
+                    },
+                    tail,
+                    cx,
+                )
+            })
+        })
+        .collect();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(card)
+        .children(boxes)
+}
+
+/// The last component of `path`, which a Tail button names.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+}
+
+/// A tool card's Tail buttons, one per file it names (each tagged
+/// `chat-tail-<id>-<n>`), each drawn selected while its box is open; a press
+/// opens or closes the box without opening the card.
+fn tail_buttons(look: &RowLook<'_>, tool: &ToolRow<'_>, cx: &mut Context<RootView>) -> Div {
+    let shift = fonts::ui_weight_shift(cx);
+    let buttons: Vec<AnyElement> = tool
+        .tail_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let selector = format!("chat-tail-{}-{index}", tool.id);
+            let open = look.tails.is_open(look.session_id, path);
+            let draw = if open {
+                primary_button
+            } else {
+                outlined_button
+            };
+            let (session_id, tool_id, path) =
+                (look.session_id.to_owned(), tool.id.to_owned(), path.clone());
+            draw(
+                look.text_offset,
+                shift,
+                &selector,
+                ButtonSize::Compact,
+                true,
+                Layer::Base,
+                &look.theme,
+            )
+            .child(format!("Tail {}", file_name(&path)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.toggle_chat_tail(&session_id, &tool_id, index, &path, cx);
+            }))
+            .into_any_element()
+        })
+        .collect();
+    div().flex().flex_wrap().gap(px(6.0)).children(buttons)
+}
+
+/// Where a Tail box sits: under tool call `tool`'s card, for the `index`th
+/// file it names, `path`.
+struct TailPlace<'a> {
+    tool: &'a str,
+    index: usize,
+    path: &'a str,
+}
+
+/// An open Tail box (tagged `chat-tail-box-<id>-<n>`): the file's lines in
+/// the terminal font at the chat's text size, twelve lines tall and
+/// scrolling, following its bottom until scrolled up; "No output yet"
+/// before any data, or the daemon's refusal in the error colour.
+fn tail_box(
+    look: &RowLook<'_>,
+    place: &TailPlace<'_>,
+    tail: &Tail,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = &look.theme;
+    let size = ui_px_at(look.text_offset, UI_TEXT_SIZE);
+    let line = (size / px(1.0) * TAIL_LINE_RATIO).round();
+    let lines: Vec<Div> = match tail.shows() {
+        TailShows::Nothing => vec![div().text_color(gpui::rgb(t.muted)).child(NO_OUTPUT)],
+        TailShows::Error(message) => {
+            vec![
+                div()
+                    .text_color(gpui::rgb(t.danger))
+                    .child(message.to_owned()),
+            ]
+        }
+        TailShows::Lines(lines) => lines
+            .into_iter()
+            .map(|text| div().child(text.to_owned()))
+            .collect(),
+    };
+    let name = format!("chat-tail-box-{}-{}", place.tool, place.index);
+    let column = div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .h(px(line * TAIL_ROWS + 2.0 * CARD_PAD_Y + 2.0))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .px(px(CARD_PAD_X))
+        .py(px(CARD_PAD_Y))
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(gpui::rgb(t.line_strong))
+        .bg(gpui::rgb(t.sunken))
+        .font_family(look.mono.clone())
+        .font_weight(crate::fonts::mono_weight())
+        .text_size(size)
+        .line_height(px(line))
+        .text_color(gpui::rgb(t.text_2))
+        .children(lines);
+    let key = (look.session_id.to_owned(), place.path.to_owned());
+    let Some(handle) = look.tail_scrolls.get(&key).cloned() else {
+        return column.into_any_element();
+    };
+    if tail.following() {
+        handle.scroll_to_bottom();
+    }
+    column
+        .track_scroll(&handle)
+        .on_scroll_wheel(cx.listener(move |_, _: &ScrollWheelEvent, window, cx| {
+            // The box has scrolled by now; the chat around it stays put.
+            cx.stop_propagation();
+            let (key, handle) = (key.clone(), handle.clone());
+            // Read once the wheel has moved the box.
+            cx.defer_in(window, move |this, _, cx| {
+                let scrolled = -handle.offset().y / px(1.0);
+                let max_scroll = handle.max_offset().height / px(1.0);
+                this.chat
+                    .tails
+                    .on_scrolled(&key.0, &key.1, scrolled, max_scroll);
+                cx.notify();
+            });
+        }))
+        .into_any_element()
 }
 
 /// An open shell tool card's command, one statement per line on the code

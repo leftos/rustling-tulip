@@ -210,6 +210,12 @@
     },
     {
       "paths": [
+        "apps/native/src/chat_tail.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^chat_tail::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/chat_view.rs",
         "apps/native/src/work_strip.rs",
         "apps/native/tests/ui/ui_chat.rs"
@@ -527,6 +533,18 @@
         "apps/native/src/notice_view.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^notice_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_keys|ui_preset_wizard|ui_spawn)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/sound.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^sound::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_notifications)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/taskbar_badge.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^taskbar_badge::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_settings)::/))"
     },
     {
       "paths": [

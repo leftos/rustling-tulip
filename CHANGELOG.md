@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Opening a Bash or PowerShell card in the chat shows the whole command, one statement per line.
 - The footer shows the app's version at its right end; hover it for the daemon's.
 - A sound plays when an agent needs you: a bundled chime, your own .wav or .ogg, or none, set in Settings › Notifications.
+- A chat command that writes a log offers Tail under its card: a scrolling box that follows the file as it grows.
 
 ### Fixed
 

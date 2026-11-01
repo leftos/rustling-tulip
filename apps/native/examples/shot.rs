@@ -137,6 +137,14 @@ const CHAT_OPEN_STRETCH: &str = "pills";
 const FOOTER_SPECS: &str = "cargo build -p rustling-tulip-native 2>&1 | tail -n 3; \
      cargo nextest run -p rustling-tulip-native -E 'test(/footer/)' > .tmp/footer.log 2>&1 && \
      echo specs passed || tail -n 20 .tmp/footer.log; git status --short apps/native/src/footer.rs";
+/// The log that call writes, which the `chat` shot tails under its card.
+const FOOTER_LOG: &str = "C:/dev/petal/.tmp/footer.log";
+/// What the fake daemon's follow of [`FOOTER_LOG`] sends: nextest's
+/// coloured lines, the colours stripped in the box.
+const FOOTER_LOG_TEXT: &str = "\x1b[32;1m    Starting\x1b[0m 4 tests across 1 binary\n\
+     \x1b[32;1m        PASS\x1b[0m [   0.412s] ui ui_footer::the_pills_keep_their_gap\n\
+     \x1b[32;1m        PASS\x1b[0m [   0.388s] ui ui_footer::the_status_chip_reads_calm\n\
+     \x1b[32;1m        PASS\x1b[0m [   0.405s] ui ui_footer::the_branch_chip_truncates\r\n";
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -245,13 +253,14 @@ impl View {
     /// summary line opens only once the lines have arrived; the Themes
     /// modal opens over Settings once drawn, and takes its Down once drawn;
     /// the editor opens on the modal once drawn, its input takes the keyboard
-    /// once drawn and takes its typing once focused.
+    /// once drawn and takes its typing once focused; the chat opens, then its
+    /// stretch, Bash card and Tail box, then scrolls up to the box once drawn.
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
-            Self::Themes => 3,
+            Self::Themes | Self::Chat => 3,
             Self::ThemesEdit => 5,
-            Self::Update | Self::Summary | Self::Chat => 2,
+            Self::Update | Self::Summary => 2,
             _ => 1,
         }
     }
@@ -321,6 +330,9 @@ impl View {
                         .chat_answer_text("s-petal", "a1")
                         .is_some_and(|text| text.contains("bottom edge"))
                     && root.chat_tool_lines("s-petal", "t3").len() > 1
+                    && root
+                        .chat_tail_lines("s-petal", FOOTER_LOG)
+                        .is_some_and(|lines| lines.len() > 1)
             }
             Self::Summary => {
                 root.pane_view("p1") == PaneView::Summary
@@ -944,6 +956,7 @@ fn drive(
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
         View::Menu => open_menu(window, cx),
         View::Update => drive_update(step, address, window, cx),
+        View::Chat if step == 2 => win32::wheel_down(address, CHAT_TAIL_POINT, CHAT_TAIL_NOTCHES),
         View::Chat => {
             let root = window
                 .root::<RootView>()
@@ -955,6 +968,7 @@ fn drive(
                 } else {
                     root.toggle_stretchtext("s-petal", "a1", CHAT_OPEN_STRETCH, cx);
                     root.toggle_chat_card("s-petal", "t3", cx);
+                    root.toggle_chat_tail("s-petal", "t3", 0, FOOTER_LOG, cx);
                 }
             });
             Ok(())
@@ -982,6 +996,10 @@ const SHOT_INSTALLER: &str = "rustling-tulip-0.99.0-setup.exe";
 
 /// Where the `update` shot's wheel turns: inside Settings' General page.
 const SETTINGS_PAGE_POINT: (i32, i32) = (560, 300);
+/// A point on the `chat` shot's rows, under the Tail box, and how far the
+/// wheel turns there to bring the box into view.
+const CHAT_TAIL_POINT: (i32, i32) = (660, 155);
+const CHAT_TAIL_NOTCHES: i16 = -3;
 /// Enough wheel notches to reach the General page's end.
 const SETTINGS_PAGE_NOTCHES: i16 = 40;
 
@@ -1526,7 +1544,10 @@ impl FakeDaemon {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(FAKE_PORT);
-        let features = vec![protocol::FEATURE_AGENT_COMMANDS.to_owned()];
+        let features = vec![
+            protocol::FEATURE_AGENT_COMMANDS.to_owned(),
+            protocol::FEATURE_FILE_TAIL.to_owned(),
+        ];
         conn.on_welcome(version, features.clone());
         self.event(NetEvent::State(conn))?;
         self.event(NetEvent::Handshake(HandshakeInfo {
@@ -1671,6 +1692,15 @@ impl FakeDaemon {
                 session_id,
                 request_id,
             } => summary_reply(session_id, request_id.clone()),
+            ClientMessage::TailFile {
+                session_id, path, ..
+            } => DaemonMessage::FileTail {
+                session_id: session_id.clone(),
+                path: path.clone(),
+                data_b64: B64.encode(FOOTER_LOG_TEXT),
+                offset: 0,
+                reset: true,
+            },
             ClientMessage::GetFileSnapshot { .. } => file_snapshot(msg)?,
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
             ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
@@ -1758,7 +1788,7 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
             input: format!("{:#}", serde_json::json!({ "command": FOOTER_SPECS })),
             result: None,
             parent_id: None,
-            tail_paths: Vec::new(),
+            tail_paths: vec![FOOTER_LOG.to_owned()],
         },
         ChatEntry::Answer {
             id: "live:m2".to_owned(),
