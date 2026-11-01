@@ -1,10 +1,22 @@
-//! The Dashboard's messages: watching a Dashboard's facts and asking for one
-//! session's detail.
+//! The Dashboard's messages: watching a Dashboard's facts, asking for one
+//! session's detail, and answering a waiting session's prompt
+//! (`AnswerPrompt`), which types the keys through the chat answer's runner
+//! ([`crate::chat_answer::answer_identified`]) and answers only a refusal.
 use super::Hub;
+use super::chat::{refuse, send_target};
 use super::connection::ConnCtx;
+use crate::chat_answer::{self, NOT_THIS_DIALOG, PROMPT_GONE};
+use crate::inject::{TypeRefusal, TypeTarget, screen_reader};
+use crate::screen::dialogs::prompt_identity;
 use crate::sync::lock;
-use protocol::{ClientMessage, DaemonMessage};
-use tracing::warn;
+use crate::view_drive::Reading;
+use chrono::{DateTime, Utc};
+use protocol::error_codes::INVALID_REQUEST;
+use protocol::{
+    ChatAnswerKind, ChatPrompt, ChatPromptKind, ClientMessage, DaemonMessage, PendingInput,
+    PendingQuestion, PromptChoice,
+};
+use tracing::{debug, warn};
 
 /// Handle the Dashboard messages `dispatch` routes here.
 pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
@@ -29,7 +41,238 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 let _ = out_tx.send(reply);
             });
         }
+        ClientMessage::AnswerPrompt {
+            session_id,
+            since,
+            choice,
+            request_id,
+        } => answer_prompt(hub, ctx, &session_id, since, choice, request_id),
         _ => warn!("dashboard::handle: a message that is not the Dashboard's was routed here"),
+    }
+}
+
+/// Answer `session_id`'s pending prompt with `choice` on a task of its own,
+/// after the checks that need no waiting; a refusal, now or from the task,
+/// is answered with an `Error` carrying `request_id`.
+fn answer_prompt(
+    hub: &Hub,
+    ctx: &ConnCtx<'_>,
+    session_id: &str,
+    since: DateTime<Utc>,
+    choice: PromptChoice,
+    request_id: Option<String>,
+) {
+    let target = match send_target(hub, session_id) {
+        Ok(target) => target,
+        Err((code, message)) => return refuse(ctx.out_tx, code, message, request_id),
+    };
+    if choice == PromptChoice::Unknown {
+        let refusal = not_this_prompt();
+        return refuse(ctx.out_tx, refusal.code, refusal.message, request_id);
+    }
+    let out_tx = ctx.out_tx.clone();
+    tokio::spawn(async move {
+        if let Err(refusal) = answer_waiting(&target, since, choice).await {
+            debug!(
+                session_id = %target.session_id,
+                code = refusal.code,
+                message = %refusal.message,
+                "dashboard answer refused"
+            );
+            refuse(&out_tx, refusal.code, refusal.message, request_id);
+        }
+    });
+}
+
+/// Answer `target`'s pending prompt with `choice` while the session still
+/// waits on the prompt it waited on at `since` and its screen shows that
+/// prompt's dialog.
+async fn answer_waiting(
+    target: &TypeTarget,
+    since: DateTime<Utc>,
+    choice: PromptChoice,
+) -> Result<(), TypeRefusal> {
+    let pending = pending_since(target, since)?;
+    within_options(choice, &pending)?;
+    let reading = screen_reader(target).current().await;
+    let prompt = dialog_for(&reading, &pending)?;
+    let kind = chat_answer_for(choice, prompt)?;
+    let identity = prompt_identity(prompt);
+    chat_answer::answer_identified(target, identity, since, &pending, &kind).await
+}
+
+/// Refuse an option index past the pending question's options.
+fn within_options(choice: PromptChoice, pending: &PendingInput) -> Result<(), TypeRefusal> {
+    let (PromptChoice::Option { index }, PendingInput::Question { questions }) = (choice, pending)
+    else {
+        return Ok(());
+    };
+    let listed = questions
+        .first()
+        .is_some_and(|question| usize::from(index) < question.options.len());
+    if listed {
+        Ok(())
+    } else {
+        Err(not_this_prompt())
+    }
+}
+
+/// The prompt `target`'s record waits on, when its status has not changed
+/// since `since` and the Dashboard offers answers for it.
+fn pending_since(target: &TypeTarget, since: DateTime<Utc>) -> Result<PendingInput, TypeRefusal> {
+    let record = target
+        .sessions
+        .get(&target.session_id)
+        .ok_or_else(|| TypeRefusal::refused(PROMPT_GONE))?;
+    let record = lock(&record);
+    if record.status_since != Some(since) {
+        return Err(TypeRefusal::refused(PROMPT_GONE));
+    }
+    let pending = record
+        .pending_input
+        .clone()
+        .ok_or_else(|| TypeRefusal::refused(PROMPT_GONE))?;
+    if !offered(&pending) {
+        return Err(not_this_prompt());
+    }
+    Ok(pending)
+}
+
+/// Whether the Dashboard answers `pending`: one single-choice question, or
+/// a permission.
+fn offered(pending: &PendingInput) -> bool {
+    match pending {
+        PendingInput::Question { questions } => {
+            matches!(questions.as_slice(), [question] if !question.multi_select)
+        }
+        PendingInput::Permission { .. } => true,
+        PendingInput::PlanApproval { .. } | PendingInput::Other { .. } | PendingInput::Unknown => {
+            false
+        }
+    }
+}
+
+/// The dialog `reading` shows for `pending`: for a question, a single-choice
+/// question with at most one question tab, asking the pending question with
+/// its options first in order; for a permission, a permission dialog whose
+/// subject or body shows the pending call's summary.
+fn dialog_for<'r>(
+    reading: &'r Reading,
+    pending: &PendingInput,
+) -> Result<&'r ChatPrompt, TypeRefusal> {
+    let shown = reading.chat.as_ref().and_then(|chat| chat.prompt.as_ref());
+    shown
+        .filter(|prompt| match pending {
+            PendingInput::Question { questions } => {
+                prompt.kind == ChatPromptKind::Question
+                    && !prompt.multi
+                    && prompt.questions.len() <= 1
+                    && questions
+                        .first()
+                        .is_some_and(|question| asks(prompt, question))
+            }
+            PendingInput::Permission { summary, .. } => {
+                prompt.kind == ChatPromptKind::Permission && shows_summary(prompt, summary)
+            }
+            _ => false,
+        })
+        .ok_or_else(|| TypeRefusal::refused(PROMPT_GONE))
+}
+
+/// Whether `prompt` asks `question`: the same question text, and the
+/// question's option labels first among its options, in order. The dialog
+/// may list rows of its own after them (`Type something`).
+fn asks(prompt: &ChatPrompt, question: &PendingQuestion) -> bool {
+    let labels: Vec<String> = prompt
+        .options
+        .iter()
+        .map(|option| words(&option.label))
+        .collect();
+    let wanted: Vec<String> = question
+        .options
+        .iter()
+        .map(String::as_str)
+        .map(words)
+        .collect();
+    words(&prompt.subject) == words(&question.question) && labels.starts_with(&wanted)
+}
+
+/// Whether `prompt`'s subject or body shows `summary`; never for an empty
+/// summary, which matches any dialog.
+fn shows_summary(prompt: &ChatPrompt, summary: &str) -> bool {
+    let summary = words(summary);
+    !summary.is_empty()
+        && (words(&prompt.subject).contains(&summary) || words(&prompt.body).contains(&summary))
+}
+
+/// `text` with each run of whitespace made one space and its ends trimmed,
+/// so a line the screen wrapped compares equal to the hook's text.
+fn words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The chat answer that gives `choice` to `prompt`: a question's option by
+/// its number, a permission's allow-once, don't-ask-again or deny option by
+/// the number the screen reads for it.
+///
+/// # Errors
+///
+/// [`INVALID_REQUEST`] for a choice that is not one for this kind of
+/// prompt; [`protocol::error_codes::CHAT_REFUSED`] when the dialog shows no
+/// option for it.
+fn chat_answer_for(
+    choice: PromptChoice,
+    prompt: &ChatPrompt,
+) -> Result<ChatAnswerKind, TypeRefusal> {
+    let number = match (choice, &prompt.kind) {
+        (PromptChoice::Option { index }, ChatPromptKind::Question) => Some(u32::from(index) + 1),
+        (PromptChoice::Allow, ChatPromptKind::Permission) => allow_once_option(prompt),
+        (PromptChoice::AllowAlways, ChatPromptKind::Permission) => always_allow_option(prompt),
+        (PromptChoice::Deny, ChatPromptKind::Permission) => labelled(prompt, DENY_LABEL),
+        _ => return Err(not_this_prompt()),
+    };
+    number
+        .map(|number| ChatAnswerKind::Option { number })
+        .ok_or_else(|| TypeRefusal::refused(NOT_THIS_DIALOG))
+}
+
+/// The label of a permission dialog's option that allows once.
+const ALLOW_ONCE_LABEL: &str = "Yes";
+/// The label of a permission dialog's option that denies.
+const DENY_LABEL: &str = "No";
+
+/// The number of `prompt`'s last option labelled exactly `label`.
+fn labelled(prompt: &ChatPrompt, label: &str) -> Option<u32> {
+    prompt
+        .options
+        .iter()
+        .rev()
+        .find(|option| option.label.trim() == label)
+        .map(|option| option.number)
+}
+
+fn allow_once_option(prompt: &ChatPrompt) -> Option<u32> {
+    labelled(prompt, ALLOW_ONCE_LABEL)
+}
+
+/// The number of the option the screen reads as "don't ask again": the one
+/// whose label ends with the rule it saves; `None` when the dialog offers
+/// none.
+fn always_allow_option(prompt: &ChatPrompt) -> Option<u32> {
+    let rule = prompt.always_allow_tip.as_deref()?;
+    let once = allow_once_option(prompt);
+    prompt
+        .options
+        .iter()
+        .find(|option| Some(option.number) != once && option.label.trim_end().ends_with(rule))
+        .map(|option| option.number)
+}
+
+/// The refusal of an answer the Dashboard does not offer for the prompt.
+fn not_this_prompt() -> TypeRefusal {
+    TypeRefusal {
+        code: INVALID_REQUEST,
+        message: NOT_THIS_DIALOG.to_owned(),
     }
 }
 
@@ -501,5 +744,511 @@ mod tests {
             }),
             "the empty seed commit is the oldest commit since the start"
         );
+    }
+
+    /// `AnswerPrompt` typed into a recording PTY while the test plays the
+    /// TUI, with no chat loaded.
+    mod answer_prompt {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use chrono::{DateTime, Utc};
+        use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST, NOT_FOUND};
+        use protocol::{
+            ChatAnswerKind, ChatPrompt, ClientMessage, DaemonMessage, PendingInput,
+            PendingQuestion, PromptChoice, SessionStatus,
+        };
+        use tokio::sync::mpsc;
+
+        use super::{Conn, conn, send};
+        use crate::history::test_support::{FakeExit, recording_pty};
+        use crate::pty::PtyHandle;
+        use crate::screen::dialogs::read;
+        use crate::screen::fixture_screen::screen_from;
+        use crate::screen::{Screen, SharedScreen};
+        use crate::server::Hub;
+        use crate::server::dashboard::chat_answer_for;
+        use crate::server::test_support::{
+            HANG_GUARD, ScratchDir, drain, idle_record, next_message, test_hub,
+        };
+        use crate::sync::lock;
+        use crate::typing_lane::Holder;
+        use crate::view_drive::READ_QUIET;
+
+        /// A permission dialog for `python -c "print(6*7)"`: 1 Yes, 2 don't
+        /// ask again, 3 auto mode, 4 No.
+        const PERMISSION: &str = include_str!("../screen/fixtures/c23-perm-bash.txt");
+        /// One single-choice question: 1 Red, 2 Blue.
+        const ONE_QUESTION: &str =
+            include_str!("../screen/fixtures/v192-agent-view-ask-with-chat-about-this.txt");
+        /// A multi-select question.
+        const MULTI_SELECT: &str = include_str!("../screen/fixtures/v33-ask-q2-toggled.txt");
+        /// Main while a turn runs, no dialog up.
+        const NO_DIALOG: &str = include_str!("../screen/fixtures/c32-ask-chat.txt");
+
+        const GONE: &str = "the prompt is no longer up";
+        const NOT_THIS: &str = "that answer does not fit the prompt on screen";
+
+        /// The session's terminal, whose TUI the test plays.
+        struct Terminal {
+            pty: Arc<PtyHandle>,
+            screen: SharedScreen,
+            input: mpsc::UnboundedReceiver<Vec<u8>>,
+            exit: FakeExit,
+        }
+
+        impl Terminal {
+            /// Draw `capture` on the grid and send it as the TUI's output.
+            async fn show(&self, capture: &str) {
+                let bytes = draw_on(&self.screen, capture);
+                self.exit.chunk(bytes).await;
+            }
+
+            /// The next write typed into the terminal.
+            async fn typed(&mut self) -> Vec<u8> {
+                tokio::time::timeout(HANG_GUARD, self.input.recv())
+                    .await
+                    .expect("hung: nothing was typed")
+                    .expect("the PTY is open")
+            }
+
+            /// The writes typed and not yet read.
+            fn typed_now(&mut self) -> Vec<Vec<u8>> {
+                let mut writes = Vec::new();
+                while let Ok(write) = self.input.try_recv() {
+                    writes.push(write);
+                }
+                writes
+            }
+
+            /// Wait until no writer holds the typing lane.
+            async fn lane_free(&self) {
+                tokio::time::timeout(HANG_GUARD, async {
+                    while self.pty.typing().holder().is_some() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("hung: the typing lane was never given back");
+            }
+        }
+
+        /// Draw `capture` whole on `screen`, sized to fit it; the bytes that
+        /// draw it.
+        fn draw_on(screen: &SharedScreen, capture: &str) -> Vec<u8> {
+            let rows: Vec<&str> = capture.lines().collect();
+            let widest = rows.iter().map(|row| row.chars().count()).max();
+            let cols = u16::try_from(widest.unwrap_or(0) + 4).expect("a capture fits a grid");
+            let height = u16::try_from(rows.len() + 2).expect("a capture fits a grid");
+            let bytes = format!("\x1b[H\x1b[2J{}", rows.join("\r\n")).into_bytes();
+            let mut screen = lock(screen);
+            screen.resize(cols, height);
+            screen.feed(&bytes);
+            bytes
+        }
+
+        /// Session `s1` waiting on `pending` since `since`, its terminal
+        /// showing `capture`, and a connection to answer it on.
+        struct Waiting {
+            hub: Hub,
+            _scratch: ScratchDir,
+            term: Terminal,
+            since: DateTime<Utc>,
+            conn: Conn,
+        }
+
+        fn waiting(tag: &str, capture: &str, pending: PendingInput) -> Waiting {
+            let (hub, scratch) = test_hub(tag);
+            let (pty, input, exit) = recording_pty();
+            let term = Terminal {
+                pty,
+                screen: Arc::new(Mutex::new(Screen::new(1, 1))),
+                input,
+                exit,
+            };
+            draw_on(&term.screen, capture);
+            let since = Utc::now();
+            let mut record = idle_record("s1");
+            record.hook_driven = true;
+            record.status = SessionStatus::AwaitingInput;
+            record.status_since = Some(since);
+            record.pending_input = Some(pending);
+            record.pty = Some(Arc::clone(&term.pty));
+            record.screen = Some(Arc::clone(&term.screen));
+            hub.sessions.insert(record);
+            Waiting {
+                hub,
+                _scratch: scratch,
+                term,
+                since,
+                conn: conn(1),
+            }
+        }
+
+        impl Waiting {
+            async fn answer_at(&self, since: DateTime<Utc>, choice: PromptChoice) {
+                send(&self.hub, &self.conn, answer_prompt("s1", since, choice)).await;
+            }
+
+            async fn answer(&self, choice: PromptChoice) {
+                self.answer_at(self.since, choice).await;
+            }
+
+            /// The answer's `Error`: its request id, code and message.
+            async fn refusal(&mut self) -> (Option<String>, String, String) {
+                refusal_of(next_message(&mut self.conn.rx).await)
+            }
+
+            /// The answer types `bytes`, then ends unrefused once the
+            /// dialog goes.
+            async fn types_and_ends(&mut self, bytes: &[u8], what: &str) {
+                assert_eq!(self.term.typed().await, bytes, "{what}");
+                self.term.show(NO_DIALOG).await;
+                self.term.lane_free().await;
+                assert!(
+                    drain(&mut self.conn.rx).is_empty(),
+                    "the answer was not refused"
+                );
+                assert!(self.term.typed_now().is_empty(), "nothing more is typed");
+            }
+
+            /// The answer is refused with `code` and `message`, and nothing
+            /// is typed.
+            async fn refused(&mut self, code: &str, message: &str, what: &str) {
+                let (request_id, got_code, got_message) = self.refusal().await;
+                assert_eq!(request_id.as_deref(), Some("a1"), "{what}");
+                assert_eq!(
+                    (got_code.as_str(), got_message.as_str()),
+                    (code, message),
+                    "{what}"
+                );
+                assert!(self.term.typed_now().is_empty(), "{what}: nothing is typed");
+            }
+        }
+
+        fn answer_prompt(
+            session_id: &str,
+            since: DateTime<Utc>,
+            choice: PromptChoice,
+        ) -> ClientMessage {
+            ClientMessage::AnswerPrompt {
+                session_id: session_id.to_owned(),
+                since,
+                choice,
+                request_id: Some("a1".to_owned()),
+            }
+        }
+
+        fn refusal_of(msg: DaemonMessage) -> (Option<String>, String, String) {
+            let shown = format!("{msg:?}");
+            let parts = match msg {
+                DaemonMessage::Error {
+                    message,
+                    code,
+                    request_id,
+                } => Some((request_id, code.unwrap_or_default(), message)),
+                _ => None,
+            };
+            assert!(parts.is_some(), "expected an Error, got {shown}");
+            parts.expect("an Error")
+        }
+
+        fn question(options: &[&str], multi_select: bool) -> PendingInput {
+            PendingInput::Question {
+                questions: vec![PendingQuestion {
+                    question: "Pick a colour".to_owned(),
+                    header: "Colour".to_owned(),
+                    options: options.iter().map(|&option| option.to_owned()).collect(),
+                    multi_select,
+                }],
+            }
+        }
+
+        fn bash_permission() -> PendingInput {
+            PendingInput::Permission {
+                tool_name: "Bash".to_owned(),
+                summary: "python -c \"print(6*7)\"".to_owned(),
+            }
+        }
+
+        /// The prompt `capture` shows, as the default agent reads it.
+        fn prompt_on(capture: &str) -> ChatPrompt {
+            let agent = agent_registry::default_agent();
+            read(&agent, &screen_from(capture))
+                .and_then(|screen| screen.prompt)
+                .expect("the capture shows a prompt")
+        }
+
+        /// A choice's option number, or its refusal's code and message.
+        type Mapped = Result<u32, (&'static str, &'static str)>;
+
+        #[test]
+        fn answer_prompt_choice_maps_to_the_option_the_screen_reads() {
+            let permission = prompt_on(PERMISSION);
+            let mut no_always = permission.clone();
+            no_always.always_allow_tip = None;
+            let question = prompt_on(ONE_QUESTION);
+            let not_this = Err((INVALID_REQUEST, NOT_THIS));
+            let table: [(&str, &ChatPrompt, PromptChoice, Mapped); 11] = [
+                ("allow once", &permission, PromptChoice::Allow, Ok(1)),
+                (
+                    "don't ask again",
+                    &permission,
+                    PromptChoice::AllowAlways,
+                    Ok(2),
+                ),
+                (
+                    "deny is No, not Esc",
+                    &permission,
+                    PromptChoice::Deny,
+                    Ok(4),
+                ),
+                (
+                    "no don't-ask-again on screen",
+                    &no_always,
+                    PromptChoice::AllowAlways,
+                    Err((CHAT_REFUSED, NOT_THIS)),
+                ),
+                (
+                    "an option index on a permission",
+                    &permission,
+                    PromptChoice::Option { index: 0 },
+                    not_this,
+                ),
+                (
+                    "unknown on a permission",
+                    &permission,
+                    PromptChoice::Unknown,
+                    not_this,
+                ),
+                (
+                    "the first option",
+                    &question,
+                    PromptChoice::Option { index: 0 },
+                    Ok(1),
+                ),
+                (
+                    "the second option",
+                    &question,
+                    PromptChoice::Option { index: 1 },
+                    Ok(2),
+                ),
+                (
+                    "allow on a question",
+                    &question,
+                    PromptChoice::Allow,
+                    not_this,
+                ),
+                (
+                    "deny on a question",
+                    &question,
+                    PromptChoice::Deny,
+                    not_this,
+                ),
+                (
+                    "unknown on a question",
+                    &question,
+                    PromptChoice::Unknown,
+                    not_this,
+                ),
+            ];
+            for (what, prompt, choice, expected) in table {
+                let got = chat_answer_for(choice, prompt)
+                    .map_err(|refusal| (refusal.code, refusal.message));
+                let expected = expected
+                    .map(|number| ChatAnswerKind::Option { number })
+                    .map_err(|(code, message)| (code, message.to_owned()));
+                assert_eq!(got, expected, "{what}");
+            }
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_types_the_digit_for_a_single_question() {
+            let mut w = waiting(
+                "dash-answer-question",
+                ONE_QUESTION,
+                question(&["Red", "Blue"], false),
+            );
+            w.answer(PromptChoice::Option { index: 1 }).await;
+            w.types_and_ends(b"2", "the second option's digit").await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_types_allow_once_for_a_permission() {
+            let mut w = waiting("dash-answer-allow", PERMISSION, bash_permission());
+            w.answer(PromptChoice::Allow).await;
+            w.types_and_ends(b"1", "the Yes option's digit").await;
+            let record = w.hub.sessions.get("s1").expect("s1 is registered");
+            assert_eq!(
+                lock(&record).pending_input,
+                None,
+                "the dialog's going clears the prompt"
+            );
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_types_the_deny_digit() {
+            let mut w = waiting("dash-answer-deny", PERMISSION, bash_permission());
+            w.answer(PromptChoice::Deny).await;
+            w.types_and_ends(b"4", "the No option's digit, not Esc")
+                .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_a_changed_status_since() {
+            let mut w = waiting("dash-answer-since", PERMISSION, bash_permission());
+            let earlier = w.since - chrono::Duration::seconds(1);
+            w.answer_at(earlier, PromptChoice::Allow).await;
+            w.refused(CHAT_REFUSED, GONE, "an older status_since").await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_a_missing_dialog() {
+            let mut w = waiting("dash-answer-no-dialog", NO_DIALOG, bash_permission());
+            w.answer(PromptChoice::Allow).await;
+            w.refused(CHAT_REFUSED, GONE, "no dialog on screen").await;
+
+            let mut w = waiting(
+                "dash-answer-other-dialog",
+                PERMISSION,
+                question(&["Red", "Blue"], false),
+            );
+            w.answer(PromptChoice::Option { index: 0 }).await;
+            w.refused(CHAT_REFUSED, GONE, "a permission dialog for a question")
+                .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_a_multi_select() {
+            let mut w = waiting(
+                "dash-answer-multi",
+                MULTI_SELECT,
+                question(&["add", "mul", "edge cases", "property tests"], true),
+            );
+            w.answer(PromptChoice::Option { index: 0 }).await;
+            w.refused(INVALID_REQUEST, NOT_THIS, "a multi-select question")
+                .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_an_unknown_choice() {
+            let mut w = waiting("dash-answer-unknown", PERMISSION, bash_permission());
+            w.answer(PromptChoice::Unknown).await;
+            w.refused(
+                INVALID_REQUEST,
+                NOT_THIS,
+                "a choice this build does not know",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_works_without_a_chat_mirror() {
+            let mut w = waiting("dash-answer-no-mirror", PERMISSION, bash_permission());
+            assert_eq!(
+                w.hub.chat_mirror.current_prompt("s1"),
+                None,
+                "no connection loads the chat"
+            );
+            w.answer(PromptChoice::Allow).await;
+            w.types_and_ends(b"1", "the Yes option's digit").await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refusal_carries_the_request_id() {
+            let mut w = waiting("dash-answer-request-id", PERMISSION, bash_permission());
+            send(
+                &w.hub,
+                &w.conn,
+                answer_prompt("nope", w.since, PromptChoice::Allow),
+            )
+            .await;
+            w.refused(
+                NOT_FOUND,
+                "unknown session: nope",
+                "an unknown session, refused at once",
+            )
+            .await;
+            w.answer_at(w.since + chrono::Duration::seconds(1), PromptChoice::Allow)
+                .await;
+            w.refused(
+                CHAT_REFUSED,
+                GONE,
+                "a newer status_since, refused by the task",
+            )
+            .await;
+        }
+
+        /// The clock is paused so the steps run in timer order alone: the
+        /// answer passes its checks, reads the screen and waits for the lane
+        /// well inside the test's sleep, and the lane's wait outlasts it.
+        #[tokio::test(start_paused = true)]
+        async fn answer_prompt_refuses_when_since_changes_while_waiting_for_the_lane() {
+            let mut w = waiting("dash-answer-lane-since", PERMISSION, bash_permission());
+            let held = w
+                .term
+                .pty
+                .typing()
+                .try_take(Holder::Injector)
+                .expect("a free lane");
+            w.answer(PromptChoice::Allow).await;
+            tokio::time::sleep(READ_QUIET * 3).await;
+            w.hub.sessions.update("s1", |record| {
+                record.status_since = Some(w.since + chrono::Duration::seconds(1));
+            });
+            w.term.show(PERMISSION).await;
+            drop(held);
+            w.refused(
+                CHAT_REFUSED,
+                GONE,
+                "an identical dialog raised while the answer waited for the lane",
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_a_permission_whose_screen_shows_another_command() {
+            let pending = PendingInput::Permission {
+                tool_name: "Bash".to_owned(),
+                summary: "git push origin main".to_owned(),
+            };
+            let mut w = waiting("dash-answer-other-command", PERMISSION, pending);
+            w.answer(PromptChoice::Allow).await;
+            w.refused(CHAT_REFUSED, GONE, "the dialog asks for another command")
+                .await;
+
+            let empty = PendingInput::Permission {
+                tool_name: "Bash".to_owned(),
+                summary: String::new(),
+            };
+            let mut w = waiting("dash-answer-no-summary", PERMISSION, empty);
+            w.answer(PromptChoice::Allow).await;
+            w.refused(CHAT_REFUSED, GONE, "a permission with no summary to match")
+                .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_a_question_whose_labels_differ() {
+            let mut w = waiting(
+                "dash-answer-other-labels",
+                ONE_QUESTION,
+                question(&["Red", "Green"], false),
+            );
+            w.answer(PromptChoice::Option { index: 0 }).await;
+            w.refused(CHAT_REFUSED, GONE, "the dialog shows other options")
+                .await;
+        }
+
+        #[tokio::test]
+        async fn answer_prompt_refuses_an_option_past_the_list() {
+            let mut w = waiting(
+                "dash-answer-past-list",
+                ONE_QUESTION,
+                question(&["Red", "Blue"], false),
+            );
+            w.answer(PromptChoice::Option { index: 2 }).await;
+            w.refused(INVALID_REQUEST, NOT_THIS, "the third of two options")
+                .await;
+        }
     }
 }

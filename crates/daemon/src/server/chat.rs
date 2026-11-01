@@ -125,7 +125,10 @@ fn send(hub: &Hub, ctx: &ConnCtx<'_>, session_id: &str, text: &str, request_id: 
 
 /// The terminal `session_id`'s message is typed into; the code and message
 /// of the refusal when the session is unknown or has no terminal.
-fn send_target(hub: &Hub, session_id: &str) -> Result<TypeTarget, (&'static str, String)> {
+pub(super) fn send_target(
+    hub: &Hub,
+    session_id: &str,
+) -> Result<TypeTarget, (&'static str, String)> {
     let record = hub
         .sessions
         .get(session_id)
@@ -158,7 +161,7 @@ fn refuse_load(ctx: &ConnCtx<'_>, err: LoadError, request_id: Option<String>) {
 
 /// Answer a request with an `Error` of `code` and `message`, carrying its
 /// `request_id`.
-fn refuse(
+pub(super) fn refuse(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     code: &str,
     message: String,

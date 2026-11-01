@@ -1,5 +1,6 @@
 //! Answering a chat prompt: `ChatAnswer`'s runner, spawned from
-//! `server/chat.rs`. It types the recipe the session's agent plugin builds
+//! `server/chat.rs`, and `AnswerPrompt`'s, spawned from
+//! `server/dashboard.rs`. It types the recipe the session's agent plugin builds
 //! for the answer ([`crate::screen::dialogs::recipe_for`]) into the
 //! terminal under the session's typing lane, one group of keys at a time,
 //! each group only once the screen reads as the step before expects.
@@ -13,6 +14,7 @@
 use std::time::Duration;
 
 use agent_api::{AnswerRecipe, AnswerRefusal, RecipeStep, ScreenExpect};
+use chrono::{DateTime, Utc};
 use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
     ChatAnswerKind, ChatPrompt, ChatPromptKind, ChatScreen, ComposerState, PendingInput,
@@ -33,7 +35,8 @@ use crate::view_drive::{KEY_WAIT, Reading, ScreenReader};
 /// reading.
 const ANSWER_CEILING: Duration = Duration::from_secs(30);
 
-const PROMPT_GONE: &str = "the prompt is no longer up";
+pub(crate) const PROMPT_GONE: &str = "the prompt is no longer up";
+pub(crate) const NOT_THIS_DIALOG: &str = "that answer does not fit the prompt on screen";
 const NOT_TAKEN: &str = "the terminal did not take the answer";
 const DENIED_NOT_SENT: &str = "the denial was typed, but the message was not sent";
 const DENY_IN_AGENT_VIEW: &str = "a denial with a message works only in the main conversation";
@@ -62,8 +65,85 @@ pub(crate) async fn answer_within(
     kind: &ChatAnswerKind,
     ceiling: Duration,
 ) -> Result<(), TypeRefusal> {
+    answer_asked(target, Asked::Mirror(prompt_id), kind, ceiling).await
+}
+
+/// Answer the prompt whose identity ([`prompt_identity`]) is `identity` on
+/// `target`'s screen with `kind`, with no chat mirror involved: the caller
+/// has checked that it is the dialog for `pending`, which the session's
+/// record has waited on since `since`.
+///
+/// # Errors
+///
+/// As [`answer`], the prompt being gone when, under the lane, the record's
+/// status changed since `since`, it no longer waits on `pending`, or the
+/// screen no longer shows a prompt of that identity.
+pub(crate) async fn answer_identified(
+    target: &TypeTarget,
+    identity: u64,
+    since: DateTime<Utc>,
+    pending: &PendingInput,
+    kind: &ChatAnswerKind,
+) -> Result<(), TypeRefusal> {
+    let asked = Asked::Waiting {
+        identity,
+        since,
+        pending,
+    };
+    answer_asked(target, asked, kind, ANSWER_CEILING).await
+}
+
+/// Which prompt an answer is for.
+#[derive(Clone, Copy)]
+enum Asked<'a> {
+    /// The prompt the chat mirror shows under this id.
+    Mirror(&'a str),
+    /// The prompt of this identity ([`prompt_identity`]), for `pending`,
+    /// which the record has waited on since `since`.
+    Waiting {
+        identity: u64,
+        since: DateTime<Utc>,
+        pending: &'a PendingInput,
+    },
+}
+
+impl Asked<'_> {
+    /// The identity of the prompt asked for, read under the lane.
+    fn identity(self, target: &TypeTarget) -> Result<u64, TypeRefusal> {
+        match self {
+            Self::Mirror(prompt_id) => mirror_identity(target, prompt_id),
+            Self::Waiting {
+                identity,
+                since,
+                pending,
+            } => {
+                let still = target
+                    .sessions
+                    .get(&target.session_id)
+                    .is_some_and(|record| {
+                        let record = lock(&record);
+                        record.status_since == Some(since)
+                            && record.pending_input.as_ref() == Some(pending)
+                    });
+                if still {
+                    Ok(identity)
+                } else {
+                    Err(TypeRefusal::refused(PROMPT_GONE))
+                }
+            }
+        }
+    }
+}
+
+/// The answer to the prompt `asked`, typed within `ceiling`.
+async fn answer_asked(
+    target: &TypeTarget,
+    asked: Asked<'_>,
+    kind: &ChatAnswerKind,
+    ceiling: Duration,
+) -> Result<(), TypeRefusal> {
     let mut progress = Progress::default();
-    match timeout(ceiling, run(target, prompt_id, kind, &mut progress)).await {
+    match timeout(ceiling, run(target, asked, kind, &mut progress)).await {
         Ok(answered) => answered,
         Err(_) => Err(progress.expired()),
     }
@@ -97,13 +177,13 @@ impl Progress {
 /// it got.
 async fn run(
     target: &TypeTarget,
-    prompt_id: &str,
+    asked: Asked<'_>,
     kind: &ChatAnswerKind,
     progress: &mut Progress,
 ) -> Result<(), TypeRefusal> {
     let turn = take_lane(target, Holder::ChatAnswer).await?;
     let mut reader = screen_reader(target);
-    let identity = mirror_identity(target, prompt_id)?;
+    let identity = asked.identity(target)?;
     let reading = reader.current().await;
     let Some(shown) = shown_prompt(&reading)
         .filter(|prompt| prompt_identity(prompt) == identity)
@@ -257,10 +337,7 @@ fn recipe_refusal(refusal: AnswerRefusal) -> TypeRefusal {
         AnswerRefusal::UnknownOption(number) => {
             (CHAT_REFUSED, format!("the prompt has no option {number}"))
         }
-        AnswerRefusal::NotThisDialog => (
-            CHAT_REFUSED,
-            "that answer does not fit the prompt on screen".to_owned(),
-        ),
+        AnswerRefusal::NotThisDialog => (CHAT_REFUSED, NOT_THIS_DIALOG.to_owned()),
         AnswerRefusal::TooManyOptions => (
             CHAT_REFUSED,
             "the option takes more than one key".to_owned(),

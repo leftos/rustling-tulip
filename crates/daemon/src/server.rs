@@ -897,37 +897,17 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 }
             });
         }
-        m @ (ClientMessage::WatchDashboard { .. } | ClientMessage::GetSessionDetail { .. }) => {
+        m @ (ClientMessage::WatchDashboard { .. }
+        | ClientMessage::GetSessionDetail { .. }
+        | ClientMessage::AnswerPrompt { .. }) => {
             dashboard::handle(hub, m, ctx).await;
         }
         m @ ClientMessage::DumpScreen { .. } => screen::handle(hub, m, ctx),
         m @ (ClientMessage::SetSummarizerSettings { .. }
         | ClientMessage::SetSummarizerKey { .. }
         | ClientMessage::TestSummary { .. }) => summarizer::handle(hub, m, ctx).await?,
-        m @ ClientMessage::AnswerPrompt { .. } => refuse_not_supported_yet(m, out_tx),
     }
     Ok(())
-}
-
-/// Refuse a Dashboard request this daemon does not handle yet: log the
-/// variant's name (never its fields), and answer a request that carries an
-/// id with an `Error` echoing it.
-fn refuse_not_supported_yet(msg: ClientMessage, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let ClientMessage::AnswerPrompt { request_id, .. } = msg else {
-        warn!("refuse_not_supported_yet: a supported message was routed here");
-        return;
-    };
-    warn!(
-        variant = "AnswerPrompt",
-        "dispatch: message not supported yet"
-    );
-    if let Some(request_id) = request_id {
-        let _ = out_tx.send(DaemonMessage::Error {
-            message: "not supported yet".to_owned(),
-            request_id: Some(request_id),
-            code: Some(protocol::error_codes::UNSUPPORTED_MESSAGE.to_owned()),
-        });
-    }
 }
 
 /// The summarizer over the real providers. A failed start never stops the
@@ -1083,11 +1063,11 @@ mod tests {
         let _ = err.raw_os_error();
     }
 
-    /// A Dashboard request whose handler has not landed is refused on the
-    /// wire with its id, so the requester does not wait on a reply.
+    /// A Dashboard answer is routed to the Dashboard's handler, which refuses
+    /// one for an unknown session with its id.
     #[tokio::test]
-    async fn a_dashboard_request_is_refused_as_not_supported_yet() {
-        let (hub, _scratch) = test_hub("answer-prompt-stub");
+    async fn answer_prompt_for_an_unknown_session_is_refused_with_its_id() {
+        let (hub, _scratch) = test_hub("answer-prompt-unknown");
         let reply = dispatch_one(
             &hub,
             ClientMessage::AnswerPrompt {
@@ -1101,8 +1081,9 @@ mod tests {
         assert!(
             matches!(
                 &reply,
-                DaemonMessage::Error { message, request_id: Some(id), .. }
-                    if message == "not supported yet" && id == "d1"
+                DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
+                    if message == "unknown session: s1" && id == "d1"
+                        && code == protocol::error_codes::NOT_FOUND
             ),
             "{reply:?}"
         );
