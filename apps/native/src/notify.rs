@@ -20,7 +20,8 @@ use protocol::{
 use crate::RootView;
 use crate::needs_you::{self, Reason};
 use crate::pairing::{PairingAction, PairingToast};
-use crate::sidebar::{NotifySkip, display_label};
+use crate::sidebar::{NeedsYouSound, NotifySkip, display_label};
+use crate::sound::{self, Sounder};
 use crate::target::HostKey;
 #[cfg(windows)]
 use crate::toast_activation;
@@ -67,9 +68,10 @@ pub type PairingActionSink = Arc<dyn Fn(PairingAction) + Send + Sync>;
 
 /// Shows OS notifications.
 pub trait Notifier: Send + Sync {
-    /// Shows a toast titled `title` with `body`. Called off the UI thread;
-    /// a failure is logged, never returned.
-    fn notify(&self, title: &str, body: &str);
+    /// Shows a toast titled `title` with `body`, without Windows' own
+    /// notification sound when `silent`. Called off the UI thread; a failure
+    /// is logged, never returned.
+    fn notify(&self, title: &str, body: &str, silent: bool);
 
     /// Raises the pairing toast for `toast`, its buttons handing what was
     /// pressed to `on_action`. Called off the UI thread; a failure is logged,
@@ -79,6 +81,12 @@ pub trait Notifier: Send + Sync {
 
     /// Whether Windows lets this app's toasts show.
     fn state(&self) -> NotifyState;
+
+    /// Whether Windows would hold back a toast raised now: this app's
+    /// toasts are off, or the user is not taking notifications (Do Not
+    /// Disturb, a presentation, a full-screen app). Called off the UI
+    /// thread.
+    fn suppressed(&self) -> bool;
 }
 
 /// The notifier the client runs with: Windows toasts under the client's own
@@ -89,8 +97,14 @@ pub struct SystemNotifier;
 
 #[cfg(windows)]
 impl Notifier for SystemNotifier {
-    fn notify(&self, title: &str, body: &str) {
-        let xml = toast_activation::toast_xml(title, body, &[], toast_activation::registered());
+    fn notify(&self, title: &str, body: &str, silent: bool) {
+        let audio = if silent {
+            toast_activation::ToastAudio::Silent
+        } else {
+            toast_activation::ToastAudio::Windows
+        };
+        let registered = toast_activation::registered();
+        let xml = toast_activation::toast_xml(title, body, &[], registered, audio);
         if let Err(err) = show_toast(&xml, None) {
             tracing::warn!("notification {title:?} was not shown: {err}");
         }
@@ -120,6 +134,31 @@ impl Notifier for SystemNotifier {
             }
         }
     }
+
+    fn suppressed(&self) -> bool {
+        match toasts_enabled() {
+            Ok(true) => {}
+            Ok(false) => return true,
+            Err(err) => tracing::debug!("could not read Windows' notification setting: {err}"),
+        }
+        match user_takes_notifications() {
+            Ok(takes) => !takes,
+            Err(err) => {
+                tracing::debug!("could not read whether the user takes notifications: {err}");
+                false
+            }
+        }
+    }
+}
+
+/// Whether the user takes notifications now: not in Do Not Disturb, a
+/// presentation or a full-screen app.
+#[cfg(windows)]
+fn user_takes_notifications() -> windows::core::Result<bool> {
+    use windows::Win32::UI::Shell::{QUNS_ACCEPTS_NOTIFICATIONS, SHQueryUserNotificationState};
+    // SAFETY: a plain call that writes only its own out parameter.
+    let state = unsafe { SHQueryUserNotificationState() }?;
+    Ok(state == QUNS_ACCEPTS_NOTIFICATIONS)
 }
 
 /// Shows the toast `xml` under the app id toasts are raised under, handing
@@ -171,7 +210,7 @@ fn toasts_enabled() -> windows::core::Result<bool> {
 
 #[cfg(not(windows))]
 impl Notifier for SystemNotifier {
-    fn notify(&self, title: &str, _: &str) {
+    fn notify(&self, title: &str, _: &str, _: bool) {
         tracing::debug!("no OS notifications on this platform: {title:?}");
     }
 
@@ -185,6 +224,10 @@ impl Notifier for SystemNotifier {
     fn state(&self) -> NotifyState {
         NotifyState::Unknown
     }
+
+    fn suppressed(&self) -> bool {
+        false
+    }
 }
 
 /// A notifier that shows nothing, for the cloaked smoke-tier window, which
@@ -192,7 +235,7 @@ impl Notifier for SystemNotifier {
 pub struct SilentNotifier;
 
 impl Notifier for SilentNotifier {
-    fn notify(&self, title: &str, _: &str) {
+    fn notify(&self, title: &str, _: &str, _: bool) {
         tracing::debug!("offscreen window: notification {title:?} not shown");
     }
 
@@ -206,12 +249,21 @@ impl Notifier for SilentNotifier {
     fn state(&self) -> NotifyState {
         NotifyState::Unknown
     }
+
+    fn suppressed(&self) -> bool {
+        false
+    }
 }
 
 /// The root view's notification state.
 pub(crate) struct Notifications {
     /// Shows the notifications, on background threads.
     pub(crate) notifier: Arc<dyn Notifier>,
+    /// Plays the Needs you sound, on background threads.
+    pub(crate) sounder: Arc<dyn Sounder>,
+    /// What is wrong with the Needs you sound's custom file, as last checked
+    /// when the Notifications tab opened or the choice changed.
+    pub(crate) sound_problem: Option<String>,
     /// Windows' toast setting as last read when the Notifications tab
     /// opened; `None` while a read is out.
     pub(crate) state: Option<NotifyState>,
@@ -238,9 +290,11 @@ fn key_of(host: &HostKey, id: &str) -> SessionKey {
 }
 
 impl Notifications {
-    pub(crate) fn new(notifier: Arc<dyn Notifier>) -> Self {
+    pub(crate) fn new(notifier: Arc<dyn Notifier>, sounder: Arc<dyn Sounder>) -> Self {
         Self {
             notifier,
+            sounder,
+            sound_problem: None,
             state: None,
             summaries: HashMap::new(),
             held: HashMap::new(),
@@ -410,6 +464,21 @@ struct Toast<'a> {
     body: &'a str,
     /// Whether the setting's toggle for this kind of toast is on.
     wanted: bool,
+    /// Whether it plays the Needs you sound as it is raised, in place of
+    /// Windows' own.
+    sound: bool,
+}
+
+/// Plays `choice`'s clip with a Needs you toast, unless Windows holds that
+/// toast back.
+fn sound_with_toast(notifier: &dyn Notifier, sounder: &dyn Sounder, choice: &NeedsYouSound) {
+    if notifier.suppressed() {
+        tracing::debug!("Windows holds notifications back: the Needs you sound does not play");
+        return;
+    }
+    if let Some(clip) = sound::clip_for(choice) {
+        sounder.play(clip);
+    }
 }
 
 /// Whether a notification for a session is skipped under `skip_when`:
@@ -498,6 +567,7 @@ impl RootView {
                             title: FINISHED_TITLE,
                             body: &label,
                             wanted,
+                            sound: false,
                         },
                         window_focused,
                         cx,
@@ -524,6 +594,7 @@ impl RootView {
                         title: NEEDS_YOU_TITLE,
                         body: &body,
                         wanted,
+                        sound: true,
                     },
                     window_focused,
                     cx,
@@ -577,9 +648,49 @@ impl RootView {
         }
         let title = toast.title.to_owned();
         let body = toast.body.to_owned();
+        // Needs you's sound is the client's own (none when it is off), never
+        // Windows' beside it.
+        let silent = toast.sound;
+        let chime = toast
+            .sound
+            .then(|| self.needs_you_sound_choice())
+            .filter(|choice| *choice != NeedsYouSound::Off);
         let notifier = Arc::clone(&self.notifications.notifier);
+        let sounder = Arc::clone(&self.notifications.sounder);
         cx.background_executor()
-            .spawn(async move { notifier.notify(&title, &body) })
+            .spawn(async move {
+                if let Some(choice) = chime {
+                    sound_with_toast(notifier.as_ref(), sounder.as_ref(), &choice);
+                }
+                notifier.notify(&title, &body, silent);
+            })
+            .detach();
+    }
+
+    /// The Needs you sound as chosen in Settings.
+    fn needs_you_sound_choice(&self) -> NeedsYouSound {
+        self.sidebar
+            .ui_state()
+            .notifications
+            .needs_you_sound
+            .clone()
+    }
+
+    /// Plays the Needs you sound as chosen in Settings, unless it is off, as
+    /// Settings' Play previews it; the custom file is read and checked on a
+    /// background thread.
+    pub(crate) fn play_needs_you_sound(&self, cx: &gpui::App) {
+        let choice = self.needs_you_sound_choice();
+        if choice == NeedsYouSound::Off {
+            return;
+        }
+        let sounder = Arc::clone(&self.notifications.sounder);
+        cx.background_executor()
+            .spawn(async move {
+                if let Some(clip) = sound::clip_for(&choice) {
+                    sounder.play(clip);
+                }
+            })
             .detach();
     }
 
@@ -627,6 +738,7 @@ impl RootView {
                 title: FINISHED_TITLE,
                 body: &held.label,
                 wanted,
+                sound: false,
             },
             focused,
             cx,
@@ -670,6 +782,7 @@ impl RootView {
                 title: &title,
                 body: &body,
                 wanted,
+                sound: false,
             },
             window_focused,
             cx,

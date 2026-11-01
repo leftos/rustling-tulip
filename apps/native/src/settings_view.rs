@@ -1,6 +1,6 @@
 //! The Settings modal: a tab list on the left and the chosen tab's rows
 //! beside it. General holds keep-awake and copy on select, Notifications
-//! the Needs you toggle and Windows' toast state, Appearance
+//! the Needs you toggle and sound and Windows' toast state, Appearance
 //! the appearance editor at the app level, App title the window title's
 //! settings; every change applies at once. The main window's title, which
 //! the App title tab controls, is kept here too.
@@ -36,8 +36,9 @@ use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::sidebar::{
-    CountMode, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView,
+    CountMode, LeafDensity, NeedsYouSound, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView,
 };
+use crate::sound::{self, SOUND_EXTENSIONS};
 use crate::spawn_view::{
     DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
     dialog_title_bar, field, muted, segmented,
@@ -47,7 +48,7 @@ use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
 use crate::window_title::compute_title;
-use crate::{Pick, RootView, tooltip};
+use crate::{FileFilter, Pick, RootView, tooltip};
 
 /// The tab list's width, its padding and edge included.
 const TAB_LIST_WIDTH: f32 = 150.0;
@@ -267,6 +268,36 @@ const COUNT_MODE_CHOICES: [CountMode; 3] = [CountMode::NeedsYou, CountMode::Busy
 const NOTIFY_SKIP_CHOICES: [NotifySkip; 3] =
     [NotifySkip::OnScreen, NotifySkip::Focused, NotifySkip::Never];
 
+/// The Notifications tab's Needs you sound choices; Custom asks for the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SoundKind {
+    Off,
+    Default,
+    Custom,
+}
+
+impl SoundKind {
+    /// The choice `sound` shows as.
+    const fn of(sound: &NeedsYouSound) -> Self {
+        match sound {
+            NeedsYouSound::Off => Self::Off,
+            NeedsYouSound::Default => Self::Default,
+            NeedsYouSound::Custom(_) => Self::Custom,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Default => "Default",
+            Self::Custom => "Custom…",
+        }
+    }
+}
+
+/// The Notifications tab's Needs you sound choices, in the order they show.
+const SOUND_CHOICES: [SoundKind; 3] = [SoundKind::Off, SoundKind::Default, SoundKind::Custom];
+
 /// A control of a Settings tab that Tab can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsControl {
@@ -284,6 +315,8 @@ pub(crate) enum SettingsControl {
     TitleSuffix,
     NotifySettingsLink,
     NotifyNeedsYou,
+    NeedsYouSound(SoundKind),
+    NeedsYouSoundPlay,
     NotifyFinished,
     NotifySkip(NotifySkip),
     SpawnTrusted,
@@ -357,6 +390,10 @@ impl SettingsControl {
             Self::TitleSuffix => "settings-title-product-suffix",
             Self::NotifySettingsLink => "settings-open-windows-notifications",
             Self::NotifyNeedsYou => "settings-notify-needs-you",
+            Self::NeedsYouSound(SoundKind::Off) => "settings-needs-you-sound-off",
+            Self::NeedsYouSound(SoundKind::Default) => "settings-needs-you-sound-default",
+            Self::NeedsYouSound(SoundKind::Custom) => "settings-needs-you-sound-custom",
+            Self::NeedsYouSoundPlay => "settings-needs-you-sound-play",
             Self::NotifyFinished => "settings-notify-finished",
             Self::NotifySkip(NotifySkip::OnScreen) => "settings-notify-skip-on-screen",
             Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
@@ -1109,14 +1146,7 @@ impl RootView {
                 .into_iter()
                 .chain([SettingsControl::TitleCount, SettingsControl::TitleSuffix])
                 .collect(),
-            SettingsTab::Notifications => [
-                SettingsControl::NotifySettingsLink,
-                SettingsControl::NotifyNeedsYou,
-                SettingsControl::NotifyFinished,
-            ]
-            .into_iter()
-            .chain(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip))
-            .collect(),
+            SettingsTab::Notifications => self.notifications_controls(),
             SettingsTab::SpawnDefaults => vec![SettingsControl::SpawnTrusted],
             SettingsTab::Agent(_) => self.agent_controls(),
             SettingsTab::Worktrees => {
@@ -1997,6 +2027,8 @@ impl RootView {
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
             SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
             SettingsControl::NotifyNeedsYou => self.toggle_notification(cx),
+            SettingsControl::NeedsYouSound(kind) => self.choose_needs_you_sound(kind, cx),
+            SettingsControl::NeedsYouSoundPlay => self.play_needs_you_sound(cx),
             SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
@@ -2590,6 +2622,7 @@ impl RootView {
         self.arm_pairing_tick(window, cx);
         if tab == SettingsTab::Notifications {
             self.read_notify_state(window, cx);
+            self.check_needs_you_sound(cx);
         }
         if tab == SettingsTab::Worktrees {
             self.hold_worktrees_tab(false, window, cx);
@@ -2650,6 +2683,106 @@ impl RootView {
             "Windows notifications: {}",
             NotifyState::line_label(self.notifications.state)
         )
+    }
+
+    /// What the Notifications tab says is wrong with the Needs you sound's
+    /// custom file, `None` when nothing is.
+    #[must_use]
+    pub fn needs_you_sound_problem(&self) -> Option<String> {
+        self.notifications.sound_problem.clone()
+    }
+
+    /// The Notifications tab's stops: the link, Needs you with its sound
+    /// choices and their Play (not while the sound is off), Finished, then
+    /// the skip choices.
+    fn notifications_controls(&self) -> Vec<SettingsControl> {
+        let sound = SoundKind::of(&self.sidebar.ui_state().notifications.needs_you_sound);
+        let mut controls = vec![
+            SettingsControl::NotifySettingsLink,
+            SettingsControl::NotifyNeedsYou,
+        ];
+        controls.extend(SOUND_CHOICES.map(SettingsControl::NeedsYouSound));
+        if sound != SoundKind::Off {
+            controls.push(SettingsControl::NeedsYouSoundPlay);
+        }
+        controls.push(SettingsControl::NotifyFinished);
+        controls.extend(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip));
+        controls
+    }
+
+    /// Off and Default apply at once; Custom asks this PC's file picker for
+    /// a `.wav` or `.ogg`, and a cancel keeps the choice as it was.
+    fn choose_needs_you_sound(&mut self, kind: SoundKind, cx: &mut Context<Self>) {
+        match kind {
+            SoundKind::Off => self.set_needs_you_sound(NeedsYouSound::Off, cx),
+            SoundKind::Default => self.set_needs_you_sound(NeedsYouSound::Default, cx),
+            SoundKind::Custom => self.pick_needs_you_sound(cx),
+        }
+    }
+
+    /// Asks for the custom sound file, opening at the current one's folder.
+    /// The sound plays on this PC, so the picker is always this PC's, even
+    /// when the window is on another host.
+    fn pick_needs_you_sound(&mut self, cx: &mut Context<Self>) {
+        let start = match &self.sidebar.ui_state().notifications.needs_you_sound {
+            NeedsYouSound::Custom(path) => path.parent().map(std::path::Path::to_path_buf),
+            NeedsYouSound::Off | NeedsYouSound::Default => None,
+        };
+        let filter = FileFilter::new("Sound", &SOUND_EXTENSIONS);
+        let picked = (self.pick_file)(cx, start, filter);
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                return;
+            };
+            // Fails only when the view is gone, and Settings with it.
+            this.update(cx, |this, cx| {
+                this.set_needs_you_sound(NeedsYouSound::Custom(path), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Records `sound`, saving it when it changed, and checks its file; Off
+    /// drops the clip waiting to play, and the one playing ends on its own.
+    fn set_needs_you_sound(&mut self, sound: NeedsYouSound, cx: &mut Context<Self>) {
+        if sound == NeedsYouSound::Off {
+            self.notifications.sounder.drop_waiting();
+        }
+        if self.sidebar.set_needs_you_sound(sound) {
+            self.save_ui();
+        }
+        self.check_needs_you_sound(cx);
+        cx.notify();
+    }
+
+    /// Checks the chosen custom sound file on a background thread; the tab
+    /// shows what is wrong with it once the check is back, unless the
+    /// choice changed meanwhile.
+    fn check_needs_you_sound(&mut self, cx: &mut Context<Self>) {
+        let choice = self
+            .sidebar
+            .ui_state()
+            .notifications
+            .needs_you_sound
+            .clone();
+        self.notifications.sound_problem = None;
+        let checked = choice.clone();
+        let check = cx
+            .background_executor()
+            .spawn(async move { sound::problem_of(&checked) });
+        cx.spawn(async move |this, cx| {
+            let problem = check.await;
+            // Fails only when the view is gone, and Settings with it.
+            this.update(cx, |this, cx| {
+                if this.sidebar.ui_state().notifications.needs_you_sound == choice {
+                    this.notifications.sound_problem = problem;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn toggle_notification(&mut self, cx: &mut Context<Self>) {
@@ -3677,6 +3810,7 @@ impl RootView {
             focused,
             cx,
         );
+        let sound = self.needs_you_sound_rows(focused, cx);
         let finished = toggle(
             SettingsControl::NotifyFinished,
             ToggleState {
@@ -3721,9 +3855,66 @@ impl RootView {
             &t,
         ))
         .child(needs_you)
+        .child(sound)
         .child(finished)
         .child(skip_row);
         vec![section.into_any_element()]
+    }
+
+    /// The Needs you sound's choices with Play beside them (not while the
+    /// sound is off), then the custom file's path and what is wrong with it.
+    fn needs_you_sound_rows(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme(cx);
+        let size = crate::fonts::ui_text_size(cx);
+        let sound = &self.sidebar.ui_state().notifications.needs_you_sound;
+        let current = SoundKind::of(sound);
+        let choices = SOUND_CHOICES.map(|choice| {
+            (
+                SettingsControl::NeedsYouSound(choice),
+                choice.label(),
+                choice == current,
+            )
+        });
+        let choices = choice_row("Needs you sound", &choices, RowLock::Live, focused, cx);
+        let play = (current != SoundKind::Off).then(|| {
+            settings_button(
+                SettingsControl::NeedsYouSoundPlay,
+                "Play",
+                true,
+                focused,
+                cx,
+            )
+        });
+        let path = match sound {
+            NeedsYouSound::Custom(path) => Some(
+                hint(size, path.display().to_string(), &t)
+                    .debug_selector(|| "settings-needs-you-sound-path".to_owned()),
+            ),
+            NeedsYouSound::Off | NeedsYouSound::Default => None,
+        };
+        let problem = self.notifications.sound_problem.clone().map(|problem| {
+            hint(size, problem, &t)
+                .text_color(gpui::rgb(t.danger_text))
+                .debug_selector(|| "settings-needs-you-sound-problem".to_owned())
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(10.0))
+                    .child(choices)
+                    .children(play),
+            )
+            .children(path)
+            .children(problem)
     }
 
     fn general_tab(

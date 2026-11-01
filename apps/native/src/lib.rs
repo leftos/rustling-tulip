@@ -114,6 +114,7 @@ mod shell_marks;
 mod shell_view;
 mod sidebar;
 mod sidebar_view;
+mod sound;
 mod source_control;
 mod source_control_view;
 mod spawn_form;
@@ -293,6 +294,7 @@ pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, DETACHED_BANNER,
     Leaf, LeafState, RepoFilter, SidebarView, resume_all_label,
 };
+pub use crate::sound::{Clip, ClipSource, SilentSounder, Sounder};
 pub use crate::source_control::{Bucket, ScKey};
 pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
 pub use crate::spawns::{OpenIn, PaneAim};
@@ -419,6 +421,9 @@ pub struct RootDeps {
     /// Shows the OS notifications attention events fire, on background
     /// threads.
     pub notify: Arc<dyn Notifier>,
+    /// Plays the Needs you sound and Settings' preview of it, on background
+    /// threads.
+    pub sound: Arc<dyn Sounder>,
     /// Asks for a folder: the Shell… dialog's and the Worktrees tab's
     /// Browse, and Add repo.
     pub pick_folder: FolderPicker,
@@ -1210,6 +1215,11 @@ impl RootView {
             } else {
                 Arc::new(SystemNotifier)
             },
+            sound: if offscreen::requested() {
+                Arc::new(SilentSounder)
+            } else {
+                Arc::new(sound::SystemSounder::default())
+            },
             pick_folder: folder_picker::system_folder_picker(window),
             pick_file: folder_picker::system_file_picker(window),
             pick_save: folder_picker::system_save_picker(window),
@@ -1308,6 +1318,7 @@ impl RootView {
             quit,
             open,
             notify,
+            sound,
             pick_folder,
             pick_file,
             pick_save,
@@ -1475,7 +1486,7 @@ impl RootView {
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
             cleanup_focus: cx.focus_handle(),
             opener: open,
-            notifications: notify::Notifications::new(notify),
+            notifications: notify::Notifications::new(notify, sound),
             run_confirm: None,
             run_focus: cx.focus_handle(),
             sc: ScModel::default(),

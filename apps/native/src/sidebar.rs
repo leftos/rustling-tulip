@@ -861,6 +861,39 @@ pub struct NotificationSettings {
     /// When a notification for a session the owner is looking at is skipped.
     #[serde(deserialize_with = "skip_or_default")]
     pub skip_when: NotifySkip,
+    /// The sound a Needs you notification plays; a file without the key,
+    /// as every release before it wrote, plays the bundled one.
+    #[serde(deserialize_with = "sound_or_default")]
+    pub needs_you_sound: NeedsYouSound,
+}
+
+/// The sound a Needs you notification plays. Saved as `"off"`, `"default"`
+/// or `{ "custom": "<path>" }`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeedsYouSound {
+    /// No sound.
+    Off,
+    /// The sound bundled with the client.
+    #[default]
+    Default,
+    /// A `.wav` or `.ogg` file the owner chose; one that is missing or will
+    /// not decode plays the bundled sound instead.
+    Custom(std::path::PathBuf),
+}
+
+/// Reads `needs_you_sound` so that any value that is not a known choice
+/// loads as the default and never fails the rest of the file.
+fn sound_or_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<NeedsYouSound, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value.clone()).unwrap_or_else(|err| {
+        tracing::warn!(
+            "notifications.needs_you_sound {value} is not a known choice ({err}); using default"
+        );
+        NeedsYouSound::default()
+    }))
 }
 
 /// Reads `skip_when` so that any value that is not a known choice (null, a
@@ -884,6 +917,7 @@ impl Default for NotificationSettings {
             awaiting_input: true,
             finished: true,
             skip_when: NotifySkip::default(),
+            needs_you_sound: NeedsYouSound::default(),
         }
     }
 }
@@ -1994,6 +2028,16 @@ impl SidebarModel {
             return false;
         }
         self.ui.notifications.skip_when = skip;
+        true
+    }
+
+    /// Records the sound a Needs you notification plays; returns whether it
+    /// changed.
+    pub fn set_needs_you_sound(&mut self, sound: NeedsYouSound) -> bool {
+        if self.ui.notifications.needs_you_sound == sound {
+            return false;
+        }
+        self.ui.notifications.needs_you_sound = sound;
         true
     }
 
@@ -5053,6 +5097,7 @@ pub(crate) mod tests {
                 awaiting_input: false,
                 finished: false,
                 skip_when: NotifySkip::Never,
+                needs_you_sound: NeedsYouSound::Off,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -5177,6 +5222,7 @@ pub(crate) mod tests {
                 awaiting_input: false,
                 finished: false,
                 skip_when: NotifySkip::Never,
+                needs_you_sound: NeedsYouSound::Default,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -6722,6 +6768,47 @@ pub(crate) mod tests {
             let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
             assert_eq!(saved["notifications"]["skip_when"], word);
             assert_eq!(load_ui_state(&dir.0).notifications.skip_when, choice);
+        }
+    }
+
+    #[test]
+    fn a_released_notifications_block_without_a_sound_key_loads_as_default() {
+        let dir = TestDir::new("notify-sound-released");
+        let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
+        assert_eq!(ui.notifications.needs_you_sound, NeedsYouSound::Default);
+        assert!(
+            !ui.notifications.awaiting_input,
+            "the saved toggle survives"
+        );
+        assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+    }
+
+    #[test]
+    fn the_needs_you_sound_choices_round_trip() {
+        let dir = TestDir::new("notify-sound-round-trip");
+        let mut model = SidebarModel::default();
+        let custom = PathBuf::from("C:\\sounds\\ding.wav");
+        for (choice, saved) in [
+            (NeedsYouSound::Off, json!("off")),
+            (
+                NeedsYouSound::Custom(custom.clone()),
+                json!({ "custom": "C:\\sounds\\ding.wav" }),
+            ),
+            (NeedsYouSound::Default, json!("default")),
+        ] {
+            assert!(
+                model.set_needs_you_sound(choice.clone()),
+                "{saved} is a change"
+            );
+            assert!(
+                !model.set_needs_you_sound(choice.clone()),
+                "{saved} again is not"
+            );
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let file: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(file["notifications"]["needs_you_sound"], saved);
+            assert_eq!(load_ui_state(&dir.0).notifications.needs_you_sound, choice);
         }
     }
 

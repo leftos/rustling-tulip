@@ -13,7 +13,7 @@ use gpui::{TestAppContext, px};
 use protocol::{
     AlertKind, AttentionReason, DaemonMessage, KeyState, SessionSnapshot, SummarySource, TabEntry,
 };
-use rustling_tulip_native::NotifyState;
+use rustling_tulip_native::{ClipSource, NotifyState};
 use std::time::Duration;
 use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, summarizer_status, tab};
 
@@ -898,4 +898,165 @@ fn needs_you_ignores_the_waiting_alert(cx: &mut TestAppContext) {
         [shown("Needs you", "review: Waiting for input")],
         "an alert words no Needs you toast"
     );
+}
+
+#[gpui::test]
+fn the_needs_you_sound_plays_once_for_a_new_item(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(h.notified().len(), 1, "Needs you is raised");
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled],
+        "no saved choice plays the default"
+    );
+
+    turn(&mut h, "s2", "review");
+    assert_eq!(h.notified().len(), 2, "Finished is raised");
+    assert_eq!(h.sounds().len(), 1, "Finished plays no sound");
+
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert_eq!(h.sounds().len(), 2, "the next Needs you item plays again");
+}
+
+#[gpui::test]
+fn no_sound_when_the_choice_is_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "needs_you_sound": "off" }));
+    let mut h = opened(cx, &dir);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(h.notified().len(), 1, "the toast still fires");
+    assert!(h.sounds().is_empty(), "the sound is off");
+}
+
+#[gpui::test]
+fn no_sound_while_windows_suppresses_notifications(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.set_notify_state(NotifyState::Blocked);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified().len(),
+        1,
+        "the toast is still handed to Windows"
+    );
+    assert!(
+        h.sounds().is_empty(),
+        "no sound while this app's toasts are off"
+    );
+
+    h.set_notify_state(NotifyState::On);
+    h.set_do_not_disturb(true);
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified().len(),
+        2,
+        "the toast is still handed to Windows"
+    );
+    assert!(h.sounds().is_empty(), "no sound under Do Not Disturb");
+}
+
+#[gpui::test]
+fn no_sound_when_the_skip_rule_skips_the_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_tabs(cx, &dir);
+    focus_window(&mut h);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert!(
+        h.notified().is_empty(),
+        "the owner is looking at s1 already"
+    );
+    assert!(h.sounds().is_empty(), "nor does it sound");
+}
+
+#[gpui::test]
+fn no_sound_when_the_needs_you_notification_is_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "awaiting_input": false }));
+    let mut h = opened(cx, &dir);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert!(h.notified().is_empty(), "the toggle is off");
+    assert!(h.sounds().is_empty(), "and the sound with it");
+}
+
+#[gpui::test]
+fn a_missing_custom_file_falls_back_to_the_default(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let missing = dir.path().join("no-such-chime.ogg");
+    save_notifications(
+        &dir,
+        &serde_json::json!({ "needs_you_sound": { "custom": missing } }),
+    );
+    let mut h = opened(cx, &dir);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(h.sounds(), [ClipSource::Bundled]);
+}
+
+#[gpui::test]
+fn choosing_off_default_and_custom_writes_the_sound_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    h.click_on("settings-needs-you-sound-off");
+    assert_eq!(saved_ui(&dir)["notifications"]["needs_you_sound"], "off");
+    // gpui keeps a selector's last bounds once it stops being drawn, so the
+    // Tab ring says whether Play is there.
+    h.keys("tab tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-notify-finished"),
+        "no Play to preview while the sound is off"
+    );
+
+    h.click_on("settings-needs-you-sound-default");
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        "default"
+    );
+
+    let chosen = dir.path().join("ding.wav");
+    h.set_picked_file(chosen.to_str());
+    h.click_on("settings-needs-you-sound-custom");
+    h.cx.run_until_parked();
+    assert_eq!(
+        h.file_filters()
+            .last()
+            .map(|filter| filter.extensions.clone()),
+        Some(vec!["wav".to_owned(), "ogg".to_owned()]),
+        "the picker offers .wav and .ogg"
+    );
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "custom": chosen })
+    );
+    assert!(
+        h.bounds("settings-needs-you-sound-path").origin.x >= px(0.0),
+        "the chosen path shows"
+    );
+    let problem = h
+        .root(|root, _| root.needs_you_sound_problem())
+        .expect("a missing file is a problem");
+    assert!(
+        problem.contains("could not be read"),
+        "the problem says why: {problem}"
+    );
+    assert!(h.bounds("settings-needs-you-sound-problem").origin.x >= px(0.0));
+
+    h.set_picked_file(None);
+    h.click_on("settings-needs-you-sound-custom");
+    h.cx.run_until_parked();
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "custom": chosen }),
+        "a cancelled pick keeps the choice"
+    );
+}
+
+#[gpui::test]
+fn play_previews_the_chosen_sound_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    assert!(h.sounds().is_empty(), "opening the tab plays nothing");
+    h.click_on("settings-needs-you-sound-play");
+    assert_eq!(h.sounds(), [ClipSource::Bundled]);
 }

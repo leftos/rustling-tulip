@@ -32,7 +32,9 @@ use rustling_tulip_native::{
 };
 use serde_json::{Value, json};
 
-use super::{Harness, NotifyRecorder, OpenRecorder, Outbox, PickRecorder, TestClock};
+use super::{
+    Harness, NotifyRecorder, OpenRecorder, Outbox, PickRecorder, SoundRecorder, TestClock,
+};
 
 /// The hang guard of every wait in the live and OS tiers: the daemon writing
 /// `daemon.json` and answering `/health`, its processes leaving after a kill,
@@ -1284,6 +1286,7 @@ impl<'a> Harness<'a> {
         let quits = Rc::new(std::cell::Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
+        let sounder = Arc::new(SoundRecorder::default());
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(super::AutostartRecorder::default());
         let updater = Arc::new(super::UpdaterRecorder::default());
@@ -1297,6 +1300,7 @@ impl<'a> Harness<'a> {
             quit: super::quit_recorder(&quits),
             open: opener.clone(),
             notify: notifier.clone(),
+            sound: sounder.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
             pick_save: PickRecorder::save_picker(&picker),
@@ -1318,6 +1322,7 @@ impl<'a> Harness<'a> {
             quits,
             opener,
             notifier,
+            sounder,
             picker,
             autostart,
             tokens,

@@ -783,6 +783,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         quit: Box::new(|cx: &mut App| cx.quit()),
         open: Arc::new(NoOpener),
         notify: Arc::new(NoNotifier),
+        sound: Arc::new(rustling_tulip_native::SilentSounder),
         pick_folder,
         pick_file,
         pick_save,
@@ -1116,10 +1117,14 @@ impl Opener for NoOpener {
 struct NoNotifier;
 
 impl Notifier for NoNotifier {
-    fn notify(&self, _title: &str, _body: &str) {}
+    fn notify(&self, _title: &str, _body: &str, _silent: bool) {}
 
     fn state(&self) -> NotifyState {
         NotifyState::On
+    }
+
+    fn suppressed(&self) -> bool {
+        false
     }
 }
 

@@ -160,6 +160,15 @@ pub(crate) struct ToastButton {
     pub(crate) kind: ActivationKind,
 }
 
+/// Whether a toast makes Windows' notification sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToastAudio {
+    /// Windows' default notification sound.
+    Windows,
+    /// No sound from Windows: the client plays its own, or none.
+    Silent,
+}
+
 /// A toast's XML: `title` and `body` as its two lines, then `buttons`.
 /// `activation_types` writes each button's activation type; without it every
 /// button takes Windows' default, a foreground activation.
@@ -169,6 +178,7 @@ pub(crate) fn toast_xml(
     body: &str,
     buttons: &[ToastButton],
     activation_types: bool,
+    audio: ToastAudio,
 ) -> String {
     let mut xml = format!(
         "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>",
@@ -192,6 +202,9 @@ pub(crate) fn toast_xml(
         }
         xml.push_str("</actions>");
     }
+    if audio == ToastAudio::Silent {
+        xml.push_str("<audio silent=\"true\"/>");
+    }
     xml.push_str("</toast>");
     xml
 }
@@ -212,7 +225,13 @@ pub(crate) fn pairing_toast_xml(toast: &PairingToast, activation_types: bool) ->
             kind: ActivationKind::Background,
         },
     ];
-    toast_xml(&toast.title, &toast.body, &buttons, activation_types)
+    toast_xml(
+        &toast.title,
+        &toast.body,
+        &buttons,
+        activation_types,
+        ToastAudio::Windows,
+    )
 }
 
 /// `text` with XML's five special characters escaped.
@@ -625,8 +644,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        ActivationKind, ToastButton, activator_registry_entries, clsid_braced, installed_copy,
-        pairing_toast_xml, parse_launch_args, shortcut_path, toast_xml,
+        ActivationKind, ToastAudio, ToastButton, activator_registry_entries, clsid_braced,
+        installed_copy, pairing_toast_xml, parse_launch_args, shortcut_path, toast_xml,
     };
     use crate::pairing::PairingToast;
 
@@ -680,15 +699,23 @@ mod tests {
             arguments: "deny:a\"b".to_owned(),
             kind: ActivationKind::Background,
         };
-        let xml = toast_xml("t", "b", &[button], true);
+        let xml = toast_xml("t", "b", &[button], true, ToastAudio::Windows);
         assert!(xml.contains("arguments=\"deny:a&quot;b\""), "{xml}");
     }
 
     #[test]
     fn toast_xml_without_buttons_has_no_actions() {
         assert_eq!(
-            toast_xml("Needs you", "fix login", &[], true),
-            "<toast><visual><binding template=\"ToastGeneric\"><text>Needs you</text><text>fix login</text></binding></visual></toast>"
+            toast_xml("Finished", "fix login", &[], true, ToastAudio::Windows),
+            "<toast><visual><binding template=\"ToastGeneric\"><text>Finished</text><text>fix login</text></binding></visual></toast>"
+        );
+    }
+
+    #[test]
+    fn a_silent_toast_asks_windows_for_no_sound() {
+        assert_eq!(
+            toast_xml("Needs you", "fix login", &[], true, ToastAudio::Silent),
+            "<toast><visual><binding template=\"ToastGeneric\"><text>Needs you</text><text>fix login</text></binding></visual><audio silent=\"true\"/></toast>"
         );
     }
 

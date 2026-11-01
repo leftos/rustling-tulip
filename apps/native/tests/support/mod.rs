@@ -24,10 +24,10 @@ use protocol::{
     SummarizerKey, SummarizerKeySource, SummarizerSettings, TabEntry, WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Activity, Clock, Connection, ContainerKind, FileFilter, FilePicker, FolderPicker,
-    HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure,
+    Activity, Clip, ClipSource, Clock, Connection, ContainerKind, FileFilter, FilePicker,
+    FolderPicker, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure,
     OpenLocalFuture, Opener, PairingAction, PairingActionSink, PairingToast, QuitFn, RootDeps,
-    RootView, SavePicker, ScPanel, Transport, bind_keys,
+    RootView, SavePicker, ScPanel, Sounder, Transport, bind_keys,
     remote_access::Autostart,
     spawn_net,
     target::{HostKey, Target},
@@ -1094,6 +1094,8 @@ pub struct Harness<'a> {
     opener: Arc<OpenRecorder>,
     /// The notifications attention events showed.
     notifier: Arc<NotifyRecorder>,
+    /// The sounds the client played.
+    sounder: Arc<SoundRecorder>,
     /// What the folder picker answers, and how often it was asked.
     picker: Rc<PickRecorder>,
     /// The login launch the Remote access page reads and switches.
@@ -1318,13 +1320,16 @@ impl Opener for OpenRecorder {
 
 /// A notifier that only records the notifications it was asked to show, as
 /// a spec must never show a real toast, and reports the Windows state a
-/// spec set (on until set). It records the pairing toasts too, and keeps the
-/// last one's action sink, so a spec can press its buttons itself.
+/// spec set (on until set) and whether Do Not Disturb is on (off until set);
+/// Windows holds toasts back while either says so. It records the pairing
+/// toasts too, and keeps the last one's action sink, so a spec can press
+/// its buttons itself.
 pub struct NotifyRecorder {
     shown: Mutex<Vec<(String, String)>>,
     pairing: Mutex<Vec<PairingToast>>,
     action: Mutex<Option<PairingActionSink>>,
     state: Mutex<NotifyState>,
+    do_not_disturb: Mutex<bool>,
 }
 
 impl Default for NotifyRecorder {
@@ -1334,6 +1339,7 @@ impl Default for NotifyRecorder {
             pairing: Mutex::new(Vec::new()),
             action: Mutex::new(None),
             state: Mutex::new(NotifyState::On),
+            do_not_disturb: Mutex::new(false),
         }
     }
 }
@@ -1364,7 +1370,7 @@ impl NotifyRecorder {
 }
 
 impl Notifier for NotifyRecorder {
-    fn notify(&self, title: &str, body: &str) {
+    fn notify(&self, title: &str, body: &str, _silent: bool) {
         self.shown
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1382,6 +1388,32 @@ impl Notifier for NotifyRecorder {
     fn state(&self) -> NotifyState {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn suppressed(&self) -> bool {
+        self.state() == NotifyState::Blocked
+            || *self
+                .do_not_disturb
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A sounder that only records where each clip it was asked to play came
+/// from, as a spec must never make a sound.
+#[derive(Default)]
+pub struct SoundRecorder {
+    played: Mutex<Vec<ClipSource>>,
+}
+
+impl Sounder for SoundRecorder {
+    fn play(&self, clip: Clip) {
+        self.played
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(clip.source);
+    }
+
+    fn drop_waiting(&self) {}
 }
 
 /// How the recording updater answers an installer start.
@@ -1940,6 +1972,7 @@ impl<'a> Harness<'a> {
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
+        let sounder = Arc::new(SoundRecorder::default());
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(AutostartRecorder::default());
         let tokens = Arc::new(MemoryTokens::default());
@@ -1954,6 +1987,7 @@ impl<'a> Harness<'a> {
             quit: quit_recorder(&quits),
             open: opener.clone(),
             notify: notifier.clone(),
+            sound: sounder.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
             pick_save: PickRecorder::save_picker(&picker),
@@ -1975,6 +2009,7 @@ impl<'a> Harness<'a> {
             quits,
             opener,
             notifier,
+            sounder,
             picker,
             autostart,
             tokens,
@@ -2005,6 +2040,7 @@ impl<'a> Harness<'a> {
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
+        let sounder = Arc::new(SoundRecorder::default());
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(AutostartRecorder::default());
         let tokens = Arc::new(MemoryTokens::default());
@@ -2019,6 +2055,7 @@ impl<'a> Harness<'a> {
             quit: quit_recorder(&quits),
             open: opener.clone(),
             notify: notifier.clone(),
+            sound: sounder.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
             pick_save: PickRecorder::save_picker(&picker),
@@ -2040,6 +2077,7 @@ impl<'a> Harness<'a> {
             quits,
             opener,
             notifier,
+            sounder,
             picker,
             autostart,
             tokens,
@@ -2189,6 +2227,17 @@ impl<'a> Harness<'a> {
             .clone()
     }
 
+    /// Where each sound the client played came from, oldest first, once the
+    /// view has settled.
+    pub fn sounds(&mut self) -> Vec<ClipSource> {
+        self.cx.run_until_parked();
+        self.sounder
+            .played
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Every pairing toast the client raised, in order, once the view has
     /// settled.
     pub fn pairing_toasts(&mut self) -> Vec<PairingToast> {
@@ -2211,6 +2260,16 @@ impl<'a> Harness<'a> {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = state;
+    }
+
+    /// Reports Do Not Disturb (or a presentation, or a full-screen app) as
+    /// `on` from now on.
+    pub fn set_do_not_disturb(&self, on: bool) {
+        *self
+            .notifier
+            .do_not_disturb
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = on;
     }
 
     /// The run confirm's title and detail while it is open.

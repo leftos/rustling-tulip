@@ -71,6 +71,13 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 sha2 = "0.10"
 semver = { workspace = true }
+# The Needs you sound: playback through the OS output device, and the WAV and
+# Ogg Vorbis decoders only (pure Rust); Ogg is why not Windows' `PlaySound`.
+rodio = { version = "0.23.0", default-features = false, features = [
+    "playback",
+    "wav",
+    "vorbis",
+] }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
