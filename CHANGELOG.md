@@ -4,6 +4,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.7.0-alpha
+
 ### Added
 
 - Right-clicking a repo or workspace offers a Spawn session submenu: Last, each agent, Shell and your presets.
