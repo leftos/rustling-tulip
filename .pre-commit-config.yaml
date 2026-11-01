@@ -9,7 +9,8 @@
 # There is no CI in this repo yet, so these hooks are the only automated
 # gates. Hygiene and fmt run at pre-commit, so a commit stays cheap; clippy
 # (which compiles GPUI) runs at pre-push, so what reaches origin is
-# warning-free. No hook runs the tests: they run by hand through
+# warning-free; the clippy hook runs through tools/gate.ps1, which routes it
+# to a builder, so a push itself runs bare. No hook runs the tests: they run by hand through
 # `.\rt.ps1 test` (cargo-nextest, full suite), or `.\rt.ps1 test -Reached`
 # for the tests one change reaches (tools/test-map.json).
 #
@@ -18,6 +19,7 @@
 # uninstalled. Run `cargo deny check` by hand before releases.
 
 default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -25,10 +27,14 @@ repos:
     hooks:
       # Sources and config only. Markdown is excluded because two trailing
       # spaces are a hard line break, and the plan docs rely on it.
+      # These three manifests list their own stages (pre-push among them),
+      # which override default_stages; pin them to pre-commit.
       - id: trailing-whitespace
         types_or: [rust, javascript, json, yaml, toml]
+        stages: [pre-commit]
       - id: end-of-file-fixer
         types_or: [rust, javascript, json, yaml, toml]
+        stages: [pre-commit]
       - id: mixed-line-ending
         args: [--fix=lf]
         exclude: '\.(bat|cmd)$'
@@ -46,6 +52,7 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=512]
         exclude: '^(Cargo\.lock|apps/native/assets/fonts/.*\.ttf)$'
+        stages: [pre-commit]
 
   - repo: local
     hooks:
@@ -68,7 +75,7 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy (-D warnings)
-        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        entry: pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/prek-clippy.log --timeout 1800 --slot heavy -- cargo clippy --workspace --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
