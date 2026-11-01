@@ -364,3 +364,10 @@
   - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext
 - [ ] RT-650 Keep the chat composer's text across a reconnect to its host · release vNext
 - [ ] RT-652 Give the Settings modal OK, Apply and Cancel instead of Enter-to-apply text rows · release vNext
+
+## No project
+
+- [ ] RT-684 Declare native-shot's cargo run in .gate/desktop.toml so it routes to the builder's desktop
+- [ ] RT-686 Update a connected remote host's daemon from the client, with automatic session recovery · release vNext
+- [ ] RT-687 Remove AgentDescriptor.accent and AccentToken with the next protocol bump
+- [ ] RT-688 Bound the agent icon SVG the client renders from a remote host's descriptor
