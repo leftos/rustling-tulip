@@ -6,6 +6,13 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## v0.7.0-alpha
 
+### Highlights
+
+- Tail a log a chat command writes, in a scrolling box under its card that follows the file as it grows.
+- Hear when an agent needs you, and on Windows see the Needs you count as a badge on the taskbar button.
+- Start sessions faster: a Spawn submenu on every repo and workspace, a target dropdown, and a remembered Trusted choice.
+- A quieter app: toasts and banners no longer narrate what you can already see.
+
 ### Added
 
 - Right-clicking a repo or workspace offers a Spawn session submenu: Last, each agent, Shell and your presets.

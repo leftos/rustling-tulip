@@ -11,7 +11,7 @@ How a versioned release of rustling-tulip is cut, starting with `v0.1.0-alpha`. 
 ## Steps
 
 1. **Scope.** `uv run --project ~/.claude/tools/linear python -m linear release status rustling-tulip`: every issue in `vNext` is Done or Canceled. An open one either lands first or moves out with `linear release add rustling-tulip --next <ID>`.
-2. **Version.** Set `[workspace.package] version` in `Cargo.toml` to the release's version (`0.1.0-alpha`), run `cargo update --workspace` so `Cargo.lock` follows, rename `CHANGELOG.md`'s `## Unreleased` to `## v<version>` with a new empty `## Unreleased` above it, and commit them as `chore: release v<version>`.
+2. **Version.** Set `[workspace.package] version` in `Cargo.toml` to the release's version (`0.1.0-alpha`), run `cargo update --workspace` so `Cargo.lock` follows, rename `CHANGELOG.md`'s `## Unreleased` to `## v<version>` with a new empty `## Unreleased` above it, open the section with `### Highlights` (up to 4 bullets, before `### Added`) when it has more than 4 bullets, and commit them as `chore: release v<version>`.
 3. **Gates on `main`'s head**, each through the gate wrapper:
    - `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/release-fmt.log --timeout 600 --slot light -- cargo fmt --all --check`
    - `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/release-clippy.log --timeout 3600 --slot heavy -- cargo clippy --workspace --all-targets --all-features -- -D warnings`

@@ -107,6 +107,7 @@ The repo keeps `CHANGELOG.md` in its root. Read by the user-level `changelog-and
 - Every landed item with a user-visible change adds or folds its bullet under `## Unreleased`, in the item's own commit (an item on a feature branch: in its commit there, and the merge carries it).
 - Sub-headings, in order: `### Added`, `### Fixed`, `### Changed`. The audience is the app's users: no issue numbers, crate, module or type names.
 - The release cut renames `## Unreleased` to `## v<version>` and opens a new empty `## Unreleased` above it (`docs/release.md`).
+- A release section with more than 4 bullets opens with `### Highlights` before `### Added`: up to 4 bullets naming what matters most to users in the release, each in the same bullet style.
 - Plan (Step 2b): **land** each item after its commit.
 
 ## Landing
