@@ -46,6 +46,7 @@
 - [ ] RT-670 Add a search box to Settings that finds a setting on any page · release vNext
 - [ ] RT-671 Add an opt-in Detailed logging switch to Settings for the client and daemon · release vNext
 - [ ] RT-676 Let a manual install over a running client finish when the close dialog takes over 30 s
+- [ ] RT-683 Show the app version at the right of the footer · release vNext
 
 ## Wave 2b — Hook status
 
