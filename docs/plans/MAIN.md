@@ -7,6 +7,7 @@
 - [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette · release vNext
 - [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons · release vNext
 - [ ] RT-619 Match italic terminal text to the Medium and SemiBold terminal weights · release vNext
+- [ ] RT-674 Step the appearance editor from in-flight values and save an app change once
 
 ## Wave 16 — Several hosts in one window
 
@@ -33,6 +34,18 @@
 
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
 - [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
+- [ ] RT-655 Smooth starting a session: spawn dialog picker, trust and container submenu · release vNext
+  - [ ] RT-656 Pick the repo or workspace from a dropdown in the New session modal · release vNext
+  - [ ] RT-657 Remember the New session modal's Trusted launch choice · release vNext
+  - [ ] RT-658 Add a Spawn submenu (Last, Claude Code, Shell, agents and presets) to the repo and workspace menu · release vNext
+  - [ ] RT-659 Skip the trusted-launch confirmation when the agent's settings already grant trust · release vNext
+- [ ] RT-660 Open a Ctrl+clicked file in its default app, and in the viewer on Ctrl+Shift+click · release vNext
+- [ ] RT-662 Cut toasts and copy that narrate what the user can already see · release vNext
+- [ ] RT-664 Check for updates at launch, not 30 s after · release vNext
+- [ ] RT-668 Show only problems in the footer's status text, not the focused session's id · release vNext
+- [ ] RT-670 Add a search box to Settings that finds a setting on any page · release vNext
+- [ ] RT-671 Add an opt-in Detailed logging switch to Settings for the client and daemon · release vNext
+- [ ] RT-676 Let a manual install over a running client finish when the close dialog takes over 30 s
 
 ## Wave 2b — Hook status
 
@@ -62,6 +75,8 @@
 - [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
 - [ ] RT-93 Fleet items: stuck agents and per-repo inbox requests
 - [ ] RT-90 Sounds per attention stream and a taskbar badge
+- [ ] RT-663 Show the Needs you count as a badge on the app icon instead of in the title · release vNext
+- [ ] RT-669 Play a sound when an agent needs you: a default one or a custom .wav or .ogg · release vNext
 
 ## Wave 6 — Remote enhancements
 
@@ -92,6 +107,8 @@
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-142 Phone: tap a Linear identifier to see its card
 - [ ] RT-588 Key the chat pane's answer cache by its text, not its length
+- [ ] RT-653 Add Comfortable and Compact Chat modes and Chat view customization · release vNext
+- [ ] RT-654 Disable Chat and Summary once the agent exits back to its shell · release vNext
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
@@ -203,13 +220,17 @@
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
 - [ ] RT-634 Let native-e2e run one e2e file as a routed gated job · release vNext+1
 - [ ] RT-636 Map the multi-host files in tools/test-map.json so -Validate passes · release vNext+1
+- [ ] RT-675 Route the whole rt.ps1 native-e2e over the builder's desktop route
 
 ## macOS
 
-- [!] RT-46 Verify macOS support M0–M3 on real Mac hardware
 - [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
-- [ ] RT-47 M4: macOS packaging, signing and notarization
-- [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent
+- [ ] RT-665 Ship rustling-tulip on macOS: verified build, signed .app and .dmg, auto-update · release vNext
+  - [!] RT-46 Verify macOS support M0–M3 on real Mac hardware · release vNext
+  - [ ] RT-47 M4: macOS packaging, signing and notarization · release vNext
+  - [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent · release vNext
+  - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap · release vNext
+  - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README · release vNext
 
 ## Agent CLIs
 
@@ -247,6 +268,7 @@
 - [ ] RT-125 Launch a session from the phone: launch last again, a preset, or /nextup in a repo
 - [ ] RT-293 Show a running shell command's live output beside its session
 - [ ] RT-438 Make a session follow the agent running in it: detect an agent typed into a plain shell and its exit · release vNext
+- [ ] RT-661 Plan file-type previewers for the in-app viewer: images, PDF, tables and more · release vNext+1
 
 ## Backlog
 
@@ -334,3 +356,4 @@
   - [ ] RT-648 Stop the prompt-box draft note flashing after a successful chat send · release vNext
   - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext
 - [ ] RT-650 Keep the chat composer's text across a reconnect to its host · release vNext
+- [ ] RT-652 Give the Settings modal OK, Apply and Cancel instead of Enter-to-apply text rows · release vNext
