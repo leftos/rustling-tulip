@@ -2659,6 +2659,8 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
     let mut h = appearance_tab(cx, &dir);
     let ring = [
         "appearance-theme",
+        "appearance-frame-width-down",
+        "appearance-frame-width-up",
         "appearance-ui-family-filter",
         "appearance-ui-family-list",
         "appearance-ui-text-size-down",

@@ -37,6 +37,7 @@ pub(crate) enum SwatchLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResetRow {
     Color(ColorRow),
+    FrameWidth,
     Size,
     TermWeight,
 }
@@ -51,6 +52,10 @@ pub(crate) enum AppearanceStop {
     Hex(ColorRow),
     Apply(ColorRow),
     Reset(ResetRow),
+    /// The terminal frame width − and +, each disabled at its end of
+    /// [`protocol::TERMINAL_FRAME_WIDTHS`].
+    FrameWidthDown,
+    FrameWidthUp,
     FamilyFilter,
     /// The whole family list is one stop; Up and Down move its highlight.
     FamilyList,
@@ -93,8 +98,11 @@ impl AppearanceStop {
             Self::Apply(ColorRow::Background) => "appearance-background-apply",
             Self::Reset(ResetRow::Color(ColorRow::Accent)) => "appearance-accent-reset",
             Self::Reset(ResetRow::Color(ColorRow::Background)) => "appearance-background-reset",
+            Self::Reset(ResetRow::FrameWidth) => "appearance-frame-width-reset",
             Self::Reset(ResetRow::Size) => "appearance-size-reset",
             Self::Reset(ResetRow::TermWeight) => "appearance-term-weight-reset",
+            Self::FrameWidthDown => "appearance-frame-width-down",
+            Self::FrameWidthUp => "appearance-frame-width-up",
             Self::FamilyFilter => "appearance-family-filter",
             Self::FamilyList => "appearance-family-list",
             Self::UiFamilyFilter => "appearance-ui-family-filter",
@@ -135,7 +143,12 @@ impl AppearanceStop {
     const fn can_disable(self) -> bool {
         matches!(
             self,
-            Self::Apply(_) | Self::Reset(_) | Self::UiTextSizeDown | Self::UiTextSizeUp
+            Self::Apply(_)
+                | Self::Reset(_)
+                | Self::FrameWidthDown
+                | Self::FrameWidthUp
+                | Self::UiTextSizeDown
+                | Self::UiTextSizeUp
         )
     }
 }
@@ -177,12 +190,13 @@ impl FontList {
 /// The stops Tab walks, in reading order: the Theme row (`app_level`);
 /// below the app level, per colour row its preset line,
 /// its recent line (`has_recent`), its hex field, Apply and its reset link;
+/// the frame width − and + and its reset link;
 /// the UI font filter and list, the UI text size − and + and the UI weight
 /// buttons (`app_level`);
 /// then the font filter and list, size − and + and the size reset, the
-/// terminal weight buttons and their reset, and Close (`close`). Apply, the reset links and
-/// the UI text size buttons are left out while `enabled` says they do
-/// nothing.
+/// terminal weight buttons and their reset, and Close (`close`). Apply, the
+/// reset links, the frame width buttons and the UI text size buttons are
+/// left out while `enabled` says they do nothing.
 pub(crate) fn stops(
     has_recent: bool,
     app_level: bool,
@@ -205,6 +219,11 @@ pub(crate) fn stops(
             ]);
         }
     }
+    ring.extend([
+        AppearanceStop::FrameWidthDown,
+        AppearanceStop::FrameWidthUp,
+        AppearanceStop::Reset(ResetRow::FrameWidth),
+    ]);
     if app_level {
         ring.extend([
             AppearanceStop::UiFamilyFilter,
@@ -431,9 +450,14 @@ mod tests {
     use crate::fonts::{BUNDLED_FAMILIES, BUNDLED_UI_FAMILIES};
 
     use AppearanceStop::{
-        Apply, Close, FamilyFilter, FamilyList, Hex, Reset, SizeDown, SizeUp, Swatches, TermWeight,
-        UiFamilyList, UiTextSizeDown, UiTextSizeUp, UiWeight,
+        Apply, Close, FamilyFilter, FamilyList, FrameWidthDown, FrameWidthUp, Hex, Reset, SizeDown,
+        SizeUp, Swatches, TermWeight, UiFamilyFilter, UiFamilyList, UiTextSizeDown, UiTextSizeUp,
+        UiWeight,
     };
+
+    /// The frame width row's stops, in ring order.
+    const FRAME_WIDTH_ROW: [AppearanceStop; 3] =
+        [FrameWidthDown, FrameWidthUp, Reset(ResetRow::FrameWidth)];
     use ColorRow::{Accent, Background};
     use SwatchLine::{Presets, Recent};
 
@@ -559,11 +583,22 @@ mod tests {
                 Reset(ResetRow::Color(row)),
             ]);
         }
+        let last_colour_reset = without.len();
+        without.extend(FRAME_WIDTH_ROW);
         without.extend(tail);
         assert_eq!(
             stops(false, false, false, |_| true),
             without,
             "no recent line"
+        );
+        assert_eq!(
+            without[last_colour_reset - 1],
+            Reset(ResetRow::Color(Background)),
+            "the frame width row follows the last colour reset"
+        );
+        assert_eq!(
+            without[last_colour_reset..last_colour_reset + 3],
+            FRAME_WIDTH_ROW
         );
 
         let with = stops(true, false, true, |_| true);
@@ -598,9 +633,27 @@ mod tests {
             "the app's colours are its theme's: {ring:?}"
         );
         assert_eq!(
-            ring[1],
-            AppearanceStop::UiFamilyFilter,
-            "the UI font follows the Theme row"
+            ring[1..4],
+            FRAME_WIDTH_ROW,
+            "the frame width row follows the Theme row"
+        );
+        assert_eq!(
+            ring[4], UiFamilyFilter,
+            "the UI font follows the frame width row"
+        );
+    }
+
+    #[test]
+    fn a_frame_width_button_at_its_end_leaves_the_ring() {
+        let at_zero = stops(false, false, false, |stop| stop != FrameWidthDown);
+        assert!(
+            !at_zero.contains(&FrameWidthDown) && at_zero.contains(&FrameWidthUp),
+            "− drops out, + stays: {at_zero:?}"
+        );
+        let at_six = stops(false, true, false, |stop| stop != FrameWidthUp);
+        assert!(
+            at_six.contains(&FrameWidthDown) && !at_six.contains(&FrameWidthUp),
+            "+ drops out at the app level too: {at_six:?}"
         );
     }
 
@@ -658,6 +711,8 @@ mod tests {
                 Apply(Accent),
                 Swatches(Background, Presets),
                 Hex(Background),
+                FrameWidthDown,
+                FrameWidthUp,
                 FamilyFilter,
                 FamilyList,
                 SizeDown,

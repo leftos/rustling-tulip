@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pane frame width mock</title>
+<style>
+  body { margin: 0; padding: 24px; background: #1b1f27; color: #c9d1e0; font: 13px Inter, Segoe UI, sans-serif; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p.note { margin: 0 0 20px; color: #8b93a5; }
+  .row { display: flex; gap: 20px; flex-wrap: wrap; }
+  .lane { width: 360px; }
+  .lane h2 { font-size: 13px; margin: 0 0 4px; color: #e6eaf2; }
+  .lane .sub { font-size: 12px; color: #8b93a5; margin: 0 0 8px; min-height: 32px; }
+  .pane { border: 1px solid #22c55e; border-radius: 6px; overflow: hidden; background: #0b1020; }
+  .hdr { position: relative; height: 26px; background: #262b36; border-bottom: 1px solid #333a48; display: flex; align-items: center; padding-left: 12px; font-size: 12px; color: #e6eaf2; }
+  .hdr::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 0; width: 3px; background: #22c55e; }
+  .ring { background: #22c55e; }
+  .inset { background: #0b1020; }
+  .term { background: #0b1020; height: 150px; font: 12px "Cascadia Mono", Consolas, monospace; color: #c9d1e0; line-height: 16px; white-space: pre; }
+  .term .dim { color: #7b8496; }
+  .term .acc { color: #e0884f; font-weight: bold; }
+  .term .red { color: #ef4444; }
+  hr { border: 0; border-top: 1px solid #333a48; margin: 28px 0 16px; }
+</style>
+</head>
+<body>
+<h1>Question 1: how wide is the coloured frame by default?</h1>
+<p class="note">The whole padding ring is the frame (today's model): a thinner frame also moves the text closer to the pane edge. 6 px is today.</p>
+<div class="row" id="widths"></div>
+
+<hr>
+<h1>Question 2: does a thinner frame keep the text's inset?</h1>
+<p class="note">Both lanes use a 2 px frame. A: the ring shrinks, text moves in. B: a 2 px coloured band, then the terminal background up to today's 6 px inset.</p>
+<div class="row" id="inset"></div>
+
+<script>
+const body = `<span class="acc">Claude Code</span> v2.1.316
+<span class="dim">Opus 5.5 with high effort · Claude Ultra</span>
+<span class="dim">X:\\dev\\rustling-tulip</span>
+
+
+
+
+<span class="dim">› Try "fix lint errors"</span>
+<span class="red">›› bypass permissions on</span>`;
+
+function pane(band, pad) {
+  // band: coloured px; pad: background px inside the band
+  return `<div class="pane"><div class="hdr">rustling-tulip: main</div>
+    <div class="ring" style="padding:${band}px"><div class="inset" style="padding:${pad}px">
+      <div class="term">${body}</div></div></div></div>`;
+}
+function lane(title, sub, band, pad) {
+  return `<div class="lane"><h2>${title}</h2><div class="sub">${sub}</div>${pane(band, pad)}</div>`;
+}
+document.getElementById('widths').innerHTML =
+  lane('6 px (today)', 'Unchanged.', 6, 0) +
+  lane('3 px', 'Matches the 3 px accent line in the header.', 3, 0) +
+  lane('2 px', '', 2, 0) +
+  lane('1 px', 'Hairline, same as the pane border.', 1, 0) +
+  lane('0 (off)', 'No frame; text touches the border.', 0, 0);
+document.getElementById('inset').innerHTML =
+  lane('A: ring shrinks', '2 px frame, text 2 px from the border.', 2, 0) +
+  lane('B: band + kept inset', '2 px frame, then 4 px of background: text stays 6 px in.', 2, 4);
+</script>
+</body>
+</html>

@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- A Frame width setting sets the coloured frame round the terminal from off to 6 px, for the app, a repo, a workspace or one session.
+
 ### Changed
 
 - The coloured frame round a session's terminal is 1 px wide by default instead of 6 px, and the text keeps its place.

@@ -66,14 +66,14 @@ fn fills_of(h: &mut Harness<'_>, pane_id: &str) -> (u32, u32) {
 }
 
 /// The width in px of the frame band pane `pane_id` draws.
-fn frame_width_of(h: &mut Harness<'_>, pane_id: &str) -> u16 {
+pub(crate) fn frame_width_of(h: &mut Harness<'_>, pane_id: &str) -> u16 {
     let pane_id = pane_id.to_owned();
     h.root(move |root, cx| root.pane_frame_width(&pane_id, cx))
         .expect("the pane has a terminal")
 }
 
 /// Session `s1` of repo `r1` whose own frame width is `width`.
-fn session_with_frame_width(width: Option<u16>) -> SessionSnapshot {
+pub(crate) fn session_with_frame_width(width: Option<u16>) -> SessionSnapshot {
     let mut s = session("s1").in_repo("r1").build();
     s.appearance.terminal_frame_width = width;
     s
@@ -749,6 +749,33 @@ fn a_session_frame_width_reaches_its_pane(cx: &mut TestAppContext) {
         1,
         "a cleared width falls back to the default"
     );
+}
+
+#[gpui::test]
+fn a_zero_frame_width_fills_the_ring_with_the_terminal_background(cx: &mut TestAppContext) {
+    let framed = |width| {
+        let mut s = session_with_frame_width(Some(width));
+        s.appearance.terminal_frame_color = Some("#e7849b".to_owned());
+        s
+    };
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        ..Fixture::single(framed(0))
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    let (grid, ring) = fills_of(&mut h, "p1");
+    assert_eq!(
+        ring, grid,
+        "no band is drawn, so the ring is the background"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: framed(2),
+        request_id: None,
+    });
+    let (_, ring) = fills_of(&mut h, "p1");
+    assert_eq!(ring, ROSE, "a drawn band wears the frame colour");
 }
 
 #[gpui::test]

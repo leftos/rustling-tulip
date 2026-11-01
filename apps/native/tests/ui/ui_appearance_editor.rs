@@ -8,6 +8,7 @@
 )]
 
 use crate::support;
+use crate::ui_appearance::{frame_width_of, session_with_frame_width};
 
 use gpui::{Modifiers, Pixels, TestAppContext, point, px};
 use protocol::{
@@ -873,6 +874,165 @@ fn term_weight_pick_and_reset(cx: &mut TestAppContext) {
     );
     assert_eq!(hint(&mut h, "weight"), "Resolved: Regular from built-in");
     assert!(!can_reset(&mut h), "the reset cleared the level's weight");
+}
+
+/// The frame widths of the `SetSessionAppearance`s sent for `session`.
+fn session_frame_widths(sent: &[ClientMessage], session: &str) -> Vec<Option<u16>> {
+    session_appearances(sent, session)
+        .iter()
+        .map(|a| a.terminal_frame_width)
+        .collect()
+}
+
+/// The stops Tab walks in the open session editor, from no stop to Close.
+fn session_editor_ring(h: &mut Harness<'_>) -> Vec<&'static str> {
+    assert_eq!(settings_focus(h), None, "no stop on open");
+    let mut ring = Vec::new();
+    for _ in 0..40 {
+        h.keys("tab");
+        let stop = settings_focus(h).expect("Tab stays in the editor");
+        ring.push(stop);
+        if stop == "appearance-footer-close" {
+            break;
+        }
+    }
+    assert_eq!(ring.last(), Some(&"appearance-footer-close"));
+    ring
+}
+
+#[gpui::test]
+fn frame_width_steps_send_session_appearance(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+    assert_eq!(hint(&mut h, "frame-width"), "1 px · built-in");
+
+    h.click_on("appearance-frame-width-up");
+    let sent = h.sent();
+    assert_eq!(session_frame_widths(&sent, "s1"), [Some(2)]);
+    let request_id = sent
+        .iter()
+        .find_map(|msg| match msg {
+            ClientMessage::SetSessionAppearance { request_id, .. } => request_id.clone(),
+            _ => None,
+        })
+        .expect("the send goes out under a request id");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session_with_frame_width(Some(2)),
+        request_id: Some(request_id),
+    });
+    assert_eq!(
+        frame_width_of(&mut h, "p1"),
+        2,
+        "the echo repaints the pane"
+    );
+    assert_eq!(hint(&mut h, "frame-width"), "2 px · session");
+    assert!(h.root(|root, _| root.appearance_can_reset("frame-width")));
+
+    h.click_on("appearance-frame-width-reset");
+    assert_eq!(
+        session_frame_widths(&h.sent(), "s1"),
+        [None],
+        "the reset clears the session's width"
+    );
+}
+
+#[gpui::test]
+fn frame_width_steppers_stop_at_the_ends(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(
+        AppearanceOverrides {
+            terminal_frame_width: Some(0),
+            ..AppearanceOverrides::default()
+        },
+        repo("r1", "C:/repos/r1"),
+    );
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+    assert_eq!(hint(&mut h, "frame-width"), "Off · session");
+    let ring = session_editor_ring(&mut h);
+    assert!(
+        !ring.contains(&"appearance-frame-width-down")
+            && ring.contains(&"appearance-frame-width-up"),
+        "at 0 only + is in the ring: {ring:?}"
+    );
+    h.click_on("appearance-frame-width-down");
+    assert_eq!(appearance_sends(&h.sent()), 0, "− at 0 sends nothing");
+
+    h.keys("escape");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session_with_frame_width(Some(6)),
+        request_id: None,
+    });
+    open_session_editor(&mut h, "s1");
+    assert_eq!(hint(&mut h, "frame-width"), "6 px · session");
+    let ring = session_editor_ring(&mut h);
+    assert!(
+        ring.contains(&"appearance-frame-width-down")
+            && !ring.contains(&"appearance-frame-width-up"),
+        "at 6 only − is in the ring: {ring:?}"
+    );
+    h.click_on("appearance-frame-width-up");
+    assert_eq!(appearance_sends(&h.sent()), 0, "+ at 6 sends nothing");
+}
+
+#[gpui::test]
+fn repo_frame_width_goes_in_set_repo_appearance(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    h.right_click_on("container-repo:r1");
+    h.click_on("container-menu-appearance");
+    assert_eq!(editor_title(&mut h).as_deref(), Some("r1 appearance"));
+    assert_eq!(hint(&mut h, "frame-width"), "1 px · built-in");
+
+    h.click_on("appearance-frame-width-up");
+    let sent = h.sent();
+    assert_eq!(
+        container_appearances(&sent),
+        [(
+            "repo r1".to_owned(),
+            AppearanceOverrides {
+                terminal_frame_width: Some(2),
+                ..AppearanceOverrides::default()
+            }
+        )],
+        "sent {sent:?}"
+    );
+    assert_eq!(appearance_sends(&sent), 1, "nothing for the session");
+}
+
+#[gpui::test]
+fn app_frame_width_persists_locally_and_repaints(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-appearance");
+    assert_eq!(editor_title(&mut h).as_deref(), Some("Settings"));
+    assert_eq!(hint(&mut h, "frame-width"), "1 px · built-in");
+
+    h.click_on("appearance-frame-width-up");
+    assert_eq!(appearance_sends(&h.sent()), 0, "the app level stays here");
+    assert_eq!(saved_ui(&dir)["terminal_frame_width"], 2);
+    assert_eq!(hint(&mut h, "frame-width"), "2 px · app");
+    assert_eq!(
+        frame_width_of(&mut h, "p1"),
+        2,
+        "a session that sets no width repaints at the app's"
+    );
+
+    h.click_on("appearance-frame-width-reset");
+    let saved = saved_ui(&dir);
+    assert!(saved["terminal_frame_width"].is_null(), "{saved}");
+    assert_eq!(appearance_sends(&h.sent()), 0);
+    assert_eq!(hint(&mut h, "frame-width"), "1 px · built-in");
+    assert_eq!(
+        frame_width_of(&mut h, "p1"),
+        1,
+        "back to the built-in width"
+    );
 }
 
 #[gpui::test]
