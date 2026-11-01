@@ -109,6 +109,7 @@
 - [ ] RT-588 Key the chat pane's answer cache by its text, not its length
 - [ ] RT-653 Add Comfortable and Compact Chat modes and Chat view customization · release vNext
 - [ ] RT-654 Disable Chat and Summary once the agent exits back to its shell · release vNext
+- [ ] RT-680 Show each answer's description and the whole question on the chat's prompt cards · release vNext
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
