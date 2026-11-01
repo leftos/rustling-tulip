@@ -19,7 +19,9 @@
 //! tab, and the tailnet host "lab" offline), `spawn-hosts` (the spawn
 //! dialog over those hosts, its Target dropdown closed), `settings-hosts`
 //! (Settings on the Claude page over those hosts, the host selector showing
-//! This PC), `menu` (the sessions panel's ⋯
+//! This PC), `settings-dashboard` (Settings on the Dashboard tab with a keyed
+//! provider chosen, its key stored, some spend and a Test result), `menu`
+//! (the sessions panel's ⋯
 //! menu open over the repo rows, with a toast over the panes), `chat` (the
 //! Petal pane switched to its chat, a row of each kind, an answer with one
 //! stretch open and two closed, and a live answer) and `summary` (the Petal
@@ -94,7 +96,9 @@ const LOAD_WAIT: Duration = Duration::from_millis(1500);
 const DRIVE_WAIT: Duration = Duration::from_millis(1000);
 /// How many Downs on the Settings tab list reach the Claude tab, the page of
 /// the registry's first agent: every tab this PC offers sits above it.
-const CLAUDE_TAB_DOWNS: usize = 7;
+const CLAUDE_TAB_DOWNS: usize = 8;
+/// How many Downs on the Settings tab list reach the Dashboard tab.
+const DASHBOARD_TAB_DOWNS: usize = 2;
 /// The port and pid the fake handshake reports.
 const FAKE_PORT: u16 = 4242;
 const FAKE_PID: u32 = 1;
@@ -192,10 +196,11 @@ enum View {
     MultiHost,
     SpawnHosts,
     SettingsHosts,
+    SettingsDashboard,
 }
 
 impl View {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 22] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -217,6 +222,7 @@ impl View {
         Self::MultiHost,
         Self::SpawnHosts,
         Self::SettingsHosts,
+        Self::SettingsDashboard,
     ];
 
     fn name(self) -> &'static str {
@@ -242,6 +248,7 @@ impl View {
             Self::MultiHost => "multi-host",
             Self::SpawnHosts => "spawn-hosts",
             Self::SettingsHosts => "settings-hosts",
+            Self::SettingsDashboard => "settings-dashboard",
         }
     }
 
@@ -258,7 +265,7 @@ impl View {
     fn steps(self) -> usize {
         match self {
             Self::ConnectionsSsh => 4,
-            Self::Themes | Self::Chat => 3,
+            Self::Themes | Self::Chat | Self::SettingsDashboard => 3,
             Self::ThemesEdit => 5,
             Self::Update | Self::Summary => 2,
             _ => 1,
@@ -348,6 +355,13 @@ impl View {
             }
             Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
             Self::Update => root.settings_open() && root.update_footer_text().is_some(),
+            Self::SettingsDashboard => {
+                root.settings_open()
+                    && root.settings_tab() == "Dashboard"
+                    && root
+                        .dashboard_test_result()
+                        .is_some_and(|result| result.contains(" ms "))
+            }
             Self::Themes => root.themes_modal_open(),
             Self::ThemesEdit => root
                 .themes_editor()
@@ -435,7 +449,8 @@ impl Shot {
             | View::ThemesEdit
             | View::MultiHost
             | View::SpawnHosts
-            | View::SettingsHosts => None,
+            | View::SettingsHosts
+            | View::SettingsDashboard => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -956,6 +971,7 @@ fn drive(
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
         View::Menu => open_menu(window, cx),
         View::Update => drive_update(step, address, window, cx),
+        View::SettingsDashboard => drive_settings_dashboard(step, address, window, cx),
         View::Chat if step == 2 => win32::wheel_down(address, CHAT_TAIL_POINT, CHAT_TAIL_NOTCHES),
         View::Chat => {
             let root = window
@@ -1016,6 +1032,86 @@ fn drive_update(step: usize, address: usize, window: &mut Window, cx: &mut App) 
         return press("ctrl-,", window, cx);
     }
     win32::wheel_down(address, SETTINGS_PAGE_POINT, SETTINGS_PAGE_NOTCHES)
+}
+
+/// Opens Settings and walks the tab list down to the Dashboard tab; once it
+/// is drawn, Shift+Tab from the list wraps to its last stop, Test, and
+/// Enter presses it; then the page scrolls down to the Test result.
+fn drive_settings_dashboard(
+    step: usize,
+    address: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
+    match step {
+        0 => {
+            press("ctrl-,", window, cx)?;
+            for _ in 0..DASHBOARD_TAB_DOWNS {
+                press("down", window, cx)?;
+            }
+            Ok(())
+        }
+        1 => {
+            press("shift-tab", window, cx)?;
+            press("enter", window, cx)
+        }
+        _ => win32::wheel_down(address, SETTINGS_PAGE_POINT, SETTINGS_PAGE_NOTCHES),
+    }
+}
+
+/// The `settings-dashboard` shot's summarizer: a keyed provider chosen with
+/// its key stored, 37 cents of a dollar spent today.
+fn shot_summarizer_status() -> DaemonMessage {
+    let provider =
+        |id: &str, name: &str, needs_key: bool, privacy: &str| protocol::SummarizerProvider {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            needs_key,
+            privacy: privacy.to_owned(),
+        };
+    DaemonMessage::SummarizerStatus {
+        settings: protocol::SummarizerSettings {
+            enabled: true,
+            provider: "deepseek".to_owned(),
+            key_source: protocol::SummarizerKeySource::Stored,
+            daily_cap_usd: 1.0,
+        },
+        providers: vec![
+            provider(
+                "claude-haiku",
+                "Claude Haiku (CLI)",
+                false,
+                "Runs through the claude CLI on your own account.",
+            ),
+            provider(
+                "deepseek",
+                "DeepSeek",
+                true,
+                "Sends session text to DeepSeek's API.",
+            ),
+        ],
+        keys: vec![protocol::SummarizerKey {
+            provider: "deepseek".to_owned(),
+            state: protocol::KeyState::Stored,
+        }],
+        spend_today_usd: 0.37,
+        cap_reached: false,
+    }
+}
+
+/// The `settings-dashboard` shot's Test reply, answering `request_id`.
+fn shot_summary_test(request_id: Option<String>) -> DaemonMessage {
+    DaemonMessage::SummaryTest {
+        result: protocol::SummaryTestResult {
+            kind: None,
+            headline: "Tests pass after the parser fix".to_owned(),
+            notification: "The parser fix is in and all 214 tests pass.".to_owned(),
+            source: protocol::SummarySource::Model,
+        },
+        latency_ms: 840,
+        cost_usd: 0.0004,
+        request_id,
+    }
 }
 
 /// An updater whose every check finds 0.99.0 ready at `installer` in the
@@ -1575,6 +1671,9 @@ impl FakeDaemon {
         })?;
         self.send(fixture.tabs.clone())?;
         self.send(fixture.keep_awake.clone())?;
+        if self.view == View::SettingsDashboard {
+            self.send(shot_summarizer_status())?;
+        }
         self.send(DaemonMessage::AgentCommands {
             commands: vec![AgentCommandEntry {
                 agent: protocol::AgentId("claude".to_owned()),
@@ -1706,6 +1805,7 @@ impl FakeDaemon {
             ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
             ClientMessage::OpenDashboardTab { id } => return dashboard_opened(id),
             ClientMessage::WatchDashboard { on: true } => dashboard_facts(self.now)?,
+            ClientMessage::TestSummary { request_id } => shot_summary_test(request_id.clone()),
             ClientMessage::SuggestBranchName { target, request_id } => {
                 DaemonMessage::BranchNameSuggestion {
                     target: target.clone(),

@@ -453,6 +453,8 @@ impl RootView {
             self.worktrees_tabs.clear();
             self.apply_edited_texts();
             self.agent_tabs = crate::settings_view::AgentTabs::default();
+            // The Dashboard tab holds a typed key: it goes with Settings.
+            self.dashboard_settings_tab = None;
             self.settings_control = None;
             self.focus_active_pane(window, cx);
             cx.notify();

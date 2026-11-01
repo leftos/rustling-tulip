@@ -22,9 +22,10 @@ use rustling_tulip_native::{
 };
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
-const TAB_SELECTORS: [&str; 8] = [
+const TAB_SELECTORS: [&str; 9] = [
     "settings-tab-general",
     "settings-tab-notifications",
+    "settings-tab-dashboard",
     "settings-tab-spawn-defaults",
     "settings-tab-worktrees",
     "settings-tab-remote-access",
@@ -181,6 +182,7 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
         [
             "General",
             "Notifications",
+            "Dashboard",
             "Spawn defaults",
             "Worktrees",
             "Remote access",
@@ -195,6 +197,7 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
         [
             "General",
             "Notifications",
+            "Dashboard",
             "Spawn defaults",
             "Worktrees",
             "Remote access",
@@ -230,6 +233,7 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
         [
             "General",
             "Notifications",
+            "Dashboard",
             "Spawn defaults",
             "Worktrees",
             "Remote access",
@@ -352,6 +356,8 @@ fn down_moves_to_next_tab(cx: &mut TestAppContext) {
     assert_eq!(settings_focus(&mut h), Some("list"), "it opens on the list");
     h.keys("down");
     assert_eq!(shown_tab(&mut h), "Notifications");
+    h.keys("down");
+    assert_eq!(shown_tab(&mut h), "Dashboard");
     h.keys("down down down down down");
     assert_eq!(shown_tab(&mut h), "App title");
     h.keys("down");
@@ -948,7 +954,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     assert_eq!(settings_focus(&mut h), Some("list"));
     assert_eq!(shown_tab(&mut h), "General");
 
-    h.keys("down down down down down down");
+    h.keys("down down down down down down down");
     assert_eq!(shown_tab(&mut h), "App title");
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-count-needs-you"));
@@ -2698,7 +2704,7 @@ fn agents_group_row_is_not_selectable(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
-    h.keys("down down down down down down");
+    h.keys("down down down down down down down");
     assert_eq!(shown_tab(&mut h), "App title");
     h.keys("down");
     assert_eq!(shown_tab(&mut h), "Claude", "Down skips the group row");
@@ -3376,4 +3382,579 @@ fn holding_enter_on_choose_opens_nothing_twice(cx: &mut TestAppContext) {
     h.keys("escape");
     h.held("enter");
     assert!(!h.root(|root, _| root.themes_modal_open()));
+}
+
+/// The privacy lines of the two providers the Dashboard specs offer.
+const CLI_PRIVACY: &str = "Runs through your agent's CLI, on your account.";
+const KEYED_PRIVACY: &str = "Sends session text to the provider's API.";
+
+/// A status offering a CLI provider (`cli`, no key) and a keyed one
+/// (`keyed`), with `chosen` chosen.
+fn dashboard_status(chosen: &str) -> support::SummarizerStatusBuilder {
+    support::summarizer_status()
+        .offers("cli", "CLI model", false, CLI_PRIVACY)
+        .offers("keyed", "Keyed model", true, KEYED_PRIVACY)
+        .chosen(chosen)
+}
+
+/// Settings open on its Dashboard tab after the daemon sent `status`,
+/// nothing sent yet.
+fn dashboard_tab<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    status: support::SummarizerStatusBuilder,
+) -> Harness<'a> {
+    dashboard_tab_after(cx, dir, status.build())
+}
+
+/// Settings open on its Dashboard tab after the daemon sent `status`, a
+/// `SummarizerStatus`, nothing sent yet.
+fn dashboard_tab_after<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    status: DaemonMessage,
+) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    h.send(status);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-dashboard");
+    h.sent();
+    h
+}
+
+/// The summarizer settings the client sent, oldest first.
+fn summarizer_sets(sent: &[ClientMessage]) -> Vec<protocol::SummarizerSettings> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetSummarizerSettings { settings, .. } => Some(settings.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `(provider, key)` of every `SetSummarizerKey` the client sent.
+fn key_sets(sent: &[ClientMessage]) -> Vec<(String, Option<String>)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetSummarizerKey { provider, key, .. } => {
+                Some((provider.clone(), key.as_ref().map(|key| key.0.clone())))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The request id of the last `SetSummarizerSettings` among `sent`.
+fn last_summarizer_id(sent: &[ClientMessage]) -> Option<String> {
+    sent.iter().rev().find_map(|msg| match msg {
+        ClientMessage::SetSummarizerSettings { request_id, .. } => request_id.clone(),
+        _ => None,
+    })
+}
+
+/// The request ids of the `TestSummary` messages among `sent`.
+fn test_ids(sent: &[ClientMessage]) -> Vec<Option<String>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::TestSummary { request_id } => Some(request_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn key_state_line(h: &mut Harness<'_>) -> Option<&'static str> {
+    h.root(|root, _| root.dashboard_key_state())
+}
+
+fn spend_line(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.dashboard_spend_line())
+}
+
+fn test_result(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.dashboard_test_result())
+}
+
+#[gpui::test]
+fn dashboard_tab_follows_the_notifications_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    let rows = h.root(|root, _| root.settings_tab_rows());
+    let at = rows
+        .iter()
+        .position(|row| *row == "Notifications")
+        .expect("Notifications is listed");
+    assert_eq!(rows.get(at + 1).copied(), Some("Dashboard"));
+    h.keys("down down");
+    assert_eq!(shown_tab(&mut h), "Dashboard", "Down walks to it");
+    assert!(
+        !drawn(&mut h, "settings-dashboard-enabled"),
+        "no controls before the daemon reports its summarizer"
+    );
+    h.send(dashboard_status("cli").build());
+    assert!(drawn(&mut h, "settings-dashboard-enabled"));
+    assert!(drawn(&mut h, "settings-dashboard-test"));
+}
+
+#[gpui::test]
+fn dashboard_tab_lists_the_providers_the_daemon_offers(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    assert!(drawn(&mut h, "settings-dashboard-provider-cli"));
+    assert!(drawn(&mut h, "settings-dashboard-provider-keyed"));
+    assert!(!drawn(&mut h, "settings-dashboard-provider-p1"));
+    assert!(
+        !drawn(&mut h, "settings-dashboard-key-source-stored"),
+        "a provider that takes no key shows no key rows"
+    );
+}
+
+#[gpui::test]
+fn summaries_toggle_sends_set_summarizer_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    h.click_on("settings-dashboard-enabled");
+    let sets = summarizer_sets(&h.sent());
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert!(!sets[0].enabled, "the toggle turns summaries off");
+    assert_eq!(sets[0].provider, "cli", "the rest is as the daemon has it");
+}
+
+#[gpui::test]
+fn provider_choice_sends_set_summarizer_settings_and_shows_its_privacy_line(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    assert_eq!(
+        h.root(|root, _| root.dashboard_privacy()).as_deref(),
+        Some(CLI_PRIVACY)
+    );
+    h.click_on("settings-dashboard-provider-keyed");
+    let sets = summarizer_sets(&h.sent());
+    assert_eq!(
+        sets.iter().map(|s| s.provider.as_str()).collect::<Vec<_>>(),
+        ["keyed"]
+    );
+    h.send(dashboard_status("keyed").build());
+    assert_eq!(
+        h.root(|root, _| root.dashboard_privacy()).as_deref(),
+        Some(KEYED_PRIVACY),
+        "the privacy line follows the chosen provider"
+    );
+    assert!(drawn(&mut h, "settings-dashboard-privacy"));
+}
+
+#[gpui::test]
+fn deepseek_save_sends_set_summarizer_key_and_clears_the_field(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let status = dashboard_status("keyed").key(protocol::KeyState::Missing);
+    let mut h = dashboard_tab(cx, &dir, status);
+    h.click_on("settings-dashboard-key-field");
+    type_text(&mut h, "sk-123");
+    h.click_on("settings-dashboard-key-save");
+    assert_eq!(
+        key_sets(&h.sent()),
+        [("keyed".to_owned(), Some("sk-123".to_owned()))]
+    );
+    assert_eq!(
+        h.root(rustling_tulip_native::RootView::dashboard_key_draft)
+            .as_deref(),
+        Some(""),
+        "Save clears the field"
+    );
+}
+
+#[gpui::test]
+fn masked_key_field_never_draws_the_typed_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let status = dashboard_status("keyed").key(protocol::KeyState::Missing);
+    let mut h = dashboard_tab(cx, &dir, status);
+    h.click_on("settings-dashboard-key-field");
+    type_text(&mut h, "secret");
+    assert_eq!(
+        h.root(rustling_tulip_native::RootView::dashboard_key_masked),
+        Some(true),
+        "the key field draws dots"
+    );
+}
+
+#[gpui::test]
+fn clear_sends_set_summarizer_key_none(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.click_on("settings-dashboard-key-clear");
+    assert_eq!(key_sets(&h.sent()), [("keyed".to_owned(), None)]);
+}
+
+#[gpui::test]
+fn key_state_line_follows_summarizer_status(cx: &mut TestAppContext) {
+    use protocol::KeyState;
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    assert!(drawn(&mut h, "settings-dashboard-key-state"));
+    for (state, words) in [
+        (KeyState::Missing, "No key"),
+        (KeyState::Stored, "Key stored"),
+        (KeyState::EnvFound, "Variable found"),
+        (KeyState::EnvMissing, "Variable not set"),
+        (KeyState::Rejected, "Key rejected"),
+        (
+            KeyState::Unreachable,
+            "Credential Manager unavailable on this host",
+        ),
+    ] {
+        h.send(dashboard_status("keyed").key(state).build());
+        assert_eq!(key_state_line(&mut h), Some(words), "{state:?}");
+    }
+}
+
+#[gpui::test]
+fn env_source_sends_the_variable_name(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    assert!(drawn(&mut h, "settings-dashboard-key-field"));
+    h.click_on("settings-dashboard-key-source-env");
+    assert_eq!(
+        summarizer_sets(&h.sent()),
+        [],
+        "no variable is named yet, so nothing is sent"
+    );
+    assert!(
+        drawn(&mut h, "settings-dashboard-env-variable"),
+        "the variable field takes the key field's place"
+    );
+    h.click_on("settings-dashboard-env-variable");
+    type_text(&mut h, "MY_KEY");
+    h.keys("enter");
+    let sets = summarizer_sets(&h.sent());
+    assert_eq!(
+        sets.iter()
+            .map(|s| s.key_source.clone())
+            .collect::<Vec<_>>(),
+        [protocol::SummarizerKeySource::Env {
+            variable: "MY_KEY".to_owned()
+        }]
+    );
+    h.send(dashboard_status("keyed").env("MY_KEY").build());
+    assert!(
+        drawn(&mut h, "settings-dashboard-env-variable"),
+        "the daemon reads the variable"
+    );
+    h.click_on("settings-dashboard-key-source-stored");
+    assert_eq!(
+        summarizer_sets(&h.sent())
+            .iter()
+            .map(|s| s.key_source.clone())
+            .collect::<Vec<_>>(),
+        [protocol::SummarizerKeySource::Stored],
+        "Stored key goes back to the stored key"
+    );
+}
+
+#[gpui::test]
+fn cap_field_sends_a_valid_cap_and_refuses_a_bad_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    h.click_on("settings-dashboard-cap");
+    h.keys("ctrl-a");
+    type_text(&mut h, "two");
+    h.keys("enter");
+    assert_eq!(summarizer_sets(&h.sent()), [], "a bad cap is not sent");
+    assert!(
+        h.root(|root, _| root.dashboard_cap_error()).is_some(),
+        "and says why"
+    );
+
+    h.keys("ctrl-a");
+    type_text(&mut h, "2.5");
+    h.keys("enter");
+    let sent = h.sent();
+    let caps: Vec<f64> = summarizer_sets(&sent)
+        .iter()
+        .map(|s| s.daily_cap_usd)
+        .collect();
+    assert_eq!(caps, [2.5]);
+    assert_eq!(h.root(|root, _| root.dashboard_cap_error()), None);
+
+    let id = last_summarizer_id(&sent).expect("the cap change carries a request id");
+    h.send(DaemonMessage::Error {
+        message: "The daily cap must be a number of dollars, zero or more.".to_owned(),
+        request_id: Some(id),
+        code: Some(error_codes::SUMMARIZER_REFUSED.to_owned()),
+    });
+    assert_eq!(
+        h.root(|root, _| root.dashboard_cap_error()).as_deref(),
+        Some("The daily cap must be a number of dollars, zero or more."),
+        "the daemon's refusal shows under the field"
+    );
+    assert!(toast_titles(&mut h).is_empty(), "and raises no toast");
+}
+
+#[gpui::test]
+fn spend_today_and_cap_reached_follow_the_status(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli").spent(0.42));
+    assert!(drawn(&mut h, "settings-dashboard-spend"));
+    assert_eq!(
+        spend_line(&mut h).as_deref(),
+        Some("Spent today: $0.42 of $1.00")
+    );
+    h.send(dashboard_status("cli").spent(1.0).cap_reached(true).build());
+    assert_eq!(
+        spend_line(&mut h).as_deref(),
+        Some("Spent today: $1.00 of $1.00 — cap reached, summaries paused until tomorrow")
+    );
+}
+
+#[gpui::test]
+fn test_button_sends_test_summary_and_shows_the_reply_source_latency_cost(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    assert_eq!(test_result(&mut h), None, "nothing before a Test");
+    h.click_on("settings-dashboard-test");
+    let ids = test_ids(&h.sent());
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    let id = ids[0].clone().expect("the Test carries a request id");
+    assert_eq!(test_result(&mut h).as_deref(), Some("Testing…"));
+    h.send(DaemonMessage::SummaryTest {
+        result: protocol::SummaryTestResult {
+            kind: None,
+            headline: "Tests pass".to_owned(),
+            notification: "All 12 tests pass.".to_owned(),
+            source: protocol::SummarySource::Model,
+        },
+        latency_ms: 840,
+        cost_usd: 0.0012,
+        request_id: Some(id),
+    });
+    assert_eq!(
+        test_result(&mut h).as_deref(),
+        Some("Tests pass — All 12 tests pass.\nModel · 840 ms · $0.0012")
+    );
+    assert!(drawn(&mut h, "settings-dashboard-test-result"));
+}
+
+#[gpui::test]
+fn test_shows_an_error_reply_at_the_cap(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli").cap_reached(true));
+    h.click_on("settings-dashboard-test");
+    let id = test_ids(&h.sent())
+        .pop()
+        .flatten()
+        .expect("the Test carries a request id");
+    h.send(DaemonMessage::Error {
+        message: "Today's summary cap is reached.".to_owned(),
+        request_id: Some(id),
+        code: Some(error_codes::SUMMARIZER_REFUSED.to_owned()),
+    });
+    assert_eq!(
+        test_result(&mut h).as_deref(),
+        Some("Today's summary cap is reached.")
+    );
+    assert!(
+        toast_titles(&mut h).is_empty(),
+        "the slot says it, not a toast"
+    );
+}
+
+#[gpui::test]
+fn status_is_kept_per_host_and_forgotten_on_welcome(cx: &mut TestAppContext) {
+    use rustling_tulip_native::target::{HostKey, Target};
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli").spent(0.1));
+    let remote = Target::tailnet("box.tail1234.ts.net", None);
+    let row = format!(
+        "settings-host-{}",
+        HostKey::of(&remote)
+            .wire()
+            .expect("a remote host has a wire key")
+    );
+    {
+        let mut host = h.host(&remote);
+        host.connect();
+        host.send(dashboard_status("cli").spent(0.2).build());
+    }
+    assert_eq!(
+        spend_line(&mut h).as_deref(),
+        Some("Spent today: $0.10 of $1.00")
+    );
+    h.click_on(&row);
+    assert_eq!(
+        spend_line(&mut h).as_deref(),
+        Some("Spent today: $0.20 of $1.00"),
+        "the selector's host shows its own"
+    );
+    h.click_on("settings-dashboard-test");
+    assert_eq!(
+        test_ids(&h.host(&remote).sent()).len(),
+        1,
+        "the Test goes to that host"
+    );
+    assert!(test_ids(&h.sent()).is_empty(), "and not to This PC");
+
+    h.host(&remote).send(support::welcome(support::PROTOCOL));
+    assert_eq!(
+        spend_line(&mut h),
+        None,
+        "a Welcome forgets the host's status"
+    );
+    assert_eq!(test_result(&mut h), None, "and its Test");
+    h.click_on("settings-host-local");
+    assert_eq!(
+        spend_line(&mut h).as_deref(),
+        Some("Spent today: $0.10 of $1.00"),
+        "This PC's stays"
+    );
+}
+
+/// `status`, a `SummarizerStatus`, with its settings edited by `edit`.
+fn with_settings(
+    mut status: DaemonMessage,
+    edit: impl FnOnce(&mut protocol::SummarizerSettings),
+) -> DaemonMessage {
+    if let DaemonMessage::SummarizerStatus { settings, .. } = &mut status {
+        edit(settings);
+    }
+    status
+}
+
+fn key_draft(h: &mut Harness<'_>) -> Option<String> {
+    h.root(rustling_tulip_native::RootView::dashboard_key_draft)
+}
+
+fn cap_draft(h: &mut Harness<'_>) -> Option<String> {
+    h.root(rustling_tulip_native::RootView::dashboard_cap_draft)
+}
+
+#[gpui::test]
+fn an_unsaved_key_is_dropped_when_settings_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let status = dashboard_status("keyed").key(protocol::KeyState::Missing);
+    let mut h = dashboard_tab(cx, &dir, status);
+    h.click_on("settings-dashboard-key-field");
+    type_text(&mut h, "sk-unsaved");
+    h.click_on("settings-tab-general");
+    assert_eq!(
+        key_draft(&mut h),
+        None,
+        "leaving the tab drops the typed key"
+    );
+    h.click_on("settings-tab-dashboard");
+    assert_eq!(
+        key_draft(&mut h).as_deref(),
+        Some(""),
+        "and it comes back empty"
+    );
+
+    h.click_on("settings-dashboard-key-field");
+    type_text(&mut h, "sk-unsaved");
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Escape closes Settings"
+    );
+    assert_eq!(
+        key_draft(&mut h),
+        None,
+        "closing Settings drops the typed key"
+    );
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-dashboard");
+    assert_eq!(
+        key_draft(&mut h).as_deref(),
+        Some(""),
+        "reopened, the field is empty"
+    );
+    assert_eq!(key_sets(&h.sent()), [], "the key was never sent");
+}
+
+#[gpui::test]
+fn a_toggle_right_after_a_cap_change_keeps_the_new_cap(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    h.click_on("settings-dashboard-cap");
+    h.keys("ctrl-a");
+    type_text(&mut h, "2.50");
+    h.keys("enter");
+    h.click_on("settings-dashboard-enabled");
+    let sets: Vec<(bool, f64)> = summarizer_sets(&h.sent())
+        .iter()
+        .map(|s| (s.enabled, s.daily_cap_usd))
+        .collect();
+    assert_eq!(
+        sets,
+        [(true, 2.5), (false, 2.5)],
+        "the toggle builds on the cap just sent, not on the daemon's last status"
+    );
+}
+
+#[gpui::test]
+fn an_unknown_key_source_locks_the_dashboard_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let status = with_settings(dashboard_status("keyed").build(), |settings| {
+        settings.key_source = protocol::SummarizerKeySource::Unknown;
+    });
+    let mut h = dashboard_tab_after(cx, &dir, status);
+    assert!(
+        drawn(&mut h, "settings-dashboard-newer-daemon"),
+        "the tab says the daemon is newer than this app"
+    );
+    h.click_on("settings-dashboard-enabled");
+    h.click_on("settings-dashboard-provider-cli");
+    h.click_on("settings-dashboard-key-source-env");
+    assert_eq!(
+        summarizer_sets(&h.sent()),
+        [],
+        "a key source this app cannot name is never sent back"
+    );
+}
+
+#[gpui::test]
+fn the_key_source_follows_the_daemon_after_env_applies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("keyed"));
+    h.click_on("settings-dashboard-key-source-env");
+    h.click_on("settings-dashboard-env-variable");
+    type_text(&mut h, "MY_KEY");
+    h.keys("enter");
+    h.send(dashboard_status("keyed").env("MY_KEY").build());
+    let shown_source = |h: &mut Harness<'_>| h.root(|root, _| root.dashboard_key_source());
+    assert_eq!(shown_source(&mut h), "Environment variable");
+
+    h.send(dashboard_status("keyed").build());
+    assert_eq!(
+        shown_source(&mut h),
+        "Stored key",
+        "the stored key set elsewhere shows"
+    );
+}
+
+#[gpui::test]
+fn the_cap_field_follows_a_cap_set_elsewhere_after_a_local_edit(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = dashboard_tab(cx, &dir, dashboard_status("cli"));
+    let capped = |cap: f64| {
+        with_settings(dashboard_status("cli").build(), |settings| {
+            settings.daily_cap_usd = cap;
+        })
+    };
+    h.click_on("settings-dashboard-cap");
+    h.keys("ctrl-a");
+    type_text(&mut h, "2.5");
+    h.keys("enter");
+    h.send(capped(2.5));
+    assert_eq!(
+        cap_draft(&mut h).as_deref(),
+        Some("2.5"),
+        "the typed cap stays"
+    );
+
+    h.send(capped(3.0));
+    assert_eq!(
+        cap_draft(&mut h).as_deref(),
+        Some("3.00"),
+        "a cap set elsewhere replaces the one this field sent"
+    );
 }

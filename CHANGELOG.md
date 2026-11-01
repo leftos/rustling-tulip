@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane.
+- Settings has a Dashboard page: turn session summaries on, pick the provider, store its key, set a daily cap and test it.
 
 ### Fixed
 

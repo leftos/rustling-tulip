@@ -697,7 +697,11 @@ pub fn facts_message(facts: Vec<protocol::SessionFacts>) -> DaemonMessage {
 pub fn summarizer_status() -> SummarizerStatusBuilder {
     SummarizerStatusBuilder {
         enabled: true,
+        provider: "p1".to_owned(),
+        providers: Vec::new(),
         key: KeyState::Stored,
+        key_source: SummarizerKeySource::Stored,
+        spend: 0.0,
         cap_reached: false,
     }
 }
@@ -705,11 +709,47 @@ pub fn summarizer_status() -> SummarizerStatusBuilder {
 /// The [`DaemonMessage::SummarizerStatus`] a spec words.
 pub struct SummarizerStatusBuilder {
     enabled: bool,
+    provider: String,
+    providers: Vec<protocol::SummarizerProvider>,
     key: KeyState,
+    key_source: SummarizerKeySource,
+    spend: f64,
     cap_reached: bool,
 }
 
 impl SummarizerStatusBuilder {
+    /// Offering provider `id`, labelled `name`, needing a key or not, with
+    /// `privacy` as its line.
+    pub fn offers(mut self, id: &str, name: &str, needs_key: bool, privacy: &str) -> Self {
+        self.providers.push(protocol::SummarizerProvider {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            needs_key,
+            privacy: privacy.to_owned(),
+        });
+        self
+    }
+
+    /// With provider `id` chosen; [`Self::key`] then names its key.
+    pub fn chosen(mut self, id: &str) -> Self {
+        id.clone_into(&mut self.provider);
+        self
+    }
+
+    /// With the key read from environment variable `variable`.
+    pub fn env(mut self, variable: &str) -> Self {
+        self.key_source = SummarizerKeySource::Env {
+            variable: variable.to_owned(),
+        };
+        self
+    }
+
+    /// With `usd` spent today.
+    pub fn spent(mut self, usd: f64) -> Self {
+        self.spend = usd;
+        self
+    }
+
     /// With summaries turned on or off.
     pub fn enabled(mut self, on: bool) -> Self {
         self.enabled = on;
@@ -729,20 +769,20 @@ impl SummarizerStatusBuilder {
     }
 
     pub fn build(self) -> DaemonMessage {
-        let provider = "p1".to_owned();
+        let provider = self.provider;
         DaemonMessage::SummarizerStatus {
             settings: SummarizerSettings {
                 enabled: self.enabled,
                 provider: provider.clone(),
-                key_source: SummarizerKeySource::Stored,
+                key_source: self.key_source,
                 daily_cap_usd: 1.0,
             },
-            providers: Vec::new(),
+            providers: self.providers,
             keys: vec![SummarizerKey {
                 provider,
                 state: self.key,
             }],
-            spend_today_usd: 0.0,
+            spend_today_usd: self.spend,
             cap_reached: self.cap_reached,
         }
     }

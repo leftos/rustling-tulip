@@ -17,7 +17,8 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
-    FEATURE_AGENT_COMMANDS, FieldKind, KeepAwakeMode, OptionValue, RemoteState, error_codes,
+    FEATURE_AGENT_COMMANDS, FieldKind, KeepAwakeMode, KeyState, OptionValue, RemoteState, Secret,
+    SummarizerKeySource, SummarizerSettings, SummarySource, error_codes,
 };
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
@@ -44,6 +45,7 @@ use crate::spawn_view::{
     DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
     dialog_title_bar, field, muted, segmented,
 };
+use crate::summarizer_settings::{SummarizerStatus, TestOutcome, parse_cap};
 use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
@@ -104,6 +106,7 @@ pub(crate) enum SettingsTab {
     #[default]
     General,
     Notifications,
+    Dashboard,
     SpawnDefaults,
     Worktrees,
     RemoteAccess,
@@ -116,9 +119,10 @@ pub(crate) enum SettingsTab {
 
 impl SettingsTab {
     /// The tabs shown before the agents' pages, in the list's order.
-    const FIXED: [Self; 7] = [
+    const FIXED: [Self; 8] = [
         Self::General,
         Self::Notifications,
+        Self::Dashboard,
         Self::SpawnDefaults,
         Self::Worktrees,
         Self::RemoteAccess,
@@ -132,6 +136,7 @@ impl SettingsTab {
         match self {
             Self::General => "General",
             Self::Notifications => "Notifications",
+            Self::Dashboard => "Dashboard",
             Self::SpawnDefaults => "Spawn defaults",
             Self::Worktrees => "Worktrees",
             Self::RemoteAccess => "Remote access",
@@ -147,6 +152,7 @@ impl SettingsTab {
         match self {
             Self::General => "settings-tab-general",
             Self::Notifications => "settings-tab-notifications",
+            Self::Dashboard => "settings-tab-dashboard",
             Self::SpawnDefaults => "settings-tab-spawn-defaults",
             Self::Worktrees => "settings-tab-worktrees",
             Self::RemoteAccess => "settings-tab-remote-access",
@@ -351,7 +357,31 @@ pub(crate) enum SettingsControl {
     AgentProgram,
     AgentArgs,
     Appearance(AppearanceStop),
+    DashboardEnabled,
+    /// Provider `index` of the shown host's summarizer status; `selector`
+    /// is `settings-dashboard-provider-{id}`.
+    DashboardProvider {
+        index: usize,
+        selector: &'static str,
+    },
+    DashboardKeySource(KeySourceChoice),
+    DashboardKey,
+    DashboardKeySave,
+    DashboardKeyClear,
+    DashboardEnvVariable,
+    DashboardCap,
+    DashboardTest,
 }
+
+/// Where the Dashboard tab reads the summarizer's key from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeySourceChoice {
+    Stored,
+    Env,
+}
+
+/// The Dashboard tab's key source choices, in the order they show.
+const KEY_SOURCE_CHOICES: [KeySourceChoice; 2] = [KeySourceChoice::Stored, KeySourceChoice::Env];
 
 impl SettingsControl {
     const fn selector(self) -> &'static str {
@@ -399,7 +429,8 @@ impl SettingsControl {
             Self::SpawnTrusted => "settings-spawn-trusted",
             Self::AgentChoice { selector, .. }
             | Self::AgentToggle { selector, .. }
-            | Self::AgentText { selector, .. } => selector,
+            | Self::AgentText { selector, .. }
+            | Self::DashboardProvider { selector, .. } => selector,
             Self::WorktreesPath => "settings-worktrees-root-input",
             Self::WorktreesBrowse => "settings-worktrees-root-browse",
             Self::WorktreesSave => "settings-worktrees-root-save",
@@ -412,6 +443,17 @@ impl SettingsControl {
             Self::AgentProgram => "settings-agent-program",
             Self::AgentArgs => "settings-agent-args",
             Self::Appearance(stop) => stop.selector(),
+            Self::DashboardEnabled => "settings-dashboard-enabled",
+            Self::DashboardKeySource(KeySourceChoice::Stored) => {
+                "settings-dashboard-key-source-stored"
+            }
+            Self::DashboardKeySource(KeySourceChoice::Env) => "settings-dashboard-key-source-env",
+            Self::DashboardKey => "settings-dashboard-key-field",
+            Self::DashboardKeySave => "settings-dashboard-key-save",
+            Self::DashboardKeyClear => "settings-dashboard-key-clear",
+            Self::DashboardEnvVariable => "settings-dashboard-env-variable",
+            Self::DashboardCap => "settings-dashboard-cap",
+            Self::DashboardTest => "settings-dashboard-test",
         }
     }
 
@@ -450,6 +492,141 @@ pub(crate) struct RemoteAccessTab {
     /// Why the last switch of the login launch failed.
     autostart_error: Option<String>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A text field of the Dashboard tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardField {
+    Key,
+    Variable,
+    Cap,
+}
+
+/// The Dashboard tab's key, variable and cap fields for the host Settings
+/// showed when the tab was built.
+pub(crate) struct DashboardSettingsTab {
+    host: HostKey,
+    key: Entity<TextInput>,
+    key_focus: FocusHandle,
+    variable: Entity<TextInput>,
+    variable_focus: FocusHandle,
+    cap: Entity<TextInput>,
+    cap_focus: FocusHandle,
+    /// The fields' texts, kept as they change.
+    key_draft: String,
+    variable_draft: String,
+    cap_draft: String,
+    /// Environment variable was chosen while the daemon still reads the
+    /// stored key: nothing is sent until a variable is named.
+    env_chosen: bool,
+    /// Why the cap field's text was not sent.
+    cap_problem: Option<String>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl DashboardSettingsTab {
+    fn draft_mut(&mut self, field: DashboardField) -> &mut String {
+        match field {
+            DashboardField::Key => &mut self.key_draft,
+            DashboardField::Variable => &mut self.variable_draft,
+            DashboardField::Cap => &mut self.cap_draft,
+        }
+    }
+
+    /// The daemon's settings went from `old` to `new`: the cap and variable
+    /// fields take the new values while they still read as the old ones,
+    /// and once the daemon reads a variable the shown key source is its.
+    fn follow(
+        &mut self,
+        old: Option<&SummarizerSettings>,
+        new: Option<&SummarizerSettings>,
+        cx: &mut Context<RootView>,
+    ) {
+        let cap_untouched = self.cap_draft.trim().is_empty()
+            || old.is_some_and(|old| parse_cap(&self.cap_draft) == Some(old.daily_cap_usd));
+        if cap_untouched {
+            self.cap_draft = new.map_or_else(String::new, |settings| usd(settings.daily_cap_usd));
+            let text = self.cap_draft.clone();
+            self.cap.update(cx, |input, cx| input.set_text(text, cx));
+        }
+        let (old_variable, new_variable) = (env_variable(old), env_variable(new));
+        if new_variable.is_some() {
+            self.env_chosen = false;
+        }
+        let untouched = self.variable_draft.trim().is_empty()
+            || old_variable.as_deref() == Some(self.variable_draft.as_str());
+        if untouched && let Some(variable) = new_variable {
+            self.variable_draft.clone_from(&variable);
+            self.variable
+                .update(cx, |input, cx| input.set_text(variable, cx));
+        }
+    }
+}
+
+/// The variable `settings` read the key from, when they read one.
+fn env_variable(settings: Option<&SummarizerSettings>) -> Option<String> {
+    match &settings?.key_source {
+        SummarizerKeySource::Env { variable } => Some(variable.clone()),
+        SummarizerKeySource::Stored | SummarizerKeySource::Unknown => None,
+    }
+}
+
+/// `amount` in US dollars to the cent, without the sign.
+fn usd(amount: f64) -> String {
+    format!("{amount:.2}")
+}
+
+const CAP_PROBLEM: &str = "Enter a number of dollars, 0 or more.";
+
+/// The words the Dashboard tab shows for a key's state.
+const fn key_state_words(state: KeyState) -> &'static str {
+    match state {
+        KeyState::Missing => "No key",
+        KeyState::Stored => "Key stored",
+        KeyState::EnvFound => "Variable found",
+        KeyState::EnvMissing => "Variable not set",
+        KeyState::Rejected => "Key rejected",
+        KeyState::Unreachable => "Credential Manager unavailable on this host",
+        KeyState::Unknown => "Key state unknown",
+    }
+}
+
+/// The line under the cap: today's spend against the cap, and whether the
+/// cap stopped summaries.
+fn spend_line(status: &SummarizerStatus) -> String {
+    let line = format!(
+        "Spent today: ${} of ${}",
+        usd(status.spend_today_usd),
+        usd(status.settings.daily_cap_usd)
+    );
+    if status.cap_reached {
+        format!("{line} — cap reached, summaries paused until tomorrow")
+    } else {
+        line
+    }
+}
+
+/// The Test result slot's text.
+fn test_text(outcome: &TestOutcome) -> String {
+    match outcome {
+        TestOutcome::Waiting => "Testing…".to_owned(),
+        TestOutcome::Failed(message) => message.clone(),
+        TestOutcome::Reply {
+            result,
+            latency_ms,
+            cost_usd,
+        } => {
+            let source = match result.source {
+                SummarySource::Model => "Model",
+                SummarySource::Template => "Template",
+                SummarySource::Unknown => "Unknown source",
+            };
+            format!(
+                "{} — {}\n{source} · {latency_ms} ms · ${cost_usd:.4}",
+                result.headline, result.notification
+            )
+        }
+    }
 }
 
 /// A row of an agent page's Launch command section.
@@ -893,6 +1070,8 @@ impl RootView {
             if self.settings_tab == SettingsTab::Worktrees {
                 self.hold_worktrees_tab(true, window, cx);
             }
+            self.dashboard_settings_tab = (self.settings_tab == SettingsTab::Dashboard)
+                .then(|| self.new_dashboard_tab(window, cx));
         }
         cx.notify();
     }
@@ -1134,6 +1313,7 @@ impl RootView {
                 .chain([SettingsControl::TitleCount, SettingsControl::TitleSuffix])
                 .collect(),
             SettingsTab::Notifications => self.notifications_controls(),
+            SettingsTab::Dashboard => self.dashboard_controls(false),
             SettingsTab::SpawnDefaults => vec![SettingsControl::SpawnTrusted],
             SettingsTab::Agent(_) => self.agent_controls(),
             SettingsTab::Worktrees => {
@@ -1164,6 +1344,7 @@ impl RootView {
     fn settings_stop_order(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
             SettingsTab::General => general_controls(true),
+            SettingsTab::Dashboard => self.dashboard_controls(true),
             SettingsTab::AppTitle | SettingsTab::Notifications | SettingsTab::SpawnDefaults => {
                 self.settings_controls(cx)
             }
@@ -1785,6 +1966,14 @@ impl RootView {
                 SettingsControl::Appearance(stop) if stop.is_field() => {
                     self.appearance_field_has_keyboard(*stop, window, cx)
                 }
+                SettingsControl::DashboardKey
+                | SettingsControl::DashboardEnvVariable
+                | SettingsControl::DashboardCap => {
+                    self.settings_tab == SettingsTab::Dashboard
+                        && self
+                            .settings_field_focus(*control)
+                            .is_some_and(|focus| focus.is_focused(window))
+                }
                 _ => self.appearance_focus.is_focused(window),
             };
             has_keyboard && controls.contains(control)
@@ -1838,6 +2027,18 @@ impl RootView {
             }
             SettingsControl::AgentArgs => self.shown_agent_tab().map(|tab| tab.args_focus.clone()),
             SettingsControl::AgentText { field, .. } => self.agent_text_focus(field),
+            SettingsControl::DashboardKey => self
+                .dashboard_settings_tab
+                .as_ref()
+                .map(|tab| tab.key_focus.clone()),
+            SettingsControl::DashboardEnvVariable => self
+                .dashboard_settings_tab
+                .as_ref()
+                .map(|tab| tab.variable_focus.clone()),
+            SettingsControl::DashboardCap => self
+                .dashboard_settings_tab
+                .as_ref()
+                .map(|tab| tab.cap_focus.clone()),
             _ => None,
         }
     }
@@ -2030,7 +2231,18 @@ impl RootView {
             | SettingsControl::RemotePort
             | SettingsControl::AgentProgram
             | SettingsControl::AgentArgs
-            | SettingsControl::AgentText { .. } => {}
+            | SettingsControl::AgentText { .. }
+            | SettingsControl::DashboardKey
+            | SettingsControl::DashboardEnvVariable
+            | SettingsControl::DashboardCap => {}
+            SettingsControl::DashboardEnabled => self.toggle_summaries(),
+            SettingsControl::DashboardProvider { index, .. } => {
+                self.choose_summarizer_provider(index);
+            }
+            SettingsControl::DashboardKeySource(choice) => self.choose_key_source(choice),
+            SettingsControl::DashboardKeySave => self.save_summarizer_key(cx),
+            SettingsControl::DashboardKeyClear => self.clear_summarizer_key(),
+            SettingsControl::DashboardTest => self.run_summary_test(),
             SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
             SettingsControl::WorktreesSave => self.save_worktrees_root(),
             SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
@@ -2617,6 +2829,9 @@ impl RootView {
             self.remote_access_tab = Some(self.new_remote_access_tab(window, cx));
             self.on_devices_page_selected();
         }
+        // The Dashboard tab holds a typed key only while it is shown.
+        self.dashboard_settings_tab =
+            (tab == SettingsTab::Dashboard).then(|| self.new_dashboard_tab(window, cx));
         if let Some(agent) = tab.agent() {
             self.hold_agent_tab(agent, window, cx);
         }
@@ -2964,7 +3179,20 @@ impl RootView {
             || self.launch_program_focused(window)
             || self.launch_args_focused(window)
             || self.agent_texts_focused(window)
+            || self.dashboard_fields_focused(window)
             || self.appearance_field_focused(window, cx)
+    }
+
+    /// Whether one of the shown Dashboard tab's text fields has the
+    /// keyboard.
+    fn dashboard_fields_focused(&self, window: &Window) -> bool {
+        self.settings_open()
+            && self.settings_tab == SettingsTab::Dashboard
+            && self.shown_dashboard_tab().is_some_and(|tab| {
+                [&tab.key_focus, &tab.variable_focus, &tab.cap_focus]
+                    .into_iter()
+                    .any(|focus| focus.is_focused(window))
+            })
     }
 
     /// Takes `host`'s daemon's [`DaemonMessage::KeepAwakeStatus`] into that
@@ -3329,6 +3557,7 @@ impl RootView {
                 .collect(),
             SettingsTab::AppTitle => self.app_title_tab(focused, cx),
             SettingsTab::Notifications => self.notifications_tab(focused, cx),
+            SettingsTab::Dashboard => self.dashboard_tab_content(focused, cx),
             SettingsTab::SpawnDefaults => self.spawn_defaults_tab(focused, cx),
             SettingsTab::Agent(_) => self.agent_page_content(focused, cx),
             SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
@@ -4152,6 +4381,775 @@ impl RootView {
     }
 }
 
+const SUMMARIES_INTRO: &str =
+    "Short summaries of what each session is doing, for the Dashboard and its notifications.";
+const VARIABLE_HINT: &str =
+    "The daemon reads this variable from its own environment. Press Enter to apply.";
+const CAP_HINT: &str =
+    "Summaries stop for the day once today's spend reaches the cap. Press Enter to apply.";
+const TEST_HINT: &str = "Summarizes a fixed sample with the settings above.";
+const NEWER_DAEMON: &str =
+    "This host's daemon is newer than this app; update the app to change these settings.";
+/// The widths of the Dashboard tab's key and variable fields.
+const KEY_FIELD_WIDTH: f32 = 280.0;
+const VARIABLE_FIELD_WIDTH: f32 = 220.0;
+
+/// The Dashboard tab: the summarizer's settings on the host Settings shows.
+impl RootView {
+    /// Folds what `msg` from `host` says about its summarizer; the shown
+    /// Dashboard tab's cap and variable fields follow a new status while
+    /// they still read as the old one.
+    pub(crate) fn on_summarizer_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) {
+        let old = self
+            .summarizer_settings
+            .status(host)
+            .map(|s| s.settings.clone());
+        if !self.summarizer_settings.fold(host, msg) {
+            return;
+        }
+        let new = self
+            .summarizer_settings
+            .status(host)
+            .map(|s| s.settings.clone());
+        if let Some(tab) = self
+            .dashboard_settings_tab
+            .as_mut()
+            .filter(|tab| tab.host == *host)
+        {
+            tab.follow(old.as_ref(), new.as_ref(), cx);
+        }
+        cx.notify();
+    }
+
+    /// A daemon refusal from `host` carrying `request_id`: when it answers
+    /// the Dashboard tab's Test or cap change, the tab shows it. Returns
+    /// whether it did.
+    pub(crate) fn on_summarizer_refused(
+        &mut self,
+        host: &HostKey,
+        request_id: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let answered = self.summarizer_settings.refused(host, request_id, message);
+        if answered {
+            tracing::info!(
+                ?host,
+                "settings: the summarizer refused a Dashboard request"
+            );
+            cx.notify();
+        }
+        answered
+    }
+
+    fn shown_summarizer(&self) -> Option<&SummarizerStatus> {
+        self.summarizer_settings.status(&self.settings_host)
+    }
+
+    fn shown_summarizer_settings(&self) -> Option<SummarizerSettings> {
+        self.shown_summarizer()
+            .map(|status| status.settings.clone())
+    }
+
+    /// Whether the shown host's daemon reads its key from a source this
+    /// app cannot name: its settings cannot be sent back whole, so the tab
+    /// changes none of them.
+    fn summarizer_locked(&self) -> bool {
+        self.shown_summarizer()
+            .is_some_and(|status| status.settings.key_source == SummarizerKeySource::Unknown)
+    }
+
+    /// The settings the next change on the shown host builds on: the ones
+    /// last sent, else its daemon's; none while the tab is locked.
+    fn next_summarizer_settings(&self) -> Option<SummarizerSettings> {
+        if self.summarizer_locked() {
+            return None;
+        }
+        self.summarizer_settings
+            .next_settings(&self.settings_host)
+            .cloned()
+    }
+
+    fn shown_dashboard_tab(&self) -> Option<&DashboardSettingsTab> {
+        self.dashboard_settings_tab
+            .as_ref()
+            .filter(|tab| tab.host == self.settings_host)
+    }
+
+    fn shown_dashboard_tab_mut(&mut self) -> Option<&mut DashboardSettingsTab> {
+        self.dashboard_settings_tab
+            .as_mut()
+            .filter(|tab| tab.host == self.settings_host)
+    }
+
+    /// The key source the tab shows: the daemon's, or Environment variable
+    /// while it was chosen and no variable is named yet.
+    fn shown_key_source(&self) -> KeySourceChoice {
+        let env = self
+            .shown_summarizer()
+            .is_some_and(|s| matches!(s.settings.key_source, SummarizerKeySource::Env { .. }));
+        if env || self.shown_dashboard_tab().is_some_and(|tab| tab.env_chosen) {
+            KeySourceChoice::Env
+        } else {
+            KeySourceChoice::Stored
+        }
+    }
+
+    fn summarizer_needs_key(&self) -> bool {
+        self.shown_summarizer()
+            .and_then(SummarizerStatus::provider)
+            .is_some_and(|provider| provider.needs_key)
+    }
+
+    fn key_save_enabled(&self) -> bool {
+        !self.summarizer_locked()
+            && self
+                .shown_dashboard_tab()
+                .is_some_and(|tab| !tab.key_draft.trim().is_empty())
+    }
+
+    /// Clear deletes a stored key: one the daemon holds, rejected or not.
+    fn key_clear_enabled(&self) -> bool {
+        !self.summarizer_locked()
+            && matches!(
+                self.shown_summarizer()
+                    .and_then(SummarizerStatus::key_state),
+                Some(KeyState::Stored | KeyState::Rejected)
+            )
+    }
+
+    fn provider_controls(&self) -> Vec<SettingsControl> {
+        let Some(status) = self.shown_summarizer() else {
+            return Vec::new();
+        };
+        status
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| SettingsControl::DashboardProvider {
+                index,
+                selector: intern(format!("settings-dashboard-provider-{}", provider.id)),
+            })
+            .collect()
+    }
+
+    /// The Dashboard tab's stops in drawing order, once the daemon reported
+    /// its summarizer; with `every`, each stop whether drawn now or not.
+    fn dashboard_controls(&self, every: bool) -> Vec<SettingsControl> {
+        if self.shown_summarizer().is_none() {
+            return Vec::new();
+        }
+        if self.summarizer_locked() && !every {
+            return vec![SettingsControl::DashboardTest];
+        }
+        let mut controls = vec![SettingsControl::DashboardEnabled];
+        controls.extend(self.provider_controls());
+        if every || self.summarizer_needs_key() {
+            controls.extend(KEY_SOURCE_CHOICES.map(SettingsControl::DashboardKeySource));
+            controls.extend(self.key_controls(every));
+        }
+        controls.extend([
+            SettingsControl::DashboardCap,
+            SettingsControl::DashboardTest,
+        ]);
+        controls
+    }
+
+    fn key_controls(&self, every: bool) -> Vec<SettingsControl> {
+        if every {
+            return vec![
+                SettingsControl::DashboardKey,
+                SettingsControl::DashboardKeySave,
+                SettingsControl::DashboardKeyClear,
+                SettingsControl::DashboardEnvVariable,
+            ];
+        }
+        if self.shown_key_source() == KeySourceChoice::Env {
+            return vec![SettingsControl::DashboardEnvVariable];
+        }
+        let mut controls = vec![SettingsControl::DashboardKey];
+        if self.key_save_enabled() {
+            controls.push(SettingsControl::DashboardKeySave);
+        }
+        if self.key_clear_enabled() {
+            controls.push(SettingsControl::DashboardKeyClear);
+        }
+        controls
+    }
+
+    /// The tab afresh for the shown host: an empty masked key field, and
+    /// the variable and cap fields holding the daemon's values.
+    fn new_dashboard_tab(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DashboardSettingsTab {
+        let settings = self.shown_summarizer_settings();
+        let cap_draft = settings
+            .as_ref()
+            .map_or_else(String::new, |settings| usd(settings.daily_cap_usd));
+        let variable_draft = env_variable(settings.as_ref()).unwrap_or_default();
+        let (key, key_subs) = Self::dashboard_input(DashboardField::Key, String::new(), window, cx);
+        key.update(cx, |input, cx| input.set_masked(true, cx));
+        let (variable, variable_subs) =
+            Self::dashboard_input(DashboardField::Variable, variable_draft.clone(), window, cx);
+        let (cap, cap_subs) =
+            Self::dashboard_input(DashboardField::Cap, cap_draft.clone(), window, cx);
+        DashboardSettingsTab {
+            host: self.settings_host.clone(),
+            key_focus: key.read(cx).focus_handle(cx),
+            variable_focus: variable.read(cx).focus_handle(cx),
+            cap_focus: cap.read(cx).focus_handle(cx),
+            key,
+            variable,
+            cap,
+            key_draft: String::new(),
+            variable_draft,
+            cap_draft,
+            env_chosen: false,
+            cap_problem: None,
+            _subscriptions: [key_subs, variable_subs, cap_subs]
+                .into_iter()
+                .flatten()
+                .collect(),
+        }
+    }
+
+    /// A Dashboard field's input holding `text`: Enter applies it, Escape
+    /// closes Settings, and an edit keeps its draft.
+    fn dashboard_input(
+        field: DashboardField,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<TextInput>, [Subscription; 2]) {
+        let placeholder = match field {
+            DashboardField::Key => "Paste the key",
+            DashboardField::Variable => "Variable name",
+            DashboardField::Cap => "1.00",
+        };
+        let input = cx.new(|cx| TextInput::new(text, placeholder.to_owned(), cx));
+        let keys = cx.subscribe_in(
+            &input,
+            window,
+            move |this, _, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Submit => {
+                    this.submit_dashboard_field(field, cx);
+                    cx.notify();
+                }
+                TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
+            },
+        );
+        let edits = cx.subscribe_in(
+            &input,
+            window,
+            move |this, input, _: &TextChanged, _, cx| {
+                let text = input.read(cx).text().to_owned();
+                if let Some(tab) = &mut this.dashboard_settings_tab {
+                    if field == DashboardField::Cap {
+                        tab.cap_problem = None;
+                    }
+                    *tab.draft_mut(field) = text;
+                }
+                cx.notify();
+            },
+        );
+        (input, [keys, edits])
+    }
+
+    fn submit_dashboard_field(&mut self, field: DashboardField, cx: &mut Context<Self>) {
+        match field {
+            DashboardField::Key => self.save_summarizer_key(cx),
+            DashboardField::Variable => self.apply_env_variable(),
+            DashboardField::Cap => self.apply_cap(),
+        }
+    }
+
+    /// Sends `settings` to the shown host, and keeps them for the next
+    /// change to build on; returns the request's id.
+    fn send_summarizer_settings(&mut self, settings: SummarizerSettings) -> String {
+        let request_id = crate::new_request_id();
+        self.send_to(
+            &self.settings_host,
+            ClientMessage::SetSummarizerSettings {
+                settings: settings.clone(),
+                request_id: Some(request_id.clone()),
+            },
+        );
+        self.summarizer_settings
+            .sent_settings(&self.settings_host, settings);
+        request_id
+    }
+
+    fn toggle_summaries(&mut self) {
+        let Some(mut settings) = self.next_summarizer_settings() else {
+            return;
+        };
+        settings.enabled = !settings.enabled;
+        tracing::info!(
+            enabled = settings.enabled,
+            "settings: switching Dashboard summaries"
+        );
+        self.send_summarizer_settings(settings);
+    }
+
+    fn choose_summarizer_provider(&mut self, index: usize) {
+        let Some(mut settings) = self.next_summarizer_settings() else {
+            return;
+        };
+        let Some(provider) = self
+            .shown_summarizer()
+            .and_then(|status| status.providers.get(index))
+            .map(|provider| provider.id.clone())
+        else {
+            return;
+        };
+        if provider == settings.provider {
+            return;
+        }
+        tracing::info!(%provider, "settings: choosing the summarizer provider");
+        settings.provider = provider;
+        self.send_summarizer_settings(settings);
+    }
+
+    /// Stored key applies at once; Environment variable applies once a
+    /// variable is named, and until then only shows the variable field.
+    fn choose_key_source(&mut self, choice: KeySourceChoice) {
+        let Some(mut settings) = self.next_summarizer_settings() else {
+            return;
+        };
+        let Some(tab) = self.shown_dashboard_tab_mut() else {
+            return;
+        };
+        tab.env_chosen = choice == KeySourceChoice::Env;
+        let variable = tab.variable_draft.trim().to_owned();
+        let source = match choice {
+            KeySourceChoice::Stored => SummarizerKeySource::Stored,
+            KeySourceChoice::Env if variable.is_empty() => return,
+            KeySourceChoice::Env => SummarizerKeySource::Env { variable },
+        };
+        if settings.key_source == source {
+            return;
+        }
+        settings.key_source = source;
+        tracing::info!(?choice, "settings: choosing the summarizer key source");
+        self.send_summarizer_settings(settings);
+    }
+
+    fn apply_env_variable(&mut self) {
+        let Some(mut settings) = self.next_summarizer_settings() else {
+            return;
+        };
+        let Some(variable) = self
+            .shown_dashboard_tab()
+            .map(|tab| tab.variable_draft.trim().to_owned())
+            .filter(|variable| !variable.is_empty())
+        else {
+            return;
+        };
+        let source = SummarizerKeySource::Env { variable };
+        if settings.key_source == source {
+            return;
+        }
+        settings.key_source = source;
+        tracing::info!("settings: reading the summarizer key from an environment variable");
+        self.send_summarizer_settings(settings);
+    }
+
+    /// Sends the cap field's cap when it is a number of dollars, zero or
+    /// more; otherwise says so under the field and sends nothing.
+    fn apply_cap(&mut self) {
+        let Some(mut settings) = self.next_summarizer_settings() else {
+            return;
+        };
+        let Some(tab) = self.shown_dashboard_tab_mut() else {
+            return;
+        };
+        let Some(cap) = parse_cap(&tab.cap_draft) else {
+            tab.cap_problem = Some(CAP_PROBLEM.to_owned());
+            return;
+        };
+        tab.cap_problem = None;
+        settings.daily_cap_usd = cap;
+        tracing::info!(cap, "settings: setting the summarizer's daily cap");
+        let request_id = self.send_summarizer_settings(settings);
+        self.summarizer_settings
+            .sent_cap(&self.settings_host, request_id);
+    }
+
+    /// Sends the key field's key for the chosen provider and empties the
+    /// field; an empty field sends nothing.
+    fn save_summarizer_key(&mut self, cx: &mut Context<Self>) {
+        let Some(provider) = self.shown_summarizer().map(|s| s.settings.provider.clone()) else {
+            return;
+        };
+        if self.summarizer_locked() {
+            return;
+        }
+        let Some(tab) = self.shown_dashboard_tab_mut() else {
+            return;
+        };
+        let key = tab.key_draft.trim().to_owned();
+        if key.is_empty() {
+            return;
+        }
+        tab.key_draft.clear();
+        tab.key.update(cx, |input, cx| input.set_text("", cx));
+        tracing::info!(%provider, "settings: saving the summarizer key");
+        self.send_to(
+            &self.settings_host,
+            ClientMessage::SetSummarizerKey {
+                provider,
+                key: Some(Secret(key)),
+                request_id: Some(crate::new_request_id()),
+            },
+        );
+    }
+
+    fn clear_summarizer_key(&self) {
+        let Some(provider) = self.shown_summarizer().map(|s| s.settings.provider.clone()) else {
+            return;
+        };
+        if self.summarizer_locked() {
+            return;
+        }
+        tracing::info!(%provider, "settings: deleting the summarizer key");
+        self.send_to(
+            &self.settings_host,
+            ClientMessage::SetSummarizerKey {
+                provider,
+                key: None,
+                request_id: Some(crate::new_request_id()),
+            },
+        );
+    }
+
+    fn run_summary_test(&mut self) {
+        if self.shown_summarizer().is_none() {
+            return;
+        }
+        let request_id = crate::new_request_id();
+        tracing::info!("settings: testing the summarizer");
+        self.send_to(
+            &self.settings_host,
+            ClientMessage::TestSummary {
+                request_id: Some(request_id.clone()),
+            },
+        );
+        self.summarizer_settings
+            .start_test(&self.settings_host, request_id);
+    }
+
+    /// The chosen provider's privacy line on the shown host.
+    #[must_use]
+    pub fn dashboard_privacy(&self) -> Option<String> {
+        self.shown_summarizer()?
+            .provider()
+            .map(|provider| provider.privacy.clone())
+    }
+
+    /// The words the Dashboard tab shows for the chosen provider's key.
+    #[must_use]
+    pub fn dashboard_key_state(&self) -> Option<&'static str> {
+        self.shown_summarizer()?.key_state().map(key_state_words)
+    }
+
+    /// The key field's text, once the tab was shown.
+    #[must_use]
+    pub fn dashboard_key_draft(&self, cx: &App) -> Option<String> {
+        self.shown_dashboard_tab()
+            .map(|tab| tab.key.read(cx).text().to_owned())
+    }
+
+    /// The key source choice the Dashboard tab shows selected.
+    #[must_use]
+    pub fn dashboard_key_source(&self) -> &'static str {
+        match self.shown_key_source() {
+            KeySourceChoice::Stored => "Stored key",
+            KeySourceChoice::Env => "Environment variable",
+        }
+    }
+
+    /// The cap field's text, once the tab was shown.
+    #[must_use]
+    pub fn dashboard_cap_draft(&self, cx: &App) -> Option<String> {
+        self.shown_dashboard_tab()
+            .map(|tab| tab.cap.read(cx).text().to_owned())
+    }
+
+    /// Whether the key field draws dots for its text.
+    #[must_use]
+    pub fn dashboard_key_masked(&self, cx: &App) -> Option<bool> {
+        self.shown_dashboard_tab()
+            .map(|tab| tab.key.read(cx).is_masked())
+    }
+
+    /// The line under the cap: today's spend on the shown host.
+    #[must_use]
+    pub fn dashboard_spend_line(&self) -> Option<String> {
+        self.shown_summarizer().map(spend_line)
+    }
+
+    /// The Test result slot's text on the shown host.
+    #[must_use]
+    pub fn dashboard_test_result(&self) -> Option<String> {
+        self.summarizer_settings
+            .test(&self.settings_host)
+            .map(test_text)
+    }
+
+    /// Why the cap was not applied: the field's text is no cap, or the
+    /// daemon refused it.
+    #[must_use]
+    pub fn dashboard_cap_error(&self) -> Option<String> {
+        self.shown_dashboard_tab()
+            .and_then(|tab| tab.cap_problem.clone())
+            .or_else(|| {
+                self.summarizer_settings
+                    .cap_error(&self.settings_host)
+                    .map(str::to_owned)
+            })
+    }
+
+    /// The Dashboard tab: summaries on or off, the provider and its privacy
+    /// line, its key, the daily cap with today's spend, and Test.
+    fn dashboard_tab_content(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let t = theme(cx);
+        let size = crate::fonts::ui_text_size(cx);
+        let shift = crate::fonts::ui_weight_shift(cx);
+        let intro =
+            section(size, shift, "Dashboard summaries").child(hint(size, SUMMARIES_INTRO, &t));
+        let (Some(status), Some(tab)) = (self.shown_summarizer(), self.shown_dashboard_tab())
+        else {
+            let line = div().text_color(gpui::rgb(t.text_2)).child(NOT_CONNECTED);
+            return vec![intro.child(line).into_any_element()];
+        };
+        let locked = self.summarizer_locked();
+        let newer_daemon = locked.then(|| {
+            hint(size, NEWER_DAEMON, &t).driver_id(|| "settings-dashboard-newer-daemon".to_owned())
+        });
+        let enabled = toggle(
+            SettingsControl::DashboardEnabled,
+            ToggleState {
+                checked: status.settings.enabled,
+                enabled: !locked,
+            },
+            "Summarize sessions",
+            focused,
+            cx,
+        );
+        let privacy = self
+            .dashboard_privacy()
+            .filter(|line| !line.is_empty())
+            .map(|line| hint(size, line, &t).driver_id(|| "settings-dashboard-privacy".to_owned()));
+        let summaries = intro
+            .children(newer_daemon)
+            .child(enabled)
+            .child(self.provider_row(status, focused, cx))
+            .children(privacy)
+            .children(self.key_rows(status, tab, focused, cx));
+        let cap_error = self.dashboard_cap_error().map(|error| {
+            hint(size, error, &t).driver_id(|| "settings-dashboard-cap-error".to_owned())
+        });
+        let spend = div()
+            .driver_id(|| "settings-dashboard-spend".to_owned())
+            .text_color(gpui::rgb(t.text_2))
+            .child(spend_line(status));
+        let cap_field = self.dashboard_field(
+            SettingsControl::DashboardCap,
+            &tab.cap,
+            PORT_FIELD_WIDTH,
+            focused,
+            cx,
+        );
+        let cap = section(size, shift, "Daily cap")
+            .child(labelled_row("Cap (USD)", cap_field))
+            .children(cap_error)
+            .child(spend)
+            .child(hint(size, CAP_HINT, &t));
+        let result = self.dashboard_test_result().map(|text| {
+            div()
+                .driver_id(|| "settings-dashboard-test-result".to_owned())
+                .text_color(gpui::rgb(t.text_2))
+                .children(text.lines().map(|line| div().child(line.to_owned())))
+        });
+        let test_button =
+            settings_button(SettingsControl::DashboardTest, "Test", true, focused, cx);
+        let test = section(size, shift, "Test")
+            .child(hint(size, TEST_HINT, &t))
+            .child(div().flex().child(test_button))
+            .children(result);
+        vec![
+            summaries.into_any_element(),
+            cap.into_any_element(),
+            test.into_any_element(),
+        ]
+    }
+
+    /// The provider choices the shown host's daemon offers, its choice
+    /// selected.
+    fn provider_row(
+        &self,
+        status: &SummarizerStatus,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let choices: Vec<(SettingsControl, &'static str, bool)> = self
+            .provider_controls()
+            .into_iter()
+            .zip(&status.providers)
+            .map(|(control, provider)| {
+                (
+                    control,
+                    intern(provider.name.clone()),
+                    provider.id == status.settings.provider,
+                )
+            })
+            .collect();
+        choice_row("Provider", &choices, self.dashboard_row_lock(), focused, cx)
+    }
+
+    /// Live, or dimmed while the tab is locked; the tab's own line says why.
+    fn dashboard_row_lock(&self) -> RowLock {
+        if self.summarizer_locked() {
+            RowLock::Dimmed
+        } else {
+            RowLock::Live
+        }
+    }
+
+    /// For a provider that takes a key: the key source, the masked key
+    /// field with Save and Clear or the variable field, and the key state.
+    fn key_rows(
+        &self,
+        status: &SummarizerStatus,
+        tab: &DashboardSettingsTab,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        if !self.summarizer_needs_key() {
+            return Vec::new();
+        }
+        let t = theme(cx);
+        let source = self.shown_key_source();
+        let choices = KEY_SOURCE_CHOICES.map(|choice| {
+            let text = match choice {
+                KeySourceChoice::Stored => "Stored key",
+                KeySourceChoice::Env => "Environment variable",
+            };
+            (
+                SettingsControl::DashboardKeySource(choice),
+                text,
+                choice == source,
+            )
+        });
+        let mut rows = vec![choice_row(
+            "Key source",
+            &choices,
+            self.dashboard_row_lock(),
+            focused,
+            cx,
+        )];
+        match source {
+            KeySourceChoice::Stored => {
+                let field = self.dashboard_field(
+                    SettingsControl::DashboardKey,
+                    &tab.key,
+                    KEY_FIELD_WIDTH,
+                    focused,
+                    cx,
+                );
+                let save = settings_button(
+                    SettingsControl::DashboardKeySave,
+                    "Save",
+                    self.key_save_enabled(),
+                    focused,
+                    cx,
+                );
+                let clear = settings_button(
+                    SettingsControl::DashboardKeyClear,
+                    "Clear",
+                    self.key_clear_enabled(),
+                    focused,
+                    cx,
+                );
+                rows.push(
+                    labelled_row("Key", field)
+                        .child(save)
+                        .child(clear)
+                        .into_any_element(),
+                );
+            }
+            KeySourceChoice::Env => {
+                let field = self.dashboard_field(
+                    SettingsControl::DashboardEnvVariable,
+                    &tab.variable,
+                    VARIABLE_FIELD_WIDTH,
+                    focused,
+                    cx,
+                );
+                rows.push(labelled_row("Variable", field).into_any_element());
+                rows.push(
+                    hint(crate::fonts::ui_text_size(cx), VARIABLE_HINT, &t).into_any_element(),
+                );
+            }
+        }
+        rows.extend(status.key_state().map(|state| {
+            div()
+                .driver_id(|| "settings-dashboard-key-state".to_owned())
+                .text_color(gpui::rgb(t.text_2))
+                .child(key_state_words(state))
+                .into_any_element()
+        }));
+        rows
+    }
+
+    /// A Dashboard text field `width` px wide, ringed while `control` has
+    /// the keyboard; a press gives it the keyboard. While the tab is
+    /// locked it is dimmed and takes no press.
+    fn dashboard_field(
+        &self,
+        control: SettingsControl,
+        input: &Entity<TextInput>,
+        width: f32,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let frame = field_frame(focused == Some(control), &theme(cx))
+            .driver_id(move || control.selector().to_owned())
+            .w(px(width))
+            .child(input.clone());
+        if self.summarizer_locked() {
+            return frame.opacity(DISABLED_OPACITY);
+        }
+        frame.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.press_settings_control(control, window, cx);
+            }),
+        )
+    }
+}
+
+/// `label` with `field` beside it.
+fn labelled_row(label: &'static str, field: Div) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(label)
+        .child(field)
+}
+
 /// A group label in the tab list: painted, never a tab stop.
 fn group_row(offset: i8, shift: i8, label: &'static str, t: &UiTheme) -> Div {
     div()
@@ -4604,6 +5602,9 @@ enum RowLock {
         note: &'static str,
         selector: &'static str,
     },
+    /// The choices are dimmed and inert; a line elsewhere on the tab says
+    /// why.
+    Dimmed,
 }
 
 /// The General tab's Sessions under repos choices, `current` selected.
@@ -4684,7 +5685,7 @@ fn choice_row(
         RowLock::Locked { note, selector } => Some(
             hint(crate::fonts::ui_text_size(cx), note, &t).driver_id(move || selector.to_owned()),
         ),
-        RowLock::Live => None,
+        RowLock::Live | RowLock::Dimmed => None,
     };
     field(
         crate::fonts::ui_text_size(cx),
@@ -4716,9 +5717,10 @@ mod tests {
     use crate::target::HostKey;
     use crate::text_input::TextInput;
 
-    const FIXED: [&str; 7] = [
+    const FIXED: [&str; 8] = [
         "General",
         "Notifications",
+        "Dashboard",
         "Spawn defaults",
         "Worktrees",
         "Remote access",

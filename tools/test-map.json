@@ -718,9 +718,10 @@
     },
     {
       "paths": [
-        "apps/native/src/settings_view.rs"
+        "apps/native/src/settings_view.rs",
+        "apps/native/src/summarizer_settings.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^settings_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_recover|ui_remote|ui_remote_access|ui_settings|ui_sidebar|ui_spawn_dialog|ui_worktrees)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(settings_view|summarizer_settings)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_recover|ui_remote|ui_remote_access|ui_settings|ui_sidebar|ui_spawn_dialog|ui_worktrees)::/))"
     },
     {
       "paths": [

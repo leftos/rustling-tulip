@@ -287,6 +287,7 @@ fn remote_access_tab_follows_worktrees(cx: &mut TestAppContext) {
         [
             "General",
             "Notifications",
+            "Dashboard",
             "Spawn defaults",
             "Worktrees",
             "Remote access",
@@ -301,6 +302,7 @@ fn remote_access_tab_follows_worktrees(cx: &mut TestAppContext) {
         [
             "General",
             "Notifications",
+            "Dashboard",
             "Spawn defaults",
             "Worktrees",
             "Remote access",

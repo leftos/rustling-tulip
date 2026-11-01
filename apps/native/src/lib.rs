@@ -130,6 +130,7 @@ mod stash_view;
 mod stashes;
 mod status_glyph;
 mod stretchtext;
+mod summarizer_settings;
 mod summary;
 mod summary_view;
 pub mod syntax;
@@ -1154,6 +1155,11 @@ pub struct RootView {
     /// The Settings Worktrees tab's path field and its save in flight, per
     /// host the selector has shown it for while Settings is open.
     worktrees_tabs: HashMap<HostKey, settings_view::WorktreesTab>,
+    /// Each host's Dashboard summarizer status, its Test and its refused
+    /// cap, as the Settings Dashboard tab reads them.
+    summarizer_settings: summarizer_settings::SummarizerSettingsState,
+    /// The Settings Dashboard tab's key, variable and cap fields, once shown.
+    dashboard_settings_tab: Option<settings_view::DashboardSettingsTab>,
     /// The Manage worktrees modal, while open.
     worktrees_manager: Option<worktrees_manager::WorktreesManager>,
     /// The Manage worktrees modal's keyboard focus.
@@ -1557,6 +1563,8 @@ impl RootView {
             vscode_prompt_focus: cx.focus_handle(),
             cwd_workspace_scans: HashMap::new(),
             worktrees_tabs: HashMap::new(),
+            summarizer_settings: summarizer_settings::SummarizerSettingsState::default(),
+            dashboard_settings_tab: None,
             worktrees_manager: None,
             worktrees_focus: cx.focus_handle(),
             session_history: recover::HostHistories::default(),
@@ -4153,6 +4161,7 @@ impl RootView {
         // Windows deactivates a window it minimizes, so a minimized window
         // counts as not focused.
         self.notify_on(host, &msg, finished, window.is_window_active(), cx);
+        self.on_summarizer_message(host, &msg, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;
         }
@@ -4405,7 +4414,8 @@ impl RootView {
             None => self.on_creator_error(&message, cx),
             Some(id) => {
                 self.on_agent_setting_refused(host, id, &message, cx);
-                self.on_agent_command_error(host, id, code, &message, cx)
+                self.on_summarizer_refused(host, id, &message, cx)
+                    || self.on_agent_command_error(host, id, code, &message, cx)
                     || self.on_preset_list_failed(id, &message, cx)
             }
         };
