@@ -10,6 +10,8 @@
     "apps/native/src/net.rs",
     "apps/native/src/hosts.rs",
     "apps/native/src/palette.rs",
+    "apps/native/src/driver_id.rs",
+    "apps/native/tests/ui/ui_driver_registry.rs",
     "apps/native/src/assets.rs",
     "apps/native/src/offscreen.rs",
     "apps/native/src/ellipsis.rs",
@@ -23,7 +25,8 @@
   "ignore": [
     "**/*.md",
     "docs/**",
-    ".claude/**"
+    ".claude/**",
+    "apps/native/src/driver/**"
   ],
   "rows": [
     {
