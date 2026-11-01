@@ -917,6 +917,12 @@
     },
     {
       "paths": [
+        "apps/native/src/shell_lines.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^shell_lines::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/chat_cards.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^chat_cards::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_chat::/))"

@@ -133,6 +133,10 @@ const SUMMARY_OPEN_LINE: &str = "t1";
 /// The stretch the `chat` shot's finished answer draws open, with a closed
 /// stretch nested in it and another closed beside it.
 const CHAT_OPEN_STRETCH: &str = "pills";
+/// The `chat` shot's running Bash call, drawn open one statement per line.
+const FOOTER_SPECS: &str = "cargo build -p rustling-tulip-native 2>&1 | tail -n 3; \
+     cargo nextest run -p rustling-tulip-native -E 'test(/footer/)' > .tmp/footer.log 2>&1 && \
+     echo specs passed || tail -n 20 .tmp/footer.log; git status --short apps/native/src/footer.rs";
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -316,6 +320,7 @@ impl View {
                     && root
                         .chat_answer_text("s-petal", "a1")
                         .is_some_and(|text| text.contains("bottom edge"))
+                    && root.chat_tool_lines("s-petal", "t3").len() > 1
             }
             Self::Summary => {
                 root.pane_view("p1") == PaneView::Summary
@@ -946,6 +951,7 @@ fn drive(
                     root.toggle_pane_view("p1", window, cx);
                 } else {
                     root.toggle_stretchtext("s-petal", "a1", CHAT_OPEN_STRETCH, cx);
+                    root.toggle_chat_card("s-petal", "t3", cx);
                 }
             });
             Ok(())
@@ -1730,7 +1736,14 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
             text: "Now run the footer specs.".to_owned(),
             pending: true,
         },
-        tool("t3", "Bash", "cargo nextest run footer", None),
+        ChatEntry::Tool {
+            id: "t3".to_owned(),
+            name: "Bash".to_owned(),
+            summary: FOOTER_SPECS.to_owned(),
+            input: format!("{:#}", serde_json::json!({ "command": FOOTER_SPECS })),
+            result: None,
+            parent_id: None,
+        },
         ChatEntry::Answer {
             id: "live:m2".to_owned(),
             text: "Running the footer specs now.\nThe first two pass".to_owned(),

@@ -36,6 +36,7 @@ use crate::chat_cards::{
 };
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::scrollbar::Scrollbar;
+use crate::shell_lines;
 use crate::sidebar::session_view_key;
 use crate::stretchtext;
 use crate::summary::{SummaryLog, wanted_loads};
@@ -1332,10 +1333,32 @@ impl RootView {
 
     /// A click on a tool card of session `session_id`'s chat opens or
     /// closes it.
-    fn toggle_chat_card(&mut self, session_id: &str, id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_chat_card(&mut self, session_id: &str, id: &str, cx: &mut Context<Self>) {
         if let Some(chat) = self.chat.sessions.get_mut(session_id) {
             chat.log.toggle_expanded(id);
             cx.notify();
+        }
+    }
+
+    /// The command statements tool card `tool_id` of session `session_id`'s
+    /// chat lists, one per line, while it is open; none while it is folded
+    /// or its tool runs no shell command.
+    #[must_use]
+    pub fn chat_tool_lines(&self, session_id: &str, tool_id: &str) -> Vec<String> {
+        let Some(chat) = self.chat.sessions.get(session_id) else {
+            return Vec::new();
+        };
+        if !chat.log.is_expanded(tool_id) {
+            return Vec::new();
+        }
+        match chat.log.get(tool_id) {
+            Some(ChatEntry::Tool {
+                name,
+                summary,
+                input,
+                ..
+            }) => shell_lines::tool_statements(name, summary, input),
+            _ => Vec::new(),
         }
     }
 
@@ -1939,8 +1962,9 @@ fn answer_row(
 }
 
 /// A tool call's card: its name, one-line summary and status mark (tagged
-/// `chat-tool-<running|done|error>-<pane>-<id>`); a click opens it to its
-/// input and result.
+/// `chat-tool-<running|done|error>-<pane>-<id>`); a click opens it to a
+/// shell tool's whole command, one statement per line, then its input and
+/// result.
 fn tool_card(
     look: &RowLook<'_>,
     tool: &ToolRow<'_>,
@@ -1999,13 +2023,37 @@ fn tool_card(
         }))
         .child(header)
         .when(open, |card| {
-            card.child(tool_detail("Input", tool.input, t))
-                .children(tool.result.map(|outcome| {
-                    let label = if outcome.is_error { "Error" } else { "Result" };
-                    tool_detail(label, &outcome.text, t)
-                }))
+            let statements = shell_lines::tool_statements(tool.name, tool.summary, tool.input);
+            card.when(!statements.is_empty(), |card| {
+                card.child(command_lines(look, tool.id, statements))
+            })
+            .child(tool_detail("Input", tool.input, t))
+            .children(tool.result.map(|outcome| {
+                let label = if outcome.is_error { "Error" } else { "Result" };
+                tool_detail(label, &outcome.text, t)
+            }))
         });
     div().child(card)
+}
+
+/// An open shell tool card's command, one statement per line on the code
+/// background (each tagged `chat-tool-line-<pane>-<id>-<n>`); a statement
+/// longer than the card wraps.
+fn command_lines(look: &RowLook<'_>, id: &str, statements: Vec<String>) -> Div {
+    let t = &look.theme;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .px(px(CARD_PAD_X))
+        .py(px(CARD_PAD_Y))
+        .rounded(px(CARD_RADIUS / 2.0))
+        .bg(gpui::rgb(t.sunken))
+        .text_color(gpui::rgb(t.text))
+        .children(statements.into_iter().enumerate().map(|(n, statement)| {
+            let name = format!("chat-tool-line-{}-{id}-{n}", look.pane_id);
+            div().debug_selector(|| name).child(statement)
+        }))
 }
 
 /// One labelled block of an open tool card.

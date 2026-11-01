@@ -1912,3 +1912,133 @@ fn a_chat_heading_stays_above_its_paragraph_at_every_offset(cx: &mut TestAppCont
         );
     }
 }
+
+// Tool cards that run a shell command.
+
+/// A Bash command of four statements, a pipe inside the first.
+const COMMAND: &str =
+    "cargo build 2>&1 | tail -n 3; git add docs/a.md && git commit -F .tmp/msg.txt; echo rc=$?";
+const STATEMENTS: [&str; 4] = [
+    "cargo build 2>&1 | tail -n 3;",
+    "git add docs/a.md &&",
+    "git commit -F .tmp/msg.txt;",
+    "echo rc=$?",
+];
+
+/// A Bash call running `command`, as the daemon sends it: the summary its
+/// first line, the input the pretty-printed JSON.
+fn bash(id: &str, command: &str) -> ChatEntry {
+    let input = serde_json::json!({ "command": command, "description": "Commit the docs" });
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: "Bash".to_owned(),
+        summary: command.lines().next().unwrap_or_default().to_owned(),
+        input: format!("{input:#}"),
+        result: None,
+        parent_id: None,
+    }
+}
+
+fn tool_lines(h: &mut Harness<'_>, id: &str) -> Vec<String> {
+    h.root(|root, _| root.chat_tool_lines("s1", id))
+}
+
+fn line(n: usize) -> String {
+    format!("chat-tool-line-p1-t1-{n}")
+}
+
+#[gpui::test]
+fn a_long_bash_command_shows_one_statement_per_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![bash("t1", COMMAND)]));
+    h.click_on("chat-row-p1-t1");
+    assert_eq!(tool_lines(&mut h, "t1"), STATEMENTS);
+    let card = h.bounds("chat-row-p1-t1");
+    let rows: Vec<_> = (0..STATEMENTS.len()).map(|n| h.bounds(&line(n))).collect();
+    for (n, row) in rows.iter().enumerate() {
+        assert!(row.size.height > px(0.0), "statement {n} is drawn");
+        assert!(
+            card.contains(&row.origin),
+            "statement {n} is inside its card"
+        );
+    }
+    for pair in rows.windows(2) {
+        assert!(
+            pair[1].top() >= pair[0].bottom(),
+            "each statement starts its own line: {pair:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_folded_bash_card_keeps_one_line_and_a_click_opens_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(
+        Some(&id),
+        vec![bash("t1", COMMAND), tool("t2", Some("ok"))],
+    ));
+    let none: [&str; 0] = [];
+    assert_eq!(
+        tool_lines(&mut h, "t1"),
+        none,
+        "a folded card lists no statements"
+    );
+    assert!(
+        !painted(&mut h, &line(0)),
+        "a folded card draws no statement"
+    );
+    let folded = h.bounds("chat-row-p1-t1").size.height;
+    assert_eq!(
+        folded,
+        h.bounds("chat-row-p1-t2").size.height,
+        "the folded card is one line, as any folded tool card"
+    );
+    h.click_on("chat-row-p1-t1");
+    assert!(
+        painted(&mut h, &line(STATEMENTS.len() - 1)),
+        "the open card draws every statement"
+    );
+    assert!(
+        h.bounds("chat-row-p1-t1").size.height > folded,
+        "the card grew"
+    );
+    h.click_on("chat-row-p1-t1");
+    assert_eq!(tool_lines(&mut h, "t1"), none, "a second click folds it");
+    assert!(
+        !drawn_now(&mut h, &line(0)),
+        "the folded card draws no statement"
+    );
+}
+
+#[gpui::test]
+fn a_command_cut_by_the_input_cap_falls_back_to_its_summary(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    let mut entry = bash("t1", COMMAND);
+    if let ChatEntry::Tool { summary, input, .. } = &mut entry {
+        *summary = "cargo build 2>&1 | tail -n 3; git add docs/a.md && git c\u{2026}".to_owned();
+        let cut: String = input.chars().take(40).collect();
+        *input = format!("{cut}\u{2026}");
+    }
+    h.send(reply(Some(&id), vec![entry]));
+    h.click_on("chat-row-p1-t1");
+    assert_eq!(
+        tool_lines(&mut h, "t1"),
+        [
+            "cargo build 2>&1 | tail -n 3;",
+            "git add docs/a.md &&",
+            "git c\u{2026}"
+        ],
+        "the summary's statements, one per line"
+    );
+    assert!(
+        painted(&mut h, &line(2)),
+        "the summary's last statement is drawn"
+    );
+    assert!(
+        !painted(&mut h, &line(3)),
+        "nothing past the summary is drawn"
+    );
+}

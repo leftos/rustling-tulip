@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Right-clicking a repo or workspace offers a Spawn session submenu: Last, each agent, Shell and your presets.
+- Opening a Bash or PowerShell card in the chat shows the whole command, one statement per line.
 
 ### Fixed
 

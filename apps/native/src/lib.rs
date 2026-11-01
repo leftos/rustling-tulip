@@ -109,6 +109,7 @@ mod session_actions;
 mod session_menu;
 mod settings_view;
 mod shell_dialog;
+mod shell_lines;
 mod shell_marks;
 mod shell_view;
 mod sidebar;
