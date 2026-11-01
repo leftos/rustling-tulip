@@ -1,1 +1,0 @@
-patterns = ["pwsh *rt.ps1 native-e2e -SealedSecretOnly*"]

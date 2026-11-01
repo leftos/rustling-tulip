@@ -141,9 +141,12 @@ param(
     # `test`: check tools/test-map.json covers every native file and names real binaries.
     [switch]$Validate,
 
-    # `native-e2e` internal: the re-entry that builds and runs only the sealed-secret
-    # spec on this PC (.gate/local.toml keeps it here; it needs Credential Manager).
-    [switch]$SealedSecretOnly,
+    # `native-e2e`: the spec files to run (e2e_live, e2e_recover, e2e_remote,
+    # e2e_ssh, e2e_multi_host; comma-separated). Default: all of them.
+    [string[]]$Test,
+
+    # `native-e2e`: a nextest filterset narrowing the specs (passed as `-E`).
+    [string]$Filter,
 
     # Extra arguments forwarded to the underlying tool (e.g. `cargo nextest
     # run` filters). Only meaningful for `launch`, `restart`, `test`, `clippy`,
@@ -153,6 +156,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# PowerShell binds a prefix such as cargo's `-F` to -Filter, so on any other
+# verb these would swallow arguments meant for cargo or nextest.
+if ($Command -ne 'native-e2e' -and ($PSBoundParameters.ContainsKey('Test') -or $PSBoundParameters.ContainsKey('Filter'))) {
+    throw '-Test and -Filter apply to native-e2e only; pass cargo''s features as --features <list>.'
+}
 
 # ---------------------------------------------------------------------------
 # Platform
@@ -982,7 +991,7 @@ function Invoke-Native {
 # client window. The build and the specs run as one gate call, re-entering
 # this script under the gate: gated separately, the build and the specs could
 # run on different machines, leaving the specs without the daemon binary.
-function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name, [string[]]$DaemonFeatures = @()) {
+function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name) {
     Assert-Nextest
     if (-not (Test-UnderGate)) {
         $reentry = @('pwsh', '-NoProfile', '-File', $PSCommandPath, $Verb)
@@ -991,7 +1000,7 @@ function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slo
         exit $LASTEXITCODE
     }
     $cargoProfile = if ($Release) { 'release' } else { 'test-release' }
-    Build-DaemonAndTracer $cargoProfile -Features $DaemonFeatures
+    Build-DaemonAndTracer $cargoProfile
     $targets = @($TestFiles | ForEach-Object { '--test'; $_ })
     $names = $TestFiles -join ', '
     Write-Host "==> Running native specs: $names ($cargoProfile)..." -ForegroundColor Cyan
@@ -1009,52 +1018,50 @@ function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slo
 # lookup never searches; -Release would put it in target\release, which it
 # does, so it is refused before anything builds.
 #
-# The sealed-secret spec stores a secret in Credential Manager, which a routed
-# run's ssh logon has none of, so it skips there (GATE_BOX_JOB). Outside a gate,
-# native-e2e therefore makes two gate calls: the full e2e, which may route, and
-# the -SealedSecretOnly re-entry, which .gate/local.toml keeps on this PC. Under
-# a gate it runs the full e2e directly, as one call.
+# Outside a gate, native-e2e is one gate call: it re-enters this script with
+# its -Test and -Filter arguments, so the build and the specs run on one
+# machine, in the builder's console session (.gate/desktop.toml `session`),
+# where the sealed-secret spec finds a Credential Manager. Under a gate it
+# builds and runs the specs directly.
 function Invoke-NativeE2e {
     if ($Release) {
         throw 'native-e2e builds a test-only daemon (e2e-loopback-peers); it runs in the test-release profile only, so drop -Release.'
     }
-    if ($SealedSecretOnly) {
-        Invoke-SealedSecretSpec
-        return
-    }
-    if (Test-UnderGate) {
-        Invoke-NativeSpecFile -Verb native-e2e -TestFiles @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh', 'e2e_multi_host') -Slot heavy -Name e2e -DaemonFeatures @('e2e-loopback-peers')
-        return
-    }
-    Assert-Nextest
-    Invoke-Gated -Slot heavy -Name e2e -Command @('pwsh', '-NoProfile', '-File', $PSCommandPath, 'native-e2e')
-    $e2eExit = $LASTEXITCODE
-    Write-Host "==> Running $SealedSecretSpec on this PC..." -ForegroundColor Cyan
-    Invoke-Gated -Slot heavy -Name e2e-sealed -Command @('pwsh', '-NoProfile', '-File', $PSCommandPath, 'native-e2e', '-SealedSecretOnly')
-    $sealedExit = $LASTEXITCODE
-    if ($e2eExit -ne 0) { exit $e2eExit }
-    exit $sealedExit
-}
-
-# The spec that needs this PC's Credential Manager.
-$SealedSecretSpec = 'live_a_sealed_secret_reaches_the_child_and_no_file'
-
-# Builds the e2e daemon and tracer and runs only $SealedSecretSpec, both in one
-# gate call (the re-entry) so the spec finds the daemon it built.
-function Invoke-SealedSecretSpec {
+    $testFiles = Get-E2eTestFiles
     Assert-Nextest
     if (-not (Test-UnderGate)) {
-        Invoke-Gated -Slot heavy -Name e2e-sealed -Command @('pwsh', '-NoProfile', '-File', $PSCommandPath, 'native-e2e', '-SealedSecretOnly')
+        $reentry = @('pwsh', '-NoProfile', '-File', $PSCommandPath, 'native-e2e')
+        if ($Test) { $reentry += @('-Test', ($testFiles -join ',')) }
+        if ($Filter) { $reentry += @('-Filter', $Filter) }
+        Invoke-Gated -Slot heavy -Name e2e -Command $reentry
         exit $LASTEXITCODE
     }
     Build-DaemonAndTracer 'test-release' -Features @('e2e-loopback-peers')
+    $names = $testFiles -join ', '
+    Write-Host "==> Running native specs: $names (test-release)..." -ForegroundColor Cyan
     $specArgs = @(
         'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
-        '-p', 'rustling-tulip-native', '--cargo-profile', 'test-release', '--run-ignored', 'only',
-        '--test', 'e2e_recover', '-E', "test(=$SealedSecretSpec)"
-    )
-    Invoke-Gated -Slot heavy -Name e2e-sealed -Command $specArgs
-    Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($SealedSecretSpec)"
+        '-p', 'rustling-tulip-native', '--cargo-profile', 'test-release', '--run-ignored', 'only'
+    ) + @($testFiles | ForEach-Object { '--test'; $_ })
+    if ($Filter) { $specArgs += @('-E', $Filter) }
+    Invoke-Gated -Slot heavy -Name e2e -Command $specArgs
+    Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($names)"
+}
+
+# The e2e spec files -Test names (each may hold a comma-separated list, since
+# `pwsh -File` passes `a,b` as one string), or all of them; an unknown name
+# throws before anything builds.
+function Get-E2eTestFiles {
+    [OutputType([string[]])]
+    param()
+    $valid = @('e2e_live', 'e2e_recover', 'e2e_remote', 'e2e_ssh', 'e2e_multi_host')
+    if (-not $Test) { return $valid }
+    $names = @($Test | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $unknown = @($names | Where-Object { $_ -notin $valid })
+    if ($unknown -or -not $names) {
+        throw "native-e2e -Test: unknown spec file '$($unknown -join ', ')'; valid: $($valid -join ', ')."
+    }
+    return $names
 }
 
 function Invoke-NativeSmoke { Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke }
@@ -1123,14 +1130,15 @@ Commands:
   native     `cargo build -p daemon -p tracer`, then `cargo run -p
              rustling-tulip-native`. Extra args are passed on (an
              optional session id to focus, or to place in the active tab).
-  native-e2e Build daemon (with e2e-loopback-peers) + tracer, then run
+  native-e2e [-Test <file>[,<file>]] [-Filter <filterset>]
+             Build daemon (with e2e-loopback-peers) + tracer, then run
              the native client's end-to-end specs (e2e_live, e2e_recover,
              e2e_remote, e2e_ssh, e2e_multi_host) against an isolated daemon
-             (needs `node`).
-             Test-release only: refuses -Release. Then runs the sealed-secret
-             spec again on this PC in its own gate call (it needs Credential
-             Manager and skips in a routed run); -SealedSecretOnly is that
-             internal re-entry, kept local by .gate/local.toml.
+             (needs `node`), as one gate call that may run in a builder's
+             console session. Test-release only: refuses -Release.
+             -Test: only these spec files (default all five; an unknown
+             name fails before anything builds). -Filter: a nextest
+             filterset, passed as `-E`.
   native-smoke
              Build daemon + tracer, then run the native client's OS smoke
              specs in a cloaked window that never takes focus; checks it
@@ -1165,6 +1173,8 @@ Flags:
                      branch.<name>.base, else main's merge-base).
   -PrintOnly         test: print the selection without running it.
   -Validate          test: check tools/test-map.json.
+  -Test <files>      native-e2e: the spec files to run (comma-separated).
+  -Filter <set>      native-e2e: a nextest filterset (`-E`).
 
 Examples:
   .\rt.ps1                       # build + run the native client

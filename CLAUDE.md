@@ -53,7 +53,8 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 fmt              # cargo fmt --all
 .\rt.ps1 clean            # cargo clean
 .\rt.ps1 native           # build daemon + tracer, then run the native client (extra args: a session id to focus)
-.\rt.ps1 native-e2e       # native client specs (e2e_live, e2e_recover, e2e_remote, e2e_ssh, e2e_multi_host) against a real daemon, built with the e2e-loopback-peers feature, isolated under .tmp/ (fake-claude, fake-tailscale and fake-ssh need node); then the sealed-secret spec again on this PC in its own gate call (it needs Credential Manager and skips when GATE_BOX_JOB is set; .gate/local.toml keeps its -SealedSecretOnly re-entry here)
+.\rt.ps1 native-e2e       # native client specs (e2e_live, e2e_recover, e2e_remote, e2e_ssh, e2e_multi_host) against a real daemon, built with the e2e-loopback-peers feature, isolated under .tmp/ (fake-claude, fake-tailscale and fake-ssh need node), as one gate call that .gate/desktop.toml's `session` patterns send to a builder's console session, whose Credential Manager the sealed-secret spec needs
+.\rt.ps1 native-e2e -Test e2e_ssh -Filter 'test(/reconnect/)'   # one or more spec files (comma-separated) and a nextest filterset, in the same routed gate call
 .\rt.ps1 native-smoke     # launch the native client exe in a cloaked, never-focused window; check it connects and takes keys
 .\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, connections, connections-ssh, menu, update, chat, summary, themes, themes-edit, multi-host, spawn-hosts, settings-hosts) in .tmp\shots\
 .\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against (needs NSIS 3; tools/installer/README.md)
@@ -95,6 +96,14 @@ The release step is cutting a versioned release from the Linear release pipeline
 Every cargo command `rt.ps1` runs goes through the repo's gate wrapper, `pwsh -NoProfile -File tools/gate.ps1 run …` (`Invoke-Gated`, logging to `.tmp/rt-<name>.log`), so a bare `.\rt.ps1 test` routes its nextest run to a builder machine; inside a gate's command (`GATE_SLOT_HELD` set by a local gate, `GATE_BOX_JOB` by a routed run on a builder; `Test-UnderGate`) it runs them directly, and the native client the `launch` verbs open holds no slot.
 
 Nothing calls `gate.exe` directly. The wrapper hands the call to the installed gate.exe (installed from the gate repo with `pwsh tools/install.ps1`), or runs the command directly on a machine without one.
+
+Four rules keep agents' gate runs routable:
+- A command that names another worktree's files is gated with `--cd <worktree>`, never from the main checkout, where the gate keeps it on this PC; `rt.ps1` passes `--cd` to its own tree, so call it bare or by its absolute path from any shell.
+- One gate call per step: `cargo clippy …` and `cargo nextest run …` route on their own, and a `pwsh -Command` chain of them matches no route pattern and runs here. A live spec needs its daemon build in the same job, which `rt.ps1 native-e2e -Test <file> -Filter <set>` does.
+- An environment variable a test needs goes with `--env NAME=value`, which carries it to a routed run, never `--local`.
+- `GATE_BOX_JOB` is the gate's to set: setting it by hand makes `rt.ps1` (`Test-UnderGate`) skip its own gating.
+
+`.gate/desktop.toml` declares the routed commands that need a builder's logged-on desktop (`patterns`: `native-shot`'s `cargo run … --example shot`, which opens a window) or only its console session (`session`: `rt.ps1 native-e2e`, for the Credential Manager vault); the PC consents to each in the gate's `remote.json`.
 
 `rustling-tulipd pair` prints a one-time device pairing code from the running daemon (it needs the daemon already running, reads `daemon.json` and takes no instance lock; `crates/daemon/src/cli_pair.rs`); the owner types the code on a device whose pairing request is waiting.
 

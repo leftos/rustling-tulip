@@ -1,0 +1,7 @@
+patterns = [
+    "cargo run --manifest-path Cargo.toml -p rustling-tulip-native --example shot*",
+]
+session = [
+    "pwsh -NoProfile -File rt.ps1 native-e2e*",
+    "pwsh -NoProfile -File ./rt.ps1 native-e2e*",
+]

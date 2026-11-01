@@ -974,15 +974,7 @@ fn assert_sealed_on_disk(daemon: &LiveDaemon, history_id: &str, sentinel: &str) 
 
 #[gpui::test]
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
-#[expect(
-    clippy::print_stderr,
-    reason = "a routed run says why the spec skipped"
-)]
 fn live_a_sealed_secret_reaches_the_child_and_no_file(cx: &mut TestAppContext) {
-    if std::env::var_os("GATE_BOX_JOB").is_some() {
-        eprintln!("skipped: needs this PC's Credential Manager (GATE_BOX_JOB is set)");
-        return;
-    }
     require_node();
     let daemon = LiveDaemon::start("sealed-secret");
     let _cleanup = SealedSecretsCleanup::new(&daemon);
