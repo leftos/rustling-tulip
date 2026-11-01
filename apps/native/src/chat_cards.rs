@@ -14,6 +14,7 @@ use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ClientMes
 use crate::UI_TEXT_SIZE;
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::chat::{PromptStack, allow_with_text, deny_with_text, type_something_answer};
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use crate::ui_theme::UiTheme;
 
@@ -574,7 +575,7 @@ pub fn prompt_card(
     let buttons = card_buttons(prompt, view.agent);
     let actions = if buttons.is_empty() {
         small(offset, OPEN_THE_TERMINAL, t.muted)
-            .debug_selector(|| "chat-card-terminal".to_owned())
+            .driver_id(|| "chat-card-terminal".to_owned())
             .into_any_element()
     } else {
         let (rows, named): (Vec<&CardButton>, Vec<&CardButton>) = buttons
@@ -600,7 +601,7 @@ pub fn prompt_card(
             .into_any_element()
     };
     let card = div()
-        .debug_selector(|| "chat-card".to_owned())
+        .driver_id(|| "chat-card".to_owned())
         .flex()
         .flex_col()
         .gap(px(CARD_GAP))
@@ -614,7 +615,7 @@ pub fn prompt_card(
         .when(!prompt.subject.is_empty(), |card| {
             card.child(
                 div()
-                    .debug_selector(|| "chat-card-subject".to_owned())
+                    .driver_id(|| "chat-card-subject".to_owned())
                     .child(prompt.subject.clone()),
             )
         })
@@ -623,12 +624,10 @@ pub fn prompt_card(
         })
         .child(actions)
         .when(view.busy, |card| {
-            card.child(
-                small(offset, SENDING, t.muted).debug_selector(|| "chat-card-busy".to_owned()),
-            )
+            card.child(small(offset, SENDING, t.muted).driver_id(|| "chat-card-busy".to_owned()))
         })
         .children(view.refusal.map(|reason| {
-            small(offset, reason, t.danger).debug_selector(|| "chat-card-refusal".to_owned())
+            small(offset, reason, t.danger).driver_id(|| "chat-card-refusal".to_owned())
         }));
     let edges = view.ghosts.min(GHOST_EDGES);
     div()
@@ -666,7 +665,7 @@ fn question_tab_row(offset: i8, prompt: &ChatPrompt, t: &UiTheme) -> Option<Div>
             .rounded(px(CHIP_RADIUS))
             .text_size(ui_px_at(offset, SMALL_TEXT));
         let chip = if tab.current {
-            chip.debug_selector(|| "chat-card-header".to_owned())
+            chip.driver_id(|| "chat-card-header".to_owned())
                 .bg(gpui::rgb(t.chip))
                 .text_color(gpui::rgb(t.text_2))
         } else {
@@ -674,7 +673,7 @@ fn question_tab_row(offset: i8, prompt: &ChatPrompt, t: &UiTheme) -> Option<Div>
         };
         let number = index + 1;
         div()
-            .debug_selector(move || format!("chat-card-tab-{number}"))
+            .driver_id(move || format!("chat-card-tab-{number}"))
             .child(chip.child(label))
     });
     Some(div().flex().flex_wrap().gap(px(CARD_GAP)).children(tabs))
@@ -728,7 +727,7 @@ fn card_button(
                 let number = option.number;
                 row.child(
                     small(offset, description, t.text_2)
-                        .debug_selector(move || format!("chat-card-option-desc-{number}")),
+                        .driver_id(move || format!("chat-card-option-desc-{number}")),
                 )
             }),
         None => base.child(button.label.clone()),

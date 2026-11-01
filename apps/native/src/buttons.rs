@@ -8,6 +8,7 @@ use gpui::{
     Div, ElementId, FontWeight, MouseButton, Pixels, SharedString, Stateful, div, prelude::*, px,
 };
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use crate::ui_theme::UiTheme;
 
@@ -200,7 +201,7 @@ pub(crate) fn button(selector: &str, look: ButtonLook) -> Stateful<Div> {
     let name = selector.to_owned();
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_center()
         .justify_center()
@@ -320,7 +321,7 @@ fn framed_field(focused: bool, ring_selector: Option<String>, t: &UiTheme) -> Di
     let look = field_look(focused, t);
     let ring = focus_ring(look.radius, t);
     let ring = match ring_selector {
-        Some(selector) => ring.debug_selector(move || selector),
+        Some(selector) => ring.driver_id(move || selector),
         None => ring,
     };
     div()

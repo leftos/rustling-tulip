@@ -19,6 +19,7 @@ use gpui::{
 };
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
+use crate::driver_id::DriverId as _;
 use crate::fonts::{self, ui_px_at};
 use crate::links::TerminalLinkCandidate;
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
@@ -813,7 +814,7 @@ pub(crate) fn render_row(
         Err(_) => format!("viewer-md-row-{}-{ix}", painter.tab_id),
     };
     div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .px(px(pad_x))
         .when(ix == 0, |first| first.pt(px(pad_top)))
         .child(framed)
@@ -1013,7 +1014,7 @@ impl RootView {
         let doc = Arc::clone(doc);
         let selector = format!("viewer-md-{tab_id}");
         div()
-            .debug_selector(move || selector)
+            .driver_id(move || selector)
             .flex_1()
             .min_h(px(0.0))
             .text_size(px(UI_TEXT_SIZE))

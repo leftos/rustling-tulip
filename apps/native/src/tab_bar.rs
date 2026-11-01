@@ -2,6 +2,7 @@
 //! middle-click or × to close, twice when the tab holds something), then "+"
 //! for a new tab.
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, App, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId, Entity,
@@ -482,7 +483,7 @@ fn popped_mark(tab_id: &str, t: &UiTheme) -> Stateful<Div> {
     let name = format!("tab-pill-popped-{tab_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex_none()
         .text_color(gpui::rgb(t.muted))
         .tooltip(tooltip("Popped out"))
@@ -591,7 +592,7 @@ impl RootView {
             .map(|tab| self.tab_pill(tab, accent, cx))
             .collect();
         div()
-            .debug_selector(|| "tab-bar".to_owned())
+            .driver_id(|| "tab-bar".to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -664,7 +665,7 @@ impl RootView {
             .map(|host| host_chip(fonts::ui_text_size(cx), &tab.id, host, &t));
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .relative()
             .on_drag_move(cx.listener(
                 move |this, event: &DragMoveEvent<DragPayload>, window, cx| {
@@ -1284,7 +1285,7 @@ fn count_badge(offset: i8, tab_id: &str, badge: TabBadge, t: &UiTheme) -> Statef
     let glyph_id = format!("tab-badge-glyph-{tab_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .items_center()
@@ -1321,7 +1322,7 @@ fn host_chip(offset: i8, tab_id: &str, host: HostLabel, t: &UiTheme) -> Stateful
     let name = format!("tab-host-{tab_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .items_center()
@@ -1341,7 +1342,7 @@ fn host_chip(offset: i8, tab_id: &str, host: HostLabel, t: &UiTheme) -> Stateful
 /// `tab-dashboard-icon-<id>`.
 fn dashboard_icon(tab_id: &str, t: &UiTheme) -> Div {
     let name = format!("tab-dashboard-icon-{tab_id}");
-    div().debug_selector(|| name).flex().flex_none().child(
+    div().driver_id(|| name).flex().flex_none().child(
         svg()
             .path(DASHBOARD_ICON)
             .size(px(TAB_ICON_SIZE))
@@ -1357,7 +1358,7 @@ fn need_you_badge(offset: i8, tab_id: &str, waiting: usize, t: &UiTheme) -> Opti
     Some(
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .flex()
             .flex_none()
             .items_center()
@@ -1398,7 +1399,7 @@ const GHOST_BADGE_TEXT_SIZE: f32 = 9.5;
 fn insertion_mark(tab_id: &str, side: Side, t: &UiTheme) -> Div {
     let selector = format!("tab-drop-mark-{tab_id}");
     let bar = div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .absolute()
         .top(px(MARK_INSET))
         .bottom(px(MARK_INSET))
@@ -1461,7 +1462,7 @@ impl Render for PillGhost {
         });
         div().child(
             div()
-                .debug_selector(|| "tab-drag-ghost".to_owned())
+                .driver_id(|| "tab-drag-ghost".to_owned())
                 .absolute()
                 .left(self.offset.x + GHOST_NUDGE.x)
                 .top(self.offset.y + GHOST_NUDGE.y)
@@ -1500,7 +1501,7 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
     let name = format!("tab-close-{tab_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .items_center()
@@ -1539,7 +1540,7 @@ fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
     let t = theme(cx);
     div()
         .id("new-tab")
-        .debug_selector(|| "new-tab".to_owned())
+        .driver_id(|| "new-tab".to_owned())
         .w(ui_px(cx, TAB_BAR_HEIGHT))
         .h_full()
         .flex()

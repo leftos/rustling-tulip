@@ -18,6 +18,7 @@ use gpui::{
 };
 
 use crate::diff_model::{DiffModel, Row, RowKind, Side};
+use crate::driver_id::DriverId as _;
 use crate::fonts::{self, FontSettings};
 use crate::syntax::{Highlighted, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
@@ -541,7 +542,7 @@ impl DiffView {
     fn ruler(&self, t: &UiTheme) -> Div {
         let marks = ruler_marks(&self.model, self.ruler_height.get());
         div()
-            .debug_selector(|| "diff-ruler".to_owned())
+            .driver_id(|| "diff-ruler".to_owned())
             .relative()
             .flex_none()
             .w(px(RULER_WIDTH))
@@ -550,7 +551,7 @@ impl DiffView {
             .border_color(rgb(t.line))
             .children(marks.into_iter().enumerate().map(|(index, mark)| {
                 div()
-                    .debug_selector(move || format!("diff-ruler-mark-{index}"))
+                    .driver_id(move || format!("diff-ruler-mark-{index}"))
                     .absolute()
                     .left(px(RULER_MARK_INSET))
                     .right(px(RULER_MARK_INSET))

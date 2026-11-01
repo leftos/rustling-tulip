@@ -5,6 +5,7 @@
 //! bottom the Recover sessions button with its badge and the Settings
 //! button.
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use gpui::{
     ClickEvent, Context, DispatchPhase, Div, FontWeight, MouseButton, MouseDownEvent,
@@ -195,7 +196,7 @@ impl RootView {
             .w(px(RAIL_WIDTH))
             .h_full()
             .pb(px(RAIL_BOTTOM))
-            .debug_selector(|| "activity-rail".to_owned())
+            .driver_id(|| "activity-rail".to_owned())
             .bg(gpui::rgb(t.sunken))
             .border_r_1()
             .border_color(gpui::rgb(t.border))
@@ -433,7 +434,7 @@ fn rail_button(
     div()
         .id(selector)
         .group(selector)
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .relative()
         .flex()
         .flex_none()
@@ -475,7 +476,7 @@ fn badge(offset: i8, shift: i8, selector: &'static str, text: String, t: &UiThem
         .text_color(gpui::rgb(t.text))
         .text_size(ui_px_at(offset, BADGE_TEXT_SIZE))
         .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .child(text)
 }
 

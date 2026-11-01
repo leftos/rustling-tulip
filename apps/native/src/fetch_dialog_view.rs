@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::RootView;
+use crate::driver_id::DriverId as _;
 use crate::fetch_dialog::{FetchControl, FetchForm, PLACEHOLDER, progress_fraction, progress_text};
 use crate::fetch_link;
 use crate::file_fetch::FetchEntry;
@@ -435,13 +436,13 @@ impl RootView {
             .child(path_box(dialog, focus, &t))
             .children(form.hint().map(|hint| {
                 div()
-                    .debug_selector(|| "fetch-hint".to_owned())
+                    .driver_id(|| "fetch-hint".to_owned())
                     .text_color(gpui::rgb(t.muted))
                     .child(hint)
             }))
             .children(form.error().map(|error| {
                 div()
-                    .debug_selector(|| "fetch-error".to_owned())
+                    .driver_id(|| "fetch-error".to_owned())
                     .px(px(6.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
@@ -476,7 +477,7 @@ fn scope_row(form: &FetchForm, focus: FetchControl, cx: &mut Context<RootView>) 
     if let Some(caption) = form.caption() {
         return row.child(
             div()
-                .debug_selector(|| "fetch-caption".to_owned())
+                .driver_id(|| "fetch-caption".to_owned())
                 .text_color(gpui::rgb(t.muted))
                 .child(caption),
         );
@@ -511,7 +512,7 @@ fn scope_row(form: &FetchForm, focus: FetchControl, cx: &mut Context<RootView>) 
 /// The path field in its box.
 fn path_box(dialog: &FetchDialog, focus: FetchControl, t: &UiTheme) -> Div {
     div()
-        .debug_selector(|| FetchControl::Path.selector())
+        .driver_id(|| FetchControl::Path.selector())
         .flex()
         .px(px(6.0))
         .py(px(3.0))
@@ -528,13 +529,13 @@ fn path_box(dialog: &FetchDialog, focus: FetchControl, t: &UiTheme) -> Div {
 /// The fetch's bar and the line saying how far it is.
 fn progress_row((text, fraction): (String, f32), t: &UiTheme) -> Div {
     let fill = div()
-        .debug_selector(|| "fetch-progress-fill".to_owned())
+        .driver_id(|| "fetch-progress-fill".to_owned())
         .h_full()
         .w(relative(fraction))
         .rounded(px(3.0))
         .bg(gpui::rgb(t.accent));
     let track = div()
-        .debug_selector(|| "fetch-progress".to_owned())
+        .driver_id(|| "fetch-progress".to_owned())
         .w_full()
         .h(px(6.0))
         .rounded(px(3.0))
@@ -542,7 +543,7 @@ fn progress_row((text, fraction): (String, f32), t: &UiTheme) -> Div {
         .child(fill);
     div().flex().flex_col().gap(px(4.0)).child(track).child(
         div()
-            .debug_selector(|| "fetch-progress-text".to_owned())
+            .driver_id(|| "fetch-progress-text".to_owned())
             .text_color(gpui::rgb(t.muted))
             .child(text),
     )

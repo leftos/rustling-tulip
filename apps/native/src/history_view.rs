@@ -11,6 +11,7 @@ use gpui::{
 use protocol::DaemonMessage;
 
 use crate::changes_view::{HEAD_HEIGHT, count_pill, head_title};
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::ui_px;
 use crate::history::{
@@ -247,7 +248,7 @@ impl RootView {
         let handle = any_expanded.then(|| {
             let active = matches!(self.drag, Some(Drag::ScSplit));
             drag_handle("sc-split", false, active, &t)
-                .debug_selector(|| "sc-split".to_owned())
+                .driver_id(|| "sc-split".to_owned())
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -274,7 +275,7 @@ impl RootView {
             );
         div()
             .id("sc-body")
-            .debug_selector(|| "sc-body".to_owned())
+            .driver_id(|| "sc-body".to_owned())
             .relative()
             .flex()
             .flex_col()
@@ -311,7 +312,7 @@ impl RootView {
                 let name = format!("sc-history-body-{}", block.id);
                 div()
                     .id(SharedString::from(name.clone()))
-                    .debug_selector(|| name)
+                    .driver_id(|| name)
                     .pl(px(ROW_PADDING * 2.0))
                     .pr(px(ROW_PADDING))
                     .pb(px(6.0))
@@ -362,7 +363,7 @@ impl RootView {
         let name = format!("sc-history-split-{id}");
         let drag_id = id.to_owned();
         let handle = drag_handle(SharedString::from(name.clone()), false, active, &t)
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -387,7 +388,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
     let toggle_key = key.clone();
     let toggle = div()
         .id(SharedString::from(name.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_1()
         .min_w(px(0.0))
@@ -449,7 +450,7 @@ fn forge_button(id: &str, forge: ForgeButton, cx: &mut Context<RootView>) -> Sta
     let name = format!("sc-history-forge-{id}");
     let button = div()
         .id(SharedString::from(name.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .items_center()
@@ -484,7 +485,7 @@ fn commit_row(key: &ScKey, id: &str, row: CommitRow, cx: &mut Context<RootView>)
     let (key, sha) = (key.clone(), row.sha);
     div()
         .id(SharedString::from(name.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .items_center()
@@ -532,7 +533,7 @@ fn more_row(key: &ScKey, id: &str, more: &MoreRow, cx: &mut Context<RootView>) -
     let text = truncating(&name, StyledText::new(more.text().to_owned()));
     let row = div()
         .id(SharedString::from(name.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex_none()
         .h(ui_px(cx, ROW_HEIGHT))
         .pl(px(ROW_PADDING * 2.0))
@@ -592,7 +593,7 @@ fn detail_pane(
         let (key, sha, path) = (key.clone(), sha.to_owned(), file.path.clone());
         div()
             .id(SharedString::from(name.clone()))
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .flex()
             .flex_none()
             .items_center()

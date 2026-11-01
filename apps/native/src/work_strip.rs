@@ -7,6 +7,7 @@ use gpui::{AnyElement, ElementId, IntoElement, SharedString, div, prelude::*, px
 
 use crate::chat::{STRIP_SEPARATOR, Strip, StripItem, StripKind};
 use crate::chat_view::{BODY_PAD_X, SMALL_TEXT_SIZE};
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use crate::tooltip;
 use crate::ui_theme::UiTheme;
@@ -41,7 +42,7 @@ pub fn strip_row(
     }
     div()
         .id("work-strip")
-        .debug_selector(|| "work-strip".to_owned())
+        .driver_id(|| "work-strip".to_owned())
         .flex_none()
         .flex()
         .flex_row()
@@ -64,7 +65,7 @@ fn segment(index: usize, text: &str, items: &[&StripItem], mono: &SharedString) 
     let tip = segment_tip(items);
     let segment = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_row()
         .children(segment_text(text, items, mono));

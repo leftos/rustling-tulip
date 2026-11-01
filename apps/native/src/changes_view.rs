@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use crate::buttons::{ButtonSize, Layer, primary_button};
 use crate::discard_confirm::{DiscardButton, DiscardConfirm};
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::{DEFAULT_FAMILY, ui_px, ui_px_at};
 use crate::notice_view::modal_panel;
@@ -970,7 +971,7 @@ fn action_button(
     let head_button_text = ui_px(cx, HEAD_TEXT_SIZE);
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex_none()
         .px(px(pad))
         .rounded(px(radius))
@@ -1197,7 +1198,7 @@ fn commit_box(
     let t = theme(cx);
     let input_name = commit.input_selector.clone();
     let field = div()
-        .debug_selector(|| input_name)
+        .driver_id(|| input_name)
         .px(px(6.0))
         .py(px(3.0))
         .rounded(px(4.0))
@@ -1277,7 +1278,7 @@ fn banner_view(key: &ScKey, id: &str, text: String, cx: &mut Context<RootView>) 
     let key = key.clone();
     let close = div()
         .id(ElementId::Name(SharedString::from(close_name.clone())))
-        .debug_selector(|| close_name)
+        .driver_id(|| close_name)
         .flex_none()
         .px(px(4.0))
         .rounded(px(3.0))
@@ -1292,7 +1293,7 @@ fn banner_view(key: &ScKey, id: &str, text: String, cx: &mut Context<RootView>) 
         }));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_start()
         .gap(px(6.0))
@@ -1318,7 +1319,7 @@ fn bucket_header(key: &ScKey, bucket: &ScBucketRow, cx: &mut Context<RootView>) 
         .collect();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -1363,7 +1364,7 @@ fn folder_row(
     let label_id = format!("{name}-label");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_center()
         .gap(px(4.0))
@@ -1407,7 +1408,7 @@ fn file_row_view(
     let (open_key, open_path) = (key.clone(), file.path.clone());
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .group(group.clone())
         .flex()
         .items_center()

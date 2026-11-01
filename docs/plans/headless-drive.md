@@ -1,6 +1,6 @@
 # RT-324 map: driving the native client headless
 
-PROTOCOL: 1 overlay: none (`docs/agents/explore.md` absent), read CLAUDE.md; 2 README: skipped, `docs/README.md` does not exist; 3 Task Index: read the `docs/architecture.md` Task index rows "Run the tests" (:123) and "Look at a UI change" (:126), no row for driving/injecting input.
+PROTOCOL: 1 overlay: none (`docs/agents/explore.md` absent), read CLAUDE.md; 2 README: skipped; 3 Task Index: read the `docs/architecture.md` Task index rows "Run the tests" (:123) and "Look at a UI change" (:126), no row for driving/injecting input.
 
 4 ck: skipped (one-repo question, Task Index rows + CLAUDE.md answered the docs side; not run); 5 design docs: RT-316/RT-42 read from Linear; 6 source: yaat/towercab/delve docs + driver, smoke_window.rs, shot.rs, offscreen.rs, tests/support/mod.rs, gpui-0.2.2 windows events; 7 tree search: done for `debug_selector`, actions, RootView accessors.
 
@@ -40,13 +40,13 @@ The rule that decides the design (`drive-owned-app-in-process`): outside-in driv
   Six views only. Note it already mixes in-process key dispatch with posted clicks, because a posted key carries no modifiers.
 - **UI-spec harness** `apps/native/tests/support/mod.rs`: in-process `TestAppContext`/`VisualTestContext` with a scripted fake daemon, `click_on(selector)`/`center(selector)` using `debug_selector` tags, `simulate_keystrokes`, `drag`, `right_click`, `root_update`.
 
-  **Trap**: gpui's `debug_selector` is a no-op unless the `test-support` feature is on (gpui `elements/div.rs:709` vs `:719`), and `apps/native/Cargo.toml:78` enables it only as a dev-dependency. A real client has no selectors; an in-app driver needs another way to address elements (RootView accessors/semantic actions, layout constants as the smoke does, or enabling `test-support` under the driver feature, whose cost is unmeasured here).
+  **Trap**: gpui's `debug_selector` is a no-op unless the `test-support` feature is on (gpui `elements/div.rs:705-721`), and gpui's bounds map is crate-private (`window.rs:682`), so enabling `test-support` in a driver build would not expose element bounds. A real client has no selectors; the `driver` feature's registry (`apps/native/src/driver/registry.rs`) answers by name instead: view code names an element with `.driver_id(|| ...)` (`apps/native/src/driver_id.rs`), which adds an absolute canvas child that records the element's padding-box bounds and the part visible under the content mask (scroll containers keep `.debug_selector`).
 - **How GPUI on Windows takes input** (`gpui-0.2.2/src/platform/windows/events.rs`, window procedure): WM_MOUSEMOVE (:283, StartTrackingMouse TME_LEAVE, so a real-cursor-elsewhere window gets WM_MOUSELEAVE, same trap as Avalonia: post a move before each press), WM_LBUTTONDOWN etc. (:81).
 
   It also takes WM_MOUSEWHEEL (:520: lParam is **screen** coords, converted with ScreenToClient, so the poster must ClientToScreen; delta uses system wheel-scroll-lines; Shift is read from real keyboard), WM_KEYDOWN (:98), WM_CHAR (:100), WM_IME_STARTCOMPOSITION/COMPOSITION (:102-103, driven by the real IME context via Imm APIs, so posting cannot fake composition), WM_ACTIVATE (:42), WM_SETCURSOR.
 
   **Modifiers come from `GetKeyState`** (`is_virtual_key_pressed`, :1460; `current_modifiers()` on mouse move/wheel). Consequences: posted Ctrl/Shift/Alt chords and modified clicks/wheel do not work (and a real held key by the owner leaks in), exactly as yaat found for Avalonia. Posted plain keys, letters (via TranslateMessage), clicks, drags (MOUSEMOVE with MK_LBUTTON) and wheel work, proven by smoke/shot for key, click.
-  Unmeasured here: posted wheel, drag, and right-click on the real exe (nothing in the repo posts them); no run was made.
+  Right-click and hover tooltips on the real cloaked exe are measured working with posted messages. Unmeasured here: posted wheel and drag on the real exe.
 - **Capture routes**: gpui 0.2.2 has no render-to-image/read-pixels API (searched `render_to_image|read_pixels|screenshot` in the crate: nothing). `PrintWindow(PW_RENDERFULLCONTENT)` of the cloaked window is proven (smoke + shot).
 
   WGC (yaat's route) is the alternative for video; PrintWindow can block the render thread 1-5 s on some apps (yaat doc) but was fine for stills here. In-process capture is limited to the same PrintWindow/GDI (call it from a non-UI thread, as shot.rs does with a `capture` thread, because PrintWindow sends WM_PRINT to the UI thread and would deadlock if called on it).
@@ -66,8 +66,8 @@ The rule that decides the design (`drive-owned-app-in-process`): outside-in driv
 
   Then come `click/move/drag/wheel` (build `MouseDownEvent`/`MouseMoveEvent`/`ScrollWheelEvent` and `Window::dispatch_event`, positions in logical px; modifiers explicit, so no GetKeyState leak), `action` (named command: open settings, new shell, select tab...). Then come `wait_for` (poll state predicate with bounded timeout, return last value), `screenshot` (PrintWindow to PNG path), `pane_text` (grid text of a pane, replacing reading scrollback over a second socket), `log_tail`.
 - MCP server: new crate (e.g. `tools/rt-driver-mcp/`, Rust, stdio, fixed tool surface: `launch`, `stop`, `call(method, params)`, `screenshot`, `batch`), owning the isolated daemon (reuse `tests/support/live.rs` logic, which should move to a shared dev crate), launching the client with the env, returning pid; stdout JSON-RPC only, shadow-copy launch, named-session-per-call (rulebook rules). A plain CLI (`rt.ps1 native-drive <script.json>`) is the same code path and is what RT-316 asks for.
-- GPUI makes easy: `dispatch_event`/`dispatch_keystroke` are public on `Window` (no test-support needed for `dispatch_keystroke`, shot.rs uses it in a normal build); RootView is already a testable object with accessors; capture proven; `RootView::with_transport` allows a **fake-daemon mode** of the same driver (no daemon at all) for pure-UI checks, which is the existing shot fixture.
-- GPUI makes hard: no `debug_selector` outside test-support, so no element addressing by name (use semantic actions/accessors and logical coordinates from layout constants; or a driver-only registry of hit regions); no accessibility tree/UIA to scrape (gpui draws its own scene), so `list_windows`/`find_elements` equivalents must be built by us.
+- GPUI makes easy: `dispatch_event`/`dispatch_keystroke` are public on `Window` (`dispatch_keystroke` needs no feature, shot.rs uses it in a normal build); RootView is already a testable object with accessors; capture proven; `RootView::with_transport` allows a **fake-daemon mode** of the same driver (no daemon at all) for pure-UI checks, which is the existing shot fixture.
+- GPUI makes hard: no `debug_selector` outside test-support, so element addressing by name is the `driver` feature's registry (`driver::registry`), with semantic actions/accessors and logical coordinates from layout constants beside it; no accessibility tree/UIA to scrape (gpui draws its own scene), so `list_windows`/`find_elements` equivalents must be built by us.
 
   There is no render-to-image, so capture depends on a window existing and on PrintWindow. Synthetic events skip the OS focus/IME path (IME composition, drag-and-drop from Explorer, native menus/dialogs untestable this way; native folder/file pickers must be queue-answered through `RootDeps.pick_folder/pick_file`, which are already injectable closures, shot.rs:256-259). `PrintWindow` must run off the UI thread.
 
@@ -134,7 +134,7 @@ Work on a feature branch from `main` (current branch: `main`). One branch per st
 
 1. **Endpoint vs OS-posted only.** Recommend: in-process endpoint (A), posted messages kept in smoke. Worst case: the synthetic path (`dispatch_event`) hides a bug the real wndproc path has (e.g. the TranslateMessage/WM_CHAR route), so a driven check passes and the owner finds the bug; mitigation: the smoke tier stays and S6 live check.
 2. **Compile-out feature vs run-time env only.** Recommend: Cargo feature `driver` plus env switch plus offscreen+isolation preconditions. Worst case: the feature is accidentally enabled in a shipped build, exposing a local pipe (current-user only) that can inject input; mitigation: installer build asserts the feature off, test pins it.
-3. **Element addressing**: semantic actions + logical coordinates (recommended) vs enabling gpui `test-support` (debug selectors) in the driver build vs a new hit-region registry. Worst case: coordinates drift after a layout change and a script clicks the wrong thing; mitigation: results report what was hit (the rulebook `refuse-before-pressing`), prefer actions.
+3. **Element addressing**: semantic actions + logical coordinates (recommended) beside the `driver` feature's registry of named elements' bounds (`driver::registry`); gpui `test-support` does not serve, since its debug selectors are a no-op without it and the bounds map is crate-private. Worst case: coordinates drift after a layout change and a script clicks the wrong thing; mitigation: results report what was hit (the rulebook `refuse-before-pressing`), prefer actions.
 4. **MCP server in Rust vs PowerShell/CLI only.** Recommend: CLI/script runner first (S2), MCP (S5) after it proves useful. Worst case: building S5 before the owner uses S2 wastes the cost; cost of the opposite order is none.
 5. **Capture**: keep PrintWindow stills; WGC only if video is wanted. Worst case: PrintWindow returns black/stale for a surface the compositor does not redraw while cloaked (shot.rs already rejects all-black).
 6. **Cloak vs hidden desktop vs off-screen position.** Recommend: stay cloaked (proven here). Worst case: a brief flash before the cloak (towercab measured 0.9 s of show before app code; here the window is created with `show:false` so it should not flash; not measured in this run).
@@ -152,7 +152,6 @@ The question took roughly 25 reads/searches beyond the Task Index row and one do
 
 ## MISSING ENTRY POINT
 
-- `docs/README.md` does not exist (CLAUDE.md names `docs/architecture.md` as the index, and the lowercase file exists with a "Task index" section of `docs/architecture.md`).
 - `docs/agents/explore.md` (repo overlay) does not exist.
 - `docs/DRIVING_CONVENTIONS.md` does not exist (see 5).
-- Glossary: no glossary was found for terms such as "cloaked", "smoke tier", "shot"; not checked beyond the absence of `docs/README.md`.
+- Glossary: no glossary was found for terms such as "cloaked", "smoke tier", "shot"; the glossary is in `docs/README.md`.

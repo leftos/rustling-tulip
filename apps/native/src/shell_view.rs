@@ -8,6 +8,7 @@ use gpui::{
     Stateful, Subscription, Window, div, prelude::*, px,
 };
 
+use crate::driver_id::DriverId as _;
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::shell_dialog::{
@@ -583,7 +584,7 @@ fn shell_host_row(selected: &HostKey, hosts: Vec<HostKey>, cx: &mut Context<Root
         })
         .collect();
     div()
-        .debug_selector(|| "shell-host-row".to_owned())
+        .driver_id(|| "shell-host-row".to_owned())
         .flex()
         .flex_col()
         .gap(px(4.0))
@@ -599,7 +600,7 @@ fn shell_folder<'a>(dialog: &'a ShellDialog, cx: &'a App) -> &'a str {
 /// The folder field in its box.
 fn input_box(dialog: &ShellDialog, focus: ShellControl, t: &UiTheme) -> Div {
     div()
-        .debug_selector(|| ShellControl::Folder.selector().to_owned())
+        .driver_id(|| ShellControl::Folder.selector().to_owned())
         .flex()
         .flex_1()
         .px(px(6.0))
@@ -618,7 +619,7 @@ fn input_box(dialog: &ShellDialog, focus: ShellControl, t: &UiTheme) -> Div {
 fn hint_row(form: &ShellForm, folder: &str, t: &UiTheme) -> Option<Div> {
     form.hint(folder).map(|hint| {
         div()
-            .debug_selector(|| "shell-path-hint".to_owned())
+            .driver_id(|| "shell-path-hint".to_owned())
             .text_color(gpui::rgb(t.muted))
             .child(hint)
     })
@@ -653,7 +654,7 @@ fn link_button(
 ) -> Stateful<Div> {
     div()
         .id(selector)
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .px(px(4.0))
         .py(px(2.0))
         .rounded(px(4.0))

@@ -14,6 +14,7 @@ use crate::chat_view::{
     BODY_PAD_X, LOADING_NOTE as CHAT_LOADING_NOTE, RowLook, SessionChat, card_key, chat_note,
     chat_row, follow_bottom, muted_line,
 };
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use crate::scrollbar::Scrollbar;
 use crate::summary::{LineEntries, OpenLine, SummaryLog, open_line};
@@ -57,11 +58,11 @@ impl RootView {
             }
             Some(summary) if !summary.is_loading() => {
                 chat_note(look.text_offset, EMPTY_NOTE, &look.theme)
-                    .debug_selector(|| "summary-empty".to_owned())
+                    .driver_id(|| "summary-empty".to_owned())
                     .into_any_element()
             }
             _ => chat_note(look.text_offset, LOADING_NOTE, &look.theme)
-                .debug_selector(|| "summary-loading".to_owned())
+                .driver_id(|| "summary-loading".to_owned())
                 .into_any_element(),
         };
         let loaded = chat.filter(|chat| !chat.is_loading());
@@ -70,7 +71,7 @@ impl RootView {
         let composer = loaded.and_then(|chat| self.composer_row(session_id, chat, cx));
         let keys_for = session_id.to_owned();
         div()
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .flex()
             .flex_col()
             .flex_1()
@@ -190,7 +191,7 @@ fn line_row(look: &RowLook<'_>, line: &StretchLine, cx: &mut Context<RootView>) 
     let hover = look.theme.hover;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex_none()
         .px(px(LINE_PAD_X))
         .py(px(LINE_PAD_Y))
@@ -260,6 +261,6 @@ fn entry_rows(
 /// A muted note among an open line's rows, tagged `name`.
 fn note_row(look: &RowLook<'_>, text: &str, name: String) -> AnyElement {
     muted_line(look.text_offset, text.to_owned(), &look.theme)
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .into_any_element()
 }

@@ -19,6 +19,7 @@ use protocol::{ClientMessage, DaemonMessage, TabContent};
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::diff_tab::split_path;
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::ellipsized;
 use crate::fonts;
 use crate::notices::ToastKind;
@@ -256,7 +257,7 @@ impl Rows {
             .on_mouse_down(MouseButton::Left, self.on_press(index))
             .child(
                 div()
-                    .debug_selector(move || selector)
+                    .driver_id(move || selector)
                     .flex_none()
                     .w(px(self.gutter_width))
                     .pr(px(GUTTER_PAD))
@@ -267,7 +268,7 @@ impl Rows {
             )
             .child(
                 div()
-                    .debug_selector(move || text_selector)
+                    .driver_id(move || text_selector)
                     .flex_1()
                     .min_w(px(0.0))
                     .pl(px(TEXT_PAD_LEFT))
@@ -918,7 +919,7 @@ impl RootView {
         let banner = tab.note().map(|note| {
             let selector = format!("viewer-banner-{tab_id}");
             div()
-                .debug_selector(move || selector)
+                .driver_id(move || selector)
                 .flex_none()
                 .px(px(HEADER_PAD_LEFT))
                 .py(px(10.0))
@@ -940,7 +941,7 @@ impl RootView {
         let (up_tab, up_out_tab) = (tab_id.to_owned(), tab_id.to_owned());
         Some(
             div()
-                .debug_selector(move || body)
+                .driver_id(move || body)
                 .track_focus(&self.viewer_focus)
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     this.on_viewer_key(&key_tab, event, window, cx);
@@ -1121,7 +1122,7 @@ fn viewer_find_bar(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) ->
     );
     Some(
         div()
-            .debug_selector(move || bar)
+            .driver_id(move || bar)
             .flex()
             .flex_none()
             .items_center()
@@ -1145,7 +1146,7 @@ fn viewer_find_bar(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) ->
             )
             .child(
                 div()
-                    .debug_selector(move || count)
+                    .driver_id(move || count)
                     .flex_none()
                     .min_w(px(FIND_COUNT_WIDTH))
                     .text_color(gpui::rgb(t.muted))
@@ -1210,7 +1211,7 @@ fn viewer_header(tab_id: &str, tab: &ViewerTab, cx: &mut Context<RootView>) -> D
     });
     let selector = format!("viewer-header-{tab_id}");
     div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex()
         .flex_none()
         .items_center()

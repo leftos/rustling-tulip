@@ -7,6 +7,7 @@ use gpui::{AnyElement, ClickEvent, Context, FontWeight, Keystroke, Window, div, 
 
 use protocol::{DaemonMessage, VscodeWorkspaceSuggestion};
 
+use crate::driver_id::DriverId as _;
 use crate::fonts;
 use crate::notice_view::modal_panel;
 use crate::scan_key;
@@ -183,7 +184,7 @@ impl RootView {
             .gap(px(6.0))
             .child(
                 div()
-                    .debug_selector(|| "vscode-prompt-body".to_owned())
+                    .driver_id(|| "vscode-prompt-body".to_owned())
                     .flex()
                     .flex_wrap()
                     .items_baseline()
@@ -211,7 +212,7 @@ impl RootView {
                     .map(|(index, row)| {
                         let badge = row.badge();
                         div()
-                            .debug_selector(move || format!("vscode-prompt-folder-{index}"))
+                            .driver_id(move || format!("vscode-prompt-folder-{index}"))
                             .flex()
                             .items_center()
                             .gap(px(6.0))

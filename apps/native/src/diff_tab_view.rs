@@ -28,6 +28,7 @@ use crate::diff_tab::{
     split_path,
 };
 use crate::diff_view::{DiffView, Nav};
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::ellipsized;
 use crate::fonts::{FontSettings, ui_px};
 use crate::notices::ToastKind;
@@ -507,7 +508,7 @@ fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
             .whitespace_nowrap()
     };
     let name = ellipsis_box()
-        .debug_selector(|| PATH_NAME.to_owned())
+        .driver_id(|| PATH_NAME.to_owned())
         .flex_none()
         .max_w(relative(1.0))
         .text_color(gpui::rgb(t.text))
@@ -518,7 +519,7 @@ fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
         ));
     div()
         .id("diff-path")
-        .debug_selector(|| "diff-path".to_owned())
+        .driver_id(|| "diff-path".to_owned())
         .flex()
         .gap(px(PATH_GAP))
         .min_w(px(0.0))
@@ -528,7 +529,7 @@ fn path_box(path: &str, t: &UiTheme) -> Stateful<Div> {
         .when(!folder.is_empty(), |path| {
             path.child(
                 ellipsis_box()
-                    .debug_selector(|| PATH_FOLDER.to_owned())
+                    .driver_id(|| PATH_FOLDER.to_owned())
                     .text_color(gpui::rgb(t.subtle))
                     .children(ellipsized(
                         PATH_FOLDER,
@@ -566,7 +567,7 @@ fn toggle(
     let glyph = if on { "☑" } else { "☐" };
     let toggle = div()
         .id(selector)
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .flex()
         .flex_none()
         .items_center()

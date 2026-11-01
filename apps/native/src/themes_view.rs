@@ -19,6 +19,7 @@ use crate::appearance_stops::AppearanceStop;
 use crate::buttons::{ButtonSize, Layer, field_frame_with_ring, focus_ring, primary_button};
 use crate::contrast;
 use crate::diff_view::wash;
+use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_view::{close_button, dialog_card, dialog_footer, dialog_title_bar};
@@ -625,7 +626,7 @@ impl RootView {
         let foot = foot.relative().when(asking, |foot| foot.child(ask_cover()));
         let error = modal.error.clone().map(|error| {
             div()
-                .debug_selector(|| "themes-error".to_owned())
+                .driver_id(|| "themes-error".to_owned())
                 .flex_none()
                 .px(px(14.0))
                 .py(px(6.0))
@@ -685,7 +686,7 @@ fn list_body(modal: &ThemesModal, offset: i8, cx: &mut Context<RootView>) -> Div
 /// A heading of the list.
 fn heading(selector: &'static str, label: &'static str, offset: i8, shift: i8, t: &UiTheme) -> Div {
     div()
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .flex_none()
         .pt(px(6.0))
         .px(px(8.0))
@@ -793,7 +794,7 @@ fn theme_row(
         .when(modal.dialog.in_use == index, |line| {
             line.child(
                 div()
-                    .debug_selector(|| "themes-in-use".to_owned())
+                    .driver_id(|| "themes-in-use".to_owned())
                     .flex_none()
                     .text_size(fonts::ui_px_at(offset, 11.0))
                     .text_color(gpui::rgb(t.text_2))
@@ -802,14 +803,14 @@ fn theme_row(
         });
     let error = row.entry.error.clone().map(|error| {
         div()
-            .debug_selector(|| "themes-row-error".to_owned())
+            .driver_id(|| "themes-row-error".to_owned())
             .text_size(fonts::ui_px_at(offset, 11.0))
             .text_color(gpui::rgb(t.danger_text))
             .child(error)
     });
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .relative()
         .flex()
         .flex_col()
@@ -858,7 +859,7 @@ fn details(modal: &ThemesModal, offset: i8, shift: i8, t: &UiTheme) -> Stateful<
     let Some(previewed) = row.theme else {
         return column.children(row.entry.error.clone().map(|error| {
             div()
-                .debug_selector(|| "themes-preview-error".to_owned())
+                .driver_id(|| "themes-preview-error".to_owned())
                 .text_color(gpui::rgb(t.danger_text))
                 .child(error)
         }));
@@ -869,14 +870,14 @@ fn details(modal: &ThemesModal, offset: i8, shift: i8, t: &UiTheme) -> Stateful<
         .child(miniature(&previewed, &Picker(None)))
         .child(
             div()
-                .debug_selector(|| "themes-light-word".to_owned())
+                .driver_id(|| "themes-light-word".to_owned())
                 .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
                 .text_color(gpui::rgb(t.text))
                 .child(light_word(row)),
         )
         .child(
             div()
-                .debug_selector(|| "themes-contrast".to_owned())
+                .driver_id(|| "themes-contrast".to_owned())
                 .when(!row.failing.is_empty(), |line| {
                     line.text_color(gpui::rgb(t.danger_text))
                 })
@@ -885,7 +886,7 @@ fn details(modal: &ThemesModal, offset: i8, shift: i8, t: &UiTheme) -> Stateful<
         .children(lines.map(|line| div().flex_none().child(line)))
         .children(terminal_line(row).map(|line| {
             div()
-                .debug_selector(|| "themes-terminal-source".to_owned())
+                .driver_id(|| "themes-terminal-source".to_owned())
                 .child(line)
         }))
 }
@@ -1837,7 +1838,7 @@ fn ask_row(ask: &Ask, go: bool, cx: &mut Context<RootView>) -> Div {
         this.answer_themes_ask(window, cx);
     }));
     div()
-        .debug_selector(|| "themes-ask".to_owned())
+        .driver_id(|| "themes-ask".to_owned())
         .font_weight(fonts::ui_weight_at(shift, FontWeight::NORMAL))
         .flex()
         .flex_none()
@@ -1863,7 +1864,7 @@ fn editor_field(
 ) -> Div {
     let selector = control.selector();
     field_frame_with_ring(focused, format!("{selector}-ring"), &theme(cx))
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .flex_1()
         .min_w(px(0.0))
         .on_mouse_down(
@@ -1879,7 +1880,7 @@ fn editor_field(
 /// A note under a field, in the danger colour.
 fn field_note(selector: &'static str, text: String, offset: i8, t: &UiTheme) -> Div {
     div()
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .flex_none()
         .text_size(fonts::ui_px_at(offset, 11.5))
         .text_color(gpui::rgb(t.danger_text))
@@ -1984,7 +1985,7 @@ fn token_row(
     let selected = editor.cursor == index;
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .relative()
         .flex()
         .flex_none()
@@ -2058,7 +2059,7 @@ fn token_badge(row: &TokenRow, badge: Option<ContrastBadge>, offset: i8, t: &UiT
     let color = if badge.below { t.danger_text } else { t.text_2 };
     place.child(
         div()
-            .debug_selector(move || selector)
+            .driver_id(move || selector)
             .text_size(fonts::ui_px_at(offset, 11.0))
             .text_color(gpui::rgb(color))
             .child(badge_text(badge)),
@@ -2191,7 +2192,7 @@ fn edit_footer(modal: &ThemesModal, editor: &ThemeEditor, cx: &mut Context<RootV
     .child("Save")
     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_editor(cx)));
     let summary = div()
-        .debug_selector(|| "themes-edit-summary".to_owned())
+        .driver_id(|| "themes-edit-summary".to_owned())
         .font_weight(fonts::ui_weight_at(shift, FontWeight::NORMAL))
         .text_size(fonts::ui_px_at(offset, 12.5))
         .text_color(gpui::rgb(if failing == 0 {
@@ -2276,13 +2277,15 @@ impl Picker {
         let Some((_, token)) = PICK_REGIONS.iter().find(|(id, _)| *id == region) else {
             return part;
         };
-        part.debug_selector(move || region.to_owned())
-            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
+        part.driver_id(move || region.to_owned()).on_mouse_down(
+            MouseButton::Left,
+            move |_: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 if let Err(err) = root.update(cx, |this, cx| this.pick_token(token, cx)) {
                     tracing::warn!("picking a token: {err}");
                 }
-            })
+            },
+        )
     }
 }
 
@@ -2291,7 +2294,7 @@ impl Picker {
 /// tells `picker` the token it shows.
 fn editor_preview(t: &UiTheme, picker: &Picker) -> impl IntoElement {
     div()
-        .debug_selector(|| "themes-editor-preview".to_owned())
+        .driver_id(|| "themes-editor-preview".to_owned())
         .flex_none()
         .flex()
         .flex_col()
@@ -2437,7 +2440,7 @@ fn miniature(t: &UiTheme, picker: &Picker) -> impl IntoElement {
     picker.tag(
         "pick-ground",
         div()
-            .debug_selector(|| "themes-miniature".to_owned())
+            .driver_id(|| "themes-miniature".to_owned())
             .font_weight(FontWeight::NORMAL)
             .flex_none()
             .flex()

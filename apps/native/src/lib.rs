@@ -44,6 +44,9 @@ mod diff_tab_view;
 pub mod diff_view;
 mod discard_confirm;
 mod drag;
+#[cfg(feature = "driver")]
+pub mod driver;
+mod driver_id;
 pub mod ellipsis;
 mod fetch_dialog;
 mod fetch_dialog_view;
@@ -166,6 +169,7 @@ mod workspace_creator_view;
 mod worktrees_manager;
 mod worktrees_manager_view;
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use alacritty_terminal::vte::ansi::CursorShape;
 use daemon_client::device_tokens::DeviceTokenStore;
@@ -5176,6 +5180,8 @@ fn font_size_to_u16(size: f32) -> u16 {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "driver")]
+        driver::registry::begin_frame(window, cx);
         // Tab switches and renames made here change the title without a
         // daemon message.
         self.refresh_window_title(window, cx);
@@ -5314,7 +5320,7 @@ impl RootView {
         let t = theme(cx);
         let connections = div()
             .id("footer-connections")
-            .debug_selector(|| "footer-connections".to_owned())
+            .driver_id(|| "footer-connections".to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -5334,7 +5340,7 @@ impl RootView {
         let counts = status_counts(self.sidebar.all_sessions(), |id| self.sidebar.is_unseen(id));
         let pill = div()
             .id("daemon-pill")
-            .debug_selector(|| "daemon-pill".to_owned())
+            .driver_id(|| "daemon-pill".to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -5378,7 +5384,7 @@ impl RootView {
             )
             .child(
                 ellipsis::truncating("footer-status", StyledText::new(self.footer_status()))
-                    .debug_selector(|| "footer-status".to_owned())
+                    .driver_id(|| "footer-status".to_owned())
                     .flex_1()
                     .text_right(),
             )
@@ -5397,7 +5403,7 @@ impl RootView {
         );
         let labels: Vec<&'static str> = rows.iter().map(|(label, _)| *label).collect();
         let details = div()
-            .debug_selector(move || format!("flyout-details={}", labels.join("|")))
+            .driver_id(move || format!("flyout-details={}", labels.join("|")))
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -5550,7 +5556,7 @@ fn hosts_online_item(text: String, cx: &mut Context<RootView>) -> Stateful<Div> 
     let t = theme(cx);
     div()
         .id("footer-hosts")
-        .debug_selector(|| "footer-hosts".to_owned())
+        .driver_id(|| "footer-hosts".to_owned())
         .flex_none()
         .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
@@ -5583,7 +5589,7 @@ fn connecting_overlay(
         }));
     let connections = div()
         .id("overlay-connections")
-        .debug_selector(|| "overlay-connections".to_owned())
+        .driver_id(|| "overlay-connections".to_owned())
         .text_size(ui_px(cx, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.muted))
         .cursor_pointer()
@@ -5636,7 +5642,7 @@ fn footer_count(span: CountSpan, t: &UiTheme) -> Div {
         .flex_none()
         .items_center()
         .gap(px(6.0))
-        .debug_selector(move || format!("footer-count-{name}"))
+        .driver_id(move || format!("footer-count-{name}"))
         .child(glyph_view(
             span.kind.glyph(t),
             GlyphSize::Footer,
@@ -5699,7 +5705,7 @@ fn action_button(
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .debug_selector(move || id.to_owned())
+        .driver_id(move || id.to_owned())
         .px(px(6.0))
         .py(px(3.0))
         .rounded(px(4.0))
@@ -5719,7 +5725,7 @@ fn tagged_text(selector: &'static str, text: impl Into<SharedString>) -> Div {
     let text = text.into();
     let tag = text.clone();
     div()
-        .debug_selector(move || format!("{selector}={tag}"))
+        .driver_id(move || format!("{selector}={tag}"))
         .child(text)
 }
 
@@ -5746,7 +5752,7 @@ impl Render for Tip {
             .rounded(px(10.0))
             .text_size(ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
-            .debug_selector(|| format!("tooltip={}", self.0))
+            .driver_id(|| format!("tooltip={}", self.0))
             .child(self.0.clone())
     }
 }

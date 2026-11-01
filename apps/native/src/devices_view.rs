@@ -15,6 +15,7 @@ use crate::devices::{
     BLOCKED_TAG, BlockConfirm, CONFIRM_BODY, ConfirmButton, DeviceRow, DevicesState, NO_DEVICES,
     RowAction, forget_message,
 };
+use crate::driver_id::DriverId as _;
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_view::SettingsTab;
@@ -221,12 +222,12 @@ impl RootView {
         let rows = self.devices.model.rows(Utc::now());
         let empty = rows.is_empty().then(|| {
             div()
-                .debug_selector(|| "settings-devices-empty".to_owned())
+                .driver_id(|| "settings-devices-empty".to_owned())
                 .text_color(gpui::rgb(t.muted))
                 .child(NO_DEVICES)
         });
         let section = div()
-            .debug_selector(|| "settings-devices".to_owned())
+            .driver_id(|| "settings-devices".to_owned())
             .flex()
             .flex_col()
             .gap(px(6.0))
@@ -310,7 +311,7 @@ fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
     let state = if row.blocked {
         let selector = format!("settings-device-blocked-{id}");
         div()
-            .debug_selector(|| selector)
+            .driver_id(|| selector)
             .px(px(6.0))
             .rounded(px(4.0))
             .border_1()
@@ -324,7 +325,7 @@ fn device_row(row: &DeviceRow, cx: &mut Context<RootView>) -> Div {
     };
     let selector = format!("settings-device-{id}");
     div()
-        .debug_selector(|| selector)
+        .driver_id(|| selector)
         .flex()
         .items_center()
         .gap(px(8.0))

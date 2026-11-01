@@ -21,6 +21,7 @@ use crate::dashboard_rows::{
     Columns, HeaderFigures, NestedRow, QUEUE_HINT, QueueChip, RowCells, RowInput, agent_glyph,
     header_figures, header_pills, queue_chips, row_cells, visible_columns,
 };
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::status_glyph::{GlyphSize, Shape, glyph, glyph_view};
@@ -165,7 +166,7 @@ impl RootView {
             .bg(gpui::rgb(t.ground))
             .text_size(crate::fonts::ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
-            .debug_selector(|| "dashboard-view".to_owned())
+            .driver_id(|| "dashboard-view".to_owned())
             .child(width_probe(cx))
             .child(header_strip(
                 crate::fonts::ui_text_size(cx),
@@ -234,7 +235,7 @@ impl RootView {
         let asking = format!("{name}-asking");
         let selector = name.clone();
         grid_line(div().id(SharedString::from(name.clone())))
-            .debug_selector(move || selector)
+            .driver_id(move || selector)
             .relative()
             .flex_none()
             .min_h(px(ROW_MIN_H))
@@ -252,7 +253,7 @@ impl RootView {
                         .bottom_0()
                         .w(px(2.0))
                         .bg(gpui::rgb(t.asking))
-                        .debug_selector(move || asking),
+                        .driver_id(move || asking),
                 )
             })
             .child(fixed(GLYPH_W).child(glyph_view(
@@ -524,7 +525,7 @@ fn summary_cell(offset: i8, cells: &RowCells, name: &str, t: &UiTheme) -> Div {
 fn stuck_flag(offset: i8, shift: i8, id: &str, text: &str, t: &UiTheme) -> Div {
     let selector = id.to_owned();
     truncating(id, StyledText::new(text.to_owned()))
-        .debug_selector(move || selector.clone())
+        .driver_id(move || selector.clone())
         .flex_shrink()
         .min_w(px(0.0))
         .px(px(5.0))
@@ -554,7 +555,7 @@ fn context_cell(offset: i8, cells: &RowCells, t: &UiTheme) -> Div {
         .gap(px(5.0))
         .text_size(crate::fonts::ui_px_at(offset, SMALL_TEXT))
         .text_color(gpui::rgb(colour))
-        .debug_selector(move || base)
+        .driver_id(move || base)
         .child(
             div()
                 .flex_none()
@@ -569,7 +570,7 @@ fn context_cell(offset: i8, cells: &RowCells, t: &UiTheme) -> Div {
                             .h_full()
                             .w(px(fill))
                             .bg(gpui::rgb(colour))
-                            .when(cells.context_hot, |fill| fill.debug_selector(move || hot)),
+                            .when(cells.context_hot, |fill| fill.driver_id(move || hot)),
                     )
                 }),
         )
@@ -589,7 +590,7 @@ fn activity_cell(cells: &RowCells, t: &UiTheme) -> Div {
         .items_end()
         .gap(px(1.5))
         .h(px(18.0))
-        .debug_selector(move || name)
+        .driver_id(move || name)
         .children(cells.activity.iter().map(|height| {
             div()
                 .flex_none()
@@ -651,7 +652,7 @@ fn nested_row(
         .flex_none()
         .h(crate::fonts::ui_px_at(offset, SUBROW_H))
         .text_size(crate::fonts::ui_px_at(offset, 12.0))
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .when(nested.dimmed, |row| row.opacity(DIMMED))
         .child(fixed(GLYPH_W))
         .child(
@@ -724,7 +725,7 @@ fn group_heading(
         .pb(px(5.0))
         .pl(px(PAD_LEFT))
         .pr(px(PAD_RIGHT))
-        .debug_selector(move || name)
+        .driver_id(move || name)
         .child(
             div()
                 .text_size(crate::fonts::ui_px_at(offset, CAPS_TEXT))
@@ -755,7 +756,7 @@ fn column_header(offset: i8, shift: i8, columns: Columns, t: &UiTheme) -> Div {
         .h(crate::fonts::ui_px_at(offset, COLUMNS_H))
         .border_b_1()
         .border_color(gpui::rgb(t.line))
-        .debug_selector(|| "dashboard-columns".to_owned())
+        .driver_id(|| "dashboard-columns".to_owned())
         .child(fixed(GLYPH_W))
         .child(fixed(SESSION_W).child(caps("SESSION")))
         .when(columns.linear, |line| {
@@ -849,7 +850,7 @@ fn header_strip(
                             .child(pill.count.to_string()),
                     )
                     .child(pill.label)
-                    .debug_selector(move || name)
+                    .driver_id(move || name)
             });
     div()
         .flex()
@@ -861,7 +862,7 @@ fn header_strip(
         .border_b_1()
         .border_color(gpui::rgb(t.line))
         .bg(gpui::rgb(t.surface))
-        .debug_selector(|| "dashboard-header".to_owned())
+        .driver_id(|| "dashboard-header".to_owned())
         .child(
             div()
                 .text_size(crate::fonts::ui_px_at(offset, 15.0))
@@ -924,7 +925,7 @@ fn figures_view(offset: i8, shift: i8, figures: HeaderFigures, t: &UiTheme) -> D
         .gap(px(16.0))
         .text_size(crate::fonts::ui_px_at(offset, 12.0))
         .text_color(gpui::rgb(t.text_2))
-        .debug_selector(|| "dashboard-figures".to_owned())
+        .driver_id(|| "dashboard-figures".to_owned())
         .child(div().flex().gap(px(4.0)).child("Today").child(figure(
             shift,
             figures.cost,
@@ -971,7 +972,7 @@ fn queue_strip(
         let selector = name.clone();
         div()
             .id(SharedString::from(name.clone()))
-            .debug_selector(move || selector)
+            .driver_id(move || selector)
             .flex()
             .flex_shrink()
             .items_center()
@@ -1025,7 +1026,7 @@ fn queue_strip(
         .border_b_1()
         .border_color(gpui::rgb(t.line))
         .bg(gpui::rgba(t.ask_wash))
-        .debug_selector(|| "dashboard-queue-strip".to_owned())
+        .driver_id(|| "dashboard-queue-strip".to_owned())
         .child(
             div()
                 .flex_none()

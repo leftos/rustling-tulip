@@ -14,6 +14,7 @@ use crate::assets::REFRESH_ICON;
 use crate::changes_view::{
     HEAD_HEIGHT, ScBucketRow, ScChanges, ScCommit, caret, changes_body, count_pill, head_title,
 };
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::ui_px;
 use crate::history::HistoryModel;
@@ -610,7 +611,7 @@ impl RootView {
             .flex_none()
             .w(px(width))
             .h_full()
-            .debug_selector(|| "sc-panel".to_owned())
+            .driver_id(|| "sc-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(t.panel_bg))
             .text_size(ui_px(cx, UI_TEXT_SIZE))
@@ -661,7 +662,7 @@ impl RootView {
         let t = theme(cx);
         let button = div()
             .id("sc-picker")
-            .debug_selector(|| "sc-picker".to_owned())
+            .driver_id(|| "sc-picker".to_owned())
             .flex()
             .min_w(px(0.0))
             .items_center()
@@ -730,7 +731,7 @@ fn refresh_button(cx: &mut Context<RootView>) -> Stateful<Div> {
     let t = theme(cx);
     div()
         .id("sc-refresh")
-        .debug_selector(|| "sc-refresh".to_owned())
+        .driver_id(|| "sc-refresh".to_owned())
         .flex()
         .items_center()
         .justify_center()
@@ -754,7 +755,7 @@ fn refresh_button(cx: &mut Context<RootView>) -> Stateful<Div> {
 fn context_line(context: ScContext, t: &UiTheme) -> Stateful<Div> {
     div()
         .id("sc-context")
-        .debug_selector(|| "sc-context".to_owned())
+        .driver_id(|| "sc-context".to_owned())
         .flex_none()
         .px(px(ROW_PADDING))
         .py(px(4.0))
@@ -806,7 +807,7 @@ fn section_view(
     let key = row.key.clone();
     let header = div()
         .id(SharedString::from(name.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -838,7 +839,7 @@ fn section_view(
     let body = (!row.collapsed || row.stashes.is_some()).then(|| {
         div()
             .id(SharedString::from(body_name.clone()))
-            .debug_selector(|| body_name)
+            .driver_id(|| body_name)
             .flex()
             .flex_col()
             .pb(px(6.0))

@@ -10,6 +10,7 @@ use gpui::{
 
 use protocol::{ClientMessage, RepoEntry, VscodeWorkspaceSuggestion, WorkspaceEntry};
 
+use crate::driver_id::DriverId as _;
 use crate::notice_view::modal_panel;
 use crate::repo_add::host_workspace_file;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
@@ -509,7 +510,7 @@ impl RootView {
         };
         let error = creator.error().map(|message| {
             div()
-                .debug_selector(|| "workspace-creator-error".to_owned())
+                .driver_id(|| "workspace-creator-error".to_owned())
                 .text_color(gpui::rgb(t.danger))
                 .child(message.to_owned())
         });
@@ -751,7 +752,7 @@ fn workspace_tab(
     let lit = mode == active;
     div()
         .id(mode.selector())
-        .debug_selector(move || mode.selector().to_owned())
+        .driver_id(move || mode.selector().to_owned())
         .px(px(8.0))
         .py(px(3.0))
         .rounded(px(4.0))
@@ -840,7 +841,7 @@ fn vscode_body(
             .children(rows.into_iter().enumerate().map(|(index, row)| {
                 let badge = row.badge();
                 div()
-                    .debug_selector(move || format!("workspace-creator-folder-{index}"))
+                    .driver_id(move || format!("workspace-creator-folder-{index}"))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -856,7 +857,7 @@ fn vscode_body(
         .when(creator.parsing(), |body| {
             body.child(
                 div()
-                    .debug_selector(|| "workspace-creator-parsing".to_owned())
+                    .driver_id(|| "workspace-creator-parsing".to_owned())
                     .text_color(gpui::rgb(t.muted))
                     .child(PARSING),
             )
@@ -902,7 +903,7 @@ fn browse_row(
                 .gap(px(6.0))
                 .child(
                     div()
-                        .debug_selector(|| "workspace-creator-file".to_owned())
+                        .driver_id(|| "workspace-creator-file".to_owned())
                         .flex_1()
                         .child(file.to_owned()),
                 )
@@ -916,7 +917,7 @@ fn file_field(field: &FileField, focus: CreatorControl, cx: &mut Context<RootVie
     let t = theme(cx);
     let input = div()
         .id(CreatorControl::File.selector())
-        .debug_selector(|| CreatorControl::File.selector().to_owned())
+        .driver_id(|| CreatorControl::File.selector().to_owned())
         .flex()
         .px(px(6.0))
         .py(px(3.0))
@@ -948,7 +949,7 @@ fn file_field(field: &FileField, focus: CreatorControl, cx: &mut Context<RootVie
 /// The name field in its box.
 fn name_box(dialog: &WorkspaceCreatorDialog, focus: CreatorControl, t: &UiTheme) -> Div {
     div()
-        .debug_selector(|| CreatorControl::Name.selector().to_owned())
+        .driver_id(|| CreatorControl::Name.selector().to_owned())
         .flex()
         .flex_1()
         .px(px(6.0))

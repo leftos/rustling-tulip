@@ -6,8 +6,8 @@ use std::fmt;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 use gpui::{
-    AnyElement, ImageSource, InteractiveElement, IntoElement, ParentElement, Pixels, Resource,
-    SharedString, Styled, div, img, svg,
+    AnyElement, ImageSource, IntoElement, ParentElement, Pixels, Resource, SharedString, Styled,
+    div, img, svg,
 };
 use protocol::{AgentDescriptor, SessionSnapshot};
 
@@ -15,6 +15,7 @@ use crate::assets::{
     RUNTIME_CMD_ICON, RUNTIME_POSIX_ICON, RUNTIME_POWERSHELL_ICON, RUNTIME_PWSH_ICON,
     SIDEBAR_SHELL_ICON, agent_icon_path,
 };
+use crate::driver_id::DriverId as _;
 use crate::ui_theme::UiTheme;
 
 /// Which icon a runtime tag is drawn as.
@@ -318,7 +319,7 @@ pub(crate) fn runtime_icon_view(
 
 /// The icon's `size` square box, tagged `selector`.
 fn frame(size: Pixels, selector: String) -> gpui::Div {
-    div().flex_none().size(size).debug_selector(|| selector)
+    div().flex_none().size(size).driver_id(|| selector)
 }
 
 #[cfg(test)]

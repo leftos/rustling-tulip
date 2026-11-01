@@ -27,6 +27,7 @@ use crate::connection_picker::{
     SshTest, SshTester, TypedHostError, offers_pair, offers_reconnect, row_detail,
     typed_ssh_target, typed_target,
 };
+use crate::driver_id::DriverId as _;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::net::NetCommand;
 use crate::notice_view::modal_panel;
@@ -1092,7 +1093,7 @@ impl RootView {
         .p_0()
         .gap_0()
         .max_h(relative(1.0))
-        .debug_selector(|| "connections-panel".to_owned())
+        .driver_id(|| "connections-panel".to_owned())
         .track_focus(&self.connection_picker_focus)
         .child(header(cx))
         .child(list)
@@ -1152,7 +1153,7 @@ fn header(cx: &mut Context<RootView>) -> Div {
     let t = theme(cx);
     let close = div()
         .id("connections-close-x")
-        .debug_selector(|| "connections-close-x".to_owned())
+        .driver_id(|| "connections-close-x".to_owned())
         .flex()
         .items_center()
         .justify_center()
@@ -1216,7 +1217,7 @@ fn section_header(
         };
         div()
             .when(tailnet, |note| {
-                note.debug_selector(|| "connections-scan".to_owned())
+                note.driver_id(|| "connections-scan".to_owned())
             })
             .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::NORMAL))
             .text_size(crate::fonts::ui_px_at(offset, 11.0))
@@ -1224,7 +1225,7 @@ fn section_header(
             .child(note)
     });
     div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex()
         .items_baseline()
         .justify_between()
@@ -1310,7 +1311,7 @@ fn host_row(
         .children(row_actions(index, controls, draw, cx));
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .group(group.clone())
         .relative()
         .flex()
@@ -1542,7 +1543,7 @@ fn detail_line(
 ) -> Div {
     let selector = format!("connections-detail-{key}");
     let mut drawn = div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -1611,9 +1612,9 @@ fn state_chip(offset: i8, shift: i8, row: &Row, state: &RowState, t: &UiTheme) -
         RowState::NeedsPairing => tag(offset, shift, selector, label, t),
         RowState::Connected => dotted(selector, t.status_ok, label),
         RowState::Disconnected { .. } => dotted(selector, t.status_idle, label),
-        RowState::Connecting => div().debug_selector(move || selector).child(label),
+        RowState::Connecting => div().driver_id(move || selector).child(label),
         RowState::Off | RowState::SameDaemonAs { .. } => div()
-            .debug_selector(move || selector)
+            .driver_id(move || selector)
             .text_color(gpui::rgb(t.faint))
             .child(label),
     }
@@ -1622,7 +1623,7 @@ fn state_chip(offset: i8, shift: i8, row: &Row, state: &RowState, t: &UiTheme) -
 /// `label` after a 7 px dot of `color`.
 fn dotted(selector: String, color: u32, label: String) -> Div {
     div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -1633,7 +1634,7 @@ fn dotted(selector: String, color: u32, label: String) -> Div {
 /// An amber tag reading `label`.
 fn tag(offset: i8, shift: i8, selector: String, label: String, t: &UiTheme) -> Div {
     div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex()
         .items_center()
         .h(crate::fonts::ui_px_at(offset, 18.0))
@@ -1730,7 +1731,7 @@ fn add_form(
         .map(|text| aligned(test_result(&form.test, text, &t)));
     let error = error.map(|error| {
         aligned(error_box(
-            div().debug_selector(|| "connections-error".to_owned()),
+            div().driver_id(|| "connections-error".to_owned()),
             error.to_owned(),
             &t,
         ))
@@ -1804,7 +1805,7 @@ fn segment(
     let on = this == mode;
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .relative()
         .px(px(12.0))
         .py(px(4.0))
@@ -1865,7 +1866,7 @@ fn field_row(
 ) -> Div {
     let selector = control.selector(&[]);
     let frame = field_frame(focus == control, t)
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex_1()
         .min_w_0()
         .text_size(crate::fonts::ui_px_at(offset, 12.0))
@@ -1903,7 +1904,7 @@ fn aligned(content: Div) -> Div {
 /// Test connection's line: a green check and the host's name once it
 /// passed, the failure in the error box, the wait muted.
 fn test_result(test: &SshTest, text: String, t: &UiTheme) -> Div {
-    let line = div().debug_selector(|| "connections-ssh-form-result".to_owned());
+    let line = div().driver_id(|| "connections-ssh-form-result".to_owned());
     match test {
         SshTest::Failed(_) => error_box(line, text, t),
         SshTest::Passed(_) => line

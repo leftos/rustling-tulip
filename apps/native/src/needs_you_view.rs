@@ -14,6 +14,7 @@ use gpui::{
 use protocol::{DaemonMessage, SessionMode, SessionStatus};
 
 use crate::activity_bar::badge_text;
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{ui_px, ui_px_at};
 use crate::needs_you::{self, NeedsYouRow, Reason};
@@ -166,7 +167,7 @@ impl RootView {
             .flex_none()
             .w(px(width))
             .h_full()
-            .debug_selector(|| "needs-you-panel".to_owned())
+            .driver_id(|| "needs-you-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(t.panel_bg))
             .text_size(ui_px(cx, UI_TEXT_SIZE))
@@ -235,7 +236,7 @@ fn header(offset: i8, shift: i8, text: String, t: &UiTheme) -> Div {
         .border_b_1()
         .border_color(gpui::rgb(t.border))
         .text_color(gpui::rgb(t.muted))
-        .debug_selector(|| "needs-you-header".to_owned())
+        .driver_id(|| "needs-you-header".to_owned())
         .child(
             div()
                 .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
@@ -251,7 +252,7 @@ fn empty_state(t: &UiTheme) -> Div {
         .px(px(ROW_PADDING))
         .py(px(6.0))
         .text_color(gpui::rgb(t.muted))
-        .debug_selector(|| "needs-you-empty".to_owned())
+        .driver_id(|| "needs-you-empty".to_owned())
         .child("Nothing needs you")
         .child(div().child("Sessions waiting on an answer, a permission or a look show here."))
 }
@@ -321,7 +322,7 @@ fn needs_you_row(
         ));
     div()
         .id(SharedString::from(name.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_col()
         .w_full()

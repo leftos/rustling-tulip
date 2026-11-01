@@ -2,6 +2,7 @@
 //! screen: rendering, keys and clicks, forwarded to [`crate::notices`] and
 //! [`crate::spawns`].
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke,
@@ -823,7 +824,7 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
         ElementId::Name(SharedString::from(name.clone())),
         &t,
     )
-    .debug_selector(|| name)
+    .driver_id(|| name)
     .flex()
     .items_start()
     .gap(px(8.0))
@@ -839,7 +840,7 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
 fn progress_bar(id: u64, fraction: f32, t: &UiTheme) -> Div {
     let selector = format!("toast-progress-{id}");
     div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .mt(px(4.0))
         .h(px(3.0))
         .w_full()
@@ -847,7 +848,7 @@ fn progress_bar(id: u64, fraction: f32, t: &UiTheme) -> Div {
         .bg(gpui::rgb(t.line_strong))
         .child(
             div()
-                .debug_selector(move || format!("toast-progress-fill-{id}"))
+                .driver_id(move || format!("toast-progress-fill-{id}"))
                 .h_full()
                 .rounded(px(2.0))
                 .bg(gpui::rgb(t.accent))

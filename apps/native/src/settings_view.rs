@@ -25,6 +25,7 @@ use crate::agent_options_view::{LOCKED, UPDATE_CLIENT};
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
+use crate::driver_id::DriverId as _;
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::remote_access::{
@@ -3221,7 +3222,7 @@ impl RootView {
                 };
                 div()
                     .id(gpui::SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
+                    .driver_id(move || selector.clone())
                     .flex()
                     .flex_none()
                     .items_center()
@@ -3245,7 +3246,7 @@ impl RootView {
             .collect();
         Some(
             div()
-                .debug_selector(|| "settings-host-row".to_owned())
+                .driver_id(|| "settings-host-row".to_owned())
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
@@ -3279,7 +3280,7 @@ impl RootView {
         };
         div()
             .id(selector)
-            .debug_selector(|| selector.to_owned())
+            .driver_id(|| selector.to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -3348,7 +3349,7 @@ impl RootView {
         };
         let path = SettingsControl::WorktreesPath;
         let field = field_frame(focused == Some(path), &theme(cx))
-            .debug_selector(|| path.selector().to_owned())
+            .driver_id(|| path.selector().to_owned())
             .flex_1()
             .min_w(px(0.0))
             .on_mouse_down(
@@ -3375,7 +3376,7 @@ impl RootView {
             .child(field)
             .children(browse);
         let active = div()
-            .debug_selector(|| "settings-worktrees-active".to_owned())
+            .driver_id(|| "settings-worktrees-active".to_owned())
             .text_color(gpui::rgb(t.text_2))
             .child(self.worktrees_active_line());
         let (save_label, save_enabled) = self.worktrees_save_button();
@@ -3441,21 +3442,21 @@ impl RootView {
             cx,
         );
         let status = div()
-            .debug_selector(|| "settings-remote-status".to_owned())
+            .driver_id(|| "settings-remote-status".to_owned())
             .text_color(gpui::rgb(t.text_2))
             .child(self.remote_status_line());
         let address = self.remote_address().map(|url| {
             div()
-                .debug_selector(|| "settings-remote-address".to_owned())
+                .driver_id(|| "settings-remote-address".to_owned())
                 .child(format!("Address: {url}"))
         });
         let cert = self.remote_cert_line().map(|line| {
             hint(crate::fonts::ui_text_size(cx), line, &t)
-                .debug_selector(|| "settings-remote-cert".to_owned())
+                .driver_id(|| "settings-remote-cert".to_owned())
         });
         let port_error = self.remote_port_error().map(|error| {
             hint(crate::fonts::ui_text_size(cx), error, &t)
-                .debug_selector(|| "settings-remote-port-error".to_owned())
+                .driver_id(|| "settings-remote-port-error".to_owned())
         });
         let section = section(
             crate::fonts::ui_text_size(cx),
@@ -3489,7 +3490,7 @@ impl RootView {
         let t = theme(cx);
         let port = SettingsControl::RemotePort;
         let frame = field_frame(focused == Some(port), &theme(cx))
-            .debug_selector(|| port.selector().to_owned())
+            .driver_id(|| port.selector().to_owned())
             .w(px(PORT_FIELD_WIDTH));
         let field = if enabled {
             frame
@@ -3544,7 +3545,7 @@ impl RootView {
         );
         let error = self.remote_autostart_line().map(|line| {
             hint(crate::fonts::ui_text_size(cx), line, &t)
-                .debug_selector(|| "settings-remote-autostart-error".to_owned())
+                .driver_id(|| "settings-remote-autostart-error".to_owned())
         });
         [
             launch,
@@ -3665,15 +3666,15 @@ impl RootView {
             };
             let program_error = refusal(LaunchCommandRow::Program).map(|text| {
                 hint(crate::fonts::ui_text_size(cx), text, &t)
-                    .debug_selector(|| "settings-agent-program-error".to_owned())
+                    .driver_id(|| "settings-agent-program-error".to_owned())
             });
             let args_error = refusal(LaunchCommandRow::Args).map(|text| {
                 hint(crate::fonts::ui_text_size(cx), text, &t)
-                    .debug_selector(|| "settings-agent-args-error".to_owned())
+                    .driver_id(|| "settings-agent-args-error".to_owned())
             });
             let env_note = self.program_env_note(&page.id).map(|note| {
                 hint(crate::fonts::ui_text_size(cx), note, &t)
-                    .debug_selector(|| "settings-agent-program-env".to_owned())
+                    .driver_id(|| "settings-agent-program-env".to_owned())
             });
             let program = input_frame(
                 SettingsControl::AgentProgram,
@@ -3685,7 +3686,7 @@ impl RootView {
             let args = input_frame(SettingsControl::AgentArgs, &tab.args, true, focused, cx);
             let saved = self.shows_saved(&page.id, tab).then(|| {
                 hint(crate::fonts::ui_text_size(cx), "Saved", &t)
-                    .debug_selector(|| "settings-agent-saved".to_owned())
+                    .driver_id(|| "settings-agent-saved".to_owned())
             });
             section
                 .child(
@@ -3749,7 +3750,7 @@ impl RootView {
         let selector = link.selector();
         let open = div()
             .id(selector)
-            .debug_selector(|| selector.to_owned())
+            .driver_id(|| selector.to_owned())
             .px(px(4.0))
             .rounded(px(LINK_RADIUS))
             .border_1()
@@ -3767,7 +3768,7 @@ impl RootView {
             })
             .child("Open Windows notification settings");
         let state = div()
-            .debug_selector(|| "settings-notify-state".to_owned())
+            .driver_id(|| "settings-notify-state".to_owned())
             .child(self.notifications_state_line());
         let windows = div()
             .flex()
@@ -3868,14 +3869,14 @@ impl RootView {
         let path = match sound {
             NeedsYouSound::Custom(path) => Some(
                 hint(size, path.display().to_string(), &t)
-                    .debug_selector(|| "settings-needs-you-sound-path".to_owned()),
+                    .driver_id(|| "settings-needs-you-sound-path".to_owned()),
             ),
             NeedsYouSound::Off | NeedsYouSound::Default => None,
         };
         let problem = self.notifications.sound_problem.clone().map(|problem| {
             hint(size, problem, &t)
                 .text_color(gpui::rgb(t.danger_text))
-                .debug_selector(|| "settings-needs-you-sound-problem".to_owned())
+                .driver_id(|| "settings-needs-you-sound-problem".to_owned())
         });
         div()
             .flex()
@@ -3919,7 +3920,7 @@ impl RootView {
         };
         let status = selected.map(|_| {
             hint(crate::fonts::ui_text_size(cx), status_text, &t)
-                .debug_selector(move || status_selector.to_owned())
+                .driver_id(move || status_selector.to_owned())
         });
         let power = section(
             crate::fonts::ui_text_size(cx),
@@ -3995,11 +3996,11 @@ impl RootView {
         .child(check)
         .child(
             hint(crate::fonts::ui_text_size(cx), version, &t)
-                .debug_selector(|| "settings-update-version".to_owned()),
+                .driver_id(|| "settings-update-version".to_owned()),
         )
         .child(
             hint(crate::fonts::ui_text_size(cx), last, &t)
-                .debug_selector(|| "settings-update-last-check".to_owned()),
+                .driver_id(|| "settings-update-last-check".to_owned()),
         )
         .child(div().flex().child(check_now))
     }
@@ -4094,7 +4095,7 @@ impl RootView {
         );
         let preview = div().flex().gap(px(10.0)).child("Preview").child(
             div()
-                .debug_selector(|| "settings-title-preview".to_owned())
+                .driver_id(|| "settings-title-preview".to_owned())
                 .px(px(8.0))
                 .py(px(2.0))
                 .rounded(px(CHIP_RADIUS))
@@ -4518,7 +4519,7 @@ fn agent_field_row(
             )
             .child(
                 div()
-                    .debug_selector(move || selector)
+                    .driver_id(move || selector)
                     .opacity(DISABLED_OPACITY)
                     .child(muted(UPDATE_CLIENT, &theme(cx))),
             )
@@ -4527,7 +4528,7 @@ fn agent_field_row(
     let locked = view.disabled && view.editor != FieldEditor::Unknown;
     let note = locked.then(|| {
         let selector = format!("settings-{tag}-{}-locked", field_part(&view.id));
-        hint(crate::fonts::ui_text_size(cx), LOCKED, &t).debug_selector(move || selector)
+        hint(crate::fonts::ui_text_size(cx), LOCKED, &t).driver_id(move || selector)
     });
     Some(
         row.children(
@@ -4550,7 +4551,7 @@ fn input_frame(
     cx: &mut Context<RootView>,
 ) -> Div {
     let frame = field_frame(focused == Some(control), &theme(cx))
-        .debug_selector(|| control.selector().to_owned())
+        .driver_id(|| control.selector().to_owned())
         .child(input.clone());
     if editable {
         frame.on_mouse_down(
@@ -4578,7 +4579,7 @@ fn disabled_launch_row(
     let selector = control.selector();
     let frame = field_frame(false, t)
         .id(selector)
-        .debug_selector(|| selector.to_owned())
+        .driver_id(|| selector.to_owned())
         .opacity(DISABLED_OPACITY)
         .text_color(gpui::rgb(t.subtle))
         .tooltip(tooltip(LAUNCH_COMMAND_UNSUPPORTED_TIP))
@@ -4674,8 +4675,7 @@ fn choice_row(
         .collect();
     let note = match lock {
         RowLock::Locked { note, selector } => Some(
-            hint(crate::fonts::ui_text_size(cx), note, &t)
-                .debug_selector(move || selector.to_owned()),
+            hint(crate::fonts::ui_text_size(cx), note, &t).driver_id(move || selector.to_owned()),
         ),
         RowLock::Live => None,
     };

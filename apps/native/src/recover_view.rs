@@ -15,6 +15,7 @@ use protocol::{ClientMessage, DaemonMessage, RecoverItemResult, SessionSnapshot}
 
 use crate::activity_bar::badge_text;
 use crate::buttons::RING_ROOM;
+use crate::driver_id::DriverId as _;
 use crate::notice_view::modal_panel;
 use crate::recover::{
     Activation, Control, FocusMove, Group, GroupKind, HostHistory, Names, RECOVER_TIMEOUT,
@@ -854,7 +855,7 @@ fn conversation_choice(
     let focused = dialog.focus() == Some(&control);
     let name = selector(&control);
     div()
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .px(px(10.0))
         .py(px(4.0))
         .rounded(px(4.0))

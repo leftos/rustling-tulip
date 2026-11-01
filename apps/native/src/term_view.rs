@@ -24,6 +24,7 @@ use gpui::{
 use protocol::{AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot};
 
 use crate::Clock;
+use crate::driver_id::DriverId as _;
 use crate::fonts::{self, FontSettings};
 use crate::hosts::HostSender;
 use crate::links::{LinkKind, TerminalLink};
@@ -1916,7 +1917,7 @@ impl TerminalPane {
             .rounded(px(10.0))
             .text_size(fonts::ui_px(cx, 12.0))
             .text_color(gpui::rgb(t.text))
-            .debug_selector(move || format!("pane-link-tip-{pane}={text}"))
+            .driver_id(move || format!("pane-link-tip-{pane}={text}"))
             .child(text);
         let tip = anchored().position(at).snap_to_window().child(tip);
         Some(deferred(tip).with_priority(1).into_any_element())
@@ -1957,7 +1958,7 @@ fn gutter_dot(
     let top = dot.row as f32 * line_height + (line_height - DOT) / 2.0;
     div()
         .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector.clone())
+        .driver_id(move || selector.clone())
         .absolute()
         .left(px(DOT_LEFT))
         .top(px(top))

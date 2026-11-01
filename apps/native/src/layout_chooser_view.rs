@@ -9,6 +9,7 @@ use gpui::{
 use protocol::{ClientMessage, ClonableLayout, TabEntry};
 
 use crate::RootView;
+use crate::driver_id::DriverId as _;
 use crate::layout_chooser::{Control, FALLBACK_ASPECT, LayoutChooser, Mode, arrangement_messages};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
@@ -314,7 +315,7 @@ fn option_row_element(
 ) -> Stateful<Div> {
     div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
-        .debug_selector(|| selector)
+        .driver_id(|| selector)
         .flex()
         .flex_col()
         .gap(px(2.0))
@@ -413,7 +414,7 @@ fn picker(
         .child(down)
         .child(
             div()
-                .debug_selector(|| "chooser-max-value".to_owned())
+                .driver_id(|| "chooser-max-value".to_owned())
                 .child(chooser.max_label()),
         )
         .child(up);

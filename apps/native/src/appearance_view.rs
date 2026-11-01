@@ -22,6 +22,7 @@ use crate::appearance_stops::{
     swatch_cursor,
 };
 use crate::buttons::{ButtonSize, Layer, field_frame_with_ring, focus_ring, outlined_button};
+use crate::driver_id::DriverId as _;
 use crate::fonts;
 use crate::notices::ToastKind;
 use crate::section::field_column;
@@ -937,7 +938,7 @@ impl RootView {
             if delta > 0 {
                 stepper = stepper.child(
                     div()
-                        .debug_selector(|| "appearance-ui-text-size-value".to_owned())
+                        .driver_id(|| "appearance-ui-text-size-value".to_owned())
                         .child(ui_text_size_label(self.sidebar.ui_state().ui_text_size)),
                 );
             }
@@ -1114,7 +1115,7 @@ fn theme_section(
                 .gap(px(8.0))
                 .child(
                     div()
-                        .debug_selector(|| "appearance-theme-name".to_owned())
+                        .driver_id(|| "appearance-theme-name".to_owned())
                         .child(editor.theme_name.clone()),
                 )
                 .child(choose),
@@ -1841,7 +1842,7 @@ fn hex_line(
     let key = row.key();
     let preview_name = format!("appearance-{key}-preview");
     let preview = div()
-        .debug_selector(|| preview_name)
+        .driver_id(|| preview_name)
         .flex_none()
         .size(px(SWATCH_SIZE))
         .rounded(px(SWATCH_RADIUS))
@@ -1879,7 +1880,7 @@ fn hex_line(
         .when(bad, |line| {
             line.child(
                 div()
-                    .debug_selector(|| hint_name)
+                    .driver_id(|| hint_name)
                     .flex_none()
                     .text_color(gpui::rgb(t.muted))
                     .child(HEX_HINT),
@@ -1928,7 +1929,7 @@ struct Mark {
 fn swatch(selector: String, color: u32, tip: String, mark: Mark, t: &UiTheme) -> Stateful<Div> {
     let swatch = div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
-        .debug_selector(|| selector)
+        .driver_id(|| selector)
         .flex_none()
         .size(px(SWATCH_SIZE))
         .rounded(px(SWATCH_RADIUS))
@@ -2013,7 +2014,7 @@ fn list_row(
     let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .gap(px(6.0))
@@ -2086,7 +2087,7 @@ fn frame_width_section(
         if delta > 0 {
             stepper = stepper.child(
                 div()
-                    .debug_selector(|| "appearance-frame-width-value".to_owned())
+                    .driver_id(|| "appearance-frame-width-value".to_owned())
                     .child(frame_width_label(view.resolved.frame_width.value)),
             );
         }
@@ -2163,7 +2164,7 @@ fn size_section(
         .child(down)
         .child(
             div()
-                .debug_selector(|| "appearance-size-value".to_owned())
+                .driver_id(|| "appearance-size-value".to_owned())
                 .child(value),
         )
         .child(up);
@@ -2263,7 +2264,7 @@ fn input_box(
     let selector = stop.selector();
     let focused = focus == Some(stop);
     field_frame_with_ring(focused, format!("{selector}-ring"), &theme(cx))
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .flex_1()
         .min_w(px(0.0))
         .on_mouse_down(
@@ -2280,7 +2281,7 @@ fn input_box(
 /// A row's muted `Resolved: … from …` line.
 fn hint_line(selector: &'static str, text: String, t: &UiTheme) -> Div {
     div()
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .text_color(gpui::rgb(t.muted))
         .child(text)
 }
@@ -2290,7 +2291,7 @@ fn hint_line(selector: &'static str, text: String, t: &UiTheme) -> Div {
 fn link(selector: &'static str, label: &'static str, enabled: bool, t: &UiTheme) -> Stateful<Div> {
     let link = div()
         .id(selector)
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .px(px(4.0))
         .rounded(px(LINK_RADIUS))
         .text_color(gpui::rgb(t.muted))
@@ -2315,7 +2316,7 @@ pub(crate) fn close_footer(
 ) -> Div {
     let t = theme(cx);
     let ring = focus_ring(ButtonSize::Regular.radius(), &theme(cx))
-        .debug_selector(move || format!("{selector}-ring"));
+        .driver_id(move || format!("{selector}-ring"));
     dialog_footer(&t).child(
         dialog_button(
             selector,

@@ -14,6 +14,7 @@ use crate::assets::{
 use crate::buttons::{ButtonSize, Layer, focus_ring, outlined_button, primary_button};
 use crate::connection::{Connection, State};
 use crate::drag::{self, DragPayload, Side, SidebarRow};
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{self, DEFAULT_FAMILY};
 use crate::fonts::{ui_px, ui_px_at};
@@ -240,7 +241,7 @@ impl RootView {
             .flex_none()
             .w(px(width))
             .h_full()
-            .debug_selector(|| "sidebar-panel".to_owned())
+            .driver_id(|| "sidebar-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(t.panel_bg))
             .text_size(ui_px(cx, UI_TEXT_SIZE))
@@ -364,7 +365,7 @@ impl RootView {
         };
         let button = div()
             .id(MORE_BUTTON)
-            .debug_selector(|| MORE_BUTTON.to_owned())
+            .driver_id(|| MORE_BUTTON.to_owned())
             .flex()
             .flex_none()
             .items_center()
@@ -417,7 +418,7 @@ impl RootView {
                 frame
                     .child(
                         menu_separator(&theme(cx))
-                            .debug_selector(|| MORE_RESUME_ALL_SEPARATOR.to_owned()),
+                            .driver_id(|| MORE_RESUME_ALL_SEPARATOR.to_owned()),
                     )
                     .child(row)
             } else {
@@ -442,7 +443,7 @@ impl RootView {
         if self.is_remote_offline(&host) {
             return div()
                 .id(MORE_ADD_WORKSPACE_ROW)
-                .debug_selector(|| MORE_ADD_WORKSPACE_ROW.to_owned())
+                .driver_id(|| MORE_ADD_WORKSPACE_ROW.to_owned())
                 .px(px(8.0))
                 .py(px(3.0))
                 .rounded(px(4.0))
@@ -453,7 +454,7 @@ impl RootView {
         if self.sidebar.repos_of(&host).len() < 2 {
             div()
                 .id(MORE_ADD_WORKSPACE_ROW)
-                .debug_selector(|| MORE_ADD_WORKSPACE_ROW.to_owned())
+                .driver_id(|| MORE_ADD_WORKSPACE_ROW.to_owned())
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -464,7 +465,7 @@ impl RootView {
                 .child("Add workspace…")
                 .child(
                     div()
-                        .debug_selector(|| "sidebar-more-add-workspace-hint".to_owned())
+                        .driver_id(|| "sidebar-more-add-workspace-hint".to_owned())
                         .text_size(ui_px(cx, 11.0))
                         .child(NEEDS_TWO_REPOS),
                 )
@@ -526,11 +527,11 @@ impl RootView {
         let t = theme(cx);
         Some(
             div()
-                .debug_selector(move || tag)
+                .driver_id(move || tag)
                 .px(px(ROW_PADDING))
                 .py(px(6.0))
                 .text_color(gpui::rgb(t.muted))
-                .child(div().debug_selector(move || shown).child(text))
+                .child(div().driver_id(move || shown).child(text))
                 .into_any_element(),
         )
     }
@@ -729,7 +730,7 @@ fn no_repos_note(gate: AddRepoGate, target: &Target, cx: &mut Context<RootView>)
         enabled: gate.enabled,
     };
     div()
-        .debug_selector(|| "sidebar-no-repos".to_owned())
+        .driver_id(|| "sidebar-no-repos".to_owned())
         .flex()
         .flex_col()
         .items_start()
@@ -762,7 +763,7 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     let t = theme(cx);
     let tip = if has_repos { SPAWN_TIP } else { NO_REPOS_TIP };
     let hint = div()
-        .debug_selector(|| "sidebar-session-hint".to_owned())
+        .driver_id(|| "sidebar-session-hint".to_owned())
         .flex_none()
         .ml(px(2.0))
         .font_family(DEFAULT_FAMILY)
@@ -871,7 +872,7 @@ fn host_header(
     };
     let fold = div()
         .id(SharedString::from(format!("host-fold-{key}")))
-        .debug_selector({
+        .driver_id({
             let selector = format!("host-fold-{key}");
             move || selector
         })
@@ -921,7 +922,7 @@ fn host_header(
             .into_any_element()
     };
     div()
-        .debug_selector({
+        .driver_id({
             let selector = format!("host-header-{key}");
             move || selector
         })
@@ -951,7 +952,7 @@ fn host_header_button(
 ) -> Stateful<Div> {
     div()
         .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex()
         .flex_none()
         .items_center()
@@ -1057,7 +1058,7 @@ const DISABLED_HEADER_BUTTON_OPACITY: f32 = 0.45;
 fn body_note(selector: Option<&'static str>, text: &'static str, t: &UiTheme) -> impl IntoElement {
     div()
         .when_some(selector, |line, selector| {
-            line.debug_selector(move || selector.to_owned())
+            line.driver_id(move || selector.to_owned())
         })
         .px(px(ROW_PADDING))
         .py(px(6.0))
@@ -1115,7 +1116,7 @@ fn segmented<C: Copy + PartialEq + 'static>(
         let active = choice == current;
         div()
             .id(selector)
-            .debug_selector(move || selector.to_owned())
+            .driver_id(move || selector.to_owned())
             .flex()
             .items_center()
             .h(ui_px(cx, 22.0))
@@ -1187,7 +1188,7 @@ fn header(view: SidebarView, filter: RepoFilter, cx: &mut Context<RootView>) -> 
 fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     let t = theme(cx);
     drag_handle("sidebar-divider", true, active, &t)
-        .debug_selector(|| "sidebar-divider".to_owned())
+        .driver_id(|| "sidebar-divider".to_owned())
         .on_mouse_down(MouseButton::Left, cx.listener(RootView::start_drag))
 }
 
@@ -1372,7 +1373,7 @@ fn row_ghost(
 /// dragged row lands.
 fn drop_line(selector: String, side: Side, t: &UiTheme) -> Div {
     let line = div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .absolute()
         .left(px(ROW_PADDING))
         .right(px(ROW_PADDING))
@@ -1399,7 +1400,7 @@ impl Render for RowGhost {
         let t = theme(cx);
         div().child(
             div()
-                .debug_selector(|| "sidebar-drag-ghost".to_owned())
+                .driver_id(|| "sidebar-drag-ghost".to_owned())
                 .absolute()
                 .left(self.offset.x + ROW_GHOST_NUDGE.x)
                 .top(self.offset.y + ROW_GHOST_NUDGE.y)
@@ -1621,7 +1622,7 @@ fn path_banner(
     let repo_host = container.host.clone();
     let repo_tip = format!("Add repo: {path}");
     let banner = div()
-        .debug_selector(move || banner_selector.clone())
+        .driver_id(move || banner_selector.clone())
         .flex()
         .flex_wrap()
         .items_center()
@@ -1663,7 +1664,7 @@ fn path_banner(
 fn banner_link(selector: String, label: &'static str, tip: String, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector.clone())
+        .driver_id(move || selector.clone())
         .flex_none()
         .cursor_pointer()
         .text_color(gpui::rgb(t.text_2))
@@ -1675,7 +1676,7 @@ fn banner_link(selector: String, label: &'static str, tip: String, t: &UiTheme) 
 /// The text under an expanded Unbound container, with the pill it names.
 fn unbound_banner(offset: i8, t: &UiTheme) -> Div {
     div()
-        .debug_selector(|| "unbound-banner".to_owned())
+        .driver_id(|| "unbound-banner".to_owned())
         .flex()
         .flex_wrap()
         .items_center()
@@ -1752,7 +1753,7 @@ fn detached_banner(container: &Container, armed: bool, cx: &mut Context<RootView
         .map(|leaf| leaf.id.clone())
         .collect();
     let banner = div()
-        .debug_selector(|| "detached-banner".to_owned())
+        .driver_id(|| "detached-banner".to_owned())
         .flex()
         .flex_wrap()
         .items_center()
@@ -1787,7 +1788,7 @@ fn detached_stop_all_chip(
         crate::fonts::ui_text_size(cx),
         div()
             .id(SharedString::from(DETACHED_STOP_ALL_SELECTOR))
-            .debug_selector(|| DETACHED_STOP_ALL_SELECTOR.to_owned()),
+            .driver_id(|| DETACHED_STOP_ALL_SELECTOR.to_owned()),
         ChipSize::Row,
         &t,
     )
@@ -2010,7 +2011,7 @@ fn leaf_pill(
         crate::fonts::ui_text_size(cx),
         div()
             .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector),
+            .driver_id(move || selector),
         size,
         &t,
     )
@@ -2070,7 +2071,7 @@ fn leaf_chips(
                 crate::fonts::ui_text_size(cx),
                 div()
                     .id(SharedString::from(name.clone()))
-                    .debug_selector(move || selector),
+                    .driver_id(move || selector),
                 size,
                 &t,
             )
@@ -2214,7 +2215,7 @@ fn container_icon(container: &Container, t: &UiTheme) -> Option<AnyElement> {
     let selector = part(&format!("icon-{suffix}"));
     Some(
         div()
-            .debug_selector(|| selector)
+            .driver_id(|| selector)
             .flex()
             .flex_none()
             .child(icon(path, 14.0, color))
@@ -2245,7 +2246,7 @@ fn container_info_parts(
     let tag = part("tag");
     parts.push(
         div()
-            .debug_selector(|| tag)
+            .driver_id(|| tag)
             .flex_none()
             .font_family(DEFAULT_FAMILY)
             .font_weight(crate::fonts::mono_weight())
@@ -2257,7 +2258,7 @@ fn container_info_parts(
     let count = part("count");
     parts.push(
         div()
-            .debug_selector(|| count)
+            .driver_id(|| count)
             .flex_none()
             .min_w(px(14.0))
             .text_right()
@@ -2272,7 +2273,7 @@ fn container_info_parts(
 /// The `!` badge of a container holding a session that needs attention.
 fn container_badge(offset: i8, shift: i8, selector: String, t: &UiTheme) -> Div {
     div()
-        .debug_selector(|| selector)
+        .driver_id(|| selector)
         .flex()
         .flex_none()
         .items_center()
@@ -2320,7 +2321,7 @@ fn container_row(
     let two_line = summary.is_some();
     let row = div()
         .id(SharedString::from(name.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .relative()
         .flex()
         .flex_none()
@@ -2425,7 +2426,7 @@ fn container_launch(
     let workspace = container.kind == ContainerKind::Workspace;
     div()
         .id(SharedString::from(selector))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .items_center()
@@ -2453,7 +2454,7 @@ fn container_launch(
 
 /// The 2 px accent ring of the container row holding the keyboard.
 fn container_focus_ring(container: &Container, t: &UiTheme) -> Div {
-    focus_ring(4.0, t).debug_selector(|| format!("container-{}-focus", container.key))
+    focus_ring(4.0, t).driver_id(|| format!("container-{}-focus", container.key))
 }
 
 /// A two-line row's text: the name line over the launch summary.
@@ -2479,7 +2480,7 @@ fn container_lines(
         .child(line)
         .child(
             truncating(&selector, StyledText::new(summary.to_owned()))
-                .debug_selector(|| selector)
+                .driver_id(|| selector)
                 .mt(px(1.0))
                 .text_size(ui_px_at(offset, 10.5))
                 .text_color(gpui::rgb(t.muted)),
@@ -2576,7 +2577,7 @@ fn leaf_frame(
     let name = format!("leaf-{}", leaf.id);
     div()
         .id(SharedString::from(name.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .relative()
         .flex()
         .flex_none()
@@ -2676,7 +2677,7 @@ fn busy_excluded_marker(id: &str, t: &UiTheme) -> AnyElement {
     let t = *t;
     div()
         .id(SharedString::from(selector.clone()))
-        .debug_selector(|| selector)
+        .driver_id(|| selector)
         .flex_none()
         .size(px(BUSY_EXCLUDED_SIZE))
         .child(
@@ -2777,7 +2778,7 @@ fn comfortable_lower(
         let text_id = format!("{selector}-label");
         lower.push(
             div()
-                .debug_selector(|| selector)
+                .driver_id(|| selector)
                 .flex()
                 .items_center()
                 .gap(px(SUBLINE_GAP))
@@ -2800,7 +2801,7 @@ fn comfortable_lower(
         let selector = format!("leaf-chips-{}", leaf.id);
         lower.push(
             div()
-                .debug_selector(|| selector)
+                .driver_id(|| selector)
                 .flex()
                 .flex_wrap()
                 .items_center()
@@ -2844,7 +2845,7 @@ fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
                 crate::fonts::ui_text_size(cx),
                 div()
                     .id(SharedString::from(selector.clone()))
-                    .debug_selector(|| selector),
+                    .driver_id(|| selector),
                 &t,
             )
             .child(inline.action.label(false, false))

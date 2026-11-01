@@ -21,6 +21,11 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+# The headless client driver: a registry of every named element's painted
+# bounds (src/driver/), fed at prepaint. Off by default.
+driver = []
+
 [dependencies]
 daemon-client = { workspace = true }
 protocol = { workspace = true }

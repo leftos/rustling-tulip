@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::{ui_px, ui_px_at};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
@@ -1344,7 +1345,7 @@ impl RootView {
             .when(!has_repos, |note| {
                 note.child(
                     div()
-                        .debug_selector(|| "empty-repo-hint".to_owned())
+                        .driver_id(|| "empty-repo-hint".to_owned())
                         .child(NO_REPOS_TIP),
                 )
             })
@@ -1466,7 +1467,7 @@ impl RootView {
     ) -> AnyElement {
         let name = format!("tab-grid-{tab_id}");
         div()
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .relative()
             .flex()
             .size_full()
@@ -1534,7 +1535,7 @@ impl RootView {
         let id = ElementId::Name(SharedString::from(name.clone()));
         let (tab_id, split_path) = (tab_id.to_owned(), path.to_vec());
         gutter_handle(id, direction == SplitDirection::Horizontal, active, &t)
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1569,7 +1570,7 @@ impl RootView {
                 let terminal = div()
                     .flex_1()
                     .min_h(px(0.0))
-                    .debug_selector(|| format!("pane-grid-{pane_id}"))
+                    .driver_id(|| format!("pane-grid-{pane_id}"))
                     .child(slot.view.clone());
                 self.attached_body(pane_id, id, terminal, cx)
             }
@@ -1621,7 +1622,7 @@ impl RootView {
                     .bg(gpui::rgb(colors.accent_line)),
             );
         div()
-            .debug_selector(|| frame)
+            .driver_id(|| frame)
             .relative()
             .flex()
             .flex_col()
@@ -1775,7 +1776,7 @@ impl RootView {
         };
         let name = format!("popout-tab-title-{tab_id}");
         let title = div()
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .flex_none()
             .whitespace_nowrap()
             .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
@@ -1818,7 +1819,7 @@ impl RootView {
                 popouts::SESSION_NOT_FOUND,
                 &t,
             )
-            .debug_selector(|| name);
+            .driver_id(|| name);
             return popout_column(toolbar, note.into_any_element());
         };
         let parts = self.session_header_parts(host, session);
@@ -1933,7 +1934,7 @@ impl RootView {
         if let Some(docked) = self.popout_docked_in(pane_id) {
             let name = format!("popout-tab-{pane_id}");
             let docked = div()
-                .debug_selector(|| name)
+                .driver_id(|| name)
                 .flex_none()
                 .whitespace_nowrap()
                 .text_color(gpui::rgb(t.muted))
@@ -1985,7 +1986,7 @@ impl RootView {
         let buttons = self.pane_buttons(tab_id, pane_id, session_id, cx);
         div()
             .id(ElementId::Name(SharedString::from(name.clone())))
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .on_drag(payload, move |payload, offset, _, cx| {
                 let drag_session = drag_session.clone();
                 if let Err(err) = root.update(cx, |this, _| {
@@ -2392,7 +2393,7 @@ impl RootView {
         let t = theme(cx);
         let session = self.sidebar.session(session_id);
         let note = muted_note(crate::fonts::ui_text_size(cx), body_note(session), &t)
-            .debug_selector(|| format!("pane-note-{pane_id}"));
+            .driver_id(|| format!("pane-note-{pane_id}"));
         let headless = session.is_some_and(|session| session.mode == SessionMode::Headless);
         match slot.filter(|_| headless) {
             Some(slot) => {
@@ -2637,7 +2638,7 @@ fn header_title(
     let selector = title_id.clone();
     let title = div()
         .id(ElementId::Name(SharedString::from(title_id.clone())))
-        .debug_selector(|| selector)
+        .driver_id(|| selector)
         .relative()
         .min_w(px(0.0))
         .overflow_hidden()
@@ -2694,7 +2695,7 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
     let selector = name.clone();
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| selector)
+        .driver_id(|| selector)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(RootView::press_on_header_control),
@@ -2863,7 +2864,7 @@ fn header_button(
     let name = format!("{action}-{pane_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(RootView::press_on_header_control),
@@ -3014,7 +3015,7 @@ impl Render for PaneGhost {
                 crate::fonts::ui_family(cx),
                 &t,
             )
-            .debug_selector(|| "pane-drag-ghost".to_owned())
+            .driver_id(|| "pane-drag-ghost".to_owned())
             .absolute()
             .left(self.offset.x)
             .top(self.offset.y),
@@ -3059,7 +3060,7 @@ fn popout_toolbar_row(
     let t = theme(cx);
     let name = format!("popout-toolbar-{slot_id}");
     div()
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .items_center()
@@ -3100,7 +3101,7 @@ fn popped_out_card(
         label: label_name,
     } = names;
     let heading = div()
-        .debug_selector(|| label_name)
+        .driver_id(|| label_name)
         .max_w_full()
         .overflow_hidden()
         .whitespace_nowrap()
@@ -3110,7 +3111,7 @@ fn popped_out_card(
         .child(label);
     let buttons = div().flex().justify_center().gap(px(6.0)).children(buttons);
     div()
-        .debug_selector(|| card)
+        .driver_id(|| card)
         .flex()
         .flex_col()
         .size_full()
@@ -3212,7 +3213,7 @@ fn drop_overlay(
     let name = format!("pane-drop-overlay-{pane_id}");
     let rect = overlay.rect;
     div()
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .absolute()
         .left(relative(rect.x))
         .top(relative(rect.y))

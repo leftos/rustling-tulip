@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::buttons::{ButtonSize, Layer, outlined_button};
 use crate::changes_view::{HEAD_HEIGHT, LOADING_TEXT, caret, count_pill, head_title};
+use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::{DEFAULT_FAMILY, ui_px};
 use crate::notice_view::modal_panel;
@@ -669,7 +670,7 @@ fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> 
     let key = key.clone();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -715,7 +716,7 @@ fn push_row(
     let t = theme(cx);
     let input_name = push.input_selector.clone();
     let field = div()
-        .debug_selector(|| input_name)
+        .driver_id(|| input_name)
         .flex_1()
         .min_w(px(0.0))
         .px(px(6.0))
@@ -770,7 +771,7 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
     let group = SharedString::from(name.clone());
     div()
         .id(ElementId::Name(group.clone()))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .group(group.clone())
         .flex()
         .items_center()
@@ -807,7 +808,7 @@ fn stash_button(
     let name = button.selector.clone();
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex_none()
         .px(px(4.0))
         .rounded(px(3.0))

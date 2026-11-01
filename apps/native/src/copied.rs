@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, ClipboardItem, Context, ElementId, SharedString, div,
@@ -141,7 +142,7 @@ impl RootView {
             ElementId::Name(SharedString::from(format!("copied-chip-{generation}"))),
             t,
         )
-        .debug_selector(|| CHIP_LABEL.to_owned())
+        .driver_id(|| CHIP_LABEL.to_owned())
         .shadow_none()
         .px(px(10.0))
         .py(px(3.0))

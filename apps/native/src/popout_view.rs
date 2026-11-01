@@ -3,6 +3,7 @@
 //! window's [`RootView`] over its one daemon connection. It registers no app
 //! shortcuts, so every key goes to the terminal.
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use gpui::{
     AnyElement, AnyWindowHandle, App, Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton,
@@ -181,6 +182,8 @@ fn watch_close_request(
 
 impl Render for PopoutView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "driver")]
+        crate::driver::registry::begin_frame(window, cx);
         let t = theme(cx);
         let here = window.window_handle().window_id();
         let body: AnyElement = self.pane(here, cx).unwrap_or_else(|| {
@@ -192,7 +195,7 @@ impl Render for PopoutView {
                 .justify_center()
                 .text_size(ui_px(cx, UI_TEXT_SIZE))
                 .text_color(gpui::rgb(t.muted))
-                .debug_selector(|| "popout-pane-gone".to_owned())
+                .driver_id(|| "popout-pane-gone".to_owned())
                 .child(PANE_GONE_NOTE)
                 .into_any_element()
         });

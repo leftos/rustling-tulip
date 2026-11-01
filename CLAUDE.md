@@ -82,6 +82,7 @@ cargo nextest run -p protocol --cargo-profile test-release
 
 # Native client UI specs: in-process GPUI (test-support), fake daemon, no real window or input
 cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_terminal   # one ui binary; the filter picks a spec module (ui_sidebar, ui_tabs, …)
+cargo nextest run -p rustling-tulip-native --cargo-profile test-release --features driver --test ui ui_driver_registry   # the driver registry spec runs only with the off-by-default driver feature
 # e2e_live.rs, e2e_recover.rs, e2e_remote.rs, e2e_ssh.rs, e2e_multi_host.rs and smoke_window.rs are #[ignore]d here; run them through rt.ps1 native-e2e / native-smoke
 ```
 

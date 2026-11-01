@@ -7,6 +7,7 @@ use protocol::{ChoiceStyle, OptionValue, SpawnPlacement};
 
 use crate::RootView;
 use crate::agent_options::{FieldEditor, FieldView};
+use crate::driver_id::DriverId as _;
 use crate::spawn_form::{Control, SpawnForm, field_selector};
 use crate::spawn_view::{
     DISABLED_OPACITY, Look, OptionInput, check_label, checkbox_row, field, input_box, muted, note,
@@ -72,7 +73,7 @@ fn row(
         FieldEditor::Text { .. } => text_row(view, inputs, &[], focus, cx),
         FieldEditor::Model { suggestions, .. } => text_row(view, inputs, suggestions, focus, cx),
         FieldEditor::Unknown => div()
-            .debug_selector({
+            .driver_id({
                 let selector = field_selector(&view.id);
                 move || selector
             })

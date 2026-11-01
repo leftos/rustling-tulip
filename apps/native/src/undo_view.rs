@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px;
 use gpui::{
     AnyElement, ClickEvent, Context, ElementId, SharedString, StyledText, Window, div, prelude::*,
@@ -197,7 +198,7 @@ impl RootView {
                 .child(
                     div()
                         .id("undo-shelf")
-                        .debug_selector(|| "undo-shelf".to_owned())
+                        .driver_id(|| "undo-shelf".to_owned())
                         .w(px(width))
                         .flex()
                         .flex_col()
@@ -254,7 +255,7 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
         ElementId::Name(SharedString::from(name.clone())),
         &theme(cx),
     )
-    .debug_selector(|| name)
+    .driver_id(|| name)
     .flex()
     .items_center()
     .gap(px(8.0))

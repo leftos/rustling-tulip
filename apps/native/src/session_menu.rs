@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::driver_id::DriverId as _;
 use crate::fonts::ui_px_at;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
@@ -70,7 +71,7 @@ const DIALOG_WIDTH: f32 = 440.0;
 pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>, t: &UiTheme) -> AnyElement {
     div()
         .id(selector)
-        .debug_selector(|| selector.to_owned())
+        .driver_id(|| selector.to_owned())
         .absolute()
         .top_0()
         .left_0()
@@ -90,10 +91,13 @@ const POPOVER_RADIUS: f32 = 10.0;
 /// The card a popover sits in, tagged `id`: the popover fill with its edge
 /// and shadow, taking the pointer from whatever is under it.
 pub(crate) fn popover_frame(offset: i8, id: &'static str, t: &UiTheme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .bg(gpui::rgb(t.popover))
+    popover_card(div().id(id).driver_id(move || id.to_owned()), offset, t)
+}
+
+/// `card` dressed as a popover: the fill, its edge and shadow, taking the
+/// pointer from whatever is under it.
+fn popover_card(card: Stateful<Div>, offset: i8, t: &UiTheme) -> Stateful<Div> {
+    card.bg(gpui::rgb(t.popover))
         .border_1()
         .border_color(gpui::rgb(t.popover_edge))
         .rounded(px(POPOVER_RADIUS))
@@ -103,10 +107,11 @@ pub(crate) fn popover_frame(offset: i8, id: &'static str, t: &UiTheme) -> Statef
         .occlude()
 }
 
-/// The frame a context menu sits in, a [`popover_frame`] tagged `id` and
+/// The frame a context menu sits in, a popover card tagged `id` and
 /// holding `focus`; a press outside it runs `on_out`. It never grows past
 /// `max_height`, scrolling its rows instead, so a long menu stays inside the
-/// window.
+/// window. It takes a debug selector, not a [`crate::driver_id::DriverId`]: the driver's
+/// recorder child would join the rows a scrolling element measures.
 pub(crate) fn menu_frame(
     offset: i8,
     id: &'static str,
@@ -115,15 +120,19 @@ pub(crate) fn menu_frame(
     on_out: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     t: &UiTheme,
 ) -> Stateful<Div> {
-    popover_frame(offset, id, t)
-        .track_focus(focus)
-        .flex()
-        .flex_col()
-        .w(px(MENU_WIDTH))
-        .max_h(max_height)
-        .overflow_y_scroll()
-        .p(px(4.0))
-        .on_mouse_down_out(on_out)
+    popover_card(
+        div().id(id).debug_selector(move || id.to_owned()),
+        offset,
+        t,
+    )
+    .track_focus(focus)
+    .flex()
+    .flex_col()
+    .w(px(MENU_WIDTH))
+    .max_h(max_height)
+    .overflow_y_scroll()
+    .p(px(4.0))
+    .on_mouse_down_out(on_out)
 }
 
 /// Who opened the delete-worktree confirm, and so what its answer does.
@@ -2759,7 +2768,7 @@ impl RootView {
                 let name = recent_selector(color);
                 div()
                     .id(ElementId::Name(SharedString::from(name.clone())))
-                    .debug_selector(|| name)
+                    .driver_id(|| name)
                     .size(px(16.0))
                     .rounded(px(3.0))
                     .border_1()
@@ -3104,7 +3113,7 @@ impl RootView {
             };
             return vec![
                 div()
-                    .debug_selector(|| name)
+                    .driver_id(|| name)
                     .flex_none()
                     .px(px(4.0))
                     .child(exit_code_label(session))
@@ -3327,7 +3336,7 @@ impl RootView {
         let name = format!("orphan-banner-{pane_id}");
         Some(
             div()
-                .debug_selector(|| name)
+                .driver_id(|| name)
                 .flex_none()
                 .px(px(8.0))
                 .py(px(4.0))
@@ -3405,7 +3414,7 @@ impl RootView {
 fn overlay_layer(offset: i8, name: String, t: &UiTheme) -> Stateful<Div> {
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .absolute()
         .top_0()
         .left_0()
@@ -3425,7 +3434,7 @@ fn overlay_layer(offset: i8, name: String, t: &UiTheme) -> Stateful<Div> {
 /// dimmed terminal: the dialog's surface, edge and shadow.
 fn overlay_card(id: String, t: &UiTheme) -> Div {
     div()
-        .debug_selector(|| id)
+        .driver_id(|| id)
         .flex()
         .flex_col()
         .items_center()
@@ -3924,7 +3933,7 @@ fn menu_item_frame(selector: &str, danger: bool, t: &UiTheme) -> Stateful<Div> {
     let hover = t.popover_hover;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .px(px(8.0))
         .py(px(3.0))
         .rounded(px(4.0))
@@ -3950,7 +3959,7 @@ fn inert_row(selector: &str, label: impl Into<SharedString>, t: &UiTheme) -> Sta
     let label: SharedString = label.into();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(move || name)
+        .driver_id(move || name)
         .flex()
         .items_center()
         .px(px(8.0))
@@ -3991,7 +4000,7 @@ fn check_row(selector: &str, label: &'static str, checked: bool, t: &UiTheme) ->
         .text_size(px(11.0))
         .line_height(px(11.0));
     let slot = if checked {
-        slot.debug_selector(|| check).child("✓")
+        slot.driver_id(|| check).child("✓")
     } else {
         slot
     };
@@ -4004,7 +4013,7 @@ fn slot_row(selector: &str, slot: Div, label: &'static str, t: &UiTheme) -> Stat
     let hover = t.popover_hover;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_center()
         .gap(px(8.0))
@@ -4033,7 +4042,7 @@ fn header_text_button(
     let hover = t.hover_bg;
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex_none()
         .px(px(4.0))
         .rounded(px(3.0))
@@ -4056,7 +4065,7 @@ pub(crate) fn muted_row(text: impl Into<SharedString>, t: &UiTheme) -> Div {
 /// The name editor with its hint.
 fn rename_row(input: &Entity<TextInput>, t: &UiTheme) -> AnyElement {
     div()
-        .debug_selector(|| "menu-rename-input".to_owned())
+        .driver_id(|| "menu-rename-input".to_owned())
         .flex()
         .flex_col()
         .gap(px(4.0))

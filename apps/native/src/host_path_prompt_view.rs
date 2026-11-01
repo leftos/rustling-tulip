@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::RootView;
+use crate::driver_id::DriverId as _;
 use crate::host_path_prompt::{HostPathPrompt, PromptControl};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
@@ -297,13 +298,13 @@ impl RootView {
             .child(path_box(dialog, focus, &t))
             .child(
                 div()
-                    .debug_selector(|| "host-path-hint".to_owned())
+                    .driver_id(|| "host-path-hint".to_owned())
                     .text_color(gpui::rgb(t.muted))
                     .child(prompt.hint()),
             )
             .children(prompt.error().map(|error| {
                 div()
-                    .debug_selector(|| "host-path-error".to_owned())
+                    .driver_id(|| "host-path-error".to_owned())
                     .px(px(6.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
@@ -331,7 +332,7 @@ impl RootView {
 /// The path field in its box.
 fn path_box(dialog: &HostPathDialog, focus: PromptControl, t: &UiTheme) -> Div {
     div()
-        .debug_selector(|| PromptControl::Path.selector().to_owned())
+        .driver_id(|| PromptControl::Path.selector().to_owned())
         .flex()
         .px(px(6.0))
         .py(px(3.0))

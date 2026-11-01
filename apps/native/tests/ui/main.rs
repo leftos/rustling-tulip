@@ -28,6 +28,7 @@ mod ui_delete_worktree;
 mod ui_device_pairing;
 mod ui_diff_tab;
 mod ui_diff_view;
+mod ui_driver_registry;
 mod ui_ellipsis;
 mod ui_fetch_dialog;
 mod ui_file_fetch;

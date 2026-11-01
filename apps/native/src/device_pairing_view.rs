@@ -17,6 +17,7 @@ use crate::RootView;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, focus_ring};
 use crate::connection::State;
 use crate::device_pairing::{DeviceButton, DevicePairing};
+use crate::driver_id::DriverId as _;
 use crate::net::{NetCommand, NetEvent};
 use crate::notice_view::modal_panel;
 use crate::session_menu::backdrop;
@@ -680,7 +681,7 @@ impl RootView {
             .gap(px(6.0))
             .child(
                 div()
-                    .debug_selector(|| "device-pairing-line".to_owned())
+                    .driver_id(|| "device-pairing-line".to_owned())
                     .child(model.line()),
             )
             .children(model.offers_code_link().then(|| {
@@ -690,13 +691,13 @@ impl RootView {
             .children(model.code().map(|_| code_box(dialog, &t)))
             .children(model.countdown((self.now)()).map(|countdown| {
                 div()
-                    .debug_selector(|| "device-pairing-countdown".to_owned())
+                    .driver_id(|| "device-pairing-countdown".to_owned())
                     .text_color(gpui::rgb(t.muted))
                     .child(countdown)
             }))
             .children(model.refusal().map(|refusal| {
                 div()
-                    .debug_selector(|| "device-pairing-refusal".to_owned())
+                    .driver_id(|| "device-pairing-refusal".to_owned())
                     .px(px(6.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
@@ -744,7 +745,7 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     let t = theme(cx);
     div()
         .id(CODE_LINK_SELECTOR)
-        .debug_selector(|| CODE_LINK_SELECTOR.to_owned())
+        .driver_id(|| CODE_LINK_SELECTOR.to_owned())
         .relative()
         .px(px(4.0))
         .py(px(2.0))
@@ -769,7 +770,7 @@ fn code_link(focused: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
 fn code_box(dialog: &DevicePairingDialog, t: &UiTheme) -> Div {
     let focused = dialog.control == Some(DeviceControl::Field);
     div()
-        .debug_selector(|| "device-pairing-code".to_owned())
+        .driver_id(|| "device-pairing-code".to_owned())
         .flex()
         .w(px(CODE_WIDTH))
         .px(px(6.0))

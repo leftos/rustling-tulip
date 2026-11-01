@@ -14,6 +14,7 @@ use crate::assets::{
     STATUS_ARC_ICON, STATUS_CORE_ICON, STATUS_CROSS_ICON, STATUS_DIAMOND_ICON, STATUS_DOT_ICON,
     STATUS_QUESTION_ICON, STATUS_RING_ICON, STATUS_TRACK_ICON,
 };
+use crate::driver_id::DriverId as _;
 use crate::ui_theme::UiTheme;
 
 /// The `×` on the error dot.
@@ -200,7 +201,7 @@ pub fn glyph_view(glyph: Glyph, size: GlyphSize, id: &str, t: &UiTheme) -> AnyEl
         .relative()
         .size(px(size))
         .opacity(glyph.opacity)
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .children(
             glyph
                 .layers(t)

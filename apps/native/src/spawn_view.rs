@@ -19,6 +19,7 @@ use crate::agent_options_view;
 use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, field_frame, focus_ring};
 use crate::combobox::{ComboRow, list_placement};
+use crate::driver_id::DriverId as _;
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::notices;
 use crate::overlay_owner::Overlay;
@@ -1612,7 +1613,7 @@ impl RootView {
             }))
         });
         let body = div()
-            .debug_selector(|| "spawn-no-repos".to_owned())
+            .driver_id(|| "spawn-no-repos".to_owned())
             .flex()
             .flex_col()
             .items_start()
@@ -1745,7 +1746,7 @@ pub(crate) fn now_unix() -> i64 {
 /// header, body and footer bands drawn edge to edge.
 pub(crate) fn dialog_card(offset: i8, id: &'static str, width: f32, t: &UiTheme) -> Stateful<Div> {
     modal_panel(offset, id, t)
-        .debug_selector(move || id.to_owned())
+        .driver_id(move || id.to_owned())
         .w(px(width))
         .p(px(0.0))
         .gap(px(0.0))
@@ -1804,7 +1805,7 @@ pub(crate) fn close_button(selector: &str, focused: bool, t: &UiTheme) -> Statef
     let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_none()
         .items_center()
@@ -1906,7 +1907,7 @@ pub(crate) fn choice_button(
     };
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(move || name)
+        .driver_id(move || name)
         .flex()
         .flex_grow()
         .items_center()
@@ -1965,20 +1966,20 @@ pub(crate) fn checkbox_row(
         .text_size(px(11.0))
         .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::BOLD))
         .when(checked, |mark| {
-            mark.debug_selector(|| format!("{name}-tick"))
+            mark.driver_id(|| format!("{name}-tick"))
                 .bg(gpui::rgb(t.accent))
                 .border_color(gpui::rgb(t.accent))
                 .text_color(gpui::rgb(t.on_accent))
                 .child("✓")
         })
         .when(!checked, |mark| {
-            mark.debug_selector(|| format!("{name}-empty"))
+            mark.driver_id(|| format!("{name}-empty"))
                 .border_color(gpui::rgb(t.line_strong))
         })
         .when(focused, |mark| mark.child(focus_ring(CHECK_RADIUS, t)));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_start()
         .gap(px(10.0))
@@ -2029,7 +2030,7 @@ fn radio_row(
         .when(focused, |ring| ring.child(focus_ring(CHECK_SIZE / 2.0, t)));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .items_start()
         .gap(px(10.0))
@@ -2209,7 +2210,7 @@ fn target_dropdown(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootV
         .text_color(gpui::rgb(t.text_2));
     let trigger = field_frame(focused, &t)
         .id(ElementId::Name(SharedString::from(selector.clone())))
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .w_full()
         .justify_between()
         .gap(px(8.0))
@@ -2301,7 +2302,7 @@ fn target_row(
     let name = control.selector();
     let row = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .justify_between()
         .gap(px(6.0))
@@ -2363,8 +2364,8 @@ fn popup_panel(
 fn labelled_text(selector: String, text: String) -> Div {
     let tag = format!("{selector}={text}");
     div()
-        .debug_selector(move || selector)
-        .child(div().debug_selector(move || tag).child(text))
+        .driver_id(move || selector)
+        .child(div().driver_id(move || tag).child(text))
 }
 
 /// One picker button per target in `targets`, each enabled only where the
@@ -2539,7 +2540,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
     )];
     if form.trusted_warning_shown() {
         let warning = warning_box(&t)
-            .debug_selector(|| "spawn-trusted-launch-warning".to_owned())
+            .driver_id(|| "spawn-trusted-launch-warning".to_owned())
             .gap(px(2.0))
             .child(
                 div()
@@ -2646,7 +2647,7 @@ pub(crate) fn input_box(
     let selector = control.selector();
     let focused = focus == control;
     field_frame(focused, &theme(cx))
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex_1()
         .min_w(px(0.0))
         .child(input.clone())
@@ -2749,14 +2750,14 @@ fn list_row(
     let t = theme(cx);
     let name = format!("{prefix}-option-{index}");
     let tag_name = format!("{name}-current");
-    let tag = current.then(|| muted(CURRENT_TAG, &t).debug_selector(move || tag_name));
+    let tag = current.then(|| muted(CURRENT_TAG, &t).driver_id(move || tag_name));
     let detail_name = format!("{name}-scopes");
     let detail = row
         .detail()
-        .map(|detail| muted(detail.to_owned(), &t).debug_selector(move || detail_name));
+        .map(|detail| muted(detail.to_owned(), &t).driver_id(move || detail_name));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .justify_between()
         .gap(px(6.0))
@@ -2854,7 +2855,7 @@ fn preview_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
     } else if let Some(text) = form.preview_members().first().and_then(staleness_notice) {
         rows.push(
             warning_box(&t)
-                .debug_selector(|| "spawn-base-stale".to_owned())
+                .driver_id(|| "spawn-base-stale".to_owned())
                 .child(text)
                 .into_any_element(),
         );
@@ -2888,7 +2889,7 @@ fn collision_box(
     let t = theme(cx);
     let recreate_note = if notice.danger {
         div()
-            .debug_selector(|| "spawn-collision-danger".to_owned())
+            .driver_id(|| "spawn-collision-danger".to_owned())
             .text_color(gpui::rgb(t.danger))
             .child(notice.recreate_note)
     } else {
@@ -2926,7 +2927,7 @@ fn collision_box(
             .into_any_element()
     });
     warning_box(&t)
-        .debug_selector(|| "spawn-collision".to_owned())
+        .driver_id(|| "spawn-collision".to_owned())
         .child(notice.headline.clone())
         .children(choices)
         .into_any_element()
@@ -2973,7 +2974,7 @@ fn preview_table(shift: i8, form: &SpawnForm, t: &UiTheme) -> AnyElement {
                 .child(text)
         });
         div()
-            .debug_selector(move || selector)
+            .driver_id(move || selector)
             .flex()
             .gap(px(6.0))
             .child(table_cell(0, t).child(row.repo))
@@ -2982,7 +2983,7 @@ fn preview_table(shift: i8, form: &SpawnForm, t: &UiTheme) -> AnyElement {
             .child(table_cell(3, t).child(row.path))
     });
     div()
-        .debug_selector(|| "spawn-preview-table".to_owned())
+        .driver_id(|| "spawn-preview-table".to_owned())
         .flex()
         .flex_col()
         .gap(px(4.0))
@@ -3006,7 +3007,7 @@ fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<Root
     };
     let toggle = div()
         .id("spawn-advanced")
-        .debug_selector(|| "spawn-advanced".to_owned())
+        .driver_id(|| "spawn-advanced".to_owned())
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -3091,7 +3092,7 @@ fn env_row(
         .tooltip(tooltip(REMOVE_ENV_TIP));
     let message = problem.map(|problem| {
         div()
-            .debug_selector(move || format!("spawn-env-problem-{index}"))
+            .driver_id(move || format!("spawn-env-problem-{index}"))
             .text_color(gpui::rgb(t.warning))
             .child(problem.message())
     });
@@ -3102,7 +3103,7 @@ fn env_row(
             t.muted
         };
         div()
-            .debug_selector(move || format!("spawn-env-note-{index}"))
+            .driver_id(move || format!("spawn-env-note-{index}"))
             .text_color(gpui::rgb(color))
             .child(note.text())
     });
@@ -3140,7 +3141,7 @@ fn env_value_cells(
         .is_some_and(EnvRow::is_saved_secret);
     if saved {
         let text = field_frame(false, &theme(cx))
-            .debug_selector(move || format!("spawn-env-saved-{index}"))
+            .driver_id(move || format!("spawn-env-saved-{index}"))
             .flex_1()
             .min_w(px(0.0))
             .text_color(gpui::rgb(t.muted))

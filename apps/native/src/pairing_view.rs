@@ -18,6 +18,7 @@ use protocol::{ClientMessage, DaemonMessage, FEATURE_DEVICE_PAIRING, PendingDevi
 use crate::RootView;
 use crate::activity_bar::badge_text;
 use crate::buttons::{ButtonKind, ButtonSize, Layer, button, button_look, focus_ring};
+use crate::driver_id::DriverId as _;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notify::PairingActionSink;
@@ -648,7 +649,7 @@ impl RootView {
             return None;
         }
         let section = div()
-            .debug_selector(|| "settings-waiting-devices".to_owned())
+            .driver_id(|| "settings-waiting-devices".to_owned())
             .flex()
             .flex_col()
             .gap(px(6.0))
@@ -670,7 +671,7 @@ impl RootView {
     ) -> Option<AnyElement> {
         let text = self.pairing_badge()?;
         let badge = div()
-            .debug_selector(|| "settings-tab-remote-access-badge".to_owned())
+            .driver_id(|| "settings-tab-remote-access-badge".to_owned())
             .ml_auto()
             .flex()
             .flex_none()
@@ -815,7 +816,7 @@ fn qr_side(width: usize) -> f32 {
 fn qr_element(matrix: &QrMatrix) -> AnyElement {
     let cells = qr_cells(matrix);
     div()
-        .debug_selector(|| "pairing-qr".to_owned())
+        .driver_id(|| "pairing-qr".to_owned())
         .flex_none()
         .size(px(qr_side(matrix.width)))
         .child(
@@ -860,7 +861,7 @@ fn confirm_body(dialog: &DialogView, t: &UiTheme) -> AnyElement {
 fn code_body(offset: i8, dialog: &DialogView, now: std::time::Instant, t: &UiTheme) -> AnyElement {
     let code = dialog.code_groups().map(|code| {
         div()
-            .debug_selector(|| "pairing-code".to_owned())
+            .driver_id(|| "pairing-code".to_owned())
             .font_family(DEFAULT_FAMILY)
             .text_size(crate::fonts::ui_px_at(offset, CODE_SIZE))
             .font_weight(FontWeight::BOLD)
@@ -875,7 +876,7 @@ fn code_body(offset: i8, dialog: &DialogView, now: std::time::Instant, t: &UiThe
         .children(
             dialog
                 .timer_text(now)
-                .map(|timer| muted(timer, t).debug_selector(|| "pairing-timer".to_owned())),
+                .map(|timer| muted(timer, t).driver_id(|| "pairing-timer".to_owned())),
         );
     div()
         .flex()
@@ -929,7 +930,7 @@ fn waiting_row(row: &WaitingRow, cx: &mut Context<RootView>) -> Div {
     });
     let selector = format!("settings-waiting-row-{id}");
     div()
-        .debug_selector(|| selector)
+        .driver_id(|| selector)
         .flex()
         .items_center()
         .gap(px(8.0))

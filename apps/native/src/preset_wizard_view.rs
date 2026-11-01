@@ -16,6 +16,7 @@ use protocol::{
     PresetVariableKind,
 };
 
+use crate::driver_id::DriverId as _;
 use crate::notice_view::modal_panel;
 use crate::preset_launch::{
     JobAction, LAUNCH_CAVEAT, MAX_PER_TAB_LABEL, MAX_PER_TAB_PLACEHOLDER, PREVIEW_EMPTY, Preview,
@@ -552,7 +553,7 @@ impl RootView {
         let wizard = &dialog.wizard;
         let description = wizard.entry().description.clone().map(|text| {
             div()
-                .debug_selector(|| "preset-wizard-description".to_owned())
+                .driver_id(|| "preset-wizard-description".to_owned())
                 .text_color(gpui::rgb(t.muted))
                 .child(text)
         });
@@ -570,7 +571,7 @@ impl RootView {
         .track_focus(&self.preset_wizard_focus)
         .child(
             div()
-                .debug_selector(|| "preset-wizard-title".to_owned())
+                .driver_id(|| "preset-wizard-title".to_owned())
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child(wizard.title()),
         )
@@ -758,11 +759,11 @@ fn preview_body(dialog: &PresetWizardDialog, t: &UiTheme) -> Div {
     let wizard = &dialog.wizard;
     let line = match wizard.preview() {
         Preview::Failed(_) => div()
-            .debug_selector(|| "preset-preview-error".to_owned())
+            .driver_id(|| "preset-preview-error".to_owned())
             .text_color(gpui::rgb(t.danger))
             .child(preview_line_of(wizard)),
         Preview::Loading { .. } | Preview::Ready(_) => {
-            muted(preview_line_of(wizard), t).debug_selector(|| "preset-preview-summary".to_owned())
+            muted(preview_line_of(wizard), t).driver_id(|| "preset-preview-summary".to_owned())
         }
     };
     let max_per_tab = wizard.shows_max_per_tab().then(|| {
@@ -813,12 +814,12 @@ fn preview_list(wizard: &PresetWizard, t: &UiTheme) -> Div {
         let header = (count > 1).then(|| muted(tab_header(at, count), t));
         let rows = group.into_iter().map(|row| {
             let selector = format!("preset-preview-row-{}", row.index);
-            div().debug_selector(move || selector).child(row.text())
+            div().driver_id(move || selector).child(row.text())
         });
         div().flex().flex_col().children(header).children(rows)
     });
     div()
-        .debug_selector(|| "preset-preview-list".to_owned())
+        .driver_id(|| "preset-preview-list".to_owned())
         .flex()
         .flex_col()
         .gap(px(6.0))
@@ -849,13 +850,13 @@ fn scripts_section(wizard: &PresetWizard, t: &UiTheme) -> Option<Div> {
         let label = field_label(command.label.clone(), command.line.note(), t);
         let label = if marked {
             label
-                .debug_selector(move || mark)
+                .driver_id(move || mark)
                 .text_color(gpui::rgb(t.danger))
         } else {
             label
         };
         div()
-            .debug_selector(move || selector)
+            .driver_id(move || selector)
             .flex()
             .flex_col()
             .child(label)
@@ -863,13 +864,13 @@ fn scripts_section(wizard: &PresetWizard, t: &UiTheme) -> Option<Div> {
     });
     let failure = stage.failure().map(|text| {
         div()
-            .debug_selector(|| "preset-script-error".to_owned())
+            .driver_id(|| "preset-script-error".to_owned())
             .text_color(gpui::rgb(t.danger))
             .child(text)
     });
     Some(
         div()
-            .debug_selector(|| "preset-script-section".to_owned())
+            .driver_id(|| "preset-script-section".to_owned())
             .flex()
             .flex_col()
             .gap(px(4.0))
@@ -900,7 +901,7 @@ fn field_label(label: String, note: Option<String>, t: &UiTheme) -> Div {
 /// A text input in its box, tagged `selector`.
 fn input_box(selector: String, input: &Entity<TextInput>, t: &UiTheme) -> Div {
     div()
-        .debug_selector(move || selector)
+        .driver_id(move || selector)
         .flex()
         .flex_1()
         .px(px(6.0))
@@ -915,7 +916,7 @@ fn input_box(selector: String, input: &Entity<TextInput>, t: &UiTheme) -> Div {
 fn radio_row(selector: &'static str, picked: bool, label: String) -> Stateful<Div> {
     div()
         .id(selector)
-        .debug_selector(move || selector.to_owned())
+        .driver_id(move || selector.to_owned())
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -992,7 +993,7 @@ fn path_row(
             let error = refusal.map(|refusal| {
                 let tag = format!("{selector}-error");
                 div()
-                    .debug_selector(move || tag)
+                    .driver_id(move || tag)
                     .px(px(6.0))
                     .py(px(3.0))
                     .rounded(px(4.0))
@@ -1047,7 +1048,7 @@ fn picked_path_row(
 ) -> Div {
     let t = theme(cx);
     let shown = div()
-        .debug_selector({
+        .driver_id({
             let selector = selector.to_owned();
             move || selector
         })
@@ -1203,10 +1204,10 @@ fn issues_field(dialog: &PresetWizardDialog, t: &UiTheme) -> Div {
     let line = match dialog.wizard.issues_feedback() {
         IssuesFeedback::Hint => muted(ISSUES_HINT, t),
         IssuesFeedback::Ok(summary) => {
-            muted(summary, t).debug_selector(|| "preset-source-github-issues-ok".to_owned())
+            muted(summary, t).driver_id(|| "preset-source-github-issues-ok".to_owned())
         }
         IssuesFeedback::Error(err) => div()
-            .debug_selector(|| "preset-source-github-issues-error".to_owned())
+            .driver_id(|| "preset-source-github-issues-error".to_owned())
             .text_color(gpui::rgb(t.danger))
             .child(err),
     };
@@ -1299,7 +1300,7 @@ fn variable_field(
     let missing = wizard.is_missing(variable).then(|| {
         let hint = format!("{selector}-required");
         div()
-            .debug_selector(move || hint)
+            .driver_id(move || hint)
             .text_color(gpui::rgb(t.danger))
             .child(REQUIRED_HINT)
     });

@@ -39,6 +39,7 @@ use crate::chat_cards::{
 };
 use crate::chat_tail::{ChatTails, NO_OUTPUT, Tail, TailCard, TailShows};
 use crate::connection::Connection;
+use crate::driver_id::DriverId as _;
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::scrollbar::Scrollbar;
 use crate::shell_lines;
@@ -1689,7 +1690,7 @@ impl RootView {
             .size_full()
             .child(
                 div()
-                    .debug_selector(|| name)
+                    .driver_id(|| name)
                     .flex_none()
                     .px(px(BODY_PAD_X))
                     .py(px(4.0))
@@ -1723,7 +1724,7 @@ impl RootView {
         let composer = loaded.and_then(|chat| self.composer_row(session_id, chat, cx));
         let keys_for = session_id.to_owned();
         div()
-            .debug_selector(|| name)
+            .driver_id(|| name)
             .flex()
             .flex_col()
             .flex_1()
@@ -1789,7 +1790,7 @@ impl RootView {
         let (offset, t) = (fonts::ui_text_size(cx), theme(cx));
         let elsewhere = chat.cards.answered_elsewhere().then(|| {
             muted_line(offset, ANSWERED_ELSEWHERE.to_owned(), &t)
-                .debug_selector(|| "chat-answered-elsewhere".to_owned())
+                .driver_id(|| "chat-answered-elsewhere".to_owned())
         });
         let agent = self.agent_label(session_id);
         let card = chat.stack.current().map(|prompt| {
@@ -1850,7 +1851,7 @@ impl RootView {
         let text = composer.input.read(cx).text().to_owned();
         let blank = text.trim().is_empty();
         let field = field_frame(false, &t)
-            .debug_selector(|| "chat-composer".to_owned())
+            .driver_id(|| "chat-composer".to_owned())
             .flex_1()
             .min_w(px(0.0))
             .py(px(6.0))
@@ -1913,7 +1914,7 @@ impl RootView {
                 .text_size(ui_px_at(offset, UI_TEXT_SIZE))
                 .children(note.map(|note| {
                     muted_line(offset, note.text(), &t)
-                        .debug_selector(|| "chat-composer-note".to_owned())
+                        .driver_id(|| "chat-composer-note".to_owned())
                 }))
                 .child(
                     div()
@@ -1925,7 +1926,7 @@ impl RootView {
                 )
                 .children(chat.send_error.clone().map(|reason| {
                     div()
-                        .debug_selector(|| "chat-composer-error".to_owned())
+                        .driver_id(|| "chat-composer-error".to_owned())
                         .text_size(ui_px_at(offset, SMALL_TEXT_SIZE))
                         .text_color(gpui::rgb(t.danger))
                         .child(reason)
@@ -2130,7 +2131,7 @@ pub(crate) fn chat_row(
     };
     let name = format!("{prefix}-{}-{id}", look.pane_id);
     div()
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_col()
         .child(row)
@@ -2206,7 +2207,7 @@ fn answer_row(
         .text_color(gpui::rgb(t.faint))
         .child(writing_tag(text.lines().count()));
     div()
-        .debug_selector(|| name)
+        .driver_id(|| name)
         .flex()
         .flex_col()
         .border_l_2()
@@ -2259,7 +2260,7 @@ fn tool_card(
         )
         .child(
             div()
-                .debug_selector(|| mark_name)
+                .driver_id(|| mark_name)
                 .flex_none()
                 .text_color(gpui::rgb(color))
                 .child(mark),
@@ -2472,7 +2473,7 @@ fn command_lines(look: &RowLook<'_>, id: &str, statements: Vec<String>) -> Div {
         .text_color(gpui::rgb(t.text))
         .children(statements.into_iter().enumerate().map(|(n, statement)| {
             let name = format!("chat-tool-line-{}-{id}-{n}", look.pane_id);
-            div().debug_selector(|| name).child(statement)
+            div().driver_id(|| name).child(statement)
         }))
 }
 

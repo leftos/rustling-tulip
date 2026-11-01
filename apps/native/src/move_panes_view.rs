@@ -9,6 +9,7 @@ use gpui::{
 use protocol::ClientMessage;
 
 use crate::RootView;
+use crate::driver_id::DriverId as _;
 use crate::move_panes::{Control, LayoutChoice, MovePanes, NAME_LABEL, NAME_PLACEHOLDER, TITLE};
 use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
@@ -309,7 +310,7 @@ impl RootView {
         let t = theme(cx);
         let focused = dialog.model.focused() == Control::Name;
         div()
-            .debug_selector(|| "move-panes-name".to_owned())
+            .driver_id(|| "move-panes-name".to_owned())
             .px(px(6.0))
             .py(px(2.0))
             .rounded(px(4.0))
