@@ -14,17 +14,18 @@ It is alpha software, Windows only for now.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
 - Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead.
-- The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A Windows notification fires when a session needs you or finishes (skipped when you are already looking at it).
+- The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A Windows notification fires when a session needs you or finishes (skipped when you are already looking at it), and a sound of your choice plays when one needs you: the bundled chime, your own .wav or .ogg, or none.
 - Each finished turn of a Claude session gets a one-line summary, kept across restarts, and the Finished notification is worded from it.
 - The Dashboard tab, opened from the activity rail, lists every agent session by status: what each is doing now, its context, recent activity, cost and running subagents, with a queue of the sessions waiting on you.
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
 - Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
 - The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, and can show every session under a repo, only the busy ones, or just a count.
 - Repos sort with the ones that need you on top, by latest activity, or in your own order, and an All / Active switch hides the repos and workspaces with nothing running.
+- Right-click a repo or workspace for a Spawn submenu: Last, each agent, Shell and your presets. The New session dialog picks its target from a dropdown and remembers your Trusted choice.
 - Launch again with one click: a repo's last launch settings are replayed from its row. Presets start many sessions at once from a prompts file, a folder or GitHub issue ranges, and on a remote host the wizard takes typed paths on that host.
-- In the terminal, copying from Claude Code's boxed panels leaves out the borders, file paths and URLs open with Ctrl+click, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
+- In the terminal, copying from Claude Code's boxed panels leaves out the borders, URLs open with Ctrl+click, a file path opens in its default app with Ctrl+click and in the viewer with Ctrl+Shift+click, shell commands get a pass/fail mark in the gutter with copy and re-run, and two header buttons jump between the prompts you sent.
 - Terminal programs that ask for urxvt or pixel-precise mouse reporting get clicks, drags and the wheel in the format they asked for.
-- When Claude exits, its pane stays a working shell.
+- When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
 - Secret environment values you give a session are stored in Windows Credential Manager, never in a settings file.
 
 ![The Dashboard tab: sessions grouped as Needs you, Working, Idle and Done, each with what it is doing now, its context, recent activity, cost and running subagents](docs/images/dashboard.png)
@@ -34,6 +35,7 @@ It is alpha software, Windows only for now.
 - A Claude session's pane can show its conversation as a chat instead of the terminal (the pane's Chat button, its menu or Ctrl+Shift+M), with answers appearing as they are written. Each session remembers which view it was last shown in.
 - Answer Claude's questions and permission prompts from cards, by click or key, and send messages from a box under the chat that keeps your text when a send is refused.
 - A strip under the chat shows what is still running: subagents, background shells and the next wakeup, with their ages.
+- A Bash or PowerShell card shows its command one statement per line, and a command that writes a log offers Tail: a scrolling box under the card that follows the file as it grows.
 - The Summary view (Ctrl+Shift+U) shows a session as one line per stretch of work, each opening into its messages.
 - Long replies written as expandable text open a short phrase into its longer form with a click, one level at a time.
 
@@ -74,10 +76,9 @@ It is alpha software, Windows only for now.
 
 ### Text and Markdown viewer
 
-- Ctrl+click a file path in the terminal and it opens in a read-only viewer tab with line numbers and syntax colours, scrolled to the line the path names.
+- Ctrl+Shift+click a file path in the terminal and it opens in a read-only viewer tab with line numbers and syntax colours, scrolled to the line the path names.
 - Markdown files open rendered (headings, lists, task boxes, tables, code blocks), with a Rendered / Source toggle. Links open, and `#heading` links scroll to the heading.
 - Ctrl+F finds text, a click or drag selects whole lines to copy, and a tab re-reads its file when you come back to it and the file has changed.
-- A setting sends text files to VS Code or your default app instead.
 
 ![A rendered Markdown file in a viewer tab, with the Rendered / Source toggle and its header buttons](docs/images/markdown-viewer.png)
 
@@ -112,6 +113,15 @@ It is alpha software, Windows only for now.
 3. The installer is not code-signed yet, so Windows SmartScreen warns on first run: choose More info, then Run anyway.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.7.0-alpha
+
+- Tail a log a chat command writes, in a scrolling box under its card that follows the file as it grows.
+- Hear when an agent needs you, and on Windows see the Needs you count as a badge on the taskbar button.
+- Start sessions faster: a Spawn submenu on every repo and workspace, a target dropdown, and a remembered Trusted choice.
+- A quieter app: toasts and banners no longer narrate what you can already see.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.7.0-alpha).
 
 ## What's new in v0.6.1-alpha
 
