@@ -9,7 +9,9 @@ use gpui::{
     Point, TestAppContext, VisualContext as _, VisualTestContext, Window, WindowId, point, px,
     size,
 };
-use protocol::{AttentionReason, ClientMessage, DaemonMessage, SplitDirection, TabEntry};
+use protocol::{
+    AttentionReason, ClientMessage, DaemonMessage, PaneDropEdge, SplitDirection, TabEntry,
+};
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{
     Connection, NetEvent, OpenOutcome, POPPED_OUT_NOTE, PopoutKey, RootView, ToastKind, ToastSpec,
@@ -2523,6 +2525,169 @@ fn spawn_is_disabled_in_a_tab_popout(cx: &mut TestAppContext) {
             ClientMessage::ClosePane { tab_id, pane_id, .. } if tab_id == "t1" && pane_id == "p2"
         )),
         "Close pane still works there: {sent:?}"
+    );
+}
+
+/// Opens a shell in `C:/work` through the main window's More menu's
+/// Shell… dialog, and replies to its spawn with standalone shell `new`;
+/// returns what the client sent from the submit on.
+fn shell_from_the_main_window(h: &mut Harness<'_>) -> Vec<ClientMessage> {
+    h.open_shell_dialog_from_more();
+    assert!(
+        h.root(|root, _| root.shell_dialog_open()),
+        "the dialog opened"
+    );
+    h.keys("C : / w o r k");
+    h.click_on("shell-submit");
+    let mut sent = h.sent();
+    let request_id = sent
+        .iter()
+        .find_map(|msg| match msg {
+            ClientMessage::SpawnSession(request) => Some(request.request_id.clone()),
+            _ => None,
+        })
+        .expect("the dialog sent its spawn");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("new").shell("C:/work").build(),
+        request_id,
+    });
+    sent.extend(h.sent());
+    sent
+}
+
+/// The tabs `msg` asks the daemon to change.
+fn tabs_named(msg: &ClientMessage) -> Vec<&str> {
+    match msg {
+        ClientMessage::SplitPane { tab_id, .. }
+        | ClientMessage::ReplacePaneSession { tab_id, .. }
+        | ClientMessage::ClosePane { tab_id, .. }
+        | ClientMessage::CloseTab { tab_id, .. } => vec![tab_id.as_str()],
+        ClientMessage::MovePane {
+            src_tab_id,
+            dst_tab_id,
+            ..
+        } => vec![src_tab_id.as_str(), dst_tab_id.as_str()],
+        _ => Vec::new(),
+    }
+}
+
+#[gpui::test]
+fn a_shell_from_the_main_window_lands_in_its_active_popped_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &split_tabs());
+    pop_out_tab(&mut h, "t1");
+    h.sent();
+
+    let sent = shell_from_the_main_window(&mut h);
+
+    assert!(
+        sent.iter().any(|msg| matches!(
+            msg,
+            ClientMessage::SplitPane { tab_id, new_session_id: Some(id), .. }
+                if tab_id == "t1" && id == "new"
+        )),
+        "the shell joins the popped tab the main window has active: {sent:?}"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::CreateTab { .. })),
+        "no tab of its own: {sent:?}"
+    );
+    assert!(tab_popped(&mut h, "t1"), "the tab stays popped out");
+}
+
+#[gpui::test]
+fn a_shell_from_the_main_window_leaves_its_other_tabs_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &split_tabs());
+    pop_out_tab(&mut h, "t1");
+    h.sent();
+
+    let sent = shell_from_the_main_window(&mut h);
+
+    assert!(
+        !sent
+            .iter()
+            .flat_map(tabs_named)
+            .any(|tab_id| tab_id == "t2"),
+        "t2 is not the active tab, so nothing touches it: {sent:?}"
+    );
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned))
+            .as_deref(),
+        Some("t1"),
+        "the popped tab stays the active one"
+    );
+}
+
+/// The point `fx` across and `fy` down `selector`'s bounds in the pop-out.
+fn popout_point(
+    popout: &mut VisualTestContext,
+    selector: &'static str,
+    fx: f32,
+    fy: f32,
+) -> Point<Pixels> {
+    popout.run_until_parked();
+    let bounds = popout
+        .debug_bounds(selector)
+        .expect("the element is drawn in the pop-out");
+    point(
+        bounds.origin.x + bounds.size.width * fx,
+        bounds.origin.y + bounds.size.height * fy,
+    )
+}
+
+#[gpui::test]
+fn a_pane_dragged_inside_a_tab_popout_moves_within_that_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &split_tabs());
+    pop_out_tab(&mut h, "t1");
+    h.click_on("tab-t2");
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned))
+            .as_deref(),
+        Some("t2"),
+        "the main window shows another tab"
+    );
+    let mut popout = h.popout_window();
+    let from = popout_point(&mut popout, "pane-title-p1", 0.5, 0.5);
+    let to = popout_point(&mut popout, "pane-frame-p2", 0.8, 0.5);
+    h.sent();
+
+    popout.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    popout.simulate_mouse_move(
+        point(from.x + px(6.0), from.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    popout.run_until_parked();
+    popout.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    popout.run_until_parked();
+    popout.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    popout.run_until_parked();
+
+    let sent = h.sent();
+    let moves: Vec<_> = sent
+        .iter()
+        .filter(|msg| matches!(msg, ClientMessage::MovePane { .. }))
+        .collect();
+    assert!(
+        matches!(
+            moves.as_slice(),
+            [ClientMessage::MovePane {
+                src_tab_id,
+                src_pane_id,
+                dst_tab_id,
+                dst_pane_id,
+                edge: PaneDropEdge::Right,
+                ..
+            }] if src_tab_id == "t1"
+                && src_pane_id == "p1"
+                && dst_tab_id == "t1"
+                && dst_pane_id == "p2"
+        ),
+        "p1 moves beside p2 in the popped tab, not into the main window's t2: {sent:?}"
     );
 }
 
