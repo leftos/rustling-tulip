@@ -109,9 +109,12 @@ pub struct TerminalPane {
     content_generation: u64,
     /// The terminal's palette, which every fresh terminal is given.
     palette: TerminalPalette,
-    /// The padding's colour around the terminal; `None` follows the
+    /// The frame band's colour around the terminal; `None` follows the
     /// terminal's background.
     frame: Option<Rgb>,
+    /// The frame band's width in px; the terminal's background fills the
+    /// rest of the padding.
+    frame_width: u16,
 }
 
 /// Ctrl+hover state: whether Ctrl is held, the viewport cell (row, column)
@@ -353,19 +356,22 @@ impl TerminalPane {
             content_generation: 0,
             palette: TerminalPalette::default(),
             frame: None,
+            frame_width: crate::appearance::DEFAULT_FRAME_WIDTH,
         }
     }
 
-    /// Paints the terminal with `palette`, and the padding around it in
-    /// `frame`, or in the terminal's background when `frame` is `None`. A
-    /// new palette repaints every row already drawn.
+    /// Paints the terminal with `palette`, and a band `frame_width` px wide
+    /// round it in `frame`, or in the terminal's background when `frame` is
+    /// `None`. A new palette repaints every row already drawn; a new width
+    /// only redraws, since the text's inset never changes.
     pub fn set_colors(
         &mut self,
         palette: TerminalPalette,
         frame: Option<Rgb>,
+        frame_width: u16,
         cx: &mut Context<Self>,
     ) {
-        if palette == self.palette && frame == self.frame {
+        if palette == self.palette && frame == self.frame && frame_width == self.frame_width {
             return;
         }
         if palette != self.palette {
@@ -374,12 +380,19 @@ impl TerminalPane {
             self.content_changed();
         }
         self.frame = frame;
+        self.frame_width = frame_width;
         cx.notify();
     }
 
+    /// The frame band's width in px.
+    pub fn frame_width(&self) -> u16 {
+        self.frame_width
+    }
+
     /// What the pane fills: the terminal's area with the terminal's
-    /// background (a program's `OSC 11` included), and the padding ring
-    /// around it with the frame, which follows that background when unset.
+    /// background (a program's `OSC 11` included), and the frame band
+    /// round it with the frame colour, which follows that background when
+    /// unset.
     pub fn fills(&self) -> (Rgb, Rgb) {
         let background = self.term.background();
         (background, self.frame.unwrap_or(background))
@@ -1757,6 +1770,7 @@ impl Render for TerminalPane {
         let input_view = view.clone();
         let focus = self.focus.clone();
         let (grid_fill, ring_fill) = self.fills();
+        let band = f32::from(self.frame_width.min(*protocol::TERMINAL_FRAME_WIDTHS.end()));
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window, family, &font_settings);
@@ -1823,8 +1837,10 @@ impl Render for TerminalPane {
         };
         let mut pane = div()
             .size_full()
-            .p(px(crate::PADDING))
-            .bg(to_rgba(ring_fill))
+            .bg(to_rgba(grid_fill))
+            .border(px(band))
+            .border_color(to_rgba(ring_fill))
+            .p(px(crate::PADDING - band))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))

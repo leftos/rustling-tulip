@@ -530,6 +530,7 @@ impl RootView {
         let app = AppLevel {
             font: &ui.terminal_font,
             theme: self.sidebar.theme_base(),
+            frame_width: self.sidebar.app_frame_width(),
         };
         // A container's last send, until the daemon's list echoes it, is
         // what the next change builds on.

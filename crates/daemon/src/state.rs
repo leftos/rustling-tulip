@@ -861,6 +861,10 @@ mod tests {
             "a weight in a field the release never wrote stays unset"
         );
         assert_eq!(
+            repo.appearance.terminal_frame_width, None,
+            "a frame width the release never wrote stays unset"
+        );
+        assert_eq!(
             repo.last_agent,
             Some(protocol::AgentId("claude".to_owned()))
         );

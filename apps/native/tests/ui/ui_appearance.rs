@@ -65,6 +65,20 @@ fn fills_of(h: &mut Harness<'_>, pane_id: &str) -> (u32, u32) {
         .expect("the pane has a terminal")
 }
 
+/// The width in px of the frame band pane `pane_id` draws.
+fn frame_width_of(h: &mut Harness<'_>, pane_id: &str) -> u16 {
+    let pane_id = pane_id.to_owned();
+    h.root(move |root, cx| root.pane_frame_width(&pane_id, cx))
+        .expect("the pane has a terminal")
+}
+
+/// Session `s1` of repo `r1` whose own frame width is `width`.
+fn session_with_frame_width(width: Option<u16>) -> SessionSnapshot {
+    let mut s = session("s1").in_repo("r1").build();
+    s.appearance.terminal_frame_width = width;
+    s
+}
+
 /// Pane `pane_id`'s terminal background and default text colour.
 fn terminal_colors(h: &mut Harness<'_>, pane_id: &str) -> (u32, u32) {
     let pane_id = pane_id.to_owned();
@@ -702,5 +716,74 @@ fn a_preset_equal_to_the_theme_colour_keeps_its_own_swatch(cx: &mut TestAppConte
     assert!(
         h.root(|root, _| root.appearance_can_reset("accent")),
         "Right from the Theme swatch lands on Rose, and Enter stores it"
+    );
+}
+
+#[gpui::test]
+fn a_pane_draws_a_one_pixel_frame_by_default(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        ..Fixture::single(session_with_frame_width(None))
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    assert_eq!(frame_width_of(&mut h, "p1"), 1);
+}
+
+#[gpui::test]
+fn a_session_frame_width_reaches_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        ..Fixture::single(session_with_frame_width(Some(3)))
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    assert_eq!(frame_width_of(&mut h, "p1"), 3);
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session_with_frame_width(None),
+        request_id: None,
+    });
+    assert_eq!(
+        frame_width_of(&mut h, "p1"),
+        1,
+        "a cleared width falls back to the default"
+    );
+}
+
+#[gpui::test]
+fn the_app_frame_width_reaches_every_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        ..Fixture::single(session_with_frame_width(None))
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    h.root_update(|root, _, cx| root.set_app_frame_width(Some(0), cx));
+    assert_eq!(frame_width_of(&mut h, "p1"), 0);
+}
+
+#[gpui::test]
+fn the_terminal_keeps_its_inset_at_every_frame_width(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        ..Fixture::single(session_with_frame_width(Some(0)))
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    let inset =
+        |h: &mut Harness<'_>| h.cell_center("p1", 0, 0).x - h.bounds("pane-grid-p1").origin.x;
+    assert_eq!(frame_width_of(&mut h, "p1"), 0);
+    let at_zero = inset(&mut h);
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session_with_frame_width(Some(6)),
+        request_id: None,
+    });
+    assert_eq!(frame_width_of(&mut h, "p1"), 6);
+    let at_six = inset(&mut h);
+    assert!(
+        (at_six - at_zero).abs() < gpui::px(0.5),
+        "the text's inset is the same at 0 and 6 px: {at_zero:?} vs {at_six:?}"
     );
 }

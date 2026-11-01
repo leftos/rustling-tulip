@@ -367,10 +367,18 @@ pub struct AppearanceOverrides {
     /// [`TERMINAL_FONT_WEIGHTS`]. `None` inherits the next level's weight.
     #[serde(default)]
     pub terminal_font_weight: Option<u16>,
+    /// The width in px of the frame band round the terminal, within
+    /// [`TERMINAL_FRAME_WIDTHS`]. `None` inherits the next level's width.
+    #[serde(default)]
+    pub terminal_frame_width: Option<u16>,
 }
 
 /// The terminal font sizes an appearance level may set, in px.
 pub const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<u16> = 8..=32;
+
+/// The terminal frame widths an appearance level may set, in whole px; 0
+/// draws no band.
+pub const TERMINAL_FRAME_WIDTHS: std::ops::RangeInclusive<u16> = 0..=6;
 
 /// The terminal font weights an appearance level may set: Regular, Medium,
 /// `SemiBold` and Bold.
@@ -389,6 +397,13 @@ pub enum AppearanceError {
         TERMINAL_FONT_SIZES.end()
     )]
     FontSize(u16),
+    /// The frame width is outside [`TERMINAL_FRAME_WIDTHS`].
+    #[error(
+        "terminal frame width must be between {} and {}",
+        TERMINAL_FRAME_WIDTHS.start(),
+        TERMINAL_FRAME_WIDTHS.end()
+    )]
+    FrameWidth(u16),
 }
 
 impl AppearanceOverrides {
@@ -398,8 +413,9 @@ impl AppearanceOverrides {
     ///
     /// # Errors
     ///
-    /// A colour that is not `#RRGGBB` (surrounding space ignored), or a
-    /// font size outside [`TERMINAL_FONT_SIZES`].
+    /// A colour that is not `#RRGGBB` (surrounding space ignored), a font
+    /// size outside [`TERMINAL_FONT_SIZES`], or a frame width outside
+    /// [`TERMINAL_FRAME_WIDTHS`].
     pub fn normalized(&self) -> Result<Self, AppearanceError> {
         let accent_color = normalized_color(self.accent_color.as_deref(), "accent color")?;
         let terminal_background_color = normalized_color(
@@ -412,6 +428,11 @@ impl AppearanceOverrides {
             && !TERMINAL_FONT_SIZES.contains(&size)
         {
             return Err(AppearanceError::FontSize(size));
+        }
+        if let Some(width) = self.terminal_frame_width
+            && !TERMINAL_FRAME_WIDTHS.contains(&width)
+        {
+            return Err(AppearanceError::FrameWidth(width));
         }
         Ok(Self {
             accent_color,
@@ -426,6 +447,7 @@ impl AppearanceOverrides {
             terminal_font_weight: self
                 .terminal_font_weight
                 .filter(|weight| TERMINAL_FONT_WEIGHTS.contains(weight)),
+            terminal_frame_width: self.terminal_frame_width,
         })
     }
 }
@@ -5700,6 +5722,7 @@ mod tests {
             terminal_font_size: Some(8),
             terminal_font_bold: Some(true),
             terminal_font_weight: Some(600),
+            terminal_frame_width: None,
         }
         .normalized()
         .expect("valid");
@@ -5808,6 +5831,39 @@ mod tests {
                 "terminal font size must be between 8 and 32"
             );
         }
+    }
+
+    #[test]
+    fn normalized_keeps_a_frame_width_of_zero_or_six() {
+        for width in [0, 6] {
+            let own = AppearanceOverrides {
+                terminal_frame_width: Some(width),
+                ..AppearanceOverrides::default()
+            };
+            assert_eq!(own.normalized().expect("in range"), own, "width {width}");
+        }
+    }
+
+    #[test]
+    fn normalized_refuses_a_frame_width_past_six() {
+        let error = AppearanceOverrides {
+            terminal_frame_width: Some(7),
+            ..AppearanceOverrides::default()
+        }
+        .normalized();
+        assert_eq!(error, Err(AppearanceError::FrameWidth(7)));
+        assert_eq!(
+            AppearanceError::FrameWidth(7).to_string(),
+            "terminal frame width must be between 0 and 6"
+        );
+    }
+
+    #[test]
+    fn appearance_without_a_frame_width_decodes_unset() {
+        let older: AppearanceOverrides =
+            serde_json::from_str(r##"{"accent_color": "#123456"}"##).expect("decodes");
+        assert_eq!(older.terminal_frame_width, None);
+        assert_eq!(older.accent_color.as_deref(), Some("#123456"));
     }
 
     #[test]

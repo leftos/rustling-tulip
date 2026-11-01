@@ -443,6 +443,12 @@ pub struct UiState {
     /// other stored value loads as [`crate::fonts::DEFAULT_UI_WEIGHT`].
     #[serde(deserialize_with = "offered_ui_font_weight")]
     pub ui_font_weight: u16,
+    /// The app's terminal frame width in px, within
+    /// [`protocol::TERMINAL_FRAME_WIDTHS`]; `None` is
+    /// [`crate::appearance::DEFAULT_FRAME_WIDTH`], and any other stored value
+    /// loads as `None`.
+    #[serde(default, deserialize_with = "offered_frame_width")]
+    pub terminal_frame_width: Option<u16>,
     /// The theme the interface draws in: a built-in's id or a user theme's
     /// file slug; `None` is the built-in theme.
     #[serde(default)]
@@ -708,6 +714,26 @@ fn offered_ui_font_weight<'de, D: Deserializer<'de>>(deserializer: D) -> Result<
     }))
 }
 
+/// Reads `terminal_frame_width`, never failing the file: a whole number in
+/// [`protocol::TERMINAL_FRAME_WIDTHS`] is kept, `null` is unset, and anything
+/// else is unset with a warning naming it.
+fn offered_frame_width<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u16>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    let offered = value
+        .as_u64()
+        .and_then(|width| u16::try_from(width).ok())
+        .filter(|width| protocol::TERMINAL_FRAME_WIDTHS.contains(width));
+    if offered.is_none() {
+        tracing::warn!("terminal_frame_width {value} is not 0 to 6; drawing the default");
+    }
+    Ok(offered)
+}
+
 /// Reads `saved_hosts`, keeping each tailnet entry whose name passes the
 /// DNS-name check and whose port is 1 to 65535, and each SSH entry whose
 /// host string passes its check, normalised; every other entry, an unknown
@@ -966,6 +992,7 @@ impl Default for UiState {
             ui_font_family: None,
             ui_text_size: 0,
             ui_font_weight: crate::fonts::DEFAULT_UI_WEIGHT,
+            terminal_frame_width: None,
             theme: None,
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
@@ -1794,6 +1821,21 @@ impl SidebarModel {
         self.ui.terminal_font = font;
     }
 
+    /// Sets the app's terminal frame width; `None`, or a width outside
+    /// [`protocol::TERMINAL_FRAME_WIDTHS`], is the default.
+    pub fn set_terminal_frame_width(&mut self, width: Option<u16>) {
+        self.ui.terminal_frame_width =
+            width.filter(|width| protocol::TERMINAL_FRAME_WIDTHS.contains(width));
+    }
+
+    /// The app's terminal frame width: the stored one, else
+    /// [`appearance::DEFAULT_FRAME_WIDTH`].
+    pub fn app_frame_width(&self) -> u16 {
+        self.ui
+            .terminal_frame_width
+            .unwrap_or(appearance::DEFAULT_FRAME_WIDTH)
+    }
+
     /// Sets the family the interface draws in; `None` is the default.
     pub fn set_ui_font_family(&mut self, family: Option<String>) {
         self.ui.ui_font_family = family;
@@ -2136,6 +2178,7 @@ impl SidebarModel {
             AppLevel {
                 font: &self.ui.terminal_font,
                 theme: self.theme_base,
+                frame_width: self.app_frame_width(),
             },
         )
     }
@@ -4843,6 +4886,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ui_state_round_trips_terminal_frame_width() {
+        let dir = TestDir::new("frame-width");
+        let state = UiState {
+            terminal_frame_width: Some(2),
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0).terminal_frame_width, Some(2));
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("the saved layout");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["terminal_frame_width"], 2, "saved as a number");
+    }
+
+    #[test]
+    fn ui_state_without_terminal_frame_width_loads_none() {
+        assert_eq!(UiState::default().terminal_frame_width, None);
+        let older: UiState = serde_json::from_value(json!({ "sidebar_width": 300.0 }))
+            .expect("a file from before the frame width was saved");
+        assert_eq!(older.terminal_frame_width, None, "absent: the default");
+        let null: UiState =
+            serde_json::from_value(json!({ "sidebar_width": 300.0, "terminal_frame_width": null }))
+                .expect("a null frame width");
+        assert_eq!(null.terminal_frame_width, None);
+    }
+
+    #[test]
+    fn an_unoffered_terminal_frame_width_loads_none() {
+        let load = |value: serde_json::Value| -> UiState {
+            serde_json::from_value(json!({ "sidebar_width": 300.0, "terminal_frame_width": value }))
+                .expect("a frame width never fails the file")
+        };
+        assert_eq!(
+            load(json!(0)).terminal_frame_width,
+            Some(0),
+            "offered: kept"
+        );
+        assert_eq!(
+            load(json!(6)).terminal_frame_width,
+            Some(6),
+            "offered: kept"
+        );
+        for bad in [json!(7), json!(-1), json!("x"), json!(2.5), json!(100_000)] {
+            let loaded = load(bad.clone());
+            assert_eq!(loaded.terminal_frame_width, None, "{bad}");
+            assert!(
+                (loaded.sidebar_width - 300.0).abs() < f32::EPSILON,
+                "the rest of the file loads: {bad}"
+            );
+        }
+    }
+
+    #[test]
     fn ui_state_without_a_theme_key_loads_none() {
         assert_eq!(UiState::default().theme, None);
         let older: UiState = serde_json::from_value(json!({ "sidebar_width": 300.0 }))
@@ -4886,6 +4981,7 @@ pub(crate) mod tests {
             ui_font_family: Some("Inter".to_owned()),
             ui_text_size: 3,
             ui_font_weight: 500,
+            terminal_frame_width: Some(2),
             theme: Some("my-theme".to_owned()),
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
             source_control: ScUiState {
