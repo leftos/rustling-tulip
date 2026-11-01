@@ -890,7 +890,7 @@ mod tests {
     fn every_fixture_reads_its_state() {
         use ScreenState::{AwaitingInput, Idle, Working};
         use Verdict::{Keep, State};
-        let cases: [(&str, &str, Verdict); 37] = [
+        let cases: [(&str, &str, Verdict); 38] = [
             (
                 "v03-ready",
                 include_str!("fixtures/v03-ready.txt"),
@@ -985,6 +985,11 @@ mod tests {
             (
                 "claude--v2302-working-agents-panel--w119",
                 include_str!("fixtures/claude--v2302-working-agents-panel--w119.txt"),
+                State(Working),
+            ),
+            (
+                "claude--v2316-task-subject-spinner",
+                include_str!("fixtures/claude--v2316-task-subject-spinner.txt"),
                 State(Working),
             ),
             (

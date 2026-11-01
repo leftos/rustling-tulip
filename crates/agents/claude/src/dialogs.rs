@@ -39,9 +39,6 @@ const CURSOR: char = '❯';
 /// The largest body a prompt carries, in bytes.
 const BODY_CAP: usize = 4096;
 
-/// The glyphs a turn's spinner cycles through.
-const SPINNER_GLYPHS: [char; 7] = ['·', '✢', '*', '✶', '✻', '✽', '✳'];
-
 /// How many non-empty rows above the input box are searched for a spinner.
 const SPINNER_ROWS: usize = 24;
 
@@ -660,28 +657,7 @@ fn spinner_above(rows: &[String]) -> bool {
         .rev()
         .filter(|row| !row.trim().is_empty())
         .take(SPINNER_ROWS)
-        .any(|row| is_spinner(row))
-}
-
-/// Whether `row` is a spinner line: a spinner glyph, then a capitalised verb
-/// ending in an ellipsis (`· Cooking… (21s · ↓ 1.1k tokens)`).
-fn is_spinner(row: &str) -> bool {
-    let mut chars = row.trim_start().chars();
-    if !chars.next().is_some_and(|c| SPINNER_GLYPHS.contains(&c)) {
-        return false;
-    }
-    let rest = chars.as_str();
-    if !rest.starts_with(char::is_whitespace) {
-        return false;
-    }
-    let word = rest.split_whitespace().next().unwrap_or_default();
-    let Some(verb) = word.strip_suffix('…') else {
-        return false;
-    };
-    verb.chars().next().is_some_and(char::is_uppercase)
-        && verb
-            .chars()
-            .all(|c| c.is_alphabetic() || matches!(c, '\'' | '\u{2019}' | '-'))
+        .any(|row| crate::rules::is_spinner_line(row))
 }
 
 /// One numbered option row: `❯ 2. label`.
@@ -1440,7 +1416,7 @@ fn panel_step(cursor: Option<usize>, row: usize) -> ViewStep {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{next_view_key, read, recipe};
+    use super::{next_view_key, read, recipe, spinner_above};
     use agent_api::{
         AnswerRefusal, Key, KeyHolder, RecipeStep, ScreenExpect, ViewGoal, ViewReading,
         ViewRefusal, ViewStep,
@@ -1766,6 +1742,21 @@ mod tests {
         assert_eq!(working.composer, ComposerState::Working);
         let typed = read(&boxed(&[], &["❯ fix the tests"]));
         assert_eq!(typed.composer, ComposerState::Draft);
+    }
+
+    #[test]
+    fn spinner_above_reads_a_task_subject_spinner() {
+        let above = rows(&[
+            "✽ Settings form: validate the fields, then run the tests… (5m 3s · ↓ 8.3k tokens)",
+            "  ⎿  ◼ Settings form: validate the fields, then run the tests",
+            "     ✔ Read the form and its tests",
+            "     ✔ Add the port check",
+            "     ✔ Add the host check; show errors inline",
+            "     ✔ Update the form's docs (two pages)",
+            "      … +2 completed",
+            "",
+        ]);
+        assert!(spinner_above(&above));
     }
 
     #[test]

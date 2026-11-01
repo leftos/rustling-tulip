@@ -12,10 +12,37 @@ use agent_api::{LineMatcher, ReadySignal, ScreenRegion, ScreenRule, ScreenRules,
 use std::sync::LazyLock;
 use std::time::Duration;
 
-/// The spinner line of a turn in progress: a cycling glyph, a capitalised
-/// verb, an ellipsis, then the optional phase, the elapsed time and the token
-/// details, which the terminal width may cut off mid-detail.
-const SPINNER: &str = r"^\s*[·✢*✶✻✽✳]\s+\p{Lu}[\p{L}'’-]*…(?:\s+·\s+[\p{L} ]+?)?(?:\s+\(.*)?\s*$";
+/// The spinner line of a turn in progress, in one of two forms after its
+/// cycling glyph. The usual form is a capitalised verb and an ellipsis, then
+/// the optional phase, the elapsed time and the token details, which the
+/// terminal width may cut off mid-detail (`· Cooking… (21s · ↓ 1.1k tokens)`).
+/// While a task-list item is in progress Claude shows the task's subject
+/// instead: any text without an ellipsis, then the ellipsis, which must be
+/// followed by the parenthesised details (`✽ Fix the build… (5m 3s · ↓ 8.3k
+/// tokens)`), so a multi-word line without them is not a spinner.
+const SPINNER: &str =
+    r"^\s*[·✢*✶✻✽✳]\s+(?:\p{Lu}[\p{L}'’-]*…(?:\s+·\s+[\p{L} ]+?)?(?:\s+\(.*)?|\S[^…]*…\s+\(.*)\s*$";
+
+/// [`SPINNER`], compiled once for the plugin's own screen reading; `None`
+/// when the pattern does not compile, which reads no row as a spinner.
+static SPINNER_RE: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
+    regex::Regex::new(SPINNER)
+        .inspect_err(|error| {
+            tracing::error!(
+                %error,
+                pattern = SPINNER,
+                "the spinner pattern does not compile; no row reads as a spinner"
+            );
+        })
+        .ok()
+});
+
+/// Whether `row` is a turn's spinner line, by [`SPINNER`].
+pub(crate) fn is_spinner_line(row: &str) -> bool {
+    SPINNER_RE
+        .as_ref()
+        .is_some_and(|spinner| spinner.is_match(row))
+}
 
 /// The spinner a turn keeps painted while its hooks run: Claude leaves it up
 /// across a hook-reported stop or tool start, so the line is not a turn of its
@@ -207,7 +234,7 @@ pub(crate) fn file_reference(repo_relative: &str) -> String {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{READY_SIGNAL, file_reference, screen_rules};
+    use super::{READY_SIGNAL, file_reference, is_spinner_line, screen_rules};
     use crate::{Agent, ClaudePlugin};
     use std::time::Duration;
 
@@ -250,6 +277,30 @@ mod tests {
             ]
         );
         assert_eq!(screen_rules().rules.len(), 18);
+    }
+
+    #[test]
+    fn spinner_matches_a_task_subject_and_keeps_its_non_matches() {
+        let spinners = [
+            "✽ Settings form: validate the fields, then run the tests… (5m 3s · ↓ 8.3k tokens)",
+            "· Cooking… (21s · ↓ 1.1k tokens)",
+            "✻ Brewing…",
+            "* fix lint errors… (3s · esc to interrupt)",
+            "✳ Simmering… · thinking (12s · ↑ 400 tokens)",
+        ];
+        for row in spinners {
+            assert!(is_spinner_line(row), "should be a spinner: {row:?}");
+        }
+        let others = [
+            "      … +2 completed",
+            "· a bullet without an ellipsis",
+            "  ⎿  · Item 4 (Add a search box…) is booked → next release",
+            "✽ Settings form: validate the fields…",
+            "✽ Cooking… extra text",
+        ];
+        for row in others {
+            assert!(!is_spinner_line(row), "should not be a spinner: {row:?}");
+        }
     }
 
     #[test]
