@@ -260,7 +260,8 @@ pub use crate::changes_view::{
 pub use crate::connection::Connection;
 pub use crate::dashboard::DashboardEntry;
 pub use crate::dashboard_rows::{
-    Columns as DashboardColumns, HeaderFigures, NestedRow, QueueChip, ReleaseFigure, RowCells,
+    AskBlock, AskChoice, Columns as DashboardColumns, HeaderFigures, NestedRow, QueueChip,
+    ReleaseFigure, RowCells,
 };
 pub use crate::diff_tab::{
     BINARY_TEXT, DiffTabBody, DiffTabHeader, EMPTY_TEXT, FINAL_NEWLINE_NOTE, LINE_ENDINGS_NOTE,
@@ -1111,6 +1112,8 @@ pub struct RootView {
     viewer_focus: FocusHandle,
     /// The Dashboard opens out, and the tab one waits to activate.
     dashboard_opens: dashboard_tab::DashboardOpens,
+    /// The `AnswerPrompt`s the Dashboard's ask blocks sent.
+    dashboard_answers: dashboard_tab::DashboardAnswers,
     /// The last `WatchDashboard` sent on this connection: whether the
     /// daemon is streaming the Dashboard's facts to this client.
     dashboard_watch: HashSet<HostKey>,
@@ -1532,6 +1535,7 @@ impl RootView {
             viewer_opens: viewer_tab::ViewerOpens::default(),
             viewer_focus: cx.focus_handle(),
             dashboard_opens: dashboard_tab::DashboardOpens::default(),
+            dashboard_answers: dashboard_tab::DashboardAnswers::default(),
             dashboard_watch: HashSet::new(),
             dashboard_facts: dashboard_facts::HostFacts::default(),
             dashboard_scroll: gpui::ScrollHandle::new(),

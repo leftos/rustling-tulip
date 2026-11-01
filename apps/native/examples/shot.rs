@@ -2121,9 +2121,16 @@ fn dashboard_rows(rows: &mut Vec<Row>) {
             "questions": [{
                 "question": "Bind Ctrl+R to Recover, or keep it free for the terminal?",
                 "header": "Keys",
-                "options": [],
+                "options": ["Bind Ctrl+R to Recover", "Keep it free"],
                 "multi_select": false,
             }],
+        });
+    }
+    for row in rows.iter_mut().filter(|row| row.id == "s-ask") {
+        row.extra["pending_input"] = json!({
+            "kind": "permission",
+            "tool_name": "Bash",
+            "summary": "gh pr merge 118 --squash --delete-branch",
         });
     }
     rows.push(Row {

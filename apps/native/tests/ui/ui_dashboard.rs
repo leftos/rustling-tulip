@@ -8,7 +8,7 @@ use crate::support;
 
 use chrono::{DateTime, Duration, Utc};
 use gpui::{TestAppContext, px, size};
-use protocol::{AgentState, ClientMessage, DaemonMessage, SessionSnapshot, TabEntry};
+use protocol::{AgentState, ClientMessage, DaemonMessage, PromptChoice, SessionSnapshot, TabEntry};
 use rustling_tulip_native::{DashboardColumns, DashboardEntry, RowCells};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, facts, facts_message, pane, repo, session, tab};
@@ -841,4 +841,196 @@ fn narrow_views_drop_columns_in_order(cx: &mut TestAppContext) {
         seen.last().is_some_and(|narrow| !narrow.agents),
         "the narrowest drops them all"
     );
+}
+
+/// A session waiting since `since` on `pending`, as the wire spells it.
+fn waiting_on(id: &str, since: DateTime<Utc>, pending: serde_json::Value) -> SessionSnapshot {
+    session(id)
+        .in_repo("r1")
+        .status("awaiting_input")
+        .status_since(since)
+        .pending_input(pending)
+        .build()
+}
+
+fn single_question() -> serde_json::Value {
+    json!({
+        "kind": "question",
+        "questions": [{ "question": "Which branch?", "header": "", "options": ["main", "dev"], "multi_select": false }],
+    })
+}
+
+fn gh_merge() -> serde_json::Value {
+    json!({ "kind": "permission", "tool_name": "Bash", "summary": "gh pr merge 118 --squash" })
+}
+
+/// The `AnswerPrompt`s the client sent since the last look.
+fn answers(h: &mut Harness<'_>) -> Vec<(String, DateTime<Utc>, PromptChoice, Option<String>)> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::AnswerPrompt {
+                session_id,
+                since,
+                choice,
+                request_id,
+            } => Some((session_id, since, choice, request_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn toasts(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .map(|t| (t.title.clone(), t.detail.clone()))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn a_choice_button_sends_answer_prompt(cx: &mut TestAppContext) {
+    let since = minutes_ago(3);
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![waiting_on("q1", since, single_question())]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    assert!(drawn(&mut h, "dash-ask-q1"));
+    assert!(drawn(&mut h, "dash-ask-choice-q1-1"));
+    answers(&mut h);
+    h.click_on("dash-ask-choice-q1-2");
+    let sent = answers(&mut h);
+    assert_eq!(sent.len(), 1, "one answer: {sent:?}");
+    let (session_id, sent_since, choice, request_id) = &sent[0];
+    assert_eq!(session_id, "q1");
+    assert_eq!(*sent_since, since, "chosen against the snapshot's stamp");
+    assert_eq!(*choice, PromptChoice::Option { index: 1 });
+    assert!(request_id.is_some(), "the answer carries a request id");
+}
+
+#[gpui::test]
+fn a_permission_shows_allow_deny_and_go_to_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![waiting_on("p1", minutes_ago(2), gh_merge())]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    let ask = cells(&mut h, "p1")
+        .ask
+        .expect("a waiting row has an ask block");
+    assert_eq!(ask.label, "Permission ·");
+    assert_eq!(ask.command.as_deref(), Some("gh pr merge 118 --squash"));
+    assert_eq!(
+        ask.choices
+            .iter()
+            .map(|choice| (choice.label.as_str(), choice.hint.as_deref()))
+            .collect::<Vec<_>>(),
+        [("Allow", None), ("Deny", None)],
+        "with no chat loaded, no Always allow and no key hint"
+    );
+    assert!(drawn(&mut h, "dash-ask-p1-command"));
+    assert!(drawn(&mut h, "dash-ask-choice-p1-1"));
+    assert!(drawn(&mut h, "dash-ask-choice-p1-2"));
+    assert!(!drawn(&mut h, "dash-ask-choice-p1-3"));
+    assert!(drawn(&mut h, "dash-ask-go-p1"));
+    answers(&mut h);
+    h.click_on("dash-ask-choice-p1-2");
+    let sent = answers(&mut h);
+    assert_eq!(sent.len(), 1, "one answer: {sent:?}");
+    assert_eq!(sent[0].2, PromptChoice::Deny);
+}
+
+#[gpui::test]
+fn a_multi_select_question_shows_only_go_to_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let multi = json!({
+        "kind": "question",
+        "questions": [{ "question": "Which crates?", "header": "", "options": ["a", "b"], "multi_select": true }],
+    });
+    let fixture = on_dashboard(vec![waiting_on("m1", minutes_ago(2), multi)]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    assert!(drawn(&mut h, "dash-ask-m1"));
+    assert!(drawn(&mut h, "dash-ask-go-m1"));
+    assert!(!drawn(&mut h, "dash-ask-choice-m1-1"));
+    assert!(!drawn(&mut h, "dash-ask-choice-m1-2"));
+}
+
+#[gpui::test]
+fn a_refused_answer_toasts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![waiting_on("q1", minutes_ago(3), single_question())]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    answers(&mut h);
+    h.click_on("dash-ask-choice-q1-1");
+    let id = answers(&mut h)
+        .pop()
+        .and_then(|(_, _, _, request_id)| request_id)
+        .expect("the answer carries a request id");
+    let refusal = "the prompt changed since";
+    h.send(DaemonMessage::Error {
+        message: refusal.to_owned(),
+        request_id: Some(id),
+        code: None,
+    });
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't answer the prompt".to_owned(),
+            Some(refusal.to_owned())
+        )]
+    );
+}
+
+#[gpui::test]
+fn a_second_click_sends_nothing_while_an_answer_is_out(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![waiting_on("q1", minutes_ago(3), single_question())]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    answers(&mut h);
+    h.click_on("dash-ask-choice-q1-1");
+    let id = answers(&mut h)
+        .pop()
+        .and_then(|(_, _, _, request_id)| request_id)
+        .expect("the first click sends its answer");
+    h.click_on("dash-ask-choice-q1-1");
+    h.click_on("dash-ask-choice-q1-2");
+    assert!(
+        answers(&mut h).is_empty(),
+        "no second answer while the first is out"
+    );
+    h.send(DaemonMessage::Error {
+        message: "the prompt changed since".to_owned(),
+        request_id: Some(id),
+        code: None,
+    });
+    h.click_on("dash-ask-choice-q1-2");
+    assert_eq!(
+        answers(&mut h).len(),
+        1,
+        "a refusal frees the buttons again"
+    );
+    let moved = minutes_ago(1);
+    update(&mut h, waiting_on("q1", moved, single_question()));
+    h.click_on("dash-ask-choice-q1-1");
+    let sent = answers(&mut h);
+    assert_eq!(sent.len(), 1, "a new wait frees the buttons: {sent:?}");
+    assert_eq!(sent[0].1, moved);
+}
+
+#[gpui::test]
+fn go_to_pane_opens_the_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![waiting_on("s1", minutes_ago(2), gh_merge())]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_dashboard(&mut h);
+    h.click_on("dash-ask-go-s1");
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t1".to_owned()),
+        "the session's pane is shown"
+    );
+    assert!(answers(&mut h).is_empty(), "Go to pane answers nothing");
 }

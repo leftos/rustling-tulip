@@ -3,11 +3,14 @@
 //! activate, and the `WatchDashboard` the client keeps in step with whether
 //! the active tab is the Dashboard.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use gpui::{Context, Window};
-use protocol::{ClientMessage, DaemonMessage, TabContent};
+use protocol::{
+    ClientMessage, DaemonMessage, PendingInput, PromptChoice, SessionSnapshot, TabContent,
+};
 
 use crate::RootView;
 use crate::connection::Connection;
@@ -18,6 +21,11 @@ use crate::target::HostKey;
 
 /// The toast an `OpenDashboardTab` the daemon refused raises.
 const OPEN_FAILED_TITLE: &str = "Couldn't open the Dashboard";
+/// The toast an `AnswerPrompt` the daemon refused raises.
+const ANSWER_REFUSED_TITLE: &str = "Couldn't answer the prompt";
+/// How many Dashboard answers are remembered, so a late refusal of one is
+/// known as ours; an accepted answer gets no reply, so the oldest go.
+const ANSWERS_CAP: usize = 16;
 
 /// The `OpenDashboardTab`s out, and the tab one of them waits to activate.
 #[derive(Debug, Default)]
@@ -81,7 +89,111 @@ impl DashboardOpens {
     }
 }
 
+/// The `AnswerPrompt`s the Dashboard's ask blocks sent and the daemon has
+/// not refused, by the host each went to, the newest [`ANSWERS_CAP`] of
+/// them; and per session the wait its last answer was sent for, whose
+/// buttons stay disabled while that wait holds.
+#[derive(Debug, Default)]
+pub(crate) struct DashboardAnswers {
+    next_answer: u64,
+    sent: VecDeque<(HostKey, String)>,
+    out: HashMap<String, AnswerOut>,
+}
+
+/// The wait an answer was sent for: the snapshot's stamp and prompt then.
+#[derive(Debug)]
+struct AnswerOut {
+    host: HostKey,
+    request_id: String,
+    since: DateTime<Utc>,
+    pending: Option<PendingInput>,
+}
+
+impl DashboardAnswers {
+    /// A fresh `AnswerPrompt` id for `host`, recorded as sent; past
+    /// [`ANSWERS_CAP`] the oldest is forgotten.
+    fn answer_id(&mut self, host: &HostKey) -> String {
+        self.next_answer += 1;
+        let id = format!("dashboard-answer-{}", self.next_answer);
+        if self.sent.len() == ANSWERS_CAP {
+            self.sent.pop_front();
+        }
+        self.sent.push_back((host.clone(), id.clone()));
+        id
+    }
+
+    /// Whether `id` is an answer this client sent `host`, which is
+    /// forgotten and its session's buttons freed.
+    fn refused(&mut self, host: &HostKey, id: &str) -> bool {
+        let Some(at) = self
+            .sent
+            .iter()
+            .position(|(sent_to, sent)| sent_to == host && sent == id)
+        else {
+            return false;
+        };
+        self.sent.remove(at);
+        self.out
+            .retain(|_, out| !(out.host == *host && out.request_id == id));
+        true
+    }
+
+    /// Whether an answer is out for `session`'s wait as its snapshot reads
+    /// now: same status stamp, same prompt.
+    pub(crate) fn is_out(&self, session: &SessionSnapshot) -> bool {
+        self.out.get(&session.id).is_some_and(|out| {
+            Some(out.since) == session.status_since && out.pending == session.pending_input
+        })
+    }
+
+    /// `host`'s connection is new: no refusal of an old answer will come.
+    fn reset(&mut self, host: &HostKey) {
+        self.sent.retain(|(sent_to, _)| sent_to != host);
+        self.out.retain(|_, out| out.host != *host);
+    }
+}
+
 impl RootView {
+    /// An ask block's choice button: sends `choice` for `session_id`'s
+    /// prompt, chosen against the snapshot's status stamp `since`, to the
+    /// session's host, and holds the session's buttons until that wait
+    /// changes or the answer is refused. Nothing is sent while an answer
+    /// for the same wait is out.
+    pub(crate) fn answer_from_dashboard(
+        &mut self,
+        session_id: &str,
+        since: DateTime<Utc>,
+        choice: PromptChoice,
+        cx: &mut Context<Self>,
+    ) {
+        let pending = match self.sidebar.session(session_id) {
+            Some(session) if self.dashboard_answers.is_out(session) => return,
+            Some(session) => session.pending_input.clone(),
+            None => None,
+        };
+        let host = self.host_of_session(session_id);
+        let request_id = self.dashboard_answers.answer_id(&host);
+        self.dashboard_answers.out.insert(
+            session_id.to_owned(),
+            AnswerOut {
+                host: host.clone(),
+                request_id: request_id.clone(),
+                since,
+                pending,
+            },
+        );
+        self.send_to(
+            &host,
+            ClientMessage::AnswerPrompt {
+                session_id: session_id.to_owned(),
+                since,
+                choice,
+                request_id: Some(request_id),
+            },
+        );
+        cx.notify();
+    }
+
     /// The listed Dashboard tab's id, if there is one this client has not
     /// asked to close.
     pub(crate) fn dashboard_tab_id(&self) -> Option<&str> {
@@ -131,6 +243,7 @@ impl RootView {
                 if *host == HostKey::Local {
                     self.dashboard_opens.reset();
                 }
+                self.dashboard_answers.reset(host);
                 self.dashboard_watch.remove(host);
                 self.dashboard_facts.clear(host);
                 self.sync_dashboard_watch();
@@ -164,6 +277,20 @@ impl RootView {
                 self.push_toast(
                     ToastKind::Error,
                     OPEN_FAILED_TITLE,
+                    Some(message.clone()),
+                    cx,
+                );
+                true
+            }
+            DaemonMessage::Error {
+                message,
+                request_id: Some(id),
+                ..
+            } if self.dashboard_answers.refused(host, id) => {
+                tracing::warn!("the daemon refused a Dashboard answer: {message}");
+                self.push_toast(
+                    ToastKind::Error,
+                    ANSWER_REFUSED_TITLE,
                     Some(message.clone()),
                     cx,
                 );
@@ -229,7 +356,28 @@ impl RootView {
         if *host == HostKey::Local {
             self.dashboard_opens = DashboardOpens::default();
         }
+        self.dashboard_answers.reset(host);
         self.dashboard_watch.remove(host);
         self.dashboard_facts.clear(host);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ANSWERS_CAP, DashboardAnswers};
+    use crate::target::HostKey;
+
+    #[test]
+    fn the_answers_remembered_are_capped_dropping_the_oldest() {
+        let mut answers = DashboardAnswers::default();
+        let ids: Vec<String> = (0..=ANSWERS_CAP)
+            .map(|_| answers.answer_id(&HostKey::Local))
+            .collect();
+        assert!(
+            !answers.refused(&HostKey::Local, &ids[0]),
+            "the oldest is forgotten once {ANSWERS_CAP} newer ones were sent"
+        );
+        assert!(answers.refused(&HostKey::Local, &ids[1]));
+        assert!(answers.refused(&HostKey::Local, &ids[ANSWERS_CAP]));
     }
 }

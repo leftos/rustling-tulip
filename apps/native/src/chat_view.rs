@@ -396,6 +396,12 @@ impl ChatPanes {
         self.sessions.get(session_id)
     }
 
+    /// The prompt card on screen in the session `session_id`'s loaded chat,
+    /// when one is loaded and a card is up.
+    pub(crate) fn held_prompt(&self, session_id: &str) -> Option<&ChatPrompt> {
+        self.session(session_id)?.stack.current()
+    }
+
     /// Pane `pane_id` closed or now shows another session: it shows a
     /// terminal again, with no note.
     pub(crate) fn forget_pane(&mut self, pane_id: &str) {

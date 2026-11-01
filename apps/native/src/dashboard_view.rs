@@ -16,10 +16,12 @@ use gpui::{
 };
 use protocol::{SessionMode, SessionStatus};
 
+use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::dashboard::{self, DashboardRow, GroupKind, HeaderCounts};
 use crate::dashboard_rows::{
-    Columns, HeaderFigures, NestedRow, QUEUE_HINT, QueueChip, RowCells, RowInput, agent_glyph,
-    header_figures, header_pills, queue_chips, row_cells, visible_columns,
+    AskBlock, AskChoice, Columns, GO_TO_PANE, HeaderFigures, NestedRow, QUEUE_HINT, QueueChip,
+    RowCells, RowInput, agent_glyph, header_figures, header_pills, queue_chips, row_cells,
+    visible_columns,
 };
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
@@ -70,6 +72,7 @@ impl RootView {
             facts: self.dashboard_facts.facts_for(&row.session_id),
             agents: self.sidebar.session_agents(&row.session_id),
             unseen: self.sidebar.is_unseen(&row.session_id),
+            prompt: self.chat.held_prompt(&row.session_id),
         })
     }
 
@@ -143,6 +146,13 @@ impl RootView {
                     .copied()
                     .unwrap_or(t.text_2);
                 body.push(self.dashboard_row(cells, columns, accent, cx));
+                if let Some(ask) = &cells.ask {
+                    let answer_out = self
+                        .sidebar
+                        .session(&ask.session_id)
+                        .is_some_and(|session| self.dashboard_answers.is_out(session));
+                    body.push(ask_block_element(ask, answer_out, cx));
+                }
                 body.extend(cells.nested.iter().map(|nested| {
                     nested_row(
                         crate::fonts::ui_text_size(cx),
@@ -361,6 +371,160 @@ impl RootView {
             .any(|at| (now - at).num_seconds() < FRESH_BELOW_SECONDS);
         if fresh { FAST_REPAINT } else { SLOW_REPAINT }
     }
+}
+
+/// The ask block under a waiting row, tagged `dash-ask-{id}`: its label and
+/// the prompt's text, a permission's command in a mono box
+/// (`dash-ask-{id}-command`), then a button per choice
+/// (`dash-ask-choice-{id}-{n}`, `n` from 1) with its key hint, the first
+/// primary, and `Go to pane` last (`dash-ask-go-{id}`). While an answer is
+/// out for this wait (`answer_out`) the choice buttons draw disabled.
+pub(crate) fn ask_block_element(
+    block: &AskBlock,
+    answer_out: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let offset = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
+    let id = block.session_id.clone();
+    let selector = format!("dash-ask-{id}");
+    let mut buttons: Vec<AnyElement> = Vec::with_capacity(block.choices.len() + 1);
+    if let Some(since) = block.since {
+        let answer_at = (!answer_out).then_some(since);
+        for (index, choice) in block.choices.iter().enumerate() {
+            buttons.push(ask_choice_button(&id, index, choice, answer_at, cx));
+        }
+    }
+    let go = id.clone();
+    buttons.push(
+        outlined_button(
+            offset,
+            shift,
+            &format!("dash-ask-go-{id}"),
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            &t,
+        )
+        .text_color(gpui::rgb(t.text_2))
+        .child(GO_TO_PANE)
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.select_session(&go, window, cx);
+        }))
+        .into_any_element(),
+    );
+    div()
+        .relative()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .pl(px(PAD_LEFT + GLYPH_W + GAP))
+        .pr(px(PAD_RIGHT))
+        .pb(px(8.0))
+        .bg(gpui::rgba(t.ask_wash))
+        .driver_id(move || selector)
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(2.0))
+                .bg(gpui::rgb(t.asking)),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
+                        .text_color(gpui::rgb(t.asking))
+                        .child(block.label.clone()),
+                )
+                .child(line_text(&format!("dash-ask-{id}-text"), &block.text).flex_1()),
+        )
+        .when_some(block.command.clone(), |ask, command| {
+            let name = format!("dash-ask-{id}-command");
+            ask.child(
+                div()
+                    .flex_none()
+                    .max_w_full()
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(gpui::rgb(t.line))
+                    .bg(gpui::rgb(t.surface))
+                    .font_family(DEFAULT_FAMILY)
+                    .font_weight(crate::fonts::mono_weight())
+                    .text_size(crate::fonts::ui_px_at(offset, SMALL_TEXT))
+                    .child(line_text(&name, &command))
+                    .driver_id(move || name),
+            )
+        })
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.0))
+                .children(buttons),
+        )
+        .into_any_element()
+}
+
+/// One answer button of an ask block: its label and key hint, primary when
+/// it is the first; a press sends its choice against `answer_at`, and with
+/// none (an answer is out) it draws disabled and takes no press.
+fn ask_choice_button(
+    id: &str,
+    index: usize,
+    choice: &AskChoice,
+    answer_at: Option<chrono::DateTime<Utc>>,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let offset = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
+    let selector = format!("dash-ask-choice-{id}-{}", index + 1);
+    let make = if index == 0 {
+        primary_button
+    } else {
+        outlined_button
+    };
+    let session = id.to_owned();
+    let answer = choice.choice;
+    make(
+        offset,
+        shift,
+        &selector,
+        ButtonSize::Compact,
+        answer_at.is_some(),
+        Layer::Base,
+        &t,
+    )
+    .gap(px(6.0))
+    .child(choice.label.clone())
+    .when_some(choice.hint.clone(), |button, hint| {
+        button.child(
+            div()
+                .opacity(0.65)
+                .text_size(crate::fonts::ui_px_at(offset, CAPS_TEXT))
+                .child(hint),
+        )
+    })
+    .when_some(answer_at, |button, since| {
+        button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.answer_from_dashboard(&session, since, answer, cx);
+        }))
+    })
+    .into_any_element()
 }
 
 /// Notes the view's laid-out width and redraws when it changed, so the

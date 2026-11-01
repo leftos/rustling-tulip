@@ -9,8 +9,9 @@
 
 use chrono::{DateTime, Utc};
 use protocol::{
-    AgentDescriptor, AgentKind, AgentNode, AgentState, NowKind, PendingInput, SessionFacts,
-    SessionMode, SessionSnapshot, SessionStatus, StuckReason,
+    AgentDescriptor, AgentKind, AgentNode, AgentState, ChatPrompt, ChatPromptKind, NowKind,
+    PendingInput, PendingQuestion, PromptChoice, SessionFacts, SessionMode, SessionSnapshot,
+    SessionStatus, StuckReason,
 };
 
 use crate::dashboard::{DashboardRow, GroupKind, HeaderCounts};
@@ -54,6 +55,10 @@ pub(crate) struct RowInput<'a> {
     pub(crate) agents: &'a [AgentDescriptor],
     /// Whether the sidebar leaf marks the session's last turn unseen.
     pub(crate) unseen: bool,
+    /// The prompt card the session's loaded chat holds, when a chat or
+    /// summary pane has it loaded: it says which permission choices the
+    /// dialog offers and their digits.
+    pub(crate) prompt: Option<&'a ChatPrompt>,
 }
 
 /// The line under a row's state word: the highest now-line rule that applies.
@@ -415,6 +420,9 @@ pub struct RowCells {
     pub tokens: String,
     /// A row waiting on the user: washed and striped.
     pub asking: bool,
+    /// The ask block under a waiting row: only under a Needs you row whose
+    /// session waits on a reported prompt.
+    pub ask: Option<AskBlock>,
     /// The rows its agent tree adds below it: only under a Working row.
     pub nested: Vec<NestedRow>,
 }
@@ -459,10 +467,181 @@ pub(crate) fn row_cells(input: &RowInput<'_>, kind: GroupKind, now: DateTime<Utc
         cost,
         tokens,
         asking: kind == GroupKind::NeedsYou,
+        ask: if kind == GroupKind::NeedsYou {
+            ask_block(input)
+        } else {
+            None
+        },
         nested: match (kind, facts) {
             (GroupKind::Working, Some(facts)) => nested_rows(&facts.agents, now),
             _ => Vec::new(),
         },
+    }
+}
+
+/// The ask block's label before a question's text.
+pub const ASK_QUESTION: &str = "Question ·";
+/// The ask block's label before a permission's text.
+pub const ASK_PERMISSION: &str = "Permission ·";
+/// The ask block's last button, which shows the session's pane.
+pub const GO_TO_PANE: &str = "Go to pane";
+
+/// One answer button of an ask block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskChoice {
+    /// The button's text: an option's label, `Allow`, `Always allow`, `Deny`.
+    pub label: String,
+    /// The key hint drawn beside it, `None` when no digit is known.
+    pub hint: Option<String>,
+    /// What a press sends in `AnswerPrompt`.
+    pub choice: PromptChoice,
+}
+
+/// The block under a waiting row: what the session asks, and the buttons
+/// that answer it from the Dashboard, the first of them primary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskBlock {
+    pub session_id: String,
+    /// `Question ·`, `Permission ·`, or the state word for any other prompt.
+    pub label: String,
+    /// The prompt's text.
+    pub text: String,
+    /// A permission's command, drawn in a mono box.
+    pub command: Option<String>,
+    /// The snapshot's status stamp the answer is chosen against.
+    pub since: Option<DateTime<Utc>>,
+    /// The answer buttons; empty when the prompt cannot be answered from
+    /// here, leaving `Go to pane` alone.
+    pub choices: Vec<AskChoice>,
+}
+
+/// The ask block of a session waiting on a prompt its hooks reported, else
+/// `None`. Buttons are offered for a single single-choice question and for
+/// a permission, and only while the snapshot carries its status stamp.
+pub(crate) fn ask_block(input: &RowInput<'_>) -> Option<AskBlock> {
+    let session = input.session;
+    if session.status != SessionStatus::AwaitingInput {
+        return None;
+    }
+    let (label, text, command, choices) = match session.pending_input.as_ref()? {
+        PendingInput::Question { questions } => (
+            ASK_QUESTION.to_owned(),
+            now_text(input),
+            None,
+            question_choices(questions),
+        ),
+        PendingInput::Permission { tool_name, summary } => (
+            ASK_PERMISSION.to_owned(),
+            permission_text(input, tool_name),
+            Some(summary.trim().to_owned()).filter(|command| !command.is_empty()),
+            permission_choices(input.prompt),
+        ),
+        PendingInput::PlanApproval { .. } | PendingInput::Other { .. } | PendingInput::Unknown => (
+            format!("{} ·", state_word(input)),
+            now_text(input),
+            None,
+            Vec::new(),
+        ),
+    };
+    let since = session.status_since;
+    Some(AskBlock {
+        session_id: session.id.clone(),
+        label,
+        text,
+        command,
+        since,
+        choices: if since.is_some() { choices } else { Vec::new() },
+    })
+}
+
+/// A permission's text: `Allow <tool>?`, or the row's asking wording when
+/// the tool has no name.
+fn permission_text(input: &RowInput<'_>, tool_name: &str) -> String {
+    let tool = one_line(tool_name);
+    if tool.is_empty() {
+        now_text(input)
+    } else {
+        format!("Allow {tool}?")
+    }
+}
+
+/// One button per option of a single single-choice question, hinted `1` to
+/// `n`; none for several questions, a multi-select or no options.
+fn question_choices(questions: &[PendingQuestion]) -> Vec<AskChoice> {
+    let [question] = questions else {
+        return Vec::new();
+    };
+    if question.multi_select {
+        return Vec::new();
+    }
+    question
+        .options
+        .iter()
+        .enumerate()
+        .map_while(|(index, label)| {
+            let index = u16::try_from(index).ok()?;
+            Some(AskChoice {
+                label: label.clone(),
+                hint: Some((u32::from(index) + 1).to_string()),
+                choice: PromptChoice::Option { index },
+            })
+        })
+        .collect()
+}
+
+/// The option numbers of a permission dialog's Allow, Always allow and
+/// Deny, picked as the daemon picks the keys it types for an
+/// `AnswerPrompt`: Allow is the option labelled exactly `Yes`, Deny the one
+/// labelled exactly `No`, and Always allow another option whose label ends
+/// with the rule the screen read (`always_allow_tip`), none without one.
+fn permission_options(prompt: &ChatPrompt) -> [(Option<u32>, &'static str, PromptChoice); 3] {
+    let labelled = |label: &str| {
+        prompt
+            .options
+            .iter()
+            .rev()
+            .find(|option| option.label.trim() == label)
+            .map(|option| option.number)
+    };
+    let once = labelled("Yes");
+    let always = prompt.always_allow_tip.as_deref().and_then(|rule| {
+        prompt
+            .options
+            .iter()
+            .find(|option| Some(option.number) != once && option.label.trim_end().ends_with(rule))
+            .map(|option| option.number)
+    });
+    [
+        (once, "Allow", PromptChoice::Allow),
+        (always, "Always allow", PromptChoice::AllowAlways),
+        (labelled("No"), "Deny", PromptChoice::Deny),
+    ]
+}
+
+/// A permission's buttons. With the dialog's card held (`prompt`), the
+/// choices the daemon would type and their digits (see
+/// [`permission_options`]). Without it, Allow and Deny with no hint, since
+/// no digit is known.
+fn permission_choices(prompt: Option<&ChatPrompt>) -> Vec<AskChoice> {
+    let Some(prompt) = prompt.filter(|prompt| prompt.kind == ChatPromptKind::Permission) else {
+        return vec![
+            permission_choice("Allow", None, PromptChoice::Allow),
+            permission_choice("Deny", None, PromptChoice::Deny),
+        ];
+    };
+    permission_options(prompt)
+        .into_iter()
+        .filter_map(|(number, label, choice)| {
+            number.map(|number| permission_choice(label, Some(number), choice))
+        })
+        .collect()
+}
+
+fn permission_choice(label: &str, number: Option<u32>, choice: PromptChoice) -> AskChoice {
+    AskChoice {
+        label: label.to_owned(),
+        hint: number.map(|number| number.to_string()),
+        choice,
     }
 }
 
@@ -755,7 +934,69 @@ mod tests {
             facts,
             agents: &[],
             unseen: false,
+            prompt: None,
         }
+    }
+
+    fn asking(pending: PendingInput) -> SessionSnapshot {
+        let mut session = in_status("s1", SessionStatus::AwaitingInput);
+        session.status_since = Some(at(-3));
+        session.pending_input = Some(pending);
+        session
+    }
+
+    fn question(text: &str, options: &[&str], multi_select: bool) -> protocol::PendingQuestion {
+        protocol::PendingQuestion {
+            question: text.to_owned(),
+            header: String::new(),
+            options: options.iter().map(|option| (*option).to_owned()).collect(),
+            multi_select,
+        }
+    }
+
+    fn bash(command: &str) -> PendingInput {
+        PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: command.to_owned(),
+        }
+    }
+
+    fn permission_card(options: &[(u32, &str)]) -> ChatPrompt {
+        ChatPrompt {
+            id: "p1".to_owned(),
+            kind: ChatPromptKind::Permission,
+            subject: "Bash command".to_owned(),
+            body: String::new(),
+            options: options
+                .iter()
+                .map(|(number, label)| protocol::ChatOption {
+                    number: *number,
+                    label: (*label).to_owned(),
+                    description: None,
+                    selected: false,
+                })
+                .collect(),
+            questions: Vec::new(),
+            can_amend: false,
+            always_allow_tip: None,
+            multi: false,
+            cursor: None,
+        }
+    }
+
+    fn block_of(session: &SessionSnapshot, prompt: Option<&ChatPrompt>) -> AskBlock {
+        let row = row("s1");
+        let mut input = input(&row, session, None);
+        input.prompt = prompt;
+        ask_block(&input).expect("a waiting session has an ask block")
+    }
+
+    fn buttons(block: &AskBlock) -> Vec<(&str, Option<&str>, PromptChoice)> {
+        block
+            .choices
+            .iter()
+            .map(|choice| (choice.label.as_str(), choice.hint.as_deref(), choice.choice))
+            .collect()
     }
 
     fn facts(id: &str) -> SessionFacts {
@@ -1438,5 +1679,176 @@ mod tests {
                 Shape::Idle
             ]
         );
+    }
+
+    #[test]
+    fn a_single_question_offers_its_options_hinted_1_to_n() {
+        let session = asking(PendingInput::Question {
+            questions: vec![question("Which branch?", &["main", "dev"], false)],
+        });
+        let block = block_of(&session, None);
+        assert_eq!(block.label, "Question ·");
+        assert_eq!(block.text, "Which branch?");
+        assert_eq!(block.command, None);
+        assert_eq!(block.since, Some(at(-3)));
+        assert_eq!(
+            buttons(&block),
+            [
+                ("main", Some("1"), PromptChoice::Option { index: 0 }),
+                ("dev", Some("2"), PromptChoice::Option { index: 1 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_multi_select_or_several_questions_offer_no_buttons() {
+        let multi = asking(PendingInput::Question {
+            questions: vec![question("Which crates?", &["a", "b"], true)],
+        });
+        let block = block_of(&multi, None);
+        assert_eq!(block.label, "Question ·");
+        assert!(block.choices.is_empty(), "a multi-select: {block:?}");
+        let several = asking(PendingInput::Question {
+            questions: vec![
+                question("First?", &["a", "b"], false),
+                question("Second?", &["c"], false),
+            ],
+        });
+        assert_eq!(block_of(&several, None).choices.len(), 0);
+        let no_options = asking(PendingInput::Question {
+            questions: vec![question("Anything?", &[], false)],
+        });
+        assert_eq!(block_of(&no_options, None).choices.len(), 0);
+    }
+
+    #[test]
+    fn a_permission_without_a_held_card_offers_allow_and_deny_unhinted() {
+        let session = asking(bash("  gh pr merge 118 --squash  "));
+        let block = block_of(&session, None);
+        assert_eq!(block.label, "Permission ·");
+        assert_eq!(block.text, "Allow Bash?");
+        assert_eq!(block.command.as_deref(), Some("gh pr merge 118 --squash"));
+        assert_eq!(
+            buttons(&block),
+            [
+                ("Allow", None, PromptChoice::Allow),
+                ("Deny", None, PromptChoice::Deny),
+            ],
+            "no Always allow and no key hint without the dialog's card"
+        );
+        let blank = asking(bash("  "));
+        assert_eq!(block_of(&blank, None).command, None);
+    }
+
+    #[test]
+    fn a_permission_with_a_held_card_follows_the_daemons_rules() {
+        let session = asking(bash("cargo build"));
+        let mut three = permission_card(&[
+            (1, "Yes"),
+            (2, "Yes, and don't ask again for cargo build"),
+            (3, "No"),
+        ]);
+        three.always_allow_tip = Some("cargo build".to_owned());
+        assert_eq!(
+            buttons(&block_of(&session, Some(&three))),
+            [
+                ("Allow", Some("1"), PromptChoice::Allow),
+                ("Always allow", Some("2"), PromptChoice::AllowAlways),
+                ("Deny", Some("3"), PromptChoice::Deny),
+            ]
+        );
+        let two = permission_card(&[(1, "Yes"), (2, "No")]);
+        assert_eq!(
+            buttons(&block_of(&session, Some(&two))),
+            [
+                ("Allow", Some("1"), PromptChoice::Allow),
+                ("Deny", Some("2"), PromptChoice::Deny),
+            ],
+            "a dialog with no don't-ask-again choice offers no Always allow"
+        );
+        let mut question_card = permission_card(&[(1, "Yes")]);
+        question_card.kind = ChatPromptKind::Question;
+        assert_eq!(
+            buttons(&block_of(&session, Some(&question_card))),
+            [
+                ("Allow", None, PromptChoice::Allow),
+                ("Deny", None, PromptChoice::Deny),
+            ],
+            "a held card of another kind counts as none"
+        );
+    }
+
+    #[test]
+    fn always_allow_needs_the_rule_the_screen_reads_as_the_daemon_does() {
+        let session = asking(bash("calc.py"));
+        let edit = permission_card(&[
+            (1, "Yes"),
+            (2, "Yes, and switch to accept edits mode"),
+            (3, "No"),
+        ]);
+        assert_eq!(
+            buttons(&block_of(&session, Some(&edit))),
+            [
+                ("Allow", Some("1"), PromptChoice::Allow),
+                ("Deny", Some("3"), PromptChoice::Deny),
+            ],
+            "a \"Yes, and …\" option with no rule read is not Always allow"
+        );
+        let mut tell = permission_card(&[
+            (1, "Yes, and tell Claude what to do next"),
+            (2, "Yes, and don\u{2019}t ask again for: python *"),
+            (3, "No"),
+        ]);
+        tell.always_allow_tip = Some("python *".to_owned());
+        assert_eq!(
+            buttons(&block_of(&session, Some(&tell))),
+            [
+                ("Always allow", Some("2"), PromptChoice::AllowAlways),
+                ("Deny", Some("3"), PromptChoice::Deny),
+            ],
+            "no plain \"Yes\" offers no Allow, and the rule's option is Always allow"
+        );
+    }
+
+    #[test]
+    fn a_plan_approval_or_other_prompt_shows_its_text_and_go_to_pane_alone() {
+        let plan = asking(PendingInput::PlanApproval { plan: None });
+        let block = block_of(&plan, None);
+        assert_eq!(block.label, "Plan ·");
+        assert_eq!(block.choices.len(), 0);
+        let other = asking(PendingInput::Other {
+            message: "Pick a server".to_owned(),
+        });
+        let block = block_of(&other, None);
+        assert_eq!(block.label, "Waiting ·");
+        assert_eq!(block.text, "Pick a server");
+        assert_eq!(block.choices.len(), 0);
+        assert_eq!(GO_TO_PANE, "Go to pane");
+    }
+
+    #[test]
+    fn no_ask_block_without_a_prompt_a_wait_or_buttons_without_a_stamp() {
+        let row = row("s1");
+        let mut waiting = in_status("s1", SessionStatus::AwaitingInput);
+        assert_eq!(ask_block(&input(&row, &waiting, None)), None, "no prompt");
+        let mut idle = asking(bash("ls"));
+        idle.status = SessionStatus::Idle;
+        assert_eq!(ask_block(&input(&row, &idle, None)), None, "not waiting");
+        waiting.pending_input = Some(bash("ls"));
+        let block = ask_block(&input(&row, &waiting, None)).expect("an ask block");
+        assert!(
+            block.choices.is_empty(),
+            "no answer can be sent without the status stamp"
+        );
+    }
+
+    #[test]
+    fn only_a_needs_you_row_carries_its_ask_block() {
+        let row = row("s1");
+        let session = asking(bash("ls"));
+        let waiting = row_cells(&input(&row, &session, None), GroupKind::NeedsYou, at(0));
+        assert!(waiting.ask.is_some());
+        let elsewhere = row_cells(&input(&row, &session, None), GroupKind::Idle, at(0));
+        assert_eq!(elsewhere.ask, None);
     }
 }

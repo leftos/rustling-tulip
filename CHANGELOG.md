@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane.
+
 ### Fixed
 
 - A running app checks for updates every hour instead of once a day, and Settings offers Restart to update as soon as a check finds one.
