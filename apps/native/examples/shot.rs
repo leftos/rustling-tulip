@@ -51,9 +51,9 @@ use gpui::{
     WindowHandle, WindowOptions, px, size,
 };
 use protocol::{
-    AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatScreen,
-    ClientMessage, ComposerState, DaemonMessage, GridNode, SessionSnapshot, SplitDirection,
-    StretchLine, SummarySource, ToolOutcome, WorkShell, WorkSubagent,
+    AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
+    ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, SessionSnapshot,
+    SplitDirection, StretchLine, SummarySource, ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::builtin_themes::DRACULA;
 use rustling_tulip_native::chat::PaneView;
@@ -1624,13 +1624,13 @@ impl FakeDaemon {
                 session_id,
                 request_id,
             } => {
-                let screen = if self.view == View::Summary {
-                    permission_screen()
-                } else {
-                    ChatScreen {
+                let screen = match self.view {
+                    View::Summary => permission_screen(),
+                    View::Chat => question_screen(),
+                    _ => ChatScreen {
                         composer: ComposerState::Working,
                         prompt: None,
-                    }
+                    },
                 };
                 return Ok(vec![
                     chat_reply(session_id, request_id.clone(), screen),
@@ -1758,6 +1758,58 @@ fn permission_screen() -> ChatScreen {
             options,
             questions: Vec::new(),
             can_amend: true,
+            always_allow_tip: None,
+            multi: false,
+            cursor: Some(1),
+        }),
+    }
+}
+
+/// The `chat` shot's screen: the second of two questions, its first
+/// answered, its question wrapped and two of its options described.
+fn question_screen() -> ChatScreen {
+    let options = [
+        (
+            1,
+            "Integer helpers",
+            Some("add, sub and div: the bodies that changed most since the last release"),
+        ),
+        (
+            2,
+            "Float helpers",
+            Some("Moved files only; their bodies are as they were"),
+        ),
+        (3, "Both", None),
+        (4, "Type something", None),
+    ]
+    .into_iter()
+    .map(|(number, label, description)| ChatOption {
+        number,
+        label: label.to_owned(),
+        description: description.map(str::to_owned),
+        selected: false,
+    })
+    .collect();
+    let questions = [("Scope", true, false), ("Tests", false, true)]
+        .into_iter()
+        .map(|(label, answered, current)| ChatQuestionTab {
+            label: label.to_owned(),
+            answered,
+            current,
+        })
+        .collect();
+    ChatScreen {
+        composer: ComposerState::Dialog,
+        prompt: Some(ChatPrompt {
+            id: "ask-1".to_owned(),
+            kind: ChatPromptKind::Question,
+            subject: "Which helpers should the new footer specs cover first, given that the release goes out \
+                to the beta channel tomorrow morning?"
+                .to_owned(),
+            body: String::new(),
+            options,
+            questions,
+            can_amend: false,
             always_allow_tip: None,
             multi: false,
             cursor: Some(1),

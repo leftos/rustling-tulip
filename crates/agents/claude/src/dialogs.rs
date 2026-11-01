@@ -430,7 +430,10 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
         .into_iter()
         .find(|&index| index > title && index < footer)
         .unwrap_or(footer);
-    let found = question_options(&rows[title + 1..end]);
+    let first_option = (title + 1..end)
+        .find(|&index| numbered(&rows[index]).is_some())
+        .unwrap_or(end);
+    let found = question_options(&rows[first_option..end]);
     if found.options.is_empty() {
         return Some(Parsed::HalfDrawn);
     }
@@ -443,11 +446,21 @@ fn parse_question(rows: &[String]) -> Option<Parsed> {
         cursor: found.cursor,
         ..prompt(
             ChatPromptKind::Question,
-            rows[title].trim().to_owned(),
+            question_text(&rows[title..first_option]),
             String::new(),
             found.options,
         )
     }))
+}
+
+/// A question wrapped over `rows` (from its title to its first option),
+/// each row trimmed and the blank ones left out, joined by spaces.
+fn question_text(rows: &[String]) -> String {
+    rows.iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whether `rows[index]` is a question card's tab bar: `←  ☐ Next fn  ✔
@@ -1810,6 +1823,40 @@ mod tests {
         );
         assert_eq!(prompt.options[1].label, "Type something");
         assert_eq!(prompt.options[1].description, None);
+    }
+
+    #[test]
+    fn a_question_wrapped_over_two_rows_keeps_every_row() {
+        let mut screen = vec![rule()];
+        screen.extend(rows(&[
+            "←  ☐ Next fn  ☐ Tests  ✔ Submit  →",
+            "",
+            "Which tests should run before the release goes out to the",
+            "users on the beta channel?",
+            "",
+            "❯ 1. sub",
+            "     Subtraction",
+            "  2. Type something.",
+        ]));
+        screen.push(rule());
+        screen.extend(rows(&[
+            "  9. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]));
+        let prompt = question(&screen);
+        assert_eq!(
+            prompt.subject,
+            "Which tests should run before the release goes out to the users on the beta channel?"
+        );
+        assert_eq!(
+            labels(&read(&screen)),
+            [(1, "sub".to_owned()), (2, "Type something".to_owned())]
+        );
+        assert_eq!(
+            prompt.options[0].description.as_deref(),
+            Some("Subtraction")
+        );
     }
 
     #[test]

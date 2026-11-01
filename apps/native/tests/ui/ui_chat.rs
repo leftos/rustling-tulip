@@ -1145,6 +1145,120 @@ fn the_composer_sends_with_ctrl_enter_and_keeps_its_text_when_refused(cx: &mut T
     assert!(painted(&mut h, "chat-composer-error"));
 }
 
+/// Options whose third field is the description drawn under the label.
+fn described(list: &[(u32, &str, Option<&str>)]) -> Vec<ChatOption> {
+    list.iter()
+        .map(|(number, label, description)| ChatOption {
+            number: *number,
+            label: (*label).to_owned(),
+            description: description.map(str::to_owned),
+            selected: false,
+        })
+        .collect()
+}
+
+/// One tab per label; the tab at `current` is the shown question and those
+/// before it are answered.
+fn tabs(labels: &[&str], current: usize) -> Vec<ChatQuestionTab> {
+    labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| ChatQuestionTab {
+            label: (*label).to_owned(),
+            answered: index < current,
+            current: index == current,
+        })
+        .collect()
+}
+
+/// A single question `q1` whose subject wraps over several lines, `sub`
+/// described and `div` not.
+fn described_question() -> ChatPrompt {
+    let mut question = ChatPrompt {
+        subject: "Which of these functions should the new tests cover first, \
+            given that the release goes out to the users on the beta channel tomorrow \
+            morning and the integer helpers changed the most since the last one, \
+            while the floating point helpers only moved files and kept their bodies?"
+            .to_owned(),
+        body: String::new(),
+        ..prompt("q1", ChatPromptKind::Question, &[])
+    };
+    question.options = described(&[
+        (
+            1,
+            "sub",
+            Some("Subtraction: returns a - b, and raises on overflow"),
+        ),
+        (2, "div", None),
+    ]);
+    question.questions = tabs(&["Op"], 0);
+    question
+}
+
+#[gpui::test]
+fn a_question_card_shows_the_whole_question_option_descriptions_and_the_header_chip(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, described_question());
+    assert!(
+        painted(&mut h, "chat-card-header"),
+        "the header chip is drawn"
+    );
+    let (subject, chip) = (h.bounds("chat-card-subject"), h.bounds("chat-card-header"));
+    assert!(
+        subject.size.height > chip.size.height * 1.5,
+        "the whole question wraps over several lines: {subject:?} against {chip:?}"
+    );
+    assert!(
+        painted(&mut h, "chat-card-option-desc-1"),
+        "sub's description is drawn"
+    );
+    let (row, description) = (h.bounds("chat-card-1"), h.bounds("chat-card-option-desc-1"));
+    assert!(
+        row.contains(&description.center()) && description.origin.y > row.origin.y,
+        "under its label, inside its row: {description:?} in {row:?}"
+    );
+    assert!(
+        !painted(&mut h, "chat-card-option-desc-2"),
+        "an option without a description draws none"
+    );
+}
+
+#[gpui::test]
+fn clicking_an_option_row_sends_its_answer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    show(&mut h, described_question());
+    h.click_on("chat-card-option-desc-1");
+    assert_eq!(
+        answer_kinds(&mut h),
+        [opt(1)],
+        "a click on the description answers"
+    );
+}
+
+#[gpui::test]
+fn a_multi_question_card_shows_its_tabs_and_marks_the_current_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    let mut question = described_question();
+    question.questions = tabs(&["Op", "Base", "Mode"], 1);
+    show(&mut h, question);
+    for tab in ["chat-card-tab-1", "chat-card-tab-2", "chat-card-tab-3"] {
+        assert!(painted(&mut h, tab), "{tab} is drawn");
+    }
+    let chip = h.bounds("chat-card-header").center();
+    assert!(
+        h.bounds("chat-card-tab-2").contains(&chip),
+        "the current tab carries the header chip"
+    );
+    for other in ["chat-card-tab-1", "chat-card-tab-3"] {
+        assert!(!h.bounds(other).contains(&chip), "{other} is not marked");
+    }
+}
+
 #[gpui::test]
 fn a_composer_draft_survives_leaving_the_chat_view(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -1157,6 +1271,85 @@ fn a_composer_draft_survives_leaving_the_chat_view(cx: &mut TestAppContext) {
     let id = load_request(&h.sent()).expect("the toggle asks for the chat again");
     h.send(reply(Some(&id), vec![]));
     assert_eq!(composer_text(&mut h).as_deref(), Some("keep me"));
+}
+
+#[gpui::test]
+fn a_composer_draft_survives_a_reconnect(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "keep me");
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s1").build()));
+    let id = load_request(&h.sent()).expect("the new connection asks for the chat again");
+    h.send(reply(Some(&id), vec![]));
+    assert_eq!(composer_text(&mut h).as_deref(), Some("keep me"));
+}
+
+#[gpui::test]
+fn a_composer_draft_survives_two_reconnects_before_the_chat_reloads(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir);
+    h.click_on("chat-composer");
+    type_text(&mut h, "keep me");
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s1").build()));
+    assert!(
+        load_request(&h.sent()).is_some(),
+        "the first new connection asks for the chat"
+    );
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s1").build()));
+    let id = load_request(&h.sent()).expect("the second new connection asks again");
+    h.send(reply(Some(&id), vec![]));
+    assert_eq!(composer_text(&mut h).as_deref(), Some("keep me"));
+}
+
+#[gpui::test]
+fn a_remote_composer_draft_survives_its_hosts_reconnect(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h =
+        support::remote_in_pane(cx, &dir, &serde_json::json!({}), &[], session("b1").build());
+    h.click_on("pane-view-chat-p2");
+    let id = remote_load_request(&mut h).expect("the pane asks its host for the chat");
+    h.host(&support::saved_remote()).send(remote_reply(&id));
+    h.click_on("chat-composer");
+    type_text(&mut h, "keep me");
+    h.host(&support::saved_remote()).connect();
+    support::remote_lists(&mut h, &["b1"]);
+    let again = remote_load_request(&mut h).expect("the host's new connection asks again");
+    h.host(&support::saved_remote()).send(remote_reply(&again));
+    assert_eq!(
+        h.root(|root, cx| root.chat_composer_text("b1", cx))
+            .as_deref(),
+        Some("keep me")
+    );
+}
+
+/// The request id of the last `LoadChat` for `b1` sent to the saved host.
+fn remote_load_request(h: &mut Harness<'_>) -> Option<String> {
+    h.host(&support::saved_remote())
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::LoadChat {
+                session_id,
+                request_id,
+            } if session_id == "b1" => request_id,
+            _ => None,
+        })
+        .next_back()
+}
+
+/// `b1`'s chat loaded with no rows, the reply echoing `request_id`.
+fn remote_reply(request_id: &str) -> DaemonMessage {
+    DaemonMessage::Chat {
+        session_id: "b1".to_owned(),
+        entries: Vec::new(),
+        hidden: 0,
+        screen: screen(),
+        request_id: Some(request_id.to_owned()),
+    }
 }
 
 #[gpui::test]

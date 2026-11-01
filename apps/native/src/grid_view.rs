@@ -872,7 +872,7 @@ impl RootView {
     /// each chat pane keeps its view and asks again once bound. A remote
     /// host's terminals stay as they are: their connection did not change.
     pub(crate) fn reset_panes(&mut self, cx: &mut Context<Self>) {
-        self.chat.reset_connection(&HostKey::Local);
+        self.chat.reset_connection(&HostKey::Local, cx);
         let local = self
             .panes
             .iter_mut()
@@ -901,7 +901,7 @@ impl RootView {
             });
             slot.attached = false;
         }
-        self.chat.reset_connection(host);
+        self.chat.reset_connection(host, cx);
         self.sync_chat_loads(cx);
     }
 

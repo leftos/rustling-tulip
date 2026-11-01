@@ -384,8 +384,9 @@ impl ChatPanes {
     }
 
     /// `host`'s new connection has loaded no chat: every chat pane of that
-    /// host asks again once its pane is bound to its session.
-    pub(crate) fn reset_connection(&mut self, host: &HostKey) {
+    /// host asks again once its pane is bound to its session, its composer
+    /// text kept as the draft.
+    pub(crate) fn reset_connection(&mut self, host: &HostKey, cx: &App) {
         let gone: Vec<String> = self
             .hosts
             .iter()
@@ -393,6 +394,7 @@ impl ChatPanes {
             .map(|(session_id, _)| session_id.clone())
             .collect();
         for session_id in gone {
+            self.stash_draft(&session_id, cx);
             self.forget_chat_load(&session_id);
             self.forget_summary_load(&session_id);
             self.hosts.remove(&session_id);
@@ -441,6 +443,25 @@ impl ChatPanes {
             .flatten();
         let other = if chat_refused { summary } else { chat };
         self.refused_loads.extend(other);
+    }
+
+    /// Keeps session `session_id`'s composer text as its draft, for the
+    /// chat's next load; an empty composer leaves no draft. A chat whose
+    /// load is still awaited has no composer yet, so the draft it would
+    /// restore is kept as it is.
+    fn stash_draft(&mut self, session_id: &str, cx: &App) {
+        let Some(chat) = self.sessions.get(session_id) else {
+            return;
+        };
+        if chat.composer.is_none() {
+            return;
+        }
+        let text = chat.composer_text(cx);
+        if text.is_empty() {
+            self.drafts.remove(session_id);
+        } else {
+            self.drafts.insert(session_id.to_owned(), text);
+        }
     }
 
     /// Forgets session `session_id`'s chat and its load, returning the
@@ -804,14 +825,8 @@ impl RootView {
         self.sync_summary_loads(wanted.summary);
         let changes = self.chat.loads.diff(wanted.chat);
         for session_id in changes.unload {
-            if let Some(chat) = self.chat.sessions.remove(&session_id) {
-                let text = chat.composer_text(cx);
-                if text.is_empty() {
-                    self.chat.drafts.remove(&session_id);
-                } else {
-                    self.chat.drafts.insert(session_id.clone(), text);
-                }
-            }
+            self.chat.stash_draft(&session_id, cx);
+            self.chat.sessions.remove(&session_id);
             let host = self.chat.host_of(&session_id);
             self.send_to(&host, ClientMessage::UnloadChat { session_id });
         }

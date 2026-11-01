@@ -8,6 +8,11 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Right-clicking a repo or workspace offers a Spawn session submenu: Last, each agent, Shell and your presets.
 
+### Fixed
+
+- Text typed in a chat's message box survives a reconnect to its host.
+- Chat question cards show the whole question, each answer's description and the question's header.
+
 ### Changed
 
 - Sessions show their program as an icon (Claude, PowerShell, cmd, bash) in the sidebar, pane headers and spawn dialog, and Trusted as a shield.

@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{AnyElement, App, ClickEvent, Div, Window, div, prelude::*, px};
-use protocol::{ChatAnswerKind, ChatPrompt, ChatPromptKind, ClientMessage};
+use protocol::{ChatAnswerKind, ChatOption, ChatPrompt, ChatPromptKind, ClientMessage};
 
 use crate::UI_TEXT_SIZE;
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
@@ -534,6 +534,13 @@ const GHOST_HEIGHT: f32 = 4.0;
 /// How many ghost edges a card shows at most.
 const GHOST_EDGES: usize = 2;
 const SMALL_TEXT: f32 = 12.0;
+/// The space between a card's parts, its option rows and its tabs.
+const CARD_GAP: f32 = 6.0;
+const CHIP_PAD_X: f32 = 6.0;
+const CHIP_PAD_Y: f32 = 1.0;
+const CHIP_RADIUS: f32 = 4.0;
+/// The tick before an answered question's tab.
+const ANSWERED_MARK: &str = "✔";
 
 /// What a card draws: its prompt, the agent its labels name, whether it was
 /// submitted and is still up, the daemon's reason for refusing its last
@@ -570,30 +577,46 @@ pub fn prompt_card(
             .debug_selector(|| "chat-card-terminal".to_owned())
             .into_any_element()
     } else {
+        let (rows, named): (Vec<&CardButton>, Vec<&CardButton>) = buttons
+            .iter()
+            .partition(|button| option_of(prompt, button).is_some());
         div()
             .flex()
-            .flex_wrap()
-            .gap(px(6.0))
+            .flex_col()
+            .gap(px(CARD_GAP))
             .children(
-                buttons
-                    .iter()
+                rows.into_iter()
                     .map(|button| card_button(offset, shift, button, view, on_press, t)),
             )
+            .when(!named.is_empty(), |actions| {
+                actions.child(
+                    div().flex().flex_wrap().gap(px(CARD_GAP)).children(
+                        named
+                            .into_iter()
+                            .map(|button| card_button(offset, shift, button, view, on_press, t)),
+                    ),
+                )
+            })
             .into_any_element()
     };
     let card = div()
         .debug_selector(|| "chat-card".to_owned())
         .flex()
         .flex_col()
-        .gap(px(6.0))
+        .gap(px(CARD_GAP))
         .p(px(CARD_PAD))
         .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(gpui::rgb(t.line_strong))
         .text_size(ui_px_at(offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(t.text))
+        .children(question_tab_row(offset, prompt, t))
         .when(!prompt.subject.is_empty(), |card| {
-            card.child(div().child(prompt.subject.clone()))
+            card.child(
+                div()
+                    .debug_selector(|| "chat-card-subject".to_owned())
+                    .child(prompt.subject.clone()),
+            )
         })
         .when(!prompt.body.is_empty(), |card| {
             card.child(small(offset, &prompt.body, t.text_2))
@@ -616,7 +639,50 @@ pub fn prompt_card(
         .into_any_element()
 }
 
-/// One button of a card; a selected multi-select option is filled.
+/// The option `button` answers, if it answers one.
+fn option_of<'a>(prompt: &'a ChatPrompt, button: &CardButton) -> Option<&'a ChatOption> {
+    prompt
+        .options
+        .iter()
+        .find(|option| option.number.to_string() == button.id)
+}
+
+/// A question card's tabs, each tagged `chat-card-tab-<n>` from 1, the
+/// answered ones ticked; the current tab is drawn as the header chip
+/// (`chat-card-header`). None for another kind or a question without tabs.
+fn question_tab_row(offset: i8, prompt: &ChatPrompt, t: &UiTheme) -> Option<Div> {
+    if prompt.kind != ChatPromptKind::Question || prompt.questions.is_empty() {
+        return None;
+    }
+    let tabs = prompt.questions.iter().enumerate().map(|(index, tab)| {
+        let label = if tab.answered {
+            format!("{ANSWERED_MARK} {}", tab.label)
+        } else {
+            tab.label.clone()
+        };
+        let chip = div()
+            .px(px(CHIP_PAD_X))
+            .py(px(CHIP_PAD_Y))
+            .rounded(px(CHIP_RADIUS))
+            .text_size(ui_px_at(offset, SMALL_TEXT));
+        let chip = if tab.current {
+            chip.debug_selector(|| "chat-card-header".to_owned())
+                .bg(gpui::rgb(t.chip))
+                .text_color(gpui::rgb(t.text_2))
+        } else {
+            chip.text_color(gpui::rgb(t.muted))
+        };
+        let number = index + 1;
+        div()
+            .debug_selector(move || format!("chat-card-tab-{number}"))
+            .child(chip.child(label))
+    });
+    Some(div().flex().flex_wrap().gap(px(CARD_GAP)).children(tabs))
+}
+
+/// One button of a card; a selected multi-select option is filled. A
+/// button answering an option is a full-width row, the option's
+/// description (`chat-card-option-desc-<n>`) under its label.
 fn card_button(
     offset: i8,
     shift: i8,
@@ -627,11 +693,8 @@ fn card_button(
 ) -> AnyElement {
     let (prompt, busy) = (view.prompt, view.busy);
     let selector = format!("chat-card-{}", button.id);
-    let selected = prompt.multi
-        && prompt
-            .options
-            .iter()
-            .any(|option| option.selected && option.number.to_string() == button.id);
+    let choice = option_of(prompt, button);
+    let selected = prompt.multi && choice.is_some_and(|option| option.selected);
     let base = if selected {
         primary_button(
             offset,
@@ -655,14 +718,28 @@ fn card_button(
     };
     let answer = button.answer.clone();
     let on_press = Rc::clone(on_press);
-    base.child(button.label.clone())
-        .when_some(button.tip.clone(), |base, tip| {
-            base.tooltip(crate::tooltip(tip))
-        })
-        .when(!busy, move |base| {
-            base.on_click(move |_: &ClickEvent, window, cx| on_press(&answer, window, cx))
-        })
-        .into_any_element()
+    let base = match choice {
+        Some(option) => base
+            .w_full()
+            .flex_col()
+            .items_start()
+            .child(button.label.clone())
+            .when_some(option.description.as_deref(), |row, description| {
+                let number = option.number;
+                row.child(
+                    small(offset, description, t.text_2)
+                        .debug_selector(move || format!("chat-card-option-desc-{number}")),
+                )
+            }),
+        None => base.child(button.label.clone()),
+    };
+    base.when_some(button.tip.clone(), |base, tip| {
+        base.tooltip(crate::tooltip(tip))
+    })
+    .when(!busy, move |base| {
+        base.on_click(move |_: &ClickEvent, window, cx| on_press(&answer, window, cx))
+    })
+    .into_any_element()
 }
 
 /// The top edge of the `depth`th card behind the current one.
