@@ -13,7 +13,7 @@ It is alpha software, Windows only for now.
 - Start a Claude session or a plain shell in a repo's own folder, or in a new git worktree on its own branch, so parallel sessions never edit the same checkout.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
-- Tab pills and the window title count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead.
+- Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead.
 - The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A Windows notification fires when a session needs you or finishes (skipped when you are already looking at it).
 - Each finished turn of a Claude session gets a one-line summary, kept across restarts, and the Finished notification is worded from it.
 - The Dashboard tab, opened from the activity rail, lists every agent session by status: what each is doing now, its context, recent activity, cost and running subagents, with a queue of the sessions waiting on you.
@@ -126,7 +126,7 @@ The full list is in the [release notes](https://github.com/leftos/rustling-tulip
 - A chat view and a summary view for Claude sessions, with prompt cards, a message box and a strip of the work still running.
 - Themes: pick a built-in theme or make your own in the Themes window; the default look is now Nord with the Inter font.
 - Interface text size and weight settings, and a terminal weight setting from Regular to Bold.
-- Tab pills and the window title count the sessions that need you.
+- Tab pills and the taskbar badge count the sessions that need you.
 - Sessions running when Windows signs out, restarts or shuts down resume on their own at the next start, and many reliability fixes.
 
 The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.6.0-alpha).

@@ -966,7 +966,7 @@ impl Default for GeneralSettings {
     }
 }
 
-/// What the tab pills' badges and the window title's count count.
+/// What the tab pills' badges and the taskbar badge count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CountMode {
@@ -982,15 +982,16 @@ pub enum CountMode {
     NeedsYou,
 }
 
-/// What the main window's title shows, and what the tab pills count.
+/// What the main window's title shows, and what the tab pills and the
+/// taskbar badge count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TitleSettings {
-    /// The active tab's count before its name.
+    /// The count over every tab on the main window's taskbar button.
     pub show_count: bool,
-    /// ` — rustling-tulip` after it.
+    /// ` — rustling-tulip` after the active tab's name in the title.
     pub suffix: bool,
-    /// What the window title's count and the tab pills' badges count.
+    /// What the taskbar badge and the tab pills' badges count.
     pub count: CountMode,
 }
 
@@ -1982,12 +1983,12 @@ impl SidebarModel {
         true
     }
 
-    /// Whether the window title shows the active tab's count.
+    /// Whether the main window's taskbar badge shows the count.
     pub fn set_title_show_count(&mut self, on: bool) {
         self.ui.title.show_count = on;
     }
 
-    /// Records what the tab pills and the window title count; returns
+    /// Records what the tab pills and the taskbar badge count; returns
     /// whether it changed.
     pub fn set_count_mode(&mut self, mode: CountMode) -> bool {
         if self.ui.title.count == mode {

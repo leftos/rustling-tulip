@@ -17,7 +17,8 @@ use protocol::{
     OptionValues, SplitDirection, TabEntry, error_codes,
 };
 use rustling_tulip_native::{
-    Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, SidebarView, TabBadge, fonts,
+    BadgeOverlay, Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, OpenOutcome,
+    PopoutKey, SidebarView, TabBadge, fonts,
 };
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
@@ -516,75 +517,230 @@ fn app_title_preview_follows_toggles(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-app-title");
     let preview = |h: &mut Harness<'_>| h.root(|root, _| root.title_preview());
-    assert_eq!(preview(&mut h), "(1) Tab name — rustling-tulip");
+    assert_eq!(preview(&mut h), "Tab name — rustling-tulip");
     assert!(h.bounds("settings-title-preview").origin.x >= px(0.0));
 
     h.click_on("settings-title-count");
-    assert_eq!(preview(&mut h), "Tab name — rustling-tulip");
+    assert_eq!(
+        preview(&mut h),
+        "Tab name — rustling-tulip",
+        "the count is the badge's, never the title's"
+    );
     h.click_on("settings-title-product-suffix");
     assert_eq!(preview(&mut h), "Tab name");
     h.click_on("settings-title-count");
-    assert_eq!(preview(&mut h), "(1) Tab name");
+    assert_eq!(preview(&mut h), "Tab name");
 
     let saved = saved_ui(&dir);
     assert_eq!(saved["title"]["show_count"], true);
     assert_eq!(saved["title"]["suffix"], false);
 }
 
-/// Sets the tab and title count to Busy / total in Settings, closes
-/// Settings, and lets the title settle.
-fn busy_mode(h: &mut Harness<'_>) {
-    h.keys("ctrl-,");
-    h.click_on("settings-tab-app-title");
-    h.click_on("settings-count-busy");
-    h.keys("escape");
+/// Puts `s2`, in the active tab `work`, waiting on the owner, and lets the
+/// title settle.
+fn s2_needs_you(h: &mut Harness<'_>) {
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").status("awaiting_input").build(),
+        request_id: None,
+    });
     h.advance(Duration::from_millis(400));
 }
 
+/// The text of each overlay put on a taskbar button, oldest first; `None`
+/// cleared it.
+fn badge_texts(h: &mut Harness<'_>) -> Vec<Option<String>> {
+    h.taskbar_badges()
+        .into_iter()
+        .map(|(_, overlay)| overlay.map(|overlay| overlay.text))
+        .collect()
+}
+
+/// The overlay the taskbar button shows now.
+fn shown_badge(h: &mut Harness<'_>) -> Option<BadgeOverlay> {
+    h.taskbar_badges().pop().and_then(|(_, overlay)| overlay)
+}
+
 #[gpui::test]
-fn the_count_setting_switches_the_pills_and_the_title(cx: &mut TestAppContext) {
+fn the_badge_shows_the_needs_you_count(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    assert_eq!(
+        badge_texts(&mut h),
+        Vec::<Option<String>>::new(),
+        "nothing needs you"
+    );
+
+    s2_needs_you(&mut h);
+    let badge = shown_badge(&mut h).expect("a badge once s2 needs you");
+    assert_eq!(badge.text, "1");
+    assert_eq!(badge.description, "1 needs you");
+    assert_eq!(
+        badge.colour,
+        h.root(|_, cx| rustling_tulip_native::ui_theme::theme(cx).danger)
+    );
+
+    h.click_on("tab-t2");
+    h.advance(Duration::from_millis(400));
+    assert_eq!(
+        badge_texts(&mut h),
+        vec![Some("1".to_owned())],
+        "every tab counts, and an unchanged badge is set once"
+    );
+}
+
+/// gpui's test platform draws every dirty window on each effect flush
+/// (gpui `app.rs`, `flush_effects`), so a minimized window, which draws no
+/// frame, cannot be simulated. What this pins instead: the badge waits out
+/// the debounce after the session update, though the window drew at once,
+/// so it is set from the update's timer and not from a frame.
+#[gpui::test]
+fn the_badge_updates_while_the_window_is_minimized(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.send(DaemonMessage::SessionUpdated {
         session: session("s2").status("awaiting_input").build(),
         request_id: None,
     });
+    h.advance(Duration::from_millis(300));
+    assert_eq!(badge_texts(&mut h), Vec::<Option<String>>::new(), "not yet");
+    h.advance(Duration::from_millis(60));
+    assert_eq!(badge_texts(&mut h), vec![Some("1".to_owned())]);
+}
+
+#[gpui::test]
+fn a_session_in_two_tabs_counts_once_on_the_badge(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = two_panes();
+    fixture.tabs[1] = named("t2", "other", &pane("p3", Some("s2")));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
     h.advance(Duration::from_millis(400));
-    let badge = |h: &mut Harness<'_>| h.root(|root, _| root.tab_badge("t1"));
+    s2_needs_you(&mut h);
+    let badge = shown_badge(&mut h).expect("a badge once s2 needs you");
     assert_eq!(
-        title(&mut h),
-        "(1) work — rustling-tulip",
+        (badge.text.as_str(), badge.description.as_str()),
+        ("1", "1 needs you"),
+        "s2 waits once, though two tabs show it"
+    );
+}
+
+#[gpui::test]
+fn the_badge_clears_at_zero(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    s2_needs_you(&mut h);
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").build(),
+        request_id: None,
+    });
+    h.advance(Duration::from_millis(400));
+    assert_eq!(badge_texts(&mut h), vec![Some("1".to_owned()), None]);
+}
+
+#[gpui::test]
+fn the_window_title_no_longer_carries_the_count(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    s2_needs_you(&mut h);
+    assert_eq!(title(&mut h), "work — rustling-tulip");
+    assert_eq!(badge_texts(&mut h), vec![Some("1".to_owned())]);
+}
+
+#[gpui::test]
+fn the_badge_follows_the_title_count_choice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    s2_needs_you(&mut h);
+    let pill = |h: &mut Harness<'_>| h.root(|root, _| root.tab_badge("t1"));
+    assert_eq!(
+        pill(&mut h),
+        Some(TabBadge::NeedsYou(1)),
         "Needs you, the default"
     );
-    assert_eq!(badge(&mut h), Some(TabBadge::NeedsYou(1)));
+    assert_eq!(
+        shown_badge(&mut h).map(|badge| badge.text).as_deref(),
+        Some("1")
+    );
 
     h.keys("ctrl-,");
     h.click_on("settings-tab-app-title");
     h.click_on("settings-count-busy");
     h.advance(Duration::from_millis(400));
-    assert_eq!(title(&mut h), "(2/2) work — rustling-tulip");
-    assert_eq!(badge(&mut h), Some(TabBadge::Busy { busy: 2, total: 2 }));
+    assert_eq!(pill(&mut h), Some(TabBadge::Busy { busy: 2, total: 2 }));
+    let busy = shown_badge(&mut h).expect("a busy badge");
+    assert_eq!(
+        (busy.text.as_str(), busy.description.as_str()),
+        ("2", "2 busy")
+    );
     assert_eq!(saved_ui(&dir)["title"]["count"], "busy", "saved at once");
 
     h.click_on("settings-count-idle");
     h.advance(Duration::from_millis(400));
-    assert_eq!(title(&mut h), "(0/2) work — rustling-tulip");
-    assert_eq!(badge(&mut h), Some(TabBadge::Idle { idle: 0, total: 2 }));
+    assert_eq!(pill(&mut h), Some(TabBadge::Idle { idle: 0, total: 2 }));
+    assert_eq!(shown_badge(&mut h), None, "no idle terminal: no badge");
     assert_eq!(saved_ui(&dir)["title"]["count"], "idle");
 
     h.click_on("settings-count-needs-you");
     h.advance(Duration::from_millis(400));
-    assert_eq!(title(&mut h), "(1) work — rustling-tulip");
-    assert_eq!(badge(&mut h), Some(TabBadge::NeedsYou(1)));
+    assert_eq!(pill(&mut h), Some(TabBadge::NeedsYou(1)));
+    assert_eq!(
+        shown_badge(&mut h).map(|badge| badge.text).as_deref(),
+        Some("1")
+    );
     assert_eq!(saved_ui(&dir)["title"]["count"], "needs_you");
+
+    h.click_on("settings-title-count");
+    h.advance(Duration::from_millis(400));
+    assert_eq!(
+        shown_badge(&mut h),
+        None,
+        "the count toggle hides the badge"
+    );
+    assert_eq!(
+        pill(&mut h),
+        Some(TabBadge::NeedsYou(1)),
+        "and leaves the pills"
+    );
+    assert_eq!(
+        title(&mut h),
+        "work — rustling-tulip",
+        "the title never counts"
+    );
+}
+
+#[gpui::test]
+fn a_popout_carries_no_badge(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    s2_needs_you(&mut h);
+    let key = PopoutKey::Pane {
+        tab_id: "t1".to_owned(),
+        pane_id: "p2".to_owned(),
+    };
+    let outcome = h.root_update(move |root, window, cx| root.open_popout(key, window, cx));
+    assert_eq!(outcome, OpenOutcome::Opened);
+    h.advance(Duration::from_millis(400));
+    assert_eq!(h.window_count(), 2, "the pop-out has a window of its own");
+
+    let main = h.cx.update(|window, _| window.window_handle().window_id());
+    let shown = h.taskbar_badges();
+    assert!(
+        shown.iter().all(|(window, _)| *window == main),
+        "only the main window carries a badge: {shown:?}"
+    );
+    assert_eq!(
+        badge_texts(&mut h),
+        vec![Some("1".to_owned())],
+        "the popped session still counts on the main window's badge"
+    );
 }
 
 #[gpui::test]
 fn window_title_debounced_350ms(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
-    busy_mode(&mut h);
-    assert_eq!(title(&mut h), "(1/2) work — rustling-tulip");
+    assert_eq!(title(&mut h), "work — rustling-tulip");
 
     let grid = split(
         SplitDirection::Horizontal,
@@ -595,29 +751,15 @@ fn window_title_debounced_350ms(cx: &mut TestAppContext) {
         tab: named("t1", "build", &grid),
     });
     h.advance(Duration::from_millis(300));
-    assert_eq!(title(&mut h), "(1/2) work — rustling-tulip", "not yet");
+    assert_eq!(title(&mut h), "work — rustling-tulip", "not yet");
     h.advance(Duration::from_millis(60));
-    assert_eq!(title(&mut h), "(1/2) build — rustling-tulip", "a rename");
-
-    h.send(DaemonMessage::SessionUpdated {
-        session: session("s2").status("working").build(),
-        request_id: None,
-    });
-    h.advance(Duration::from_millis(300));
-    assert_eq!(title(&mut h), "(1/2) build — rustling-tulip", "not yet");
-    h.advance(Duration::from_millis(60));
-    assert_eq!(
-        title(&mut h),
-        "(2/2) build — rustling-tulip",
-        "a session working"
-    );
+    assert_eq!(title(&mut h), "build — rustling-tulip", "a rename");
 }
 
 #[gpui::test]
 fn window_title_debounce_restarts_on_second_change(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
-    busy_mode(&mut h);
     let grid = split(
         SplitDirection::Horizontal,
         pane("p1", Some("s1")),
@@ -631,11 +773,11 @@ fn window_title_debounce_restarts_on_second_change(cx: &mut TestAppContext) {
     h.advance(Duration::from_millis(160));
     assert_eq!(
         title(&mut h),
-        "(1/2) work — rustling-tulip",
+        "work — rustling-tulip",
         "360 ms after the first change, the second restarted the wait"
     );
     h.advance(Duration::from_millis(180));
-    assert_eq!(title(&mut h), "(1/2) work — rustling-tulip", "not yet");
+    assert_eq!(title(&mut h), "work — rustling-tulip", "not yet");
     h.advance(Duration::from_millis(20));
     assert_eq!(
         title(&mut h),
@@ -648,10 +790,9 @@ fn window_title_debounce_restarts_on_second_change(cx: &mut TestAppContext) {
 fn window_title_follows_a_local_tab_switch(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
-    busy_mode(&mut h);
     h.click_on("tab-t2");
     h.advance(Duration::from_millis(300));
-    assert_eq!(title(&mut h), "(1/2) work — rustling-tulip", "not yet");
+    assert_eq!(title(&mut h), "work — rustling-tulip", "not yet");
     h.advance(Duration::from_millis(60));
     assert_eq!(
         title(&mut h),
@@ -3146,7 +3287,7 @@ fn a_family_row_click_keeps_the_clicked_row_in_view(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn window_title_without_suffix_or_count(cx: &mut TestAppContext) {
+fn window_title_without_suffix(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
@@ -3154,7 +3295,7 @@ fn window_title_without_suffix_or_count(cx: &mut TestAppContext) {
     h.click_on("settings-count-busy");
     h.click_on("settings-title-product-suffix");
     h.advance(Duration::from_millis(360));
-    assert_eq!(title(&mut h), "(1/2) work");
+    assert_eq!(title(&mut h), "work");
     h.click_on("settings-title-count");
     h.advance(Duration::from_millis(360));
     assert_eq!(title(&mut h), "work");

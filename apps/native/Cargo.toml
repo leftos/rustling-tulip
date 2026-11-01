@@ -86,12 +86,14 @@ raw-window-handle = "0.6"
 # Start-menu shortcut that carries the app id and its class id
 # (`Win32_UI_Shell_PropertiesSystem`, `Win32_Storage_EnhancedStorage` for the
 # property keys, `Win32_System_Com_StructuredStorage` and `Win32_System_Variant`
-# for their values).
+# for their values). The taskbar badge draws its icon through GDI
+# (`Win32_Graphics_Gdi`) and sets it through `Win32_UI_Shell`'s taskbar list.
 windows = { version = "0.61", features = [
     "Data_Xml_Dom",
     "Foundation",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_WNet",
     "Win32_Storage_EnhancedStorage",
     "Win32_Storage_FileSystem",

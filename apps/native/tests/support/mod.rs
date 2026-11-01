@@ -17,17 +17,17 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     App, Bounds, Entity, InputHandler, KeyDownEvent, Keystroke, Modifiers, MouseButton,
     MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext,
-    TouchPhase, VisualTestContext, Window, point, px,
+    TouchPhase, VisualTestContext, Window, WindowId, point, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, KeyState, RepoEntry, SessionSnapshot, SplitDirection,
     SummarizerKey, SummarizerKeySource, SummarizerSettings, TabEntry, WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Activity, Clip, ClipSource, Clock, Connection, ContainerKind, FileFilter, FilePicker,
-    FolderPicker, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState, OpenFailure,
-    OpenLocalFuture, Opener, PairingAction, PairingActionSink, PairingToast, QuitFn, RootDeps,
-    RootView, SavePicker, ScPanel, Sounder, Transport, bind_keys,
+    Activity, BadgeOverlay, Clip, ClipSource, Clock, Connection, ContainerKind, FileFilter,
+    FilePicker, FolderPicker, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState,
+    OpenFailure, OpenLocalFuture, Opener, PairingAction, PairingActionSink, PairingToast, QuitFn,
+    RootDeps, RootView, SavePicker, ScPanel, Sounder, TaskbarBadge, Transport, bind_keys,
     remote_access::Autostart,
     spawn_net,
     target::{HostKey, Target},
@@ -1096,6 +1096,8 @@ pub struct Harness<'a> {
     notifier: Arc<NotifyRecorder>,
     /// The sounds the client played.
     sounder: Arc<SoundRecorder>,
+    /// What the main window's taskbar badge was set to.
+    badge: Rc<BadgeRecorder>,
     /// What the folder picker answers, and how often it was asked.
     picker: Rc<PickRecorder>,
     /// The login launch the Remote access page reads and switches.
@@ -1414,6 +1416,22 @@ impl Sounder for SoundRecorder {
     }
 
     fn drop_waiting(&self) {}
+}
+
+/// A taskbar badge that records each overlay the client put on a window's
+/// taskbar button, and the window, as a spec draws on no taskbar.
+#[derive(Default)]
+pub struct BadgeRecorder {
+    shown: RefCell<Vec<(WindowId, Option<BadgeOverlay>)>>,
+}
+
+impl TaskbarBadge for BadgeRecorder {
+    fn show(&self, window: &Window, overlay: Option<&BadgeOverlay>) -> bool {
+        self.shown
+            .borrow_mut()
+            .push((window.window_handle().window_id(), overlay.cloned()));
+        true
+    }
 }
 
 /// How the recording updater answers an installer start.
@@ -1973,6 +1991,7 @@ impl<'a> Harness<'a> {
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
         let sounder = Arc::new(SoundRecorder::default());
+        let badge = Rc::new(BadgeRecorder::default());
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(AutostartRecorder::default());
         let tokens = Arc::new(MemoryTokens::default());
@@ -1988,6 +2007,7 @@ impl<'a> Harness<'a> {
             open: opener.clone(),
             notify: notifier.clone(),
             sound: sounder.clone(),
+            badge: badge.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
             pick_save: PickRecorder::save_picker(&picker),
@@ -2010,6 +2030,7 @@ impl<'a> Harness<'a> {
             opener,
             notifier,
             sounder,
+            badge,
             picker,
             autostart,
             tokens,
@@ -2041,6 +2062,7 @@ impl<'a> Harness<'a> {
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
         let sounder = Arc::new(SoundRecorder::default());
+        let badge = Rc::new(BadgeRecorder::default());
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(AutostartRecorder::default());
         let tokens = Arc::new(MemoryTokens::default());
@@ -2056,6 +2078,7 @@ impl<'a> Harness<'a> {
             open: opener.clone(),
             notify: notifier.clone(),
             sound: sounder.clone(),
+            badge: badge.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
             pick_save: PickRecorder::save_picker(&picker),
@@ -2078,6 +2101,7 @@ impl<'a> Harness<'a> {
             opener,
             notifier,
             sounder,
+            badge,
             picker,
             autostart,
             tokens,
@@ -2225,6 +2249,13 @@ impl<'a> Harness<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Each overlay the client put on a taskbar button, with its window,
+    /// oldest first, once the view has settled; `None` cleared it.
+    pub fn taskbar_badges(&mut self) -> Vec<(WindowId, Option<BadgeOverlay>)> {
+        self.cx.run_until_parked();
+        self.badge.shown.borrow().clone()
     }
 
     /// Where each sound the client played came from, oldest first, once the

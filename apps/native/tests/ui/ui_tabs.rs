@@ -416,7 +416,7 @@ fn menu_text(h: &mut Harness) -> Vec<String> {
     h.root(|root, _| root.tab_menu_text())
 }
 
-/// Sets the tab and title count to `mode` (`busy` or `idle`) in Settings,
+/// Sets the tab and badge count to `mode` (`busy` or `idle`) in Settings,
 /// then closes Settings.
 fn count_mode(h: &mut Harness, mode: &str) {
     h.keys("ctrl-,");

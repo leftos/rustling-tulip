@@ -784,6 +784,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         open: Arc::new(NoOpener),
         notify: Arc::new(NoNotifier),
         sound: Arc::new(rustling_tulip_native::SilentSounder),
+        badge: std::rc::Rc::new(rustling_tulip_native::NoTaskbarBadge),
         pick_folder,
         pick_file,
         pick_save,

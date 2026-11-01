@@ -133,6 +133,7 @@ mod tab_bar;
 mod tab_menu;
 mod tabs;
 pub mod target;
+mod taskbar_badge;
 mod term;
 mod term_input;
 mod term_view;
@@ -302,6 +303,7 @@ pub use crate::stash_view::{
     ScStashPush, ScStashRow, ScStashes, StashAction, StashButton, StashDropView,
 };
 pub use crate::tabs::{TabBadge, TabPill};
+pub use crate::taskbar_badge::{BadgeOverlay, NoTaskbarBadge, TaskbarBadge};
 pub use crate::text_input::bind_keys;
 pub use crate::undo::{TabSnapshot, UndoEntry};
 pub use crate::viewer_tab::{
@@ -424,6 +426,8 @@ pub struct RootDeps {
     /// Plays the Needs you sound and Settings' preview of it, on background
     /// threads.
     pub sound: Arc<dyn Sounder>,
+    /// Puts the App title count on the main window's taskbar button.
+    pub badge: Rc<dyn TaskbarBadge>,
     /// Asks for a folder: the Shell… dialog's and the Worktrees tab's
     /// Browse, and Add repo.
     pub pick_folder: FolderPicker,
@@ -926,6 +930,17 @@ pub struct RootView {
     title_pending: Option<String>,
     /// Sets the pending title once its debounce is up.
     title_timer: Option<Task<()>>,
+    /// Puts the count on the main window's taskbar button.
+    taskbar_badge: Rc<dyn TaskbarBadge>,
+    /// The badge last put on the taskbar button; `None` while it shows none.
+    badge_shown: Option<BadgeOverlay>,
+    /// Whether the button may not show `badge_shown`: a set failed, or the
+    /// OS made the button afresh.
+    badge_unsure: bool,
+    /// The badge waiting out its debounce.
+    badge_pending: Option<BadgeOverlay>,
+    /// Sets the wanted badge once its debounce is up.
+    badge_timer: Option<Task<()>>,
     /// Each repo's or workspace's last appearance sent, until the daemon's
     /// list echoes it: the daemon answers with the whole list and no
     /// request id, so the next change builds on this, not on what is
@@ -1220,6 +1235,11 @@ impl RootView {
             } else {
                 Arc::new(sound::SystemSounder::default())
             },
+            badge: if offscreen::requested() {
+                Rc::new(NoTaskbarBadge)
+            } else {
+                Rc::new(taskbar_badge::SystemTaskbarBadge::default())
+            },
             pick_folder: folder_picker::system_folder_picker(window),
             pick_file: folder_picker::system_file_picker(window),
             pick_save: folder_picker::system_save_picker(window),
@@ -1319,6 +1339,7 @@ impl RootView {
             open,
             notify,
             sound,
+            badge,
             pick_folder,
             pick_file,
             pick_save,
@@ -1435,6 +1456,11 @@ impl RootView {
             window_title: String::new(),
             title_pending: None,
             title_timer: None,
+            taskbar_badge: badge,
+            badge_shown: None,
+            badge_unsure: false,
+            badge_pending: None,
+            badge_timer: None,
             container_sends: HashMap::new(),
             tab_menu: None,
             tab_menu_focus: cx.focus_handle(),
@@ -1554,6 +1580,7 @@ impl RootView {
         view.arm_needs_you_repaint(cx);
         view.start_update_checks(cx);
         view.connect_saved_hosts(window, cx);
+        view.watch_taskbar_button(window, cx);
         view
     }
 
@@ -1567,6 +1594,7 @@ impl RootView {
                 let close = root.on_close_requested(window, cx);
                 if close {
                     root.close_popouts(cx);
+                    root.clear_taskbar_badge(window);
                 }
                 close
             })
@@ -3917,6 +3945,7 @@ impl RootView {
             | NetEvent::PairRequestSent => false,
         };
         let pairing_input = device_pairing_view::PairingInput::of(&event);
+        let moves_badge = taskbar_badge::moves_badge(&event);
         match event {
             NetEvent::State(conn) => self.on_conn_state(host, conn, window, cx),
             NetEvent::Handshake(info) => self.set_handshake(host, info),
@@ -3938,6 +3967,9 @@ impl RootView {
             | NetEvent::PairingLost
             | NetEvent::TokenSaveFailed
             | NetEvent::PairRequestSent => {}
+        }
+        if moves_badge {
+            self.schedule_taskbar_badge(window, cx);
         }
         // The overlay covers the footer; a flyout left open under it would
         // reappear (possibly armed) when the overlay goes.

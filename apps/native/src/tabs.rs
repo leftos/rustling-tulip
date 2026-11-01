@@ -833,7 +833,7 @@ pub struct TabCounts {
     pub total: usize,
 }
 
-/// What a grid tab's count badge, and the window title's count, show.
+/// What a grid tab's count badge, and the taskbar badge, show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBadge {
     /// How many terminals need the owner; never 0.
@@ -903,6 +903,42 @@ pub fn tab_session_counts(tab: &TabEntry, sessions: &HostSessions<'_>) -> Option
     }
     counts.needs_you = asking.len();
     Some(counts)
+}
+
+/// The live terminals of every tab in `tabs` together, each session counted
+/// once however many panes and tabs show it, as the footer counts. A
+/// session marked "Don't count as busy" counts in total, idle and needs you
+/// but never in busy; a diff tab adds nothing.
+#[must_use]
+pub fn window_session_counts(tabs: &[TabEntry], sessions: &HostSessions<'_>) -> TabCounts {
+    let mut counts = TabCounts::default();
+    let mut seen = HashSet::new();
+    for pane in tabs
+        .iter()
+        .filter_map(TabEntry::grid)
+        .flat_map(collect_panes)
+    {
+        let Some(id) = pane.session else {
+            continue;
+        };
+        let Some(session) = find_hosted(sessions, &pane.host, id) else {
+            continue;
+        };
+        if session.is_inactive || !seen.insert((pane.host.clone(), session.id.as_str())) {
+            continue;
+        }
+        counts.total += 1;
+        if is_busy(session) && !session.busy_excluded {
+            counts.busy += 1;
+        }
+        if session.status == SessionStatus::Idle && !session.background {
+            counts.idle += 1;
+        }
+        if session.status == SessionStatus::AwaitingInput && !session.is_abandoned {
+            counts.needs_you += 1;
+        }
+    }
+    counts
 }
 
 /// How many of `grid`'s panes hold a session.

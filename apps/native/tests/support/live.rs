@@ -1287,6 +1287,7 @@ impl<'a> Harness<'a> {
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
         let sounder = Arc::new(SoundRecorder::default());
+        let badge = Rc::new(super::BadgeRecorder::default());
         let picker = Rc::new(PickRecorder::default());
         let autostart = Arc::new(super::AutostartRecorder::default());
         let updater = Arc::new(super::UpdaterRecorder::default());
@@ -1301,6 +1302,7 @@ impl<'a> Harness<'a> {
             open: opener.clone(),
             notify: notifier.clone(),
             sound: sounder.clone(),
+            badge: badge.clone(),
             pick_folder: PickRecorder::picker(&picker),
             pick_file: PickRecorder::file_picker(&picker),
             pick_save: PickRecorder::save_picker(&picker),
@@ -1323,6 +1325,7 @@ impl<'a> Harness<'a> {
             opener,
             notifier,
             sounder,
+            badge,
             picker,
             autostart,
             tokens,

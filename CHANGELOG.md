@@ -28,6 +28,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - With Trusted launch by default on, the New session dialog skips its trusted warning and Launch last of a trusted session no longer asks for review.
 - The New session dialog picks its repo or workspace from a dropdown instead of a wrapped list.
 - Ctrl+click on a file in the terminal opens it in its default app and Ctrl+Shift+click in the viewer; the Settings switch for this is gone.
+- On Windows the Needs you count shows as a badge on the app's taskbar button instead of in the window title.
 
 ## v0.6.1-alpha
 

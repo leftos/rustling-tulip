@@ -43,7 +43,6 @@ use crate::spawn_view::{
     DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
     dialog_title_bar, field, muted, segmented,
 };
-use crate::tabs::{TabCounts, tab_session_counts};
 use crate::target::HostKey;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
@@ -76,7 +75,7 @@ const LINK_RADIUS: f32 = 4.0;
 const CHIP_RADIUS: f32 = 5.0;
 /// How long the window title waits for its inputs to settle, so a session
 /// flickering between working and idle does not flicker the taskbar.
-const TITLE_DEBOUNCE: Duration = Duration::from_millis(350);
+pub(crate) const TITLE_DEBOUNCE: Duration = Duration::from_millis(350);
 const NOT_CONNECTED: &str = "(daemon not connected)";
 const WORKTREES_HINT: &str = "Per-session git worktrees land under this directory. Changes take effect for new sessions only — sessions already spawned keep their existing worktree paths.";
 const REMOTE_INTRO: &str = "Lets your other devices on your tailnet connect to this PC's sessions over HTTPS. Only devices signed in to your own Tailscale account can connect.";
@@ -1095,21 +1094,10 @@ impl RootView {
         keep_awake_status(self.settings_mirrors().keep_awake)
     }
 
-    /// The App title tab's preview: the title for a tab named "Tab name"
-    /// with three terminals, one waiting on the owner and two idle.
+    /// The App title tab's preview: the title for a tab named "Tab name".
     #[must_use]
     pub fn title_preview(&self) -> String {
-        let sample = TabCounts {
-            busy: 1,
-            idle: 2,
-            needs_you: 1,
-            total: 3,
-        };
-        let preview = compute_title(
-            Some(sample),
-            Some("Tab name"),
-            &self.sidebar.ui_state().title,
-        );
+        let preview = compute_title(Some("Tab name"), &self.sidebar.ui_state().title);
         if preview.is_empty() {
             "(empty)".to_owned()
         } else {
@@ -3062,17 +3050,15 @@ impl RootView {
     fn after_title_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.save_ui();
         self.refresh_window_title(window, cx);
+        self.schedule_taskbar_badge(window, cx);
         cx.notify();
     }
 
-    /// The title the window should show now: the active tab's name and
-    /// counts as the App title settings shape them.
+    /// The title the window should show now: the active tab's name as the
+    /// App title settings shape it.
     fn wanted_window_title(&self) -> String {
-        let tab = self.tabs.active_tab();
-        let counts = tab.and_then(|tab| tab_session_counts(tab, &self.sidebar.sessions_by_host()));
         compute_title(
-            counts,
-            tab.map(|tab| tab.name.as_str()),
+            self.tabs.active_tab().map(|tab| tab.name.as_str()),
             &self.sidebar.ui_state().title,
         )
     }
@@ -4092,7 +4078,7 @@ impl RootView {
                 checked: title.show_count,
                 enabled: true,
             },
-            "Show the count in the window title",
+            "Show the count on the taskbar button",
             focused,
             cx,
         );
@@ -4122,11 +4108,11 @@ impl RootView {
         )
         .child(hint(
             crate::fonts::ui_text_size(cx),
-            "Controls what the OS window title bar shows for the main window.",
+            "Controls what the main window's title bar and taskbar button show.",
             &t,
         ))
         .child(choice_row(
-            "Tab and title count",
+            "Tab and badge count",
             &modes,
             RowLock::Live,
             focused,
@@ -4134,7 +4120,7 @@ impl RootView {
         ))
         .child(hint(
             crate::fonts::ui_text_size(cx),
-            "What the tab pills and the window title count. Needs you counts the \
+            "What the tab pills and the taskbar badge count. Needs you counts the \
                  terminals waiting on you and shows nothing at 0; Busy / total and Idle / \
                  total count the busy or idle terminals out of all of them.",
             &t,
@@ -4142,8 +4128,8 @@ impl RootView {
         .child(count)
         .child(hint(
             crate::fonts::ui_text_size(cx),
-            "Renders the count in parentheses before the active tab's name. Hidden \
-                 when the tab has nothing to count.",
+            "Draws the count over every tab as a badge on the main window's taskbar \
+                 button, 9+ above 9 (Windows only). Hidden when there is nothing to count.",
             &t,
         ))
         .child(suffix)
