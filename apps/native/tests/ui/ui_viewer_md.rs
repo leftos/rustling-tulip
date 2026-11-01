@@ -252,7 +252,11 @@ fn a_markdown_link_with_a_line_opens_source_at_the_line(cx: &mut TestAppContext)
     h.sent();
     h.pty("s1", b"see docs/notes.md:60 here");
     let link = h.cell_center("p1", 6, 0);
-    h.click(link, Modifiers::secondary_key());
+    let ctrl_shift = Modifiers {
+        shift: true,
+        ..Modifiers::secondary_key()
+    };
+    h.click(link, ctrl_shift);
 
     let opens: Vec<(String, String)> = h
         .sent()

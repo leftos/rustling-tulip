@@ -233,6 +233,7 @@ fn a_locked_target_shows_a_chip_not_a_dropdown(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture());
     h.right_click_on("container-repo:r1");
     h.click_on("container-menu-spawn");
+    h.click_on("container-spawn-agent-claude");
     assert!(is_open(&mut h), "the dialog opened locked to r1");
 
     assert!(painted(&mut h, "spawn-target-repo-r1"), "the chip is drawn");
