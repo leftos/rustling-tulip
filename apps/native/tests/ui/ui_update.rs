@@ -1,7 +1,8 @@
-//! Auto-update specs: the check at launch and every 24 h, the
+//! Auto-update specs: the check at every launch and every hour, the
 //! footer's notice of a ready update and its Restart to update button, the
-//! Settings → General update rows, and the toast after an update. The
-//! updater is the harness's recording fake: no feed, no installer.
+//! Settings → General update rows and their Restart to update button, and
+//! the toast after an update. The updater is the harness's recording fake:
+//! no feed, no installer.
 
 #![expect(
     clippy::expect_used,
@@ -19,7 +20,7 @@ use rustling_tulip_native::NetCommand;
 use rustling_tulip_native::update::LastResult;
 use support::{Fixture, Harness, TestDir, UpdaterRecorder, pane, session, tab};
 
-const CHECK_EVERY: Duration = Duration::from_hours(24);
+const CHECK_EVERY: Duration = Duration::from_hours(1);
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
 /// A stand-in installer in `dir`, which a ready update holds open.
@@ -123,6 +124,27 @@ fn a_check_is_requested_right_after_launch(cx: &mut TestAppContext) {
     assert_eq!(footer(&mut h).as_deref(), Some("Update 0.99.0 ready"));
 }
 
+/// Nothing a launch keeps says when the last check ran: a relaunch over the
+/// same layout checks at once, moments after the last window checked.
+#[gpui::test]
+fn the_launch_check_runs_even_right_after_a_check(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    {
+        let mut first = opened(cx, &dir, &updater);
+        first.cx.run_until_parked();
+        press_in_settings(&mut first, "settings-general-check-now");
+        assert_eq!(updater.checks(), 2, "the launch check, then Check now");
+    }
+
+    updater.offer("0.99.0", &installer(&dir));
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+
+    assert_eq!(updater.checks(), 3, "the relaunch checks at once");
+    assert_eq!(footer(&mut h).as_deref(), Some("Update 0.99.0 ready"));
+}
+
 #[gpui::test]
 fn no_check_runs_at_launch_with_checks_off(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -200,6 +222,51 @@ fn restart_to_update_starts_the_installer_and_quits_keeping_sessions(cx: &mut Te
     assert_eq!(h.quit_requests(), 1, "the client quits");
     assert!(!h.root(|root, _| root.exit_dialog_open()), "no exit dialog");
     assert_eq!(shutdowns(&mut h), 0, "the daemon keeps running");
+}
+
+#[gpui::test]
+fn settings_offers_restart_to_update_once_an_update_is_ready(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+    assert_eq!(footer(&mut h), None, "the launch check found nothing");
+    h.commands();
+
+    updater.offer("0.99.0", &installer(&dir));
+    press_in_settings(&mut h, "settings-general-check-now");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Settings stays open"
+    );
+    h.scroll_into_view("settings-content", "settings-restart-to-update");
+    assert!(
+        drawn(&mut h, "settings-restart-to-update"),
+        "Settings draws Restart to update"
+    );
+
+    h.click_on("settings-restart-to-update");
+
+    assert_eq!(updater.installs(), [installer(&dir)]);
+    assert_eq!(h.quit_requests(), 1, "the client quits");
+    assert_eq!(shutdowns(&mut h), 0, "the daemon keeps running");
+}
+
+#[gpui::test]
+fn settings_shows_no_restart_without_an_update(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+    h.cx.run_until_parked();
+
+    press_in_settings(&mut h, "settings-general-check-now");
+
+    assert_eq!(settings_lines(&mut h)[1], "Up to date");
+    assert!(drawn(&mut h, "settings-general-check-now"));
+    assert!(
+        !drawn(&mut h, "settings-restart-to-update"),
+        "no Restart to update without a ready update"
+    );
 }
 
 #[gpui::test]

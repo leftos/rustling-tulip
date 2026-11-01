@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- A running app checks for updates every hour instead of once a day, and Settings offers Restart to update as soon as a check finds one.
+
 ## v0.7.0-alpha
 
 ### Highlights

@@ -3967,7 +3967,8 @@ impl RootView {
     }
 
     /// The Updates section: the automatic-check toggle, the client's version
-    /// and the last check's result, and Check now.
+    /// and the last check's result, Check now, and Restart to update once an
+    /// update is ready.
     fn updates_section(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let check = toggle(
@@ -4002,7 +4003,13 @@ impl RootView {
             hint(crate::fonts::ui_text_size(cx), last, &t)
                 .driver_id(|| "settings-update-last-check".to_owned()),
         )
-        .child(div().flex().child(check_now))
+        .child(
+            div()
+                .flex()
+                .gap(px(8.0))
+                .child(check_now)
+                .children(self.settings_restart_button(cx)),
+        )
     }
 
     /// The Sidebar section: the default view, how much room a leaf takes, how

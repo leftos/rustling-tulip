@@ -1,6 +1,7 @@
 //! The updater on screen: the checks it runs, the footer's notice of a ready
 //! update and its Restart to update button, the footer's client version, the
-//! Settings → General update rows, and the toast after an update
+//! Settings → General update rows and their Restart to update button, and
+//! the toast after an update
 //! (`docs/auto-update.md`, decisions 3, 5, 6 and 8). The checking and the
 //! installing are [`crate::update`]'s.
 
@@ -11,14 +12,14 @@ use futures::FutureExt as _;
 use futures::future::Shared;
 use gpui::{AnyElement, ClickEvent, Context, Task, div, prelude::*, px};
 
-use crate::buttons::{ButtonSize, Layer, outlined_button};
+use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::notices::ToastKind;
 use crate::ui_theme::theme;
 use crate::update::{AlreadyRunning, LastResult, Ready, Updater};
 use crate::{FOOTER_PILL_HEIGHT, FOOTER_PILL_TEXT_SIZE, RootView, tagged_text};
 
 /// How often the checks repeat after the one at launch.
-const CHECK_EVERY: Duration = Duration::from_hours(24);
+const CHECK_EVERY: Duration = Duration::from_hours(1);
 /// The waits before the retries after scheduled checks that failed in a
 /// row; the last one repeats until a check succeeds.
 const RETRY_AFTER: [Duration; 3] = [
@@ -52,7 +53,7 @@ pub(crate) struct UpdateUi {
     /// The check under way; at most one runs at a time. Shared so the
     /// schedule can wait for its outcome.
     checking: Option<Shared<Task<()>>>,
-    /// The launch's result toast, then the checks at launch and every 24 h,
+    /// The launch's result toast, then the checks at launch and every hour,
     /// sooner after a failure.
     schedule: Option<Task<()>>,
 }
@@ -71,8 +72,9 @@ impl UpdateUi {
 
 impl RootView {
     /// Starts the launch's update work: the last update's result as a toast
-    /// at once, then a check straight after it and every 24 h, retried
-    /// after 5, 15 and then every 60 minutes while checks fail.
+    /// at once, then a check straight after it and every hour, retried
+    /// after 5, 15 and then every 60 minutes while checks fail. Every launch
+    /// checks: nothing records when the last check ran.
     pub(crate) fn start_update_checks(&mut self, cx: &mut Context<Self>) {
         self.update.schedule = Some(cx.spawn(async move |this, cx| {
             if this.update(cx, Self::announce_last_update).is_err() {
@@ -84,7 +86,7 @@ impl RootView {
                     return;
                 };
                 // A skipped check (turned off, or an update ready) counts
-                // as no failure: the schedule returns to the daily cadence.
+                // as no failure: the schedule returns to the hourly cadence.
                 let mut failed = false;
                 if let Some(pending) = pending {
                     pending.await;
@@ -123,7 +125,7 @@ impl RootView {
         }
     }
 
-    /// The check at launch, every 24 h and on a retry: skipped while
+    /// The check at launch, every hour and on a retry: skipped while
     /// automatic checks are off or an update is already ready to install.
     /// Returns the check under way, if any, for the schedule to wait on.
     fn scheduled_update_check(&mut self, cx: &mut Context<Self>) -> Option<Shared<Task<()>>> {
@@ -290,11 +292,31 @@ impl RootView {
                 .into_any_element(),
         )
     }
+
+    /// Settings' Restart to update button, beside Check now, once an update
+    /// is ready; it restarts as the footer's button does.
+    pub(crate) fn settings_restart_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.update.ready.as_ref()?;
+        let button = primary_button(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "settings-restart-to-update",
+            ButtonSize::Regular,
+            true,
+            Layer::Floating,
+            &theme(cx),
+        )
+        .child(RESTART_LABEL)
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.restart_to_update(cx);
+        }));
+        Some(button.into_any_element())
+    }
 }
 
 /// The schedule's next step after a scheduled check: the failures in a row
 /// counting this one, and the wait before the next check. A success, or a
-/// skipped check, resets the count and returns to the daily cadence.
+/// skipped check, resets the count and returns to the hourly cadence.
 fn next_check(failed_before: usize, this_one_failed: bool) -> (usize, Duration) {
     if !this_one_failed {
         return (0, CHECK_EVERY);
@@ -317,7 +339,7 @@ fn version_tooltip(client: &str, daemon: Option<&str>) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::{CHECK_EVERY, next_check, version_tooltip};
+    use super::{next_check, version_tooltip};
 
     #[test]
     fn after_a_failed_check_the_next_waits_5_minutes() {
@@ -336,11 +358,11 @@ mod tests {
     }
 
     #[test]
-    fn a_success_returns_to_the_daily_cadence() {
-        assert_eq!(next_check(0, false), (0, CHECK_EVERY));
+    fn a_success_waits_an_hour_for_the_next_check() {
+        assert_eq!(next_check(0, false), (0, Duration::from_hours(1)));
         assert_eq!(
             next_check(3, false),
-            (0, CHECK_EVERY),
+            (0, Duration::from_hours(1)),
             "a success resets the backoff"
         );
     }
