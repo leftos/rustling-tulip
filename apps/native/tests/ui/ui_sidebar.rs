@@ -15,7 +15,7 @@ use protocol::{
     WorktreeReusePolicy,
 };
 use rustling_tulip_native::{
-    Activity, DETACHED_BANNER, RepoFilter, SidebarView, TabPill, resume_all_label,
+    Activity, DETACHED_BANNER, RepoFilter, RuntimeIcon, SidebarView, TabPill, resume_all_label,
 };
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
@@ -2267,5 +2267,51 @@ fn a_long_folder_path_keeps_the_links_on_the_row(cx: &mut TestAppContext) {
     assert!(
         link.left() >= panel.left() && link.right() <= panel.right(),
         "the link stays inside the row: {link:?} in {panel:?}"
+    );
+}
+
+#[gpui::test]
+fn leaves_draw_their_runtime_as_an_icon(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        sessions: vec![
+            session("s1").in_repo("r1").build(),
+            session("s2")
+                .shell("D:/elsewhere")
+                .program_name("pwsh")
+                .build(),
+            session("s3")
+                .shell("D:/elsewhere")
+                .program_name("node")
+                .build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    for selector in [
+        "leaf-runtime-s1-icon-agent",
+        "leaf-runtime-s2-icon-pwsh",
+        "leaf-runtime-s3-icon-generic",
+    ] {
+        assert!(painted(&mut h, selector), "{selector} is drawn");
+    }
+    let icon = h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .flat_map(|container| container.leaves)
+            .find(|leaf| leaf.id == "s1")
+            .and_then(|leaf| leaf.icon)
+    });
+    assert!(
+        matches!(icon, Some(RuntimeIcon::Agent(_))),
+        "the Claude leaf wears its agent's icon, not the text `claude`: {icon:?}"
+    );
+    assert_eq!(
+        tags(&mut h, "s1"),
+        [tag("claude", "Running claude")],
+        "the tooltip still names the runtime"
     );
 }

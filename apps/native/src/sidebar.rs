@@ -3,9 +3,9 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    AccentToken, AgentDescriptor, AgentId, AppearanceOverrides, CharRange, ContainerRef,
-    DaemonMessage, RepoEntry, SessionChip, SessionKind, SessionMode, SessionSnapshot,
-    SessionStatus, SpawnConfig, SpawnTarget, TabEntry, WorkspaceEntry,
+    AgentDescriptor, AgentId, AppearanceOverrides, CharRange, ContainerRef, DaemonMessage,
+    RepoEntry, SessionChip, SessionKind, SessionMode, SessionSnapshot, SessionStatus, SpawnConfig,
+    SpawnTarget, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -20,6 +20,7 @@ use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
 use crate::popouts::{PopoutKey, SavedPopout};
+use crate::runtime_icon::{RuntimeIcon, runtime_icon};
 use crate::source_control::{Part, ScKey, ScUiState};
 use crate::tabs::collect_panes;
 use crate::target::{HostKey, Target};
@@ -183,9 +184,8 @@ pub struct Leaf {
     /// branches, or a shell's folder.
     pub subline: Option<String>,
     pub runtime: Option<String>,
-    /// The runtime tag wears its agent's accent colour: the agent's
-    /// descriptor asks for one and the tag names the agent itself.
-    pub accent: bool,
+    /// The runtime's icon; `None` for a shell with no known program.
+    pub icon: Option<RuntimeIcon>,
     /// The chips the daemon evaluated from the session's agent options;
     /// empty when there is nothing to say.
     pub chips: Vec<SessionChip>,
@@ -2546,7 +2546,7 @@ fn leaf(
         agent: s.agent.clone(),
         label: display_label(s, agents),
         subline: subline(s, HOME.as_deref(), tabs_view),
-        accent: runtime_accent(s, runtime.as_deref(), agents),
+        icon: runtime_icon(s, runtime.as_deref(), agents),
         runtime,
         chips: s.agent_chips.clone(),
         attention: attention.contains(&s.id),
@@ -3159,17 +3159,6 @@ pub(crate) fn agent_up<'a>(
 ) -> Option<&'a AgentDescriptor> {
     let descriptor = descriptor_for(agents, s.agent.as_ref()?)?;
     (runtime == Some(descriptor.tag.as_str())).then_some(descriptor)
-}
-
-/// Whether a session's runtime tag wears its agent's accent: the agent is
-/// up and its descriptor asks for one.
-#[must_use]
-pub(crate) fn runtime_accent(
-    s: &SessionSnapshot,
-    runtime: Option<&str>,
-    agents: &[AgentDescriptor],
-) -> bool {
-    agent_up(s, runtime, agents).is_some_and(|descriptor| descriptor.accent == AccentToken::Claude)
 }
 
 /// Whether a leaf click may attach the terminal to the session: only
@@ -4340,35 +4329,27 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn accent_follows_the_descriptor_not_the_text() {
+    fn icon_follows_the_agent_only_while_it_is_up() {
+        const SVG: &str = "<svg viewBox=\"0 0 16 16\"></svg>";
         let mut agent = session("a");
         agent.agent = Some(AgentId("test-agent".to_owned()));
-        let mut accented = test_descriptor();
-        accented.accent = AccentToken::Claude;
-        let listed = leaf(&agent, &HashSet::new(), &HashSet::new(), false, &[accented]);
-        assert!(listed.accent, "a descriptor asking for the accent wears it");
+        let mut iconed = test_descriptor();
+        iconed.icon = Some(SVG.to_owned());
+        let agents = [iconed];
+        let listed = leaf(&agent, &HashSet::new(), &HashSet::new(), false, &agents);
         assert_eq!(listed.runtime.as_deref(), Some("test"), "the tag names it");
-        let listed = leaf(
-            &agent,
-            &HashSet::new(),
-            &HashSet::new(),
-            false,
-            &[test_descriptor()],
+        assert_eq!(
+            listed.icon,
+            Some(RuntimeIcon::Agent(SVG.into())),
+            "the agent up wears its descriptor's icon"
         );
-        assert!(!listed.accent, "a default accent stays plain");
-        let mut left = session("a");
-        left.agent = Some(protocol::AgentId("claude".to_owned()));
-        left.program_name = Some("pwsh".to_owned());
-        let listed = leaf(
-            &left,
-            &HashSet::new(),
-            &HashSet::new(),
-            false,
-            &[claude_descriptor()],
-        );
-        assert!(
-            !listed.accent,
-            "the shell Claude left behind keeps the plain tag"
+        agent.program_name = Some("pwsh".to_owned());
+        let listed = leaf(&agent, &HashSet::new(), &HashSet::new(), false, &agents);
+        assert_eq!(listed.runtime.as_deref(), Some("pwsh"));
+        assert_eq!(
+            listed.icon,
+            Some(RuntimeIcon::Pwsh),
+            "the shell around the agent wears the shell's icon"
         );
     }
 

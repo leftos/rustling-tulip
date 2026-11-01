@@ -1124,3 +1124,20 @@ fn dialog_takes_the_spawn_boards_sizes(cx: &mut TestAppContext) {
         "Cancel, then Spawn at the right: {cancel:?} {submit:?}"
     );
 }
+
+#[gpui::test]
+fn runtime_options_draw_their_icons(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+
+    for selector in [
+        "spawn-runtime-claude-icon-agent",
+        "spawn-runtime-shell-icon-generic",
+    ] {
+        assert!(
+            h.bounds(selector).origin.x >= px(0.0),
+            "{selector} is drawn"
+        );
+    }
+}

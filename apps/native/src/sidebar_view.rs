@@ -23,6 +23,7 @@ use crate::palette::ROW_GAP;
 use crate::preset_launch::LaunchHighlight;
 use crate::remote_mode::{Capabilities, sidebar_no_repos_note};
 use crate::repo_add::RepoAdd;
+use crate::runtime_icon::runtime_icon_view;
 use crate::session_actions::inline_actions;
 use crate::session_menu::disabled_row;
 use crate::session_menu::{
@@ -2641,16 +2642,13 @@ fn label_head(offset: i8, shift: i8, leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement
     if leaf.busy_excluded {
         parts.push(busy_excluded_marker(&leaf.id, t));
     }
-    if let Some((text, tip)) = leaf.runtime_tag() {
+    if let (Some(icon), Some((_, tip))) = (&leaf.icon, leaf.runtime_tag()) {
+        let id = format!("leaf-runtime-{}", leaf.id);
         parts.push(
             div()
-                .id(SharedString::from(format!("leaf-runtime-{}", leaf.id)))
+                .id(SharedString::from(id.clone()))
                 .flex_none()
-                .font_family(DEFAULT_FAMILY)
-                .font_weight(crate::fonts::mono_weight())
-                .text_size(ui_px_at(offset, 10.5))
-                .text_color(gpui::rgb(runtime_color(leaf, t)))
-                .child(text)
+                .child(runtime_icon_view(icon, ui_px_at(offset, 12.0), &id, t))
                 .tooltip(tooltip(tip))
                 .into_any_element(),
         );
@@ -2720,12 +2718,6 @@ fn paint_busy_excluded(bounds: Bounds<Pixels>, window: &mut Window, t: &UiTheme)
             );
         }
     }
-}
-
-/// The runtime tag's colour: the agent's accent, or `t.subtle` for a shell's
-/// program and a tag that is not the agent itself.
-fn runtime_color(leaf: &Leaf, t: &UiTheme) -> u32 {
-    if leaf.accent { t.accent } else { t.subtle }
 }
 
 /// A Comfortable leaf's subline, with the chips at its end when they fit
@@ -2979,7 +2971,7 @@ mod tests {
             label: "s1".to_owned(),
             subline: Some("main".to_owned()),
             runtime: Some("claude".to_owned()),
-            accent: false,
+            icon: None,
             chips: chip
                 .map(|text| SessionChip {
                     text: text.to_owned(),

@@ -198,6 +198,8 @@ pub struct AgentDescriptor {
     pub texts: AgentTexts,          // shell_resume_label, no_conversation
     pub fields: Vec<OptionField>,
     pub chips: Vec<ChipRule>,
+    pub title: TitleRules,          // title glyphs and placeholder
+    pub icon: Option<String>,       // runtime icon, SVG markup in its own colours
 }
 pub struct OptionField {
     pub id: String,
@@ -236,7 +238,7 @@ Where it mounts:
 
 - Spawn dialog: `Runtime::Agent(AgentId)` lists the descriptors in daemon order, then Plain shell; the Main and Advanced sections render the agent's fields, starting from the agent's settings; Run mode offers Headless only when `caps.headless`; the trusted note reads `trust_note`. Duplicate and launch-last prefill an `AgentSelection` as stored.
 - Settings: one page per descriptor under the existing non-selectable `Agents` group row, holding the fields with `settings: true`, read from `AgentSettings` and written with `SetAgentSettings`.
-- Chips and labels: pane headers and leaves draw `agent_chips`; the runtime chip text is `program_name`, else `tag`, else the agent id, and it wears the accent only when `accent` is Claude and the text is the tag itself; Shift+Enter sends the bytes `shift_enter` names.
+- Chips and labels: pane headers and leaves draw `agent_chips`; the runtime chip's label is `program_name`, else `tag`, else the agent id, and it is drawn as the descriptor's `icon` only while that label is the tag itself (a shell's label draws its shell's icon); `accent` is no longer read by the client; Shift+Enter sends the bytes `shift_enter` names.
 - Recover dialog: offers the kinds `caps` allows, named by `label` and `texts`.
 
 What it replaces (inventory group 8, Claude rows, after RT-266 has removed the Codex and Cursor ones):

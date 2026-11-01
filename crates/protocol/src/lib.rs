@@ -106,6 +106,9 @@ pub struct AgentDescriptor {
     /// use the title as it stands.
     #[serde(default)]
     pub title: TitleRules,
+    /// The runtime icon: SVG markup drawn in its own colours; none draws the generic shell glyph.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 /// What an agent paints into its terminal title besides a name: a leading
@@ -10445,7 +10448,27 @@ mod tests {
                 ],
                 placeholder: Some("Claude Code".to_owned()),
             },
+            icon: None,
         }
+    }
+
+    #[test]
+    fn descriptor_without_an_icon_decodes_to_none() {
+        let mut json = serde_json::to_value(sample_descriptor()).expect("encode");
+        json.as_object_mut().expect("an object").remove("icon");
+        let back: AgentDescriptor = serde_json::from_value(json).expect("decode");
+        assert_eq!(back.icon, None);
+    }
+
+    #[test]
+    fn descriptor_with_an_icon_round_trips() {
+        let descriptor = AgentDescriptor {
+            icon: Some("<svg viewBox=\"0 0 16 16\"></svg>".to_owned()),
+            ..sample_descriptor()
+        };
+        let json = serde_json::to_string(&descriptor).expect("encode");
+        let back: AgentDescriptor = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, descriptor);
     }
 
     #[test]

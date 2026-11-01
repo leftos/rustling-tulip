@@ -41,6 +41,30 @@ pub fn check<A: Agent>(agent: &A) {
     check_chat(agent);
     check_recovery_and_import(agent);
     check_summarizer(agent);
+    check_icon(descriptor);
+}
+
+/// The largest runtime icon a descriptor may carry, in bytes.
+const MAX_ICON_BYTES: usize = 8192;
+
+/// A runtime icon, when the descriptor carries one, is SVG markup: not
+/// blank, one `<svg …>…</svg>` element, and at most [`MAX_ICON_BYTES`].
+fn check_icon(descriptor: &AgentDescriptor) {
+    let Some(svg) = descriptor.icon.as_deref() else {
+        return;
+    };
+    let svg = svg.trim();
+    assert!(!svg.is_empty(), "the icon is blank");
+    assert!(
+        svg.starts_with("<svg"),
+        "the icon does not start with <svg: {svg:.40}"
+    );
+    assert!(svg.ends_with("</svg>"), "the icon does not end with </svg>");
+    assert!(
+        svg.len() <= MAX_ICON_BYTES,
+        "the icon is {} bytes, over the {MAX_ICON_BYTES}-byte limit",
+        svg.len()
+    );
 }
 
 /// A summarizer, when the agent offers one, carries the schema it was asked

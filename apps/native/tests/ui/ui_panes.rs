@@ -15,7 +15,9 @@ use protocol::{
 };
 use rustling_tulip_native::appearance::{BUILTIN_ACCENT, PaneFrame};
 use rustling_tulip_native::palette::{LINE, RAISED, SURFACE};
-use rustling_tulip_native::{HeaderChip, HeaderChipKind, PANE_GUTTER, PaneHeaderParts};
+use rustling_tulip_native::{
+    HeaderChip, HeaderChipKind, PANE_GUTTER, PaneHeaderParts, RuntimeIcon,
+};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
@@ -252,15 +254,28 @@ fn chip(kind: HeaderChipKind, text: &str, tip: &str) -> HeaderChip {
         kind,
         text: text.to_owned(),
         tip: tip.to_owned(),
-        accent: false,
+        icon: None,
     }
 }
 
-/// A runtime chip wearing its agent's accent.
+/// A runtime chip drawn as the registry Claude's icon.
 fn runtime(name: &str) -> HeaderChip {
+    let icon = agent_registry::descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.id.0 == "claude")
+        .and_then(|descriptor| descriptor.icon)
+        .expect("the registry's Claude carries an icon");
     HeaderChip {
-        accent: true,
+        icon: Some(RuntimeIcon::Agent(icon.into())),
         ..chip(HeaderChipKind::Runtime, name, &format!("Running {name}"))
+    }
+}
+
+/// A `pwsh` runtime chip, drawn as PowerShell's icon.
+fn pwsh_runtime() -> HeaderChip {
+    HeaderChip {
+        icon: Some(RuntimeIcon::Pwsh),
+        ..chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")
     }
 }
 
@@ -431,7 +446,7 @@ fn deepseek_chip_follows_the_runtime_chip(cx: &mut TestAppContext) {
     assert_eq!(header_of(&mut h, "p2").chips, [runtime("claude")]);
     assert_eq!(
         header_of(&mut h, "p3").chips,
-        [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")],
+        [pwsh_runtime()],
         "a plain shell says no provider, whatever the snapshot reports"
     );
 
@@ -535,8 +550,8 @@ fn repo_and_shell_headers_are_one_row(cx: &mut TestAppContext) {
     assert_eq!(header.title, "scratch");
     assert_eq!(
         header.chips,
-        [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")],
-        "a shell's program tag wears no agent accent"
+        [pwsh_runtime()],
+        "a shell's program tag wears its shell's icon"
     );
     assert_eq!(
         header_of(&mut h, "p2").chips,

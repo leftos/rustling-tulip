@@ -14,7 +14,7 @@ fn box_chip() -> HeaderChip {
         kind: HeaderChipKind::Host,
         text: "box".to_owned(),
         tip: REMOTE.to_owned(),
-        accent: false,
+        icon: None,
     }
 }
 

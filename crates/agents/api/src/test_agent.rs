@@ -90,6 +90,7 @@ pub static DESCRIPTOR: LazyLock<AgentDescriptor> = LazyLock::new(|| AgentDescrip
     ],
     chips: Vec::new(),
     title: TitleRules::default(),
+    icon: None,
 });
 
 /// The conversations a [`TestAgent`] finds, keyed by the folder text a query

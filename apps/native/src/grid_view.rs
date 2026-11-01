@@ -9,7 +9,7 @@ use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
     Entity, FocusHandle, FontWeight, HighlightStyle, MouseButton, MouseDownEvent, Pixels, Point,
     SharedString, Stateful, StyledText, Subscription, Window, WindowId, canvas, div, prelude::*,
-    px, relative,
+    px, relative, svg,
 };
 use protocol::{
     AgentDescriptor, ClientMessage, GridNode, PaneDropEdge, SessionMember, SessionMode,
@@ -17,6 +17,7 @@ use protocol::{
 };
 
 use crate::appearance::{self, PaneFrame, Resolved, Source};
+use crate::assets::SHIELD_ICON;
 use crate::chat::PaneView;
 use crate::chat_view::{offers_chat, view_segment};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
@@ -25,12 +26,11 @@ use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::DEFAULT_FAMILY;
 use crate::open_view::LinkSource;
 use crate::popouts::{self, PopoutKey};
+use crate::runtime_icon::{RuntimeIcon, runtime_icon, runtime_icon_view};
 use crate::session_actions::StopPlace;
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
-use crate::sidebar::{
-    can_attach, chip_tip, display_label, label_tooltip, runtime_accent, runtime_label,
-};
+use crate::sidebar::{can_attach, chip_tip, display_label, label_tooltip, runtime_label};
 use crate::spawn_view::{DISABLED_OPACITY, SpawnEntry};
 use crate::spawns::{OpenIn, PaneAim};
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -74,8 +74,6 @@ const CHIP_TEXT_SIZE: f32 = 11.0;
 /// The repo:branch chip's flex shrink against the title's 1: large enough
 /// that the chip gives up nearly all its width before the title gives any.
 const BRANCH_CHIP_SHRINK: f32 = 1000.0;
-/// How strongly the agent runtime chip washes its fill with the accent.
-const RUNTIME_WASH_ALPHA: f32 = 0.13;
 const HEADER_BUTTON_SIZE: f32 = 26.0;
 const HEADER_BUTTON_RADIUS: f32 = 6.0;
 const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
@@ -2508,14 +2506,15 @@ impl HostLabel {
     }
 }
 
-/// One chip in a pane header: its text, its hover text, and whether it wears
-/// its agent's accent colour.
+/// One chip in a pane header: its text, its hover text, and for the runtime
+/// chip the icon it is drawn as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderChip {
     pub kind: HeaderChipKind,
     pub text: String,
     pub tip: String,
-    pub accent: bool,
+    /// The runtime chip's icon; `None` draws the chip's text.
+    pub icon: Option<RuntimeIcon>,
 }
 
 impl HeaderChip {
@@ -2524,14 +2523,14 @@ impl HeaderChip {
             kind,
             text: text.into(),
             tip: tip.into(),
-            accent: false,
+            icon: None,
         }
     }
 
-    /// The chip drawn in its agent's accent colour.
+    /// The chip drawn as `icon`.
     #[must_use]
-    fn accented(mut self, accent: bool) -> Self {
-        self.accent = accent;
+    fn with_icon(mut self, icon: Option<RuntimeIcon>) -> Self {
+        self.icon = icon;
         self
     }
 }
@@ -2550,8 +2549,8 @@ fn header_parts(
         .collect();
     chips.extend(runtime_label(session, agents).map(|runtime| {
         let tip = format!("Running {runtime}");
-        let accent = runtime_accent(session, Some(&runtime), agents);
-        HeaderChip::new(HeaderChipKind::Runtime, runtime, tip).accented(accent)
+        let icon = runtime_icon(session, Some(&runtime), agents);
+        HeaderChip::new(HeaderChipKind::Runtime, runtime, tip).with_icon(icon)
     }));
     chips.extend(session.agent_chips.iter().map(|agent_chip| {
         HeaderChip::new(
@@ -2683,8 +2682,9 @@ fn header_title(
     out
 }
 
-/// A 20 px Geist Mono chip: the agent runtime washed in the accent,
-/// repo:branch with its repo name bright, trusted outlined, the rest filled.
+/// A 20 px Geist Mono chip: the runtime a 20 px square holding its icon,
+/// repo:branch with its repo name bright, trusted an outlined square holding
+/// a shield, the rest filled.
 fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> AnyElement {
     let t = theme(cx);
     let name = format!("pane-chip-{pane_id}-{}", chip.kind.name());
@@ -2717,21 +2717,28 @@ fn header_chip(pane_id: &str, chip: &HeaderChip, cx: &mut Context<RootView>) -> 
     };
     let text = chip.text.clone();
     match chip.kind {
-        HeaderChipKind::Runtime => if chip.accent {
-            base.bg(gpui::Rgba {
-                a: RUNTIME_WASH_ALPHA,
-                ..gpui::rgb(t.accent)
-            })
-            .text_color(gpui::rgb(t.accent))
-        } else {
-            base
-        }
-        .child(text),
+        HeaderChipKind::Runtime => match &chip.icon {
+            Some(icon) => base
+                .w(ui_px(cx, CHIP_HEIGHT))
+                .px(px(0.0))
+                .justify_center()
+                .child(runtime_icon_view(icon, ui_px(cx, 12.0), &name, &t)),
+            None => base.child(text),
+        },
         HeaderChipKind::Branch => branch_chip(&name, base, text, &t),
         HeaderChipKind::Trusted => base
             .bg(gpui::rgba(t.transparent))
             .border_color(gpui::rgb(t.line_strong))
-            .child(text),
+            .w(ui_px(cx, CHIP_HEIGHT))
+            .px(px(0.0))
+            .justify_center()
+            .child(
+                svg()
+                    .path(SHIELD_ICON)
+                    .size(ui_px(cx, 12.0))
+                    .flex_none()
+                    .text_color(gpui::rgb(t.text_2)),
+            ),
         HeaderChipKind::More | HeaderChipKind::Provider | HeaderChipKind::Host => base.child(text),
     }
     .into_any_element()
@@ -3241,6 +3248,7 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
 )]
 mod tests {
     use super::{HeaderChip, HeaderChipKind, RetryGate, header_parts, status_label};
+    use crate::runtime_icon::RuntimeIcon;
     use crate::tabs::SessionRef;
     use crate::target::HostKey;
     use protocol::{AgentDescriptor, AgentId, SessionMode, SessionSnapshot, SessionStatus};
@@ -3342,9 +3350,11 @@ mod tests {
         HeaderChip::new(kind, text, tip)
     }
 
-    /// A runtime chip wearing its agent's accent.
+    /// A runtime chip drawn as the registry Claude's icon.
     fn runtime(text: &str) -> HeaderChip {
-        chip(HeaderChipKind::Runtime, text, &format!("Running {text}")).accented(true)
+        let icon = claude_descriptor().icon.expect("Claude carries an icon");
+        chip(HeaderChipKind::Runtime, text, &format!("Running {text}"))
+            .with_icon(Some(RuntimeIcon::Agent(icon.into())))
     }
 
     /// The registry's Claude descriptor, as the daemon sends it.
@@ -3408,8 +3418,9 @@ mod tests {
         shell.program_name = Some("pwsh".to_owned());
         assert_eq!(
             header_parts(&shell, false, &[claude_descriptor()], None).chips,
-            [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")],
-            "a plain shell says no provider and wears no accent"
+            [chip(HeaderChipKind::Runtime, "pwsh", "Running pwsh")
+                .with_icon(Some(RuntimeIcon::Pwsh))],
+            "a plain shell says no provider and wears its shell's icon"
         );
     }
 }

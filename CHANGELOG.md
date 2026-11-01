@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Changed
+
+- Sessions show their program as an icon (Claude, PowerShell, cmd, bash) in the sidebar, pane headers and spawn dialog, and Trusted as a shield.
+
 ## v0.6.1-alpha
 
 ### Added

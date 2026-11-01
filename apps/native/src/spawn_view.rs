@@ -23,10 +23,11 @@ use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::notices;
 use crate::overlay_owner::Overlay;
 use crate::remote_mode::spawn_no_repos_note;
+use crate::runtime_icon::runtime_icon_view;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::spawn_form::{
     Control, EnvRow, EnvRowNote, FormInputs, HostInputs, ListField, Lock, OpenChoice, Outcome,
-    Prefill, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
+    Prefill, Runtime, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
@@ -2117,7 +2118,21 @@ fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
         .into_iter()
         .map(|runtime| {
             let selected = runtime == form.runtime();
-            let label = form.runtime_label(&runtime);
+            let key = match &runtime {
+                Runtime::Agent(agent) => agent.0.clone(),
+                Runtime::PlainShell => "shell".to_owned(),
+            };
+            let label = div()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .child(runtime_icon_view(
+                    &form.runtime_icon(&runtime),
+                    crate::fonts::ui_px(cx, 12.0),
+                    &format!("spawn-runtime-{key}"),
+                    &t,
+                ))
+                .child(form.runtime_label(&runtime));
             choice(&Control::Runtime(runtime), label, selected, focus, cx)
         })
         .collect();

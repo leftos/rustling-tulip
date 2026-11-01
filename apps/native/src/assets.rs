@@ -2,6 +2,9 @@
 //! as its asset source, so nothing is read from disk at runtime.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use gpui::{AssetSource, SharedString};
 
@@ -83,9 +86,60 @@ pub(crate) const HOST_TAILNET_ICON: &str = "icons/host-tailnet.svg";
 pub(crate) const HOST_SSH_ICON: &str = "icons/host-ssh.svg";
 /// A check mark: the Connections picker's passed Test connection.
 pub(crate) const CHECK_ICON: &str = "icons/check.svg";
+/// The pane header's trusted chip: a shield.
+pub(crate) const SHIELD_ICON: &str = "icons/shield.svg";
+
+/// The runtime icon of PowerShell 7 and later.
+pub(crate) const RUNTIME_PWSH_ICON: &str = "icons/runtime-pwsh.svg";
+/// The runtime icon of Windows PowerShell 5.
+pub(crate) const RUNTIME_POWERSHELL_ICON: &str = "icons/runtime-powershell.svg";
+/// The runtime icon of cmd.
+pub(crate) const RUNTIME_CMD_ICON: &str = "icons/runtime-cmd.svg";
+/// The runtime icon of bash, zsh, sh and WSL.
+pub(crate) const RUNTIME_POSIX_ICON: &str = "icons/runtime-posix.svg";
+
+/// Where an agent's icon is served from: `agent-icons/<hash>.svg`.
+const AGENT_ICONS_DIR: &str = "agent-icons/";
+
+/// The agents' icons registered while the app runs, by the path
+/// [`agent_icon_path`] gave them.
+static AGENT_ICONS: LazyLock<RwLock<HashMap<String, Arc<[u8]>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// The asset path agent icon `svg` is served under, registering its bytes
+/// there the first time; the same markup always gets the same path.
+pub(crate) fn agent_icon_path(svg: &str) -> SharedString {
+    let mut hasher = DefaultHasher::new();
+    svg.hash(&mut hasher);
+    let path = format!("{AGENT_ICONS_DIR}{:016x}.svg", hasher.finish());
+    let known = AGENT_ICONS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains_key(&path);
+    if !known {
+        AGENT_ICONS
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(path.clone())
+            .or_insert_with(|| Arc::from(svg.as_bytes()));
+    }
+    path.into()
+}
+
+/// The bytes of a registered agent icon at `path`.
+fn agent_icon_bytes(path: &str) -> Option<Cow<'static, [u8]>> {
+    if !path.starts_with(AGENT_ICONS_DIR) {
+        return None;
+    }
+    AGENT_ICONS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(path)
+        .map(|bytes| Cow::Owned(bytes.to_vec()))
+}
 
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 37] = [
+const ASSETS: [(&str, &[u8]); 42] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -219,6 +273,23 @@ const ASSETS: [(&str, &[u8]); 37] = [
         include_bytes!("../assets/icons/host-ssh.svg"),
     ),
     (CHECK_ICON, include_bytes!("../assets/icons/check.svg")),
+    (SHIELD_ICON, include_bytes!("../assets/icons/shield.svg")),
+    (
+        RUNTIME_PWSH_ICON,
+        include_bytes!("../assets/icons/runtime-pwsh.svg"),
+    ),
+    (
+        RUNTIME_POWERSHELL_ICON,
+        include_bytes!("../assets/icons/runtime-powershell.svg"),
+    ),
+    (
+        RUNTIME_CMD_ICON,
+        include_bytes!("../assets/icons/runtime-cmd.svg"),
+    ),
+    (
+        RUNTIME_POSIX_ICON,
+        include_bytes!("../assets/icons/runtime-posix.svg"),
+    ),
 ];
 
 /// The bundled assets; the app registers it with `Application::with_assets`.
@@ -229,7 +300,8 @@ impl AssetSource for Assets {
         Ok(ASSETS
             .iter()
             .find(|(name, _)| *name == path)
-            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
+            .map(|(_, bytes)| Cow::Borrowed(*bytes))
+            .or_else(|| agent_icon_bytes(path)))
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
@@ -238,5 +310,57 @@ impl AssetSource for Assets {
             .filter(|(name, _)| name.starts_with(path))
             .map(|(name, _)| SharedString::from(*name))
             .collect())
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a test fails with the message of the precondition it lost"
+)]
+mod tests {
+    use super::*;
+
+    fn load(path: &str) -> Option<Vec<u8>> {
+        Assets
+            .load(path)
+            .expect("loading never errs")
+            .map(Cow::into_owned)
+    }
+
+    #[test]
+    fn the_shell_runtime_icons_are_bundled() {
+        for path in [
+            RUNTIME_PWSH_ICON,
+            RUNTIME_POWERSHELL_ICON,
+            RUNTIME_CMD_ICON,
+            RUNTIME_POSIX_ICON,
+        ] {
+            assert!(load(path).is_some_and(|bytes| !bytes.is_empty()), "{path}");
+        }
+    }
+
+    #[test]
+    fn an_agent_icon_is_served_under_its_own_path() {
+        let spark = "<svg viewBox=\"0 0 16 16\"><path d=\"M8 1v14\"/></svg>";
+        let other = "<svg viewBox=\"0 0 16 16\"><path d=\"M1 8h14\"/></svg>";
+        let path = agent_icon_path(spark);
+        assert!(path.starts_with(AGENT_ICONS_DIR), "{path}");
+        assert_eq!(
+            agent_icon_path(spark),
+            path,
+            "the same markup, the same path"
+        );
+        assert_ne!(agent_icon_path(other), path, "other markup, another path");
+        assert_eq!(load(&path), Some(spark.as_bytes().to_vec()));
+        assert_eq!(
+            load(&agent_icon_path(other)),
+            Some(other.as_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn an_unregistered_agent_icon_loads_nothing() {
+        assert_eq!(load("agent-icons/0000000000000000.svg"), None);
     }
 }

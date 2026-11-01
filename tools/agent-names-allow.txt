@@ -8,7 +8,6 @@ crates/agents/api/src/lib.rs:Claude's|RUSTLING_TULIP_CLAUDE # doc examples namin
 crates/agents/api/src/hook_vocabulary.rs:Claude Code|Claude's conversation|agent-claude # the shared hook vocabulary is Claude Code's by design
 crates/protocol/src/lib.rs:^\s*Claude,$ # AccentToken::Claude, the wire palette name
 crates/protocol/src/lib.rs:such as \W*(Claude|claude|RUSTLING_TULIP_CLAUDE) # descriptor field docs giving the Claude plugin's values as examples
-apps/native/src/*.rs:AccentToken::Claude # readers of the wire palette name
 apps/native/src/term_input.rs:Claude's TUI # the Shift+Enter fallback bytes are the ones Claude's TUI takes
 apps/native/src/prompt_nav.rs:Claude # prompt navigation reads Claude's `❯ ` prompt echo, not yet behind the seam
 crates/daemon/Cargo.toml:agent-claude # the daemon's dev-dependency for its tests

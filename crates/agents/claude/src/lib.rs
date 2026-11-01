@@ -109,6 +109,7 @@ fn claude_descriptor() -> AgentDescriptor {
             glyphs: TITLE_GLYPHS.to_vec(),
             placeholder: Some("Claude Code".to_string()),
         },
+        icon: Some(include_str!("../assets/icon.svg").trim_end().to_owned()),
     }
 }
 

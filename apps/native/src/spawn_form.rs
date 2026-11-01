@@ -19,6 +19,7 @@ use protocol::{
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView};
 use crate::combobox::{ComboRow, Combobox};
+use crate::runtime_icon::{RuntimeIcon, agent_icon};
 use crate::sidebar::SpawnDefaults;
 use crate::spawn_preview::{Preview, PreviewKey, ReuseChoice};
 use crate::spawns::OpenIn;
@@ -2224,6 +2225,19 @@ impl SpawnForm {
                 .find(|descriptor| &descriptor.id == agent)
                 .map_or_else(|| agent.0.clone(), |descriptor| descriptor.tag.clone()),
             Runtime::PlainShell => "Plain shell".to_owned(),
+        }
+    }
+
+    /// A runtime's icon: its agent's, or the generic glyph for a plain
+    /// shell, whose program the daemon picks.
+    pub(crate) fn runtime_icon(&self, runtime: &Runtime) -> RuntimeIcon {
+        match runtime {
+            Runtime::Agent(agent) => agent_icon(
+                self.agents
+                    .iter()
+                    .find(|descriptor| &descriptor.id == agent),
+            ),
+            Runtime::PlainShell => RuntimeIcon::Generic,
         }
     }
 
