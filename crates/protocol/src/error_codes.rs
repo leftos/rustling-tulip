@@ -51,6 +51,9 @@ pub const PRESETS_FAILED: &str = "presets_failed";
 pub const BUSY: &str = "busy";
 /// The terminal's state does not take a chat message now.
 pub const CHAT_REFUSED: &str = "chat_refused";
+/// A per-connection limit was reached, such as a fifth file follow
+/// ([`crate::ClientMessage::TailFile`]) on one connection; stop one first.
+pub const LIMIT_REACHED: &str = "limit_reached";
 
 /// Every code in the catalogue.
 pub const ALL: &[&str] = &[
@@ -76,11 +79,17 @@ pub const ALL: &[&str] = &[
     PRESETS_FAILED,
     BUSY,
     CHAT_REFUSED,
+    LIMIT_REACHED,
 ];
 
 #[cfg(test)]
 mod tests {
-    use super::ALL;
+    use super::{ALL, LIMIT_REACHED};
+
+    #[test]
+    fn the_catalogue_lists_limit_reached() {
+        assert!(ALL.contains(&LIMIT_REACHED), "{ALL:?}");
+    }
 
     fn is_snake_case(code: &str) -> bool {
         !code.is_empty()

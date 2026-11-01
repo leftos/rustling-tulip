@@ -1703,6 +1703,7 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
             is_error: false,
         }),
         parent_id: None,
+        tail_paths: Vec::new(),
     };
     let answer = "The footer now keeps **8 px** between its \
                   {{pills|pills, the {{status chips|status, branch and model chips}} along \
@@ -1757,6 +1758,7 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
             input: format!("{:#}", serde_json::json!({ "command": FOOTER_SPECS })),
             result: None,
             parent_id: None,
+            tail_paths: Vec::new(),
         },
         ChatEntry::Answer {
             id: "live:m2".to_owned(),

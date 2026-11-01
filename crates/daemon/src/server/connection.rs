@@ -385,9 +385,8 @@ pub(super) async fn client_session_until<S: Socket>(
     //   - Kept in `conn.lane`, which also counts the bytes each session has
     //     queued: a forwarder whose session goes over its budget resyncs the
     //     client with a fresh snapshot in its own task.
-    // Active `FetchFile` transfers by client-assigned id; cancelled by
-    // `CancelFetch` and on teardown below.
-    let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+    // Active `FetchFile` transfers and `TailFile` follows, stopped on teardown.
+    let (fetches, tails): (FetchRegistry, TailRegistry) = Default::default();
 
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
@@ -424,6 +423,7 @@ pub(super) async fn client_session_until<S: Socket>(
         file_tx: &file_tx,
         pty_lane: &conn.lane,
         fetches: &fetches,
+        tails: &tails,
         client_id: &client_id,
         client_name: client_name.as_deref(),
         connection,
@@ -432,7 +432,7 @@ pub(super) async fn client_session_until<S: Socket>(
     recv_loop(&hub, &mut receiver, &ctx, &conn, live.as_ref()).await;
 
     info!("client_session: recv_loop returned; tearing down");
-    stop_transfers(&conn.lane, &fetches).await;
+    stop_transfers(&conn.lane, &fetches, &tails).await;
     drop(watches);
     drop(file_tx);
     drop(out_tx);
@@ -470,14 +470,21 @@ async fn end_served<S: Outbound, R: Inbound>(
     .await;
 }
 
-/// Abort every PTY forwarder and cancel every file fetch of a connection
-/// that is going.
-pub(super) async fn stop_transfers(pty_lane: &PtyLane, fetches: &FetchRegistry) {
+/// Abort every PTY forwarder and cancel every file fetch and file follow of
+/// a connection that is going.
+pub(super) async fn stop_transfers(
+    pty_lane: &PtyLane,
+    fetches: &FetchRegistry,
+    tails: &TailRegistry,
+) {
     for (_, handle) in pty_lane.forwarders.lock().await.drain() {
         handle.abort();
     }
     for (_, token) in fetches.lock().await.drain() {
         token.cancel();
+    }
+    for (_, entry) in tails.lock().await.drain() {
+        entry.cancel();
     }
 }
 
@@ -913,6 +920,10 @@ fn spawn_preset_forwarder(
 
 pub(super) type FetchRegistry = Arc<AsyncMutex<HashMap<String, CancellationToken>>>;
 
+/// A connection's `TailFile` follows by session id and path as requested,
+/// each stopped through its entry.
+pub(super) type TailRegistry = Arc<AsyncMutex<HashMap<(String, String), super::tail::TailEntry>>>;
+
 /// Per-connection handles that [`dispatch`] needs beyond the [`Hub`].
 #[derive(Clone, Copy)]
 pub(super) struct ConnCtx<'a> {
@@ -921,6 +932,8 @@ pub(super) struct ConnCtx<'a> {
     pub(super) file_tx: &'a mpsc::Sender<DaemonMessage>,
     pub(super) pty_lane: &'a Arc<PtyLane>,
     pub(super) fetches: &'a FetchRegistry,
+    /// This connection's file follows, stopped when it goes.
+    pub(super) tails: &'a TailRegistry,
     pub(super) client_id: &'a str,
     pub(super) client_name: Option<&'a str>,
     /// This connection's id, unique for the daemon's run: a client may hold

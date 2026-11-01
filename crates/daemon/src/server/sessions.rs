@@ -1743,7 +1743,7 @@ mod tests {
         settle().await;
 
         // The connection's teardown, while the forwarder waits to resync.
-        stop_transfers(&lane, &fetches).await;
+        stop_transfers(&lane, &fetches, &Arc::default()).await;
         drop(out_tx);
         let closed = tokio::time::timeout(Duration::from_secs(600), async {
             while out_rx.recv().await.is_some() {}
@@ -1851,6 +1851,7 @@ mod tests {
             file_tx: &file_tx,
             pty_lane: &pty_lane,
             fetches: &fetches,
+            tails: &Arc::default(),
             client_id,
             client_name: None,
             connection: 1,

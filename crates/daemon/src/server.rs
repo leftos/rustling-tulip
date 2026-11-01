@@ -22,6 +22,7 @@ mod recovery;
 mod screen;
 mod settings;
 mod summarizer;
+mod tail;
 pub(crate) use self::recovery::RecoveryClaims;
 
 mod sessions;
@@ -758,6 +759,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             start_fetch(ctx, id, target).await;
         }
         ClientMessage::CancelFetch { id } => cancel_fetch(ctx.fetches, &id).await,
+        m @ (ClientMessage::TailFile { .. } | ClientMessage::UntailFile { .. }) => {
+            tail::handle(hub, m, ctx).await;
+        }
         ClientMessage::Shutdown { drain } => {
             info!(drain, "dispatch: ClientMessage::Shutdown received");
             if drain {

@@ -156,6 +156,7 @@ mod tests {
             file_tx: &file_tx,
             pty_lane: &pty_lane,
             fetches: &fetches,
+            tails: &Arc::default(),
             client_id: "c1",
             client_name: None,
             connection: conn.id,

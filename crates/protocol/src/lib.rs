@@ -37,6 +37,12 @@ pub const FEATURE_DEVICE_BLOCK: &str = "device_block";
 /// connections to the same daemon apart from connections to two daemons.
 pub const FEATURE_DAEMON_ID: &str = "daemon_id";
 
+/// `Welcome.features` entry: the daemon follows a file inside a session's
+/// folders ([`ClientMessage::TailFile`], [`DaemonMessage::FileTail`],
+/// [`ClientMessage::UntailFile`]). A client offers a tail only when the
+/// connected daemon lists it.
+pub const FEATURE_FILE_TAIL: &str = "file_tail";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -2658,6 +2664,12 @@ pub enum ChatEntry {
         result: Option<ToolOutcome>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
+        /// Files the call writes or names as its log, as absolute paths
+        /// (resolved against the session's working folder) when the agent
+        /// knows that folder; a client may follow each with
+        /// [`ClientMessage::TailFile`]. Empty for a call that names none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tail_paths: Vec<String>,
     },
     /// A row the daemon itself wrote, such as a cleared conversation.
     System { id: String, text: String },
@@ -3451,6 +3463,33 @@ pub enum ClientMessage {
     /// further messages for it are sent. An unknown id is ignored.
     CancelFetch {
         id: String,
+    },
+    /// Follow the file at `path` (absolute, or relative to the session's
+    /// working folder): the daemon sends [`DaemonMessage::FileTail`]s, the
+    /// last 64 KiB first, then new bytes as they arrive. A missing file is
+    /// followed once it appears. A path that does not resolve, symlinks
+    /// followed, inside one of the session's own folders, a network or
+    /// device path (`\\server\share`, `\\?\`, `\\.\`), a path over 1024
+    /// characters or 64 components, an unknown session and a fifth running
+    /// follow on one connection are refused with an `Error` carrying
+    /// `request_id`. A repeat for the same session and path restarts that
+    /// follow, whose first `FileTail` carries `reset`. Advertised by the
+    /// `file_tail` feature.
+    TailFile {
+        session_id: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Stop the [`ClientMessage::TailFile`] follow of `path` in this session.
+    /// The daemon reads no more of the file, but [`DaemonMessage::FileTail`]s
+    /// already queued for it may still arrive: a client that has stopped a
+    /// follow ignores them, and one that follows the path again drops
+    /// whatever arrives before the new follow's first message, which carries
+    /// `reset`. An unknown follow is ignored.
+    UntailFile {
+        session_id: String,
+        path: String,
     },
     /// Request the persisted scrollback for a session, replayed on attach.
     /// The daemon answers with [`DaemonMessage::Scrollback`].
@@ -4824,6 +4863,21 @@ pub enum DaemonMessage {
     FileFetchError {
         id: String,
         error: String,
+    },
+    /// Bytes of a file followed by [`ClientMessage::TailFile`], base64,
+    /// at most 64 KiB a message. `path` is the path as the request named it;
+    /// `offset` is the file offset of the first byte. `reset` means the file
+    /// shrank, was replaced or rewritten, grew by more than 64 KiB since the
+    /// last message (this data is then its last 64 KiB), or the follow was
+    /// restarted: the client drops what it holds, chunks that arrived before
+    /// this one included, and starts over from this data.
+    FileTail {
+        session_id: String,
+        path: String,
+        data_b64: String,
+        offset: u64,
+        #[serde(default)]
+        reset: bool,
     },
     /// Persisted scrollback bytes (raw PTY output for interactive sessions,
     /// raw stream-json lines for headless), base64-encoded. `truncated` is
@@ -10738,6 +10792,7 @@ mod tests {
                     is_error: false,
                 }),
                 parent_id: Some("a1".to_string()),
+                tail_paths: Vec::new(),
             },
             ChatEntry::System {
                 id: "sys1".to_string(),
@@ -10780,6 +10835,123 @@ mod tests {
                 cursor: Some(2),
             }),
         }
+    }
+
+    #[test]
+    fn tail_file_round_trips() {
+        let msg = ClientMessage::TailFile {
+            session_id: "s1".to_string(),
+            path: "C:/repo/build.log".to_string(),
+            request_id: Some("req-tail".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"tail_file""#), "{json}");
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::TailFile {
+                session_id,
+                path,
+                request_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(path, "C:/repo/build.log");
+                assert_eq!(request_id.as_deref(), Some("req-tail"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare: ClientMessage =
+            serde_json::from_str(r#"{"type":"tail_file","session_id":"s1","path":"x.log"}"#)
+                .expect("a request id is optional");
+        assert!(matches!(
+            bare,
+            ClientMessage::TailFile {
+                request_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn untail_file_round_trips() {
+        let msg = ClientMessage::UntailFile {
+            session_id: "s1".to_string(),
+            path: "x.log".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"type":"untail_file","session_id":"s1","path":"x.log"}"#
+        );
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::UntailFile { session_id, path } => {
+                assert_eq!((session_id.as_str(), path.as_str()), ("s1", "x.log"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_tail_round_trips() {
+        let msg = DaemonMessage::FileTail {
+            session_id: "s1".to_string(),
+            path: "x.log".to_string(),
+            data_b64: "aGk=".to_string(),
+            offset: 65_536,
+            reset: true,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"file_tail""#), "{json}");
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::FileTail {
+                session_id,
+                path,
+                data_b64,
+                offset,
+                reset,
+            } => {
+                assert_eq!((session_id.as_str(), path.as_str()), ("s1", "x.log"));
+                assert_eq!((data_b64.as_str(), offset, reset), ("aGk=", 65_536, true));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let no_reset: DaemonMessage = serde_json::from_str(
+            r#"{"type":"file_tail","session_id":"s1","path":"x.log","data_b64":"","offset":0}"#,
+        )
+        .expect("reset defaults");
+        assert!(matches!(
+            no_reset,
+            DaemonMessage::FileTail { reset: false, .. }
+        ));
+    }
+
+    #[test]
+    fn a_tool_entry_carries_tail_paths_only_when_it_has_some() {
+        let bare = r#"{"kind":"tool","id":"t","name":"Bash","summary":"ls","input":"{}"}"#;
+        let decoded: ChatEntry = serde_json::from_str(bare).expect("absent tail_paths decode");
+        let ChatEntry::Tool { tail_paths, .. } = &decoded else {
+            panic!("unexpected entry: {decoded:?}");
+        };
+        assert_eq!(*tail_paths, Vec::<String>::new());
+        let encoded = serde_json::to_value(&decoded).expect("encode");
+        assert!(encoded.get("tail_paths").is_none(), "{encoded}");
+
+        let with = ChatEntry::Tool {
+            id: "t".to_string(),
+            name: "Bash".to_string(),
+            summary: "make > build.log".to_string(),
+            input: "{}".to_string(),
+            result: None,
+            parent_id: None,
+            tail_paths: vec!["C:/repo/build.log".to_string()],
+        };
+        let json = serde_json::to_string(&with).expect("encode");
+        assert!(
+            json.contains(r#""tail_paths":["C:/repo/build.log"]"#),
+            "{json}"
+        );
+        let back: ChatEntry = serde_json::from_str(&json).expect("decode");
+        assert!(
+            matches!(back, ChatEntry::Tool { tail_paths, .. } if tail_paths == ["C:/repo/build.log"])
+        );
     }
 
     #[test]
@@ -11178,6 +11350,7 @@ mod tests {
                 input: String::new(),
                 result: None,
                 parent_id: None,
+                tail_paths: Vec::new(),
             },
             ChatEntry::TurnEnd {
                 id: "end2".to_string(),

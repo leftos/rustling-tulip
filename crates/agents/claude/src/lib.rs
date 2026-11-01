@@ -19,6 +19,7 @@ mod records;
 mod rules;
 mod subagents;
 mod summarize;
+mod tail_paths;
 mod transcripts;
 
 pub use providers::{display_name, provider_for_model};

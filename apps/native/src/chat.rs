@@ -1155,6 +1155,7 @@ mod tests {
             input: "{}".to_owned(),
             result,
             parent_id: None,
+            tail_paths: Vec::new(),
         }
     }
 

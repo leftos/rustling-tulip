@@ -206,6 +206,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_DEVICE_BLOCK,
     protocol::FEATURE_DAEMON_ID,
     FEATURE_SCREEN_DUMP,
+    protocol::FEATURE_FILE_TAIL,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every

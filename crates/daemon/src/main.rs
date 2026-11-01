@@ -28,6 +28,7 @@ mod detach;
 mod devices;
 mod env_secrets;
 mod file_fetch;
+mod file_tail;
 mod git;
 mod git_inspect;
 mod git_watch;

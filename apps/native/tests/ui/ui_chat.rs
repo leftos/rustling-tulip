@@ -115,6 +115,7 @@ fn tool(id: &str, result: Option<&str>) -> ChatEntry {
             is_error: false,
         }),
         parent_id: None,
+        tail_paths: Vec::new(),
     }
 }
 
@@ -1937,6 +1938,7 @@ fn bash(id: &str, command: &str) -> ChatEntry {
         input: format!("{input:#}"),
         result: None,
         parent_id: None,
+        tail_paths: Vec::new(),
     }
 }
 

@@ -11,6 +11,7 @@ use protocol::{ChatEntry, ToolOutcome};
 use serde_json::{Map, Value};
 
 use crate::records;
+use crate::tail_paths::{Shell, tail_paths};
 use crate::transcripts::{is_command_noise, is_meta};
 
 /// The most bytes of a tool call's input a card keeps.
@@ -230,6 +231,7 @@ fn tool_result_entries(record: &Value, block: &Value, known: Known<'_>) -> Vec<C
         summary,
         input,
         parent_id,
+        tail_paths,
         ..
     }) = known(tool_use_id)
     else {
@@ -255,6 +257,7 @@ fn tool_result_entries(record: &Value, block: &Value, known: Known<'_>) -> Vec<C
             is_error,
         }),
         parent_id,
+        tail_paths,
     };
     std::iter::once(card).chain(receipts).collect()
 }
@@ -372,7 +375,7 @@ fn assistant_entries(record: &Value, uuid: &str) -> Vec<ChatEntry> {
                 push_answer(&mut entries, id, text, in_text_run);
             }
             Some("thinking") => entries.extend(thinking_row(record, block, id)),
-            Some("tool_use") => entries.extend(tool_card(block)),
+            Some("tool_use") => entries.extend(tool_card(block, str_at(record, "cwd"))),
             _ => {}
         }
         in_text_run = kind == Some("text");
@@ -410,10 +413,16 @@ fn thinking_row(record: &Value, block: &Value, id: String) -> Option<ChatEntry> 
     Some(ChatEntry::Thinking { id, secs })
 }
 
-fn tool_card(block: &Value) -> Option<ChatEntry> {
+/// A tool call's card. A shell call names the files its command writes or
+/// logs to, resolved against `cwd`, the record's working folder.
+fn tool_card(block: &Value, cwd: Option<&str>) -> Option<ChatEntry> {
     let id = str_at(block, "id")?;
     let name = str_at(block, "name")?;
     let input = block.get("input").unwrap_or(&Value::Null);
+    let tail_paths = match (Shell::of_tool(name), str_at(input, "command")) {
+        (Some(shell), Some(command)) => tail_paths(shell, command, cwd),
+        _ => Vec::new(),
+    };
     Some(ChatEntry::Tool {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -421,6 +430,7 @@ fn tool_card(block: &Value) -> Option<ChatEntry> {
         input: cap(&format!("{input:#}"), TOOL_INPUT_CAP),
         result: None,
         parent_id: None,
+        tail_paths,
     })
 }
 
@@ -832,6 +842,7 @@ mod tests {
                 is_error,
             }),
             parent_id: None,
+            tail_paths: Vec::new(),
         }
     }
 
@@ -969,6 +980,48 @@ mod tests {
         assert_eq!(summary_of("Bash", &json!({"command": ""})), "Bash");
         assert_eq!(summary_of("Read", &json!({})), "Read");
         assert_eq!(summary_of("Bash", &json!({"command": 7})), "Bash");
+    }
+
+    #[test]
+    fn a_shell_card_names_the_files_its_command_writes_and_keeps_them_with_its_result() {
+        let cwd = std::env::temp_dir().join("repo");
+        let line = json!({"type": "assistant", "uuid": "u", "cwd": cwd.display().to_string(),
+        "message": {"content": [
+            {"type": "tool_use", "id": "toolu_t", "name": "Bash",
+                "input": {"command": "make 2>&1 | tee make.log"}},
+            {"type": "tool_use", "id": "toolu_r", "name": "Read",
+                "input": {"file_path": "make.log", "command": "> x.log"}}
+        ]}})
+        .to_string();
+        let cards = chat_entries(&line, &|_| None);
+        let expected = vec![cwd.join("make.log").display().to_string()];
+        let [
+            ChatEntry::Tool { tail_paths, .. },
+            ChatEntry::Tool {
+                tail_paths: none, ..
+            },
+        ] = cards.as_slice()
+        else {
+            unreachable!("two cards expected, got {cards:?}");
+        };
+        assert_eq!(tail_paths, &expected);
+        assert_eq!(
+            *none,
+            Vec::<String>::new(),
+            "a tool that runs no shell names no file"
+        );
+
+        let result = json!({"type": "user", "uuid": "v", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_t", "content": "ok"}
+        ]}})
+        .to_string();
+        let first = cards[0].clone();
+        let known = move |id: &str| (id == "toolu_t").then(|| first.clone());
+        let updated = chat_entries(&result, &known);
+        assert!(
+            matches!(updated.as_slice(), [ChatEntry::Tool { tail_paths, result: Some(_), .. }] if *tail_paths == expected),
+            "{updated:?}"
+        );
     }
 
     #[test]

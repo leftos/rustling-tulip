@@ -301,6 +301,7 @@ mod tests {
             input: String::new(),
             result: None,
             parent_id: None,
+            tail_paths: Vec::new(),
         };
         (entry, at, false)
     }
