@@ -14,7 +14,7 @@ use crate::drag::PaneDrop;
 use crate::move_panes_view::MovePanesDialog;
 use crate::overlay_owner::Overlay;
 use crate::pane_close::PaneClose;
-use crate::session_menu::{MENU_MAX_SHARE, menu_frame, menu_item, menu_separator};
+use crate::session_menu::{MENU_MAX_SHARE, disabled_row, menu_frame, menu_item, menu_separator};
 use crate::tabs::{collect_panes, pick_balanced_drop_target};
 use crate::target::HostKey;
 use crate::ui_theme::theme;
@@ -152,6 +152,17 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// Why the open session menu's view row tagged `selector` is drawn
+    /// disabled; `None` while it can be pressed or no such row is offered.
+    #[must_use]
+    pub fn pane_view_menu_disabled_tip(&self, selector: &str) -> Option<&'static str> {
+        let pane_id = self.pane_view_menu_pane()?;
+        pane_view_rows(self.pane_view(pane_id))
+            .into_iter()
+            .find(|(row, _, _)| *row == selector)
+            .and_then(|(_, _, view)| self.pane_view_disabled_tip(pane_id, view))
+    }
+
     /// The pane whose header opened the session menu, while it offers the
     /// Terminal / Chat row.
     fn pane_view_menu_pane(&self) -> Option<&str> {
@@ -160,7 +171,8 @@ impl RootView {
     }
 
     /// The session menu's view rows, while it offers them: a click closes
-    /// the menu and switches the pane, as its header control does.
+    /// the menu and switches the pane, as its header control does. A row
+    /// the pane cannot switch to now is drawn disabled, saying why.
     pub(crate) fn pane_view_menu_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(pane_id) = self.pane_view_menu_pane().map(ToOwned::to_owned) else {
             return Vec::new();
@@ -169,6 +181,9 @@ impl RootView {
         pane_view_rows(self.pane_view(&pane_id))
             .into_iter()
             .map(|(selector, label, view)| {
+                if let Some(tip) = self.pane_view_disabled_tip(&pane_id, view) {
+                    return disabled_row(selector, label, tip, &t).into_any_element();
+                }
                 let pane_id = pane_id.clone();
                 menu_item(selector, label, false, &t)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {

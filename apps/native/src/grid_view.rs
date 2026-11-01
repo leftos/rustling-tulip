@@ -19,7 +19,7 @@ use protocol::{
 use crate::appearance::{self, PaneFrame, Resolved, Source};
 use crate::assets::SHIELD_ICON;
 use crate::chat::PaneView;
-use crate::chat_view::{offers_chat, view_segment};
+use crate::chat_view::{AGENT_DOWN_TIP, offers_chat, view_segment};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
@@ -2061,7 +2061,8 @@ impl RootView {
             .map(|_| self.pane_prompt_jumps(pane_id, cx));
         let mut buttons = Self::header_buttons(tab_id, pane_id, session_id, prompt_jumps, cx);
         if session.is_some_and(offers_chat) {
-            buttons.insert(0, view_segments(pane_id, shown, cx));
+            let chat_up = session_id.is_some_and(|id| self.session_chat_available(id));
+            buttons.insert(0, view_segments(pane_id, shown, chat_up, cx));
         }
         buttons
     }
@@ -2880,8 +2881,14 @@ fn header_button(
 
 /// A pane header's Terminal | Chat | Summary control, the view `shown`
 /// marked; each segment is tagged `pane-view-<view>-<pane>` and a click
-/// switches pane `pane_id` to its view.
-fn view_segments(pane_id: &str, shown: PaneView, cx: &mut Context<RootView>) -> AnyElement {
+/// switches pane `pane_id` to its view. While the session's agent is not
+/// running (`chat_up` false) Chat and Summary are drawn disabled, saying so.
+fn view_segments(
+    pane_id: &str,
+    shown: PaneView,
+    chat_up: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
     let t = theme(cx);
     let segments: Vec<AnyElement> = [
         (PaneView::Terminal, "pane-view-terminal"),
@@ -2890,14 +2897,23 @@ fn view_segments(pane_id: &str, shown: PaneView, cx: &mut Context<RootView>) -> 
     ]
     .into_iter()
     .map(|(view, action)| {
+        let enabled = chat_up || !view.hides_terminal();
         let (label, tip) = view_segment(view);
-        let pane = pane_id.to_owned();
-        header_button(pane_id, action, label, tip, cx)
+        let tip = if enabled { tip } else { AGENT_DOWN_TIP };
+        let segment = header_button(pane_id, action, label, tip, cx)
             .w_auto()
             .px(px(8.0))
             .when(view == shown, |segment| {
                 segment.bg(gpui::rgb(t.chip)).text_color(gpui::rgb(t.text))
-            })
+            });
+        if !enabled {
+            return segment
+                .opacity(DISABLED_OPACITY)
+                .cursor_default()
+                .into_any_element();
+        }
+        let pane = pane_id.to_owned();
+        segment
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 if this.pane_view(&pane) != view {
                     this.set_pane_view(&pane, view, window, cx);

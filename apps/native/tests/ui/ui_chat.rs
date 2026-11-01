@@ -20,6 +20,7 @@ use protocol::{
     ClientMessage, ComposerState, DaemonMessage, GridNode, SplitDirection, ToolOutcome, WorkShell,
     WorkSubagent,
 };
+use rustling_tulip_native::chat::PaneView;
 use rustling_tulip_native::ui_theme::UiTheme;
 use rustling_tulip_native::{OpenOutcome, PopoutKey};
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
@@ -2041,4 +2042,260 @@ fn a_command_cut_by_the_input_cap_falls_back_to_its_summary(cx: &mut TestAppCont
         !painted(&mut h, &line(3)),
         "nothing past the summary is drawn"
     );
+}
+
+/// What a disabled Chat or Summary control says while `s1`'s agent is down.
+const AGENT_DOWN: &str = "The agent isn't running";
+
+/// The daemon's snapshot of `s1` with `program` up in its pane: the shell's
+/// `pwsh` once its hosted agent ended, `claude` once it started again.
+fn running(h: &mut Harness<'_>, program: &str) {
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").program_name(program).build(),
+        request_id: None,
+    });
+}
+
+/// Why `p1`'s header cannot switch to `view` now; `None` when it can.
+fn header_tip(h: &mut Harness<'_>, view: PaneView) -> Option<&'static str> {
+    h.root(|root, _| root.pane_view_disabled_tip("p1", view))
+}
+
+fn summary_loads(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::LoadSummary { session_id, .. } if session_id == "s1"))
+        .count()
+}
+
+#[gpui::test]
+fn a_pane_on_its_chat_falls_back_to_the_terminal_when_the_hosted_agent_exits(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    h.sent();
+    running(&mut h, "pwsh");
+    assert_eq!(
+        h.root(|root, _| root.pane_view("p1")),
+        PaneView::Terminal,
+        "the pane shows its terminal"
+    );
+    assert_eq!(header_tip(&mut h, PaneView::Chat), Some(AGENT_DOWN));
+    assert_eq!(header_tip(&mut h, PaneView::Summary), Some(AGENT_DOWN));
+    assert_eq!(header_tip(&mut h, PaneView::Terminal), None);
+    h.click_on(TO_CHAT);
+    assert_eq!(
+        load_request(&h.sent()),
+        None,
+        "the disabled Chat segment asks for nothing"
+    );
+    assert!(!shows_chat(&mut h), "and switches nothing");
+}
+
+#[gpui::test]
+fn the_chat_unloads_when_the_agent_exits(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    h.sent();
+    running(&mut h, "pwsh");
+    let sent = h.sent();
+    assert_eq!(unloads(&sent), 1, "the chat unloads: {sent:?}");
+    assert_eq!(
+        h.root(|root, _| root.chat_rows("s1")),
+        Vec::new(),
+        "its rows are gone"
+    );
+}
+
+#[gpui::test]
+fn the_chat_comes_back_when_the_agent_starts_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    running(&mut h, "pwsh");
+    h.sent();
+    running(&mut h, "claude");
+    assert!(shows_chat(&mut h), "the pane is back on its chat");
+    assert!(
+        load_request(&h.sent()).is_some(),
+        "and asks for the chat again"
+    );
+    assert_eq!(header_tip(&mut h, PaneView::Chat), None);
+    assert_eq!(header_tip(&mut h, PaneView::Summary), None);
+}
+
+#[gpui::test]
+fn a_reconnect_onto_a_shell_without_its_agent_shows_the_terminal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    h.send_welcome(support::PROTOCOL);
+    h.load(&Fixture::single(session("s1").program_name("pwsh").build()));
+    let sent = h.sent();
+    assert_eq!(load_request(&sent), None, "no chat is asked for: {sent:?}");
+    assert!(!shows_chat(&mut h), "the pane shows its terminal");
+    assert_eq!(header_tip(&mut h, PaneView::Chat), Some(AGENT_DOWN));
+}
+
+#[gpui::test]
+fn the_view_key_does_nothing_while_the_agent_is_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    running(&mut h, "pwsh");
+    h.sent();
+    h.keys("ctrl-shift-m");
+    h.keys("ctrl-shift-u");
+    let sent = h.sent();
+    assert_eq!(load_request(&sent), None, "no chat is asked for: {sent:?}");
+    assert_eq!(summary_loads(&sent), 0, "nor a summary: {sent:?}");
+    running(&mut h, "claude");
+    assert_eq!(
+        h.root(|root, _| root.pane_view("p1")),
+        PaneView::Terminal,
+        "the keys chose no view to come back to"
+    );
+}
+
+#[gpui::test]
+fn the_remembered_view_is_kept_while_the_agent_is_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    h.click_on(TO_CHAT);
+    running(&mut h, "pwsh");
+    assert!(!shows_chat(&mut h));
+    assert_eq!(
+        saved_views(&dir),
+        serde_json::json!({ "local": { "s1": "chat" } }),
+        "the session's chosen view stays saved"
+    );
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &split_with("s1"))],
+    });
+    running(&mut h, "claude");
+    assert!(shows_chat(&mut h), "p1 returns to its chat");
+    assert!(
+        h.root(|root, _| root.pane_shows_chat("p2")),
+        "a pane opened while the agent was down opens on the chat too"
+    );
+}
+
+/// Whether `p1`'s terminal has the main window's keyboard.
+fn terminal_focused(h: &mut Harness<'_>) -> bool {
+    let root = h.root.clone();
+    h.cx.update(|window, cx| root.read(cx).pane_terminal_focused("p1", window, cx))
+}
+
+/// `s1` of `r1` alone in `p1`, attached, its hosted agent down and its
+/// chat the view last chosen for it, so `p1` shows its terminal.
+fn down_on_a_remembered_chat<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "session_views": { "local": { "s1": "chat" } } }"#,
+    )
+    .expect("seed native-ui.json");
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").program_name("pwsh").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    assert!(!shows_chat(&mut h), "p1 starts on its terminal");
+    h
+}
+
+#[gpui::test]
+fn the_terminal_takes_the_keyboard_when_the_agent_exits(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(Some(&id), vec![user("u1")]));
+    assert!(
+        !terminal_focused(&mut h),
+        "the chat pane's terminal has no keys"
+    );
+    running(&mut h, "pwsh");
+    assert!(
+        terminal_focused(&mut h),
+        "the focused pane's terminal takes them"
+    );
+}
+
+#[gpui::test]
+fn the_terminal_takes_a_tab_pop_outs_keyboard_when_the_agent_exits(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached_in_a_repo(cx, &dir);
+    let key = PopoutKey::Tab {
+        tab_id: "t1".to_owned(),
+    };
+    let outcome = h.root_update(move |root, window, cx| root.open_popout(key, window, cx));
+    assert_eq!(outcome, OpenOutcome::Opened);
+    h.root_update(|root, window, cx| root.toggle_pane_view("p1", window, cx));
+    assert!(!focused_in_popout(&mut h));
+    running(&mut h, "pwsh");
+    assert!(
+        focused_in_popout(&mut h),
+        "the popped tab's focused pane's terminal takes the pop-out's keyboard"
+    );
+}
+
+#[gpui::test]
+fn the_terminal_lets_go_of_the_keyboard_when_the_agent_starts_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = down_on_a_remembered_chat(cx, &dir);
+    h.click_on("leaf-s1");
+    assert!(terminal_focused(&mut h), "the terminal has the keys");
+    running(&mut h, "claude");
+    assert!(shows_chat(&mut h), "p1 goes back to its chat");
+    assert!(
+        !terminal_focused(&mut h),
+        "the hidden terminal lets go of the keys"
+    );
+}
+
+#[gpui::test]
+fn the_terminal_lets_go_of_the_pop_outs_keyboard_when_the_agent_starts_again(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = down_on_a_remembered_chat(cx, &dir);
+    pop_out_p1(&mut h);
+    assert!(
+        focused_in_popout(&mut h),
+        "the popped terminal has the keys"
+    );
+    running(&mut h, "claude");
+    assert!(shows_chat(&mut h), "p1 goes back to its chat");
+    assert!(
+        !focused_in_popout(&mut h),
+        "the hidden terminal lets go of the pop-out's keyboard"
+    );
+}
+
+#[gpui::test]
+fn the_pane_menu_disables_chat_and_summary_while_the_agent_is_down(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir);
+    running(&mut h, "pwsh");
+    h.sent();
+    h.right_click_on("pane-header-p1");
+    assert_eq!(
+        h.root(|root, _| root.pane_view_menu_labels()),
+        ["Show chat", "Show summary"],
+        "both rows are drawn"
+    );
+    for selector in [MENU_ROW, "session-menu-pane-view-summary"] {
+        assert_eq!(
+            h.root(|root, _| root.pane_view_menu_disabled_tip(selector)),
+            Some(AGENT_DOWN),
+            "{selector} is disabled"
+        );
+    }
+    h.click_on(MENU_ROW);
+    let sent = h.sent();
+    assert_eq!(
+        load_request(&sent),
+        None,
+        "the row asks for nothing: {sent:?}"
+    );
+    assert!(!shows_chat(&mut h));
 }

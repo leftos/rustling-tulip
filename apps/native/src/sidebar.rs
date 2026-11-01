@@ -3216,7 +3216,8 @@ pub fn runtime_label(s: &SessionSnapshot, agents: &[AgentDescriptor]) -> Option<
 /// The agent driving `s`, when it is the program up in the pane: the session
 /// names one, its descriptor is at hand, and the runtime tag showing
 /// (`runtime`) is the descriptor's own tag — not the shell's label that sits
-/// on screen before a hosted agent starts and after it ends.
+/// on screen after a hosted agent ends. A spawn names the agent's tag from
+/// the start, so an agent still being typed in counts as up.
 #[must_use]
 pub(crate) fn agent_up<'a>(
     s: &SessionSnapshot,

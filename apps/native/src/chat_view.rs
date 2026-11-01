@@ -20,10 +20,11 @@ use gpui::{
 };
 use protocol::error_codes::UNSUPPORTED_MESSAGE;
 use protocol::{
-    ChatAnswerKind, ChatEntry, ChatPrompt, ChatScreen, ClientMessage, ComposerState, DaemonMessage,
-    SessionMode, SessionSnapshot, ToolOutcome,
+    AgentDescriptor, ChatAnswerKind, ChatEntry, ChatPrompt, ChatScreen, ClientMessage,
+    ComposerState, DaemonMessage, SessionMode, SessionSnapshot, ToolOutcome,
 };
 
+use crate::agent_options::descriptor_for;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
     self, ChatLoads, ChatLog, ComposerNote, PaneView, PaneViews, PromptStack, RunningWork,
@@ -37,7 +38,7 @@ use crate::chat_cards::{
 use crate::fonts::{self, DEFAULT_FAMILY, ui_px_at};
 use crate::scrollbar::Scrollbar;
 use crate::shell_lines;
-use crate::sidebar::session_view_key;
+use crate::sidebar::{agent_up, runtime_label, session_view_key};
 use crate::stretchtext;
 use crate::summary::{SummaryLog, wanted_loads};
 use crate::target::HostKey;
@@ -101,6 +102,21 @@ const PILL_PAD_Y: f32 = 2.0;
 /// plain shell or a headless run.
 pub(crate) fn offers_chat(session: &SessionSnapshot) -> bool {
     session.mode == SessionMode::Interactive && session.agent.is_some()
+}
+
+/// The tooltip of a Chat or Summary control drawn disabled while its
+/// session's agent is not running.
+pub(crate) const AGENT_DOWN_TIP: &str = "The agent isn't running";
+
+/// Whether `session` can show its chat and summary now: it offers a chat
+/// and its agent is up in the pane (see [`agent_up`]), or its host's agents
+/// (`agents`) do not name its agent yet, so nothing says it is down.
+pub(crate) fn chat_available(session: &SessionSnapshot, agents: &[AgentDescriptor]) -> bool {
+    let Some(agent) = session.agent.as_ref().filter(|_| offers_chat(session)) else {
+        return false;
+    };
+    descriptor_for(agents, agent).is_none()
+        || agent_up(session, runtime_label(session, agents).as_deref(), agents).is_some()
 }
 
 /// One session's loaded chat: its rows, its prompt cards, the `LoadChat`
@@ -511,12 +527,11 @@ struct ToolRow<'a> {
 
 impl RootView {
     /// What pane `pane_id`, showing `session_id`, draws: the view it was
-    /// switched to while the session offers a chat, else its terminal.
+    /// switched to while the session can show its chat, else its terminal.
+    /// The view it was switched to is kept, so the pane goes back to it when
+    /// the session's agent starts again.
     pub(crate) fn view_shown(&self, pane_id: &str, session_id: Option<&str>) -> PaneView {
-        let offers = session_id
-            .and_then(|id| self.sidebar.session(id))
-            .is_some_and(offers_chat);
-        if offers {
+        if session_id.is_some_and(|id| self.session_chat_available(id)) {
             self.chat.views.get(pane_id)
         } else {
             PaneView::Terminal
@@ -656,7 +671,7 @@ impl RootView {
     }
 
     /// Ctrl+Shift+M or Ctrl+Shift+U (`key`) on pane `pane_id`, when its
-    /// session offers a chat.
+    /// session can show its chat now.
     fn press_view_key(
         &mut self,
         pane_id: &str,
@@ -664,14 +679,15 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pane_offers_chat(pane_id) {
+        if self.pane_chat_available(pane_id) {
             let next = self.chat.views.get(pane_id).after_key(key);
             self.set_pane_view(pane_id, next, window, cx);
         }
     }
 
     /// Ctrl+Shift+M or Ctrl+Shift+U in the main window: switches the
-    /// active tab's focused pane, when its session offers a chat.
+    /// active tab's focused pane, when its session can show its chat now
+    /// (it offers one and its agent is running).
     pub(crate) fn focused_pane_view_key(
         &mut self,
         key: ViewKey,
@@ -684,8 +700,8 @@ impl RootView {
     }
 
     /// Ctrl+Shift+M or Ctrl+Shift+U in pop-out window `here`: switches the
-    /// pane it draws (a popped tab's focused pane) when its session offers a
-    /// chat.
+    /// pane it draws (a popped tab's focused pane) when its session can show
+    /// its chat now (it offers one and its agent is running).
     pub(crate) fn window_pane_view_key(
         &mut self,
         here: WindowId,
@@ -704,6 +720,61 @@ impl RootView {
             || session_view_key(&HostKey::Local),
             |slot| session_view_key(slot.host()),
         )
+    }
+
+    /// Whether session `session_id` can show its chat and summary now, read
+    /// against its own host's agents (see [`chat_available`]).
+    pub(crate) fn session_chat_available(&self, session_id: &str) -> bool {
+        self.sidebar
+            .session(session_id)
+            .is_some_and(|session| chat_available(session, self.sidebar.session_agents(session_id)))
+    }
+
+    /// Whether the session pane `pane_id` shows can show its chat and
+    /// summary now.
+    fn pane_chat_available(&self, pane_id: &str) -> bool {
+        self.panes
+            .get(pane_id)
+            .and_then(|slot| slot.session())
+            .is_some_and(|id| self.session_chat_available(id))
+    }
+
+    /// Why pane `pane_id` cannot switch to `view` now: Chat and Summary
+    /// while its session's agent is not running. `None` when it can.
+    #[must_use]
+    pub fn pane_view_disabled_tip(&self, pane_id: &str, view: PaneView) -> Option<&'static str> {
+        (view.hides_terminal() && !self.pane_chat_available(pane_id)).then_some(AGENT_DOWN_TIP)
+    }
+
+    /// A session snapshot or list came in: a pane whose session's agent
+    /// stopped shows its terminal, which takes the keyboard when that pane
+    /// held it, and one whose agent started again shows the view it was
+    /// switched to, its terminal letting go of the keyboard, as a switch by
+    /// hand does. The chats and summaries load or unload to match.
+    pub(crate) fn follow_agent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The last sync left one scroll for each pane that hid its terminal.
+        let hid: BTreeSet<String> = self.chat.scrolls.keys().cloned().collect();
+        self.sync_chat_loads(cx);
+        self.arm_work_strip_repaint(cx);
+        self.update_pane_roles(cx);
+        let hides: BTreeSet<String> = self.chat.scrolls.keys().cloned().collect();
+        for pane_id in hides.difference(&hid) {
+            self.release_pane_keyboard(pane_id, window, cx);
+        }
+        for pane_id in hid.difference(&hides) {
+            if self.pane_holds_focus(pane_id) {
+                self.focus_pane_where_drawn(pane_id, window, cx);
+            }
+        }
+    }
+
+    /// Whether pane `pane_id` is the one its window's keys go to: a popped
+    /// pane's window's pane, else the main window's focused pane.
+    fn pane_holds_focus(&self, pane_id: &str) -> bool {
+        match self.slot_window(pane_id) {
+            Some(here) => self.window_pane(here).as_deref() == Some(pane_id),
+            None => self.focused_pane().as_deref() == Some(pane_id),
+        }
     }
 
     /// Whether the session pane `pane_id` shows offers its chat, which is

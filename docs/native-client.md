@@ -599,6 +599,8 @@ A pane showing an interactive agent session that offers a chat has three views: 
 
 - **Switching**: the pane header starts with a Terminal | Chat | Summary control (`pane-view-<view>-<pane>`, tips "Show this session's terminal", "Show this session's chat", "Show this session's summary") with the shown view marked, and the header's right-click menu has the other two as "Show terminal", "Show chat" and "Show summary".
 
+  While the session's agent is not running (`sidebar::agent_up`: its `program_name` is not the agent descriptor's tag, as after the agent typed into a shell exits), Chat and Summary are dimmed in the header and the menu with the tip "The agent isn't running", their keys do nothing, a pane on either shows its terminal and its chat unloads; the remembered view is kept, so the pane returns to Chat or Summary once the agent starts again (`chat_view.rs` `chat_available`, `RootView::follow_agent_runs` on every session update). Until the host's agent descriptors arrive, the chat is offered as before.
+
   `Ctrl+Shift+M` switches the focused pane between terminal and chat and leaves the summary for the terminal; `Ctrl+Shift+U` opens the summary and leaves it for the terminal. In a pop-out the keys act on the pane that window draws. Both keys are always taken and never reach the terminal. A pop-out's toolbar has no control, and a pop-out draws the pane's view.
 - **Remembered view**: each switch becomes the session's remembered view in `native-ui.json` (`session_views`, per host, `"chat"` or `"summary"`; a terminal is not written). A new pane on that session, a session pop-out included, opens in it, and a new session opens in Terminal.
 

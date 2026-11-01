@@ -4664,6 +4664,7 @@ impl RootView {
         }
         self.place_duplicate(request_id, reply, window, cx);
         self.place_spawn(request_id, reply, window, cx);
+        self.follow_agent_runs(window, cx);
         // A shell spawned after the session list, or moved to a new folder by
         // its own cwd report, reveals a folder only its snapshot names.
         self.scan_unseen_cwd_paths();
@@ -4700,6 +4701,7 @@ impl RootView {
         self.attach_waiting_panes(cx);
         self.apply_pane_fonts(false, cx);
         self.try_wanted_session(window, cx);
+        self.follow_agent_runs(window, cx);
         // The prune first, so a restore never opens a pane its forget
         // closes again.
         if *host != HostKey::Local {
