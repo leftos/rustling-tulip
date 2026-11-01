@@ -834,6 +834,7 @@ impl RootView {
                 link,
                 base_dirs,
                 session,
+                prefer_viewer,
             } => {
                 let Some(host) = host else {
                     tracing::debug!(%slot_id, "a gone terminal's link click; not opened");
@@ -842,6 +843,7 @@ impl RootView {
                 let source = LinkSource {
                     host: &host,
                     session: session.as_deref(),
+                    prefer_viewer: *prefer_viewer,
                 };
                 self.open_link(link, base_dirs.clone(), &source, window, cx);
             }

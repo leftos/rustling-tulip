@@ -1,6 +1,7 @@
-//! Terminal link specs: Ctrl+hover underlines the link under the mouse, and
-//! Ctrl+click opens it — a URL in the browser, a path with a line in VS
-//! Code, a plain path in its default app — through a recording opener.
+//! Terminal link specs: Ctrl+hover underlines the link under the mouse and
+//! names its gestures, and Ctrl+click opens it — a URL in the browser, a
+//! path with a line in VS Code, a plain path in its default app — through a
+//! recording opener; Ctrl+Shift+click views a text path in the viewer.
 
 #![expect(
     clippy::expect_used,
@@ -20,14 +21,8 @@ use support::{Fixture, Harness, Opened, TestDir, session};
 const URL: &str = "https://example.com/docs";
 
 /// `s` alone in pane `p1`, its scrollback answered, the pane focused and
-/// everything sent so far drained. Text files open externally, as these
-/// specs pin the external route; `ui_viewer` covers the viewer's.
+/// everything sent so far drained.
 fn attached<'a>(cx: &'a mut TestAppContext, dir: &TestDir, s: SessionSnapshot) -> Harness<'a> {
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        json!({ "general": { "open_text_externally": true } }).to_string(),
-    )
-    .expect("seed native-ui.json");
     let id = s.id.clone();
     let mut h = Harness::with(cx, dir, &Fixture::single(s));
     h.answer_scrollback(&id, b"");
@@ -56,6 +51,34 @@ fn write_file(root: &Path, rel: &str) -> PathBuf {
 fn ctrl() -> Modifiers {
     Modifiers::secondary_key()
 }
+
+fn ctrl_shift() -> Modifiers {
+    Modifiers {
+        shift: true,
+        ..Modifiers::secondary_key()
+    }
+}
+
+/// The paths of the `OpenViewerTab`s sent since the last look.
+fn viewer_opens(h: &mut Harness<'_>) -> Vec<PathBuf> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenViewerTab { path, .. } => Some(PathBuf::from(path)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether an element tagged `selector` was painted.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.cx.run_until_parked();
+    let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    h.cx.debug_bounds(selector).is_some()
+}
+
+const BOTH_GESTURES: &str = "pane-link-tip-p1=Ctrl+click to open · Ctrl+Shift+click to view";
+const OPEN_ONLY: &str = "pane-link-tip-p1=Ctrl+click to open";
 
 #[gpui::test]
 fn plain_click_on_a_url_opens_nothing(cx: &mut TestAppContext) {
@@ -117,7 +140,7 @@ fn ctrl_click_on_a_path_with_line_opens_vscode_at_the_line(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn ctrl_click_on_a_plain_path_opens_the_default_app(cx: &mut TestAppContext) {
+fn ctrl_click_on_a_text_path_opens_the_default_app(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let file = write_file(dir.path(), "docs/notes.md");
     let mut h = attached(cx, &dir, shell_in(dir.path()));
@@ -125,6 +148,57 @@ fn ctrl_click_on_a_plain_path_opens_the_default_app(cx: &mut TestAppContext) {
     let on = h.cell_center("p1", 9, 0);
     h.click(on, ctrl());
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+    assert_eq!(viewer_opens(&mut h), Vec::<PathBuf>::new(), "no viewer tab");
+}
+
+#[gpui::test]
+fn ctrl_shift_click_on_a_text_path_opens_the_viewer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "docs/notes.md");
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", b"wrote docs/notes.md");
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, ctrl_shift());
+    assert_eq!(h.opened(), [], "no default app");
+    assert_eq!(viewer_opens(&mut h), [file]);
+}
+
+#[gpui::test]
+fn ctrl_shift_click_on_a_binary_opens_the_default_app(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let file = write_file(dir.path(), "out/blob.dat");
+    std::fs::write(&file, b"PK\0\x03binary").expect("make the file binary");
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", b"wrote out/blob.dat");
+    let on = h.cell_center("p1", 9, 0);
+    h.click(on, ctrl_shift());
+    assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
+    assert_eq!(
+        viewer_opens(&mut h),
+        Vec::<PathBuf>::new(),
+        "the viewer can't show it"
+    );
+}
+
+#[gpui::test]
+fn the_link_tooltip_names_both_gestures(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "docs/notes.md");
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    h.pty("s1", format!("wrote docs/notes.md\r\nsee {URL}").as_bytes());
+    let path = h.cell_center("p1", 9, 0);
+    h.hover(path, Modifiers::none());
+    assert!(!drawn(&mut h, BOTH_GESTURES), "no tip without Ctrl");
+    h.hover(path, ctrl());
+    assert!(drawn(&mut h, BOTH_GESTURES), "a path names both gestures");
+
+    let url = h.cell_center("p1", 10, 1);
+    h.hover(url, ctrl());
+    assert!(drawn(&mut h, OPEN_ONLY), "a URL only opens");
+    assert!(!drawn(&mut h, BOTH_GESTURES), "a URL has no view");
+
+    h.set_modifiers(Modifiers::none());
+    assert!(!drawn(&mut h, OPEN_ONLY), "releasing Ctrl hides the tip");
 }
 
 #[gpui::test]

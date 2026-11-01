@@ -306,7 +306,6 @@ pub(crate) enum SettingsControl {
     LeafDensity(LeafDensity),
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
-    OpenTextExternally,
     CopyOnSelect,
     CheckUpdates,
     CheckNow,
@@ -379,7 +378,6 @@ impl SettingsControl {
             Self::RepoSort(RepoSort::Manual) => "settings-repo-sort-manual",
             Self::RepoSort(RepoSort::Active) => "settings-repo-sort-active",
             Self::RepoSort(RepoSort::NeedsYou) => "settings-repo-sort-needs-you",
-            Self::OpenTextExternally => "settings-general-open-text-externally",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
             Self::CheckUpdates => "settings-general-check-updates",
             Self::CheckNow => "settings-general-check-now",
@@ -2018,7 +2016,6 @@ impl RootView {
             SettingsControl::LeafDensity(density) => self.set_leaf_density(density, cx),
             SettingsControl::SessionsUnderRepos(mode) => self.set_sessions_under_repos(mode, cx),
             SettingsControl::RepoSort(sort) => self.set_repo_sort(sort, cx),
-            SettingsControl::OpenTextExternally => self.toggle_open_text_externally(cx),
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
             SettingsControl::CheckUpdates => self.toggle_check_updates(cx),
             SettingsControl::CheckNow => self.check_for_updates_now(cx),
@@ -3044,13 +3041,6 @@ impl RootView {
         cx.notify();
     }
 
-    fn toggle_open_text_externally(&mut self, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().general.open_text_externally;
-        self.sidebar.set_open_text_externally(on);
-        self.save_ui();
-        cx.notify();
-    }
-
     fn set_count_mode(&mut self, mode: CountMode, window: &mut Window, cx: &mut Context<Self>) {
         if self.sidebar.set_count_mode(mode) {
             self.after_title_setting(window, cx);
@@ -3981,26 +3971,9 @@ impl RootView {
              (when there's a selection) or Ctrl+Shift+C.",
             &t,
         ));
-        let open_text = toggle(
-            SettingsControl::OpenTextExternally,
-            ToggleState {
-                checked: self.sidebar.ui_state().general.open_text_externally,
-                enabled: true,
-            },
-            "Open text files in the external app",
-            focused,
-            cx,
-        );
-        let files = section(
-            crate::fonts::ui_text_size(cx),
-            crate::fonts::ui_weight_shift(cx),
-            "Files",
-        )
-        .child(open_text);
         vec![
             power.into_any_element(),
             sidebar,
-            files.into_any_element(),
             terminal.into_any_element(),
             self.updates_section(focused, cx).into_any_element(),
         ]
@@ -4324,7 +4297,6 @@ fn general_controls(keep_awake: bool) -> Vec<SettingsControl> {
         .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
         .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
         .chain([
-            SettingsControl::OpenTextExternally,
             SettingsControl::CopyOnSelect,
             SettingsControl::CheckUpdates,
             SettingsControl::CheckNow,

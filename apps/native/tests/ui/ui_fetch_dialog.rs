@@ -25,8 +25,7 @@ use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent, RootView};
 use support::{
-    Fixture, Harness, HostHandle, Opened, TestDir, remote_in_pane, saved_remote, saved_remote_over,
-    session,
+    Fixture, Harness, HostHandle, TestDir, remote_in_pane, saved_remote, saved_remote_over, session,
 };
 
 const HOST: &str = "box.tail1234.ts.net";
@@ -61,10 +60,7 @@ fn on_remote_saving<'a>(
         .iter()
         .map(|name| serde_json::json!({ "name": name, "port": 8787 }))
         .collect();
-    let ui = serde_json::json!({
-        "general": { "open_text_externally": true },
-        "saved_hosts": saved,
-    });
+    let ui = serde_json::json!({ "saved_hosts": saved });
     let mut h = remote_in_pane(cx, dir, &ui, &["r1", "r2"], s);
     let root = dir.path().join("remote-files");
     let set = root.clone();
@@ -344,14 +340,19 @@ fn enter_sends_fetch_file_for_the_scope_and_path_with_the_line(cx: &mut TestAppC
     remote(&mut h).send(chunk(id, 0, b"fn\n"));
     remote(&mut h).send(DaemonMessage::FileFetchDone { id: id.clone() });
     let saved = root.join(HOST).join("r1").join("src").join("main.rs");
-    assert_eq!(
-        h.opened(),
-        vec![Opened::VsCode {
-            path: saved,
-            line: 42,
-            column: 1
-        }]
-    );
+    assert_eq!(h.opened(), [], "the dialog's text file goes to the viewer");
+    assert_eq!(viewer_opens(&mut h), [saved]);
+}
+
+/// The paths of the `OpenViewerTab`s sent on This PC since the last look.
+fn viewer_opens(h: &mut Harness<'_>) -> Vec<PathBuf> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenViewerTab { path, .. } => Some(PathBuf::from(path)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[gpui::test]
@@ -434,7 +435,8 @@ fn done_closes_the_dialog_and_opens_the_file(cx: &mut TestAppContext) {
     remote(&mut h).send(DaemonMessage::FileFetchDone { id: id.clone() });
 
     let saved = root.join(HOST).join("r1").join("src").join("a.rs");
-    assert_eq!(h.opened(), vec![Opened::DefaultApp(saved.clone())]);
+    assert_eq!(h.opened(), [], "a text file goes to the viewer");
+    assert_eq!(viewer_opens(&mut h), std::slice::from_ref(&saved));
     assert_eq!(fs::read(&saved).expect("the file is saved"), b"ok");
     assert!(!is_open(&mut h), "the save closes the dialog");
     no_failure_toast(&mut h);
@@ -591,6 +593,7 @@ fn already_fetching_shows_inline(cx: &mut TestAppContext) {
         line: None,
         column: None,
         open_when_done: true,
+        prefer_viewer: true,
     };
     h.root_update(move |view, _, cx| view.fetch_remote_file(request, cx))
         .expect("the link fetch starts");

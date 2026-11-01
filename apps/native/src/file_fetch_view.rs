@@ -19,7 +19,7 @@ use crate::html_media;
 use crate::links::TerminalLink;
 use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{OpenAction, OpenJob};
-use crate::open_view::{COULD_NOT_OPEN, Origin, Route, Then};
+use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, Route, Then};
 use crate::target::HostKey;
 
 /// The detail of the toast refusing a fetched file's open of a path outside
@@ -61,12 +61,14 @@ impl RootView {
 
     /// A Ctrl+click on a path link in a pane of remote host `host`: fetches
     /// the first of the link's readings under the repos and worktrees of
-    /// `session` as that host lists it, trying them one at a time.
+    /// `session` as that host lists it, trying them one at a time; the copy
+    /// opens in the viewer when `prefer_viewer` (Ctrl+Shift+click).
     pub(crate) fn fetch_path_link(
         &mut self,
         link: &TerminalLink,
         host: &HostKey,
         session: Option<&str>,
+        prefer_viewer: bool,
         cx: &mut Context<Self>,
     ) {
         let mut readings = session
@@ -93,6 +95,9 @@ impl RootView {
                 cx,
             );
             return;
+        }
+        for reading in &mut readings {
+            reading.prefer_viewer = prefer_viewer;
         }
         let first = readings.remove(0);
         let group = self.fetches.new_group(readings);
@@ -774,8 +779,9 @@ impl RootView {
         }
     }
 
-    /// Opens the fetched copy at `path` the way `request` asked: a text
-    /// file in the viewer at its line, anything else by the `:line` rule.
+    /// Opens the fetched copy at `path` the way `request` asked: when it
+    /// prefers the viewer, a text file in the viewer at its line; anything
+    /// else by the `:line` rule.
     fn open_fetched(
         &mut self,
         path: PathBuf,
@@ -791,7 +797,11 @@ impl RootView {
             },
             None => OpenAction::DefaultApp(path),
         };
-        self.open_text_or_external(action, Origin::Fetched, window, cx);
+        let opening = Opening {
+            origin: Origin::Fetched,
+            prefer_viewer: request.prefer_viewer,
+        };
+        self.open_text_or_external(action, opening, window, cx);
     }
 
     /// Opens `job`, which a fetch started, without the remote host's refusal

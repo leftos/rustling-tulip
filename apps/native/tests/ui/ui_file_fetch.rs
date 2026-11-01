@@ -42,7 +42,9 @@ fn remote_target() -> Target {
     Target::tailnet(HOST, None)
 }
 
-/// A request for `rel` in the repo `r1`'s worktree.
+/// A request for `rel` in the repo `r1`'s worktree that opens externally,
+/// as a link's Ctrl+click asks, since these specs pin the external route;
+/// `ui_viewer` covers the viewer's.
 fn request(rel: &str, line: Option<u32>, column: Option<u32>) -> FetchRequest {
     FetchRequest {
         host: HostKey::of(&remote_target()),
@@ -53,6 +55,7 @@ fn request(rel: &str, line: Option<u32>, column: Option<u32>) -> FetchRequest {
         line,
         column,
         open_when_done: true,
+        prefer_viewer: false,
     }
 }
 
@@ -86,19 +89,12 @@ fn names_in(dir: &Path) -> Vec<String> {
 
 /// The window on This PC with `target` held beside it, that host's daemon
 /// listing the repo `r1` and a session on its worktree; the downloads go
-/// under `dir`, and the download root is returned. Text files open
-/// externally, as these specs pin the external route; `ui_viewer` covers
-/// the viewer's.
+/// under `dir`, and the download root is returned.
 fn on_host<'a>(
     cx: &'a mut TestAppContext,
     dir: &TestDir,
     target: &Target,
 ) -> (Harness<'a>, PathBuf) {
-    fs::write(
-        dir.path().join("native-ui.json"),
-        serde_json::json!({ "general": { "open_text_externally": true } }).to_string(),
-    )
-    .expect("seed native-ui.json");
     let mut h = Harness::with(cx, dir, &Fixture::default());
     let mut host = h.host(target);
     host.connect();
@@ -449,14 +445,13 @@ fn titled(h: &mut Harness<'_>, title: &str) -> usize {
 
 /// `s` in pane `p2` beside This PC's `a1`, on the saved host [`HOST`]
 /// listing the repo `r1`, `p2` focused, its downloads under `dir`; returns
-/// the download root. Text files open externally, as these specs pin the
-/// external route.
+/// the download root.
 fn linked_with<'a>(
     cx: &'a mut TestAppContext,
     dir: &TestDir,
     s: SessionSnapshot,
 ) -> (Harness<'a>, PathBuf) {
-    let ui = serde_json::json!({ "general": { "open_text_externally": true } });
+    let ui = serde_json::json!({});
     let mut h = remote_in_pane(cx, dir, &ui, &["r1"], s);
     let root = dir.path().join("remote-files");
     let set = root.clone();

@@ -18,14 +18,15 @@ use gpui::{
     HitboxBehavior, Hsla, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
     MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent,
     SharedString, StrikethroughStyle, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
-    Window, WindowId, canvas, div, fill, font, outline, point, prelude::*, px, size,
+    Window, WindowId, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
+    size,
 };
 use protocol::{AgentDescriptor, ClientMessage, SessionMode, SessionSnapshot};
 
 use crate::Clock;
 use crate::fonts::{self, FontSettings};
 use crate::hosts::HostSender;
-use crate::links::TerminalLink;
+use crate::links::{LinkKind, TerminalLink};
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open;
@@ -287,10 +288,13 @@ pub enum PaneEvent {
     Copied { text: String },
     /// Ctrl+click picked `link`; a path in it resolves against
     /// `base_dirs`, the folders of `session`, the pane's session.
+    /// `prefer_viewer`: Shift was held too, so a text file opens in the
+    /// viewer rather than the external app.
     OpenLink {
         link: TerminalLink,
         base_dirs: Vec<String>,
         session: Option<String>,
+        prefer_viewer: bool,
     },
     /// A left press on the gutter dot at `index` (top first): the root opens
     /// that command's menu at `at`, in window coordinates.
@@ -1343,9 +1347,10 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        // Ctrl+click on a link opens it, ahead of a selection or a mouse
-        // report; its release then finds no gesture to end. Only the first
-        // press of a multi-click opens it; the later ones do nothing.
+        // Ctrl+click on a link opens it (Ctrl+Shift+click in the viewer),
+        // ahead of a selection or a mouse report; its release then finds no
+        // gesture to end. Only the first press of a multi-click opens it;
+        // the later ones do nothing.
         if event.button == MouseButton::Left
             && event.modifiers.secondary()
             && let Some(link) = self
@@ -1357,6 +1362,7 @@ impl TerminalPane {
                     link,
                     base_dirs: self.base_dirs.clone(),
                     session: self.session_id().map(str::to_owned),
+                    prefer_viewer: event.modifiers.shift,
                 });
             }
             cx.notify();
@@ -1862,14 +1868,58 @@ impl Render for TerminalPane {
                 .on_mouse_up(button, cx.listener(Self::on_mouse_up))
                 .on_mouse_up_out(button, cx.listener(Self::on_mouse_up));
         }
-        match gutter {
+        let tip = self.link_tip(cx);
+        let pane = match gutter {
             Some(gutter) => pane
                 .flex()
                 .flex_row()
                 .child(gutter)
                 .child(grid.flex_1().h_full()),
             None => pane.child(grid.size_full()),
-        }
+        };
+        pane.children(tip)
+    }
+}
+
+/// What the tip over a hovered link of `kind` says: a path opens or views,
+/// a URL only opens.
+fn link_tip_text(kind: LinkKind) -> &'static str {
+    match kind {
+        LinkKind::Path => "Ctrl+click to open · Ctrl+Shift+click to view",
+        LinkKind::Url => "Ctrl+click to open",
+    }
+}
+
+impl TerminalPane {
+    /// The tip naming the gestures of the link Ctrl+hover underlines, just
+    /// below the hovered cell and kept inside the window.
+    fn link_tip(&self, cx: &App) -> Option<AnyElement> {
+        let link = self.hovered_link()?;
+        let (row, col) = self.links.cell?;
+        let (origin, cell) = self.layout?;
+        #[expect(clippy::cast_precision_loss, reason = "grid positions are small")]
+        let at = origin
+            + point(
+                px(col as f32 * cell.width),
+                px((row + 1) as f32 * cell.height),
+            );
+        let text = link_tip_text(link.kind);
+        let pane = self.pane_id.clone();
+        let t = ui_theme::theme(cx);
+        let tip = div()
+            .px(px(6.0))
+            .py(px(2.0))
+            .font_family(fonts::ui_family(cx))
+            .bg(gpui::rgb(t.popover))
+            .border_1()
+            .border_color(gpui::rgb(t.popover_edge))
+            .rounded(px(10.0))
+            .text_size(fonts::ui_px(cx, 12.0))
+            .text_color(gpui::rgb(t.text))
+            .debug_selector(move || format!("pane-link-tip-{pane}={text}"))
+            .child(text);
+        let tip = anchored().position(at).snap_to_window().child(tip);
+        Some(deferred(tip).with_priority(1).into_any_element())
     }
 }
 

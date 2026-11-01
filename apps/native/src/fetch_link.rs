@@ -130,6 +130,7 @@ pub fn readings(
                     line: candidate.line,
                     column: candidate.column,
                     open_when_done: true,
+                    prefer_viewer: true,
                 };
                 let seen = found.iter().any(|other| {
                     (&other.repo_id, &other.worktree_path, &other.rel_path)
@@ -323,6 +324,7 @@ mod tests {
             line: None,
             column: None,
             open_when_done: true,
+            prefer_viewer: true,
         }
     }
 

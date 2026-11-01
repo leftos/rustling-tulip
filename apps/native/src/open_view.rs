@@ -25,10 +25,20 @@ use crate::{RootView, file_fetch};
 pub(crate) const COULD_NOT_OPEN: &str = "Couldn't open";
 
 /// The terminal a link was Ctrl+clicked in: the host its slot sends to,
-/// and the session it shows.
+/// and the session it shows; and whether Shift was held too, asking for
+/// the viewer.
 pub(crate) struct LinkSource<'a> {
     pub(crate) host: &'a HostKey,
     pub(crate) session: Option<&'a str>,
+    pub(crate) prefer_viewer: bool,
+}
+
+/// How a file opens: by `origin`'s route, and in the viewer when
+/// `prefer_viewer` and the viewer can show it, else in the external app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Opening {
+    pub(crate) origin: Origin,
+    pub(crate) prefer_viewer: bool,
 }
 
 /// The toast of a file over the viewer's size cap, sent out instead.
@@ -41,7 +51,7 @@ const TOO_LARGE_FOR_VIEWER: &str = "Too large for the viewer, opened externally"
 fn viewer_verdict(action: &OpenAction) -> std::io::Result<Verdict> {
     let path = action_path(action);
     let probe = viewer_text::probe_file(path)?;
-    let verdict = viewer_text::decide(false, action, &probe);
+    let verdict = viewer_text::decide(action, &probe);
     if !matches!(verdict, Verdict::Viewer { .. }) {
         return Ok(verdict);
     }
@@ -108,9 +118,10 @@ impl RootView {
     }
 
     /// A pane's Ctrl+click picked `link`; a path in it resolves against
-    /// `base_dirs`, the folders of the pane's session. A path in a pane of
-    /// a remote host is fetched from its session's repos instead, never
-    /// opened on This PC, whether or not the window holds that host's
+    /// `base_dirs`, the folders of the pane's session, and opens in the
+    /// external app, or in the viewer for a Ctrl+Shift+click. A path in a
+    /// pane of a remote host is fetched from its session's repos instead,
+    /// never opened on This PC, whether or not the window holds that host's
     /// connection.
     pub(crate) fn open_link(
         &mut self,
@@ -144,22 +155,26 @@ impl RootView {
             // A host path is not on this PC; resolving it here could open
             // a local file of the same name, so it is fetched instead.
             LinkKind::Path if !opens_here => {
-                self.fetch_path_link(link, &host, session, cx);
+                self.fetch_path_link(link, &host, session, source.prefer_viewer, cx);
             }
             LinkKind::Path => {
                 let candidates = link.candidates.clone();
-                self.resolve_path(candidates, base_dirs, Origin::Link, window, cx);
+                let opening = Opening {
+                    origin: Origin::Link,
+                    prefer_viewer: source.prefer_viewer,
+                };
+                self.resolve_path(candidates, base_dirs, opening, window, cx);
             }
         }
     }
 
     /// Checks the path's readings on a background thread, then opens the
-    /// first that exists by `origin`'s route.
+    /// first that exists as `opening` says.
     pub(crate) fn resolve_path(
         &mut self,
         candidates: Vec<TerminalLinkCandidate>,
         base_dirs: Vec<String>,
-        origin: Origin,
+        opening: Opening,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -176,26 +191,27 @@ impl RootView {
             let resolution = resolve.await;
             // Fails only when the view is gone, leaving nowhere to report.
             this.update_in(cx, |root, window, cx| {
-                root.after_resolve(resolution, &first, origin, window, cx);
+                root.after_resolve(resolution, &first, opening, window, cx);
             })
             .ok();
         })
         .detach();
     }
 
-    /// Opens the file a link resolved to by `origin`'s route; a link from a
+    /// Opens the file a link resolved to as `opening` says; a link from a
     /// fetched file opens only a file in the folder for fetched files.
     fn after_resolve(
         &mut self,
         resolution: Resolution,
         first: &str,
-        origin: Origin,
+        opening: Opening,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match resolution {
             Resolution::Open(action) => {
-                if origin == Origin::Fetched && !self.is_fetched_copy(action_path(&action)) {
+                if opening.origin == Origin::Fetched && !self.is_fetched_copy(action_path(&action))
+                {
                     tracing::warn!(
                         ?action,
                         "refusing a fetched file's link outside the download folder"
@@ -208,7 +224,7 @@ impl RootView {
                     );
                     return;
                 }
-                self.open_text_or_external(action, origin, window, cx);
+                self.open_text_or_external(action, opening, window, cx);
             }
             Resolution::NotFound(err) => {
                 tracing::warn!("no file found for link {first}: {err}");
@@ -240,18 +256,19 @@ impl RootView {
         }
     }
 
-    /// Opens `action`'s file, which came from `origin`: a text file in the
-    /// viewer, checked on a background thread, anything else by today's
-    /// route. With the setting that sends text out on, nothing is checked
-    /// and every file takes today's route.
+    /// Opens `action`'s file as `opening` says: when it prefers the viewer,
+    /// a text file in the viewer, checked on a background thread, and
+    /// anything else by the external route; otherwise every file by the
+    /// external route, unchecked.
     pub(crate) fn open_text_or_external(
         &mut self,
         action: OpenAction,
-        origin: Origin,
+        opening: Opening,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar.ui_state().general.open_text_externally {
+        let origin = opening.origin;
+        if !opening.prefer_viewer {
             self.open_external(action, origin, window, cx);
             return;
         }

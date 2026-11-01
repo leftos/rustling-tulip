@@ -476,12 +476,6 @@ fn remote_html_fetch_brings_its_relative_media(
     std::fs::write(repo.join("page.html"), PAGE).expect("write the page");
     std::fs::write(repo.join("img").join("dot.png"), DOT).expect("write the image");
     commit_all(&repo, "a page with an image");
-    // Text files open externally, so the page's open is the recorded one.
-    std::fs::write(
-        home.dir().join("ui").join("native-ui.json"),
-        serde_json::json!({ "general": { "open_text_externally": true } }).to_string(),
-    )
-    .expect("seed native-ui.json");
 
     let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
     let port = serve_remote(&mut host, &host_client, &daemon);
@@ -517,6 +511,7 @@ fn remote_html_fetch_brings_its_relative_media(
         line: None,
         column: None,
         open_when_done: true,
+        prefer_viewer: false,
     };
     device
         .root_update(move |view, _, cx| view.fetch_remote_file(request, cx))

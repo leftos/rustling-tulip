@@ -763,6 +763,7 @@ fn fetch_request(target: &Target, repo_id: &str, rel: &str) -> FetchRequest {
         line: None,
         column: None,
         open_when_done: false,
+        prefer_viewer: true,
     }
 }
 

@@ -1,8 +1,8 @@
-//! Text viewer specs: a path link to a text file opens a viewer tab instead
-//! of the default app, scrolled to its `:line`; binary and large files, and
-//! every file while the setting is on, still go out; the header's buttons
-//! take the route the tab's file came by; a file fetched from a remote host
-//! opens in the viewer too.
+//! Text viewer specs: a Ctrl+Shift+click on a path link to a text file opens
+//! a viewer tab instead of the default app, scrolled to its `:line`; binary
+//! and large files, and every file a plain Ctrl+click picks, still go out;
+//! the header's buttons take the route the tab's file came by; a file
+//! fetched from a remote host opens in the viewer too.
 
 #![expect(
     clippy::expect_used,
@@ -63,18 +63,18 @@ fn numbered_lines(count: usize) -> String {
         .concat()
 }
 
-/// Seeds `native-ui.json` with the setting that sends text files out.
-fn seed_open_externally(dir: &TestDir) {
-    fs::write(
-        dir.path().join("native-ui.json"),
-        json!({ "general": { "open_text_externally": true } }).to_string(),
-    )
-    .expect("seed native-ui.json");
-}
-
 fn ctrl_click_cell(h: &mut Harness<'_>, col: usize, row: usize) {
     let on = h.cell_center("p1", col, row);
     h.click(on, Modifiers::secondary_key());
+}
+
+fn ctrl_shift_click_cell(h: &mut Harness<'_>, col: usize, row: usize) {
+    let on = h.cell_center("p1", col, row);
+    let ctrl_shift = Modifiers {
+        shift: true,
+        ..Modifiers::secondary_key()
+    };
+    h.click(on, ctrl_shift);
 }
 
 /// The `OpenViewerTab`s sent since the last look, as `(id, path)`.
@@ -162,7 +162,7 @@ fn a_plain_path_link_opens_a_viewer_tab_not_the_default_app(cx: &mut TestAppCont
     let file = write_file(dir.path(), "docs/notes.md", b"# Notes\n");
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"wrote docs/notes.md");
-    ctrl_click_cell(&mut h, 9, 0);
+    ctrl_shift_click_cell(&mut h, 9, 0);
 
     assert_eq!(h.opened(), [], "no default app");
     let id = one_open(&mut h, &file);
@@ -190,7 +190,7 @@ fn a_line_ref_opens_the_viewer_scrolled_to_the_line(cx: &mut TestAppContext) {
     let file = write_file(dir.path(), "src/main.rs", numbered_lines(300).as_bytes());
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"error at src/main.rs:250:5 here");
-    ctrl_click_cell(&mut h, 12, 0);
+    ctrl_shift_click_cell(&mut h, 12, 0);
 
     assert_eq!(h.opened(), [], "no VS Code");
     let id = one_open(&mut h, &file);
@@ -209,7 +209,7 @@ fn a_binary_file_still_goes_to_the_default_app(cx: &mut TestAppContext) {
     let file = write_file(dir.path(), "out/blob.dat", b"PK\0\x03binary");
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"wrote out/blob.dat");
-    ctrl_click_cell(&mut h, 9, 0);
+    ctrl_shift_click_cell(&mut h, 9, 0);
 
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
     assert!(opens_sent(&mut h).is_empty(), "no viewer tab");
@@ -222,7 +222,7 @@ fn a_big_file_still_goes_to_the_default_app(cx: &mut TestAppContext) {
     let file = write_file(dir.path(), "logs/big.log", &big);
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"wrote logs/big.log");
-    ctrl_click_cell(&mut h, 9, 0);
+    ctrl_shift_click_cell(&mut h, 9, 0);
 
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
     assert!(opens_sent(&mut h).is_empty(), "no viewer tab");
@@ -244,7 +244,7 @@ fn a_file_with_bad_bytes_past_the_probe_head_opens_externally(cx: &mut TestAppCo
     let file = write_file(dir.path(), "logs/odd.log", &bytes);
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"wrote logs/odd.log");
-    ctrl_click_cell(&mut h, 9, 0);
+    ctrl_shift_click_cell(&mut h, 9, 0);
 
     assert_eq!(h.opened(), [Opened::DefaultApp(file)]);
     assert!(opens_sent(&mut h).is_empty(), "no viewer tab");
@@ -256,7 +256,7 @@ fn reopening_a_loaded_viewer_tab_reads_the_file_again(cx: &mut TestAppContext) {
     let file = write_file(dir.path(), "docs/notes.txt", b"first\n");
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"wrote docs/notes.txt");
-    ctrl_click_cell(&mut h, 9, 0);
+    ctrl_shift_click_cell(&mut h, 9, 0);
     let id = one_open(&mut h, &file);
     answer_open(&mut h, &id, &file);
     assert!(drawn(&mut h, "viewer-line-v1-1"));
@@ -264,7 +264,7 @@ fn reopening_a_loaded_viewer_tab_reads_the_file_again(cx: &mut TestAppContext) {
 
     fs::write(&file, b"first\nsecond\n").expect("change the file");
     h.click_on("tab-t1");
-    ctrl_click_cell(&mut h, 9, 0);
+    ctrl_shift_click_cell(&mut h, 9, 0);
     let id = one_open(&mut h, &file);
     h.send(DaemonMessage::ViewerTabOpened {
         id,
@@ -281,9 +281,8 @@ fn reopening_a_loaded_viewer_tab_reads_the_file_again(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn with_the_setting_on_a_link_opens_as_before(cx: &mut TestAppContext) {
+fn a_ctrl_click_on_a_link_opens_it_externally(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    seed_open_externally(&dir);
     let notes = write_file(dir.path(), "docs/notes.md", b"# Notes\n");
     let main = write_file(dir.path(), "src/main.rs", b"fn main() {}\n");
     let mut h = attached(cx, &dir, shell_in(dir.path()));
@@ -325,7 +324,7 @@ fn an_executable_script_is_viewed_and_the_button_still_asks_first(cx: &mut TestA
     let file = write_file(dir.path(), "tools/run.bat", b"@echo off\r\n");
     let mut h = attached(cx, &dir, shell_in(dir.path()));
     h.pty("s1", b"run tools/run.bat");
-    ctrl_click_cell(&mut h, 8, 0);
+    ctrl_shift_click_cell(&mut h, 8, 0);
 
     assert_eq!(
         h.run_confirm(),
@@ -378,6 +377,7 @@ fn fetch(h: &mut Harness<'_>, root: &Path, rel: &str, line: Option<u32>, bytes: 
         line,
         column: None,
         open_when_done: true,
+        prefer_viewer: true,
     };
     let id = h
         .root_update(move |view, _, cx| view.fetch_remote_file(request, cx))

@@ -261,6 +261,7 @@ impl FetchForm {
             line: target.line,
             column: target.column,
             open_when_done: true,
+            prefer_viewer: true,
         };
         self.phase = Phase::Starting;
         self.error = None;

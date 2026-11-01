@@ -38,6 +38,10 @@ pub struct FetchRequest {
     pub column: Option<u32>,
     /// Whether the saved copy opens once the fetch is done.
     pub open_when_done: bool,
+    /// Whether the saved copy opens in the viewer when the viewer can show
+    /// it, rather than in the external app: a Ctrl+click on a link clears
+    /// it, and every open without that gesture sets it.
+    pub prefer_viewer: bool,
 }
 
 /// Characters Windows forbids in a file name.
@@ -905,6 +909,7 @@ impl FetchRegistry {
                 line: None,
                 column: None,
                 open_when_done: false,
+                prefer_viewer: page.prefer_viewer,
             })
             .collect()
     }
@@ -1266,6 +1271,7 @@ mod tests {
             line: None,
             column: None,
             open_when_done: false,
+            prefer_viewer: true,
         };
         let target = download_path(Path::new("root"), host, "repo", rel).expect("a valid path");
         FetchEntry::new(HostKey::Local, host.to_owned(), request, target)

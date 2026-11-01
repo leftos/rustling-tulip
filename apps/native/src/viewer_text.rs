@@ -229,13 +229,10 @@ pub(crate) enum Verdict {
     External(Option<NotText>),
 }
 
-/// Where `action` sends `probe`'s file: the external app when the setting
-/// is on or the file is not text, else the viewer at its line.
+/// Where `action` sends `probe`'s file when the viewer is asked for: the
+/// external app when the file is not text, else the viewer at its line.
 #[must_use]
-pub(crate) fn decide(open_text_externally: bool, action: &OpenAction, probe: &Probe) -> Verdict {
-    if open_text_externally {
-        return Verdict::External(None);
-    }
+pub(crate) fn decide(action: &OpenAction, probe: &Probe) -> Verdict {
     if let Err(not_text) = check(probe) {
         return Verdict::External(Some(not_text));
     }
@@ -268,29 +265,14 @@ mod tests {
     }
 
     #[test]
-    fn the_setting_on_sends_a_line_ref_to_vscode_and_a_plain_path_to_the_default_app() {
+    fn text_goes_to_the_viewer() {
         let line_ref = OpenAction::VsCode {
             path: std::path::PathBuf::from("C:/src/main.rs"),
             line: 7,
             column: Some(3),
         };
         assert_eq!(
-            decide(true, &line_ref, &text_probe()),
-            Verdict::External(None)
-        );
-        let plain = OpenAction::DefaultApp(std::path::PathBuf::from("C:/src/main.rs"));
-        assert_eq!(decide(true, &plain, &text_probe()), Verdict::External(None));
-    }
-
-    #[test]
-    fn text_goes_to_the_viewer_when_the_setting_is_off() {
-        let line_ref = OpenAction::VsCode {
-            path: std::path::PathBuf::from("C:/src/main.rs"),
-            line: 7,
-            column: Some(3),
-        };
-        assert_eq!(
-            decide(false, &line_ref, &text_probe()),
+            decide(&line_ref, &text_probe()),
             Verdict::Viewer {
                 path: std::path::PathBuf::from("C:/src/main.rs"),
                 line: Some(7),
@@ -302,7 +284,7 @@ mod tests {
     fn a_binary_probe_goes_external_with_the_reason() {
         let plain = OpenAction::DefaultApp(std::path::PathBuf::from("C:/bin/blob"));
         assert_eq!(
-            decide(false, &plain, &probe(9, b"plain\0txt")),
+            decide(&plain, &probe(9, b"plain\0txt")),
             Verdict::External(Some(NotText::Binary))
         );
     }
@@ -311,7 +293,7 @@ mod tests {
     fn a_latin1_head_is_not_decodable_and_goes_external() {
         let plain = OpenAction::DefaultApp(std::path::PathBuf::from("C:/src/cafe.txt"));
         assert_eq!(
-            decide(false, &plain, &probe(11, b"caf\xE9 latin1")),
+            decide(&plain, &probe(11, b"caf\xE9 latin1")),
             Verdict::External(Some(NotText::NotDecodable))
         );
     }
@@ -322,7 +304,7 @@ mod tests {
         assert_eq!(check(&cut), Ok(()), "an incomplete tail is a cut head");
         let plain = OpenAction::DefaultApp(std::path::PathBuf::from("C:/src/cafe.txt"));
         assert_eq!(
-            decide(false, &plain, &cut),
+            decide(&plain, &cut),
             Verdict::Viewer {
                 path: std::path::PathBuf::from("C:/src/cafe.txt"),
                 line: None,

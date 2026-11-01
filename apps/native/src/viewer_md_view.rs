@@ -14,8 +14,8 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontStyle, FontWeight, HighlightStyle, Hsla,
-    InteractiveText, ListOffset, ListState, SharedString, StrikethroughStyle, StyledText,
-    UnderlineStyle, Window, div, list, prelude::*, px,
+    InteractiveText, ListOffset, ListState, Modifiers, SharedString, StrikethroughStyle,
+    StyledText, UnderlineStyle, Window, div, list, prelude::*, px,
 };
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
@@ -24,7 +24,7 @@ use crate::links::TerminalLinkCandidate;
 use crate::md_blocks::{self, Align, Block, LinkTarget, Span};
 use crate::notices::ToastKind;
 use crate::open::OpenJob;
-use crate::open_view::{COULD_NOT_OPEN, Origin, Then};
+use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, Then};
 use crate::stretchtext::Composed;
 use crate::syntax::{self, Highlighted, LineSpans, TokenClass};
 use crate::ui_theme::{UiTheme, theme};
@@ -132,6 +132,13 @@ impl LinkRoute {
             Self::WebOnly => matches!(target, LinkTarget::Url(_) | LinkTarget::Stretchtext { .. }),
         }
     }
+}
+
+/// Whether a click on a file link with `modifiers` held views the file:
+/// Ctrl+click opens it in the external app, and a plain click or
+/// Ctrl+Shift+click views it.
+fn prefers_viewer(modifiers: Modifiers) -> bool {
+    !modifiers.secondary() || modifiers.shift
 }
 
 /// Each span `route` follows a link from: its byte range in
@@ -646,6 +653,7 @@ impl Painter {
                 tracing::debug!("a Markdown link click in a window without the root view");
                 return;
             };
+            let prefer_viewer = prefers_viewer(window.modifiers());
             root.update(cx, |root, cx| match (route, target) {
                 (_, LinkTarget::Stretchtext { key }) => {
                     if let Some((session_id, answer_id)) = &stretchtext {
@@ -654,7 +662,9 @@ impl Painter {
                         tracing::debug!("a stretchtext link outside a chat answer");
                     }
                 }
-                (LinkRoute::ViewerTab, target) => root.follow_md_link(&tab_id, target, window, cx),
+                (LinkRoute::ViewerTab, target) => {
+                    root.follow_md_link(&tab_id, target, prefer_viewer, window, cx);
+                }
                 (LinkRoute::WebOnly, LinkTarget::Url(url)) => {
                     root.dispatch_open(
                         &crate::target::HostKey::Local,
@@ -888,20 +898,21 @@ impl RootView {
             return;
         };
         let target = md_blocks::classify_link(href, &file_dir(tab.path()));
-        self.follow_md_link(tab_id, target, window, cx);
+        self.follow_md_link(tab_id, target, true, window, cx);
     }
 
     /// A link to `target` in Markdown tab `tab_id` was clicked: a URL opens
     /// in the browser; a file, resolved on this PC against the tab file's
     /// folder and without its `#fragment`, opens by the route the tab's file
     /// came by (from a fetched copy, only a file in the folder for fetched
-    /// files); a heading anchor scrolls to its heading; a refused target
-    /// says so.
+    /// files), in the viewer when `prefer_viewer` and it can show the file;
+    /// a heading anchor scrolls to its heading; a refused target says so.
     /// A tab whose file is not on this PC follows no link.
     pub(crate) fn follow_md_link(
         &mut self,
         tab_id: &str,
         target: LinkTarget,
+        prefer_viewer: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -932,7 +943,11 @@ impl RootView {
                     column: None,
                 };
                 let base_dirs = vec![folder.to_string_lossy().into_owned()];
-                self.resolve_path(vec![candidate], base_dirs, origin, window, cx);
+                let opening = Opening {
+                    origin,
+                    prefer_viewer,
+                };
+                self.resolve_path(vec![candidate], base_dirs, opening, window, cx);
             }
             LinkTarget::Anchor(slug) => self.scroll_to_md_anchor(tab_id, &slug, cx),
             LinkTarget::Stretchtext { .. } => {
@@ -1080,6 +1095,18 @@ mod tests {
             Some(Block::Paragraph(spans)) => spans.clone(),
             other => panic!("one paragraph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_ctrl_alone_sends_a_file_link_out_of_the_viewer() {
+        let ctrl = Modifiers::secondary_key();
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ..ctrl
+        };
+        assert!(prefers_viewer(Modifiers::none()), "a plain click views");
+        assert!(!prefers_viewer(ctrl), "Ctrl+click opens externally");
+        assert!(prefers_viewer(ctrl_shift), "Ctrl+Shift+click views");
     }
 
     #[test]

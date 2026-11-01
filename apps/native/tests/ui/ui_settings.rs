@@ -495,23 +495,18 @@ fn copy_on_select_setting_saved_and_honoured(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_open_text_externally_row_toggles_and_saves(cx: &mut TestAppContext) {
+fn the_general_tab_has_no_open_text_externally_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.keys("ctrl-,");
     assert!(
-        h.bounds("settings-general-open-text-externally").origin.x >= px(0.0),
-        "the row is drawn"
+        drawn(&mut h, "settings-repo-sort-active"),
+        "the General tab is drawn"
     );
-    h.scroll_into_view("settings-content", "settings-general-open-text-externally");
-    h.click_on("settings-general-open-text-externally");
-    assert_eq!(
-        saved_ui(&dir)["general"]["open_text_externally"],
-        true,
-        "saved at once"
+    assert!(
+        !drawn(&mut h, "settings-general-open-text-externally"),
+        "the link gestures replaced the row"
     );
-    h.click_on("settings-general-open-text-externally");
-    assert_eq!(saved_ui(&dir)["general"]["open_text_externally"], false);
 }
 
 #[gpui::test]
@@ -771,16 +766,9 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     h.keys("tab tab tab tab tab tab tab tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-general-open-text-externally"),
+        Some("settings-terminal-copy-on-selection"),
         "past Always, the two Default view, the two Leaf density, the three Sessions under repos \
          and the three Sort repos choices"
-    );
-    h.keys("space");
-    assert_eq!(saved_ui(&dir)["general"]["open_text_externally"], true);
-    h.keys("tab");
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("settings-terminal-copy-on-selection")
     );
     h.keys("space");
     assert_eq!(saved_ui(&dir)["general"]["copy_on_select"], false);
@@ -808,7 +796,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     );
     h.keys(
         "shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab \
-         shift-tab shift-tab shift-tab shift-tab shift-tab",
+         shift-tab shift-tab shift-tab shift-tab",
     );
     assert_eq!(
         settings_focus(&mut h),

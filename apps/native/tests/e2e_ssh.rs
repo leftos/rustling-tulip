@@ -121,12 +121,6 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
     std::fs::create_dir_all(repo.join("docs")).expect("create the fixture's docs dir");
     std::fs::write(repo.join("docs").join("notes.txt"), NOTES).expect("write the notes");
     commit_all(&repo, "notes");
-    // Text files open externally, so the fetched file's open is recorded.
-    std::fs::write(
-        home.dir().join("ui").join("native-ui.json"),
-        serde_json::json!({ "general": { "open_text_externally": true } }).to_string(),
-    )
-    .expect("seed native-ui.json");
     let _fake = use_fake_ssh(&daemon, None);
     let (mut h, hosts) = open_ssh(cx, &home, &daemon, true);
     let client = hosts.client(&ssh_key());
@@ -159,6 +153,7 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
         line: None,
         column: None,
         open_when_done: true,
+        prefer_viewer: false,
     };
     h.root_update(move |view, _, cx| view.fetch_remote_file(request, cx))
         .expect("a fetch on the ssh host starts");

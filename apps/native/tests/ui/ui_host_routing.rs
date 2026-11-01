@@ -458,7 +458,7 @@ fn add_to_new_tab_from_a_remote_sessions_menu_binds_that_host(cx: &mut TestAppCo
 #[gpui::test]
 fn a_remote_panes_link_fetches_from_that_host_when_both_hold_the_repo_id(cx: &mut TestAppContext) {
     let dir = TestDir::new();
-    let ui = serde_json::json!({ "general": { "open_text_externally": true } });
+    let ui = serde_json::json!({});
     let mut h = remote_in_pane(cx, &dir, &ui, &["r1"], session("s1").worktree("r1").build());
     let root = dir.path().join("remote-files");
     h.root_update(move |view, _, _| view.set_remote_files_root(root));

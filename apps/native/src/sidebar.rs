@@ -949,9 +949,6 @@ pub struct GeneralSettings {
     pub sessions_under_repos: SessionsUnderRepos,
     /// How the repos view orders its repo and workspace rows.
     pub repo_sort: RepoSort,
-    /// Whether text files a link or a fetch opens go to the external app
-    /// instead of the built-in viewer.
-    pub open_text_externally: bool,
     /// Whether the client checks for updates at launch and every 24 h;
     /// Settings' Check now checks either way.
     pub check_updates: bool,
@@ -964,7 +961,6 @@ impl Default for GeneralSettings {
             leaf_density: LeafDensity::Comfortable,
             sessions_under_repos: SessionsUnderRepos::Every,
             repo_sort: RepoSort::NeedsYou,
-            open_text_externally: false,
             check_updates: true,
         }
     }
@@ -1934,11 +1930,6 @@ impl SidebarModel {
     /// Whether a terminal selection is copied on release.
     pub fn set_copy_on_select(&mut self, on: bool) {
         self.ui.general.copy_on_select = on;
-    }
-
-    /// Whether text files go to the external app instead of the viewer.
-    pub fn set_open_text_externally(&mut self, on: bool) {
-        self.ui.general.open_text_externally = on;
     }
 
     /// Whether the client checks for updates on its own.
@@ -5086,7 +5077,6 @@ pub(crate) mod tests {
                 leaf_density: LeafDensity::Compact,
                 sessions_under_repos: SessionsUnderRepos::Busy,
                 repo_sort: RepoSort::Active,
-                open_text_externally: true,
                 check_updates: false,
             },
             title: TitleSettings {
@@ -5239,7 +5229,6 @@ pub(crate) mod tests {
             leaf_density: LeafDensity::Compact,
             sessions_under_repos: SessionsUnderRepos::Busy,
             repo_sort: RepoSort::Active,
-            open_text_externally: true,
             ..GeneralSettings::default()
         }
     }
@@ -5931,26 +5920,28 @@ pub(crate) mod tests {
         assert!(loaded.viewer_markdown_rendered);
     }
 
+    /// The Ctrl+click gestures replaced the `open_text_externally` setting:
+    /// a released file carrying it, either way, loads every other value,
+    /// and a save leaves it out.
     #[test]
-    fn open_text_externally_defaults_off() {
-        assert!(!GeneralSettings::default().open_text_externally);
-        assert!(!UiState::default().general.open_text_externally);
-    }
+    fn a_released_file_with_open_text_externally_still_loads() {
+        for value in [true, false] {
+            let dir = TestDir::new(&format!("open-text-externally-{value}"));
+            let mut file = v0_5_1_alpha_ui_file();
+            file["general"]["open_text_externally"] = serde_json::json!(value);
+            let ui = load_released(&dir, &file);
+            let id = ui.theme.clone().expect("the migrated theme is selected");
+            assert_eq!(ui, released_values(Some(id), released_general()), "{value}");
 
-    #[test]
-    fn a_file_without_the_key_loads_off() {
-        let dir = TestDir::new("open-text-externally");
-        std::fs::write(
-            dir.0.join(UI_FILE),
-            r#"{ "general": { "copy_on_select": false } }"#,
-        )
-        .expect("write");
-        let loaded = load_ui_state(&dir.0);
-        assert!(
-            !loaded.general.copy_on_select,
-            "the file was read: its copy-on-select is not the default"
-        );
-        assert!(!loaded.general.open_text_externally);
+            save_ui_state(&dir.0, &ui).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read the save");
+            let saved: serde_json::Value = serde_json::from_str(&text).expect("the save is JSON");
+            assert_eq!(
+                saved["general"].get("open_text_externally"),
+                None,
+                "a save no longer writes the key: {saved}"
+            );
+        }
     }
 
     #[test]
