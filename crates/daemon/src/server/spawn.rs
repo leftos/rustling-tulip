@@ -734,6 +734,7 @@ fn interactive_record(
         last_hook_time: None,
         hook_driven: false,
         background: false,
+        turn_end: None,
         last_assistant_message: None,
         summary: None,
         busy_excluded: new.busy_excluded,
@@ -821,6 +822,7 @@ fn plain_shell_record(
         last_hook_time: None,
         hook_driven: false,
         background: false,
+        turn_end: None,
         last_assistant_message: None,
         summary: None,
         busy_excluded: new.busy_excluded,
@@ -1725,6 +1727,80 @@ fn shell_resume_injector(command: String) -> protocol::PromptInjector {
     }
 }
 
+/// What a headless session's record is built from.
+struct HeadlessRecord<'a> {
+    session_id: String,
+    label: String,
+    kind: SessionKind,
+    members: Vec<SessionMember>,
+    workspace_id: Option<String>,
+    cfg: &'a SpawnArgs,
+    stored_config: protocol::SpawnConfig,
+    last_prompt: Option<String>,
+    initial_cwd: String,
+    started_at: chrono::DateTime<Utc>,
+    busy_excluded: bool,
+}
+
+impl HeadlessRecord<'_> {
+    /// The record of a headless session about to spawn.
+    fn into_record(self) -> SessionRecord {
+        let worktree_paths = worktree_paths_for_config(&self.stored_config, &self.members);
+        SessionRecord {
+            id: self.session_id,
+            label: self.label.clone(),
+            default_label: self.label,
+            user_label: None,
+            kind: self.kind,
+            members: self.members,
+            mode: SessionMode::Headless,
+            started_at: self.started_at,
+            status: SessionStatus::Spawning,
+            status_since: Some(self.started_at),
+            status_seq: 0,
+            exit_code: None,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            pty: None,
+            headless: None,
+            workspace_id: self.workspace_id,
+            agent: self.cfg.agent.clone(),
+            terminal_title: None,
+            program_name: Some(self.cfg.backend.descriptor().tag.clone()),
+            current_cwd: Some(self.initial_cwd),
+            appearance: AppearanceOverrides::default(),
+            spawn_config: Some(self.stored_config),
+            is_abandoned: false,
+            is_inactive: false,
+            worktree_paths,
+            last_prompt: self.last_prompt,
+            input_notifier: None,
+            screen: None,
+            scrollback_snapshot_req: None,
+            spawn_origin: None,
+            conversation_id: None,
+            pending_input: None,
+            last_hook_time: None,
+            hook_driven: false,
+            background: false,
+            turn_end: None,
+            last_assistant_message: None,
+            summary: None,
+            busy_excluded: self.busy_excluded,
+            agent_in_shell: false,
+            shell_label: None,
+            agent_exit_announced: false,
+            applied_size: None,
+            size_client: None,
+            work: crate::background_work::BackgroundWork::default(),
+            hook_agent: None,
+            hook_options: OptionValues::new(),
+            hook_trusted: false,
+            resumed_from: self.cfg.extras.resumed_from.clone(),
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     clippy::needless_pass_by_value,
@@ -1751,57 +1827,20 @@ fn spawn_headless_session(
     super::child_env_probe::record(&spec.env, &[]);
 
     let started_at = Utc::now();
-    let mut record = SessionRecord {
-        id: session_id.clone(),
+    let mut record = HeadlessRecord {
+        session_id: session_id.clone(),
         label: label.clone(),
-        default_label: label.clone(),
-        user_label: None,
         kind: kind.clone(),
         members: members.clone(),
-        mode: SessionMode::Headless,
-        started_at,
-        status: SessionStatus::Spawning,
-        status_since: Some(started_at),
-        status_seq: 0,
-        exit_code: None,
-        metrics: SessionMetrics::default(),
-        recent_actions: Vec::new(),
-        pty: None,
-        headless: None,
         workspace_id: workspace_id.clone(),
-        agent: cfg.agent.clone(),
-        terminal_title: None,
-        program_name: Some(cfg.backend.descriptor().tag.clone()),
-        current_cwd: Some(initial_cwd.clone()),
-        appearance: AppearanceOverrides::default(),
-        spawn_config: Some(stored_config.clone()),
-        is_abandoned: false,
-        is_inactive: false,
-        worktree_paths: worktree_paths_for_config(&stored_config, &members),
+        cfg,
+        stored_config: stored_config.clone(),
         last_prompt: last_prompt.clone(),
-        input_notifier: None,
-        screen: None,
-        scrollback_snapshot_req: None,
-        spawn_origin: None,
-        conversation_id: None,
-        pending_input: None,
-        last_hook_time: None,
-        hook_driven: false,
-        background: false,
-        last_assistant_message: None,
-        summary: None,
+        initial_cwd: initial_cwd.clone(),
+        started_at,
         busy_excluded,
-        agent_in_shell: false,
-        shell_label: None,
-        agent_exit_announced: false,
-        applied_size: None,
-        size_client: None,
-        work: crate::background_work::BackgroundWork::default(),
-        hook_agent: None,
-        hook_options: OptionValues::new(),
-        hook_trusted: false,
-        resumed_from: cfg.extras.resumed_from.clone(),
-    };
+    }
+    .into_record();
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
     // broadcast and the first snapshot clients see carries its handle.

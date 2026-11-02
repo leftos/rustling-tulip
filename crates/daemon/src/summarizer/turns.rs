@@ -17,7 +17,7 @@ use protocol::{SessionStatus, SummaryLine};
 use tokio::time::Instant;
 
 use crate::hook_status::truncate_bytes;
-use crate::session::{SessionEvent, SessionRegistry};
+use crate::session::{SessionRegistry, TurnAlert};
 use crate::summarizer::policy::Line;
 use crate::summarizer::prompt::{self, Trigger};
 use crate::summarizer::service::{Outcome, Request, Summarizer};
@@ -239,16 +239,24 @@ impl Turns {
                 provisional: false,
             };
             record.push_summary_line(line.kind, line.headline, ring_line, Utc::now());
+            let alert = TurnAlert {
+                kind: line.kind,
+                notification: line.notification,
+                source: line.source,
+            };
             let waiting = matches!(
                 record.status,
                 SessionStatus::Idle | SessionStatus::AwaitingInput
             );
-            waiting.then(|| SessionEvent::WaitingAlert {
-                session_id: id.to_owned(),
-                kind: line.kind,
-                notification: line.notification,
-                source: line.source,
-            })
+            if waiting {
+                return Some(alert.event(id));
+            }
+            // A client deletes an alert on any `Working` update, so a held
+            // turn end keeps it for the update that lands `Idle`.
+            if let Some(held) = record.turn_end.as_mut() {
+                held.alert = Some(alert);
+            }
+            None
         });
         if held {
             self.sessions.sync_summary(id);
@@ -648,6 +656,57 @@ mod tests {
             matches!(next, SessionEvent::WaitingAlert { .. }),
             "the alert comes right after the update it was decided with: {next:?}"
         );
+    }
+
+    const IDLE_PROMPT: &str =
+        r#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#;
+
+    /// Put `s1` mid-turn on a live screen, where a `Stop` is held.
+    fn start_turn_on_a_screen(hub: &Hub) {
+        hub.sessions.update("s1", |record| {
+            record.status = SessionStatus::Working;
+            record.screen = Some(std::sync::Arc::new(std::sync::Mutex::new(
+                crate::screen::Screen::new(80, 24),
+            )));
+        });
+    }
+
+    #[tokio::test]
+    async fn an_alert_held_with_a_turn_end_goes_out_when_idle_lands() {
+        let (hub, _scratch, _fake, mut events) = hub_with_session("turns-held-alert");
+        start_turn_on_a_screen(&hub);
+        apply_hook(&hub, &stop("a report"), 100);
+        let snapshot = updated(next_summary_event(&mut events).await, "the line");
+        assert_eq!(snapshot.status, SessionStatus::Working);
+        assert_eq!(alerts_waiting(&mut events), 0, "no alert while held");
+
+        apply_hook(&hub, IDLE_PROMPT, 200);
+        let snapshot = updated(next_summary_event(&mut events).await, "the landing");
+        assert_eq!(snapshot.status, SessionStatus::Idle);
+        let next = events.try_recv().expect("an event follows the update");
+        assert!(
+            matches!(&next, SessionEvent::WaitingAlert { session_id, notification, .. }
+                if session_id == "s1" && notification == FAKE_NOTIFICATION),
+            "the alert follows the update that landed Idle: {next:?}"
+        );
+        assert_eq!(alerts_waiting(&mut events), 0, "exactly one alert");
+    }
+
+    #[tokio::test]
+    async fn an_alert_held_with_a_dropped_turn_end_goes_nowhere() {
+        let (hub, _scratch, _fake, mut events) = hub_with_session("turns-dropped-alert");
+        start_turn_on_a_screen(&hub);
+        apply_hook(&hub, &stop("a report"), 100);
+        updated(next_summary_event(&mut events).await, "the line");
+
+        apply_hook(&hub, r#"{"hook_event_name":"UserPromptSubmit"}"#, 200);
+        apply_hook(&hub, IDLE_PROMPT, 300);
+        let idle = hub
+            .sessions
+            .get("s1")
+            .is_some_and(|record| crate::sync::lock(&record).status == SessionStatus::Idle);
+        assert!(idle, "the turn ended");
+        assert_eq!(alerts_waiting(&mut events), 0, "the alert went with it");
     }
 
     #[tokio::test]

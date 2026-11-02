@@ -161,7 +161,11 @@ impl Refresh {
         let (last_message, stop_line_stamp) = {
             let record = self.sessions.get(id)?;
             let record = lock(&record);
-            if record.mode != SessionMode::Interactive || record.status != SessionStatus::Working {
+            // A held turn end shows `Working`, but its turn has stopped.
+            if record.mode != SessionMode::Interactive
+                || record.status != SessionStatus::Working
+                || record.turn_end.is_some()
+            {
                 return None;
             }
             (
@@ -762,6 +766,43 @@ mod tests {
         }
         assert_eq!(fake.calls(), 0, "the pending report goes first");
         assert_eq!(hub.turns.state_of("s1"), Some((1, false)));
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_turn_end_gets_no_refresh() {
+        let fake = Arc::new(FakeCaller::default());
+        let (hub, _scratch, script) = hub_with("refresh-held", &fake);
+        add_session(
+            &hub,
+            &script,
+            "held",
+            SessionMode::Interactive,
+            SessionStatus::Working,
+            "Some text.",
+        );
+        hub.sessions.update("held", |record| {
+            record.turn_end = Some(crate::session::TurnEnd {
+                event_time: 1,
+                background: false,
+                alert: None,
+                held_at: tokio::time::Instant::now(),
+            });
+        });
+        let _watch = watch(&hub, 1).await;
+        let task = spawn_refresh(&hub);
+        for _ in 0..3 {
+            next_tick().await;
+        }
+        assert_eq!(fake.calls(), 0, "a held turn end is no running turn");
+
+        hub.sessions.update("held", |record| record.turn_end = None);
+        hub.dashboard.tick(Utc::now()).await;
+        next_tick().await;
+        assert!(
+            settles(|| fake.calls() == 1).await,
+            "the dropped hold is a running turn again"
+        );
         task.abort();
     }
 

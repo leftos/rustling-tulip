@@ -87,6 +87,11 @@ const CONFIRM_CAP: Duration = Duration::from_millis(700);
 /// the frame from before the change.
 const FOREIGN_WRITE_HOLD: Duration = Duration::from_millis(700);
 
+/// The longest a turn end stays held. Past it a settled frame showing a turn
+/// that runs, by its spinner or its title, or an overlay that hides the screen,
+/// drops the turn end; anything else lands `Idle`.
+const TURN_END_CEILING: Duration = Duration::from_secs(60);
+
 /// How soon the view switch reads the screen again after another writer
 /// held the session's typing lane.
 const LANE_RETRY: Duration = Duration::from_millis(500);
@@ -163,6 +168,13 @@ struct Sight {
 /// hold ends, output or not. The write itself is refused unless the
 /// record still holds the status, hook stamp and hook-driven flag the window
 /// read (see [`apply_screen_status`]).
+///
+/// A main `Stop` on this record is held as its `turn_end`, the status staying
+/// `Working`, and the watcher alone resolves it: the first settled frame after
+/// the hold that shows no sign of hooks lands `Idle` at once, and a frame
+/// showing the agent idle lands it through the usual window. A main hook event
+/// or a later `Stop` is the other way out. At [`TURN_END_CEILING`], on a
+/// settled frame, a spinner drops it and anything else lands `Idle`.
 ///
 /// `attention_tx` receives one event each time the screen moves the session
 /// into `AwaitingInput`. `streams.rules` are the screen rules of the session's
@@ -258,6 +270,8 @@ struct ScreenWatch {
     /// screen clears only a flag it set. Any other writer's change to the
     /// record, and any status change, drops it.
     screen_set_background: bool,
+    /// What the checks have read of the turn end the record holds.
+    turn_end: TurnEndWatch,
     /// Takes the terminal back to main for a prompt seen in an agent's view.
     view_return: ViewReturn,
     /// The session's typing lane, held by the view return from the reading
@@ -271,6 +285,54 @@ struct ScreenWatch {
     /// it again: a reading after new output, or the one at the key's
     /// deadline ([`KEY_WAIT`] after it), which every check re-arms.
     view_key_at: Option<Instant>,
+}
+
+/// What a watcher's checks have read of the turn end the record holds.
+#[derive(Default)]
+struct TurnEndWatch {
+    /// The `Stop` these readings belong to.
+    event_time: Option<u128>,
+    /// A check read the hooks row.
+    hooks_seen: bool,
+    /// A check read a settled frame.
+    read: bool,
+}
+
+impl TurnEndWatch {
+    /// Start afresh when `event_time` names a different `Stop`.
+    fn track(&mut self, event_time: u128) {
+        if self.event_time != Some(event_time) {
+            *self = Self {
+                event_time: Some(event_time),
+                ..Self::default()
+            };
+        }
+    }
+}
+
+/// What a reading says about a held turn end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnEndSign {
+    /// The hooks row.
+    Hooks,
+    /// A spinner, or the title of a turn that runs.
+    Spinner,
+    /// The agent idle or asking: the screen's own write resolves it.
+    Settled,
+    /// An overlay, an unmatched screen, or the title alone.
+    Nothing,
+}
+
+impl TurnEndSign {
+    fn of(reading: &Reading) -> Self {
+        match reading.verdict {
+            Verdict::HooksRunning => Self::Hooks,
+            Verdict::State(ScreenState::Working) => Self::Spinner,
+            Verdict::State(_) if reading.from_title => Self::Nothing,
+            Verdict::State(ScreenState::Idle | ScreenState::AwaitingInput) => Self::Settled,
+            Verdict::Keep | Verdict::Background | Verdict::NoMatch => Self::Nothing,
+        }
+    }
 }
 
 /// What one screen check read from one frame.
@@ -344,17 +406,17 @@ impl Confirm {
         at <= now
     }
 
-    /// The next check due: the debounced one, or the window's next
-    /// confirmation, whichever comes first.
-    fn next_check(&self) -> Option<Instant> {
+    /// The next check due: the debounced one, the window's next confirmation,
+    /// or a held turn end's `ceiling`, whichever comes first.
+    fn next_check(&self, ceiling: Option<Instant>) -> Option<Instant> {
         let confirm = self
             .window
             .as_ref()
             .map(|window| window.counted + CONFIRM_SPACING);
-        match (self.check_at, confirm) {
-            (Some(at), Some(confirm)) => Some(at.min(confirm)),
-            (at, confirm) => at.or(confirm),
-        }
+        [self.check_at, confirm, ceiling]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Read the screen at `at` at the latest.
@@ -402,6 +464,16 @@ impl Confirm {
 }
 
 impl ScreenWatch {
+    /// The next check due. A held turn end's ceiling waits for the frame to
+    /// settle and for any hold to end, so a ceiling already past never spins.
+    fn next_check(&self) -> Option<Instant> {
+        let ceiling = self.wake.ceiling().map(|ceiling| {
+            let settled = self.last_output.map_or(ceiling, |at| at + CHECK_DEBOUNCE);
+            ceiling.max(settled).max(self.confirm.hold_until)
+        });
+        self.confirm.next_check(ceiling)
+    }
+
     /// Subscribe to the registry before the watcher's task starts, and hold
     /// the screen unread for [`FOREIGN_WRITE_HOLD`] from now.
     fn new(
@@ -425,6 +497,7 @@ impl ScreenWatch {
             last_verdict: None,
             dialog_edge_armed: true,
             screen_set_background: false,
+            turn_end: TurnEndWatch::default(),
             view_return: ViewReturn::default(),
             view_turn: None,
             view_turn_since: None,
@@ -435,7 +508,7 @@ impl ScreenWatch {
 
     async fn run_agent(&mut self, output: &mut broadcast::Receiver<Vec<u8>>) {
         loop {
-            let next_check = self.confirm.next_check();
+            let next_check = self.next_check();
             // In arm order: output is fed before a due check reads the grid,
             // and a check already due runs inline, since this biased select
             // would otherwise starve the timer arm under continuous output.
@@ -545,9 +618,15 @@ impl ScreenWatch {
         if reading.verdict != Verdict::State(ScreenState::AwaitingInput) {
             self.dialog_edge_armed = true;
         }
+        if self.turn_end_ceiling(read, &reading, quiet, now) {
+            return Checked::Done;
+        }
         match mode {
             Mode::Shell => self.watch_for_agent(read, shows_agent(&reading) && !prompt, quiet, now),
             Mode::ShellAgent if prompt => self.watch_for_agent_end(read, now),
+            Mode::Agent | Mode::ShellAgent if self.follow_turn_end(read, &reading, quiet) => {
+                Checked::Done
+            }
             Mode::ShellAgent if !shows_agent(&reading) => {
                 // An agent screen no rule knows, or the agent's title alone, with
                 // the shell's prompt not back: the agent may still run. Nothing
@@ -580,16 +659,7 @@ impl ScreenWatch {
         let Some(read) = record_status(&self.registry, &self.session_id) else {
             return Err(Checked::Gone);
         };
-        let before = self.wake.seen;
-        // Another writer changed the record and its broadcast has not arrived
-        // yet: the grid predates that change too.
-        if self.wake.note(read) {
-            match self.record_moved(before, mode, now) {
-                Moved::HooksFlipped => return Err(Checked::HooksFlipped),
-                Moved::Held => return Err(Checked::Done),
-                Moved::Ignored => {}
-            }
-        }
+        self.note_read(read, mode, now)?;
         if matches!(read.status, SessionStatus::Stopped | SessionStatus::Error) {
             self.confirm.window = None;
             self.confirm.candidate = None;
@@ -600,6 +670,80 @@ impl ScreenWatch {
             self.confirm.check_at = settled_at;
         }
         Ok((read, quiet))
+    }
+
+    /// Take `read` as the record last seen. `Err` carries what ends the check:
+    /// another writer changed the record and its broadcast has not arrived
+    /// yet, so the grid predates that change too.
+    fn note_read(&mut self, read: StatusRead, mode: Mode, now: Instant) -> Result<(), Checked> {
+        let before = self.wake.seen;
+        if !self.wake.note(read) {
+            return Ok(());
+        }
+        match self.record_moved(before, mode, now) {
+            Moved::HooksFlipped => Err(Checked::HooksFlipped),
+            Moved::Held => Err(Checked::Done),
+            Moved::Ignored => Ok(()),
+        }
+    }
+
+    /// Resolve a held turn end that has reached [`TURN_END_CEILING`], on a
+    /// settled frame only: a half-drawn spinner must not land a false `Idle`.
+    /// A spinner or a working title drops it, and so does an overlay, which
+    /// hides what the turn is doing: no status is written, and the screen
+    /// demotes the ordinary way once the overlay closes. Anything else lands
+    /// `Idle`. Answers whether it resolved.
+    fn turn_end_ceiling(
+        &mut self,
+        read: StatusRead,
+        reading: &Reading,
+        quiet: bool,
+        now: Instant,
+    ) -> bool {
+        if !quiet || read.held.is_none_or(|held| now < held.ceiling) {
+            return false;
+        }
+        self.confirm.window = None;
+        self.confirm.candidate = None;
+        let why = if reading.verdict == Verdict::Keep {
+            "ceiling_overlay"
+        } else if TurnEndSign::of(reading) == TurnEndSign::Spinner {
+            "ceiling_spinner"
+        } else {
+            self.publish_as(read, SessionStatus::Idle, "ceiling");
+            return true;
+        };
+        if clear_turn_end(&self.registry, &self.session_id, read) {
+            // This watcher's own write, so its broadcast starts no hold.
+            self.wake.seen = Some(StatusRead { held: None, ..read });
+            info!(session_id = %self.session_id, why, "turn end dropped");
+        }
+        true
+    }
+
+    /// Follow a held turn end through one reading; answers whether that
+    /// decided the check. Otherwise the reading goes the usual way, which
+    /// writes nothing but what an idle or asking screen publishes. A spinner
+    /// decides nothing: a blocked turn resolves by its next main hook event,
+    /// and one between the hooks row and the idle box must keep what is held.
+    fn follow_turn_end(&mut self, read: StatusRead, reading: &Reading, quiet: bool) -> bool {
+        let Some(held) = read.held else {
+            self.turn_end = TurnEndWatch::default();
+            return false;
+        };
+        self.turn_end.track(held.event_time);
+        let sign = TurnEndSign::of(reading);
+        let first_read = quiet && !self.turn_end.read;
+        // A working title may outlive the turn: it uses up no read.
+        self.turn_end.read |= quiet && !(reading.from_title && sign == TurnEndSign::Spinner);
+        self.turn_end.hooks_seen |= sign == TurnEndSign::Hooks;
+        if sign != TurnEndSign::Nothing || !first_read || self.turn_end.hooks_seen {
+            return false;
+        }
+        self.confirm.window = None;
+        self.confirm.candidate = None;
+        self.publish_as(read, SessionStatus::Idle, "no_evidence");
+        true
     }
 
     /// The screen's reading, the background rule that fires on it, and
@@ -762,6 +906,7 @@ impl ScreenWatch {
                 // The background window opens on the check that published.
                 let after = StatusRead {
                     status: target,
+                    held: None,
                     ..read
                 };
                 self.follow_background(after, reading, background, now);
@@ -871,8 +1016,14 @@ impl ScreenWatch {
 
     /// Write `next` over `from`; answers whether it wrote. A write that lands
     /// is this watcher's own, so its broadcast starts no hold; the status
-    /// change cleared the background flag.
+    /// change cleared the background flag, and one a held turn end landed
+    /// beside `Idle` is not the screen's own.
     fn publish(&mut self, from: StatusRead, next: SessionStatus) -> bool {
+        self.publish_as(from, next, "screen")
+    }
+
+    /// [`Self::publish`], logging a turn end's landing as `how`.
+    fn publish_as(&mut self, from: StatusRead, next: SessionStatus, how: &'static str) -> bool {
         let wrote = apply_screen_status(
             &self.registry,
             &self.session_id,
@@ -883,9 +1034,13 @@ impl ScreenWatch {
         if wrote {
             self.wake.seen = Some(StatusRead {
                 status: next,
+                held: None,
                 ..from
             });
             self.screen_set_background = false;
+            if from.held.is_some() && next == SessionStatus::Idle {
+                info!(session_id = %self.session_id, how, "turn end landed");
+            }
             if next == SessionStatus::AwaitingInput {
                 self.dialog_edge_armed = false;
             }
@@ -935,7 +1090,7 @@ fn screen_target(reading: &Reading) -> Option<SessionStatus> {
         Verdict::State(ScreenState::Working) => Some(SessionStatus::Working),
         Verdict::State(ScreenState::AwaitingInput) => Some(SessionStatus::AwaitingInput),
         Verdict::State(ScreenState::Idle) => Some(SessionStatus::Idle),
-        Verdict::Keep | Verdict::Background | Verdict::NoMatch => None,
+        Verdict::Keep | Verdict::HooksRunning | Verdict::Background | Verdict::NoMatch => None,
     }
 }
 
@@ -960,18 +1115,17 @@ fn publishes_at_once(from: SessionStatus, to: SessionStatus) -> bool {
     )
 }
 
-/// Whether `record` moved since `from` was read (its status, hook stamp or
-/// hook-driven flag), or is stopped or failed: either refuses a screen write.
+/// Whether `record` moved since `from` was read (see [`StatusRead`]'s
+/// equality), or is stopped or failed: either refuses a screen write.
 fn moved_since(record: &SessionRecord, from: StatusRead) -> bool {
-    record.status != from.status
-        || record.last_hook_time != from.last_hook_time
-        || record.hook_driven != from.hook_driven
+    status_read(record) != from
         || matches!(record.status, SessionStatus::Stopped | SessionStatus::Error)
 }
 
-/// Write the status the screen shows, refused unless the record still holds
-/// the status, hook stamp and hook-driven flag of `from` and is not stopped
-/// or failed; answers whether it wrote.
+/// Write the status the screen shows, refused when the record moved since
+/// `from` was read (see [`moved_since`]; under a held turn end its `Stop`
+/// stands in for the hook stamp) or is stopped or failed; answers whether it
+/// wrote.
 ///
 /// A hook event, the owner's key or an exit that landed after `from` was read
 /// wins. A refused write neither broadcasts nor touches the sidecar. A write
@@ -979,6 +1133,11 @@ fn moved_since(record: &SessionRecord, from: StatusRead) -> bool {
 /// `background` and, leaving `AwaitingInput`, the pending prompt; it never
 /// writes `hook_driven` or the hook stamp. On entry to `AwaitingInput` the
 /// one [`AttentionEvent`] is sent after the registry update returns.
+///
+/// A write of `Idle` consumes a held turn end in the same update: its
+/// background flag lands beside the status, since a broadcast of `Idle`
+/// without it would arm the client's Finished hold, and its alert follows
+/// that update's broadcast.
 fn apply_screen_status(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
@@ -988,17 +1147,41 @@ fn apply_screen_status(
 ) -> bool {
     let mut wrote = false;
     let mut entered_awaiting = false;
-    registry.update_if_changed(session_id, |rec| {
+    registry.update_if_changed_then(session_id, |rec| {
         if moved_since(rec, from) {
-            return false;
+            return None;
         }
+        let held = rec.turn_end.take_if(|_| next == SessionStatus::Idle);
         entered_awaiting = apply_watcher_status(rec, next);
         wrote = rec.status == next;
-        wrote
+        if !wrote {
+            return None;
+        }
+        let Some(held) = held else {
+            return Some(None);
+        };
+        rec.background = held.background;
+        Some(held.alert.map(|alert| alert.event(session_id)))
     });
     if entered_awaiting {
         announce_awaiting_input(session_id, attention_tx);
     }
+    wrote
+}
+
+/// Forget the turn end `from` held, refused unless the record still holds
+/// what `from` read; answers whether it wrote. Only the turn end changes, so
+/// the update raises no Attention and leaves the status as it stands.
+fn clear_turn_end(registry: &Arc<SessionRegistry>, session_id: &str, from: StatusRead) -> bool {
+    let mut wrote = false;
+    registry.update_if_changed(session_id, |rec| {
+        if moved_since(rec, from) {
+            return false;
+        }
+        rec.turn_end = None;
+        wrote = true;
+        true
+    });
     wrote
 }
 
@@ -1042,7 +1225,8 @@ fn record_background(registry: &Arc<SessionRegistry>, session_id: &str) -> Optio
 /// answers the record as written, or `None` when refused. It is the only
 /// screen write of `hook_driven`, and it never writes the hook stamp. An agent
 /// typed into its shell at spawn whose `SessionEnd` never came ends here, and
-/// its end is announced once the update is broadcast.
+/// its end is announced once the update is broadcast. A held turn end's alert
+/// follows that update; its background flag ended with the agent.
 fn hand_shell_back(
     registry: &Arc<SessionRegistry>,
     session_id: &str,
@@ -1050,9 +1234,9 @@ fn hand_shell_back(
 ) -> Option<StatusRead> {
     let mut after = None;
     let mut agent_exited = false;
-    registry.update_if_changed(session_id, |rec| {
+    registry.update_if_changed_then(session_id, |rec| {
         if moved_since(rec, from) {
-            return false;
+            return None;
         }
         let in_turn = matches!(
             rec.status,
@@ -1062,6 +1246,10 @@ fn hand_shell_back(
         let changed = rec.hook_driven || rec.background || in_turn || agent_exited;
         rec.hook_driven = false;
         rec.background = false;
+        let held = rec.turn_end.take();
+        if held.is_some() {
+            info!(session_id, how = "hand_back", "turn end landed");
+        }
         if in_turn {
             apply_watcher_status(rec, SessionStatus::Idle);
         }
@@ -1069,8 +1257,10 @@ fn hand_shell_back(
             status: rec.status,
             hook_driven: false,
             last_hook_time: rec.last_hook_time,
+            held: None,
         });
-        changed
+        let alert = held.and_then(|held| held.alert);
+        changed.then(|| alert.map(|alert| alert.event(session_id)))
     });
     if agent_exited {
         registry.announce_agent_exited(session_id);
@@ -1202,7 +1392,7 @@ impl ShellWatcher {
     async fn run(&mut self, output: &mut broadcast::Receiver<Vec<u8>>) {
         loop {
             let mode = self.mode();
-            let next_check = self.watch.confirm.next_check();
+            let next_check = self.watch.next_check();
             let next_idle_check = self.quiet_from + SHELL_IDLE_AFTER;
             let idle_due = mode == Mode::Shell
                 && !self.idle_checked
@@ -1455,23 +1645,59 @@ impl From<State> for SessionStatus {
 /// The record fields a watcher read before deciding a transition, and the
 /// write re-checks under the record lock: a hook event or another writer's
 /// change that landed in between wins over the watcher.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 struct StatusRead {
     status: SessionStatus,
     hook_driven: bool,
     last_hook_time: Option<u128>,
+    /// The turn end the record holds.
+    held: Option<HeldRead>,
 }
 
-/// The record's current status, whether hooks drive its promotions, and the
-/// hook ordering stamp, as one snapshot the caller carries into its write.
+/// The turn end a [`StatusRead`] saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeldRead {
+    /// The `Stop` that holds it.
+    event_time: u128,
+    /// When it reaches [`TURN_END_CEILING`].
+    ceiling: Instant,
+}
+
+/// Two reads match when the record has not moved between them. While a turn
+/// end is held its `Stop` stands in for the hook stamp, which every subagent
+/// event moves: a window takes about a second, and those events would
+/// otherwise restart it for as long as the subagents work.
+impl PartialEq for StatusRead {
+    fn eq(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.hook_driven == other.hook_driven
+            && self.held == other.held
+            && (self.held.is_some() || self.last_hook_time == other.last_hook_time)
+    }
+}
+
+impl Eq for StatusRead {}
+
+/// What a watcher reads of `record`.
+fn status_read(record: &SessionRecord) -> StatusRead {
+    StatusRead {
+        status: record.status,
+        hook_driven: record.hook_driven,
+        last_hook_time: record.last_hook_time,
+        held: record.turn_end.as_ref().map(|held| HeldRead {
+            event_time: held.event_time,
+            ceiling: held.held_at + TURN_END_CEILING,
+        }),
+    }
+}
+
+/// The record's current status, whether hooks drive its promotions, the hook
+/// ordering stamp and any held turn end, as one snapshot the caller carries
+/// into its write.
 fn record_status(registry: &Arc<SessionRegistry>, session_id: &str) -> Option<StatusRead> {
     let arc = registry.get(session_id)?;
     let guard = crate::sync::lock(&arc);
-    Some(StatusRead {
-        status: guard.status,
-        hook_driven: guard.hook_driven,
-        last_hook_time: guard.last_hook_time,
-    })
+    Some(status_read(&guard))
 }
 
 /// The registry's session events, read for one session: a hook event or
@@ -1530,6 +1756,11 @@ impl RecordWake {
         changed
     }
 
+    /// When the turn end last seen reaches [`TURN_END_CEILING`].
+    fn ceiling(&self) -> Option<Instant> {
+        Some(self.seen?.held?.ceiling)
+    }
+
     /// [`Self::reread`] over a read the caller has already taken.
     fn note(&mut self, read: StatusRead) -> bool {
         let changed = Some(read) != self.seen;
@@ -1553,10 +1784,11 @@ fn plain_shell_idle_due(registry: &Arc<SessionRegistry>, session_id: &str, state
 /// Apply `next` to `record` when it is a real change.
 ///
 /// Sets the status, clears the background flag (true only beside the `Idle`
-/// a `Stop` writes after this) and records the `"awaiting input"` action on
-/// entry. Answers whether the record entered `AwaitingInput`, so a caller
-/// holding a registry update can raise the one `Attention` after that update
-/// returns.
+/// a `Stop` or a held turn end writes after this) and records the
+/// `"awaiting input"` action on entry. A held turn end is settled by the
+/// registry update around it, as every status change does. Answers whether
+/// the record entered `AwaitingInput`, so a caller holding a registry update
+/// can raise the one `Attention` after that update returns.
 pub fn apply_status(record: &mut SessionRecord, next: SessionStatus) -> bool {
     if record.status == next {
         return false;
@@ -1721,6 +1953,7 @@ mod hysteresis_tests {
             last_hook_time: None,
             hook_driven: false,
             background: false,
+            turn_end: None,
             last_assistant_message: None,
             summary: None,
             busy_excluded: false,
@@ -3930,6 +4163,399 @@ mod hysteresis_tests {
         );
         assert_eq!(h.status(), SessionStatus::AwaitingInput);
         assert!(pending_input(&h).is_some(), "the hook's prompt is pending");
+    }
+
+    /// A main-agent `Stop` reporting a running shell when `background`.
+    fn main_stop(background: bool) -> serde_json::Value {
+        let tasks = if background {
+            serde_json::json!([{"id": "b1", "type": "shell", "status": "running"}])
+        } else {
+            serde_json::json!([])
+        };
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": "done",
+            "background_tasks": tasks,
+            "session_crons": [],
+        })
+    }
+
+    /// A subagent's tool call.
+    fn subagent_tool() -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "agent_id": "a0123456789abcdef",
+            "agent_type": "Explore",
+            "tool_name": "Read",
+        })
+    }
+
+    impl Harness {
+        /// Apply the hook `body` at hook time `time`, as the hook route does.
+        fn hook(&self, time: u128, body: &serde_json::Value) {
+            let report = agent_registry::plugin(&agent_registry::default_agent())
+                .expect("Claude is registered")
+                .map_hook_event(body, None, false)
+                .expect("the payload maps to a report");
+            self.set_record(|record| {
+                crate::hook_status::apply_to_record(record, Some(time), &report);
+            });
+        }
+
+        fn holds_turn_end(&self) -> bool {
+            let rec = self.registry.get(SESSION).expect("session registered");
+            rec.lock().expect("record lock").turn_end.is_some()
+        }
+
+        /// How many status changes the record has seen.
+        fn status_seq(&self) -> u64 {
+            let rec = self.registry.get(SESSION).expect("session registered");
+            rec.lock().expect("record lock").status_seq
+        }
+    }
+
+    /// The statuses and background flags `events` carried for the session,
+    /// in order.
+    fn updates(
+        events: &mut broadcast::Receiver<crate::session::SessionEvent>,
+    ) -> Vec<(SessionStatus, bool)> {
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let crate::session::SessionEvent::Updated(snapshot, _) = event {
+                seen.push((snapshot.status, snapshot.background));
+            }
+        }
+        seen
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_blocked_stop_never_leaves_working() {
+        let h = start_record("blocked-stop", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        let seq = h.status_seq();
+        h.hook(2, &main_stop(false));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        pass_hold().await;
+        for tick in 0..3 {
+            let row = format!("✢ Simmering… (running Stop hooks… {tick}/2 · 5s · ↓ 621 tokens)");
+            h.chunk(idle_frame(&[row.as_str()]));
+            advance(ms(300)).await;
+            assert_eq!(h.status(), SessionStatus::Working, "hooks row {tick}");
+            assert!(h.holds_turn_end(), "the hooks row resolves nothing");
+        }
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Working);
+        let tool = serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Read"});
+        h.hook(3, &tool);
+        settle().await;
+        assert!(!h.holds_turn_end(), "the next main tool event drops it");
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert_eq!(h.status_seq(), seq, "a status was written");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_spinner_between_the_hooks_row_and_the_idle_box_keeps_the_held_background() {
+        let h = start_record(
+            "spinner-between",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &main_stop(true));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(1)).await;
+        assert!(h.holds_turn_end(), "a spinner resolves nothing");
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the held flag lands");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ceiling_waits_for_a_settled_frame() {
+        let h = start_record(
+            "ceiling-settled",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        let seq = h.status_seq();
+        h.hook(2, &main_stop(false));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        advance(ms(59_900)).await;
+        // Chunks closer than the debounce, on past the ceiling and past
+        // `CHECK_MAX_WAIT` beyond it, so checks run on unsettled frames.
+        for chunk in 0..12 {
+            h.chunk(frame(&["half a frame"]));
+            advance(ms(30)).await;
+            assert!(h.holds_turn_end(), "chunk {chunk}: read an unsettled frame");
+        }
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(ms(100)).await;
+        assert!(!h.holds_turn_end(), "the settled frame decides");
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert_eq!(h.status_seq(), seq, "a status was written");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_working_title_is_not_no_evidence() {
+        let h = start_record("working-title", false, hook_record(SessionStatus::Working));
+        let mut titled = "\x1b]0;◐ Fixing tests\x07".as_bytes().to_vec();
+        titled.extend(frame(&["something no rule reads"]));
+        h.chunk(titled);
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        pass_hold().await;
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert!(h.holds_turn_end(), "the title says the turn runs");
+        advance(Duration::from_secs(60)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "the ceiling landed it");
+        assert!(!h.holds_turn_end(), "the ceiling drops it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_title_that_stops_working_lands_no_evidence() {
+        let h = start_record("title-stops", false, hook_record(SessionStatus::Working));
+        let mut titled = "\x1b]0;◐ Fixing tests\x07".as_bytes().to_vec();
+        titled.extend(frame(&["something no rule reads"]));
+        h.chunk(titled);
+        pass_hold().await;
+        h.hook(2, &main_stop(true));
+        pass_hold().await;
+        assert!(h.holds_turn_end(), "the title says the turn runs");
+        let mut titled = "\x1b]0;✳ Fixing tests\x07".as_bytes().to_vec();
+        titled.extend(frame(&["something no rule reads"]));
+        h.chunk(titled);
+        advance(ms(100)).await;
+        assert_eq!(h.status(), SessionStatus::Idle, "waited for the ceiling");
+        assert!(h.background(), "the held flag lands");
+        assert!(!h.holds_turn_end());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_overlay_at_the_ceiling_writes_no_idle() {
+        let h = start_record(
+            "ceiling-overlay",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        let seq = h.status_seq();
+        h.hook(2, &main_stop(true));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        pass_hold().await;
+        h.chunk(transcript_overlay_frame());
+        advance(Duration::from_secs(61)).await;
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert_eq!(h.status_seq(), seq, "a status was written");
+        assert!(!h.holds_turn_end(), "the ceiling drops it");
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the ordinary path lands it"
+        );
+        assert!(!h.background(), "the dropped hold took its flag");
+    }
+
+    #[test]
+    fn handing_the_shell_back_keeps_the_held_alert() {
+        let registry = SessionRegistry::new(scratch_dirs("hand-back-alert"));
+        let mut record = hook_record(SessionStatus::Working);
+        record.agent_in_shell = true;
+        record.turn_end = Some(crate::session::TurnEnd {
+            event_time: 1,
+            background: true,
+            alert: Some(crate::session::TurnAlert {
+                kind: None,
+                notification: "held".to_owned(),
+                source: protocol::SummarySource::Model,
+            }),
+            held_at: tokio::time::Instant::now(),
+        });
+        registry.insert(record);
+        let mut events = registry.subscribe();
+        let read = record_status(&registry, SESSION).expect("the session is registered");
+        assert!(hand_shell_back(&registry, SESSION, read).is_some());
+        let mut alerts = 0;
+        let mut landed = None;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                crate::session::SessionEvent::WaitingAlert { .. } => alerts += 1,
+                crate::session::SessionEvent::Updated(snapshot, _) => {
+                    landed = Some((snapshot.status, snapshot.background));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(alerts, 1, "the alert goes out");
+        assert_eq!(
+            landed,
+            Some((SessionStatus::Idle, false)),
+            "the agent's work ended with it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unblocked_stop_lands_idle_when_the_hooks_row_clears() {
+        let h = start_record("unblocked-stop", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        let mut events = h.registry.subscribe();
+        h.hook(2, &main_stop(true));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        pass_hold().await;
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        advance(ms(300)).await;
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert!(!h.background(), "the flag waits for Idle");
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the held flag lands");
+        assert!(!h.holds_turn_end());
+        let landed = updates(&mut events)
+            .into_iter()
+            .find(|(status, _)| *status == SessionStatus::Idle);
+        assert_eq!(
+            landed,
+            Some((SessionStatus::Idle, true)),
+            "Idle and its flag land in one update"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_flag_a_held_turn_end_landed_is_not_the_screens_to_clear() {
+        let h = start_record("landed-flag", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.hook(2, &main_stop(true));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        advance(Duration::from_secs(5)).await;
+        assert!(h.background(), "the screen cleared a flag it never set");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_evidence_of_hooks_lands_idle_after_the_hold() {
+        let overlay = transcript_overlay_frame();
+        let unmatched = frame(&["something no rule reads"]);
+        for (tag, screen) in [("overlay", overlay), ("no-match", unmatched)] {
+            let mut h = start_record(
+                &format!("no-evidence-{tag}"),
+                false,
+                hook_record(SessionStatus::Working),
+            );
+            h.chunk(screen);
+            pass_hold().await;
+            h.hook(2, &main_stop(true));
+            settle().await;
+            assert_eq!(h.status(), SessionStatus::Working, "{tag}: held");
+            advance(ms(600)).await;
+            assert_eq!(h.status(), SessionStatus::Working, "{tag}: inside the hold");
+            advance(ms(200)).await;
+            assert_eq!(h.status(), SessionStatus::Idle, "{tag}");
+            assert!(h.background(), "{tag}: the held flag lands");
+            assert!(!h.holds_turn_end(), "{tag}");
+            assert_eq!(h.attentions(), 0, "{tag}: resolution raises no Attention");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_spinner_before_the_hooks_row_keeps_the_hold() {
+        let h = start_record("stale-spinner", false, hook_record(SessionStatus::Working));
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        pass_hold().await;
+        h.hook(2, &main_stop(true));
+        pass_hold().await;
+        advance(Duration::from_secs(1)).await;
+        assert!(h.holds_turn_end(), "a spinner alone drops nothing");
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        advance(ms(300)).await;
+        assert!(h.holds_turn_end());
+        h.chunk(background_shell_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the held flag lands");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ceiling_never_lands_on_a_spinner() {
+        let h = start_record(
+            "ceiling-hooks-spinner",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        let seq = h.status_seq();
+        h.hook(2, &main_stop(false));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        pass_hold().await;
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(61)).await;
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert_eq!(h.status_seq(), seq, "a status was written");
+
+        let h = start_record(
+            "ceiling-spinner",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        pass_hold().await;
+        let seq = h.status_seq();
+        h.hook(2, &main_stop(false));
+        advance(Duration::from_secs(59)).await;
+        assert!(h.holds_turn_end(), "only the ceiling decides this one");
+        advance(Duration::from_secs(2)).await;
+        assert!(!h.holds_turn_end(), "the ceiling drops the held turn end");
+        assert_eq!(h.status(), SessionStatus::Working);
+        assert_eq!(h.status_seq(), seq, "a status was written");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ceiling_lands_idle_otherwise() {
+        let mut h = start_record("ceiling-hooks", false, hook_record(SessionStatus::Working));
+        pass_hold().await;
+        h.hook(2, &main_stop(true));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        advance(Duration::from_secs(59)).await;
+        assert_eq!(h.status(), SessionStatus::Working, "before the ceiling");
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert!(h.background(), "the held flag lands");
+        assert!(!h.holds_turn_end());
+        assert_eq!(h.attentions(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subagent_stamps_do_not_delay_the_landing() {
+        let h = start_record(
+            "subagent-stamps",
+            false,
+            hook_record(SessionStatus::Working),
+        );
+        pass_hold().await;
+        h.hook(2, &main_stop(false));
+        h.chunk(idle_frame(&[STOP_HOOKS_ROW]));
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        settle().await;
+        for time in 3..12 {
+            h.hook(time, &subagent_tool());
+            advance(ms(100)).await;
+        }
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "subagent stamps starved the window"
+        );
     }
 
     #[tokio::test(start_paused = true)]

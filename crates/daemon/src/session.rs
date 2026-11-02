@@ -143,6 +143,55 @@ pub struct ScrollbackSnapshot {
 /// the `SessionRecord` so the handler can find it via the registry.
 pub type ScrollbackSnapshotReq = mpsc::UnboundedSender<oneshot::Sender<ScrollbackSnapshot>>;
 
+/// The `WaitingAlert` of a line published while a turn end is held: it goes
+/// out with the update that lands `Idle`, and is lost with a dropped turn end.
+#[derive(Debug, Clone)]
+pub struct TurnAlert {
+    pub kind: Option<protocol::AlertKind>,
+    pub notification: String,
+    pub source: protocol::SummarySource,
+}
+
+impl TurnAlert {
+    /// The alert as `session_id`'s registry event.
+    pub fn event(self, session_id: &str) -> SessionEvent {
+        SessionEvent::WaitingAlert {
+            session_id: session_id.to_owned(),
+            kind: self.kind,
+            notification: self.notification,
+            source: self.source,
+        }
+    }
+}
+
+/// A main-agent `Stop` whose `Idle` waits while the session's Stop hooks may
+/// still send the agent back to work. The status watcher resolves it from
+/// what the screen shows.
+#[derive(Debug, Clone)]
+pub struct TurnEnd {
+    /// The `Stop`'s hook time, which names that one `Stop`.
+    pub event_time: u128,
+    /// The background flag the `Stop` reported, written when `Idle` lands.
+    pub background: bool,
+    /// The alert of a line published while held.
+    pub alert: Option<TurnAlert>,
+    /// When the `Stop` was held.
+    pub held_at: tokio::time::Instant,
+}
+
+/// A status change met `record`'s held turn end: a move to `Idle` lands its
+/// flag and answers its alert, and any other move drops it.
+fn settle_turn_end(record: &mut SessionRecord, id: &str) -> Option<SessionEvent> {
+    let held = record.turn_end.take()?;
+    if record.status != SessionStatus::Idle {
+        info!(session_id = id, why = "status_change", "turn end dropped");
+        return None;
+    }
+    record.background = held.background;
+    info!(session_id = id, how = "status_change", "turn end landed");
+    held.alert.map(|alert| alert.event(id))
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent runtime flags on one record; a state machine would not describe them"
@@ -280,10 +329,10 @@ pub struct SessionRecord {
     /// hook-driven state.
     pub last_hook_time: Option<u128>,
     /// True once a mapped hook event has been applied to this session. While
-    /// true, hook signals own every promotion into `Working` and
-    /// `AwaitingInput`, and the PTY classifier only demotes. Set by the first
-    /// accepted signal from [`crate::hook_status::apply_signal`]; cleared by a
-    /// daemon restart's rebuild of the record (see [`Self::last_hook_time`])
+    /// true, a plain shell runs the screen check in place of its classifier.
+    /// Set by the first accepted signal from
+    /// [`crate::hook_status::apply_signal`]; cleared by a daemon restart's
+    /// rebuild of the record (see [`Self::last_hook_time`])
     /// and by a plain shell's own `SessionEnd`, after which the classifier
     /// owns its status again. Runtime-only: neither mirrored into the sidecar
     /// nor sent on the wire.
@@ -303,11 +352,18 @@ pub struct SessionRecord {
     pub summary: Option<protocol::SessionSummary>,
     /// True while the session is `Idle` but the main agent's last `Stop`
     /// reported background work still running; copied into
-    /// [`SessionSnapshot::background`]. Set by that `Stop`, cleared by any
-    /// status change ([`crate::pty_state::apply_status`]) and by the writers
-    /// that set a terminal status directly. Runtime-only: a reattached or
-    /// rebuilt record starts with it false.
+    /// [`SessionSnapshot::background`]. Set by that `Stop`, or with the `Idle`
+    /// of the turn end it held, cleared by any status change
+    /// ([`crate::pty_state::apply_status`]) and by the writers that set a
+    /// terminal status directly. Runtime-only: a reattached or rebuilt record
+    /// starts with it false.
     pub background: bool,
+    /// The main `Stop` whose `Idle` is held while the status stays `Working`;
+    /// `None` otherwise. Every status change settles it in the registry
+    /// update: a move to `Idle` keeps its flag and alert, unless the writer
+    /// took it first. Runtime-only: neither mirrored into the sidecar nor
+    /// sent on the wire, so a restart loses it.
+    pub turn_end: Option<TurnEnd>,
     /// The background tasks and one-shot wakeups the main agent's last `Stop`
     /// reported still running, with the time each was first seen. Each such
     /// `Stop` replaces the lists; nothing else writes them. Runtime-only:
@@ -1082,6 +1138,16 @@ impl SessionRegistry {
         self.update_from_if_changed(id, None, f)
     }
 
+    /// [`Self::update_if_changed`], where `f` answers `None` when it changed
+    /// nothing, else the event, if any, to send right after the
+    /// `SessionUpdated`, decided under the same record lock.
+    pub fn update_if_changed_then<F>(&self, id: &str, f: F) -> bool
+    where
+        F: FnOnce(&mut SessionRecord) -> Option<Option<SessionEvent>>,
+    {
+        self.update_inner(id, None, f)
+    }
+
     /// The owner answered session `id`'s pending prompt: a hook-driven record
     /// leaves `AwaitingInput` at once, with no settle window, and drops its
     /// pending input. The test and the clear share one registry update, so a
@@ -1161,7 +1227,7 @@ impl SessionRegistry {
             let mut guard = lock(&arc);
             let was_error = guard.status == SessionStatus::Error;
             let was_status = guard.status;
-            let Some(follow_up) = f(&mut guard) else {
+            let Some(mut follow_up) = f(&mut guard) else {
                 return true;
             };
             let mut status_change = None;
@@ -1170,6 +1236,8 @@ impl SessionRegistry {
                 guard.status_since = Some(at);
                 guard.status_seq = guard.status_seq.saturating_add(1);
                 status_change = Some((at, guard.status));
+                let alert = settle_turn_end(&mut guard, id);
+                follow_up = follow_up.or(alert);
                 if self.turn_ended_without_stop_line(id, was_status, guard.status) {
                     guard.drop_provisional_line();
                 }
@@ -1714,6 +1782,7 @@ impl SessionRegistry {
             last_hook_time: None,
             hook_driven: false,
             background: false,
+            turn_end: None,
             last_assistant_message: None,
             summary: self.restore_summary(&meta.session_id),
             busy_excluded: meta.busy_excluded,
@@ -1801,6 +1870,7 @@ impl SessionRegistry {
             last_hook_time: None,
             hook_driven: false,
             background: false,
+            turn_end: None,
             last_assistant_message: None,
             summary: self.restore_summary(&meta.session_id),
             busy_excluded: meta.busy_excluded,
@@ -1865,6 +1935,7 @@ impl SessionRegistry {
             last_hook_time: None,
             hook_driven: false,
             background: false,
+            turn_end: None,
             last_assistant_message: None,
             summary: self.restore_summary(&meta.session_id),
             busy_excluded: meta.busy_excluded,
@@ -1957,6 +2028,7 @@ mod tests {
             last_hook_time: None,
             hook_driven: false,
             background: false,
+            turn_end: None,
             last_assistant_message: None,
             summary: None,
             busy_excluded: false,
@@ -1991,6 +2063,39 @@ mod tests {
             }),
             extra_env: Vec::new(),
         }
+    }
+
+    #[test]
+    fn any_status_change_clears_a_held_turn_end() {
+        let dirs = scratch_dirs("turn-end-choke");
+        let registry = SessionRegistry::new(dirs.clone());
+        for status in [
+            SessionStatus::Idle,
+            SessionStatus::AwaitingInput,
+            SessionStatus::Stopped,
+            SessionStatus::Error,
+        ] {
+            let mut rec = record("s1");
+            rec.status = SessionStatus::Working;
+            rec.turn_end = Some(TurnEnd {
+                event_time: 2,
+                background: true,
+                alert: None,
+                held_at: tokio::time::Instant::now(),
+            });
+            registry.insert(rec);
+            registry.update("s1", |rec| rec.pending_input = None);
+            let held = |registry: &SessionRegistry| {
+                registry
+                    .get("s1")
+                    .is_some_and(|rec| lock(&rec).turn_end.is_some())
+            };
+            assert!(held(&registry), "an update that keeps the status keeps it");
+            registry.update("s1", |rec| rec.status = status);
+            assert!(!held(&registry), "{status:?} left it held");
+            registry.remove("s1");
+        }
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]
