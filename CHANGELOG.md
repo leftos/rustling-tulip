@@ -4,6 +4,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.7.2-alpha
+
 ### Fixed
 
 - A Finished toast no longer fires when a Stop hook sends the agent back to work; the session stays Working until its hooks finish.
