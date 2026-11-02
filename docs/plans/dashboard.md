@@ -454,6 +454,8 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 - [ ] DB.7 Show each session's Linear issue. `crates/daemon/src/dashboard/linear.rs` (new: detection from the branch and first prompt, the issues Done rule, the sync age), `crates/daemon/src/linear.rs` (RT-133's client: the detected identifiers join its refresh set; release done and total counts in its batched query), `crates/daemon/src/dashboard/mod.rs` (the identifier on facts, `DayTotals.releases`).
 
   Proof: detection unit tests (a branch, a prompt, a non-team key like `UTF-8` ignored, the branch winning over the prompt); a fake-transport test that a detected identifier is fetched and refreshed and that release counts parse. Waits on RT-133's LL.1 to LL.3, DB.5.
+
+  The branch slice is built: `issue_from_branch` fills the facts' `issue`. Prompt detection and the Linear data are RT-735.
 - [ ] DB.8 Show gate holds and queue places under the session that runs them. `crates/daemon/src/dashboard/gates.rs` (new: place each claim and ticket of the daemon's gate state by process ancestry and command match), `crates/daemon/src/dashboard/mod.rs`, `crates/daemon/src/dashboard/now.rs` (the gate rule).
 
   Proof: placement unit tests over a fake process table and claims (holder under its session, under its subagent by command, a queued ticket's number, no gate state gives no rows). Waits on DB.5 and the daemon's gate reader (RT-55's GD.1 to GD.4, as RT-64 re-cuts them).

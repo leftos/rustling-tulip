@@ -11,6 +11,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Finished toasts play the app's own sound instead of Windows', with their own chime, .wav or .ogg, or none in Settings › Notifications.
 - Pick each toast's sound from a list of chimes in Settings › Notifications; the defaults are new, softer mallet chimes.
 - The Dashboard header shows today's cost, tokens and commits across every session, kept through daemon restarts.
+- The Dashboard's Issue column shows the Linear key named in a session's branch.
 
 ### Fixed
 

@@ -10,6 +10,7 @@
 //! first message holds every listed session's facts.
 
 pub(crate) mod ledger;
+pub(crate) mod linear;
 pub(crate) mod now;
 pub(crate) mod pr;
 pub(crate) mod tracks;
@@ -34,6 +35,7 @@ use tracing::warn;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 
+use self::linear::issue_from_branch;
 use self::now::{NowInput, now_line, one_line, running_text, subagent_name};
 
 /// How often the facts are read while a Dashboard is watched.
@@ -134,6 +136,8 @@ struct Listed {
     repo: String,
     /// Its display label.
     label: String,
+    /// Its first member's branch, which may name its issue.
+    branch: String,
     /// Its members' worktree folders, whose commits the day ledger counts.
     folders: Vec<PathBuf>,
     /// Whether it resumed abandoned sessions in place, so its figures already
@@ -592,6 +596,10 @@ fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
                     });
             let repo = lane_name(&record);
             let label = record.label.clone();
+            let branch = record
+                .members
+                .first()
+                .map_or_else(String::new, |member| member.branch.clone());
             let folders = record
                 .members
                 .iter()
@@ -612,6 +620,7 @@ fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
                     .unwrap_or_default(),
                 repo,
                 label,
+                branch,
                 folders,
                 resumed: !record.resumed_from.is_empty(),
             })
@@ -782,6 +791,7 @@ fn build_facts(
     };
     let mut facts = empty_facts(&session.id);
     facts.now = now_line(&input, now);
+    facts.issue = issue_from_branch(&session.branch);
     let Some(snapshot) = snapshot else {
         return facts;
     };
@@ -1123,6 +1133,7 @@ mod tests {
             extra_env: Vec::new(),
             repo: "repo".to_owned(),
             label: "s1".to_owned(),
+            branch: "main".to_owned(),
             folders: Vec::new(),
             resumed: false,
         }

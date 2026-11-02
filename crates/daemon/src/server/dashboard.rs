@@ -336,6 +336,7 @@ mod tests {
         ScratchDir, drain, git_init, git_ok, hello, idle_record, loopback_ws_client, next_message,
         test_hub, ws_next, ws_send,
     };
+    use crate::session::SessionRecord;
 
     /// One test connection: its id and the queue its messages land on.
     struct Conn {
@@ -431,8 +432,22 @@ mod tests {
     /// work for it.
     const NOT_A_REPO: &str = "C:/work/repo";
 
+    /// A listed session record `id` on conversation `conversation`, its one
+    /// member on branch `branch` with its worktree at `worktree`.
+    fn member_record(id: &str, conversation: &str, branch: &str, worktree: &str) -> SessionRecord {
+        let mut record = idle_record(id);
+        record.conversation_id = Some(conversation.to_owned());
+        record.members = vec![SessionMember {
+            repo_id: "r1".to_owned(),
+            repo_name: "repo".to_owned(),
+            branch: branch.to_owned(),
+            worktree_path: worktree.to_owned(),
+        }];
+        record
+    }
+
     /// Add listed session `id` on conversation `conversation`, its reading
-    /// carrying `tokens_in`, its one member's worktree at `worktree`.
+    /// carrying `tokens_in`, its one member's worktree at `worktree` on `main`.
     fn add_session(
         hub: &Hub,
         script: &Script,
@@ -441,16 +456,23 @@ mod tests {
         tokens_in: u64,
         worktree: &str,
     ) {
-        let mut record = idle_record(id);
-        record.conversation_id = Some(conversation.to_owned());
-        record.members = vec![SessionMember {
-            repo_id: "r1".to_owned(),
-            repo_name: "repo".to_owned(),
-            branch: "main".to_owned(),
-            worktree_path: worktree.to_owned(),
-        }];
-        hub.sessions.insert(record);
+        hub.sessions
+            .insert(member_record(id, conversation, "main", worktree));
         script.set(conversation, tokens(tokens_in));
+    }
+
+    /// Add listed session `id` whose one member sits on `branch`, its worktree
+    /// not a repository.
+    fn add_session_on_branch(
+        hub: &Hub,
+        script: &Script,
+        id: &str,
+        conversation: &str,
+        branch: &str,
+    ) {
+        hub.sessions
+            .insert(member_record(id, conversation, branch, NOT_A_REPO));
+        script.set(conversation, tokens(1));
     }
 
     fn tokens(tokens_in: u64) -> ActivitySnapshot {
@@ -488,6 +510,23 @@ mod tests {
             "the first message carries a fresh reading"
         );
         assert_eq!(script.reads(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_sessions_branch_names_its_issue_in_its_facts() {
+        let (hub, _scratch, script) = scripted_hub("dash-issue");
+        add_session_on_branch(&hub, &script, "s1", "conv1", "rt-42-x");
+        let mut c1 = conn(1);
+
+        send(&hub, &c1, ON).await;
+
+        let messages = facts_messages(&mut c1);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert_eq!(
+            messages[0][0].issue,
+            Some("RT-42".to_owned()),
+            "the first member's branch names the issue"
+        );
     }
 
     #[tokio::test]
