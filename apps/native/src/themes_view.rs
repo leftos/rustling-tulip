@@ -432,7 +432,7 @@ impl RootView {
             true
         } else {
             let typing = self.settings_typing(window, cx);
-            self.on_settings_key(ks, window, cx)
+            self.on_settings_key(ks, event.is_held, window, cx)
                 || self.on_editor_key(ks, window, cx)
                 || (!typing && self.on_appearance_key(ks, window, cx))
         };

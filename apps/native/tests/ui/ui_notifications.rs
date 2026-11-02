@@ -13,7 +13,7 @@ use gpui::{TestAppContext, px};
 use protocol::{
     AlertKind, AttentionReason, DaemonMessage, KeyState, SessionSnapshot, SummarySource, TabEntry,
 };
-use rustling_tulip_native::{ClipSource, NotifyState};
+use rustling_tulip_native::{BundledSound, ClipSource, NotifyKind, NotifyState};
 use std::time::Duration;
 use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, summarizer_status, tab};
 
@@ -354,9 +354,7 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
 
     assert_eq!(settings_focus(&mut h), Some("settings-notify-finished"));
     for stop in [
-        "settings-finished-sound-off",
-        "settings-finished-sound-default",
-        "settings-finished-sound-custom",
+        "settings-finished-sound-field",
         "settings-finished-sound-play",
         "settings-notify-skip-on-screen",
         "settings-notify-skip-focused",
@@ -773,7 +771,7 @@ fn a_needs_answer_alert_plays_the_needs_you_sound(cx: &mut TestAppContext) {
     );
     assert_eq!(
         h.sounds(),
-        [ClipSource::Bundled],
+        [ClipSource::Bundled(BundledSound::MalletRisingFifth)],
         "an answer request plays the Needs you sound"
     );
 }
@@ -1054,7 +1052,7 @@ fn the_needs_you_sound_plays_once_for_a_new_item(cx: &mut TestAppContext) {
     assert_eq!(h.notified().len(), 1, "Needs you is raised");
     assert_eq!(
         h.sounds(),
-        [ClipSource::Bundled],
+        [ClipSource::Bundled(BundledSound::MalletRisingFifth)],
         "no saved choice plays the default"
     );
 
@@ -1063,7 +1061,10 @@ fn the_needs_you_sound_plays_once_for_a_new_item(cx: &mut TestAppContext) {
     assert_eq!(h.notified().len(), 2, "Finished is raised");
     assert_eq!(
         h.sounds(),
-        [ClipSource::Bundled, ClipSource::BundledFinished],
+        [
+            ClipSource::Bundled(BundledSound::MalletRisingFifth),
+            ClipSource::Bundled(BundledSound::MalletFallingFifth)
+        ],
         "Finished plays the Finished sound"
     );
 
@@ -1071,9 +1072,9 @@ fn the_needs_you_sound_plays_once_for_a_new_item(cx: &mut TestAppContext) {
     assert_eq!(
         h.sounds(),
         [
-            ClipSource::Bundled,
-            ClipSource::BundledFinished,
-            ClipSource::Bundled
+            ClipSource::Bundled(BundledSound::MalletRisingFifth),
+            ClipSource::Bundled(BundledSound::MalletFallingFifth),
+            ClipSource::Bundled(BundledSound::MalletRisingFifth)
         ],
         "the next Needs you item plays again"
     );
@@ -1149,7 +1150,10 @@ fn a_missing_custom_file_falls_back_to_the_default(cx: &mut TestAppContext) {
     );
     let mut h = opened(cx, &dir);
     h.send(attention("s1", AttentionReason::AwaitingInput));
-    assert_eq!(h.sounds(), [ClipSource::Bundled]);
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled(BundledSound::MalletRisingFifth)]
+    );
 }
 
 /// Asserts the Needs you toast `s1` raises under `sound` is raised silent.
@@ -1195,7 +1199,10 @@ fn a_finished_toast_is_raised_silent_and_plays_the_finished_sound(cx: &mut TestA
         [true],
         "a Finished toast is raised silent"
     );
-    assert_eq!(h.sounds(), [ClipSource::BundledFinished]);
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled(BundledSound::MalletFallingFifth)]
+    );
 }
 
 #[gpui::test]
@@ -1225,7 +1232,7 @@ fn the_finished_and_needs_you_sounds_are_chosen_apart(cx: &mut TestAppContext) {
     grace(&mut h);
     assert_eq!(
         h.sounds(),
-        [ClipSource::BundledFinished],
+        [ClipSource::Bundled(BundledSound::MalletFallingFifth)],
         "Finished plays its own sound"
     );
 }
@@ -1243,25 +1250,373 @@ fn a_held_finished_toast_plays_the_finished_sound_when_it_expires(cx: &mut TestA
     h.advance(Duration::from_secs(12));
     assert_eq!(h.notified().len(), 1, "the fallback is raised");
     assert_eq!(h.notified_silent(), [true], "and is raised silent");
-    assert_eq!(h.sounds(), [ClipSource::BundledFinished]);
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled(BundledSound::MalletFallingFifth)]
+    );
+}
+
+/// The Needs you row's sound dropdown.
+const NEEDS_YOU_FIELD: &str = "settings-needs-you-sound-field";
+/// The Finished row's sound dropdown.
+const FINISHED_FIELD: &str = "settings-finished-sound-field";
+/// The open sound list's last entry, which asks for a file.
+const CUSTOM_OPTION: &str = "settings-sound-option-custom";
+
+/// Opens `field`'s sound list and presses `option`, scrolled into view.
+fn choose_sound(h: &mut Harness<'_>, field: &str, option: &str) {
+    h.click_on(field);
+    h.scroll_into_view("settings-sound-list", option);
+    h.click_on(option);
+    h.cx.run_until_parked();
+}
+
+/// Which row's sound list is open.
+fn open_list(h: &mut Harness<'_>) -> Option<NotifyKind> {
+    h.root(|root, _| root.open_sound_list())
+}
+
+/// Asserts the Needs you field shows `shown` when `sound` is saved.
+fn assert_needs_you_field_shows(cx: &mut TestAppContext, sound: &serde_json::Value, shown: &str) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "needs_you_sound": sound }));
+    let mut h = on_notifications_tab(cx, &dir);
+    assert!(
+        h.bounds(&format!("{NEEDS_YOU_FIELD}-text={shown}"))
+            .origin
+            .x
+            >= px(0.0),
+        "{sound} shows as {shown}"
+    );
+}
+
+#[gpui::test]
+fn an_off_sound_shows_as_off(cx: &mut TestAppContext) {
+    assert_needs_you_field_shows(cx, &serde_json::json!("off"), "Off");
+}
+
+#[gpui::test]
+fn the_default_sound_shows_as_the_default_entry(cx: &mut TestAppContext) {
+    assert_needs_you_field_shows(
+        cx,
+        &serde_json::json!("default"),
+        "Mallet, rising fifth (default)",
+    );
+}
+
+#[gpui::test]
+fn the_rows_own_default_saved_as_a_sound_shows_as_the_default_entry(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(
+        &dir,
+        &serde_json::json!({ "needs_you_sound": { "bundled": "mallet_rising_fifth" } }),
+    );
+    let mut h = on_notifications_tab(cx, &dir);
+    assert!(
+        h.bounds("settings-needs-you-sound-field-text=Mallet, rising fifth (default)")
+            .origin
+            .x
+            >= px(0.0),
+        "the closed field shows the default entry"
+    );
+    h.click_on(NEEDS_YOU_FIELD);
+    assert!(
+        h.bounds("settings-sound-option-mallet_rising_fifth-text=Mallet, rising fifth (default)")
+            .origin
+            .x
+            >= px(0.0),
+        "the list marks the row's default"
+    );
+    assert!(
+        h.bounds("settings-sound-option-mallet_rising_fifth-chosen")
+            .origin
+            .x
+            >= px(0.0),
+        "and that entry is the chosen one"
+    );
+}
+
+#[gpui::test]
+fn the_other_rows_default_shows_as_that_sound_with_no_suffix(cx: &mut TestAppContext) {
+    assert_needs_you_field_shows(
+        cx,
+        &serde_json::json!({ "bundled": "mallet_falling_fifth" }),
+        "Mallet, falling fifth",
+    );
+}
+
+#[gpui::test]
+fn a_custom_sound_shows_as_custom_file(cx: &mut TestAppContext) {
+    assert_needs_you_field_shows(
+        cx,
+        &serde_json::json!({ "custom": "ding.wav" }),
+        "Custom file…",
+    );
+}
+
+#[gpui::test]
+fn choosing_a_sound_writes_it_and_play_previews_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    choose_sound(
+        &mut h,
+        NEEDS_YOU_FIELD,
+        "settings-sound-option-bell_rising_fifth",
+    );
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "bundled": "bell_rising_fifth" })
+    );
+    assert_eq!(open_list(&mut h), None, "a choice closes the list");
+    h.click_on("settings-needs-you-sound-play");
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled(BundledSound::BellRisingFifth)]
+    );
+}
+
+#[gpui::test]
+fn the_sound_list_is_walked_by_keys(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    h.keys("tab tab tab tab tab tab");
+    assert_eq!(settings_focus(&mut h), Some(FINISHED_FIELD));
+    h.keys("enter");
+    assert_eq!(open_list(&mut h), Some(NotifyKind::Finished));
+    h.keys("down enter");
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["finished_sound"],
+        serde_json::json!({ "bundled": "mallet_rising_third" }),
+        "Down moves off the chosen entry and Enter chooses"
+    );
+    assert_eq!(open_list(&mut h), None);
+    assert_eq!(
+        settings_focus(&mut h),
+        Some(FINISHED_FIELD),
+        "the field keeps the keyboard"
+    );
+    h.keys("space up enter");
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["finished_sound"],
+        "default",
+        "Space opens the list and Up moves back to the row's default"
+    );
+}
+
+#[gpui::test]
+fn choosing_the_default_entry_writes_default(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(
+        &dir,
+        &serde_json::json!({ "finished_sound": { "bundled": "bong" } }),
+    );
+    let mut h = on_notifications_tab(cx, &dir);
+    choose_sound(
+        &mut h,
+        FINISHED_FIELD,
+        "settings-sound-option-mallet_falling_fifth",
+    );
+    assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "default");
+    choose_sound(
+        &mut h,
+        NEEDS_YOU_FIELD,
+        "settings-sound-option-mallet_falling_fifth",
+    );
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "bundled": "mallet_falling_fifth" }),
+        "the Finished default is an ordinary sound on the Needs you row"
+    );
+}
+
+#[gpui::test]
+fn esc_closes_the_sound_list_and_leaves_settings_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    h.click_on(NEEDS_YOU_FIELD);
+    assert_eq!(open_list(&mut h), Some(NotifyKind::NeedsYou));
+    h.keys("escape");
+    assert_eq!(open_list(&mut h), None);
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Settings stays open"
+    );
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "with the list closed, Esc closes Settings"
+    );
+}
+
+#[gpui::test]
+fn a_held_key_neither_opens_nor_closes_a_sound_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    h.keys("tab tab tab");
+    assert_eq!(settings_focus(&mut h), Some(NEEDS_YOU_FIELD));
+    h.held("enter");
+    assert_eq!(open_list(&mut h), None, "a held Enter opens nothing");
+
+    h.keys("enter");
+    h.held("down");
+    h.held("enter");
+    assert_eq!(
+        open_list(&mut h),
+        Some(NotifyKind::NeedsYou),
+        "a held Enter chooses nothing"
+    );
+    h.keys("enter");
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "bundled": "mallet_falling_fifth" }),
+        "a held Down still moves, and only the press chose"
+    );
+
+    h.keys("enter");
+    h.held("escape");
+    assert_eq!(
+        open_list(&mut h),
+        Some(NotifyKind::NeedsYou),
+        "a held Esc closes nothing"
+    );
+    h.keys("escape");
+    assert_eq!(open_list(&mut h), None);
+    h.held("escape");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "the repeat of the Esc that closed the list leaves Settings open"
+    );
+}
+
+#[gpui::test]
+fn leaving_the_notifications_tab_closes_the_sound_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(
+        &dir,
+        &serde_json::json!({ "needs_you_sound": { "bundled": "bong" } }),
+    );
+    let mut h = on_notifications_tab(cx, &dir);
+    h.click_on(NEEDS_YOU_FIELD);
+    assert_eq!(open_list(&mut h), Some(NotifyKind::NeedsYou));
+    h.root_update(|root, window, cx| root.show_settings_tab("General", window, cx));
+    assert_eq!(open_list(&mut h), None);
+    h.keys("down enter");
+    assert_eq!(
+        h.root(|root, _| root.settings_tab()),
+        "Notifications",
+        "Down is the tab list's again"
+    );
+    assert_eq!(open_list(&mut h), None, "and no hidden list came back");
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "bundled": "bong" }),
+        "Enter saved no hidden highlight"
+    );
+}
+
+#[gpui::test]
+fn tab_closes_the_sound_list_and_walks_on(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    h.keys("tab tab tab enter");
+    assert_eq!(open_list(&mut h), Some(NotifyKind::NeedsYou));
+    h.keys("tab");
+    assert_eq!(open_list(&mut h), None);
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-needs-you-sound-play")
+    );
+}
+
+#[gpui::test]
+fn up_and_down_stop_at_the_ends_of_the_sound_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    h.keys("tab tab tab enter up up up enter");
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        "off",
+        "Up stops on the first entry"
+    );
+    let chosen = dir.path().join("ding.wav");
+    h.set_picked_file(chosen.to_str());
+    h.keys("enter");
+    h.keys("down ".repeat(20).trim_end());
+    h.keys("enter");
+    h.cx.run_until_parked();
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "custom": chosen }),
+        "Down stops on the last entry"
+    );
+}
+
+#[gpui::test]
+fn a_short_window_keeps_the_whole_sound_list_on_screen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    let height = px(460.0);
+    h.cx.simulate_resize(gpui::size(px(1000.0), height));
+    h.click_on(NEEDS_YOU_FIELD);
+    let list = h.bounds("settings-sound-list");
+    assert!(
+        list.top() >= px(0.0) && list.bottom() <= height,
+        "the list stays inside the window: {list:?}"
+    );
+    h.scroll_into_view("settings-sound-list", CUSTOM_OPTION);
+    let last = h.bounds(CUSTOM_OPTION);
+    assert!(
+        last.top() >= px(0.0) && last.bottom() <= height,
+        "the last row scrolls into the window: {last:?}"
+    );
+    let chosen = dir.path().join("ding.wav");
+    h.set_picked_file(chosen.to_str());
+    h.click_on(CUSTOM_OPTION);
+    h.cx.run_until_parked();
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["needs_you_sound"],
+        serde_json::json!({ "custom": chosen }),
+        "and a press reaches it"
+    );
+}
+
+#[gpui::test]
+fn opening_one_sound_list_closes_the_other(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    // The Needs you list opens over the Finished field, so the Finished list
+    // opens first: its own list leaves the Needs you field to click.
+    h.click_on(FINISHED_FIELD);
+    assert_eq!(open_list(&mut h), Some(NotifyKind::Finished));
+    h.click_on(NEEDS_YOU_FIELD);
+    assert_eq!(open_list(&mut h), Some(NotifyKind::NeedsYou));
+    h.click_on(NEEDS_YOU_FIELD);
+    assert_eq!(open_list(&mut h), None, "a second click closes it");
+    h.click_on(FINISHED_FIELD);
+    h.click_on("settings-tab-notifications");
+    assert_eq!(open_list(&mut h), None, "a press outside closes it");
 }
 
 #[gpui::test]
 fn choosing_off_default_and_custom_writes_the_sound_key(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = on_notifications_tab(cx, &dir);
-    h.click_on("settings-needs-you-sound-off");
+    choose_sound(&mut h, NEEDS_YOU_FIELD, "settings-sound-option-off");
     assert_eq!(saved_ui(&dir)["notifications"]["needs_you_sound"], "off");
     // gpui keeps a selector's last bounds once it stops being drawn, so the
     // Tab ring says whether Play is there.
-    h.keys("tab tab tab");
+    h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-notify-finished"),
         "no Play to preview while the sound is off"
     );
 
-    h.click_on("settings-needs-you-sound-default");
+    choose_sound(
+        &mut h,
+        NEEDS_YOU_FIELD,
+        "settings-sound-option-mallet_rising_fifth",
+    );
     assert_eq!(
         saved_ui(&dir)["notifications"]["needs_you_sound"],
         "default"
@@ -1269,8 +1624,7 @@ fn choosing_off_default_and_custom_writes_the_sound_key(cx: &mut TestAppContext)
 
     let chosen = dir.path().join("ding.wav");
     h.set_picked_file(chosen.to_str());
-    h.click_on("settings-needs-you-sound-custom");
-    h.cx.run_until_parked();
+    choose_sound(&mut h, NEEDS_YOU_FIELD, CUSTOM_OPTION);
     assert_eq!(
         h.file_filters()
             .last()
@@ -1296,8 +1650,7 @@ fn choosing_off_default_and_custom_writes_the_sound_key(cx: &mut TestAppContext)
     assert!(h.bounds("settings-needs-you-sound-problem").origin.x >= px(0.0));
 
     h.set_picked_file(None);
-    h.click_on("settings-needs-you-sound-custom");
-    h.cx.run_until_parked();
+    choose_sound(&mut h, NEEDS_YOU_FIELD, CUSTOM_OPTION);
     assert_eq!(
         saved_ui(&dir)["notifications"]["needs_you_sound"],
         serde_json::json!({ "custom": chosen }),
@@ -1311,31 +1664,37 @@ fn play_previews_the_chosen_sound_once(cx: &mut TestAppContext) {
     let mut h = on_notifications_tab(cx, &dir);
     assert!(h.sounds().is_empty(), "opening the tab plays nothing");
     h.click_on("settings-needs-you-sound-play");
-    assert_eq!(h.sounds(), [ClipSource::Bundled]);
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled(BundledSound::MalletRisingFifth)]
+    );
 }
 
 #[gpui::test]
 fn choosing_off_default_and_custom_writes_the_finished_sound_key(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = on_notifications_tab(cx, &dir);
-    h.click_on("settings-finished-sound-off");
+    choose_sound(&mut h, FINISHED_FIELD, "settings-sound-option-off");
     assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "off");
     // gpui keeps a selector's last bounds once it stops being drawn, so the
     // Tab ring says whether Play is there.
-    h.keys("tab tab tab");
+    h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-notify-skip-on-screen"),
         "no Play to preview while the sound is off, so the skip choices follow"
     );
 
-    h.click_on("settings-finished-sound-default");
+    choose_sound(
+        &mut h,
+        FINISHED_FIELD,
+        "settings-sound-option-mallet_falling_fifth",
+    );
     assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "default");
 
     let chosen = dir.path().join("done.wav");
     h.set_picked_file(chosen.to_str());
-    h.click_on("settings-finished-sound-custom");
-    h.cx.run_until_parked();
+    choose_sound(&mut h, FINISHED_FIELD, CUSTOM_OPTION);
     assert_eq!(
         h.file_filters()
             .last()
@@ -1361,8 +1720,7 @@ fn choosing_off_default_and_custom_writes_the_finished_sound_key(cx: &mut TestAp
     assert!(h.bounds("settings-finished-sound-problem").origin.x >= px(0.0));
 
     h.set_picked_file(None);
-    h.click_on("settings-finished-sound-custom");
-    h.cx.run_until_parked();
+    choose_sound(&mut h, FINISHED_FIELD, CUSTOM_OPTION);
     assert_eq!(
         saved_ui(&dir)["notifications"]["finished_sound"],
         serde_json::json!({ "custom": chosen }),
@@ -1376,5 +1734,8 @@ fn play_previews_the_finished_sound_once(cx: &mut TestAppContext) {
     let mut h = on_notifications_tab(cx, &dir);
     assert!(h.sounds().is_empty(), "opening the tab plays nothing");
     h.click_on("settings-finished-sound-play");
-    assert_eq!(h.sounds(), [ClipSource::BundledFinished]);
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled(BundledSound::MalletFallingFifth)]
+    );
 }

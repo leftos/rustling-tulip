@@ -672,7 +672,9 @@ The Dashboard tab, after Notifications, sets each host's Dashboard summaries (`s
 
 The Notifications tab reads, top to bottom: a `Needs you` toggle, its `Needs you sound` row, a `Finished` toggle, its `Finished sound` row, and a `Skip notifications when` row: `Session on screen` (the default), `Window focused` or `Never`.
 
-Each sound row offers `Off`, `Default` or `Custom…` with the chosen `.wav` or `.ogg` path, and a `Play` preview hidden while Off. A custom file over 5 MB, or one that cannot be read or decoded, plays that kind's default and shows why in red. The Needs you default is the bundled `needs-you.ogg`, the Finished default `finished.ogg` (the same two tones in reverse).
+Each sound row is one dropdown listing `Off`, every bundled sound (`BundledSound` in `sound.rs`, sources in `apps/native/assets/sounds/README.md`) and `Custom file…`, with the chosen `.wav` or `.ogg` path under it and a `Play` preview hidden while Off. The list opens below its field at a fixed 240 px and scrolls, one list at a time; Enter or Space opens and chooses, Up and Down move, Esc closes the list and leaves Settings open, and Tab closes it and walks on.
+
+The row's default carries ` (default)`, and choosing it saves `"default"`, so a later change of default follows; any other sound saves its id. The Needs you default is `Mallet, rising fifth`, the Finished default `Mallet, falling fifth`. A custom file over 5 MB, or one that cannot be read or decoded, plays that kind's default and shows why in red.
 
 A sound plays once per toast the toggle and skip rule let through, on its own thread through `sound.rs`, and not while Windows holds the toast back (the app's notifications off, Do Not Disturb or Focus Assist, a presentation or a full-screen app). A summarizer alert worded "needs your answer" plays the Needs you sound; every other Finished toast plays the Finished sound.
 

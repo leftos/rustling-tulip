@@ -1,20 +1,17 @@
-//! The toast sounds: which clip a choice plays, the bundled clip each kind
-//! of toast falls back to when a custom file is missing, oversized or
-//! undecodable, and the sounder that plays a clip on this PC's default
-//! output device, off the UI thread, one at a time with at most one waiting.
+//! The toast sounds: the sounds bundled with the client, which clip a choice
+//! plays, the default each kind of toast falls back to when a custom file is
+//! missing, oversized or undecodable, and the sounder that plays a clip on
+//! this PC's default output device, off the UI thread, one at a time with at
+//! most one waiting.
 
 use std::io::{Cursor, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
+use serde::{Deserialize, Serialize};
+
 use crate::sidebar::ToastSound;
-
-/// The bundled Needs you chime (`assets/sounds/README.md`).
-const BUNDLED_NEEDS_YOU: &[u8] = include_bytes!("../assets/sounds/needs-you.ogg");
-
-/// The bundled Finished chime (`assets/sounds/README.md`).
-const BUNDLED_FINISHED: &[u8] = include_bytes!("../assets/sounds/finished.ogg");
 
 /// The file types the Custom choice's picker offers.
 pub(crate) const SOUND_EXTENSIONS: [&str; 2] = ["wav", "ogg"];
@@ -24,6 +21,119 @@ const MAX_CUSTOM_BYTES: u64 = 5 * 1024 * 1024;
 
 /// A sound's decoder, over the whole encoded file held in memory.
 type Sound = rodio::Decoder<Cursor<Arc<[u8]>>>;
+
+/// A sound bundled with the client (`assets/sounds/README.md`), saved by its
+/// [`Self::id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BundledSound {
+    MalletRisingFifth,
+    MalletFallingFifth,
+    MalletRisingThird,
+    BellRisingFifth,
+    BellFallingFifth,
+    Question1,
+    Question2,
+    Question3,
+    Confirm1,
+    Confirm2,
+    Confirm3,
+    GlassBright,
+    GlassShort,
+    Bong,
+    ClassicRising,
+    ClassicFalling,
+}
+
+impl BundledSound {
+    /// Every bundled sound, in the order Settings lists them.
+    pub(crate) const ALL: [Self; 16] = [
+        Self::MalletRisingFifth,
+        Self::MalletFallingFifth,
+        Self::MalletRisingThird,
+        Self::BellRisingFifth,
+        Self::BellFallingFifth,
+        Self::Question1,
+        Self::Question2,
+        Self::Question3,
+        Self::Confirm1,
+        Self::Confirm2,
+        Self::Confirm3,
+        Self::GlassBright,
+        Self::GlassShort,
+        Self::Bong,
+        Self::ClassicRising,
+        Self::ClassicFalling,
+    ];
+
+    /// The sound's saved id.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::MalletRisingFifth => "mallet_rising_fifth",
+            Self::MalletFallingFifth => "mallet_falling_fifth",
+            Self::MalletRisingThird => "mallet_rising_third",
+            Self::BellRisingFifth => "bell_rising_fifth",
+            Self::BellFallingFifth => "bell_falling_fifth",
+            Self::Question1 => "question1",
+            Self::Question2 => "question2",
+            Self::Question3 => "question3",
+            Self::Confirm1 => "confirm1",
+            Self::Confirm2 => "confirm2",
+            Self::Confirm3 => "confirm3",
+            Self::GlassBright => "glass_bright",
+            Self::GlassShort => "glass_short",
+            Self::Bong => "bong",
+            Self::ClassicRising => "classic_rising",
+            Self::ClassicFalling => "classic_falling",
+        }
+    }
+
+    /// The sound's name in Settings.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MalletRisingFifth => "Mallet, rising fifth",
+            Self::MalletFallingFifth => "Mallet, falling fifth",
+            Self::MalletRisingThird => "Mallet, rising third",
+            Self::BellRisingFifth => "Bell, rising fifth",
+            Self::BellFallingFifth => "Bell, falling fifth",
+            Self::Question1 => "Question 1",
+            Self::Question2 => "Question 2",
+            Self::Question3 => "Question 3",
+            Self::Confirm1 => "Confirm 1",
+            Self::Confirm2 => "Confirm 2",
+            Self::Confirm3 => "Confirm 3",
+            Self::GlassBright => "Glass, bright",
+            Self::GlassShort => "Glass, short",
+            Self::Bong => "Bong",
+            Self::ClassicRising => "Classic, rising",
+            Self::ClassicFalling => "Classic, falling",
+        }
+    }
+
+    /// The sound's encoded file.
+    const fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::MalletRisingFifth => include_bytes!("../assets/sounds/mallet-rising-fifth.ogg"),
+            Self::MalletFallingFifth => include_bytes!("../assets/sounds/mallet-falling-fifth.ogg"),
+            Self::MalletRisingThird => include_bytes!("../assets/sounds/mallet-rising-third.ogg"),
+            Self::BellRisingFifth => include_bytes!("../assets/sounds/bell-rising-fifth.ogg"),
+            Self::BellFallingFifth => include_bytes!("../assets/sounds/bell-falling-fifth.ogg"),
+            Self::Question1 => include_bytes!("../assets/sounds/question-1.ogg"),
+            Self::Question2 => include_bytes!("../assets/sounds/question-2.ogg"),
+            Self::Question3 => include_bytes!("../assets/sounds/question-3.ogg"),
+            Self::Confirm1 => include_bytes!("../assets/sounds/confirm-1.ogg"),
+            Self::Confirm2 => include_bytes!("../assets/sounds/confirm-2.ogg"),
+            Self::Confirm3 => include_bytes!("../assets/sounds/confirm-3.ogg"),
+            Self::GlassBright => include_bytes!("../assets/sounds/glass-bright.ogg"),
+            Self::GlassShort => include_bytes!("../assets/sounds/glass-short.ogg"),
+            Self::Bong => include_bytes!("../assets/sounds/bong.ogg"),
+            Self::ClassicRising => include_bytes!("../assets/sounds/classic-rising.ogg"),
+            Self::ClassicFalling => include_bytes!("../assets/sounds/classic-falling.ogg"),
+        }
+    }
+}
 
 /// Which kind of toast a sound plays for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,15 +152,22 @@ impl NotifyKind {
             Self::Finished => "Finished",
         }
     }
+
+    /// The sound the kind's Default choice plays.
+    #[must_use]
+    pub const fn default_sound(self) -> BundledSound {
+        match self {
+            Self::NeedsYou => BundledSound::MalletRisingFifth,
+            Self::Finished => BundledSound::MalletFallingFifth,
+        }
+    }
 }
 
 /// Where a clip's sound came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipSource {
-    /// The sound bundled with the client for a Needs you toast.
-    Bundled,
-    /// The sound bundled with the client for a Finished toast.
-    BundledFinished,
+    /// This sound bundled with the client.
+    Bundled(BundledSound),
     /// The custom file at this path.
     File(PathBuf),
 }
@@ -65,21 +182,17 @@ pub struct Clip {
 }
 
 impl Clip {
-    /// The sound bundled for `kind`; `None`, with a warning, should it not
+    /// `bundled` to play for `kind`; `None`, with a warning, should it not
     /// decode.
-    fn bundled(kind: NotifyKind) -> Option<Self> {
-        let (bytes, source) = match kind {
-            NotifyKind::NeedsYou => (BUNDLED_NEEDS_YOU, ClipSource::Bundled),
-            NotifyKind::Finished => (BUNDLED_FINISHED, ClipSource::BundledFinished),
-        };
-        match decode(Arc::from(bytes)) {
+    fn bundled(bundled: BundledSound, kind: NotifyKind) -> Option<Self> {
+        match decode(Arc::from(bundled.bytes())) {
             Ok(sound) => Some(Self {
-                source,
+                source: ClipSource::Bundled(bundled),
                 kind,
                 sound,
             }),
             Err(problem) => {
-                tracing::warn!("the bundled {} sound {problem}", kind.label());
+                tracing::warn!("the bundled sound {} {problem}", bundled.label());
                 None
             }
         }
@@ -99,14 +212,16 @@ pub trait Sounder: Send + Sync {
     fn drop_waiting(&self, kind: NotifyKind);
 }
 
-/// The clip `choice` plays for `kind`: none when it is off; the custom file
-/// when it reads and decodes, else `kind`'s bundled sound with a warning
-/// naming the path. Reads the file, so it runs off the UI thread.
+/// The clip `choice` plays for `kind`: none when it is off; the bundled sound
+/// it names; the custom file when it reads and decodes, else `kind`'s default
+/// sound with a warning naming the path. Reads the file, so it runs off the UI
+/// thread.
 #[must_use]
 pub(crate) fn clip_for(choice: &ToastSound, kind: NotifyKind) -> Option<Clip> {
     match choice {
         ToastSound::Off => None,
-        ToastSound::Default => Clip::bundled(kind),
+        ToastSound::Default => Clip::bundled(kind.default_sound(), kind),
+        ToastSound::Bundled(sound) => Clip::bundled(*sound, kind),
         ToastSound::Custom(path) => match read_sound(path) {
             Ok(sound) => Some(Clip {
                 source: ClipSource::File(path.clone()),
@@ -119,7 +234,7 @@ pub(crate) fn clip_for(choice: &ToastSound, kind: NotifyKind) -> Option<Clip> {
                     kind.label(),
                     path.display()
                 );
-                Clip::bundled(kind)
+                Clip::bundled(kind.default_sound(), kind)
             }
         },
     }
@@ -467,6 +582,64 @@ mod tests {
             problem.as_deref(),
             Some("This file is over 5 MB; the default sound plays instead.")
         );
-        assert_eq!(source, Some(ClipSource::Bundled));
+        assert_eq!(
+            source,
+            Some(ClipSource::Bundled(BundledSound::MalletRisingFifth))
+        );
+    }
+
+    fn source_of(choice: &ToastSound, kind: NotifyKind) -> Option<ClipSource> {
+        clip_for(choice, kind).map(|clip| clip.source)
+    }
+
+    #[test]
+    fn the_default_sound_is_the_kinds_mallet_fifth() {
+        assert_eq!(
+            source_of(&ToastSound::Default, NotifyKind::NeedsYou),
+            Some(ClipSource::Bundled(BundledSound::MalletRisingFifth))
+        );
+        assert_eq!(
+            source_of(&ToastSound::Default, NotifyKind::Finished),
+            Some(ClipSource::Bundled(BundledSound::MalletFallingFifth))
+        );
+    }
+
+    #[test]
+    fn a_bundled_choice_plays_that_sound_for_either_kind() {
+        let choice = ToastSound::Bundled(BundledSound::Bong);
+        for kind in [NotifyKind::NeedsYou, NotifyKind::Finished] {
+            assert_eq!(
+                source_of(&choice, kind),
+                Some(ClipSource::Bundled(BundledSound::Bong))
+            );
+        }
+    }
+
+    #[test]
+    fn every_bundled_sound_decodes_and_its_id_is_its_saved_id() {
+        for sound in BundledSound::ALL {
+            assert_eq!(
+                source_of(&ToastSound::Bundled(sound), NotifyKind::Finished),
+                Some(ClipSource::Bundled(sound)),
+                "{sound:?} decodes"
+            );
+            assert_eq!(
+                serde_json::to_value(sound).expect("a sound serializes"),
+                serde_json::json!(sound.id())
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_custom_file_falls_back_to_the_kinds_default() {
+        let choice = ToastSound::Custom(PathBuf::from("rt-native-no-such-sound.ogg"));
+        assert_eq!(
+            source_of(&choice, NotifyKind::NeedsYou),
+            Some(ClipSource::Bundled(BundledSound::MalletRisingFifth))
+        );
+        assert_eq!(
+            source_of(&choice, NotifyKind::Finished),
+            Some(ClipSource::Bundled(BundledSound::MalletFallingFifth))
+        );
     }
 }

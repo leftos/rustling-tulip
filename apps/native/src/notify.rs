@@ -268,6 +268,8 @@ pub(crate) struct Notifications {
     /// What is wrong with the Finished sound's custom file, as last checked
     /// when the Notifications tab opened or the choice changed.
     pub(crate) finished_sound_problem: Option<String>,
+    /// The Notifications tab's open sound dropdown list, if one is.
+    pub(crate) sound_list: Option<crate::settings_view::SoundList>,
     /// Windows' toast setting as last read when the Notifications tab
     /// opened; `None` while a read is out.
     pub(crate) state: Option<NotifyState>,
@@ -292,6 +294,7 @@ impl Notifications {
             sounder,
             sound_problem: None,
             finished_sound_problem: None,
+            sound_list: None,
             state: None,
             summaries: HashMap::new(),
             held: HashMap::new(),

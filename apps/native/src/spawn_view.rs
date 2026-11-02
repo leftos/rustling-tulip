@@ -64,7 +64,7 @@ const RADIO_DOT: f32 = 7.0;
 /// The least outer height of a segment of a segmented control.
 const SEGMENT_HEIGHT: f32 = 32.0;
 /// The corner radius of a segment, and of the control round the segments.
-const SEGMENT_RADIUS: f32 = 6.0;
+pub(crate) const SEGMENT_RADIUS: f32 = 6.0;
 const SEGMENTED_RADIUS: f32 = 8.0;
 /// The size of a segment's label.
 const SEGMENT_TEXT_SIZE: f32 = 12.5;
@@ -2280,7 +2280,7 @@ fn target_list(dialog: &SpawnDialog, cx: &mut Context<RootView>) -> AnyElement {
         ),
         _ => (false, px(LIST_MAX_HEIGHT)),
     };
-    popup_panel("spawn-target-list".to_owned(), placement, items, &t)
+    popup_panel("spawn-target-list".to_owned(), placement, None, items, &t)
 }
 
 /// One row of the Target list: a target that can be picked follows the
@@ -2331,16 +2331,19 @@ fn target_row(
 }
 
 /// A dialog list's panel tagged `name`, drawn over the dialog above or
-/// below its field (`above`) up to `max_height`, scrolling past it.
-fn popup_panel(
+/// below its field (`above`) up to `max_height`, scrolling past it, by
+/// `scroll` when the caller moves it.
+pub(crate) fn popup_panel(
     name: String,
     (above, max_height): (bool, Pixels),
+    scroll: Option<&ScrollHandle>,
     items: Vec<AnyElement>,
     t: &UiTheme,
 ) -> AnyElement {
     let panel = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
+        .when_some(scroll, StatefulInteractiveElement::track_scroll)
         .absolute()
         .left(px(0.0))
         .w_full()
@@ -2361,7 +2364,7 @@ fn popup_panel(
 }
 
 /// `text` tagged `selector`, with its text tagged `<selector>=<text>`.
-fn labelled_text(selector: String, text: String) -> Div {
+pub(crate) fn labelled_text(selector: String, text: String) -> Div {
     let tag = format!("{selector}={text}");
     div()
         .driver_id(move || selector)
@@ -2735,7 +2738,7 @@ fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>
             )
         })
         .collect();
-    popup_panel(format!("{prefix}-list"), placement, items, &t)
+    popup_panel(format!("{prefix}-list"), placement, None, items, &t)
 }
 
 /// One row of a branch list; `(highlighted, current)` say how it looks.

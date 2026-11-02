@@ -69,9 +69,9 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   Notifications holds the `Needs you` and `Finished` toggles (`notifications.awaiting_input` and `notifications.finished`) and the skip choice.
 
-  It holds the Needs you sound (`notifications.needs_you_sound`: `"off"`, `"default"` or `{"custom": "<path to a .wav or .ogg>"}`; a missing key or an unknown value loads as `"default"`, the bundled `apps/native/assets/sounds/needs-you.ogg`).
+  It holds the Needs you sound (`notifications.needs_you_sound`: `"off"`, `"default"`, `{"bundled": "<sound id>"}` or `{"custom": "<path to a .wav or .ogg>"}`; a missing key or an unknown value loads as `"default"`, the bundled `apps/native/assets/sounds/mallet-rising-fifth.ogg`).
 
-  It holds the Finished sound (`notifications.finished_sound`, the same shape: `"off"`, `"default"` or `{"custom": "<path to a .wav or .ogg>"}`; a missing key or an unknown value loads as `"default"`, the bundled `apps/native/assets/sounds/finished.ogg`).
+  It holds the Finished sound (`notifications.finished_sound`, the same shape: `"off"`, `"default"`, `{"bundled": "<sound id>"}` or `{"custom": "<path to a .wav or .ogg>"}`; a missing key or an unknown value loads as `"default"`, the bundled `apps/native/assets/sounds/mallet-falling-fifth.ogg`).
 
   It also holds the toast style (`notifications.toast_style`: `"os"`, the default, or `"app"`; a missing key or an unknown value loads as `"os"` with a warning and the rest of the file still loads; both values raise the OS toast until the Settings row and the app's own toast windows land).
 

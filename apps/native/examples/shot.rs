@@ -29,6 +29,8 @@
 //! pinned Permission card), `themes-edit` (the theme editor on a duplicate of
 //! Nord with its Ground edited) and `themes` (the Themes modal over Settings,
 //! over a user theme, a broken file and a file named after a built-in).
+//! `settings-sounds` shows Settings on the Notifications tab with the Needs
+//! you sound dropdown open.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -68,9 +70,9 @@ use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::update::{LastResult, Ready, Updater};
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
-    NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener,
-    RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker, ToastKind, ToastSpec, Transport,
-    ViewerLoad, bind_keys, remote_access::Autostart,
+    NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure,
+    Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker, ToastKind, ToastSpec,
+    Transport, ViewerLoad, bind_keys, remote_access::Autostart,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -197,10 +199,11 @@ enum View {
     SpawnHosts,
     SettingsHosts,
     SettingsDashboard,
+    SettingsSounds,
 }
 
 impl View {
-    const ALL: [Self; 22] = [
+    const ALL: [Self; 23] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -223,6 +226,7 @@ impl View {
         Self::SpawnHosts,
         Self::SettingsHosts,
         Self::SettingsDashboard,
+        Self::SettingsSounds,
     ];
 
     fn name(self) -> &'static str {
@@ -249,6 +253,7 @@ impl View {
             Self::SpawnHosts => "spawn-hosts",
             Self::SettingsHosts => "settings-hosts",
             Self::SettingsDashboard => "settings-dashboard",
+            Self::SettingsSounds => "settings-sounds",
         }
     }
 
@@ -312,6 +317,9 @@ impl View {
             Self::Diff => root.active_tab_id() == Some(DIFF_TAB),
             Self::Settings => root.settings_open(),
             Self::SettingsClaude => root.settings_open() && root.settings_tab() == "Claude",
+            Self::SettingsSounds => {
+                root.settings_open() && root.open_sound_list() == Some(NotifyKind::NeedsYou)
+            }
             Self::Spawn => root.spawn_dialog_open(),
             Self::Viewer | Self::ViewerMd => {
                 root.active_tab_id() == Some(VIEWER_TAB)
@@ -450,7 +458,8 @@ impl Shot {
             | View::MultiHost
             | View::SpawnHosts
             | View::SettingsHosts
-            | View::SettingsDashboard => None,
+            | View::SettingsDashboard
+            | View::SettingsSounds => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -928,6 +937,7 @@ fn drive(
             }
             Ok(())
         }
+        View::SettingsSounds => drive_settings_sounds(window, cx),
         View::Spawn => {
             press("ctrl-shift-n", window, cx)?;
             let root = window
@@ -1171,6 +1181,13 @@ fn open_menu(window: &mut Window, cx: &mut App) -> Result<()> {
         );
         root.open_more_menu(window, cx);
     });
+    Ok(())
+}
+
+fn drive_settings_sounds(window: &mut Window, cx: &mut App) -> Result<()> {
+    for key in ["ctrl-,", "down", "tab", "tab", "tab", "enter"] {
+        press(key, window, cx)?;
+    }
     Ok(())
 }
 

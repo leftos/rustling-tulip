@@ -11,9 +11,9 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, Entity, EntityId, FocusHandle, Focusable as _,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, SharedString, Stateful, Subscription,
-    Window, div, prelude::*, px,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, FocusHandle,
+    Focusable as _, FontWeight, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    ScrollHandle, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*, px, svg,
 };
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
@@ -25,7 +25,9 @@ use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for}
 use crate::agent_options_view::{LOCKED, UPDATE_CLIENT};
 use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
+use crate::assets::SIDEBAR_CHEVRON_DOWN_ICON;
 use crate::buttons::{field_frame, focus_ring};
+use crate::combobox::list_placement;
 use crate::driver_id::DriverId as _;
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
@@ -40,10 +42,10 @@ use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::sidebar::{
     CountMode, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView, ToastSound,
 };
-use crate::sound::{self, SOUND_EXTENSIONS};
+use crate::sound::{self, BundledSound, NotifyKind, SOUND_EXTENSIONS};
 use crate::spawn_view::{
-    DISABLED_OPACITY, Look, checkbox_row, choice_button, close_button, dialog_card,
-    dialog_title_bar, field, muted, segmented,
+    DISABLED_OPACITY, Look, SEGMENT_RADIUS, checkbox_row, choice_button, close_button, dialog_card,
+    dialog_title_bar, field, labelled_text, muted, popup_panel, segmented,
 };
 use crate::summarizer_settings::{SummarizerStatus, TestOutcome, parse_cap};
 use crate::target::HostKey;
@@ -73,6 +75,10 @@ const PANEL_WIDTH: f32 = TAB_LIST_WIDTH + CONTENT_WIDTH + 2.0 * CONTENT_PAD_X + 
 const PANEL_HEIGHT: f32 = 640.0;
 /// The size of a hint.
 const HINT_SIZE: f32 = 12.5;
+/// The width of a sound field, and of its list.
+const SOUND_FIELD_WIDTH: f32 = 280.0;
+/// The most height a sound list takes before it scrolls.
+const SOUND_LIST_MAX_HEIGHT: f32 = 240.0;
 /// The corner radius of a text link, and of the title preview's chip.
 const LINK_RADIUS: f32 = 4.0;
 const CHIP_RADIUS: f32 = 5.0;
@@ -274,35 +280,87 @@ const COUNT_MODE_CHOICES: [CountMode; 3] = [CountMode::NeedsYou, CountMode::Busy
 const NOTIFY_SKIP_CHOICES: [NotifySkip; 3] =
     [NotifySkip::OnScreen, NotifySkip::Focused, NotifySkip::Never];
 
-/// The Notifications tab's Needs you sound choices; Custom asks for the file.
+/// An entry of a sound dropdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SoundKind {
+enum SoundEntry {
     Off,
-    Default,
+    Sound(BundledSound),
+    /// Asks for the file.
     Custom,
 }
 
-impl SoundKind {
-    /// The choice `sound` shows as.
-    const fn of(sound: &ToastSound) -> Self {
+impl SoundEntry {
+    /// Every entry, in the order the list shows them.
+    const ALL: [Self; BundledSound::ALL.len() + 2] = {
+        let mut entries = [Self::Custom; BundledSound::ALL.len() + 2];
+        entries[0] = Self::Off;
+        let mut at = 0;
+        while at < BundledSound::ALL.len() {
+            entries[at + 1] = Self::Sound(BundledSound::ALL[at]);
+            at += 1;
+        }
+        entries
+    };
+
+    /// The entry `sound` shows as on `kind`'s row.
+    const fn of(sound: &ToastSound, kind: NotifyKind) -> Self {
         match sound {
             ToastSound::Off => Self::Off,
-            ToastSound::Default => Self::Default,
+            ToastSound::Default => Self::Sound(kind.default_sound()),
+            ToastSound::Bundled(bundled) => Self::Sound(*bundled),
             ToastSound::Custom(_) => Self::Custom,
         }
     }
 
-    const fn label(self) -> &'static str {
+    /// The entry's words on `kind`'s row.
+    fn text(self, kind: NotifyKind) -> String {
         match self {
-            Self::Off => "Off",
-            Self::Default => "Default",
-            Self::Custom => "Custom…",
+            Self::Off => "Off".to_owned(),
+            Self::Sound(sound) if sound == kind.default_sound() => {
+                format!("{} (default)", sound.label())
+            }
+            Self::Sound(sound) => sound.label().to_owned(),
+            Self::Custom => "Custom file…".to_owned(),
         }
+    }
+
+    /// The entry's row in the open list.
+    fn selector(self) -> String {
+        let name = match self {
+            Self::Off => "off",
+            Self::Sound(sound) => sound.id(),
+            Self::Custom => "custom",
+        };
+        format!("settings-sound-option-{name}")
     }
 }
 
-/// The Notifications tab's Needs you sound choices, in the order they show.
-const SOUND_CHOICES: [SoundKind; 3] = [SoundKind::Off, SoundKind::Default, SoundKind::Custom];
+/// An open sound dropdown's list.
+pub(crate) struct SoundList {
+    /// The row it belongs to.
+    kind: NotifyKind,
+    /// The place in [`SoundEntry::ALL`] Up, Down and the pointer have reached.
+    highlight: usize,
+    scroll: ScrollHandle,
+    /// Where the field and the window were last laid out, which places the
+    /// list; `None` until the first frame.
+    measured: Option<SoundListRoom>,
+}
+
+/// What a sound list is placed from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SoundListRoom {
+    field: Bounds<Pixels>,
+    window_height: Pixels,
+}
+
+/// How a row of a sound list draws.
+#[derive(Debug, Clone, Copy)]
+struct SoundRowLook {
+    /// Carries a check.
+    chosen: bool,
+    highlighted: bool,
+}
 
 /// A control of a Settings tab that Tab can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,9 +378,9 @@ pub(crate) enum SettingsControl {
     TitleSuffix,
     NotifySettingsLink,
     NotifyNeedsYou,
-    NeedsYouSound(SoundKind),
+    NeedsYouSoundField,
     NeedsYouSoundPlay,
-    FinishedSound(SoundKind),
+    FinishedSoundField,
     FinishedSoundPlay,
     NotifyFinished,
     NotifySkip(NotifySkip),
@@ -420,13 +478,9 @@ impl SettingsControl {
             Self::TitleSuffix => "settings-title-product-suffix",
             Self::NotifySettingsLink => "settings-open-windows-notifications",
             Self::NotifyNeedsYou => "settings-notify-needs-you",
-            Self::NeedsYouSound(SoundKind::Off) => "settings-needs-you-sound-off",
-            Self::NeedsYouSound(SoundKind::Default) => "settings-needs-you-sound-default",
-            Self::NeedsYouSound(SoundKind::Custom) => "settings-needs-you-sound-custom",
+            Self::NeedsYouSoundField => "settings-needs-you-sound-field",
             Self::NeedsYouSoundPlay => "settings-needs-you-sound-play",
-            Self::FinishedSound(SoundKind::Off) => "settings-finished-sound-off",
-            Self::FinishedSound(SoundKind::Default) => "settings-finished-sound-default",
-            Self::FinishedSound(SoundKind::Custom) => "settings-finished-sound-custom",
+            Self::FinishedSoundField => "settings-finished-sound-field",
             Self::FinishedSoundPlay => "settings-finished-sound-play",
             Self::NotifyFinished => "settings-notify-finished",
             Self::NotifySkip(NotifySkip::OnScreen) => "settings-notify-skip-on-screen",
@@ -1069,6 +1123,7 @@ impl RootView {
         self.settings_host = host;
         self.keep_offered_tab();
         self.settings_control = None;
+        self.notifications.sound_list = None;
         if self.settings_open() {
             if let Some(agent) = self.settings_tab.agent() {
                 self.hold_agent_tab(agent, window, cx);
@@ -1135,6 +1190,19 @@ impl RootView {
         row_tabs(&self.settings_rows())
     }
 
+    /// Shows the offered tab labelled `label`, as its row does; a label no
+    /// tab has changes nothing.
+    pub fn show_settings_tab(&mut self, label: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let agents = self.agents();
+        let tab = self
+            .settings_tabs()
+            .into_iter()
+            .find(|tab| tab.label(agents) == label);
+        if let Some(tab) = tab {
+            self.select_settings_tab(tab, window, cx);
+        }
+    }
+
     /// The rows the tab list draws for the host Settings shows, in order:
     /// Remote access configures this PC's daemon, so it is offered only
     /// where the client manages it, and an agent's page only while the
@@ -1175,6 +1243,7 @@ impl RootView {
         if kept != self.settings_tab {
             self.settings_tab = kept;
             self.settings_control = None;
+            self.notifications.sound_list = None;
         }
     }
 
@@ -2220,9 +2289,13 @@ impl RootView {
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
             SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
             SettingsControl::NotifyNeedsYou => self.toggle_notification(cx),
-            SettingsControl::NeedsYouSound(kind) => self.choose_needs_you_sound(kind, cx),
+            SettingsControl::NeedsYouSoundField => {
+                self.toggle_sound_list(NotifyKind::NeedsYou, cx);
+            }
             SettingsControl::NeedsYouSoundPlay => self.play_needs_you_sound(cx),
-            SettingsControl::FinishedSound(kind) => self.choose_finished_sound(kind, cx),
+            SettingsControl::FinishedSoundField => {
+                self.toggle_sound_list(NotifyKind::Finished, cx);
+            }
             SettingsControl::FinishedSoundPlay => self.play_finished_sound(cx),
             SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
@@ -2812,6 +2885,7 @@ impl RootView {
             self.settings_tab = SettingsTab::General;
             self.settings_scroll = Scrollbar::default();
             self.settings_control = None;
+            self.notifications.sound_list = None;
             self.settings_tabs_focus.focus(window);
             self.arm_pairing_tick(window, cx);
         }
@@ -2825,6 +2899,7 @@ impl RootView {
     ) {
         self.settings_tab = tab;
         self.settings_control = None;
+        self.notifications.sound_list = None;
         self.arm_pairing_tick(window, cx);
         if tab == SettingsTab::Notifications {
             self.read_notify_state(window, cx);
@@ -2910,36 +2985,186 @@ impl RootView {
     }
 
     /// The Notifications tab's stops: the link, Needs you with its sound
-    /// choices and their Play (not while the sound is off), Finished with its
-    /// own sound choices and their Play, then the skip choices.
+    /// field and that field's Play (not while the sound is off), Finished
+    /// with its own sound field and Play, then the skip choices.
     fn notifications_controls(&self) -> Vec<SettingsControl> {
         let settings = &self.sidebar.ui_state().notifications;
-        let needs_you = SoundKind::of(&settings.needs_you_sound);
-        let finished = SoundKind::of(&settings.finished_sound);
         let mut controls = vec![
             SettingsControl::NotifySettingsLink,
             SettingsControl::NotifyNeedsYou,
+            SettingsControl::NeedsYouSoundField,
         ];
-        controls.extend(SOUND_CHOICES.map(SettingsControl::NeedsYouSound));
-        if needs_you != SoundKind::Off {
+        if settings.needs_you_sound != ToastSound::Off {
             controls.push(SettingsControl::NeedsYouSoundPlay);
         }
         controls.push(SettingsControl::NotifyFinished);
-        controls.extend(SOUND_CHOICES.map(SettingsControl::FinishedSound));
-        if finished != SoundKind::Off {
+        controls.push(SettingsControl::FinishedSoundField);
+        if settings.finished_sound != ToastSound::Off {
             controls.push(SettingsControl::FinishedSoundPlay);
         }
         controls.extend(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip));
         controls
     }
 
-    /// Off and Default apply at once; Custom asks this PC's file picker for
-    /// a `.wav` or `.ogg`, and a cancel keeps the choice as it was.
-    fn choose_needs_you_sound(&mut self, kind: SoundKind, cx: &mut Context<Self>) {
+    /// Which row's sound list is open, if one is.
+    #[must_use]
+    pub fn open_sound_list(&self) -> Option<NotifyKind> {
+        self.notifications.sound_list.as_ref().map(|list| list.kind)
+    }
+
+    /// The sound chosen on `kind`'s row.
+    fn sound_of(&self, kind: NotifyKind) -> &ToastSound {
+        let settings = &self.sidebar.ui_state().notifications;
         match kind {
-            SoundKind::Off => self.set_needs_you_sound(ToastSound::Off, cx),
-            SoundKind::Default => self.set_needs_you_sound(ToastSound::Default, cx),
-            SoundKind::Custom => self.pick_needs_you_sound(cx),
+            NotifyKind::NeedsYou => &settings.needs_you_sound,
+            NotifyKind::Finished => &settings.finished_sound,
+        }
+    }
+
+    /// Opens `kind`'s sound list on its chosen entry, in place of any other,
+    /// or closes it when it is the one open.
+    fn toggle_sound_list(&mut self, kind: NotifyKind, cx: &mut Context<Self>) {
+        if self.open_sound_list() == Some(kind) {
+            self.notifications.sound_list = None;
+        } else {
+            let chosen = SoundEntry::of(self.sound_of(kind), kind);
+            let highlight = SoundEntry::ALL
+                .iter()
+                .position(|entry| *entry == chosen)
+                .unwrap_or(0);
+            let scroll = ScrollHandle::new();
+            scroll.scroll_to_item(highlight);
+            self.notifications.sound_list = Some(SoundList {
+                kind,
+                highlight,
+                scroll,
+                measured: None,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Closes the open sound list, if there is one.
+    fn close_sound_list(&mut self, cx: &mut Context<Self>) {
+        if self.notifications.sound_list.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Keeps where the open list's field and the window were laid out; a
+    /// change draws again so the list is placed from it, its highlight in
+    /// view.
+    fn measure_sound_list(
+        &mut self,
+        room: SoundListRoom,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(list) = &mut self.notifications.sound_list else {
+            return;
+        };
+        if list.measured != Some(room) {
+            list.measured = Some(room);
+            list.scroll.scroll_to_item(list.highlight);
+            cx.defer_in(window, |_, window, _| window.refresh());
+        }
+    }
+
+    /// Whether a held Enter, Space or Esc does nothing: on a sound field or
+    /// in an open sound list, where its repeats would strobe the list or
+    /// close Settings behind it.
+    fn sound_ignores_held_key(&self, key: &str, window: &Window, cx: &App) -> bool {
+        matches!(key, "enter" | "space" | "escape")
+            && (self.notifications.sound_list.is_some()
+                || matches!(
+                    self.focused_settings_control(window, cx),
+                    Some(SettingsControl::NeedsYouSoundField | SettingsControl::FinishedSoundField)
+                ))
+    }
+
+    fn hover_sound_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(list) = &mut self.notifications.sound_list
+            && list.highlight != index
+        {
+            list.highlight = index;
+            cx.notify();
+        }
+    }
+
+    /// A key while a sound list is open; returns whether it was the list's:
+    /// Up and Down move the highlight, stopping at either end, Enter or Space
+    /// chooses it, Esc closes the list, and Tab closes it and walks on.
+    fn on_sound_list_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.settings_tab != SettingsTab::Notifications {
+            return false;
+        }
+        let Some(list) = &mut self.notifications.sound_list else {
+            return false;
+        };
+        let entries = SoundEntry::ALL;
+        match key {
+            "up" | "down" => {
+                list.highlight = if key == "down" {
+                    (list.highlight + 1).min(entries.len() - 1)
+                } else {
+                    list.highlight.saturating_sub(1)
+                };
+                list.scroll.scroll_to_item(list.highlight);
+                cx.notify();
+                true
+            }
+            "enter" | "space" => {
+                let kind = list.kind;
+                if let Some(entry) = entries.get(list.highlight) {
+                    self.choose_sound_entry(kind, *entry, window, cx);
+                }
+                true
+            }
+            "escape" => {
+                self.close_sound_list(cx);
+                true
+            }
+            "tab" => {
+                self.close_sound_list(cx);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// A choice in `kind`'s sound list: Off and the sounds apply at once, the
+    /// row's default entry as the Default choice; Custom asks this PC's file
+    /// picker for a `.wav` or `.ogg`, and a cancel keeps the choice as it was.
+    /// The keyboard stays on the field.
+    fn choose_sound_entry(
+        &mut self,
+        kind: NotifyKind,
+        entry: SoundEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_sound_list(cx);
+        self.move_settings_focus(sound_field(kind), window, cx);
+        let sound = match entry {
+            SoundEntry::Off => ToastSound::Off,
+            SoundEntry::Sound(sound) if sound == kind.default_sound() => ToastSound::Default,
+            SoundEntry::Sound(sound) => ToastSound::Bundled(sound),
+            SoundEntry::Custom => {
+                match kind {
+                    NotifyKind::NeedsYou => self.pick_needs_you_sound(cx),
+                    NotifyKind::Finished => self.pick_finished_sound(cx),
+                }
+                return;
+            }
+        };
+        match kind {
+            NotifyKind::NeedsYou => self.set_needs_you_sound(sound, cx),
+            NotifyKind::Finished => self.set_finished_sound(sound, cx),
         }
     }
 
@@ -2949,7 +3174,7 @@ impl RootView {
     fn pick_needs_you_sound(&mut self, cx: &mut Context<Self>) {
         let start = match &self.sidebar.ui_state().notifications.needs_you_sound {
             ToastSound::Custom(path) => path.parent().map(std::path::Path::to_path_buf),
-            ToastSound::Off | ToastSound::Default => None,
+            ToastSound::Off | ToastSound::Default | ToastSound::Bundled(_) => None,
         };
         let filter = FileFilter::new("Sound", &SOUND_EXTENSIONS);
         let picked = (self.pick_file)(cx, start, filter);
@@ -3010,23 +3235,13 @@ impl RootView {
         .detach();
     }
 
-    /// Off and Default apply at once; Custom asks this PC's file picker for
-    /// a `.wav` or `.ogg`, and a cancel keeps the choice as it was.
-    fn choose_finished_sound(&mut self, kind: SoundKind, cx: &mut Context<Self>) {
-        match kind {
-            SoundKind::Off => self.set_finished_sound(ToastSound::Off, cx),
-            SoundKind::Default => self.set_finished_sound(ToastSound::Default, cx),
-            SoundKind::Custom => self.pick_finished_sound(cx),
-        }
-    }
-
     /// Asks for the custom sound file, opening at the current one's folder.
     /// The sound plays on this PC, so the picker is always this PC's, even
     /// when the window is on another host.
     fn pick_finished_sound(&mut self, cx: &mut Context<Self>) {
         let start = match &self.sidebar.ui_state().notifications.finished_sound {
             ToastSound::Custom(path) => path.parent().map(std::path::Path::to_path_buf),
-            ToastSound::Off | ToastSound::Default => None,
+            ToastSound::Off | ToastSound::Default | ToastSound::Bundled(_) => None,
         };
         let filter = FileFilter::new("Sound", &SOUND_EXTENSIONS);
         let picked = (self.pick_file)(cx, start, filter);
@@ -3220,20 +3435,27 @@ impl RootView {
     }
 
     /// A key while Settings is open; returns whether it was the frame's.
-    /// Tab and Shift+Tab walk the ring of the tab list and the shown tab's
-    /// controls, Up and Down on the tab list change the tab, Space or
-    /// Enter presses the focused control, and the arrows move along an
-    /// Appearance swatch line or family list. While a text field has the
-    /// keyboard, only Tab is the frame's.
+    /// An open sound list has the first say. Tab and Shift+Tab walk the ring
+    /// of the tab list and the shown tab's controls, Up and Down on the tab
+    /// list change the tab, Space or Enter presses the focused control, and
+    /// the arrows move along an Appearance swatch line or family list. While
+    /// a text field has the keyboard, only Tab is the frame's.
     pub(crate) fn on_settings_key(
         &mut self,
         keystroke: &Keystroke,
+        held: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let mods = &keystroke.modifiers;
         if !self.settings_open() || mods.control || mods.alt || mods.platform || mods.function {
             return false;
+        }
+        if held && self.sound_ignores_held_key(&keystroke.key, window, cx) {
+            return true;
+        }
+        if self.on_sound_list_key(&keystroke.key, window, cx) {
+            return true;
         }
         let on_list = self.settings_tabs_focus.is_focused(window);
         let typing = self.settings_typing(window, cx);
@@ -4165,7 +4387,7 @@ impl RootView {
         vec![section.into_any_element()]
     }
 
-    /// The Needs you sound's choices with Play beside them (not while the
+    /// The Needs you sound's dropdown with Play beside it (not while the
     /// sound is off), then the custom file's path and what is wrong with it.
     fn needs_you_sound_rows(
         &self,
@@ -4175,16 +4397,8 @@ impl RootView {
         let t = theme(cx);
         let size = crate::fonts::ui_text_size(cx);
         let sound = &self.sidebar.ui_state().notifications.needs_you_sound;
-        let current = SoundKind::of(sound);
-        let choices = SOUND_CHOICES.map(|choice| {
-            (
-                SettingsControl::NeedsYouSound(choice),
-                choice.label(),
-                choice == current,
-            )
-        });
-        let choices = choice_row("Needs you sound", &choices, RowLock::Live, focused, cx);
-        let play = (current != SoundKind::Off).then(|| {
+        let dropdown = self.sound_dropdown(NotifyKind::NeedsYou, "Needs you sound", focused, cx);
+        let play = (*sound != ToastSound::Off).then(|| {
             settings_button(
                 SettingsControl::NeedsYouSoundPlay,
                 "Play",
@@ -4198,7 +4412,7 @@ impl RootView {
                 hint(size, path.display().to_string(), &t)
                     .driver_id(|| "settings-needs-you-sound-path".to_owned()),
             ),
-            ToastSound::Off | ToastSound::Default => None,
+            ToastSound::Off | ToastSound::Default | ToastSound::Bundled(_) => None,
         };
         let problem = self.notifications.sound_problem.clone().map(|problem| {
             hint(size, problem, &t)
@@ -4214,29 +4428,21 @@ impl RootView {
                     .flex()
                     .items_end()
                     .gap(px(10.0))
-                    .child(choices)
+                    .child(dropdown)
                     .children(play),
             )
             .children(path)
             .children(problem)
     }
 
-    /// The Finished sound's choices with Play beside them (not while the
+    /// The Finished sound's dropdown with Play beside it (not while the
     /// sound is off), then the custom file's path and what is wrong with it.
     fn finished_sound_rows(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
         let t = theme(cx);
         let size = crate::fonts::ui_text_size(cx);
         let sound = &self.sidebar.ui_state().notifications.finished_sound;
-        let current = SoundKind::of(sound);
-        let choices = SOUND_CHOICES.map(|choice| {
-            (
-                SettingsControl::FinishedSound(choice),
-                choice.label(),
-                choice == current,
-            )
-        });
-        let choices = choice_row("Finished sound", &choices, RowLock::Live, focused, cx);
-        let play = (current != SoundKind::Off).then(|| {
+        let dropdown = self.sound_dropdown(NotifyKind::Finished, "Finished sound", focused, cx);
+        let play = (*sound != ToastSound::Off).then(|| {
             settings_button(
                 SettingsControl::FinishedSoundPlay,
                 "Play",
@@ -4250,7 +4456,7 @@ impl RootView {
                 hint(size, path.display().to_string(), &t)
                     .driver_id(|| "settings-finished-sound-path".to_owned()),
             ),
-            ToastSound::Off | ToastSound::Default => None,
+            ToastSound::Off | ToastSound::Default | ToastSound::Bundled(_) => None,
         };
         let problem = self
             .notifications
@@ -4270,11 +4476,70 @@ impl RootView {
                     .flex()
                     .items_end()
                     .gap(px(10.0))
-                    .child(choices)
+                    .child(dropdown)
                     .children(play),
             )
             .children(path)
             .children(problem)
+    }
+
+    /// `kind`'s closed sound field under `label`, with its list while open,
+    /// over what is below it. A click on the field opens or closes the list,
+    /// and a press outside both closes it.
+    fn sound_dropdown(
+        &self,
+        kind: NotifyKind,
+        label: &'static str,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme(cx);
+        let control = sound_field(kind);
+        let selector = control.selector();
+        let shown = SoundEntry::of(self.sound_of(kind), kind);
+        let chosen = labelled_text(format!("{selector}-text"), shown.text(kind))
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden();
+        let chevron = svg()
+            .path(SIDEBAR_CHEVRON_DOWN_ICON)
+            .flex_none()
+            .size(px(12.0))
+            .text_color(gpui::rgb(t.text_2));
+        let trigger = field_frame(focused == Some(control), &t)
+            .id(selector)
+            .driver_id(|| selector.to_owned())
+            .w_full()
+            .justify_between()
+            .gap(px(8.0))
+            .cursor_pointer()
+            .child(chosen)
+            .child(chevron)
+            .on_click(press(control, cx));
+        let list = self
+            .notifications
+            .sound_list
+            .as_ref()
+            .filter(|list| list.kind == kind);
+        let dropdown = div()
+            .relative()
+            .w(px(SOUND_FIELD_WIDTH))
+            .child(trigger)
+            .when_some(list, |dropdown, list| {
+                dropdown
+                    .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.close_sound_list(cx);
+                    }))
+                    .child(sound_list_measurer(cx))
+                    .child(sound_list_rows_panel(list, shown, cx))
+            });
+        field(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            label,
+            &t,
+        )
+        .child(dropdown)
     }
 
     fn general_tab(
@@ -5801,6 +6066,115 @@ fn count_mode_choices(current: CountMode) -> [(SettingsControl, &'static str, bo
         };
         (SettingsControl::CountMode(choice), text, choice == current)
     })
+}
+
+/// The dropdown field of `kind`'s sound.
+const fn sound_field(kind: NotifyKind) -> SettingsControl {
+    match kind {
+        NotifyKind::NeedsYou => SettingsControl::NeedsYouSoundField,
+        NotifyKind::Finished => SettingsControl::FinishedSoundField,
+    }
+}
+
+/// Measures the open sound list's field and the window, filling the field's
+/// dropdown.
+fn sound_list_measurer(cx: &mut Context<RootView>) -> impl IntoElement {
+    let root = cx.weak_entity();
+    canvas(
+        move |field, window, cx| {
+            let room = SoundListRoom {
+                field,
+                window_height: window.viewport_size().height,
+            };
+            // Fails only when the view is gone, and Settings with it.
+            root.update(cx, |this, cx| this.measure_sound_list(room, window, cx))
+                .ok();
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .inset(px(0.0))
+}
+
+/// An open sound list, with `chosen` carrying a check: under its field, over
+/// it when there is more room there, inside the window and scrolling past
+/// the height that leaves.
+fn sound_list_rows_panel(
+    list: &SoundList,
+    chosen: SoundEntry,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let wanted = px(SOUND_LIST_MAX_HEIGHT);
+    let placement = list.measured.map_or((false, wanted), |room| {
+        list_placement(
+            px(0.0)..room.window_height,
+            room.field.top()..room.field.bottom(),
+            wanted,
+        )
+    });
+    let rows = SoundEntry::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let look = SoundRowLook {
+                chosen: entry == chosen,
+                highlighted: index == list.highlight,
+            };
+            sound_list_row(entry, list.kind, index, look, cx)
+        })
+        .collect();
+    popup_panel(
+        "settings-sound-list".to_owned(),
+        placement,
+        Some(&list.scroll),
+        rows,
+        &theme(cx),
+    )
+}
+
+/// One row of `kind`'s open sound list at place `index`, following the
+/// pointer and chosen by a press.
+fn sound_list_row(
+    entry: SoundEntry,
+    kind: NotifyKind,
+    index: usize,
+    look: SoundRowLook,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let name = entry.selector();
+    let check = format!("{name}-chosen");
+    let text = labelled_text(format!("{name}-text"), entry.text(kind));
+    div()
+        .id(SharedString::from(name.clone()))
+        .driver_id(|| name)
+        .flex()
+        .flex_none()
+        .justify_between()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(SEGMENT_RADIUS))
+        .cursor_pointer()
+        .when(look.highlighted, move |row| {
+            row.bg(gpui::rgb(t.popover_hover))
+        })
+        .child(text)
+        .when(look.chosen, |row| {
+            row.child(div().driver_id(move || check).child("✓"))
+        })
+        .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+            this.hover_sound_entry(index, cx);
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.choose_sound_entry(kind, entry, window, cx);
+            }),
+        )
+        .into_any_element()
 }
 
 /// A labelled row of segmented choices, laid out as the spawn dialog's;

@@ -862,11 +862,11 @@ pub struct NotificationSettings {
     #[serde(deserialize_with = "skip_or_default")]
     pub skip_when: NotifySkip,
     /// The sound a Needs you notification plays; a file without the key,
-    /// as every release before it wrote, plays the bundled one.
+    /// as every release before it wrote, plays the default one.
     #[serde(deserialize_with = "sound_or_default")]
     pub needs_you_sound: ToastSound,
     /// The sound a Finished notification plays; a file without the key, as
-    /// every release before this one wrote, plays the bundled one.
+    /// every release before this one wrote, plays the default one.
     #[serde(deserialize_with = "finished_sound_or_default")]
     pub finished_sound: ToastSound,
     /// Which toasts the client raises: the OS's or its own; a file without
@@ -875,18 +875,20 @@ pub struct NotificationSettings {
     pub toast_style: ToastStyle,
 }
 
-/// The sound a toast plays. Saved as `"off"`, `"default"` or
-/// `{ "custom": "<path>" }`.
+/// The sound a toast plays. Saved as `"off"`, `"default"`,
+/// `{ "bundled": "<id>" }` or `{ "custom": "<path>" }`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToastSound {
     /// No sound.
     Off,
-    /// The sound bundled with the client.
+    /// The toast kind's default sound.
     #[default]
     Default,
+    /// One of the sounds bundled with the client.
+    Bundled(crate::sound::BundledSound),
     /// A `.wav` or `.ogg` file the owner chose; one that is missing or will
-    /// not decode plays the bundled sound instead.
+    /// not decode plays the kind's default sound instead.
     Custom(std::path::PathBuf),
 }
 
@@ -6878,6 +6880,64 @@ pub(crate) mod tests {
             assert_eq!(file["notifications"]["needs_you_sound"], saved);
             assert_eq!(load_ui_state(&dir.0).notifications.needs_you_sound, choice);
         }
+    }
+
+    #[test]
+    fn a_sound_saved_in_a_released_shape_loads_as_it_did() {
+        let dir = TestDir::new("notify-sound-released-shapes");
+        for (saved, want) in [
+            (json!("default"), ToastSound::Default),
+            (json!("off"), ToastSound::Off),
+            (
+                json!({ "custom": "x.ogg" }),
+                ToastSound::Custom(PathBuf::from("x.ogg")),
+            ),
+        ] {
+            let mut file = v0_5_1_alpha_ui_file();
+            file["notifications"]["needs_you_sound"] = saved.clone();
+            file["notifications"]["finished_sound"] = saved;
+            let ui = load_released(&dir, &file);
+            assert_eq!(ui.notifications.needs_you_sound, want);
+            assert_eq!(ui.notifications.finished_sound, want);
+        }
+        let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
+        assert_eq!(ui.notifications.needs_you_sound, ToastSound::Default);
+        assert_eq!(ui.notifications.finished_sound, ToastSound::Default);
+    }
+
+    #[test]
+    fn a_bundled_sound_choice_round_trips() {
+        let dir = TestDir::new("notify-sound-bundled-round-trip");
+        let mut model = SidebarModel::default();
+        let choice = ToastSound::Bundled(crate::sound::BundledSound::BellRisingFifth);
+        assert!(model.set_finished_sound(choice.clone()));
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        let file: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(
+            file["notifications"]["finished_sound"],
+            json!({ "bundled": "bell_rising_fifth" })
+        );
+        assert_eq!(load_ui_state(&dir.0).notifications.finished_sound, choice);
+    }
+
+    #[test]
+    fn an_unknown_bundled_sound_loads_as_default_and_the_rest_of_the_file_loads() {
+        let dir = TestDir::new("notify-sound-unknown-bundled");
+        let mut file = v0_5_1_alpha_ui_file();
+        file["notifications"]["needs_you_sound"] = json!({ "bundled": "not_a_sound" });
+        file["notifications"]["finished_sound"] = json!("off");
+        let ui = load_released(&dir, &file);
+        assert_eq!(ui.notifications.needs_you_sound, ToastSound::Default);
+        assert_eq!(
+            ui.notifications.finished_sound,
+            ToastSound::Off,
+            "the other sound survives"
+        );
+        assert!(
+            !ui.notifications.awaiting_input,
+            "the saved toggle survives"
+        );
     }
 
     #[test]

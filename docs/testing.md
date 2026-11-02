@@ -51,6 +51,7 @@ The views:
 - `multi-host`: the sidebar grouped by host: This PC, "box" online with a repo and a session in the first tab's second pane, and "lab" offline.
 - `spawn-hosts`: the spawn dialog over those two hosts with its closed Target field.
 - `settings-hosts`: Settings on the Claude page with the host selector showing This PC.
+- `settings-sounds`: Settings on the Notifications tab with the Needs you sound list open.
 
 ## Fake CLIs
 
