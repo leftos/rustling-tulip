@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Live lines one session's channel keeps for a subscriber that has not read
 /// them yet; past it the slowest subscriber lags and loses the oldest.
@@ -101,8 +101,15 @@ pub fn truncate_bytes(text: &str, max_bytes: usize) -> String {
 /// The report's other fields — a new conversation id, the turn's last
 /// message, a failure line, background work — are written under the same
 /// update as the status, after the ordering check and the terminal guard; a
-/// permission mismatch it carries is logged.
-pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, report: &HookReport) {
+/// permission mismatch it carries is logged, and a status change is logged
+/// under `event`, the hook event's name.
+pub fn apply_signal(
+    hub: &Hub,
+    session_id: &str,
+    event_time: Option<u128>,
+    report: &HookReport,
+    event: &str,
+) {
     let mut applied = Applied::default();
     let mut start_turns = false;
     hub.sessions.update(session_id, |record| {
@@ -115,6 +122,16 @@ pub fn apply_signal(hub: &Hub, session_id: &str, event_time: Option<u128>, repor
         }
     });
     log_mismatch(session_id, applied.mismatch.as_ref());
+    if let Some((from, to)) = applied.status_change {
+        info!(
+            session_id,
+            event,
+            subagent = report.subagent,
+            ?from,
+            ?to,
+            "status set by a hook event"
+        );
+    }
     if applied.entered_awaiting {
         crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
     }
@@ -156,7 +173,11 @@ pub fn deliver(
     if let Some(line) = line {
         hub.live_lines.publish(session_id, line);
     } else if let Some(report) = report {
-        apply_signal(hub, session_id, event_time, &report);
+        let event = body
+            .get("hook_event_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        apply_signal(hub, session_id, event_time, &report, event);
     }
 }
 
@@ -198,6 +219,8 @@ impl LiveLines {
 pub(crate) struct Applied {
     /// The record entered `AwaitingInput`.
     pub(crate) entered_awaiting: bool,
+    /// The status the event moved the record from and to, when it moved it.
+    pub(crate) status_change: Option<(SessionStatus, SessionStatus)>,
     /// The expected and reported permission modes, when a prompt's differ.
     pub(crate) mismatch: Option<(String, String)>,
     /// The agent inside the session's shell ended, and its end is to be
@@ -236,6 +259,14 @@ pub(crate) fn apply_to_record(
     if matches!(record.status, SessionStatus::Stopped | SessionStatus::Error) {
         return Applied::default();
     }
+    let from = record.status;
+    let mut applied = apply_report(record, report, event_time);
+    applied.status_change = (record.status != from).then_some((from, record.status));
+    applied
+}
+
+/// The state writes of one ordered event on a running `record`.
+fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u128) -> Applied {
     // An agent typed into its shell starts a new run: the leaf names it again
     // and the run's end will be announced.
     if report.agent_started {
@@ -263,6 +294,7 @@ pub(crate) fn apply_to_record(
     if leaves_pending_alone(record, report) {
         return Applied {
             entered_awaiting: false,
+            status_change: None,
             mismatch: apply_details(record, report, event_time),
             agent_exited,
             turn_report: turn_report(record, report),
@@ -288,6 +320,7 @@ pub(crate) fn apply_to_record(
     }
     Applied {
         entered_awaiting,
+        status_change: None,
         mismatch: apply_details(record, report, event_time),
         agent_exited,
         turn_report: turn_report(record, report),

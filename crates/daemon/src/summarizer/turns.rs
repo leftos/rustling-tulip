@@ -293,7 +293,7 @@ mod tests {
             .expect("Claude is registered")
             .map_hook_event(&event, None, false)
             .expect("the body maps to a report");
-        crate::hook_status::apply_signal(hub, "s1", Some(event_time), &report);
+        crate::hook_status::apply_signal(hub, "s1", Some(event_time), &report, "Test");
     }
 
     fn stop(message: &str) -> String {
