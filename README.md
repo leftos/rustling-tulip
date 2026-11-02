@@ -114,6 +114,12 @@ It is alpha software, Windows only for now.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
 
+## What's new in v0.7.2-alpha
+
+- A Finished toast no longer fires when a Stop hook sends the agent back to work; the session stays Working until its hooks finish.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.7.2-alpha).
+
 ## What's new in v0.7.1-alpha
 
 - Finished toasts no longer fire after nearly every tool call while Claude works through a task-list item.
