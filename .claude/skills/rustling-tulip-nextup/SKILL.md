@@ -93,9 +93,11 @@ The goal is each release as soon as possible, through Release 2; this overrides 
 |---|---|
 | Native feature delivered | **land** its issue, delete its section in `docs/plans/native-client.md`, tick the parity lines it covered in `docs/plans/native-client-parity.md`, and record any lasting design decision in `docs/native-client.md` |
 | A file, module or flow a task-index row names added, moved or removed | `docs/architecture.md` (Components, Task index) |
-| A crate, binary, `rt.ps1` verb, env var or on-disk path added, moved or removed | `CLAUDE.md` (Project shape, Common commands, Environment variables, Where things live), `docs/README.md` Layout / Build |
-| How tests run, or which tests a change reaches | `rt.ps1` (`Invoke-Test`), `tools/test-map.json`, `.config/nextest.toml`, `.pre-commit-config.yaml`, this profile's gates; `docs/architecture.md` Task index |
-| Wire protocol | `crates/protocol/src/lib.rs` doc comments, CLAUDE.md "Wire-protocol gotchas" when a rule changes |
+| A crate, binary, `rt.ps1` verb, env var or on-disk path added, moved or removed | `CLAUDE.md` (Project shape, Common commands, Environment variables), `docs/on-disk.md`, `docs/README.md` Layout / Build |
+| A `rustling-tulipd` subcommand, or how a client starts or retires a daemon | `docs/daemon-cli.md` |
+| Session status, recovery, the chat mirror, tracers or the git watcher | `docs/session-runtime.md` |
+| How tests run, or which tests a change reaches | `rt.ps1` (`Invoke-Test`), `tools/test-map.json`, `.config/nextest.toml`, `.pre-commit-config.yaml`, this profile's gates; `docs/testing.md`; `docs/architecture.md` Task index |
+| Wire protocol | `crates/protocol/src/lib.rs` doc comments, `docs/wire-protocol.md` when a rule changes |
 | Tracer ABI | `docs/tracer-abi.md` |
 | A term used in a project-specific sense (a new plan word, a phase name) | `docs/README.md` Glossary |
 | A subplan finished | durable decisions promoted into `docs/` (and the feature summary in `docs/architecture.md` "What it does"), then the design file deleted |

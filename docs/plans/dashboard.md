@@ -502,6 +502,6 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
   Proof: specs that the Dashboard opens By repo by default, the toggle switches and survives a reload of the UI state, and a lane row click lands on its drawer. Waits on DB.14, DB.24.
 - [ ] SA.11 Document the summarizer and the Dashboard.
 
-  `CLAUDE.md` (the on-disk list gains `summarizer-spend.json`, `day-ledger.json`, the `activity/` folder and `sessions/<id>/summary.json`; `native-ui.json` gains `dashboard.view`; `state.json`'s `summarizer` block; the no-direct-API line names the DeepSeek summarizer's HTTP call).
+  `docs/on-disk.md` and `CLAUDE.md` (the on-disk list gains `summarizer-spend.json`, `day-ledger.json`, the `activity/` folder and `sessions/<id>/summary.json`; `native-ui.json` gains `dashboard.view`; `state.json`'s `summarizer` block; the no-direct-API line names the DeepSeek summarizer's HTTP call).
 
   Also `docs/architecture.md` (task index rows), `docs/native-client.md` (a Dashboard section), `docs/README.md` (glossary), `docs/env-secrets.md` (the summarizer key); the design's lasting decisions promoted and this file deleted. Waits on every step above.

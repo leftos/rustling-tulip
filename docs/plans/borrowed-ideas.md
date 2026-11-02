@@ -34,7 +34,7 @@ Each idea taken up has its own subplan, linked from its entry, which holds its o
   - Hysteresis: leaving `AwaitingInput`, and `Working` to `Idle`, wait for 3 checks 150 ms apart, capped at 700 ms, while entering `AwaitingInput` publishes at once (`mux/src/agent_status/hysteresis.rs`, after herdr's pending-idle confirmation).
   - Prompt rules in versioned per-agent data files with a user override (`mux/src/agent_status/manifests/claude.toml`, ThinkTerm's `docs/agent-status.md`).
   - Finding the agent in a Windows process tree by taking the topmost agent process, so `claude` wins over its MCP children (`mux/src/agent_status/windows_select.rs`).
-- [x] **Share the workspace design on Orca issue #1099** (multi-repo workspaces). Posted with the user's approval: https://github.com/stablyai/orca/issues/1099#issuecomment-5878340045. It describes the anchor-free worktree layout the daemon builds (CLAUDE.md, "Where things live on disk"). The text as posted:
+- [x] **Share the workspace design on Orca issue #1099** (multi-repo workspaces). Posted with the user's approval: https://github.com/stablyai/orca/issues/1099#issuecomment-5878340045. It describes the anchor-free worktree layout the daemon builds (`docs/on-disk.md`). The text as posted:
 
   > 🤖 Posted by Claude Code on behalf of @leftos.
   >

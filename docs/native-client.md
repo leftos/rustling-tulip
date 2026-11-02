@@ -242,7 +242,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
   The per-host session count for an SSH host is keyed `ssh:<host string>`. A hand-edited `saved_hosts` entry that fails the DNS-name check or has a port outside 1 to 65535 is dropped on load with a warn, its name normalised otherwise.
   On a remote host the empty-registry notes name the host (`No repos or workspaces on {host} yet.` in the sidebar, `No repos on {host} yet.` in the spawn dialog), and Reconnect now in the flyout or the overlay redials the same host.
-- **Request ids**: a client that must match a reply to its request sets the optional `request_id` (spawn, duplicate, scrollback, appearance, git reads, spawn previews, checkout prompts, session history, recovery, env names, branch-name suggestions, and the tab requests `CreateTab` / `MergeTabs` / `MovePane` / `ExtractToNewTab` / `SplitPane`), and the daemon echoes it only to the requester (CLAUDE.md, "Wire-protocol gotchas").
+- **Request ids**: a client that must match a reply to its request sets the optional `request_id` (spawn, duplicate, scrollback, appearance, git reads, spawn previews, checkout prompts, session history, recovery, env names, branch-name suggestions, and the tab requests `CreateTab` / `MergeTabs` / `MovePane` / `ExtractToNewTab` / `SplitPane`), and the daemon echoes it only to the requester ([wire-protocol.md](wire-protocol.md)).
 
   A tab request's id comes back only on the refusing `Error`, which a refused split also logs at warn as `tab layout request failed`.
 
@@ -257,7 +257,7 @@ This doc records the decisions a change to the client needs to know; what each f
 - On Windows a build without debug assertions (release, test-release) is a GUI-subsystem exe, so an installed launch opens no console window; a debug build keeps the console and its stderr log.
 ## Persistence
 
-Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in CLAUDE.md, "Where things live on disk"). Tab layouts, session appearance overrides and host settings such as the keep-awake mode and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.
+Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in [on-disk.md](on-disk.md)). Tab layouts, session appearance overrides and host settings such as the keep-awake mode and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.
 
 Settings → Worktrees edits the daemon's worktrees-root override, and shows `Saved` only once the daemon has echoed the last save. Manage worktrees (opened from that tab) lists the root's groups titled by their `.rt-group` name, deletes one group or every stale one, and "Launch session here" opens the spawn dialog with the target locked and that worktree pinned (the spawn form's `Lock`, which a duplicate prefill reuses).
 

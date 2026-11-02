@@ -6,6 +6,11 @@ The start page for working on rustling-tulip: a native Windows desktop client (G
 
 - [architecture.md](architecture.md): the entry point. Components, what the product does, the task index (which files to read, in order, for each kind of change), and non-goals.
 - [native-client.md](native-client.md): the native client's settled design decisions, view by view.
+- [on-disk.md](on-disk.md): every file and folder the daemon and client keep, what each holds, and how they are written.
+- [wire-protocol.md](wire-protocol.md): the rules of the daemon/client protocol that its types do not show.
+- [session-runtime.md](session-runtime.md): session recovery, status, the chat mirror, workspace spawns, tracers and the git watcher.
+- [testing.md](testing.md): the test tiers, the runner's settings, the fake CLIs and the `native-shot` views.
+- [daemon-cli.md](daemon-cli.md): the `rustling-tulipd` subcommands, and how a client starts, retires or refuses a daemon.
 - [auto-update.md](auto-update.md): how the native client finds, verifies and installs a published release, and how the daemon is taken over.
 - [env-secrets.md](env-secrets.md): how secret env rows are sealed into Windows Credential Manager, and what is and isn't protected.
 - [tracer-abi.md](tracer-abi.md): the daemon/tracer ABI, its stability contract and what counts as a bump.
@@ -272,7 +277,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Session ref**: the native client's `SessionRef`, a (host, session id) pair; a pane, a slot and a pop-out name their session by it, so one id on two hosts is two sessions (`apps/native/src/tabs.rs`).
 - **Shared client core**: the planned Rust crate holding the tailnet connect and host profiles, used by both the native client's remote mode and the mobile app.
 - **Spend cap**: the summarizer's daily cap in dollars (default $1.00): Working refreshes stop at half of it and Stop summaries become templates at the full cap, which is soft, so a call already running finishes; `docs/plans/dashboard.md` ("Privacy, cache, cap and fallbacks").
-- **Spend ledger**: the summarizer's per-day spend record, `summarizer-spend.json` in the config dir (`{"date", "spent_usd"}` for the current local day); see "Where things live on disk" in `CLAUDE.md`.
+- **Spend ledger**: the summarizer's per-day spend record, `summarizer-spend.json` in the config dir (`{"date", "spent_usd"}` for the current local day); see [on-disk.md](on-disk.md).
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **SSH target**: `Target::Ssh`, a host the native client reaches by running `ssh` with an `~/.ssh/config` alias or `user@host[:port]` and `rustling-tulipd bridge` (or the saved host's `remote_command`), speaking the protocol over the child's stdio; the SSH login is the owner, so there is no device token; `apps/native/src/ssh.rs`, `docs/native-client.md`, `docs/plans/ssh-remote.md`.
 - **Staging folder**: `$INSTDIR\.staging`, where the installer extracts a setup's files before the staged `rustling-tulipd apply-update` swaps them into the install folder; the installer removes it afterwards (`docs/auto-update.md`).
@@ -287,7 +292,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Subagent tree**: each session's subagents and background shells, read from the transcripts by the Claude plugin (`crates/agents/claude/src/subagents.rs`, `agent_api::SubagentNode`) for the Dashboard; see `docs/plans/dashboard.md` ("The transcript activity reader").
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
 - **Summarizer**: the daemon service (`crates/daemon/src/summarizer/`) that turns a session's turn-end reports into a kind, a headline and a one-line summary, through Claude Haiku on the CLI or DeepSeek. Its settings, per-session queue, cache and spend ledger are in place, and finished-turn summaries run into each session's summary ring. See `docs/plans/dashboard.md`.
-- **Summarizer folder**: the empty machine-local folder (`<data_local>/summarizer`) the summarizer's CLI call runs in; see "Where things live on disk" in `CLAUDE.md`.
+- **Summarizer folder**: the empty machine-local folder (`<data_local>/summarizer`) the summarizer's CLI call runs in; see [on-disk.md](on-disk.md).
 - **Summary line**: one `StretchLine` of the summary view, a stretch's summarizer `notification` (at most 100 characters) or, with no model text, its template line (the turn's first user line, its duration and tool count); not the Dashboard ring's `SummaryLine`.
 - **Summary ring**: a session's last summary lines (at most 12, or 2 hours), newest first, kept in `sessions/<id>/summary.json`; the Dashboard's drawer shows it.
 - **Summary view**: the third view of a session beside terminal and chat: one summarizer line per stretch of work, the open question pinned on top, each line expandable into the chat entries of its stretch.

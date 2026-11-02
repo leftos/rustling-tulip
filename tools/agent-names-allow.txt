@@ -13,5 +13,4 @@ apps/native/src/prompt_nav.rs:Claude # prompt navigation reads Claude's `❯ ` p
 crates/daemon/Cargo.toml:agent-claude # the daemon's dev-dependency for its tests
 crates/daemon/src/summarizer/providers.rs # the summarizer's provider table names each provider it calls over HTTP
 crates/daemon/src/server/test_support.rs # test-only module (declared under #[cfg(test)] in server.rs) driving the Claude plugin
-crates/daemon/src/worktrees_admin.rs:CLAUDE\.md # the repo's guide file, not an agent name
 tools/test-map.json:\.claude/ # Claude Code's own config folder, ignored by the test map

@@ -59,7 +59,7 @@ Build an `rustling-tulipd bridge` subcommand and a `Target::Ssh` in the native c
   - `pairing.rs:550` (approvals);
   - `remote.rs:302` (tailnet router builds `Tailnet`).
 - `FetchFile` dispatch (`server.rs:702`) has no auth gate, so file fetch works on a `Local` connection. The transport is just the WS.
-- `Hello.auth_token` on loopback is the `daemon.json` token (CLAUDE.md "Wire-protocol gotchas"). The device store is keyed by the tailnet node `stable_id` (`devices.rs:57,194,230`), which an SSH client does not have.
+- `Hello.auth_token` on loopback is the `daemon.json` token (`docs/wire-protocol.md`). The device store is keyed by the tailnet node `stable_id` (`devices.rs:57,194,230`), which an SSH client does not have.
 - Native client, `apps/native/src/net.rs`:
   - `Target::{Local, Tailnet}` is matched at `net.rs:455-458`.
   - `attempt_local` (`:463-510`) runs `deps.ensure`, `open_local` with the `/proof` check, then `client_async` over `MaybeTlsStream::Plain(TcpStream)`.
@@ -115,7 +115,7 @@ If the owner later wants per-client revoke, the least bad path is `command="rust
 
 ## Q3. Host picker
 
-A tailnet entry of `saved_hosts` is `{name, port}` (`connection_picker.rs`, `sidebar.rs` UiState, CLAUDE.md native-ui.json bullet). A name that fails the DNS check is dropped on load.
+A tailnet entry of `saved_hosts` is `{name, port}` (`connection_picker.rs`, `sidebar.rs` UiState, `docs/on-disk.md` native-ui.json bullet). A name that fails the DNS check is dropped on load.
 
 - Add a `kind` field, `"tailnet"` (default when missing) or `"ssh"`. A saved SSH host is `{kind: "ssh", name: "<alias or user@host>", remote_command: <optional>}` with no port. An unknown kind is dropped on load, like a bad name.
 - `Target::Ssh(SshHost)` with `name()` (the exact string handed to ssh), `short_name()` (the alias, or the part after `@`) and `address()` for display.
@@ -232,7 +232,7 @@ SSH.1 and SSH.3 can overlap only in review: they touch disjoint files.
 
 - `docs/plans/remote-access.md`: title and intro ("Tailscale-first" becomes "two ways in"), add an SSH section with the invariants (SSH arrives as `Local`, bridge holds the token, no listener, fixed remote command, option-injection rule), retire "attach from outside the tailnet" and the P6 item list gets SSH.n.
 - `docs/architecture.md:289` non-goal: delete the "SSH tunnelling" part ("internet exposure or a relay" stay non-goals). Add a "Remote (SSH) access" bullet near `:118-144` and a Task Index row. Also line 23 ("The daemon binds only loopback and ... tailnet") is still true but add the bridge.
-- `CLAUDE.md`: the last bullet ("Things that are deferred") and the project-shape line for `crates/tailnet`; the `rustling-tulipd bridge` command beside `pair`/`shutdown`; the env var table (`RUSTLING_TULIP_SSH`); the `native-ui.json` bullet (`saved_hosts` `kind`); the E2E tier bullet (fake-ssh).
+- `CLAUDE.md`: the last bullet ("Things that are deferred") and the project-shape line for `crates/tailnet`; the env var table (`RUSTLING_TULIP_SSH`). `docs/daemon-cli.md`: the `rustling-tulipd bridge` command. `docs/on-disk.md`: the `native-ui.json` bullet (`saved_hosts` `kind`). `docs/testing.md`: the E2E tier bullet (fake-ssh).
 - `docs/native-client.md` (picker, fetched files host folder), `docs/remote-hand-checklist.md`, `CHANGELOG.md` (Unreleased bullet), `README.md` (feature showcase at release).
 
 ## DEPENDS ON

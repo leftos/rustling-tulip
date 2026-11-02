@@ -2,7 +2,7 @@
 //! `ClientMessage::InspectWorktreesRoot` and `ClientMessage::DeleteWorktreeAt`.
 //!
 //! Layout (see `crates/daemon/src/git.rs::workspace_worktree_paths` and
-//! CLAUDE.md "Where things live on disk"): a single repo's worktree is the
+//! docs/on-disk.md): a single repo's worktree is the
 //! group folder `<root>/wt.<branch-slug>/<repo-slug>` itself; a workspace's
 //! members sit at `<root>/wt.<branch-slug>/<workspace-slug>/<offset>`. A
 //! group folder is recognised by the marker file beside it,

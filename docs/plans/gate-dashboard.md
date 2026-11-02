@@ -210,7 +210,7 @@ Order: GD.1 → GD.2 → GD.3 → GD.4; GD.5 needs GD.1; GD.6 needs GD.4 and GD.
 
   `docs/architecture.md` (the daemon's components list gains `gate_slots.rs`; a task-index row for the gate view: `gate_slots.rs`, `protocol` `GateSlots`, `gates.rs`, `gates_view.rs`, `activity_bar.rs`); `docs/native-client.md` (a Gates section beside Needs You).
 
-  CLAUDE.md's `native-ui.json` line if it lists the `activity` values; the `docs/README.md` glossary (the terms below and `GD.n` in the step-id entry); `docs/plans/native-client-parity.md` if it gains a line; delete this subplan once promoted.
+  `docs/on-disk.md`'s `native-ui.json` line if it lists the `activity` values; the `docs/README.md` glossary (the terms below and `GD.n` in the step-id entry); `docs/plans/native-client-parity.md` if it gains a line; delete this subplan once promoted.
 
 ## Glossary terms this subplan coins
 
