@@ -119,7 +119,7 @@ fn cloak_and_show(address: usize, size: (u16, u16)) {
 /// makes it the foreground window, and returns whether it took it. A window
 /// left without it is still kept out of sight by the cloak.
 #[cfg(windows)]
-fn never_activate(hwnd: windows::Win32::Foundation::HWND) -> bool {
+pub(crate) fn never_activate(hwnd: windows::Win32::Foundation::HWND) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
     };

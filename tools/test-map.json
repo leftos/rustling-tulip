@@ -556,9 +556,11 @@
     },
     {
       "paths": [
-        "apps/native/src/notify.rs"
+        "apps/native/src/notify.rs",
+        "apps/native/src/toast_stack.rs",
+        "apps/native/src/toast_window.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^notify::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_notifications)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(notify|toast_stack|toast_window)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_notifications)::/))"
     },
     {
       "paths": [
