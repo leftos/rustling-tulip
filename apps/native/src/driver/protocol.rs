@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Every method a request may name, sorted.
-pub const METHODS: [&str; 4] = ["find", "key", "ping", "state"];
+pub const METHODS: [&str; 5] = ["find", "key", "ping", "screenshot", "state"];
 
 /// One call from a driver client.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -268,7 +268,7 @@ mod tests {
                 "error": {
                     "code": "unknown_method",
                     "message": "unknown method: nope",
-                    "hint": "methods: find, key, ping, state",
+                    "hint": "methods: find, key, ping, screenshot, state",
                 },
             })
         );

@@ -21,6 +21,7 @@
 use anyhow::Context as _;
 use daemon_client::capped_log::{self, CappedLog};
 use gpui::{App, Application};
+use rustling_tulip_native::driver_gate::{self, GateDecision};
 use rustling_tulip_native::{Assets, LOG_FILE, offscreen, toast_activation, update};
 use std::path::Path;
 use std::sync::Mutex;
@@ -112,7 +113,39 @@ fn take_updated_from(args: impl IntoIterator<Item = String>) -> (Vec<String>, Op
     (rest, updated_from)
 }
 
+/// Whether this launch is a driven run, decided before anything touches a
+/// folder; a refused one ends the process here.
+fn driver_gate() -> bool {
+    let override_vars: Vec<&str> = agent_registry::all()
+        .iter()
+        .map(|plugin| plugin.program_env_var())
+        .collect();
+    match driver_gate::decide(
+        |variable| std::env::var(variable).ok(),
+        cfg!(all(feature = "driver", windows)),
+        &override_vars,
+    ) {
+        GateDecision::Off => false,
+        GateDecision::Drive => true,
+        GateDecision::Refuse(reason) => refuse_driver_run(&reason),
+    }
+}
+
+/// Logs why a driven run was refused, to stderr only, and ends the process.
+#[expect(
+    clippy::exit,
+    reason = "a refused driven run must stop before it touches any folder"
+)]
+fn refuse_driver_run(reason: &str) -> ! {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+    tracing::error!("driver run refused: {reason}");
+    std::process::exit(offscreen::DRIVER_REFUSED_EXIT)
+}
+
 fn main() {
+    let drive = driver_gate();
     init_tracing();
     install_panic_hook();
     // Bring the login launch up to date: an entry already naming this install's
@@ -138,7 +171,7 @@ fn main() {
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            rustling_tulip_native::open_main_window(wanted_session, cx);
+            rustling_tulip_native::open_main_window(wanted_session, drive, cx);
         });
 }
 

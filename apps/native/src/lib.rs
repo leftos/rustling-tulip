@@ -46,6 +46,7 @@ mod discard_confirm;
 mod drag;
 #[cfg(feature = "driver")]
 pub mod driver;
+pub mod driver_gate;
 mod driver_id;
 pub mod ellipsis;
 mod fetch_dialog;
@@ -454,8 +455,9 @@ pub struct RootDeps {
 }
 
 /// Opens the client's window on a live daemon connection, focusing
-/// `wanted_session` once it arrives.
-pub fn open_main_window(wanted_session: Option<String>, cx: &mut App) {
+/// `wanted_session` once it arrives. A driven run (`drive`, which the driver
+/// gate decided) starts the driver endpoint once the window is open.
+pub fn open_main_window(wanted_session: Option<String>, drive: bool, cx: &mut App) {
     bind_keys(cx);
     fonts::register_bundled(cx);
     let offscreen = offscreen::requested();
@@ -480,7 +482,11 @@ pub fn open_main_window(wanted_session: Option<String>, cx: &mut App) {
             if offscreen {
                 offscreen::show_cloaked(window, WINDOW_SIZE);
             }
-            cx.new(|cx| RootView::new(wanted_session, window, cx))
+            let root = cx.new(|cx| RootView::new(wanted_session, window, cx));
+            if drive {
+                start_driver(window, &root, cx);
+            }
+            root
         },
     );
     if let Err(err) = opened {
@@ -491,6 +497,20 @@ pub fn open_main_window(wanted_session: Option<String>, cx: &mut App) {
     if !offscreen {
         cx.activate(true);
     }
+}
+
+/// Starts the driver endpoint on the main window.
+#[cfg(all(feature = "driver", windows))]
+fn start_driver(window: &mut Window, root: &gpui::Entity<RootView>, cx: &mut App) {
+    driver::endpoint::start(window, root, cx);
+}
+
+/// The driver endpoint is a Win32 named pipe; the gate refuses a driven run
+/// in a build without the driver, so only a non-Windows driver build gets
+/// here.
+#[cfg(not(all(feature = "driver", windows)))]
+fn start_driver(_window: &mut Window, _root: &gpui::Entity<RootView>, _cx: &mut App) {
+    tracing::error!("the driver endpoint runs on Windows only; this run is not driven");
 }
 
 /// The main window's place saved in `native-ui.json`, if the config dir

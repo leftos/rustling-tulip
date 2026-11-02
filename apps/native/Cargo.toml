@@ -23,10 +23,21 @@ workspace = true
 
 [features]
 # The headless client driver: a registry of every named element's painted
-# bounds (src/driver/), fed at prepaint. Off by default.
-driver = []
+# bounds (src/driver/), fed at prepaint, and the endpoint a driven run opens:
+# a named pipe (`interprocess`), current-user only (`Win32_Security`,
+# `Win32_Security_Authorization`), and `screenshot`'s capture (`Win32_Storage_Xps`
+# for PrintWindow) written as a PNG. Off by default.
+driver = [
+    "dep:interprocess",
+    "dep:png",
+    "windows/Win32_Security",
+    "windows/Win32_Security_Authorization",
+    "windows/Win32_Storage_Xps",
+]
 
 [dependencies]
+# The driver gate requires each registered agent's binary override.
+agent-registry = { workspace = true }
 daemon-client = { workspace = true }
 protocol = { workspace = true }
 tailnet = { workspace = true }
@@ -83,6 +94,8 @@ rodio = { version = "0.23.0", default-features = false, features = [
     "wav",
     "vorbis",
 ] }
+interprocess = { version = "2", features = ["tokio"], optional = true }
+png = { version = "0.18", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"

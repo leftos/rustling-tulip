@@ -78,7 +78,7 @@ fn driver_unknown_method_lists_methods(cx: &mut TestAppContext) {
     assert_eq!(failed.message, "unknown method: nope");
     assert_eq!(
         failed.hint.as_deref(),
-        Some("methods: find, key, ping, state")
+        Some("methods: find, key, ping, screenshot, state")
     );
 }
 

@@ -26,6 +26,11 @@ pub fn handle(
         "state" => Ok(state(root.read(cx), window)),
         "find" => find(request, window, cx),
         "key" => key(request, window, cx),
+        // It awaits a capture thread, so the pipe's dispatcher answers it.
+        "screenshot" => Err(request.fail(
+            ErrorCode::Refused,
+            "screenshot is answered only over the driver pipe".to_owned(),
+        )),
         _ => return Reply::unknown_method(request.id, &request.method),
     };
     outcome.map_or_else(|failed| failed, |result| Reply::ok(request.id, result))

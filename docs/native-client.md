@@ -919,3 +919,17 @@ Three tiers, all Rust tests:
   No daemon starts and no config dir is read. The Working spinner animates on wall-clock time, so two shots differ inside that glyph and nowhere else.
 
 The e2e and smoke tiers are `#[ignore]`d in the normal nextest run and run only through their `rt.ps1` verbs, under `nextest --run-ignored only`. A probe or dev daemon never runs with default dirs, where its client attaches to the user's real sessions and resizes their PTYs: it sets all of `RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to `.tmp/` dirs, as `native-e2e` does. `daemon_client::isolation::check_isolated` is that rule as code: it passes only when the three variables are each set to an absolute folder with a `.tmp` folder strictly above it, and otherwise returns the first `NotIsolated` (variable and `Reason`).
+
+### Driver endpoint
+
+A driven run is a launch with `RUSTLING_TULIP_DRIVER=1`. The gate (`apps/native/src/driver_gate.rs`, compiled in every build) decides first in `main`, before tracing starts or any folder, log or registry entry is touched. Unset or empty, the client runs as usual. A driven run needs a build with the `driver` feature, `RUSTLING_TULIP_OFFSCREEN_WINDOW` set, the three isolated dirs passing `check_isolated`, and each registered agent's binary override variable set.
+
+Any other value of `RUSTLING_TULIP_DRIVER`, or any condition unmet, refuses the run: it logs `driver run refused: <reason>` to stderr only and exits with code 4 (`offscreen::DRIVER_REFUSED_EXIT`).
+
+Once the window is open, a driven run listens on the named pipe `rt-driver-<pid>` (`apps/native/src/driver/pipe.rs`). Its DACL grants only the current user's SID, it refuses remote clients, and a name already held is fatal (exit 4), never retried under another name.
+
+Each line is one request in the format of `apps/native/src/driver/protocol.rs`, and gets one reply line, in order. A line over 64 KiB is answered with `bad_params` under id 0, and then the connection closes. Requests run one at a time on the UI thread (`apps/native/src/driver/endpoint.rs`), and each reply waits for a frame drawn after its request, at most 5 s. When no frame draws in time, or the window closes, the handler's own reply is still sent, an ok object result carrying `"drawn": false`.
+
+Once a frame has drawn with the window cloaked, the client writes its discovery file `%TEMP%\rustling-tulip-driver\<pid>.json` (`{"pid", "pipe", "started_at", "version"}`, `started_at` being the process creation time as a `FILETIME`) by temp file and rename. It removes the file when the app quits, and first deletes each file there whose pid is not running or whose `started_at` is not that pid's creation time.
+
+`screenshot` takes no params. It captures the cloaked window with `PrintWindow` on a worker thread to `<config dir>/driver-shots/<pid>-<n>.png`, `<n>` counting from 1 in each run, and replies `{"path", "width", "height"}`. It refuses a window that is not shown, is not cloaked by the client (`DWM_CLOAKED_APP`), is the foreground window, belongs to another process, or captured black, and a capture that does not finish within 10 s. The discovery file waits for the same shown and app-cloaked state, and for the pipe's listener to exist.

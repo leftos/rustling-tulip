@@ -20,6 +20,10 @@ pub fn requested() -> bool {
 /// The exit code of a process whose window could not be cloaked.
 pub const CLOAK_FAILED_EXIT: i32 = 3;
 
+/// The exit code of a driven run that was refused: its environment fails
+/// the driver gate, or its driver pipe could not be created.
+pub const DRIVER_REFUSED_EXIT: i32 = 4;
+
 /// Places `window` at the primary display's work-area origin at `size` in
 /// logical pixels (gpui applies neither to a window it opens hidden), marks
 /// it never to be activated, puts it at the bottom of the Z order, cloaks it

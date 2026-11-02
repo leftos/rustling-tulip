@@ -5619,6 +5619,7 @@ dependencies = [
  "encoding_rs",
  "futures",
  "gpui",
+ "interprocess",
  "png 0.18.1",
  "protocol",
  "pulldown-cmark",
