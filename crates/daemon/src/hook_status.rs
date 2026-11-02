@@ -3,7 +3,7 @@
 //! An agent's hooks arrive through the files and argv its spawn's hook plan
 //! injects, whose shim posts to the daemon's hook endpoint, and the agent's
 //! plugin maps each payload to a [`HookReport`]. The daemon's own status
-//! watcher (`pty_state`) guesses the status from the byte stream; these
+//! watcher (`pty_state`) reads the status from the session's screen; these
 //! reports are the agent's own. This module orders them, holds the ones that
 //! arrive before their session is inserted, and writes them to the record.
 //!
@@ -12,7 +12,7 @@
 //! never touches the record.
 
 use crate::server::Hub;
-use crate::session::{PendingInsert, SessionRecord, push_recent_action};
+use crate::session::{PendingInsert, SessionRecord, TurnAlert, TurnEnd, push_recent_action};
 use agent_api::{AgentPlugin, HookReport, LiveLine, PendingUpdate};
 use chrono::{DateTime, Local};
 use protocol::{AgentId, SessionStatus};
@@ -112,7 +112,7 @@ pub fn apply_signal(
 ) {
     let mut applied = Applied::default();
     let mut start_turns = false;
-    hub.sessions.update(session_id, |record| {
+    hub.sessions.update_then(session_id, |record| {
         applied = apply_to_record(record, event_time, report);
         // The report joins the pipeline in the same update that ends the
         // turn, so the registry sees a stop line on its way and keeps a
@@ -120,6 +120,10 @@ pub fn apply_signal(
         if let Some(message) = applied.turn_report.as_deref() {
             start_turns = hub.turns.add_report(session_id, message);
         }
+        applied
+            .turn_alert
+            .take()
+            .map(|alert| alert.event(session_id))
     });
     log_mismatch(session_id, applied.mismatch.as_ref());
     if let Some((from, to)) = applied.status_change {
@@ -229,6 +233,71 @@ pub(crate) struct Applied {
     /// The trimmed last message of a main-agent `Stop` in an interactive
     /// session, for the turn pipeline to summarize.
     pub(crate) turn_report: Option<String>,
+    /// The alert a held turn end kept, when the event landed its `Idle`.
+    pub(crate) turn_alert: Option<TurnAlert>,
+}
+
+/// The background flag of a `Stop` that holds its turn end: a main `Stop` on a
+/// `Working` record with a live screen, whose `Idle` the status watcher can
+/// still decide. `StopFailure` reports no flag: nothing can send the agent
+/// back after it. Any other record's `Stop` applies at once.
+fn holds_turn_end(record: &SessionRecord, report: &HookReport) -> Option<bool> {
+    report
+        .background
+        .filter(|_| record.status == SessionStatus::Working && record.screen.is_some())
+}
+
+/// Hold a `Stop` at `event_time` on `record`, replacing any earlier one, whose
+/// alert stands until a new one arrives.
+fn hold_turn_end(record: &mut SessionRecord, background: bool, event_time: u128) {
+    let earlier = record.turn_end.take();
+    if earlier.is_some() {
+        info!(session_id = %record.id, why = "replaced", "turn end dropped");
+    }
+    record.turn_end = Some(TurnEnd {
+        event_time,
+        background,
+        alert: earlier.and_then(|held| held.alert),
+        held_at: tokio::time::Instant::now(),
+    });
+    info!(session_id = %record.id, background, "turn end held");
+}
+
+/// Land the turn end `record` holds at `Idle`, its flag kept when
+/// `keep_background`; answers the alert it held.
+fn land_turn_end(
+    record: &mut SessionRecord,
+    keep_background: bool,
+    how: &'static str,
+) -> Option<TurnAlert> {
+    let held = record.turn_end.take()?;
+    crate::pty_state::apply_status(record, SessionStatus::Idle);
+    record.background = keep_background && held.background;
+    info!(session_id = %record.id, how, "turn end landed");
+    held.alert
+}
+
+/// Forget the turn end `record` holds, as a hook event's.
+fn drop_turn_end(record: &mut SessionRecord) {
+    if record.turn_end.take().is_some() {
+        info!(session_id = %record.id, why = "hook", "turn end dropped");
+    }
+}
+
+/// What a main-agent event other than a `Stop` that holds does to a held turn
+/// end; answers the alert when it lands one. A subagent's turn is not the main
+/// agent's, so its events neither drop nor resolve one.
+fn settle_turn_end(record: &mut SessionRecord, report: &HookReport) -> Option<TurnAlert> {
+    if report.subagent {
+        return None;
+    }
+    if report.weak_idle {
+        return land_turn_end(record, true, "weak_idle");
+    }
+    if report.status == Some(SessionStatus::Working) {
+        drop_turn_end(record);
+    }
+    None
 }
 
 /// The message a main-agent `Stop` ended an interactive session's turn
@@ -271,6 +340,7 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
     // and the run's end will be announced.
     if report.agent_started {
         record.start_agent_in_shell();
+        drop_turn_end(record);
     }
     // A shell outlives the CLI whose hooks drive it: once that CLI ends, its
     // hooks stop arriving and the shell classifier owns the status again.
@@ -283,12 +353,14 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
     // is announced once per run. A `/clear` ends only the conversation: the
     // agent runs on and starts the next one at once.
     let mut agent_exited = false;
+    let mut turn_alert = None;
     if report.agent_ended && record.shell_hosted() {
         record.hook_driven = false;
         if record.status == SessionStatus::AwaitingInput {
             crate::pty_state::apply_status(record, SessionStatus::Idle);
             record.pending_input = None;
         }
+        turn_alert = land_turn_end(record, false, "agent_end");
         agent_exited = record.end_agent_in_shell();
     }
     if leaves_pending_alone(record, report) {
@@ -298,17 +370,24 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
             mismatch: apply_details(record, report, event_time),
             agent_exited,
             turn_report: turn_report(record, report),
+            turn_alert,
         };
     }
+    turn_alert = turn_alert.or_else(|| settle_turn_end(record, report));
     // A subagent's turn is not the main agent's: it works on while the main
     // agent is idle and ends while the main agent works, so its events never
     // promote the session into `Working` or end a turn at `Idle`.
-    let entered_awaiting = report
-        .status
-        .filter(|status| {
-            !(report.subagent && matches!(status, SessionStatus::Working | SessionStatus::Idle))
-        })
-        .is_some_and(|status| crate::pty_state::apply_status(record, status));
+    let entered_awaiting = if let Some(background) = holds_turn_end(record, report) {
+        hold_turn_end(record, background, event_time);
+        false
+    } else {
+        report
+            .status
+            .filter(|status| {
+                !(report.subagent && matches!(status, SessionStatus::Working | SessionStatus::Idle))
+            })
+            .is_some_and(|status| crate::pty_state::apply_status(record, status))
+    };
     match &report.pending {
         PendingUpdate::Clear => record.pending_input = None,
         PendingUpdate::Set(pending) => record.pending_input = Some(pending.clone()),
@@ -324,6 +403,7 @@ fn apply_report(record: &mut SessionRecord, report: &HookReport, event_time: u12
         mismatch: apply_details(record, report, event_time),
         agent_exited,
         turn_report: turn_report(record, report),
+        turn_alert,
     }
 }
 
@@ -626,9 +706,10 @@ pub(crate) fn apply_details(
     {
         store_last_message(record, message);
     }
-    // Only the main agent's turn end says whether work runs on; the status is
-    // already `Idle` here, in the same update.
-    if let Some(background) = report.background {
+    // Only the main agent's turn end says whether work runs on. The status is
+    // already `Idle` here, in the same update, unless the `Stop` was held: its
+    // turn end then carries the flag until `Idle` lands.
+    if let Some(background) = report.background.filter(|_| record.turn_end.is_none()) {
         record.background = background;
     }
     // The work the same turn end listed, with the lists it reported.
@@ -984,6 +1065,197 @@ mod tests {
         record.last_hook_time = Some(1);
         record.hook_driven = true;
         record
+    }
+
+    /// [`turn_record`] with a live screen, which a `Stop` is held on.
+    fn screened_record() -> SessionRecord {
+        let mut record = turn_record();
+        record.screen = Some(Arc::new(Mutex::new(crate::screen::Screen::new(80, 24))));
+        record
+    }
+
+    /// [`screened_record`] holding the turn end of a `Stop` at hook time 2
+    /// that reported a running shell.
+    fn held_record() -> SessionRecord {
+        let mut record = screened_record();
+        let tasks = json!([{"id": "b1", "type": "shell", "status": "running"}]);
+        apply_body(&mut record, 2, &main_stop(&tasks, &json!([])));
+        record
+    }
+
+    fn held_time(record: &SessionRecord) -> Option<u128> {
+        record.turn_end.as_ref().map(|held| held.event_time)
+    }
+
+    #[test]
+    fn a_main_stop_on_a_screen_holds_its_turn_end() {
+        let record = held_record();
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(held_time(&record), Some(2));
+        assert!(!record.background, "the flag waits for Idle");
+        assert!(
+            record.turn_end.as_ref().is_some_and(|held| held.background),
+            "the held turn end carries the flag"
+        );
+        assert_eq!(record.last_assistant_message.as_deref(), Some("started"));
+        assert_eq!(record.last_hook_time, Some(2));
+    }
+
+    #[test]
+    fn a_stop_failure_lands_idle_at_once() {
+        let mut record = screened_record();
+        let body = json!({"hook_event_name": "StopFailure", "error": "rate_limit"});
+        apply_body(&mut record, 2, &body);
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert_eq!(held_time(&record), None);
+    }
+
+    #[test]
+    fn a_stop_on_a_record_not_working_applies_at_once() {
+        let mut record = screened_record();
+        record.status = SessionStatus::Idle;
+        let tasks = json!([{"id": "b1", "type": "shell", "status": "running"}]);
+        apply_body(&mut record, 2, &main_stop(&tasks, &json!([])));
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert!(record.background, "the flag applies at once");
+        assert_eq!(held_time(&record), None);
+    }
+
+    #[test]
+    fn a_stop_with_no_screen_applies_at_once() {
+        let mut record = turn_record();
+        let tasks = json!([{"id": "b1", "type": "shell", "status": "running"}]);
+        apply_body(&mut record, 2, &main_stop(&tasks, &json!([])));
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert!(record.background, "the flag applies at once");
+        assert_eq!(held_time(&record), None);
+    }
+
+    #[test]
+    fn a_main_tool_event_drops_a_held_turn_end() {
+        let mut record = held_record();
+        let body = json!({"hook_event_name": "PostToolUse", "tool_name": "Read"});
+        apply_body(&mut record, 3, &body);
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(held_time(&record), None);
+    }
+
+    #[test]
+    fn a_subagent_event_leaves_a_held_turn_end() {
+        let mut record = held_record();
+        let tool = json!({
+            "hook_event_name": "PostToolUse",
+            "agent_id": "a0123456789abcdef",
+            "agent_type": "Explore",
+            "tool_name": "Read",
+        });
+        apply_body(&mut record, 3, &tool);
+        let stop = json!({
+            "hook_event_name": "Stop",
+            "agent_id": "a0123456789abcdef",
+            "agent_type": "Explore",
+        });
+        apply_body(&mut record, 4, &stop);
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(held_time(&record), Some(2));
+    }
+
+    #[test]
+    fn a_session_start_clears_a_held_turn_end() {
+        let mut record = held_record();
+        let body = json!({"hook_event_name": "SessionStart", "source": "compact"});
+        apply_body(&mut record, 3, &body);
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(held_time(&record), None);
+    }
+
+    #[test]
+    fn an_agent_end_consumes_a_held_turn_end() {
+        let mut record = held_record();
+        record.mode = SessionMode::PlainShell;
+        let applied = apply_body(&mut record, 3, &session_end());
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert!(!record.background, "the agent's work ended with it");
+        assert_eq!(held_time(&record), None);
+        assert_eq!(
+            applied.status_change,
+            Some((SessionStatus::Working, SessionStatus::Idle))
+        );
+    }
+
+    #[test]
+    fn a_weak_idle_consumes_a_held_turn_end() {
+        let mut record = held_record();
+        apply_body(&mut record, 3, &idle_prompt());
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert!(record.background, "the held flag lands");
+        assert_eq!(held_time(&record), None);
+    }
+
+    fn parked_alert() -> TurnAlert {
+        TurnAlert {
+            kind: None,
+            notification: "parked".to_owned(),
+            source: protocol::SummarySource::Model,
+        }
+    }
+
+    #[test]
+    fn a_later_stop_keeps_the_parked_alert() {
+        let mut record = held_record();
+        if let Some(held) = record.turn_end.as_mut() {
+            held.alert = Some(parked_alert());
+        }
+        apply_body(&mut record, 3, &main_stop(&json!([]), &json!([])));
+        assert_eq!(held_time(&record), Some(3));
+        assert!(
+            record
+                .turn_end
+                .as_ref()
+                .is_some_and(|held| held.alert.is_some()),
+            "the alert survives until a new one arrives"
+        );
+    }
+
+    #[test]
+    fn a_stop_failure_on_a_held_turn_end_keeps_its_alert_and_background() {
+        let (hub, _scratch) = test_agent_hub("stop-failure-held");
+        let mut record = held_record();
+        if let Some(held) = record.turn_end.as_mut() {
+            held.alert = Some(parked_alert());
+        }
+        hub.sessions.insert(record);
+        let mut events = hub.sessions.subscribe();
+        let failure = json!({"hook_event_name": "StopFailure", "error": "rate_limit"});
+        apply_signal(&hub, "s1", Some(3), &report(&failure), "StopFailure");
+        let mut landed = None;
+        let mut alerts = 0;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                crate::session::SessionEvent::Updated(snapshot, _) => {
+                    landed = Some((snapshot.status, snapshot.background));
+                }
+                crate::session::SessionEvent::WaitingAlert { .. } => alerts += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(landed, Some((SessionStatus::Idle, true)));
+        assert_eq!(alerts, 1, "the alert follows the update");
+    }
+
+    #[test]
+    fn a_later_stop_replaces_a_held_turn_end() {
+        let mut record = held_record();
+        apply_body(&mut record, 3, &main_stop(&json!([]), &json!([])));
+        assert_eq!(record.status, SessionStatus::Working);
+        assert_eq!(held_time(&record), Some(3));
+        assert!(
+            record
+                .turn_end
+                .as_ref()
+                .is_some_and(|held| !held.background),
+            "the later Stop's flag replaces the first's"
+        );
     }
 
     /// A main-agent `Stop` carrying `tasks` and `crons`.

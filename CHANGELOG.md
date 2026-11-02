@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - A running app checks for updates every hour instead of once a day, and Settings offers Restart to update as soon as a check finds one.
+- A Finished toast no longer fires when a Stop hook sends the agent back to work; the session stays Working until its hooks finish.
 
 ### Changed
 

@@ -36,7 +36,7 @@ A rule table fails closed: one bad rule (a structural problem, an unknown part, 
 
 There is no output/input volume classifier, no title heartbeat and no silence demotion for a Claude session: a quiet screen that still shows the spinner stays `Working`.
 
-A session turns hook-driven on its first mapped hook event that passes the ordering check, from Claude Code's hooks, injected through the settings file its spawn writes. A hook event applies at once. A session whose hooks never run is screen-driven only.
+A session turns hook-driven on its first mapped hook event that passes the ordering check, from Claude Code's hooks, injected through the settings file its spawn writes. A hook event applies at once, except a main-agent `Stop`, whose `Idle` is held (below). A session whose hooks never run is screen-driven only.
 
 A screen-derived change publishes at once when it enters `AwaitingInput` from a dialog footer or when a spinner line promotes the session to `Working`. Leaving `AwaitingInput` and `Working` to `Idle` publish only after hysteresis: 3 agreeing checks at least 150 ms apart, or the first agreeing check 700 ms after the first.
 
@@ -49,6 +49,16 @@ An interactive Claude session whose agent is typed into the user's shell (`agent
 The record's `program_name` becomes the shell's label then and `claude` again on the next `SessionStart`; the session itself ends only when the shell exits.
 
 A subagent's hook event (an `agent_id` in its input) never ends or replaces the main agent's pending prompt, never promotes the session to `Working` and never ends a turn at `Idle`, and a subagent `PermissionRequest` raises one only when none is pending.
+
+A main-agent `Stop` does not land `Idle` itself: it parks its report in the runtime-only `SessionRecord.turn_end` (`TurnEnd`), the status stays `Working`, and the `background` flag and any `WaitingAlert` wait in it, so a stop that a Stop hook blocks never reads as finished. A subagent's `Stop` never holds, and `StopFailure` lands `Idle` at once, keeping what a hold already carries.
+
+The screen watcher is the only resolver of a held turn end. The `turn_hooks_running` rule (verdict `hooks_running`) keeps the hold while the hooks row is up; a screen that reads idle lands `Idle`; and with no sign of hooks on the screen, the first settled frame after the foreign-write hold (about 700 ms after the `Stop`) lands it.
+
+`TURN_END_CEILING` (60 s) lands `Idle` on a settled frame that shows no spinner, and drops the hold on a spinner, a title-only `Working` reading or an overlay, writing no `Idle` on any of them.
+
+A main hook event during the hold drops it, since the turn went on, and a later `Stop` replaces it, keeping an earlier alert unless a new one arrives. Any status change takes the hold, and any move to `Idle` lands the alert and the `background` flag it carried, except `hand_shell_back`, which lands the alert and leaves `background` false.
+
+The log says `turn end held`, `turn end landed` (`how`: `screen`, `ceiling`, `no_evidence`, `weak_idle`, `agent_end`, `hand_back`, `status_change`) and `turn end dropped` (`why`: `ceiling_overlay`, `ceiling_spinner`, `hook`, `replaced`, `status_change`). The summarizer's refresher skips a record with a held turn end, so it makes no billed call.
 
 A main-agent `Stop` whose `background_tasks` lists a running task, or whose `session_crons` holds a one-shot cron, sets the snapshot's `background` flag beside `Idle` (RT-84); any status change, a stop, a park or an exit clears it, and it is never written to the sidecar.
 

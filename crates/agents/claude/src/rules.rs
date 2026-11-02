@@ -148,7 +148,7 @@ static SCREEN_RULES: LazyLock<ScreenRules> = LazyLock::new(|| ScreenRules {
             region: ScreenRegion::AbovePromptBox { rows: 24 },
             matcher: LineMatcher::Regex(HOOKS_RUNNING.to_string()),
             not: Vec::new(),
-            verdict: ScreenVerdict::Keep,
+            verdict: ScreenVerdict::HooksRunning,
         },
         ScreenRule {
             name: "turn_spinner".to_string(),

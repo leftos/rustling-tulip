@@ -44,6 +44,8 @@ pub enum Verdict {
     State(ScreenState),
     /// An overlay is open: leave the status as it is.
     Keep,
+    /// Hooks run under a turn's spinner: the status stays as it is.
+    HooksRunning,
     /// Work runs on in the background. Only a background rule gives it, and
     /// [`CompiledRules::read_background`] reads those rules apart from the
     /// state rules, so a [`Reading`] never carries it.
@@ -394,6 +396,7 @@ fn verdict_of(verdict: ScreenVerdict) -> Option<Verdict> {
         ScreenVerdict::AwaitingInput => Some(Verdict::State(ScreenState::AwaitingInput)),
         ScreenVerdict::Idle => Some(Verdict::State(ScreenState::Idle)),
         ScreenVerdict::Keep => Some(Verdict::Keep),
+        ScreenVerdict::HooksRunning => Some(Verdict::HooksRunning),
         ScreenVerdict::Background => Some(Verdict::Background),
         ScreenVerdict::Unknown => None,
     }
@@ -955,12 +958,12 @@ mod tests {
             (
                 "v54-plan-feedback-sent",
                 include_str!("fixtures/v54-plan-feedback-sent.txt"),
-                Keep,
+                Verdict::HooksRunning,
             ),
             (
                 "c80-bang-out",
                 include_str!("fixtures/c80-bang-out.txt"),
-                Keep,
+                Verdict::HooksRunning,
             ),
             (
                 "claude--working",
@@ -1063,7 +1066,7 @@ mod tests {
             (
                 "claude--v2302-turn-ending-stop-hooks--w119",
                 include_str!("fixtures/claude--v2302-turn-ending-stop-hooks--w119.txt"),
-                Keep,
+                Verdict::HooksRunning,
             ),
         ];
         let mut wrong = Vec::new();
