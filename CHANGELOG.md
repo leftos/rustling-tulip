@@ -4,6 +4,13 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.7.1-alpha
+
+### Fixed
+
+- Finished toasts no longer fire after nearly every tool call while Claude works through a task-list item.
+- A Finished toast now waits 5 seconds and is dropped if the session starts working again.
+
 ## v0.7.0-alpha
 
 ### Highlights
