@@ -494,6 +494,8 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 - [ ] DB.23 Draw the need-you band. `apps/native/src/dashboard_band_view.rs` (new: Need you with ask blocks, the accounts card, Questions by repo, the calm state), `apps/native/src/dashboard.rs` (the band model and the needs-you count rule), `apps/native/src/activity_bar.rs` and `apps/native/src/tab_bar.rs` (the badge follows the rule), `apps/native/src/dashboard_view.rs` (the queue strip's accounts and questions chips), `apps/native/tests/ui/ui_dashboard.rs`.
 
   Proof: specs that waits run longest first with working answer buttons, Questions never raise the badge, a dry fleet adds one and a later run-dry does not, and the calm state shows with nothing due. Waits on DB.11, DB.13, the accounts fleet verdict (RT-39 and RT-66, [accounts.md](./accounts.md) CA.4 and CA.5) and the board's Questions (RT-56).
+
+  Need you column and calm state built, unmounted until DB.24; Accounts and Questions are RT-737.
 - [ ] DB.24 Draw the repo lanes, the default view.
 
   `apps/native/src/dashboard_lanes.rs` (new, plain Rust: lanes in sidebar order, live and total counts, captions, the No live agent table, Show all lanes), `apps/native/src/dashboard_lanes_view.rs` (new: lane head with chart and caption, session rows with nested rows, Questions and Next up, the No live agent table), `apps/native/src/lib.rs` (mounted; `Open plan` opens the Plan tab), `apps/native/tests/ui/ui_dashboard.rs`, `apps/native/examples/shot.rs` (a `dashboard-repo` view).

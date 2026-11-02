@@ -9,7 +9,7 @@ use crate::support;
 use chrono::{DateTime, Duration, Utc};
 use gpui::{TestAppContext, px, size};
 use protocol::{AgentState, ClientMessage, DaemonMessage, PromptChoice, SessionSnapshot, TabEntry};
-use rustling_tulip_native::{DashboardColumns, DashboardEntry, RowCells};
+use rustling_tulip_native::{DashboardColumns, DashboardEntry, RowCells, enable_band_probe};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, facts, facts_message, pane, repo, session, tab};
 
@@ -1033,4 +1033,77 @@ fn go_to_pane_opens_the_session(cx: &mut TestAppContext) {
         "the session's pane is shown"
     );
     assert!(answers(&mut h).is_empty(), "Go to pane answers nothing");
+}
+
+#[gpui::test]
+fn band_answer_button_sends_answer_prompt(cx: &mut TestAppContext) {
+    let since = minutes_ago(3);
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![waiting_on("q1", since, single_question())]);
+    enable_band_probe();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert!(drawn(&mut h, "dashboard-band"));
+    assert!(drawn(&mut h, "dashboard-band-washed"), "a wait washes it");
+    assert!(drawn(&mut h, "dashboard-band-wait=q1"));
+    assert!(
+        drawn(&mut h, "dash-ask-q1"),
+        "the wait carries its ask block"
+    );
+    answers(&mut h);
+    h.click_on("dash-ask-choice-q1-2");
+    let sent = answers(&mut h);
+    assert_eq!(sent.len(), 1, "one answer from the band: {sent:?}");
+    assert_eq!(sent[0].0, "q1");
+    assert_eq!(sent[0].1, since, "chosen against the snapshot's stamp");
+    assert_eq!(sent[0].2, PromptChoice::Option { index: 1 });
+}
+
+#[gpui::test]
+fn band_shows_no_agent_is_waiting_when_empty(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![working("w1")]);
+    enable_band_probe();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert!(drawn(&mut h, "dashboard-band"));
+    assert!(drawn(&mut h, "dashboard-band-empty"));
+    assert!(
+        !drawn(&mut h, "dashboard-band-wait=w1"),
+        "a working session is not a wait"
+    );
+}
+
+#[gpui::test]
+fn band_calm_state_has_no_wash(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![working("w1")]);
+    enable_band_probe();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert!(drawn(&mut h, "dashboard-band-calm"));
+    assert!(!drawn(&mut h, "dashboard-band-washed"), "nothing waits");
+}
+
+#[gpui::test]
+fn band_wait_without_an_ask_goes_to_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![
+        session("s1")
+            .in_repo("r1")
+            .status("awaiting_input")
+            .status_since(minutes_ago(2))
+            .build(),
+    ]);
+    enable_band_probe();
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert!(drawn(&mut h, "dashboard-band-wait=s1"));
+    assert!(
+        !drawn(&mut h, "dash-ask-s1"),
+        "a screen-detected wait reports no prompt"
+    );
+    assert!(drawn(&mut h, "dashboard-band-go=s1"));
+    h.click_on("dashboard-band-go=s1");
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t1".to_owned()),
+        "the session's pane is shown"
+    );
 }
