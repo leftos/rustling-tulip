@@ -2987,6 +2987,7 @@ fn a_turn_finishing_in_a_focused_tab_popout_is_seen(cx: &mut TestAppContext) {
     assert!(focused_in_popout(&h, &mut popout, "p1"));
 
     end_s1_turn(&mut h);
+    h.advance(std::time::Duration::from_secs(5));
 
     assert_eq!(
         leaf_unseen(&mut h, "s1"),

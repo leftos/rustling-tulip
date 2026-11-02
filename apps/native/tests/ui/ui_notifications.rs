@@ -60,6 +60,11 @@ fn turn(h: &mut Harness<'_>, id: &str, label: &str) {
     h.send(updated(session(id).user_label(label).build()));
 }
 
+/// Waits out the grace period a Finished toast is held for.
+fn grace(h: &mut Harness<'_>) {
+    h.advance(Duration::from_secs(5));
+}
+
 fn shown(title: &str, body: &str) -> (String, String) {
     (title.to_owned(), body.to_owned())
 }
@@ -126,6 +131,7 @@ fn a_turn_ending_notifies_finished_with_label(cx: &mut TestAppContext) {
         session("s2").user_label("review").status("working").build(),
     ));
     h.send(updated(session("s2").user_label("review").build()));
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("Finished", "review")],
@@ -145,11 +151,101 @@ fn a_turn_ending_with_background_work_waits(cx: &mut TestAppContext) {
     h.send(updated(holding));
     assert!(h.notified().is_empty(), "the background work still runs");
     h.send(updated(session("s2").user_label("review").build()));
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("Finished", "review")],
         "the last of the work is done"
     );
+}
+
+#[gpui::test]
+fn a_finished_toast_waits_out_the_grace(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(4));
+    assert!(h.notified().is_empty(), "the agent may start again");
+    h.advance(Duration::from_secs(1));
+    assert_eq!(h.notified(), [shown("Finished", "review")]);
+}
+
+#[gpui::test]
+fn working_again_inside_the_grace_raises_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(1));
+    h.send(updated(
+        session("s2").user_label("review").status("working").build(),
+    ));
+    h.advance(Duration::from_secs(12));
+    assert!(h.notified().is_empty(), "the turn went on");
+}
+
+#[gpui::test]
+fn each_idle_starts_its_own_grace(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(3));
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(3));
+    assert!(
+        h.notified().is_empty(),
+        "the first idle's timer raises nothing for the second"
+    );
+    h.advance(Duration::from_secs(2));
+    assert_eq!(h.notified(), [shown("Finished", "review")]);
+}
+
+#[gpui::test]
+fn background_work_inside_the_grace_raises_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    h.send(updated(
+        session("s2").user_label("review").background().build(),
+    ));
+    h.advance(Duration::from_secs(12));
+    assert!(
+        h.notified().is_empty(),
+        "the screen saw the background shell after it read Idle"
+    );
+    h.send(updated(session("s2").user_label("review").build()));
+    grace(&mut h);
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "the toast waits for the work to end"
+    );
+}
+
+#[gpui::test]
+fn an_alert_inside_the_grace_words_the_toast_when_it_ends(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.send(alert("s2", AlertKind::DoneWaiting, "tests pass"));
+    assert!(
+        h.notified().is_empty(),
+        "an alert does not cut the grace short"
+    );
+    grace(&mut h);
+    assert_eq!(h.notified(), [shown("review finished", "tests pass")]);
+}
+
+#[gpui::test]
+fn an_alert_after_the_grace_words_the_toast_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(8));
+    assert!(h.notified().is_empty(), "the toast waits for its alert");
+    h.send(alert("s2", AlertKind::DoneWaiting, "tests pass"));
+    assert_eq!(h.notified(), [shown("review finished", "tests pass")]);
 }
 
 #[gpui::test]
@@ -180,6 +276,7 @@ fn finished_toggle_off_silences_it(cx: &mut TestAppContext) {
         session("s2").user_label("review").status("working").build(),
     ));
     h.send(updated(session("s2").user_label("review").build()));
+    grace(&mut h);
     assert!(h.notified().is_empty(), "the toggle is off");
     h.send(attention("s2", AttentionReason::AwaitingInput));
     assert_eq!(
@@ -201,6 +298,7 @@ fn finished_skips_a_session_on_screen(cx: &mut TestAppContext) {
             .build(),
     ));
     h.send(updated(session("s1").user_label("fix login").build()));
+    grace(&mut h);
     assert!(
         h.notified().is_empty(),
         "the owner watched that turn finish"
@@ -522,6 +620,7 @@ fn finished_waits_for_its_alert_and_takes_its_title_and_body(cx: &mut TestAppCon
         AlertKind::DoneWaiting,
         "tests pass, ready for review",
     ));
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("review finished", "tests pass, ready for review")]
@@ -540,6 +639,7 @@ fn finished_title_follows_the_alert_kind(cx: &mut TestAppContext) {
     ] {
         turn(&mut h, "s2", "review");
         h.send(alert("s2", kind, "the turn's news"));
+        grace(&mut h);
         assert_eq!(
             h.notified().last(),
             Some(&shown(title, "the turn's news")),
@@ -580,18 +680,20 @@ fn a_late_alert_after_the_fallback_raises_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn finished_without_summaries_raises_at_once(cx: &mut TestAppContext) {
+fn finished_without_summaries_waits_only_for_the_grace(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("Finished", "review")],
-        "no status has arrived, so nothing is held"
+        "no status has arrived, so no alert is waited for"
     );
 
     h.send(summarizer_status().enabled(false).build());
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(
         h.notified().last(),
         Some(&shown("Finished", "review")),
@@ -600,6 +702,7 @@ fn finished_without_summaries_raises_at_once(cx: &mut TestAppContext) {
 
     h.send(summarizer_status().cap_reached(true).build());
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(
         h.notified().last(),
         Some(&shown("Finished", "review")),
@@ -608,6 +711,7 @@ fn finished_without_summaries_raises_at_once(cx: &mut TestAppContext) {
 
     h.send(summarizer_status().key(KeyState::Rejected).build());
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(
         h.notified().last(),
         Some(&shown("Finished", "review")),
@@ -622,6 +726,7 @@ fn finished_with_a_template_alert_uses_the_fallback(cx: &mut TestAppContext) {
     h.send(summarizer_status().build());
     turn(&mut h, "s2", "review");
     h.send(template_alert("s2", "Turn finished: edited two files"));
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("Finished", "review")],
@@ -638,6 +743,7 @@ fn an_alert_for_another_session_leaves_the_hold(cx: &mut TestAppContext) {
     h.send(alert("s1", AlertKind::DoneWaiting, "s1's news"));
     assert!(h.notified().is_empty(), "s1 holds no toast");
     h.send(alert("s2", AlertKind::DoneWaiting, "s2's news"));
+    grace(&mut h);
     assert_eq!(h.notified(), [shown("review finished", "s2's news")]);
 }
 
@@ -652,6 +758,7 @@ fn a_needs_answer_alert_plays_the_needs_you_sound(cx: &mut TestAppContext) {
         AlertKind::NeedsAnswer,
         "the agent asks which repo",
     ));
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown(
@@ -695,6 +802,7 @@ fn a_held_finished_toast_honours_the_toggle_and_skip_rule(cx: &mut TestAppContex
         h.send(summarizer_status().build());
         turn(&mut h, "s1", "fix login");
         h.send(alert("s1", AlertKind::DoneWaiting, "news"));
+        grace(&mut h);
         assert!(
             h.notified().is_empty(),
             "the owner is looking at that session"
@@ -743,10 +851,11 @@ fn a_reconnect_drops_held_toasts_and_the_status(cx: &mut TestAppContext) {
         "the held toast went with the old connection"
     );
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("Finished", "review")],
-        "the new connection's status says nothing yet, so the toast is raised at once"
+        "the new connection's status says nothing yet, so no alert is waited for"
     );
 }
 
@@ -809,7 +918,7 @@ fn needs_you_without_a_prompt_says_waiting_for_input(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_headless_or_agentless_finished_toast_is_not_held(cx: &mut TestAppContext) {
+fn a_headless_or_agentless_finished_toast_waits_for_no_alert(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.send(summarizer_status().build());
@@ -824,6 +933,7 @@ fn a_headless_or_agentless_finished_toast_is_not_held(cx: &mut TestAppContext) {
     h.send(updated(
         session("s2").user_label("review").headless().build(),
     ));
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("Finished", "review")],
@@ -840,6 +950,7 @@ fn a_headless_or_agentless_finished_toast_is_not_held(cx: &mut TestAppContext) {
     h.send(updated(
         session("s2").user_label("review").no_agent().build(),
     ));
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("Finished", "review"), shown("Finished", "review")],
@@ -864,10 +975,11 @@ fn an_alert_before_background_work_clears_words_the_later_finished_toast(cx: &mu
         "the turn is not over while its background work runs"
     );
     h.send(updated(session("s2").user_label("review").build()));
+    grace(&mut h);
     assert_eq!(
         h.notified(),
         [shown("review finished", "tests pass, ready")],
-        "the alert that came early words the toast at once"
+        "the alert that came early words the toast"
     );
 }
 
@@ -947,6 +1059,7 @@ fn the_needs_you_sound_plays_once_for_a_new_item(cx: &mut TestAppContext) {
     );
 
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(h.notified().len(), 2, "Finished is raised");
     assert_eq!(
         h.sounds(),
@@ -1075,6 +1188,7 @@ fn a_finished_toast_is_raised_silent_and_plays_the_finished_sound(cx: &mut TestA
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(h.notified().len(), 1, "Finished is raised");
     assert_eq!(
         h.notified_silent(),
@@ -1090,6 +1204,7 @@ fn no_finished_sound_when_its_choice_is_off(cx: &mut TestAppContext) {
     save_notifications(&dir, &serde_json::json!({ "finished_sound": "off" }));
     let mut h = opened(cx, &dir);
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(h.notified().len(), 1, "the toast still fires");
     assert_eq!(h.notified_silent(), [true], "and is raised silent");
     assert!(h.sounds().is_empty(), "the sound is off");
@@ -1107,6 +1222,7 @@ fn the_finished_and_needs_you_sounds_are_chosen_apart(cx: &mut TestAppContext) {
     assert_eq!(h.notified().len(), 1, "Needs you is raised");
     assert!(h.sounds().is_empty(), "its sound is off");
     turn(&mut h, "s2", "review");
+    grace(&mut h);
     assert_eq!(
         h.sounds(),
         [ClipSource::BundledFinished],

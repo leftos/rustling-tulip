@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - A running app checks for updates every hour instead of once a day, and Settings offers Restart to update as soon as a check finds one.
 - Finished toasts no longer fire after nearly every tool call while Claude works through a task-list item.
+- A Finished toast now waits 5 seconds and is dropped if the session starts working again.
 
 ### Changed
 

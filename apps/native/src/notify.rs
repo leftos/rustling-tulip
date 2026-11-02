@@ -275,8 +275,8 @@ pub(crate) struct Notifications {
     /// before one arrives and after every reconnect, so a newly chosen host
     /// never inherits "on".
     summaries: HashMap<HostKey, Summaries>,
-    /// Finished toasts waiting for their session's alert, by host and
-    /// session id.
+    /// Finished toasts waiting out their grace or their session's alert, by
+    /// host and session id.
     held: HashMap<SessionKey, Held>,
     /// Each session's latest alert, kept for a Finished toast the alert came
     /// too early to word, by host and session id.
@@ -343,21 +343,24 @@ impl Notifications {
             }
             // A relist that has a session working, waiting, exited or gone
             // leaves its held toast with no alert to word it, and a session
-            // at work has an alert of its own coming.
+            // at work has an alert of its own coming. Background work holds a
+            // toast back but keeps its alert for when the work ends.
             DaemonMessage::Sessions { sessions } => {
-                let keep = |(owner, id): &SessionKey| {
+                let idle = |(owner, id): &SessionKey, finished: bool| {
                     owner != host
                         || sessions.iter().any(|session| {
-                            session.id == *id && session.status == SessionStatus::Idle
+                            session.id == *id
+                                && session.status == SessionStatus::Idle
+                                && !(finished && session.background)
                         })
                 };
-                self.held.retain(|key, _| keep(key));
-                self.alerts.retain(|key, _| keep(key));
+                self.held.retain(|key, _| idle(key, true));
+                self.alerts.retain(|key, _| idle(key, false));
                 false
             }
             DaemonMessage::SessionUpdated { session, .. } => {
                 let key = key_of(host, &session.id);
-                if session.status != SessionStatus::Idle {
+                if session.status != SessionStatus::Idle || session.background {
                     self.held.remove(&key);
                 }
                 if session.status == SessionStatus::Working {
@@ -376,8 +379,13 @@ pub(crate) const NEEDS_YOU_TITLE: &str = "Needs you";
 /// The title of the notification a session raises when its turn ends.
 pub(crate) const FINISHED_TITLE: &str = "Finished";
 
-/// How long a Finished toast waits for its session's `WaitingAlert` before
-/// it falls back to the plain wording.
+/// How long a turn must stay ended before its Finished toast is raised: an
+/// agent often starts again at once (a Stop hook sends it back, a background
+/// task wakes it), and a session that does raises nothing.
+pub(crate) const FINISHED_GRACE: Duration = Duration::from_secs(5);
+
+/// How long after its turn ended a Finished toast waits for its session's
+/// `WaitingAlert` before it falls back to the plain wording.
 pub(crate) const FINISHED_HOLD: Duration = Duration::from_secs(12);
 
 /// The title an alert's `kind` words for a toast about `label`, or `None`
@@ -392,7 +400,8 @@ fn alert_title(kind: Option<AlertKind>, label: &str) -> Option<String> {
     }
 }
 
-/// A Finished toast waiting for its session's alert.
+/// A Finished toast waiting out its grace and then, when a summary can word
+/// it, its session's alert.
 struct Held {
     /// The session's label: the fallback toast's body, and the name a worded
     /// title starts with.
@@ -400,6 +409,10 @@ struct Held {
     /// Which hold this is, so the timer of one that was dropped raises
     /// nothing once its session is held again.
     generation: u64,
+    /// Whether a summary can still word the toast once the grace ends.
+    awaits_alert: bool,
+    /// Whether the grace has ended, so an alert raises the toast at once.
+    graced: bool,
 }
 
 /// The last alert a session raised, as a Finished toast words itself from it.
@@ -542,10 +555,10 @@ impl RootView {
     /// Folds `msg` into the notifications: the summarizer's status decides
     /// whether a Finished toast waits; a session awaiting input raises Needs
     /// you, and one `finished` marks as having ended its turn raises
-    /// Finished, held for the session's alert while summaries can still come;
-    /// an alert words the toast held for its session, or is kept for a toast
-    /// still to come. `window_focused` is whether this client window has the
-    /// keyboard.
+    /// Finished once its grace ends, held on for the session's alert while
+    /// summaries can still come; an alert words the toast held for its
+    /// session, or is kept for a toast still to come. `window_focused` is
+    /// whether this client window has the keyboard.
     pub(crate) fn notify_on(
         &mut self,
         host: &HostKey,
@@ -560,26 +573,8 @@ impl RootView {
         match msg {
             DaemonMessage::SessionUpdated { session, .. } if finished => {
                 let label = body(Some(session), self.sidebar.agents(host));
-                if !self.waits_for_alert(host, session) {
-                    let wanted = self.sidebar.ui_state().notifications.finished;
-                    self.raise_toast(
-                        &Toast {
-                            session_id: &session.id,
-                            title: FINISHED_TITLE,
-                            body: &label,
-                            wanted,
-                            kind: NotifyKind::Finished,
-                        },
-                        window_focused,
-                        cx,
-                    );
-                } else if let Some(alert) =
-                    self.notifications.alerts.remove(&key_of(host, &session.id))
-                {
-                    self.raise_alert(&session.id, &label, &alert, window_focused, cx);
-                } else {
-                    self.hold_finished(key_of(host, &session.id), label, cx);
-                }
+                let awaits_alert = self.waits_for_alert(host, session);
+                self.hold_finished(key_of(host, &session.id), label, awaits_alert, cx);
             }
             DaemonMessage::Attention {
                 session_id,
@@ -705,16 +700,62 @@ impl RootView {
             .detach();
     }
 
-    /// Holds a Finished toast about `label` for session `key`'s alert for
-    /// [`FINISHED_HOLD`], raising the plain one if none comes.
-    fn hold_finished(&mut self, key: SessionKey, label: String, cx: &mut Context<Self>) {
+    /// Holds a Finished toast about `label` for session `key` through
+    /// [`FINISHED_GRACE`], and on until [`FINISHED_HOLD`] when `awaits_alert`
+    /// says a summary can still word it. A session that leaves Idle or shows
+    /// background work meanwhile drops the hold (`fold_state`).
+    fn hold_finished(
+        &mut self,
+        key: SessionKey,
+        label: String,
+        awaits_alert: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.notifications.next_hold += 1;
         let generation = self.notifications.next_hold;
-        self.notifications
-            .held
-            .insert(key.clone(), Held { label, generation });
+        self.notifications.held.insert(
+            key.clone(),
+            Held {
+                label,
+                generation,
+                awaits_alert,
+                graced: false,
+            },
+        );
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(FINISHED_HOLD).await;
+            cx.background_executor().timer(FINISHED_GRACE).await;
+            // Fails only when the view is gone, and the hold with it.
+            this.update(cx, |this, cx| {
+                this.grace_ended(key, generation, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The turn stayed ended through its grace: the toast is raised, worded
+    /// by an alert that came meanwhile, or held on for one that can still
+    /// come.
+    fn grace_ended(&mut self, key: SessionKey, generation: u64, cx: &mut Context<Self>) {
+        let Some(held) = self.notifications.held.get_mut(&key) else {
+            return;
+        };
+        if held.generation != generation {
+            return;
+        }
+        if !held.awaits_alert {
+            self.hold_expired(&key, generation, cx);
+            return;
+        }
+        held.graced = true;
+        if let Some(alert) = self.notifications.alerts.remove(&key) {
+            let window_focused = self.main_window_focused(cx);
+            self.release_hold(&key, &alert, window_focused, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let rest = FINISHED_HOLD.saturating_sub(FINISHED_GRACE);
+            cx.background_executor().timer(rest).await;
             // Fails only when the view is gone, and the hold with it.
             this.update(cx, |this, cx| {
                 this.hold_expired(&key, generation, cx);
@@ -722,6 +763,12 @@ impl RootView {
             .ok();
         })
         .detach();
+    }
+
+    /// Whether this client's main window has the keyboard.
+    fn main_window_focused(&self, cx: &Context<Self>) -> bool {
+        cx.active_window()
+            .is_some_and(|window| window.window_id() == self.layouts.main())
     }
 
     /// The hold's time is up with no alert having worded it: the plain toast
@@ -739,9 +786,7 @@ impl RootView {
             return;
         };
         let session_id = key.1.as_str();
-        let focused = cx
-            .active_window()
-            .is_some_and(|window| window.window_id() == self.layouts.main());
+        let focused = self.main_window_focused(cx);
         let wanted = self.sidebar.ui_state().notifications.finished;
         self.raise_toast(
             &Toast {
@@ -756,8 +801,9 @@ impl RootView {
         );
     }
 
-    /// Ends the toast held for session `key` with its alert's wording. An
-    /// alert with no held toast behind it raises nothing.
+    /// Ends the toast held for session `key` with its alert's wording, once
+    /// its grace has ended; the alert is kept for that until then. An alert
+    /// with no held toast behind it raises nothing.
     fn release_hold(
         &mut self,
         key: &SessionKey,
@@ -765,6 +811,10 @@ impl RootView {
         window_focused: bool,
         cx: &mut Context<Self>,
     ) {
+        let graced = self.notifications.held.get(key).is_some_and(|h| h.graced);
+        if !graced {
+            return;
+        }
         let Some(held) = self.notifications.held.remove(key) else {
             return;
         };
