@@ -544,6 +544,11 @@ mod tests {
             std::sync::Arc::clone(&hub.sessions),
             std::sync::Arc::clone(&hub.summarizer),
         );
+        let mut settings = hub.state.summarizer_settings();
+        settings.enabled = true;
+        hub.state
+            .set_summarizer_settings(settings)
+            .expect("store the summarizer settings");
         crate::history::test_support::write_meta_for(&hub.dirs, "s1");
         hub.sessions.insert(crate::history::test_support::record(
             "s1",

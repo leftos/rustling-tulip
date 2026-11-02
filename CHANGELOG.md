@@ -14,6 +14,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - A running app checks for updates every hour instead of once a day, and Settings offers Restart to update as soon as a check finds one.
 
+### Changed
+
+- Session summaries stay off until you turn them on in Settings › Dashboard, since each one uses your provider's account; a saved choice is kept.
+
 ## v0.7.0-alpha
 
 ### Highlights

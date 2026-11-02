@@ -256,8 +256,9 @@ mod tests {
     use crate::summarizer::turns::Turns;
 
     /// A hub whose provider is `fake` with one client connected, whose
-    /// Dashboard reads through the returned script.
-    fn hub_with(tag: &str, fake: &Arc<FakeCaller>) -> (Hub, ScratchDir, Script) {
+    /// Dashboard reads through the returned script, and which never saved
+    /// summarizer settings.
+    fn hub_with_unsaved_settings(tag: &str, fake: &Arc<FakeCaller>) -> (Hub, ScratchDir, Script) {
         let (mut hub, scratch) = test_hub(tag);
         hub.client_count.send_replace(1);
         hub.summarizer = test_summarizer(
@@ -275,6 +276,18 @@ mod tests {
             script.factory(),
         )
         .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
+        (hub, scratch, script)
+    }
+
+    /// [`hub_with_unsaved_settings`] with summaries on, as a user who chose
+    /// them has them.
+    fn hub_with(tag: &str, fake: &Arc<FakeCaller>) -> (Hub, ScratchDir, Script) {
+        let (hub, scratch, script) = hub_with_unsaved_settings(tag, fake);
+        let mut settings = hub.state.summarizer_settings();
+        settings.enabled = true;
+        hub.state
+            .set_summarizer_settings(settings)
+            .expect("store the summarizer settings");
         (hub, scratch, script)
     }
 
@@ -406,6 +419,37 @@ mod tests {
             next_tick().await;
         }
         assert_eq!(fake.calls(), 1, "and the same text again makes none");
+        task.abort();
+    }
+
+    /// A hub that never saved summarizer settings makes no model call: a
+    /// summary spends the chosen provider's account, so summaries stay off
+    /// until the user turns them on.
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_with_no_saved_settings_makes_no_model_call() {
+        let fake = Arc::new(FakeCaller::default());
+        let (hub, _scratch, script) = hub_with_unsaved_settings("refresh-unsaved", &fake);
+        add_session(
+            &hub,
+            &script,
+            "s1",
+            SessionMode::Interactive,
+            SessionStatus::Working,
+            "I fixed the bug.\n",
+        );
+        let _watch = watch(&hub, 1).await;
+        let task = spawn_refresh(&hub);
+
+        set_text(&script, "s1", "Now the tests.");
+        hub.dashboard.tick(Utc::now()).await;
+        for _ in 0..3 {
+            next_tick().await;
+        }
+        assert_eq!(
+            fake.calls(),
+            0,
+            "summaries the user never turned on make no model call"
+        );
         task.abort();
     }
 

@@ -88,21 +88,19 @@ pub(crate) fn resolve(id: &str) -> Option<Provider> {
         .or_else(|| providers::row(id).map(Provider::Http))
 }
 
-/// The settings before any are saved: the first CLI summarizer, on, since it
-/// needs no key; else the first HTTP provider, off until a key is saved. The
-/// cap is [`DEFAULT_DAILY_CAP_USD`] and the key source the stored key.
+/// The settings before any are saved: off, since a summary spends the chosen
+/// provider's account, until the user turns them on; the provider is the first
+/// CLI summarizer, else the first HTTP provider. The cap is
+/// [`DEFAULT_DAILY_CAP_USD`] and the key source the stored key.
 pub(crate) fn default_settings() -> SummarizerSettings {
-    let (enabled, provider) = match cli_providers().next() {
-        Some((plugin, _)) => (true, plugin.descriptor().id.0.clone()),
-        None => (
-            false,
-            providers::TABLE
-                .first()
-                .map_or_else(String::new, |row| row.id.to_owned()),
-        ),
+    let provider = match cli_providers().next() {
+        Some((plugin, _)) => plugin.descriptor().id.0.clone(),
+        None => providers::TABLE
+            .first()
+            .map_or_else(String::new, |row| row.id.to_owned()),
     };
     SummarizerSettings {
-        enabled,
+        enabled: false,
         provider,
         key_source: SummarizerKeySource::Stored,
         daily_cap_usd: DEFAULT_DAILY_CAP_USD,
@@ -187,10 +185,13 @@ pub(crate) fn template(report: &str) -> Line {
 mod tests {
     use super::*;
 
+    /// The default settings with summaries turned on, as a user who chose
+    /// them has them.
     fn on() -> SummarizerSettings {
-        let settings = default_settings();
-        assert!(settings.enabled, "a CLI summarizer is registered");
-        settings
+        SummarizerSettings {
+            enabled: true,
+            ..default_settings()
+        }
     }
 
     #[test]

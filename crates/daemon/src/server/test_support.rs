@@ -208,6 +208,11 @@ pub(crate) fn billing_hub(
         Arc::clone(&hub.sessions),
         Arc::clone(&hub.summarizer),
     );
+    let mut settings = hub.state.summarizer_settings();
+    settings.enabled = true;
+    hub.state
+        .set_summarizer_settings(settings)
+        .expect("store the summarizer settings");
     (hub, scratch, fake)
 }
 

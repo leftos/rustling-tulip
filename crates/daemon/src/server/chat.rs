@@ -303,6 +303,13 @@ mod tests {
         /// whose provider `caller` answers.
         fn with_summarizer(tag: &str, conversation: Option<&str>, caller: Arc<FakeCaller>) -> Self {
             let fixture = Self::new(tag, conversation);
+            let mut settings = fixture.hub.state.summarizer_settings();
+            settings.enabled = true;
+            fixture
+                .hub
+                .state
+                .set_summarizer_settings(settings)
+                .expect("store the summarizer settings");
             let summarizer = test_support::test_summarizer(
                 &fixture.hub.state,
                 &fixture.hub.dirs,

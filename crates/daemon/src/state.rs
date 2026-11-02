@@ -1243,12 +1243,12 @@ mod tests {
         assert_eq!(
             default,
             protocol::SummarizerSettings {
-                enabled: true,
+                enabled: false,
                 provider: agent_registry::default_agent().0,
                 key_source: protocol::SummarizerKeySource::Stored,
                 daily_cap_usd: 1.0,
             },
-            "the registered CLI summarizer, on, with a $1.00 cap"
+            "the registered CLI summarizer, off until the user turns it on, with a $1.00 cap"
         );
         state
             .set_keep_awake_mode(KeepAwakeMode::Always)
@@ -1277,6 +1277,58 @@ mod tests {
             "the settings survive a reload"
         );
 
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A `state.json` that carries no `summarizer` block reads as off: a
+    /// summary spends the chosen provider's account, so the owner made it
+    /// opt-in, and a user who never saved the settings gets it off.
+    #[test]
+    fn a_state_file_without_a_summarizer_block_reads_summaries_off() {
+        let dirs = scratch_dirs("no-summarizer-block");
+        let json = r#"{
+            "repos": [
+                {
+                    "id": "repo-a",
+                    "name": "Alpha",
+                    "path": "X:\\dev\\alpha",
+                    "default_branch": "trunk"
+                }
+            ],
+            "workspaces": [],
+            "layouts": {
+                "client-1": {
+                    "name": "leftos-desktop",
+                    "tabs": [
+                        {
+                            "id": "tab-1",
+                            "name": "Alpha",
+                            "content": {
+                                "kind": "grid",
+                                "grid": {"kind": "pane", "pane_id": "pane-1", "session_id": "sess-1"}
+                            },
+                            "created_at": "2025-01-02T03:04:05Z"
+                        }
+                    ]
+                }
+            }
+        }"#;
+        std::fs::write(&dirs.state_file, json).expect("write the v0.5.1 state.json");
+
+        let state = AppState::load_or_default(&dirs).expect("the v0.5.1 state.json loads");
+        assert!(!state.state_file_corrupt(), "the released file parses");
+        assert!(
+            !state.summarizer_settings().enabled,
+            "summaries the user never turned on stay off"
+        );
+        let persisted = state.with_persisted(PersistedState::clone);
+        assert_eq!(persisted.repos.len(), 1, "the repo it held is still read");
+        assert_eq!(persisted.repos[0].name, "Alpha");
+        assert_eq!(
+            persisted.layouts.get("client-1").map(|l| l.tabs.len()),
+            Some(1),
+            "the layout it held is still read"
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

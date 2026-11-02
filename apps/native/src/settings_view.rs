@@ -4535,8 +4535,8 @@ impl RootView {
     }
 }
 
-const SUMMARIES_INTRO: &str =
-    "Short summaries of what each session is doing, for the Dashboard and its notifications.";
+const SUMMARIES_INTRO: &str = "Short summaries of what each session is doing, for the Dashboard and its notifications. \
+     Off until you turn them on: each summary uses the chosen provider's account.";
 const VARIABLE_HINT: &str =
     "The daemon reads this variable from its own environment. Press Enter to apply.";
 const CAP_HINT: &str =
