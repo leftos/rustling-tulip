@@ -114,6 +114,13 @@ It is alpha software, Windows only for now.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
 
+## What's new in v0.7.1-alpha
+
+- Finished toasts no longer fire after nearly every tool call while Claude works through a task-list item.
+- A Finished toast now waits 5 seconds and is dropped if the session starts working again.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.7.1-alpha).
+
 ## What's new in v0.7.0-alpha
 
 - Tail a log a chat command writes, in a scrolling box under its card that follows the file as it grows.
