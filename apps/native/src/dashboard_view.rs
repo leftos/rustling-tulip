@@ -1098,12 +1098,9 @@ fn figures_view(offset: i8, shift: i8, figures: HeaderFigures, t: &UiTheme) -> D
         )))
         .child(figure(shift, figures.tokens, "tokens", t))
         .child(figure(shift, figures.commits.to_string(), "commits", t))
-        .child(figure(
-            shift,
-            figures.issues_done.to_string(),
-            "issues Done",
-            t,
-        ))
+        .when_some(figures.issues_done, |strip, done| {
+            strip.child(figure(shift, done.to_string(), "issues Done", t))
+        })
         .children(releases)
         .when_some(figures.synced, |strip, synced| {
             strip.child(

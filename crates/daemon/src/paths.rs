@@ -380,6 +380,13 @@ pub fn summarizer_spend_file(dirs: &Dirs) -> PathBuf {
     dirs.config.join("summarizer-spend.json")
 }
 
+/// The Dashboard's day ledger: `<config>/day-ledger.json`, the tokens, cost
+/// and commits of each local day (see [`crate::dashboard::ledger`]).
+#[must_use]
+pub fn day_ledger_file(dirs: &Dirs) -> PathBuf {
+    dirs.config.join("day-ledger.json")
+}
+
 /// A session's summary ring and latest summary:
 /// `<sessions>/<id>/summary.json`, beside its `meta.json` sidecar.
 #[must_use]

@@ -9,15 +9,16 @@
 //! send. With no watcher the task parks and reads nothing. A new watcher's
 //! first message holds every listed session's facts.
 
+pub(crate) mod ledger;
 pub(crate) mod now;
 pub(crate) mod pr;
 pub(crate) mod tracks;
 pub(crate) mod work;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_api::{
     ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, EndedTask, SubagentNode,
@@ -73,11 +74,12 @@ struct Inner {
     pr: pr::PrCache,
 }
 
-#[derive(Default)]
 struct State {
     watchers: HashMap<u64, Watcher>,
     /// One entry per listed session, by session id.
     entries: BTreeMap<String, Entry>,
+    /// What the day's listed sessions spent and the commits they made.
+    ledger: ledger::Ledger,
 }
 
 /// A connection that watches a Dashboard.
@@ -85,6 +87,8 @@ struct Watcher {
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
     /// The facts last sent to it, by session id.
     sent: HashMap<String, SessionFacts>,
+    /// The day's totals last sent to it.
+    totals_sent: DayTotals,
     /// The activity track last sent to it; `None` until it has had one.
     tracks_sent: Option<Vec<ActivitySegment>>,
     /// The window start that track was built at, beside [`Self::tracks_sent`].
@@ -130,6 +134,11 @@ struct Listed {
     repo: String,
     /// Its display label.
     label: String,
+    /// Its members' worktree folders, whose commits the day ledger counts.
+    folders: Vec<PathBuf>,
+    /// Whether it resumed abandoned sessions in place, so its figures already
+    /// carry a conversation's earlier spend.
+    resumed: bool,
 }
 
 /// One session's read, handed to the blocking pool and back.
@@ -143,16 +152,22 @@ struct Job {
 }
 
 impl Dashboard {
-    /// The service over `sessions`, reading with each agent plugin's reader
-    /// and the status-change logs under `activity_dir`.
-    pub(crate) fn new(sessions: Arc<SessionRegistry>, activity_dir: PathBuf) -> Self {
-        Self::with_reader_factory(sessions, activity_dir, Arc::new(plugin_reader))
+    /// The service over `sessions`, reading with each agent plugin's reader,
+    /// the status-change logs under `activity_dir` and its day ledger in
+    /// `ledger_path`.
+    pub(crate) fn new(
+        sessions: Arc<SessionRegistry>,
+        activity_dir: PathBuf,
+        ledger_path: PathBuf,
+    ) -> Self {
+        Self::with_reader_factory(sessions, activity_dir, ledger_path, Arc::new(plugin_reader))
     }
 
     /// The service over `sessions`, reading with `factory`'s readers.
     pub(crate) fn with_reader_factory(
         sessions: Arc<SessionRegistry>,
         activity_dir: PathBuf,
+        ledger_path: PathBuf,
         factory: ReaderFactory,
     ) -> Self {
         Self {
@@ -160,7 +175,11 @@ impl Dashboard {
                 sessions,
                 factory,
                 activity_dir,
-                state: Mutex::new(State::default()),
+                state: Mutex::new(State {
+                    watchers: HashMap::new(),
+                    entries: BTreeMap::new(),
+                    ledger: ledger::Ledger::open(ledger_path, Utc::now()),
+                }),
                 watcher_count: watch::Sender::new(0),
                 pass: tokio::sync::Mutex::new(()),
                 work: work::WorkCache::default(),
@@ -202,6 +221,7 @@ impl Dashboard {
                 Watcher {
                     out_tx,
                     sent: HashMap::new(),
+                    totals_sent: DayTotals::default(),
                     tracks_sent: None,
                     tracks_window_start: None,
                     greeted: false,
@@ -213,7 +233,7 @@ impl Dashboard {
         if first {
             self.read_pass(now).await;
         }
-        self.send_changes();
+        self.send_changes(now);
         self.send_tracks(now).await;
     }
 
@@ -274,7 +294,7 @@ impl Dashboard {
     pub(crate) async fn tick(&self, now: DateTime<Utc>) {
         let _pass = self.inner.pass.lock().await;
         if self.read_pass(now).await {
-            self.send_changes();
+            self.send_changes(now);
             self.send_tracks(now).await;
         }
     }
@@ -355,6 +375,7 @@ impl Dashboard {
                 return true;
             }
         };
+        self.read_commits(&listed, now).await;
         let mut state = lock(&self.inner.state);
         // The last watcher may have left while the pass read; its emptied
         // cache stays empty.
@@ -365,41 +386,107 @@ impl Dashboard {
         true
     }
 
-    /// Send each watcher the entries that changed since its last send, and
-    /// a first message to one that has had none. A watcher whose connection
-    /// is gone is dropped.
-    fn send_changes(&self) {
+    /// Read each listed session's worktree folders' commits since local
+    /// midnight, at most once every [`ledger::COMMIT_TTL`] per folder, and
+    /// keep every sha in the day's set. The git processes run without the
+    /// state lock held.
+    async fn read_commits(&self, listed: &[Listed], now: DateTime<Utc>) {
+        let folders: BTreeSet<PathBuf> = listed
+            .iter()
+            .flat_map(|listed| listed.folders.iter().cloned())
+            .collect();
+        if folders.is_empty() {
+            return;
+        }
+        let due = {
+            let state = lock(&self.inner.state);
+            state.ledger.due_folders(&folders, Instant::now())
+        };
+        if due.is_empty() {
+            return;
+        }
+        let today = ledger::local_date(now);
+        let since = ledger::local_midnight_utc(today);
+        let mut reads = Vec::with_capacity(due.len());
+        for folder in due {
+            let read = crate::git_inspect::commit_shas_since(&folder, since, ledger::COMMIT_LIMIT)
+                .await
+                .map_err(|err| format!("{err:#}"));
+            reads.push((folder, read));
+        }
         let mut state = lock(&self.inner.state);
-        let State { watchers, entries } = &mut *state;
-        watchers.retain(|connection, watcher| {
-            watcher.sent.retain(|id, _| entries.contains_key(id));
-            let changed: Vec<SessionFacts> = entries
-                .iter()
-                .filter(|(id, entry)| watcher.sent.get(*id) != Some(&entry.facts))
-                .map(|(_, entry)| entry.facts.clone())
-                .collect();
-            if changed.is_empty() && watcher.greeted {
-                return true;
+        let read_at = Instant::now();
+        for (folder, read) in reads {
+            state.ledger.note_commit_read(&folder, read_at);
+            match read {
+                Ok(shas) => {
+                    state.ledger.record_commits(today, shas);
+                }
+                Err(error) => state.ledger.record_failure(&folder, &error),
             }
-            let message = DaemonMessage::DashboardFacts {
-                facts: changed.clone(),
-                totals: DayTotals::default(),
-                linear_synced_at: None,
-            };
-            if watcher.out_tx.send(message).is_err() {
-                warn!(
-                    connection,
-                    "dashboard: a watcher's connection is gone; it stops watching"
-                );
-                return false;
-            }
-            watcher.greeted = true;
-            for facts in changed {
-                watcher.sent.insert(facts.session_id.clone(), facts);
-            }
-            true
-        });
-        self.watchers_changed(&mut state);
+        }
+    }
+
+    /// Send each watcher the entries that changed since its last send, and a
+    /// first message to one that has had none; a change of the day's totals is
+    /// a change for every watcher. A watcher whose connection is gone is
+    /// dropped. The day ledger's file is written, outside the state lock, when
+    /// a write is due.
+    fn send_changes(&self, now: DateTime<Utc>) {
+        let today = ledger::local_date(now);
+        let write = {
+            let mut state = lock(&self.inner.state);
+            let totals = state.ledger.totals(today);
+            let State {
+                watchers,
+                entries,
+                ledger,
+            } = &mut *state;
+            watchers.retain(|connection, watcher| {
+                watcher.sent.retain(|id, _| entries.contains_key(id));
+                let changed: Vec<SessionFacts> = entries
+                    .iter()
+                    .filter(|(id, entry)| watcher.sent.get(*id) != Some(&entry.facts))
+                    .map(|(_, entry)| entry.facts.clone())
+                    .collect();
+                if changed.is_empty() && watcher.greeted && watcher.totals_sent == totals {
+                    return true;
+                }
+                let message = DaemonMessage::DashboardFacts {
+                    facts: changed.clone(),
+                    totals: totals.clone(),
+                    linear_synced_at: None,
+                };
+                if watcher.out_tx.send(message).is_err() {
+                    warn!(
+                        connection,
+                        "dashboard: a watcher's connection is gone; it stops watching"
+                    );
+                    return false;
+                }
+                watcher.greeted = true;
+                watcher.totals_sent = totals.clone();
+                for facts in changed {
+                    watcher.sent.insert(facts.session_id.clone(), facts);
+                }
+                true
+            });
+            let path = ledger.path().to_path_buf();
+            let write = ledger
+                .take_write(today, Instant::now())
+                .map(|bytes| (path, bytes));
+            self.watchers_changed(&mut state);
+            write
+        };
+        if let Some((path, bytes)) = write
+            && let Err(err) = crate::atomic_file::write_atomic(&path, &bytes)
+        {
+            warn!(
+                ?err,
+                path = %path.display(),
+                "dashboard: the day ledger did not write"
+            );
+        }
     }
 
     /// Build the whole activity track once for this pass, then send it to
@@ -505,6 +592,11 @@ fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
                     });
             let repo = lane_name(&record);
             let label = record.label.clone();
+            let folders = record
+                .members
+                .iter()
+                .map(|member| PathBuf::from(&member.worktree_path))
+                .collect();
             Some(Listed {
                 id: snapshot.id,
                 agent: record.agent.clone(),
@@ -520,6 +612,8 @@ fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
                     .unwrap_or_default(),
                 repo,
                 label,
+                folders,
+                resumed: !record.resumed_from.is_empty(),
             })
         })
         .collect()
@@ -588,8 +682,10 @@ fn run_jobs(jobs: Vec<Job>, factory: &ReaderFactory, now: DateTime<Utc>) -> Vec<
         .collect()
 }
 
-/// Put a pass's readings into the cache and rebuild each session's facts.
+/// Put a pass's readings into the cache, rebuild each session's facts, and
+/// keep the session's renewed figures in the day ledger.
 fn apply_jobs(state: &mut State, listed: &[Listed], done: Vec<Job>, now: DateTime<Utc>) {
+    let today = ledger::local_date(now);
     let mut done: HashMap<String, Job> =
         done.into_iter().map(|job| (job.id.clone(), job)).collect();
     for session in listed {
@@ -617,6 +713,20 @@ fn apply_jobs(state: &mut State, listed: &[Listed], done: Vec<Job>, now: DateTim
         }
         note_status(entry, session);
         entry.facts = build_facts(session, entry.snapshot.as_ref(), entry.turn_started_at, now);
+        // A transcript not read yet says nothing about what the session spent,
+        // so its base is set by the first pass that has a reading.
+        if entry.snapshot.is_some() {
+            state.ledger.note(
+                today,
+                &ledger::Seen {
+                    id: &session.id,
+                    started_at: session.started_at,
+                    resumed: session.resumed,
+                    tokens: entry.facts.tokens_in.saturating_add(entry.facts.tokens_out),
+                    cost_usd: entry.facts.cost_usd,
+                },
+            );
+        }
     }
 }
 
@@ -956,13 +1066,16 @@ pub(crate) mod test_support {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
 mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
     use agent_api::{
         ActivitySnapshot, BackgroundTask, ContextReading, EndedTask, OpenCall, SubagentNode,
     };
     use chrono::{DateTime, Duration, TimeZone as _, Utc};
-    use protocol::{AgentKind, AgentState, SessionStatus, StuckReason};
+    use protocol::{AgentKind, AgentState, DayTotals, SessionStatus, StuckReason};
 
-    use super::{Listed, TreeContext, agent_tree, build_facts};
+    use super::{Job, Listed, State, TreeContext, agent_tree, apply_jobs, build_facts, ledger};
+    use crate::server::test_support::ScratchDir;
 
     fn at(minute: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 28, 12, 0, 0)
@@ -1010,7 +1123,62 @@ mod tests {
             extra_env: Vec::new(),
             repo: "repo".to_owned(),
             label: "s1".to_owned(),
+            folders: Vec::new(),
+            resumed: false,
         }
+    }
+
+    /// The pass's job for `session`, reading `snapshot` or nothing at all.
+    fn job(session: &Listed, snapshot: Option<ActivitySnapshot>) -> Job {
+        Job {
+            id: session.id.clone(),
+            agent: session.agent.clone(),
+            key: None,
+            extra_env: Vec::new(),
+            reader: None,
+            snapshot,
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_reading_yet_is_not_noted() {
+        let scratch = ScratchDir::new("dash-no-reading");
+        let mut state = State {
+            watchers: HashMap::new(),
+            entries: BTreeMap::new(),
+            ledger: ledger::Ledger::open(scratch.path().join("day-ledger.json"), at(0)),
+        };
+        let mut session = listed(SessionStatus::Idle);
+        session.started_at = at(0) - Duration::days(3);
+        let today = ledger::local_date(at(0));
+
+        apply_jobs(
+            &mut state,
+            std::slice::from_ref(&session),
+            vec![job(&session, None)],
+            at(0),
+        );
+        assert_eq!(
+            state.ledger.totals(today),
+            DayTotals::default(),
+            "a pass whose transcript is unread notes nothing"
+        );
+
+        let reading = ActivitySnapshot {
+            tokens_in: 2_000_000,
+            ..ActivitySnapshot::default()
+        };
+        apply_jobs(
+            &mut state,
+            std::slice::from_ref(&session),
+            vec![job(&session, Some(reading))],
+            at(0),
+        );
+        assert_eq!(
+            state.ledger.totals(today).tokens,
+            0,
+            "its base is the first figures the daemon saw"
+        );
     }
 
     #[test]

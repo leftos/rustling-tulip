@@ -334,6 +334,39 @@ pub async fn commits_since(repo: &Path, since: DateTime<Utc>) -> anyhow::Result<
     Ok(stdout.lines().filter_map(parse_work_commit_line).collect())
 }
 
+/// `repo`'s commit shas on `HEAD` whose commit time is at or after `since`,
+/// newest first, at most `limit`; the shas alone, with no subject or time. A
+/// repository with no commit yet has none.
+///
+/// # Errors
+///
+/// git could not be run, or the log failed.
+pub async fn commit_shas_since(
+    repo: &Path,
+    since: DateTime<Utc>,
+    limit: usize,
+) -> anyhow::Result<Vec<String>> {
+    if run_git_read_quiet(repo, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .await?
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let since = since_arg(since);
+    let limit = format!("-n{limit}");
+    let stdout = run_git_read(
+        repo,
+        &["log", "HEAD", since.as_str(), limit.as_str(), "--format=%H"],
+    )
+    .await?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// The oldest commit on `HEAD` at or after `since`, or `None` when there is
 /// none — nor any commit at all.
 pub async fn oldest_commit_since(
@@ -1283,6 +1316,27 @@ mod tests {
                 .expect("a valid time"),
             "the oldest is the one cut"
         );
+    }
+
+    #[tokio::test]
+    async fn commit_shas_since_reads_past_twenty() {
+        let dir = init_repo("commit-shas").await;
+        let repo = dir.path();
+        for minute in 0..25 {
+            let date = format!("2026-10-01T10:{minute:02}:00+00:00");
+            let body = format!("line {minute}\n");
+            commit_file_at(repo, "f.txt", body.as_bytes(), &date).await;
+        }
+        let since = "2026-10-01T09:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a valid time");
+
+        let shas = commit_shas_since(repo, since, 1000)
+            .await
+            .expect("commit shas since");
+
+        assert_eq!(shas.len(), 25, "every commit past the first twenty");
+        assert_eq!(shas[0], head_sha(repo).await, "newest first");
     }
 
     #[tokio::test]

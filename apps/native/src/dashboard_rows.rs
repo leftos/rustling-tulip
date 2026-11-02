@@ -653,7 +653,9 @@ pub struct HeaderFigures {
     /// `8.6M`, the day's tokens.
     pub tokens: String,
     pub commits: u32,
-    pub issues_done: u32,
+    /// How many issues the day closed; `None` until the issue cache has
+    /// synced, since the daemon fills it from Linear.
+    pub issues_done: Option<u32>,
     pub releases: Vec<ReleaseFigure>,
     /// `Linear · 1m ago`, once the issue cache has synced.
     pub synced: Option<String>,
@@ -676,11 +678,12 @@ pub(crate) fn header_figures(store: &FactsStore, now: DateTime<Utc>) -> Option<H
         return None;
     }
     let totals = store.totals();
+    let synced = store.linear_synced_at();
     Some(HeaderFigures {
         cost: format_cost(Some(totals.cost_usd)),
         tokens: format_tokens(totals.tokens),
         commits: totals.commits,
-        issues_done: totals.issues_done,
+        issues_done: synced.map(|_| totals.issues_done),
         releases: totals
             .releases
             .iter()
@@ -695,9 +698,7 @@ pub(crate) fn header_figures(store: &FactsStore, now: DateTime<Utc>) -> Option<H
                 },
             })
             .collect(),
-        synced: store
-            .linear_synced_at()
-            .map(|at| format!("Linear · {} ago", format_age(at, now))),
+        synced: synced.map(|at| format!("Linear · {} ago", format_age(at, now))),
     })
 }
 
@@ -1637,6 +1638,23 @@ mod tests {
         store.apply(&protocol::DaemonMessage::DashboardFacts {
             facts: Vec::new(),
             totals: protocol::DayTotals {
+                cost_usd: 1.5,
+                tokens: 1_000,
+                issues_done: 5,
+                ..protocol::DayTotals::default()
+            },
+            linear_synced_at: None,
+        });
+        let unsynced = header_figures(&store, at(0)).expect("measured figures are known");
+        assert_eq!(
+            unsynced.issues_done, None,
+            "the issues figure waits for the first Linear sync"
+        );
+        assert_eq!(unsynced.cost, "$1.50");
+
+        store.apply(&protocol::DaemonMessage::DashboardFacts {
+            facts: Vec::new(),
+            totals: protocol::DayTotals {
                 cost_usd: 4.1,
                 tokens: 8_600_000,
                 commits: 14,
@@ -1652,7 +1670,7 @@ mod tests {
         let figures = header_figures(&store, at(0)).expect("known figures");
         assert_eq!(figures.cost, "$4.10");
         assert_eq!(figures.tokens, "8.6M");
-        assert_eq!((figures.commits, figures.issues_done), (14, 5));
+        assert_eq!((figures.commits, figures.issues_done), (14, Some(5)));
         assert_eq!(figures.releases[0].name, "vNext");
         assert!((figures.releases[0].share - 0.5).abs() < 1e-9);
         assert_eq!(figures.synced.as_deref(), Some("Linear · 1m ago"));

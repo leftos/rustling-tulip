@@ -273,6 +273,7 @@ mod tests {
         hub.dashboard = Dashboard::with_reader_factory(
             Arc::clone(&hub.sessions),
             hub.dirs.activity_dir(),
+            crate::paths::day_ledger_file(&hub.dirs),
             script.factory(),
         )
         .with_pr_program(crate::dashboard::pr::NO_PROGRAM);

@@ -9,6 +9,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane.
 - Settings has a Dashboard page: turn session summaries on, pick the provider, store its key, set a daily cap and test it.
 - Finished toasts play the app's own sound instead of Windows', with their own chime, .wav or .ogg, or none in Settings › Notifications.
+- The Dashboard header shows today's cost, tokens and commits across every session, kept through daemon restarts.
 
 ### Fixed
 

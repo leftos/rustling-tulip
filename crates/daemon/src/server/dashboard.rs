@@ -321,8 +321,8 @@ mod tests {
     use agent_api::ActivitySnapshot;
     use chrono::Utc;
     use protocol::{
-        ActivitySegment, ClientMessage, DaemonMessage, RecentWork, SegmentActivity, SegmentKind,
-        SessionFacts, SessionMember, SessionStatus, WorkTotals,
+        ActivitySegment, ClientMessage, DaemonMessage, DayTotals, RecentWork, SegmentActivity,
+        SegmentKind, SessionFacts, SessionMember, SessionStatus, WorkTotals,
     };
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
@@ -380,6 +380,18 @@ mod tests {
             .collect()
     }
 
+    /// The day totals of every `DashboardFacts` waiting on `conn`, one list per
+    /// message.
+    fn day_totals(conn: &mut Conn) -> Vec<DayTotals> {
+        drain(&mut conn.rx)
+            .into_iter()
+            .filter_map(|message| match message {
+                DaemonMessage::DashboardFacts { totals, .. } => Some(totals),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every `ActivityTracks` message waiting on `conn`, as its hours and its
     /// segments.
     fn tracks_messages(conn: &mut Conn) -> Vec<(u32, Vec<ActivitySegment>)> {
@@ -408,6 +420,7 @@ mod tests {
         hub.dashboard = Dashboard::with_reader_factory(
             Arc::clone(&hub.sessions),
             hub.dirs.activity_dir(),
+            crate::paths::day_ledger_file(&hub.dirs),
             script.factory(),
         )
         .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
@@ -443,6 +456,14 @@ mod tests {
     fn tokens(tokens_in: u64) -> ActivitySnapshot {
         ActivitySnapshot {
             tokens_in,
+            ..ActivitySnapshot::default()
+        }
+    }
+
+    fn spent(tokens_in: u64, cost_usd: f64) -> ActivitySnapshot {
+        ActivitySnapshot {
+            tokens_in,
+            cost_usd,
             ..ActivitySnapshot::default()
         }
     }
@@ -494,6 +515,42 @@ mod tests {
             drain(&mut other.rx).is_empty(),
             "a connection that never watched gets nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn day_totals_carry_the_days_tokens_and_cost() {
+        let (hub, _scratch, script) = scripted_hub("dash-day-totals");
+        add_session(&hub, &script, "s1", "conv1", 30, NOT_A_REPO);
+        add_session(&hub, &script, "s2", "conv2", 12, NOT_A_REPO);
+        script.set("conv1", spent(30, 0.3));
+        script.set("conv2", spent(12, 0.12));
+        let mut c1 = conn(1);
+
+        send(&hub, &c1, ON).await;
+
+        let totals = day_totals(&mut c1);
+        assert_eq!(totals.len(), 1, "{totals:?}");
+        assert_eq!(totals[0].tokens, 42, "both sessions' tokens");
+        assert!(
+            (totals[0].cost_usd - 0.42).abs() < 1e-9,
+            "both sessions' cost: {}",
+            totals[0].cost_usd
+        );
+        assert_eq!(totals[0].commits, 0, "neither worktree is a repository");
+        assert_eq!(totals[0].issues_done, 0);
+        assert_eq!(totals[0].releases, Vec::new());
+
+        script.set("conv1", spent(40, 0.4));
+        hub.dashboard.tick(Utc::now()).await;
+
+        let totals = day_totals(&mut c1);
+        assert_eq!(
+            totals.len(),
+            1,
+            "one message carrying the raised totals: {totals:?}"
+        );
+        assert_eq!(totals[0].tokens, 52);
+        assert!((totals[0].cost_usd - 0.52).abs() < 1e-9);
     }
 
     #[tokio::test]

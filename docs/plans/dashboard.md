@@ -273,7 +273,7 @@ A **dispatch run** (a `claude -p` implementer run started by the user's `dispatc
 
 ### Day ledger
 
-`day-ledger.json` in the config dir: per local date, each session's latest cost and token figures (a figure only rises), the commit shas and the issue keys moved to Done. The header's Today figures sum the current date. Written at most every 30 s while it changed; dates older than 30 days are dropped. It outlives the sessions, so an ended session's cost still counts.
+`day-ledger.json` in the config dir: per local date, each session's base and latest cost and token figures (a figure only rises; its day figure is latest minus base) and the commit shas; the issue keys moved to Done join it with RT-736. The header's Today figures sum the current date. Written at most every 10 s while it changed; dates older than 30 days are dropped. It outlives the sessions, so an ended session's cost still counts.
 
 ### The status-change log and the activity track
 
@@ -458,6 +458,8 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 
   Proof: placement unit tests over a fake process table and claims (holder under its session, under its subagent by command, a queued ticket's number, no gate state gives no rows). Waits on DB.5 and the daemon's gate reader (RT-55's GD.1 to GD.4, as RT-64 re-cuts them).
 - [ ] DB.9 Keep a day ledger for the header's figures. `crates/daemon/src/dashboard/ledger.rs` (new: `day-ledger.json`, rising figures, 30-day prune), `crates/daemon/src/paths.rs`, `crates/daemon/src/dashboard/mod.rs` (`DayTotals`). Proof: unit tests that a figure only rises, an ended session still counts, a new local date starts empty, and a corrupt file starts empty without being overwritten. Waits on DB.5, DB.6, DB.7.
+
+  Cost, tokens and commits are built (`crates/daemon/src/dashboard/ledger.rs`); issues Done and releases are RT-736.
 - [x] DB.10 Open the Dashboard as a tab from the rail. `crates/daemon/src/server/tabs.rs` (`OpenDashboardTab`, one per client), `apps/native/src/dashboard_tab.rs` (the tab's rules), `apps/native/src/tab_bar.rs` (the tab's icon and badge), `apps/native/src/activity_bar.rs` (the rail button and badge), `apps/native/src/lib.rs` (routing, `WatchDashboard` on show and hide).
 
   Proof: a daemon test that a second open focuses the first; a `ui_tabs` spec that the rail button opens and then focuses the tab and sends `WatchDashboard`. Waits on DB.2.
