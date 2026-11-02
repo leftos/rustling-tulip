@@ -268,11 +268,14 @@ pub(crate) fn apply_to_record(
             turn_report: turn_report(record, report),
         };
     }
-    // A subagent works on while the main agent is idle, so its events never
-    // promote the session into `Working`.
+    // A subagent's turn is not the main agent's: it works on while the main
+    // agent is idle and ends while the main agent works, so its events never
+    // promote the session into `Working` or end a turn at `Idle`.
     let entered_awaiting = report
         .status
-        .filter(|status| !(report.subagent && *status == SessionStatus::Working))
+        .filter(|status| {
+            !(report.subagent && matches!(status, SessionStatus::Working | SessionStatus::Idle))
+        })
         .is_some_and(|status| crate::pty_state::apply_status(record, status));
     match &report.pending {
         PendingUpdate::Clear => record.pending_input = None,
@@ -1090,6 +1093,21 @@ mod tests {
         );
         assert_eq!(record.status, SessionStatus::Working);
         assert!(!record.background, "leaving Idle clears the flag");
+    }
+
+    #[test]
+    fn a_subagent_stop_never_ends_the_main_turn() {
+        for event in ["Stop", "StopFailure"] {
+            let mut record = turn_record();
+            record.status = SessionStatus::Working;
+            apply_body(
+                &mut record,
+                2,
+                &json!({"hook_event_name": event, "agent_id": "a1", "agent_type": "Explore"}),
+            );
+            assert_eq!(record.status, SessionStatus::Working, "{event}");
+            assert_eq!(record.last_hook_time, Some(2), "{event} still stamps");
+        }
     }
 
     #[test]

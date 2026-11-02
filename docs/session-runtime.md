@@ -48,7 +48,7 @@ An interactive Claude session whose agent is typed into the user's shell (`agent
 
 The record's `program_name` becomes the shell's label then and `claude` again on the next `SessionStart`; the session itself ends only when the shell exits.
 
-A subagent's hook event (an `agent_id` in its input) never ends or replaces the main agent's pending prompt and never promotes the session to `Working`, and a subagent `PermissionRequest` raises one only when none is pending.
+A subagent's hook event (an `agent_id` in its input) never ends or replaces the main agent's pending prompt, never promotes the session to `Working` and never ends a turn at `Idle`, and a subagent `PermissionRequest` raises one only when none is pending.
 
 A main-agent `Stop` whose `background_tasks` lists a running task, or whose `session_crons` holds a one-shot cron, sets the snapshot's `background` flag beside `Idle` (RT-84); any status change, a stop, a park or an exit clears it, and it is never written to the sidecar.
 
