@@ -369,7 +369,7 @@ mod tests {
         );
         let event: serde_json::Value = serde_json::from_str(question).expect("parse hook body");
         let signal = report(&event);
-        crate::hook_status::apply_signal(&hub, "s1", Some(100), &signal);
+        crate::hook_status::apply_signal(&hub, "s1", Some(100), &signal, "Test");
         assert!(
             matches!(
                 attention.try_recv().map(|event| event.reason),
@@ -396,7 +396,7 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         }
-        crate::hook_status::apply_signal(&hub, "s1", Some(200), &signal);
+        crate::hook_status::apply_signal(&hub, "s1", Some(200), &signal, "Test");
         assert!(
             attention.try_recv().is_err(),
             "the dialog on screen and a repeat event raise no second event"
@@ -655,7 +655,7 @@ mod tests {
     /// Apply the hook `body` to `s1` at `event_time`, as the route does.
     fn apply_hook(hub: &Hub, body: &str, event_time: u128) {
         let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
-        crate::hook_status::apply_signal(hub, "s1", Some(event_time), &report(&event));
+        crate::hook_status::apply_signal(hub, "s1", Some(event_time), &report(&event), "Test");
     }
 
     /// The report Claude's plugin maps `event` to, for a session with no
@@ -691,7 +691,7 @@ mod tests {
         hub.sessions.insert(idle_record("agent"));
         let apply = |id: &str, body: &str, event_time: u128| {
             let event: serde_json::Value = serde_json::from_str(body).expect("parse hook body");
-            crate::hook_status::apply_signal(&hub, id, Some(event_time), &report(&event));
+            crate::hook_status::apply_signal(&hub, id, Some(event_time), &report(&event), "Test");
         };
 
         for id in ["shell", "agent"] {
