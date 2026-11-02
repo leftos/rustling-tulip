@@ -5,3 +5,7 @@ session = [
     "pwsh -NoProfile -File rt.ps1 native-e2e*",
     "pwsh -NoProfile -File ./rt.ps1 native-e2e*",
 ]
+hidden = [
+    "pwsh -NoProfile -File rt.ps1 native-smoke*",
+    "pwsh -NoProfile -File ./rt.ps1 native-smoke*",
+]
