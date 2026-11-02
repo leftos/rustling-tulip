@@ -4,7 +4,7 @@ The native client finds a newer published release, downloads it in the backgroun
 
 The code is the client's `update.rs` (feed, pick, download, verify), `update_view.rs` (timer, notice, Restart to update, toasts), the daemon's `cli_apply_update.rs` (the file swap), `crates/daemon-client/src/supervisor.rs` (daemon takeover) and the NSIS script `tools/installer/rustling-tulip.nsi`.
 
-The client's side of the UI is in [native-client.md](./native-client.md) ("Updates"), the release steps in [release.md](./release.md) and the owner's hand tests in [tools/installer/README.md](../tools/installer/README.md).
+The client's side of the UI is in [native-client.md](./native-client.md) ("Updates"), the release steps in [release.md](./release.md) and what the installer does in [tools/installer/README.md](../tools/installer/README.md).
 
 ## Trust model
 
@@ -71,6 +71,6 @@ Velopack was considered and not used. It would replace the NSIS installer and ad
 
 ## Proof
 
-The proof is the local-server tests in `apps/native/src/update.rs` (feed parse, pick, download, hash, `.sha256` parse, cleanup, against a local HTTP server on the real clock), the `ui_update` specs (`apps/native/tests/ui/ui_update.rs`, with the updater injected), the `apply-update` and supervisor tests, the release's agent-run smoke of the installer, and the owner's hand test in `tools/installer/README.md`.
+The proof is the local-server tests in `apps/native/src/update.rs` (feed parse, pick, download, hash, `.sha256` parse, cleanup, against a local HTTP server on the real clock), the `ui_update` specs (`apps/native/tests/ui/ui_update.rs`, with the updater injected), the `apply-update` and supervisor tests, and the release's agent-run smoke of the installer.
 
 There is no live e2e spec and no fake-releases feed shim. `.\rt.ps1 native-shot update` shows the footer notice.
