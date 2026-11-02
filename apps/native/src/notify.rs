@@ -20,8 +20,8 @@ use protocol::{
 use crate::RootView;
 use crate::needs_you::{self, Reason};
 use crate::pairing::{PairingAction, PairingToast};
-use crate::sidebar::{NeedsYouSound, NotifySkip, display_label};
-use crate::sound::{self, Sounder};
+use crate::sidebar::{NotifySkip, ToastSound, display_label};
+use crate::sound::{self, NotifyKind, Sounder};
 use crate::target::HostKey;
 #[cfg(windows)]
 use crate::toast_activation;
@@ -259,11 +259,14 @@ impl Notifier for SilentNotifier {
 pub(crate) struct Notifications {
     /// Shows the notifications, on background threads.
     pub(crate) notifier: Arc<dyn Notifier>,
-    /// Plays the Needs you sound, on background threads.
+    /// Plays the toast sounds, on background threads.
     pub(crate) sounder: Arc<dyn Sounder>,
     /// What is wrong with the Needs you sound's custom file, as last checked
     /// when the Notifications tab opened or the choice changed.
     pub(crate) sound_problem: Option<String>,
+    /// What is wrong with the Finished sound's custom file, as last checked
+    /// when the Notifications tab opened or the choice changed.
+    pub(crate) finished_sound_problem: Option<String>,
     /// Windows' toast setting as last read when the Notifications tab
     /// opened; `None` while a read is out.
     pub(crate) state: Option<NotifyState>,
@@ -295,6 +298,7 @@ impl Notifications {
             notifier,
             sounder,
             sound_problem: None,
+            finished_sound_problem: None,
             state: None,
             summaries: HashMap::new(),
             held: HashMap::new(),
@@ -464,19 +468,23 @@ struct Toast<'a> {
     body: &'a str,
     /// Whether the setting's toggle for this kind of toast is on.
     wanted: bool,
-    /// Whether it plays the Needs you sound as it is raised, in place of
-    /// Windows' own.
-    sound: bool,
+    /// Which sound it plays as it is raised, in place of Windows' own.
+    kind: NotifyKind,
 }
 
-/// Plays `choice`'s clip with a Needs you toast, unless Windows holds that
+/// Plays `choice`'s clip with a `kind` toast, unless Windows holds that
 /// toast back.
-fn sound_with_toast(notifier: &dyn Notifier, sounder: &dyn Sounder, choice: &NeedsYouSound) {
+fn sound_with_toast(
+    notifier: &dyn Notifier,
+    sounder: &dyn Sounder,
+    choice: &ToastSound,
+    kind: NotifyKind,
+) {
     if notifier.suppressed() {
-        tracing::debug!("Windows holds notifications back: the Needs you sound does not play");
+        tracing::debug!("Windows holds notifications back: the toast sound does not play");
         return;
     }
-    if let Some(clip) = sound::clip_for(choice) {
+    if let Some(clip) = sound::clip_for(choice, kind) {
         sounder.play(clip);
     }
 }
@@ -567,7 +575,7 @@ impl RootView {
                             title: FINISHED_TITLE,
                             body: &label,
                             wanted,
-                            sound: false,
+                            kind: NotifyKind::Finished,
                         },
                         window_focused,
                         cx,
@@ -594,7 +602,7 @@ impl RootView {
                         title: NEEDS_YOU_TITLE,
                         body: &body,
                         wanted,
-                        sound: true,
+                        kind: NotifyKind::NeedsYou,
                     },
                     window_focused,
                     cx,
@@ -648,46 +656,56 @@ impl RootView {
         }
         let title = toast.title.to_owned();
         let body = toast.body.to_owned();
-        // Needs you's sound is the client's own (none when it is off), never
-        // Windows' beside it.
-        let silent = toast.sound;
-        let chime = toast
-            .sound
-            .then(|| self.needs_you_sound_choice())
-            .filter(|choice| *choice != NeedsYouSound::Off);
+        // The toast's sound is the client's own (none when it is off), never
+        // Windows' beside it, so every app toast is raised silent.
+        let kind = toast.kind;
+        let choice = self.sound_choice(kind);
+        let chime = (choice != ToastSound::Off).then_some(choice);
         let notifier = Arc::clone(&self.notifications.notifier);
         let sounder = Arc::clone(&self.notifications.sounder);
         cx.background_executor()
             .spawn(async move {
                 if let Some(choice) = chime {
-                    sound_with_toast(notifier.as_ref(), sounder.as_ref(), &choice);
+                    sound_with_toast(notifier.as_ref(), sounder.as_ref(), &choice, kind);
                 }
-                notifier.notify(&title, &body, silent);
+                notifier.notify(&title, &body, true);
             })
             .detach();
     }
 
-    /// The Needs you sound as chosen in Settings.
-    fn needs_you_sound_choice(&self) -> NeedsYouSound {
-        self.sidebar
-            .ui_state()
-            .notifications
-            .needs_you_sound
-            .clone()
+    /// The sound `kind`'s toast plays as chosen in Settings.
+    fn sound_choice(&self, kind: NotifyKind) -> ToastSound {
+        let notifications = &self.sidebar.ui_state().notifications;
+        match kind {
+            NotifyKind::NeedsYou => notifications.needs_you_sound.clone(),
+            NotifyKind::Finished => notifications.finished_sound.clone(),
+        }
     }
 
     /// Plays the Needs you sound as chosen in Settings, unless it is off, as
     /// Settings' Play previews it; the custom file is read and checked on a
     /// background thread.
     pub(crate) fn play_needs_you_sound(&self, cx: &gpui::App) {
-        let choice = self.needs_you_sound_choice();
-        if choice == NeedsYouSound::Off {
+        self.play_sound(NotifyKind::NeedsYou, cx);
+    }
+
+    /// Plays the Finished sound as chosen in Settings, unless it is off, as
+    /// Settings' Play previews it; the custom file is read and checked on a
+    /// background thread.
+    pub(crate) fn play_finished_sound(&self, cx: &gpui::App) {
+        self.play_sound(NotifyKind::Finished, cx);
+    }
+
+    /// Plays `kind`'s chosen sound once, unless it is off.
+    fn play_sound(&self, kind: NotifyKind, cx: &gpui::App) {
+        let choice = self.sound_choice(kind);
+        if choice == ToastSound::Off {
             return;
         }
         let sounder = Arc::clone(&self.notifications.sounder);
         cx.background_executor()
             .spawn(async move {
-                if let Some(clip) = sound::clip_for(&choice) {
+                if let Some(clip) = sound::clip_for(&choice, kind) {
                     sounder.play(clip);
                 }
             })
@@ -738,7 +756,7 @@ impl RootView {
                 title: FINISHED_TITLE,
                 body: &held.label,
                 wanted,
-                sound: false,
+                kind: NotifyKind::Finished,
             },
             focused,
             cx,
@@ -776,13 +794,19 @@ impl RootView {
             |title| (title, alert.notification.clone()),
         );
         let wanted = self.sidebar.ui_state().notifications.finished;
+        // A NeedsAnswer alert asks the owner for an answer, so it sounds with
+        // Needs you's own sound; every other kind sounds as Finished.
+        let kind = match alert.kind {
+            Some(AlertKind::NeedsAnswer) => NotifyKind::NeedsYou,
+            _ => NotifyKind::Finished,
+        };
         self.raise_toast(
             &Toast {
                 session_id,
                 title: &title,
                 body: &body,
                 wanted,
-                sound: false,
+                kind,
             },
             window_focused,
             cx,

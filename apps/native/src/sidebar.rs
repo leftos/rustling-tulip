@@ -864,14 +864,18 @@ pub struct NotificationSettings {
     /// The sound a Needs you notification plays; a file without the key,
     /// as every release before it wrote, plays the bundled one.
     #[serde(deserialize_with = "sound_or_default")]
-    pub needs_you_sound: NeedsYouSound,
+    pub needs_you_sound: ToastSound,
+    /// The sound a Finished notification plays; a file without the key, as
+    /// every release before this one wrote, plays the bundled one.
+    #[serde(deserialize_with = "finished_sound_or_default")]
+    pub finished_sound: ToastSound,
 }
 
-/// The sound a Needs you notification plays. Saved as `"off"`, `"default"`
-/// or `{ "custom": "<path>" }`.
+/// The sound a toast plays. Saved as `"off"`, `"default"` or
+/// `{ "custom": "<path>" }`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NeedsYouSound {
+pub enum ToastSound {
     /// No sound.
     Off,
     /// The sound bundled with the client.
@@ -886,13 +890,27 @@ pub enum NeedsYouSound {
 /// loads as the default and never fails the rest of the file.
 fn sound_or_default<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<NeedsYouSound, D::Error> {
+) -> Result<ToastSound, D::Error> {
+    read_sound_choice(deserializer, "needs_you_sound")
+}
+
+/// Reads `finished_sound` as `needs_you_sound` is read.
+fn finished_sound_or_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ToastSound, D::Error> {
+    read_sound_choice(deserializer, "finished_sound")
+}
+
+/// Reads one of the sound keys, warning with `key` when its value is not a
+/// known choice.
+fn read_sound_choice<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    key: &str,
+) -> Result<ToastSound, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value.clone()).unwrap_or_else(|err| {
-        tracing::warn!(
-            "notifications.needs_you_sound {value} is not a known choice ({err}); using default"
-        );
-        NeedsYouSound::default()
+        tracing::warn!("notifications.{key} {value} is not a known choice ({err}); using default");
+        ToastSound::default()
     }))
 }
 
@@ -917,7 +935,8 @@ impl Default for NotificationSettings {
             awaiting_input: true,
             finished: true,
             skip_when: NotifySkip::default(),
-            needs_you_sound: NeedsYouSound::default(),
+            needs_you_sound: ToastSound::default(),
+            finished_sound: ToastSound::default(),
         }
     }
 }
@@ -2025,11 +2044,21 @@ impl SidebarModel {
 
     /// Records the sound a Needs you notification plays; returns whether it
     /// changed.
-    pub fn set_needs_you_sound(&mut self, sound: NeedsYouSound) -> bool {
+    pub fn set_needs_you_sound(&mut self, sound: ToastSound) -> bool {
         if self.ui.notifications.needs_you_sound == sound {
             return false;
         }
         self.ui.notifications.needs_you_sound = sound;
+        true
+    }
+
+    /// Records the sound a Finished notification plays; returns whether it
+    /// changed.
+    pub fn set_finished_sound(&mut self, sound: ToastSound) -> bool {
+        if self.ui.notifications.finished_sound == sound {
+            return false;
+        }
+        self.ui.notifications.finished_sound = sound;
         true
     }
 
@@ -5089,7 +5118,8 @@ pub(crate) mod tests {
                 awaiting_input: false,
                 finished: false,
                 skip_when: NotifySkip::Never,
-                needs_you_sound: NeedsYouSound::Off,
+                needs_you_sound: ToastSound::Off,
+                finished_sound: ToastSound::Default,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -5214,7 +5244,8 @@ pub(crate) mod tests {
                 awaiting_input: false,
                 finished: false,
                 skip_when: NotifySkip::Never,
-                needs_you_sound: NeedsYouSound::Default,
+                needs_you_sound: ToastSound::Default,
+                finished_sound: ToastSound::Default,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -6768,7 +6799,7 @@ pub(crate) mod tests {
     fn a_released_notifications_block_without_a_sound_key_loads_as_default() {
         let dir = TestDir::new("notify-sound-released");
         let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
-        assert_eq!(ui.notifications.needs_you_sound, NeedsYouSound::Default);
+        assert_eq!(ui.notifications.needs_you_sound, ToastSound::Default);
         assert!(
             !ui.notifications.awaiting_input,
             "the saved toggle survives"
@@ -6782,12 +6813,12 @@ pub(crate) mod tests {
         let mut model = SidebarModel::default();
         let custom = PathBuf::from("C:\\sounds\\ding.wav");
         for (choice, saved) in [
-            (NeedsYouSound::Off, json!("off")),
+            (ToastSound::Off, json!("off")),
             (
-                NeedsYouSound::Custom(custom.clone()),
+                ToastSound::Custom(custom.clone()),
                 json!({ "custom": "C:\\sounds\\ding.wav" }),
             ),
-            (NeedsYouSound::Default, json!("default")),
+            (ToastSound::Default, json!("default")),
         ] {
             assert!(
                 model.set_needs_you_sound(choice.clone()),
@@ -6802,6 +6833,67 @@ pub(crate) mod tests {
             let file: serde_json::Value = serde_json::from_str(&text).expect("JSON");
             assert_eq!(file["notifications"]["needs_you_sound"], saved);
             assert_eq!(load_ui_state(&dir.0).notifications.needs_you_sound, choice);
+        }
+    }
+
+    #[test]
+    fn a_file_without_finished_sound_loads_the_default() {
+        let dir = TestDir::new("notify-finished-sound-released");
+        let mut file = v0_5_1_alpha_ui_file();
+        file["notifications"]["needs_you_sound"] = json!("off");
+        assert!(
+            file["notifications"].get("finished_sound").is_none(),
+            "no release before this one wrote a Finished sound"
+        );
+        let ui = load_released(&dir, &file);
+        assert_eq!(ui.notifications.finished_sound, ToastSound::Default);
+        assert_eq!(
+            ui.notifications.needs_you_sound,
+            ToastSound::Off,
+            "the saved Needs you sound survives"
+        );
+        assert!(
+            !ui.notifications.awaiting_input,
+            "the saved toggle survives"
+        );
+        assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+    }
+
+    #[test]
+    fn an_unknown_finished_sound_loads_the_default() {
+        let dir = TestDir::new("notify-finished-sound-unknown");
+        let mut file = v0_5_1_alpha_ui_file();
+        file["notifications"]["finished_sound"] = json!("chime");
+        let ui = load_released(&dir, &file);
+        assert_eq!(ui.notifications.finished_sound, ToastSound::Default);
+    }
+
+    #[test]
+    fn the_finished_sound_choices_round_trip() {
+        let dir = TestDir::new("notify-finished-sound-round-trip");
+        let mut model = SidebarModel::default();
+        let custom = PathBuf::from("C:\\sounds\\done.ogg");
+        for (choice, saved) in [
+            (ToastSound::Off, json!("off")),
+            (
+                ToastSound::Custom(custom.clone()),
+                json!({ "custom": "C:\\sounds\\done.ogg" }),
+            ),
+            (ToastSound::Default, json!("default")),
+        ] {
+            assert!(
+                model.set_finished_sound(choice.clone()),
+                "{saved} is a change"
+            );
+            assert!(
+                !model.set_finished_sound(choice.clone()),
+                "{saved} again is not"
+            );
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let file: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(file["notifications"]["finished_sound"], saved);
+            assert_eq!(load_ui_state(&dir.0).notifications.finished_sound, choice);
         }
     }
 

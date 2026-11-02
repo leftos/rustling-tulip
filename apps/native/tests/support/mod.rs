@@ -25,9 +25,10 @@ use protocol::{
 };
 use rustling_tulip_native::{
     Activity, BadgeOverlay, Clip, ClipSource, Clock, Connection, ContainerKind, FileFilter,
-    FilePicker, FolderPicker, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyState,
-    OpenFailure, OpenLocalFuture, Opener, PairingAction, PairingActionSink, PairingToast, QuitFn,
-    RootDeps, RootView, SavePicker, ScPanel, Sounder, TaskbarBadge, Transport, bind_keys,
+    FilePicker, FolderPicker, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyKind,
+    NotifyState, OpenFailure, OpenLocalFuture, Opener, PairingAction, PairingActionSink,
+    PairingToast, QuitFn, RootDeps, RootView, SavePicker, ScPanel, Sounder, TaskbarBadge,
+    Transport, bind_keys,
     remote_access::Autostart,
     spawn_net,
     target::{HostKey, Target},
@@ -1368,6 +1369,7 @@ impl Opener for OpenRecorder {
 /// its buttons itself.
 pub struct NotifyRecorder {
     shown: Mutex<Vec<(String, String)>>,
+    silent: Mutex<Vec<bool>>,
     pairing: Mutex<Vec<PairingToast>>,
     action: Mutex<Option<PairingActionSink>>,
     state: Mutex<NotifyState>,
@@ -1378,6 +1380,7 @@ impl Default for NotifyRecorder {
     fn default() -> Self {
         Self {
             shown: Mutex::new(Vec::new()),
+            silent: Mutex::new(Vec::new()),
             pairing: Mutex::new(Vec::new()),
             action: Mutex::new(None),
             state: Mutex::new(NotifyState::On),
@@ -1412,11 +1415,15 @@ impl NotifyRecorder {
 }
 
 impl Notifier for NotifyRecorder {
-    fn notify(&self, title: &str, body: &str, _silent: bool) {
+    fn notify(&self, title: &str, body: &str, silent: bool) {
         self.shown
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push((title.to_owned(), body.to_owned()));
+        self.silent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(silent);
     }
 
     fn notify_pairing(&self, toast: &PairingToast, on_action: PairingActionSink) {
@@ -1455,7 +1462,7 @@ impl Sounder for SoundRecorder {
             .push(clip.source);
     }
 
-    fn drop_waiting(&self) {}
+    fn drop_waiting(&self, _kind: NotifyKind) {}
 }
 
 /// A taskbar badge that records each overlay the client put on a window's
@@ -2286,6 +2293,17 @@ impl<'a> Harness<'a> {
         self.cx.run_until_parked();
         self.notifier
             .shown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether each notification shown was raised silent, oldest first,
+    /// in the order of [`Harness::notified`], once the view has settled.
+    pub fn notified_silent(&mut self) -> Vec<bool> {
+        self.cx.run_until_parked();
+        self.notifier
+            .silent
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()

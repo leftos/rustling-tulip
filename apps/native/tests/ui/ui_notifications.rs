@@ -256,6 +256,10 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
 
     assert_eq!(settings_focus(&mut h), Some("settings-notify-finished"));
     for stop in [
+        "settings-finished-sound-off",
+        "settings-finished-sound-default",
+        "settings-finished-sound-custom",
+        "settings-finished-sound-play",
         "settings-notify-skip-on-screen",
         "settings-notify-skip-focused",
         "settings-notify-skip-never",
@@ -638,6 +642,36 @@ fn an_alert_for_another_session_leaves_the_hold(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_needs_answer_alert_plays_the_needs_you_sound(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.send(alert(
+        "s2",
+        AlertKind::NeedsAnswer,
+        "the agent asks which repo",
+    ));
+    assert_eq!(
+        h.notified(),
+        [shown(
+            "review needs your answer",
+            "the agent asks which repo"
+        )]
+    );
+    assert_eq!(
+        h.notified_silent(),
+        [true],
+        "the alert's toast is raised silent"
+    );
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled],
+        "an answer request plays the Needs you sound"
+    );
+}
+
+#[gpui::test]
 fn a_held_finished_toast_honours_the_toggle_and_skip_rule(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     save_notifications(&dir, &serde_json::json!({ "finished": false }));
@@ -914,10 +948,22 @@ fn the_needs_you_sound_plays_once_for_a_new_item(cx: &mut TestAppContext) {
 
     turn(&mut h, "s2", "review");
     assert_eq!(h.notified().len(), 2, "Finished is raised");
-    assert_eq!(h.sounds().len(), 1, "Finished plays no sound");
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::Bundled, ClipSource::BundledFinished],
+        "Finished plays the Finished sound"
+    );
 
     h.send(attention("s2", AttentionReason::AwaitingInput));
-    assert_eq!(h.sounds().len(), 2, "the next Needs you item plays again");
+    assert_eq!(
+        h.sounds(),
+        [
+            ClipSource::Bundled,
+            ClipSource::BundledFinished,
+            ClipSource::Bundled
+        ],
+        "the next Needs you item plays again"
+    );
 }
 
 #[gpui::test]
@@ -993,6 +1039,97 @@ fn a_missing_custom_file_falls_back_to_the_default(cx: &mut TestAppContext) {
     assert_eq!(h.sounds(), [ClipSource::Bundled]);
 }
 
+/// Asserts the Needs you toast `s1` raises under `sound` is raised silent.
+fn assert_needs_you_silent_under(cx: &mut TestAppContext, sound: &serde_json::Value, choice: &str) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "needs_you_sound": sound }));
+    let mut h = opened(cx, &dir);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified().len(),
+        1,
+        "Needs you is raised with the {choice} choice"
+    );
+    assert_eq!(
+        h.notified_silent(),
+        [true],
+        "a Needs you toast is raised silent with the {choice} choice"
+    );
+}
+
+#[gpui::test]
+fn a_needs_you_toast_is_raised_silent_whatever_the_sound_choice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let missing = dir.path().join("no-such-chime.ogg");
+    assert_needs_you_silent_under(cx, &serde_json::json!("off"), "off");
+    assert_needs_you_silent_under(cx, &serde_json::json!("default"), "default");
+    assert_needs_you_silent_under(
+        cx,
+        &serde_json::json!({ "custom": missing }),
+        "a missing custom file",
+    );
+}
+
+#[gpui::test]
+fn a_finished_toast_is_raised_silent_and_plays_the_finished_sound(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    assert_eq!(h.notified().len(), 1, "Finished is raised");
+    assert_eq!(
+        h.notified_silent(),
+        [true],
+        "a Finished toast is raised silent"
+    );
+    assert_eq!(h.sounds(), [ClipSource::BundledFinished]);
+}
+
+#[gpui::test]
+fn no_finished_sound_when_its_choice_is_off(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "finished_sound": "off" }));
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    assert_eq!(h.notified().len(), 1, "the toast still fires");
+    assert_eq!(h.notified_silent(), [true], "and is raised silent");
+    assert!(h.sounds().is_empty(), "the sound is off");
+}
+
+#[gpui::test]
+fn the_finished_and_needs_you_sounds_are_chosen_apart(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(
+        &dir,
+        &serde_json::json!({ "needs_you_sound": "off", "finished_sound": "default" }),
+    );
+    let mut h = opened(cx, &dir);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(h.notified().len(), 1, "Needs you is raised");
+    assert!(h.sounds().is_empty(), "its sound is off");
+    turn(&mut h, "s2", "review");
+    assert_eq!(
+        h.sounds(),
+        [ClipSource::BundledFinished],
+        "Finished plays its own sound"
+    );
+}
+
+#[gpui::test]
+fn a_held_finished_toast_plays_the_finished_sound_when_it_expires(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    assert!(
+        h.sounds().is_empty(),
+        "nothing plays while an alert may still come"
+    );
+    h.advance(Duration::from_secs(12));
+    assert_eq!(h.notified().len(), 1, "the fallback is raised");
+    assert_eq!(h.notified_silent(), [true], "and is raised silent");
+    assert_eq!(h.sounds(), [ClipSource::BundledFinished]);
+}
+
 #[gpui::test]
 fn choosing_off_default_and_custom_writes_the_sound_key(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -1059,4 +1196,69 @@ fn play_previews_the_chosen_sound_once(cx: &mut TestAppContext) {
     assert!(h.sounds().is_empty(), "opening the tab plays nothing");
     h.click_on("settings-needs-you-sound-play");
     assert_eq!(h.sounds(), [ClipSource::Bundled]);
+}
+
+#[gpui::test]
+fn choosing_off_default_and_custom_writes_the_finished_sound_key(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    h.click_on("settings-finished-sound-off");
+    assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "off");
+    // gpui keeps a selector's last bounds once it stops being drawn, so the
+    // Tab ring says whether Play is there.
+    h.keys("tab tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-notify-skip-on-screen"),
+        "no Play to preview while the sound is off, so the skip choices follow"
+    );
+
+    h.click_on("settings-finished-sound-default");
+    assert_eq!(saved_ui(&dir)["notifications"]["finished_sound"], "default");
+
+    let chosen = dir.path().join("done.wav");
+    h.set_picked_file(chosen.to_str());
+    h.click_on("settings-finished-sound-custom");
+    h.cx.run_until_parked();
+    assert_eq!(
+        h.file_filters()
+            .last()
+            .map(|filter| filter.extensions.clone()),
+        Some(vec!["wav".to_owned(), "ogg".to_owned()]),
+        "the picker offers .wav and .ogg"
+    );
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["finished_sound"],
+        serde_json::json!({ "custom": chosen })
+    );
+    assert!(
+        h.bounds("settings-finished-sound-path").origin.x >= px(0.0),
+        "the chosen path shows"
+    );
+    let problem = h
+        .root(|root, _| root.finished_sound_problem())
+        .expect("a missing file is a problem");
+    assert!(
+        problem.contains("could not be read"),
+        "the problem says why: {problem}"
+    );
+    assert!(h.bounds("settings-finished-sound-problem").origin.x >= px(0.0));
+
+    h.set_picked_file(None);
+    h.click_on("settings-finished-sound-custom");
+    h.cx.run_until_parked();
+    assert_eq!(
+        saved_ui(&dir)["notifications"]["finished_sound"],
+        serde_json::json!({ "custom": chosen }),
+        "a cancelled pick keeps the choice"
+    );
+}
+
+#[gpui::test]
+fn play_previews_the_finished_sound_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    assert!(h.sounds().is_empty(), "opening the tab plays nothing");
+    h.click_on("settings-finished-sound-play");
+    assert_eq!(h.sounds(), [ClipSource::BundledFinished]);
 }

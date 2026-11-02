@@ -38,7 +38,7 @@ use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::sidebar::{
-    CountMode, LeafDensity, NeedsYouSound, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView,
+    CountMode, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView, ToastSound,
 };
 use crate::sound::{self, SOUND_EXTENSIONS};
 use crate::spawn_view::{
@@ -284,11 +284,11 @@ pub(crate) enum SoundKind {
 
 impl SoundKind {
     /// The choice `sound` shows as.
-    const fn of(sound: &NeedsYouSound) -> Self {
+    const fn of(sound: &ToastSound) -> Self {
         match sound {
-            NeedsYouSound::Off => Self::Off,
-            NeedsYouSound::Default => Self::Default,
-            NeedsYouSound::Custom(_) => Self::Custom,
+            ToastSound::Off => Self::Off,
+            ToastSound::Default => Self::Default,
+            ToastSound::Custom(_) => Self::Custom,
         }
     }
 
@@ -322,6 +322,8 @@ pub(crate) enum SettingsControl {
     NotifyNeedsYou,
     NeedsYouSound(SoundKind),
     NeedsYouSoundPlay,
+    FinishedSound(SoundKind),
+    FinishedSoundPlay,
     NotifyFinished,
     NotifySkip(NotifySkip),
     SpawnTrusted,
@@ -422,6 +424,10 @@ impl SettingsControl {
             Self::NeedsYouSound(SoundKind::Default) => "settings-needs-you-sound-default",
             Self::NeedsYouSound(SoundKind::Custom) => "settings-needs-you-sound-custom",
             Self::NeedsYouSoundPlay => "settings-needs-you-sound-play",
+            Self::FinishedSound(SoundKind::Off) => "settings-finished-sound-off",
+            Self::FinishedSound(SoundKind::Default) => "settings-finished-sound-default",
+            Self::FinishedSound(SoundKind::Custom) => "settings-finished-sound-custom",
+            Self::FinishedSoundPlay => "settings-finished-sound-play",
             Self::NotifyFinished => "settings-notify-finished",
             Self::NotifySkip(NotifySkip::OnScreen) => "settings-notify-skip-on-screen",
             Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
@@ -2216,6 +2222,8 @@ impl RootView {
             SettingsControl::NotifyNeedsYou => self.toggle_notification(cx),
             SettingsControl::NeedsYouSound(kind) => self.choose_needs_you_sound(kind, cx),
             SettingsControl::NeedsYouSoundPlay => self.play_needs_you_sound(cx),
+            SettingsControl::FinishedSound(kind) => self.choose_finished_sound(kind, cx),
+            SettingsControl::FinishedSoundPlay => self.play_finished_sound(cx),
             SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
@@ -2821,6 +2829,7 @@ impl RootView {
         if tab == SettingsTab::Notifications {
             self.read_notify_state(window, cx);
             self.check_needs_you_sound(cx);
+            self.check_finished_sound(cx);
         }
         if tab == SettingsTab::Worktrees {
             self.hold_worktrees_tab(false, window, cx);
@@ -2893,20 +2902,33 @@ impl RootView {
         self.notifications.sound_problem.clone()
     }
 
+    /// What the Notifications tab says is wrong with the Finished sound's
+    /// custom file, `None` when nothing is.
+    #[must_use]
+    pub fn finished_sound_problem(&self) -> Option<String> {
+        self.notifications.finished_sound_problem.clone()
+    }
+
     /// The Notifications tab's stops: the link, Needs you with its sound
-    /// choices and their Play (not while the sound is off), Finished, then
-    /// the skip choices.
+    /// choices and their Play (not while the sound is off), Finished with its
+    /// own sound choices and their Play, then the skip choices.
     fn notifications_controls(&self) -> Vec<SettingsControl> {
-        let sound = SoundKind::of(&self.sidebar.ui_state().notifications.needs_you_sound);
+        let settings = &self.sidebar.ui_state().notifications;
+        let needs_you = SoundKind::of(&settings.needs_you_sound);
+        let finished = SoundKind::of(&settings.finished_sound);
         let mut controls = vec![
             SettingsControl::NotifySettingsLink,
             SettingsControl::NotifyNeedsYou,
         ];
         controls.extend(SOUND_CHOICES.map(SettingsControl::NeedsYouSound));
-        if sound != SoundKind::Off {
+        if needs_you != SoundKind::Off {
             controls.push(SettingsControl::NeedsYouSoundPlay);
         }
         controls.push(SettingsControl::NotifyFinished);
+        controls.extend(SOUND_CHOICES.map(SettingsControl::FinishedSound));
+        if finished != SoundKind::Off {
+            controls.push(SettingsControl::FinishedSoundPlay);
+        }
         controls.extend(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip));
         controls
     }
@@ -2915,8 +2937,8 @@ impl RootView {
     /// a `.wav` or `.ogg`, and a cancel keeps the choice as it was.
     fn choose_needs_you_sound(&mut self, kind: SoundKind, cx: &mut Context<Self>) {
         match kind {
-            SoundKind::Off => self.set_needs_you_sound(NeedsYouSound::Off, cx),
-            SoundKind::Default => self.set_needs_you_sound(NeedsYouSound::Default, cx),
+            SoundKind::Off => self.set_needs_you_sound(ToastSound::Off, cx),
+            SoundKind::Default => self.set_needs_you_sound(ToastSound::Default, cx),
             SoundKind::Custom => self.pick_needs_you_sound(cx),
         }
     }
@@ -2926,8 +2948,8 @@ impl RootView {
     /// when the window is on another host.
     fn pick_needs_you_sound(&mut self, cx: &mut Context<Self>) {
         let start = match &self.sidebar.ui_state().notifications.needs_you_sound {
-            NeedsYouSound::Custom(path) => path.parent().map(std::path::Path::to_path_buf),
-            NeedsYouSound::Off | NeedsYouSound::Default => None,
+            ToastSound::Custom(path) => path.parent().map(std::path::Path::to_path_buf),
+            ToastSound::Off | ToastSound::Default => None,
         };
         let filter = FileFilter::new("Sound", &SOUND_EXTENSIONS);
         let picked = (self.pick_file)(cx, start, filter);
@@ -2937,7 +2959,7 @@ impl RootView {
             };
             // Fails only when the view is gone, and Settings with it.
             this.update(cx, |this, cx| {
-                this.set_needs_you_sound(NeedsYouSound::Custom(path), cx);
+                this.set_needs_you_sound(ToastSound::Custom(path), cx);
             })
             .ok();
         })
@@ -2946,9 +2968,11 @@ impl RootView {
 
     /// Records `sound`, saving it when it changed, and checks its file; Off
     /// drops the clip waiting to play, and the one playing ends on its own.
-    fn set_needs_you_sound(&mut self, sound: NeedsYouSound, cx: &mut Context<Self>) {
-        if sound == NeedsYouSound::Off {
-            self.notifications.sounder.drop_waiting();
+    fn set_needs_you_sound(&mut self, sound: ToastSound, cx: &mut Context<Self>) {
+        if sound == ToastSound::Off {
+            self.notifications
+                .sounder
+                .drop_waiting(crate::sound::NotifyKind::NeedsYou);
         }
         if self.sidebar.set_needs_you_sound(sound) {
             self.save_ui();
@@ -2978,6 +3002,78 @@ impl RootView {
             this.update(cx, |this, cx| {
                 if this.sidebar.ui_state().notifications.needs_you_sound == choice {
                     this.notifications.sound_problem = problem;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Off and Default apply at once; Custom asks this PC's file picker for
+    /// a `.wav` or `.ogg`, and a cancel keeps the choice as it was.
+    fn choose_finished_sound(&mut self, kind: SoundKind, cx: &mut Context<Self>) {
+        match kind {
+            SoundKind::Off => self.set_finished_sound(ToastSound::Off, cx),
+            SoundKind::Default => self.set_finished_sound(ToastSound::Default, cx),
+            SoundKind::Custom => self.pick_finished_sound(cx),
+        }
+    }
+
+    /// Asks for the custom sound file, opening at the current one's folder.
+    /// The sound plays on this PC, so the picker is always this PC's, even
+    /// when the window is on another host.
+    fn pick_finished_sound(&mut self, cx: &mut Context<Self>) {
+        let start = match &self.sidebar.ui_state().notifications.finished_sound {
+            ToastSound::Custom(path) => path.parent().map(std::path::Path::to_path_buf),
+            ToastSound::Off | ToastSound::Default => None,
+        };
+        let filter = FileFilter::new("Sound", &SOUND_EXTENSIONS);
+        let picked = (self.pick_file)(cx, start, filter);
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                return;
+            };
+            // Fails only when the view is gone, and Settings with it.
+            this.update(cx, |this, cx| {
+                this.set_finished_sound(ToastSound::Custom(path), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Records `sound`, saving it when it changed, and checks its file; Off
+    /// drops the clip waiting to play, and the one playing ends on its own.
+    fn set_finished_sound(&mut self, sound: ToastSound, cx: &mut Context<Self>) {
+        if sound == ToastSound::Off {
+            self.notifications
+                .sounder
+                .drop_waiting(crate::sound::NotifyKind::Finished);
+        }
+        if self.sidebar.set_finished_sound(sound) {
+            self.save_ui();
+        }
+        self.check_finished_sound(cx);
+        cx.notify();
+    }
+
+    /// Checks the chosen custom sound file on a background thread; the tab
+    /// shows what is wrong with it once the check is back, unless the
+    /// choice changed meanwhile.
+    fn check_finished_sound(&mut self, cx: &mut Context<Self>) {
+        let choice = self.sidebar.ui_state().notifications.finished_sound.clone();
+        self.notifications.finished_sound_problem = None;
+        let checked = choice.clone();
+        let check = cx
+            .background_executor()
+            .spawn(async move { sound::problem_of(&checked) });
+        cx.spawn(async move |this, cx| {
+            let problem = check.await;
+            // Fails only when the view is gone, and Settings with it.
+            this.update(cx, |this, cx| {
+                if this.sidebar.ui_state().notifications.finished_sound == choice {
+                    this.notifications.finished_sound_problem = problem;
                     cx.notify();
                 }
             })
@@ -4017,6 +4113,7 @@ impl RootView {
             cx,
         );
         let sound = self.needs_you_sound_rows(focused, cx);
+        let finished_sound = self.finished_sound_rows(focused, cx);
         let finished = toggle(
             SettingsControl::NotifyFinished,
             ToggleState {
@@ -4063,6 +4160,7 @@ impl RootView {
         .child(needs_you)
         .child(sound)
         .child(finished)
+        .child(finished_sound)
         .child(skip_row);
         vec![section.into_any_element()]
     }
@@ -4096,17 +4194,73 @@ impl RootView {
             )
         });
         let path = match sound {
-            NeedsYouSound::Custom(path) => Some(
+            ToastSound::Custom(path) => Some(
                 hint(size, path.display().to_string(), &t)
                     .driver_id(|| "settings-needs-you-sound-path".to_owned()),
             ),
-            NeedsYouSound::Off | NeedsYouSound::Default => None,
+            ToastSound::Off | ToastSound::Default => None,
         };
         let problem = self.notifications.sound_problem.clone().map(|problem| {
             hint(size, problem, &t)
                 .text_color(gpui::rgb(t.danger_text))
                 .driver_id(|| "settings-needs-you-sound-problem".to_owned())
         });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(10.0))
+                    .child(choices)
+                    .children(play),
+            )
+            .children(path)
+            .children(problem)
+    }
+
+    /// The Finished sound's choices with Play beside them (not while the
+    /// sound is off), then the custom file's path and what is wrong with it.
+    fn finished_sound_rows(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let size = crate::fonts::ui_text_size(cx);
+        let sound = &self.sidebar.ui_state().notifications.finished_sound;
+        let current = SoundKind::of(sound);
+        let choices = SOUND_CHOICES.map(|choice| {
+            (
+                SettingsControl::FinishedSound(choice),
+                choice.label(),
+                choice == current,
+            )
+        });
+        let choices = choice_row("Finished sound", &choices, RowLock::Live, focused, cx);
+        let play = (current != SoundKind::Off).then(|| {
+            settings_button(
+                SettingsControl::FinishedSoundPlay,
+                "Play",
+                true,
+                focused,
+                cx,
+            )
+        });
+        let path = match sound {
+            ToastSound::Custom(path) => Some(
+                hint(size, path.display().to_string(), &t)
+                    .driver_id(|| "settings-finished-sound-path".to_owned()),
+            ),
+            ToastSound::Off | ToastSound::Default => None,
+        };
+        let problem = self
+            .notifications
+            .finished_sound_problem
+            .clone()
+            .map(|problem| {
+                hint(size, problem, &t)
+                    .text_color(gpui::rgb(t.danger_text))
+                    .driver_id(|| "settings-finished-sound-problem".to_owned())
+            });
         div()
             .flex()
             .flex_col()

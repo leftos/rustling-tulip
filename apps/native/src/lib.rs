@@ -302,7 +302,7 @@ pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, DETACHED_BANNER,
     Leaf, LeafState, RepoFilter, SidebarView, resume_all_label,
 };
-pub use crate::sound::{Clip, ClipSource, SilentSounder, Sounder};
+pub use crate::sound::{Clip, ClipSource, NotifyKind, SilentSounder, Sounder};
 pub use crate::source_control::{Bucket, ScKey};
 pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
 pub use crate::spawns::{OpenIn, PaneAim};
