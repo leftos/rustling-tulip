@@ -88,6 +88,13 @@ pub trait Notifier: Send + Sync {
     /// Disturb, a presentation, a full-screen app). Called off the UI
     /// thread.
     fn suppressed(&self) -> bool;
+
+    /// Whether the user is in Do Not Disturb, a presentation or a
+    /// full-screen app, whatever Windows' own toast setting for this app
+    /// says. Called off the UI thread.
+    fn user_busy(&self) -> bool {
+        false
+    }
 }
 
 /// The notifier the client runs with: Windows toasts under the client's own
@@ -137,11 +144,17 @@ impl Notifier for SystemNotifier {
     }
 
     fn suppressed(&self) -> bool {
-        match toasts_enabled() {
-            Ok(true) => {}
-            Ok(false) => return true,
-            Err(err) => tracing::debug!("could not read Windows' notification setting: {err}"),
-        }
+        let os_off = match toasts_enabled() {
+            Ok(enabled) => !enabled,
+            Err(err) => {
+                tracing::debug!("could not read Windows' notification setting: {err}");
+                false
+            }
+        };
+        os_off || self.user_busy()
+    }
+
+    fn user_busy(&self) -> bool {
         match user_takes_notifications() {
             Ok(takes) => !takes,
             Err(err) => {
@@ -156,10 +169,20 @@ impl Notifier for SystemNotifier {
 /// presentation or a full-screen app.
 #[cfg(windows)]
 fn user_takes_notifications() -> windows::core::Result<bool> {
-    use windows::Win32::UI::Shell::{QUNS_ACCEPTS_NOTIFICATIONS, SHQueryUserNotificationState};
+    use windows::Win32::UI::Shell::SHQueryUserNotificationState;
     // SAFETY: a plain call that writes only its own out parameter.
     let state = unsafe { SHQueryUserNotificationState() }?;
-    Ok(state == QUNS_ACCEPTS_NOTIFICATIONS)
+    Ok(takes_notifications(state))
+}
+
+/// Whether `state` has the user taking notifications: only
+/// `QUNS_ACCEPTS_NOTIFICATIONS` does, while Do Not Disturb, a presentation,
+/// a full-screen app, a locked screen and the rest hold them back.
+#[cfg(windows)]
+pub(crate) fn takes_notifications(
+    state: windows::Win32::UI::Shell::QUERY_USER_NOTIFICATION_STATE,
+) -> bool {
+    state == windows::Win32::UI::Shell::QUNS_ACCEPTS_NOTIFICATIONS
 }
 
 /// Shows the toast `xml` under the app id toasts are raised under, handing
@@ -969,5 +992,28 @@ mod tests {
         assert_eq!(NotifyState::Unknown.label(), "unknown");
         assert_eq!(NotifyState::line_label(None), "checking…");
         assert_eq!(NotifyState::line_label(Some(NotifyState::On)), "on");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_accepts_notifications_takes_them() {
+        use windows::Win32::UI::Shell::{
+            QUNS_ACCEPTS_NOTIFICATIONS, QUNS_APP, QUNS_BUSY, QUNS_NOT_PRESENT,
+            QUNS_PRESENTATION_MODE, QUNS_QUIET_TIME, QUNS_RUNNING_D3D_FULL_SCREEN,
+        };
+        for state in [
+            QUNS_NOT_PRESENT,
+            QUNS_BUSY,
+            QUNS_RUNNING_D3D_FULL_SCREEN,
+            QUNS_PRESENTATION_MODE,
+            QUNS_QUIET_TIME,
+            QUNS_APP,
+        ] {
+            assert!(
+                !takes_notifications(state),
+                "{state:?} holds notifications back"
+            );
+        }
+        assert!(takes_notifications(QUNS_ACCEPTS_NOTIFICATIONS));
     }
 }
