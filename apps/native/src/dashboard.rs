@@ -11,8 +11,11 @@ use chrono::{DateTime, Utc};
 use protocol::{SessionFacts, SessionSnapshot, SessionStatus};
 
 use crate::RootView;
+use crate::dashboard_rows::{AskBlock, RowInput, ask_block, format_age, state_word};
 use crate::needs_you;
 use crate::sidebar::{Leaf, LeafState, SidebarModel};
+use crate::status_glyph::{Glyph, glyph};
+use crate::ui_theme::UiTheme;
 
 /// The Dashboard's groups, in the order it shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +106,72 @@ impl DashboardModel {
             done: self.rows(GroupKind::Done).len(),
         }
     }
+}
+
+/// One wait of the need-you band: the session, its status glyph, what it is,
+/// where, what it is doing, how long it has waited, and the ask block that
+/// answers it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BandWait {
+    pub(crate) session_id: String,
+    /// The status glyph its row draws.
+    pub(crate) glyph: Glyph,
+    /// The label the sidebar leaf shows.
+    pub(crate) label: String,
+    /// The sidebar container the session sits in.
+    pub(crate) repo: String,
+    /// The word beside the glyph, e.g. `Question`.
+    pub(crate) state: String,
+    /// How long the status has held, `—` without a stamp.
+    pub(crate) age: String,
+    /// What the session asks, when a prompt its hooks reported can be
+    /// answered from the band.
+    pub(crate) ask: Option<AskBlock>,
+}
+
+/// The need-you band's waits, longest wait first.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Band {
+    pub(crate) waits: Vec<BandWait>,
+}
+
+/// The band over the waits the Dashboard's Needs you rows hold, in their
+/// order: longest wait first, an ended session never among them.
+pub(crate) fn band(inputs: &[RowInput<'_>], t: &UiTheme, now: DateTime<Utc>) -> Band {
+    Band {
+        waits: inputs
+            .iter()
+            .map(|input| band_wait(input, t, now))
+            .collect(),
+    }
+}
+
+fn band_wait(input: &RowInput<'_>, t: &UiTheme, now: DateTime<Utc>) -> BandWait {
+    let session = input.session;
+    BandWait {
+        session_id: session.id.clone(),
+        glyph: glyph(
+            session.status,
+            session.background,
+            session.mode,
+            input.unseen,
+            t,
+        ),
+        label: input.row.label.clone(),
+        repo: input.row.container_name.clone(),
+        state: state_word(input),
+        age: session
+            .status_since
+            .map_or_else(|| "—".to_owned(), |since| format_age(since, now)),
+        ask: ask_block(input),
+    }
+}
+
+/// The need-you count the badges and the band share: the waits, plus one
+/// while every account is dry (`fleet_blocked`, always false until the
+/// accounts verdict exists, which RT-737 reads).
+pub(crate) fn needs_you_count(waits: usize, fleet_blocked: bool) -> usize {
+    waits + usize::from(fleet_blocked)
 }
 
 /// A row with the times it sorts by.
@@ -246,10 +315,14 @@ impl RootView {
 mod tests {
     use super::*;
     use protocol::{
-        AlertKind, AttentionReason, DaemonMessage, RepoEntry, SessionMode, SessionSummary,
-        SummarySource,
+        AlertKind, AttentionReason, DaemonMessage, PendingInput, RepoEntry, SessionMode,
+        SessionSummary, SummarySource,
     };
     use serde_json::json;
+
+    use crate::dashboard_rows::RowInput;
+    use crate::status_glyph::Shape;
+    use crate::ui_theme::UiTheme;
 
     /// The repo every fixture session belongs to.
     const REPO: &str = "r1";
@@ -640,6 +713,84 @@ mod tests {
         let model = build(&sidebar(vec![excluded]));
         assert_eq!(ids(model.rows(GroupKind::Working)), ["s1"]);
         assert_eq!(model.counts().working, 0);
+    }
+
+    #[test]
+    fn band_waits_run_longest_first_like_needs_you_rows() {
+        let mut oldest = stamped("s3", SessionStatus::AwaitingInput, stamp(-600));
+        oldest.pending_input = Some(PendingInput::Permission {
+            tool_name: "Bash".to_owned(),
+            summary: "cargo build".to_owned(),
+        });
+        let recent = stamped("s1", SessionStatus::AwaitingInput, stamp(-60));
+        let unstamped = with_status("s2", SessionStatus::AwaitingInput);
+        let ended = with_status("s4", SessionStatus::Error);
+        let mut sidebar = sidebar(vec![recent, oldest, unstamped, ended]);
+        sidebar.apply(
+            &crate::target::HostKey::Local,
+            &DaemonMessage::Attention {
+                session_id: "s4".to_owned(),
+                reason: AttentionReason::Error,
+            },
+        );
+        let model = build(&sidebar);
+        let inputs: Vec<RowInput<'_>> = model
+            .waits()
+            .iter()
+            .filter_map(|row| {
+                Some(RowInput {
+                    row,
+                    session: sidebar.session(&row.session_id)?,
+                    facts: None,
+                    agents: &[],
+                    unseen: false,
+                    prompt: None,
+                })
+            })
+            .collect();
+        let band = band(&inputs, &UiTheme::CONTRAST, stamp(0));
+        let ids: Vec<String> = band
+            .waits
+            .iter()
+            .map(|wait| wait.session_id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            ["s3", "s1", "s2"],
+            "longest wait first, the unstamped one after those, an ended session left out"
+        );
+        let listed: Vec<String> = needs_you::rows(&sidebar)
+            .into_iter()
+            .filter(|row| row.reason == needs_you::Reason::Asking)
+            .map(|row| row.session_id)
+            .collect();
+        assert_eq!(ids, listed, "the band and the Needs you rows agree");
+        let oldest = &band.waits[0];
+        assert_eq!(oldest.glyph.shape, Shape::Asking);
+        assert_eq!(oldest.label, "s3");
+        assert_eq!(oldest.repo, REPO);
+        assert_eq!(oldest.state, "Permission");
+        assert_eq!(oldest.age, "10m");
+        assert!(
+            oldest.ask.is_some(),
+            "a wait on a reported prompt carries its ask block"
+        );
+        assert!(
+            band.waits[2].ask.is_none(),
+            "a wait with nothing reported has no ask block"
+        );
+    }
+
+    #[test]
+    fn needs_you_count_adds_one_only_for_a_blocked_fleet() {
+        assert_eq!(needs_you_count(0, false), 0);
+        assert_eq!(needs_you_count(3, false), 3, "the waits alone");
+        assert_eq!(
+            needs_you_count(0, true),
+            1,
+            "a dry fleet needs you with nothing waiting"
+        );
+        assert_eq!(needs_you_count(3, true), 4);
     }
 
     #[test]

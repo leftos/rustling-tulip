@@ -30,6 +30,7 @@ pub mod contrast;
 mod copied;
 mod copy_text;
 mod dashboard;
+mod dashboard_band_view;
 mod dashboard_facts;
 mod dashboard_rows;
 mod dashboard_tab;
@@ -261,6 +262,7 @@ pub use crate::changes_view::{
 };
 pub use crate::connection::Connection;
 pub use crate::dashboard::DashboardEntry;
+pub use crate::dashboard_band_view::enable_band_probe;
 pub use crate::dashboard_rows::{
     AskBlock, AskChoice, Columns as DashboardColumns, HeaderFigures, NestedRow, QueueChip,
     ReleaseFigure, RowCells,
@@ -5267,6 +5269,9 @@ impl Render for RootView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .child(self.main_row(window, cx))
             .child(self.footer_bar(&footer, cx))
+            // The need-you band, over the app while a spec's probe is on;
+            // nothing draws it in the product until RT-501 mounts it.
+            .children(self.dashboard_band_layer(cx))
             .children(self.session_menu_layer(here, cx).into_iter().flatten())
             .children(self.shell_menu_layer(here, cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
