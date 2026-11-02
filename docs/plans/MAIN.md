@@ -72,8 +72,11 @@
 - [ ] RT-93 Fleet items: stuck agents and per-repo inbox requests
 - [ ] RT-90 Sounds per attention stream and a taskbar badge
 - [ ] RT-695 Dim the Needs you sound row while Needs you is off and refresh its file note
-- [ ] RT-703 Play only the app's own sound with its toast, never Windows' beside it · release vNext
 - [ ] RT-704 Offer the app's own interactive toasts in place of the OS's, with Go to pane and prompt answers · release vNext
+  - [/] RT-728 Open a non-activating topmost toast window on Windows (RT-704 C) · release vNext
+  - [ ] RT-729 Draw the app's own toast windows with Go to pane and dismiss (RT-704 D1) · release vNext
+  - [ ] RT-730 Answer a waiting prompt from the app's own toast (RT-704 D2) · release vNext
+  - [ ] RT-731 Document the app's own toasts and promote their design (RT-704 F) · release vNext
 
 ## Wave 6 — Remote enhancements
 
@@ -89,6 +92,9 @@
 - [ ] RT-536 Host SSH remote sessions on Linux and macOS machines · release vNext+2
 - [ ] RT-539 Start a daemon for an SSH login through an S4U task so it can use Credential Manager
 - [ ] RT-540 Make a one-shot ssh bridge call return after it starts the host's daemon
+- [ ] RT-746 Read a relative file link against an absolute path earlier in the same line · release vNext+1
+- [ ] RT-747 Fetch a folder from a remote host, or a file's whole containing folder · release vNext+1
+- [ ] RT-748 Benchmark folder transfer from a remote host: packed and compressed stream vs loose files vs scp and sftp · release vNext+1
 
 ## Wave 7 — Pop-out windows
 
@@ -115,19 +121,25 @@
 
 - [ ] RT-721 Show whether LINEAR_API_KEY is found on the Dashboard settings tab
 - [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext
-  - [ ] RT-498 Send the two-hour tracks to watching Dashboards (DB.20) · release vNext
-  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21) · release vNext
+  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21) · release vNext+1
   - [ ] RT-493 Open a drawer under a Dashboard row (DB.14) · release vNext
   - [ ] RT-456 Draw the two-hour activity track (DB.22) · release vNext
-  - [ ] RT-500 Draw the need-you band (DB.23) · release vNext
+  - [/] RT-500 Draw the need-you band (DB.23) · release vNext
   - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext
   - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext
   - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext
-  - [ ] RT-487 Show each session's Linear issue (DB.7) · release vNext
-  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext
-  - [ ] RT-489 Keep a day ledger for the header's figures (DB.9) · release vNext
+  - [/] RT-487 Show each session's Linear issue (DB.7) · release vNext
+  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext+1
   - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time
   - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker
+  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks · release vNext+1
+  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row · release vNext+1
+  - [ ] RT-734 Show the Linear column in the Dashboard drawer · release vNext+1
+  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client · release vNext+1
+  - [ ] RT-736 Count issues Done and release progress in the Dashboard header · release vNext+1
+  - [ ] RT-737 Add the accounts card and Questions to the need-you band · release vNext+1
+  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes · release vNext+1
+  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md · release vNext+1
 - [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5) · release vNext+1
 
 ## Wave 10 — Subagent streams
@@ -191,6 +203,7 @@
 - [ ] RT-376 Re-read docs/release.md and docs/env-secrets.md against their named files' changes since 2026-10-22
 - [ ] RT-602 Describe the Contrast look where the docs still describe Petal
 - [ ] RT-722 Move the nextup profile's orchestration rules into docs/agents/orchestrator.md
+- [ ] RT-725 Repoint issues that link to deleted design files
 
 ## Build tooling
 
@@ -210,12 +223,12 @@
 - [!] RT-294 Route rt.ps1 native-e2e to the builder through the gate
 - [ ] RT-324 Drive the native client headless: hidden window, virtual input, captures · release vNext
   - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command
-  - [/] RT-327 RT-324 S3: In-process driver endpoint behind a feature: keys, clicks, actions, state, screenshot · release vNext
   - [ ] RT-328 RT-324 S4: Driver drag, wheel, type_text, pane_text and wait_for · release vNext
   - [ ] RT-329 RT-324 S5: stdio MCP server over the driver endpoint · release vNext
   - [ ] RT-330 RT-324 S6: Live no-focus check, DRIVING_CONVENTIONS and task index for driving · release vNext
   - [ ] RT-711 Guard posted clicks on the cloaked client with a smoke spec and document point arguments · release vNext
   - [ ] RT-723 Choose how the driver clicks: dispatch_event is unreachable outside gpui · release vNext
+  - [ ] RT-741 Swap in recording pickers, opener and autostart for a driven client
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
 - [ ] RT-348 Update tokio past RUSTSEC-2026-0386 so cargo deny passes
 - [ ] RT-705 Make native-shot -Out, native-smoke's slot and posted mouse input work for agent smoke runs
@@ -366,6 +379,13 @@
 - [ ] RT-718 Let Tab reach Settings' Restart to update button
 - [ ] RT-719 Keep Check now and its status line consistent with a ready update, and keep unconfirmed Settings edits on a restart quit
 - [ ] RT-724 Make the UI specs' drawn check see only the latest frame, and audit absence assertions
+- [ ] RT-742 Keep an ended session's activity track for its two hours
+- [ ] RT-743 Name a workspace session's track lane from its workspace, not its label
+- [ ] RT-745 Take the day ledger's disk write and git reads off the dashboard pass, and fix its edge cases
+
+## No project
+
+- [ ] RT-740 Restrict the tracer pipe to the current user
 
 ## Design files
 
@@ -375,11 +395,12 @@
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217
 - [agent-plugins.md](agent-plugins.md) — RT-277
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
-- [dashboard.md](dashboard.md) — RT-28, RT-453, RT-456, RT-487, RT-488, RT-489, RT-493, RT-498, RT-499, RT-500, RT-501, RT-502, RT-721
+- [custom-toasts.md](custom-toasts.md) — RT-728, RT-729, RT-730, RT-731
+- [dashboard.md](dashboard.md) — RT-28, RT-453, RT-456, RT-487, RT-488, RT-493, RT-499, RT-500, RT-501, RT-502, RT-721, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [gate-dashboard.md](gate-dashboard.md) — RT-64
-- [headless-drive.md](headless-drive.md) — RT-324, RT-327, RT-328, RT-329, RT-330, RT-711
+- [headless-drive.md](headless-drive.md) — RT-324, RT-328, RT-329, RT-330, RT-711
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
 - [macos-compat.md](macos-compat.md) — RT-665
