@@ -386,6 +386,15 @@
 ## No project
 
 - [ ] RT-740 Restrict the tracer pipe to the current user
+- [ ] RT-749 Replace path:line references in durable docs with symbols, headings or test names
+- [ ] RT-751 Prove native-shot and native-e2e on a hidden desktop, then move them to hidden (GATE-1039)
+- [ ] RT-753 Stitch a hard-wrapped terminal path whose continuation row is indented
+- [ ] RT-754 Decide whether the screen may end a hook-driven turn, or a working title vetoes it
+- [ ] RT-755 Log every status writer and every toast decision
+- [ ] RT-756 Read esc to interrupt, background agents and MCP tasks as Working
+- [ ] RT-757 Add a Background work counts as busy notification setting
+- [ ] RT-758 Make a plain shell an agent session while a hand-typed claude runs in it
+- [ ] RT-759 Let the user set the Finished toast's grace period in Settings · release vNext
 
 ## Design files
 
@@ -399,6 +408,7 @@
 - [dashboard.md](dashboard.md) — RT-28, RT-453, RT-456, RT-487, RT-488, RT-493, RT-499, RT-500, RT-501, RT-502, RT-721, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
+- [finished-toast.md](finished-toast.md) — RT-754, RT-755, RT-756, RT-757
 - [gate-dashboard.md](gate-dashboard.md) — RT-64
 - [headless-drive.md](headless-drive.md) — RT-324, RT-328, RT-329, RT-330, RT-711
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
@@ -411,7 +421,7 @@
 - [off-orca.md](off-orca.md) — RT-66, RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-101, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
 - [remote-access.md](remote-access.md) — RT-686, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
 - [remote-file-transfer.md](remote-file-transfer.md) — Wave 6 — Remote enhancements
-- [screen-status.md](screen-status.md) — RT-289
+- [screen-status.md](screen-status.md) — RT-289, RT-754
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-539, RT-686
 - [subagent-streams.md](subagent-streams.md) — RT-167, RT-293, RT-406
 - [turn-notifications.md](turn-notifications.md) — RT-74
