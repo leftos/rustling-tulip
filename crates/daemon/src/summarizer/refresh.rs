@@ -269,8 +269,12 @@ mod tests {
         );
         hub.turns = Turns::new(Arc::clone(&hub.sessions), Arc::clone(&hub.summarizer));
         let script = Script::default();
-        hub.dashboard = Dashboard::with_reader_factory(Arc::clone(&hub.sessions), script.factory())
-            .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
+        hub.dashboard = Dashboard::with_reader_factory(
+            Arc::clone(&hub.sessions),
+            hub.dirs.activity_dir(),
+            script.factory(),
+        )
+        .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
         (hub, scratch, script)
     }
 

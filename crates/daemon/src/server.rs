@@ -427,7 +427,7 @@ pub async fn run(
     // task. Same liveness predicate as the idle-exit watcher below.
     let (keep_awake_tx, keep_awake_status_rx) = start_keep_awake(&state, &sessions, &state_events);
 
-    let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions));
+    let dashboard = crate::dashboard::Dashboard::new(Arc::clone(&sessions), dirs.activity_dir());
     let summarizer = start_summarizer(&state, &dirs, &client_count, &state_events);
     outlets.chat.set_summarizer(Arc::clone(&summarizer));
     let turns =

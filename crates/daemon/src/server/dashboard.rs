@@ -321,10 +321,12 @@ mod tests {
     use agent_api::ActivitySnapshot;
     use chrono::Utc;
     use protocol::{
-        ClientMessage, DaemonMessage, RecentWork, SessionFacts, SessionMember, WorkTotals,
+        ActivitySegment, ClientMessage, DaemonMessage, RecentWork, SegmentActivity, SegmentKind,
+        SessionFacts, SessionMember, SessionStatus, WorkTotals,
     };
     use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
+    use crate::activity_log;
     use crate::dashboard::test_support::Script;
     use crate::dashboard::{Dashboard, TICK};
     use crate::server::Hub;
@@ -378,6 +380,20 @@ mod tests {
             .collect()
     }
 
+    /// Every `ActivityTracks` message waiting on `conn`, as its hours and its
+    /// segments.
+    fn tracks_messages(conn: &mut Conn) -> Vec<(u32, Vec<ActivitySegment>)> {
+        drain(&mut conn.rx)
+            .into_iter()
+            .filter_map(|message| match message {
+                DaemonMessage::ActivityTracks {
+                    hours, segments, ..
+                } => Some((hours, segments)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn ids(facts: &[SessionFacts]) -> Vec<&str> {
         facts
             .iter()
@@ -389,8 +405,12 @@ mod tests {
     fn scripted_hub(tag: &str) -> (Hub, ScratchDir, Script) {
         let (mut hub, scratch) = test_hub(tag);
         let script = Script::default();
-        hub.dashboard = Dashboard::with_reader_factory(Arc::clone(&hub.sessions), script.factory())
-            .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
+        hub.dashboard = Dashboard::with_reader_factory(
+            Arc::clone(&hub.sessions),
+            hub.dirs.activity_dir(),
+            script.factory(),
+        )
+        .with_pr_program(crate::dashboard::pr::NO_PROGRAM);
         (hub, scratch, script)
     }
 
@@ -473,6 +493,155 @@ mod tests {
         assert!(
             drain(&mut other.rx).is_empty(),
             "a connection that never watched gets nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_watcher_gets_every_segment_on_watch() {
+        let (hub, _scratch, script) = scripted_hub("dash-tracks-watch");
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        let key = activity_log::session_key("s1");
+        activity_log::append(
+            &hub.dirs.activity_dir(),
+            &key,
+            Utc::now(),
+            SessionStatus::Working,
+        );
+        let mut c1 = conn(1);
+
+        send(&hub, &c1, ON).await;
+
+        let messages = drain(&mut c1.rx);
+        assert!(
+            matches!(messages.first(), Some(DaemonMessage::DashboardFacts { .. })),
+            "the tracks follow the facts: {messages:?}"
+        );
+        let tracks = messages
+            .iter()
+            .find_map(|message| match message {
+                DaemonMessage::ActivityTracks {
+                    hours, segments, ..
+                } => Some((hours, segments)),
+                _ => None,
+            })
+            .expect("the watcher is sent its tracks");
+        assert_eq!(*tracks.0, 2);
+        let open = tracks
+            .1
+            .iter()
+            .rfind(|segment| segment.key == key)
+            .expect("the session's newest stretch");
+        assert_eq!(open.kind, SegmentKind::Session);
+        assert_eq!(open.repo, "repo");
+        assert_eq!(open.activity, Some(SegmentActivity::Working));
+        assert_eq!(open.to, None);
+    }
+
+    #[tokio::test]
+    async fn a_status_change_sends_one_tracks_message() {
+        let (hub, _scratch, script) = scripted_hub("dash-tracks-change");
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        let key = activity_log::session_key("s1");
+        let dir = hub.dirs.activity_dir();
+        activity_log::append(&dir, &key, Utc::now(), SessionStatus::Working);
+        let mut c1 = conn(1);
+        send(&hub, &c1, ON).await;
+        assert_eq!(tracks_messages(&mut c1).len(), 1, "the watch's own tracks");
+
+        let now = Utc::now();
+        activity_log::append(&dir, &key, now, SessionStatus::Stopped);
+        hub.dashboard.tick(now).await;
+
+        let messages = tracks_messages(&mut c1);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        let closed = messages[0]
+            .1
+            .iter()
+            .rfind(|segment| segment.key == key)
+            .expect("the closed stretch");
+        assert_eq!(closed.activity, Some(SegmentActivity::Working));
+        assert_eq!(closed.to, Some(now));
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_stretch_sends_nothing() {
+        let (hub, _scratch, script) = scripted_hub("dash-tracks-unchanged");
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        activity_log::append(
+            &hub.dirs.activity_dir(),
+            &activity_log::session_key("s1"),
+            Utc::now(),
+            SessionStatus::Working,
+        );
+        let mut c1 = conn(1);
+        send(&hub, &c1, ON).await;
+        assert_eq!(tracks_messages(&mut c1).len(), 1);
+
+        let fixed = Utc::now();
+        hub.dashboard.tick(fixed).await;
+        hub.dashboard.tick(fixed + Duration::from_secs(2)).await;
+
+        assert!(
+            tracks_messages(&mut c1).is_empty(),
+            "no stretch opened, closed or changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_carried_stretch_sends_nothing_on_a_later_tick() {
+        let (hub, _scratch, script) = scripted_hub("dash-tracks-carried");
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        let dir = hub.dirs.activity_dir();
+        let _ = activity_log::record_start(&dir, Utc::now() - Duration::from_hours(6));
+        activity_log::append(
+            &dir,
+            &activity_log::session_key("s1"),
+            Utc::now() - Duration::from_hours(3),
+            SessionStatus::Working,
+        );
+        let mut c1 = conn(1);
+        send(&hub, &c1, ON).await;
+        assert_eq!(tracks_messages(&mut c1).len(), 1, "the watch's own tracks");
+
+        let t = Utc::now();
+        hub.dashboard.tick(t).await;
+        hub.dashboard.tick(t + Duration::from_secs(2)).await;
+
+        assert!(
+            tracks_messages(&mut c1).is_empty(),
+            "a stretch carried in from before the window does not resend"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_watcher_gets_no_tracks() {
+        let (hub, _scratch, script) = scripted_hub("dash-tracks-only-watchers");
+        add_session(&hub, &script, "s1", "conv1", 1, NOT_A_REPO);
+        let key = activity_log::session_key("s1");
+        let dir = hub.dirs.activity_dir();
+        activity_log::append(&dir, &key, Utc::now(), SessionStatus::Working);
+        let mut watcher = conn(1);
+        let mut other = conn(2);
+        send(&hub, &watcher, ON).await;
+        send(&hub, &other, OFF).await;
+        assert_eq!(
+            tracks_messages(&mut watcher).len(),
+            1,
+            "the watch's own tracks"
+        );
+
+        let now = Utc::now();
+        activity_log::append(&dir, &key, now, SessionStatus::Stopped);
+        hub.dashboard.tick(now).await;
+
+        assert_eq!(
+            tracks_messages(&mut watcher).len(),
+            1,
+            "the watcher hears of the change"
+        );
+        assert!(
+            tracks_messages(&mut other).is_empty(),
+            "a connection that never watched gets no tracks"
         );
     }
 

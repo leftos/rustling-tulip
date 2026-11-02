@@ -11,6 +11,7 @@
 
 pub(crate) mod now;
 pub(crate) mod pr;
+pub(crate) mod tracks;
 pub(crate) mod work;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -23,13 +24,13 @@ use agent_api::{
 };
 use chrono::{DateTime, Utc};
 use protocol::{
-    AgentId, AgentKind, AgentNode, AgentState, DaemonMessage, DayTotals, RecentWork, SessionFacts,
-    SessionMember, SessionStatus, StuckReason,
+    ActivitySegment, AgentId, AgentKind, AgentNode, AgentState, DaemonMessage, DayTotals,
+    RecentWork, SessionFacts, SessionKind, SessionMember, SessionStatus, StuckReason,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
-use crate::session::SessionRegistry;
+use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 
 use self::now::{NowInput, now_line, one_line, running_text, subagent_name};
@@ -58,6 +59,8 @@ pub(crate) struct Dashboard {
 struct Inner {
     sessions: Arc<SessionRegistry>,
     factory: ReaderFactory,
+    /// The folder the status-change logs are read from.
+    activity_dir: PathBuf,
     state: Mutex<State>,
     /// The number of watchers, which wakes and parks the tick task.
     watcher_count: watch::Sender<usize>,
@@ -82,6 +85,10 @@ struct Watcher {
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
     /// The facts last sent to it, by session id.
     sent: HashMap<String, SessionFacts>,
+    /// The activity track last sent to it; `None` until it has had one.
+    tracks_sent: Option<Vec<ActivitySegment>>,
+    /// The window start that track was built at, beside [`Self::tracks_sent`].
+    tracks_window_start: Option<DateTime<Utc>>,
     /// Whether it has had its first message.
     greeted: bool,
 }
@@ -119,6 +126,10 @@ struct Listed {
     started_at: DateTime<Utc>,
     key: Option<ReaderKey>,
     extra_env: Vec<(String, String)>,
+    /// The lane its activity track draws in.
+    repo: String,
+    /// Its display label.
+    label: String,
 }
 
 /// One session's read, handed to the blocking pool and back.
@@ -132,20 +143,23 @@ struct Job {
 }
 
 impl Dashboard {
-    /// The service over `sessions`, reading with each agent plugin's reader.
-    pub(crate) fn new(sessions: Arc<SessionRegistry>) -> Self {
-        Self::with_reader_factory(sessions, Arc::new(plugin_reader))
+    /// The service over `sessions`, reading with each agent plugin's reader
+    /// and the status-change logs under `activity_dir`.
+    pub(crate) fn new(sessions: Arc<SessionRegistry>, activity_dir: PathBuf) -> Self {
+        Self::with_reader_factory(sessions, activity_dir, Arc::new(plugin_reader))
     }
 
     /// The service over `sessions`, reading with `factory`'s readers.
     pub(crate) fn with_reader_factory(
         sessions: Arc<SessionRegistry>,
+        activity_dir: PathBuf,
         factory: ReaderFactory,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 sessions,
                 factory,
+                activity_dir,
                 state: Mutex::new(State::default()),
                 watcher_count: watch::Sender::new(0),
                 pass: tokio::sync::Mutex::new(()),
@@ -170,14 +184,16 @@ impl Dashboard {
     }
 
     /// Make `connection` a watcher sending on `out_tx`, and send it every
-    /// listed session's facts. The first watcher gets a read pass at once,
-    /// so it never waits for a tick or sees a reading from before it came.
+    /// listed session's facts and the activity track. The first watcher gets
+    /// a read pass at once, so it never waits for a tick or sees a reading
+    /// from before it came.
     pub(crate) async fn watch(
         &self,
         connection: u64,
         out_tx: mpsc::UnboundedSender<DaemonMessage>,
     ) {
         let _pass = self.inner.pass.lock().await;
+        let now = Utc::now();
         let first = {
             let mut state = lock(&self.inner.state);
             let first = state.watchers.is_empty();
@@ -186,6 +202,8 @@ impl Dashboard {
                 Watcher {
                     out_tx,
                     sent: HashMap::new(),
+                    tracks_sent: None,
+                    tracks_window_start: None,
                     greeted: false,
                 },
             );
@@ -193,9 +211,10 @@ impl Dashboard {
             first
         };
         if first {
-            self.read_pass(Utc::now()).await;
+            self.read_pass(now).await;
         }
         self.send_changes();
+        self.send_tracks(now).await;
     }
 
     /// Stop `connection` watching; a connection that was not is left alone.
@@ -256,6 +275,7 @@ impl Dashboard {
         let _pass = self.inner.pass.lock().await;
         if self.read_pass(now).await {
             self.send_changes();
+            self.send_tracks(now).await;
         }
     }
 
@@ -381,6 +401,66 @@ impl Dashboard {
         });
         self.watchers_changed(&mut state);
     }
+
+    /// Build the whole activity track once for this pass, then send it to
+    /// every watcher holding another copy; a watcher whose connection is gone
+    /// is dropped. No log is read with no watcher.
+    async fn send_tracks(&self, now: DateTime<Utc>) {
+        let sessions: Vec<tracks::TrackedSession> = {
+            if lock(&self.inner.state).watchers.is_empty() {
+                return;
+            }
+            listed_sessions(&self.inner.sessions)
+                .into_iter()
+                .map(|listed| tracks::TrackedSession {
+                    id: listed.id,
+                    repo: listed.repo,
+                    label: listed.label,
+                })
+                .collect()
+        };
+        let dir = self.inner.activity_dir.clone();
+        let built = tokio::task::spawn_blocking(move || tracks::build(&dir, &sessions, now)).await;
+        let segments = match built {
+            Ok(segments) => segments,
+            Err(err) => {
+                warn!(
+                    ?err,
+                    "dashboard: the activity track read failed; the next pass builds it again"
+                );
+                return;
+            }
+        };
+        let window_start = tracks::window_start(now);
+        let mut state = lock(&self.inner.state);
+        state.watchers.retain(|connection, watcher| {
+            let unchanged = match (&watcher.tracks_sent, watcher.tracks_window_start) {
+                (Some(sent), Some(sent_start)) => {
+                    tracks::same_tracks(sent, &segments, sent_start, window_start)
+                }
+                _ => false,
+            };
+            if unchanged {
+                return true;
+            }
+            let message = DaemonMessage::ActivityTracks {
+                now,
+                hours: tracks::TRACK_HOURS,
+                segments: segments.clone(),
+            };
+            if watcher.out_tx.send(message).is_err() {
+                warn!(
+                    connection,
+                    "dashboard: a watcher's connection is gone; it stops watching"
+                );
+                return false;
+            }
+            watcher.tracks_sent = Some(segments.clone());
+            watcher.tracks_window_start = Some(window_start);
+            true
+        });
+        self.watchers_changed(&mut state);
+    }
 }
 
 /// Stops its connection watching when dropped.
@@ -423,6 +503,8 @@ fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
                         folder: PathBuf::from(folder),
                         process_started_at: record.started_at,
                     });
+            let repo = lane_name(&record);
+            let label = record.label.clone();
             Some(Listed {
                 id: snapshot.id,
                 agent: record.agent.clone(),
@@ -436,9 +518,27 @@ fn listed_sessions(sessions: &SessionRegistry) -> Vec<Listed> {
                     .as_ref()
                     .map(|config| config.extra_env.clone())
                     .unwrap_or_default(),
+                repo,
+                label,
             })
         })
         .collect()
+}
+
+/// The lane a session draws its activity track in: its workspace's name, else
+/// its repo's name.
+fn lane_name(record: &SessionRecord) -> String {
+    if matches!(record.kind, SessionKind::Workspace)
+        // The daemon builds a workspace's default label as
+        // `<workspace name>: <branch>`, and a branch name holds no colon.
+        && let Some((name, _)) = record.default_label.rsplit_once(": ")
+    {
+        return name.to_owned();
+    }
+    record
+        .members
+        .first()
+        .map_or_else(|| record.label.clone(), |member| member.repo_name.clone())
 }
 
 /// Drop the entries of sessions no longer listed, and take each listed
@@ -908,6 +1008,8 @@ mod tests {
             started_at: at(0),
             key: None,
             extra_env: Vec::new(),
+            repo: "repo".to_owned(),
+            label: "s1".to_owned(),
         }
     }
 

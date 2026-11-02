@@ -478,6 +478,8 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
   Proof: unit tests over a scratch folder and an injected clock: appends follow status changes, old lines prune, a restart after a stale alive stamp yields one gap, a key first seen after a start is gapped from the window's start, a file goes 2 hours after its session. Waits on nothing.
 - [ ] DB.20 Send the two-hour tracks to watching Dashboards. `crates/daemon/src/dashboard/tracks.rs` (new: segments and gaps from the log, gate holds from the gate journal by working folder), `crates/daemon/src/dashboard/mod.rs`, `crates/daemon/src/server/dashboard.rs` (`ActivityTracks` on watch and on each stretch change).
 
+  Session segments and restart gaps are built (`crates/daemon/src/dashboard/tracks.rs`); gate holds are RT-732.
+
   Proof: server tests that a watcher gets every segment on `WatchDashboard`, then one message per stretch change, a gap segment after a restart, and a hold inside a session's worktree joined to it. Waits on DB.2, DB.5, DB.19; gate holds on the daemon's gate reader (RT-55, as RT-64 re-cuts it), with none drawn until it lands.
 - [ ] DB.21 Nest dispatch runs under their session and track them. `crates/daemon/src/dispatch_runs.rs` (RT-31's watcher appends each run's status changes to the log), `crates/daemon/src/dashboard/mod.rs` (a run's node under the session that started it, by `tool_pid` ancestry, else by worktree), `crates/daemon/src/dashboard/now.rs` (rule 3 for a run), `crates/daemon/src/dashboard/tracks.rs` (dispatch keys).
 

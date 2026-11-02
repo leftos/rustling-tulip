@@ -101,10 +101,6 @@ pub fn append(dir: &Path, key: &str, at: DateTime<Utc>, status: SessionStatus) {
 /// is stable, so equal stamps keep their file order. A line that does not
 /// parse is skipped with one warning for the whole file; a missing file is
 /// empty.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the Dashboard's wire reads it; no caller yet")
-)]
 #[must_use]
 pub fn read_lines(dir: &Path, key: &str) -> Vec<(DateTime<Utc>, SessionStatus)> {
     let path = line_path(dir, key);
@@ -250,10 +246,6 @@ pub fn stamp_alive(dir: &Path, now: DateTime<Utc>) {
 /// `first_line_at`, in time order and never overlapping: the record's own
 /// gaps still inside the window, plus the stretch from the window's start to
 /// this daemon's start when the key has no line from before it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the Dashboard's wire reads it; no caller yet")
-)]
 #[must_use]
 pub fn gaps_for(
     record: &DaemonRecord,
@@ -308,7 +300,7 @@ fn daemon_path(dir: &Path) -> PathBuf {
 
 /// The stored record; a missing file is the default, and an unreadable one is
 /// logged and read as the default.
-fn read_daemon_record(dir: &Path) -> DaemonRecord {
+pub fn read_daemon_record(dir: &Path) -> DaemonRecord {
     let path = daemon_path(dir);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
