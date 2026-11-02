@@ -25,6 +25,7 @@ use crate::sound::{self, NotifyKind, Sounder};
 use crate::target::HostKey;
 #[cfg(windows)]
 use crate::toast_activation;
+use crate::toast_stack::{SessionKey, key_of};
 use crate::window_title::PRODUCT_NAME;
 
 /// The URI of Windows' notification settings page.
@@ -282,14 +283,6 @@ pub(crate) struct Notifications {
     alerts: HashMap<SessionKey, Alert>,
     /// The generation the next hold is given.
     next_hold: u64,
-}
-
-/// A session as the notifications know it: its host and its id.
-type SessionKey = (HostKey, String);
-
-/// The key of session `id` on `host`.
-fn key_of(host: &HostKey, id: &str) -> SessionKey {
-    (host.clone(), id.to_owned())
 }
 
 impl Notifications {

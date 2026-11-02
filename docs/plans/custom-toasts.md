@@ -24,8 +24,8 @@ Rulings below are orchestrator decisions (ship-fast profile), open to the owner.
 
 ## Steps
 
-- [ ] A: the `toast_style` setting, its Settings row and the `raise_toast` branch (still raising OS toasts for `"os"`)
-- [ ] B: the plain-Rust toast stack (`toast_stack.rs`): keys, kinds, push-or-update, expiry, hover, overflow, placement maths, unit-tested
+- [x] A: the `toast_style` setting, its Settings row and the `raise_toast` branch (still raising OS toasts for `"os"`); the Settings row moved to D1 (RT-729)
+- [x] B: the plain-Rust toast stack (`toast_stack.rs`): keys, kinds, push-or-update, expiry, hover, overflow, placement maths, unit-tested
 - [ ] C: the Windows shim (`toast_window.rs`): non-activating topmost window, work area per monitor, the user-busy check split out of `suppressed()`
 - [ ] D1: the toast view and its RootView host: open, place, update and close windows, × and Go to pane, timers, `native-shot toast`
 - [ ] D2: answer buttons, the sent and refused states, dismissal on session and host changes

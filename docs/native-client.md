@@ -680,7 +680,9 @@ Every toast but the pairing toast is raised with `<audio silent="true"/>` (`toas
 
 Window focused skips whenever the window is focused, and Never never skips, for both toasts. Each window decides for itself, and a session marked "Don't count as busy" still notifies.
 
-The settings are `notifications.awaiting_input`, `notifications.finished` (on unless turned off), `notifications.needs_you_sound` and `notifications.finished_sound` (`"off"`, `"default"` or `{"custom": path}`; a missing or unknown value loads as `"default"`, an unknown one with a warn line) and `notifications.skip_when` (`on_screen`, `focused` or `never`) in `native-ui.json`. An unknown or non-string `skip_when` loads as `on_screen` with a warn line in `native.log`, and the rest of the file still loads. The tab also shows Windows' read-only toast state with a link to Windows' settings.
+The settings are `notifications.awaiting_input`, `notifications.finished` (on unless turned off), `notifications.needs_you_sound` and `notifications.finished_sound` (`"off"`, `"default"` or `{"custom": path}`; a missing or unknown value loads as `"default"`, an unknown one with a warn line) `notifications.toast_style` (`"os"`, the default, or `"app"`; a missing or unknown value loads as `"os"`) and `notifications.skip_when` (`on_screen`, `focused` or `never`) in `native-ui.json`.
+
+Both `toast_style` values raise the OS toast until the Settings row and the app's own toast windows land. An unknown or non-string `skip_when` loads as `on_screen` with a warn line in `native.log`, and the rest of the file still loads. The tab also shows Windows' read-only toast state with a link to Windows' settings.
 
 ## Updates
 

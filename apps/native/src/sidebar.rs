@@ -869,6 +869,10 @@ pub struct NotificationSettings {
     /// every release before this one wrote, plays the bundled one.
     #[serde(deserialize_with = "finished_sound_or_default")]
     pub finished_sound: ToastSound,
+    /// Which toasts the client raises: the OS's or its own; a file without
+    /// the key, as every release before this one wrote, keeps the OS's.
+    #[serde(deserialize_with = "toast_style_or_default")]
+    pub toast_style: ToastStyle,
 }
 
 /// The sound a toast plays. Saved as `"off"`, `"default"` or
@@ -886,32 +890,31 @@ pub enum ToastSound {
     Custom(std::path::PathBuf),
 }
 
+/// Which toasts the client raises. Saved as `"os"` or `"app"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToastStyle {
+    /// The operating system's own toasts, as every release before this one
+    /// raised.
+    #[default]
+    Os,
+    /// The client's own toast windows.
+    App,
+}
+
 /// Reads `needs_you_sound` so that any value that is not a known choice
 /// loads as the default and never fails the rest of the file.
 fn sound_or_default<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<ToastSound, D::Error> {
-    read_sound_choice(deserializer, "needs_you_sound")
+    read_choice(deserializer, "needs_you_sound", "default")
 }
 
 /// Reads `finished_sound` as `needs_you_sound` is read.
 fn finished_sound_or_default<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<ToastSound, D::Error> {
-    read_sound_choice(deserializer, "finished_sound")
-}
-
-/// Reads one of the sound keys, warning with `key` when its value is not a
-/// known choice.
-fn read_sound_choice<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-    key: &str,
-) -> Result<ToastSound, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value.clone()).unwrap_or_else(|err| {
-        tracing::warn!("notifications.{key} {value} is not a known choice ({err}); using default");
-        ToastSound::default()
-    }))
+    read_choice(deserializer, "finished_sound", "default")
 }
 
 /// Reads `skip_when` so that any value that is not a known choice (null, a
@@ -920,13 +923,35 @@ fn read_sound_choice<'de, D: serde::Deserializer<'de>>(
 fn skip_or_default<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<NotifySkip, D::Error> {
+    read_choice(deserializer, "skip_when", "on_screen")
+}
+
+/// Reads `toast_style` so that any value that is not a known choice loads as
+/// the OS's own toasts and never fails the rest of the file.
+fn toast_style_or_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ToastStyle, D::Error> {
+    read_choice(deserializer, "toast_style", "os")
+}
+
+/// Reads a setting that is one of a fixed set of words, warning with `key`
+/// when its value is not a known choice and naming the default `fallback` it
+/// loads instead.
+fn read_choice<'de, D, T>(deserializer: D, key: &str, fallback: &str) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value.clone()).unwrap_or_else(|err| {
-        tracing::warn!(
-            "notifications.skip_when {value} is not a known choice ({err}); using on_screen"
-        );
-        NotifySkip::default()
-    }))
+    Ok(match T::deserialize(&value) {
+        Ok(choice) => choice,
+        Err(err) => {
+            tracing::warn!(
+                "notifications.{key} {value} is not a known choice ({err}); using {fallback}"
+            );
+            T::default()
+        }
+    })
 }
 
 impl Default for NotificationSettings {
@@ -937,6 +962,7 @@ impl Default for NotificationSettings {
             skip_when: NotifySkip::default(),
             needs_you_sound: ToastSound::default(),
             finished_sound: ToastSound::default(),
+            toast_style: ToastStyle::default(),
         }
     }
 }
@@ -2059,6 +2085,22 @@ impl SidebarModel {
             return false;
         }
         self.ui.notifications.finished_sound = sound;
+        true
+    }
+
+    /// Records which toasts the client raises; returns whether it changed.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the Settings row that sets the toast style is not drawn yet"
+        )
+    )]
+    pub fn set_toast_style(&mut self, style: ToastStyle) -> bool {
+        if self.ui.notifications.toast_style == style {
+            return false;
+        }
+        self.ui.notifications.toast_style = style;
         true
     }
 
@@ -5120,6 +5162,7 @@ pub(crate) mod tests {
                 skip_when: NotifySkip::Never,
                 needs_you_sound: ToastSound::Off,
                 finished_sound: ToastSound::Default,
+                toast_style: ToastStyle::Os,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -5246,6 +5289,7 @@ pub(crate) mod tests {
                 skip_when: NotifySkip::Never,
                 needs_you_sound: ToastSound::Default,
                 finished_sound: ToastSound::Default,
+                toast_style: ToastStyle::Os,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -6894,6 +6938,57 @@ pub(crate) mod tests {
             let file: serde_json::Value = serde_json::from_str(&text).expect("JSON");
             assert_eq!(file["notifications"]["finished_sound"], saved);
             assert_eq!(load_ui_state(&dir.0).notifications.finished_sound, choice);
+        }
+    }
+
+    #[test]
+    fn a_file_without_toast_style_loads_os_toasts() {
+        let dir = TestDir::new("notify-toast-style-released");
+        let file = v0_5_1_alpha_ui_file();
+        for key in ["needs_you_sound", "finished_sound", "toast_style"] {
+            assert!(
+                file["notifications"].get(key).is_none(),
+                "no release before this one wrote {key}"
+            );
+        }
+        let ui = load_released(&dir, &file);
+        assert_eq!(ui.notifications.toast_style, ToastStyle::Os);
+        assert!(
+            !ui.notifications.awaiting_input,
+            "the saved toggle survives"
+        );
+        assert!(!ui.notifications.finished, "the saved toggle survives");
+        assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+    }
+
+    #[test]
+    fn the_toast_style_choices_round_trip() {
+        let dir = TestDir::new("notify-toast-style-round-trip");
+        let mut model = SidebarModel::default();
+        for (choice, saved) in [
+            (ToastStyle::App, json!("app")),
+            (ToastStyle::Os, json!("os")),
+        ] {
+            assert!(model.set_toast_style(choice), "{saved} is a change");
+            assert!(!model.set_toast_style(choice), "{saved} again is not");
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let file: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(file["notifications"]["toast_style"], saved);
+            assert_eq!(load_ui_state(&dir.0).notifications.toast_style, choice);
+        }
+    }
+
+    #[test]
+    fn an_unknown_toast_style_loads_os_toasts() {
+        let dir = TestDir::new("notify-toast-style-unknown");
+        for value in [json!("banner"), json!(7), serde_json::Value::Null] {
+            let mut file = v0_5_1_alpha_ui_file();
+            file["notifications"]["toast_style"] = value.clone();
+            let ui = load_released(&dir, &file);
+            assert_eq!(ui.notifications.toast_style, ToastStyle::Os, "{value}");
+            assert_eq!(ui.notifications.skip_when, NotifySkip::Never, "{value}");
+            assert!(!ui.notifications.finished, "{value}");
         }
     }
 

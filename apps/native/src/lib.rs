@@ -150,6 +150,7 @@ pub mod theme_tokens;
 pub mod themes;
 mod themes_view;
 pub mod toast_activation;
+mod toast_stack;
 pub mod ui_theme;
 mod undo;
 mod undo_view;
