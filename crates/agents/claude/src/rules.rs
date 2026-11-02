@@ -17,11 +17,11 @@ use std::time::Duration;
 /// the optional phase, the elapsed time and the token details, which the
 /// terminal width may cut off mid-detail (`· Cooking… (21s · ↓ 1.1k tokens)`).
 /// While a task-list item is in progress Claude shows the task's subject
-/// instead: any text without an ellipsis, then the ellipsis, which must be
-/// followed by the parenthesised details (`✽ Fix the build… (5m 3s · ↓ 8.3k
-/// tokens)`), so a multi-word line without them is not a spinner.
-const SPINNER: &str =
-    r"^\s*[·✢*✶✻✽✳]\s+(?:\p{Lu}[\p{L}'’-]*…(?:\s+·\s+[\p{L} ]+?)?(?:\s+\(.*)?|\S[^…]*…\s+\(.*)\s*$";
+/// instead: any text without an ellipsis, then the ellipsis and the optional
+/// phase, which must be followed by the parenthesised details (`✽ Fix the
+/// build… · thinking (5m 3s · ↓ 8.3k tokens)`), so a multi-word line without
+/// them is not a spinner.
+const SPINNER: &str = r"^\s*[·✢*✶✻✽✳]\s+(?:\p{Lu}[\p{L}'’-]*…(?:\s+·\s+[\p{L} ]+?)?(?:\s+\(.*)?|\S[^…]*…(?:\s+·\s+[\p{L} ]+?)?\s+\(.*)\s*$";
 
 /// [`SPINNER`], compiled once for the plugin's own screen reading; `None`
 /// when the pattern does not compile, which reads no row as a spinner.
@@ -287,6 +287,8 @@ mod tests {
             "✻ Brewing…",
             "* fix lint errors… (3s · esc to interrupt)",
             "✳ Simmering… · thinking (12s · ↑ 400 tokens)",
+            "✶ Fix the build steps 3-4: compile, live run, submit… · thinking (5m 24s · ↓ 9.7k tokens · thinking with high effort)",
+            "✻ Fix the build… · tool use (40s · ↓ 2k tokens)",
         ];
         for row in spinners {
             assert!(is_spinner_line(row), "should be a spinner: {row:?}");
@@ -297,6 +299,7 @@ mod tests {
             "  ⎿  · Item 4 (Add a search box…) is booked → next release",
             "✽ Settings form: validate the fields…",
             "✽ Cooking… extra text",
+            "✽ Settings form: validate the fields… · thinking",
         ];
         for row in others {
             assert!(!is_spinner_line(row), "should not be a spinner: {row:?}");
