@@ -84,6 +84,11 @@ pub fn to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     if let Some(bytes) = modified_key(ks.key.as_str(), m) {
         return Some(bytes);
     }
+    // Ctrl+Backspace sends ^H, as Windows Terminal does: shells and agent
+    // CLIs read it as deleting the previous word.
+    if ks.key == "backspace" && m.control {
+        return Some(prefix_alt(m.alt, vec![0x08]));
+    }
     if let Some(bytes) = named_key(ks.key.as_str(), m.shift, app_cursor) {
         return Some(prefix_alt(m.alt, bytes));
     }
@@ -347,6 +352,21 @@ mod tests {
         assert_eq!(
             bytes(&with(key("escape"), alt())),
             Some(b"\x1b\x1b".to_vec())
+        );
+    }
+
+    #[test]
+    fn ctrl_backspace_sends_a_word_delete() {
+        assert_eq!(bytes(&with(key("backspace"), ctrl())), Some(vec![0x08]));
+        assert_eq!(bytes(&key("backspace")), Some(vec![0x7f]));
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            bytes(&with(key("backspace"), ctrl_alt)),
+            Some(b"\x1b\x08".to_vec())
         );
     }
 
