@@ -143,6 +143,8 @@ agent-api = { workspace = true, features = ["test-support"] }
 # The fake daemon sends the daemon's own agent descriptors, and the live tier
 # points every registered agent at its fake CLI.
 agent-registry = { workspace = true, features = ["test-support"] }
+# The live tier's isolated daemon, which `tests/support/live.rs` wraps.
+dev-daemon = { workspace = true }
 gpui = { version = "0.2.2", features = ["test-support"] }
 png = "0.18"
 # `test-util` enables the paused clock net.rs's tests run its deadlines on.

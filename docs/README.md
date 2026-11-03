@@ -33,6 +33,7 @@ crates/
   tracer/       - rt-tracer.exe, the per-session ConPTY supervisor that survives daemon restarts
   tracer-protocol/ - the stable daemon <-> tracer ABI
   daemon-client/ - client-side daemon supervision shared by the clients
+  dev-daemon/   - an isolated daemon under a `.tmp` folder for the live tests and the driver tools; never shipped
   tailnet/      - Tailscale CLI wrapper and the owner rule for tailnet peers
   agents/api/   - the agent plugin trait and its context types
   agents/claude/ - the Claude plugin (argv, hook settings, stream-json parsing), with its fake `claude` CLI shim for the native e2e tier in `fake/`

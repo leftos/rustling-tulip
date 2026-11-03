@@ -19,6 +19,8 @@ The native client has three test tiers:
 
   `e2e_remote`, `e2e_ssh` and `e2e_multi_host` open the window as production does (`Harness::open_hosts`, `apps/native/tests/support/live.rs`): This PC runs on its own isolated home daemon and the daemon under test is a remote host beside it, on a real net thread of its own. Every daemon a spec starts is its own `LiveDaemon::start(<unique name>)`, since its roots, tracer pipe prefix and binaries dir derive from that name, and a spec has one fake ssh per process, which any ssh alias reaches.
 
+  A live daemon is an `IsolatedDaemon` (`crates/dev-daemon`); a start that fails keeps its scratch folder under `.tmp/native-e2e/`, and a hung start's message ends with `daemon.log`'s last lines.
+
   `e2e_ssh` drives the native client's SSH host through the fake ssh shim to a real `rustling-tulipd bridge` (connect and list sessions, typed input, a fetched file under `remote-files/ssh-devbox/…`, reconnect after the ssh process is killed, the bridge starting a stopped daemon in the same isolated dirs, a refused login showing ssh's stderr).
 
   `e2e_multi_host` runs two real isolated daemons in one window: This PC on a home daemon and an SSH host through the fake ssh shim and `rustling-tulipd bridge`.

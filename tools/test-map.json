@@ -144,6 +144,12 @@
     },
     {
       "paths": [
+        "crates/dev-daemon/**"
+      ],
+      "filter": "package(dev-daemon) | package(rustling-tulip-native)"
+    },
+    {
+      "paths": [
         "apps/native/src/main.rs",
         "apps/native/tests/ui/exe_subsystem.rs"
       ],

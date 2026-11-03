@@ -1,22 +1,21 @@
 //! A real daemon for the end-to-end and smoke specs, isolated from the
-//! user's: its config, binaries and worktrees dirs and its tracer pipe prefix
-//! all live under `<repo>/.tmp/native-e2e/<test>-<pid>/`, set on the child
-//! process only. [`Harness::open_live`] connects the root view to it through
-//! the real network thread.
+//! user's: [`dev_daemon::IsolatedDaemon`] puts its config, binaries and
+//! worktrees dirs and its tracer pipe prefix under
+//! `<repo>/.tmp/native-e2e/<test>-<pid>/`, set on the child process only.
+//! [`Harness::open_live`] connects the root view to it through the real
+//! network thread.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_api::{AgentPlugin, FakeCli};
 use daemon_client::device_tokens::MemoryTokens;
+use dev_daemon::{DaemonSpec, IsolatedDaemon, no_console};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{Modifiers, TestAppContext, px};
@@ -32,6 +31,8 @@ use rustling_tulip_native::{
 };
 use serde_json::{Value, json};
 
+pub use dev_daemon::{kill_process, processes_under};
+
 use super::{
     Harness, NotifyRecorder, OpenRecorder, Outbox, PickRecorder, SoundRecorder, TestClock,
 };
@@ -40,16 +41,13 @@ use super::{
 /// `daemon.json` and answering `/health`, its processes leaving after a kill,
 /// and every [`Harness::wait_until`] / [`Harness::wait_for_row`]. A passing run
 /// never reaches it (load-proof-tests); reaching it fails as "hung".
-pub const HANG_GUARD: Duration = Duration::from_secs(300);
+pub const HANG_GUARD: Duration = dev_daemon::HANG_GUARD;
 /// The hang guard of [`Harness::wait_until_in_process`], for the in-process
 /// UI specs: under nextest's 300 s kill, so a hang fails with its own
 /// "hung" message rather than as TIMEOUT.
 pub const IN_PROCESS_HANG_GUARD: Duration = Duration::from_secs(120);
 /// The id file the native client keeps its identity in.
 const CLIENT_ID_FILE: &str = "client-id-native";
-const MISSING_DAEMON: &str = "rustling-tulipd.exe not found next to the test binary; \
-                              run `.\\rt.ps1 native-e2e` or `.\\rt.ps1 native-smoke`; \
-                              they build daemon + tracer first";
 
 /// The repository root, for the `.tmp` dir and `tools/e2e/fake-tailscale`.
 fn repo_root() -> PathBuf {
@@ -70,43 +68,11 @@ pub fn target_bin_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// `rustling-tulipd` beside the test binary, checked to be there.
-fn daemon_binary() -> PathBuf {
-    let daemon = target_bin_dir().join(format!("rustling-tulipd{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        daemon.is_file(),
-        "{MISSING_DAEMON} (looked for {})",
-        daemon.display()
-    );
-    daemon
-}
-
-/// Starts `rustling-tulipd` from beside the test binary with `envs` set and no
-/// console or standard streams.
-fn spawn_daemon(envs: &[(&'static str, OsString)]) -> Child {
-    let mut command = Command::new(daemon_binary());
-    command
-        .envs(envs.iter().map(|(key, value)| (*key, value)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    no_console(&mut command);
-    command.spawn().expect("spawn rustling-tulipd")
-}
-
-/// A shell whose prompt and echo are the same on every run.
-fn test_shell() -> OsString {
-    std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"))
-}
-
 /// A running `rustling-tulipd` with every directory under this test's own
 /// scratch dir. Drop kills it and the tracers it spawned, then removes the
 /// dir.
 pub struct LiveDaemon {
-    root: PathBuf,
-    child: Child,
-    envs: Vec<(&'static str, OsString)>,
-    handshake: DaemonHandshake,
+    inner: IsolatedDaemon,
     /// The DER of the test CA behind the fake `tailscale cert`'s leaf, for a
     /// daemon from [`Self::start_remote`].
     tailnet_ca: Option<Vec<u8>>,
@@ -156,56 +122,28 @@ impl LiveDaemon {
         )
     }
 
-    /// Starts the daemon over `root`, made by [`scratch_root`], and waits for
-    /// its handshake and `/health`.
+    /// Starts the daemon over `root`, from [`scratch_root`], with the daemon
+    /// and tracer beside the test binary, and waits for its handshake and
+    /// `/health`.
+    #[expect(
+        clippy::panic,
+        reason = "a daemon that does not start fails the spec with the launcher's own message"
+    )]
     fn spawn_in(
         root: PathBuf,
         test: &str,
         extra: &[(&'static str, OsString)],
         tailnet_ca: Option<Vec<u8>>,
     ) -> Self {
-        let mut envs = isolated_envs(&root, test);
-        envs.extend(extra.iter().cloned());
-        let child = spawn_daemon(&envs);
-        let mut live = Self {
-            root,
-            child,
-            envs,
-            handshake: DaemonHandshake {
-                protocol_version: 0,
-                port: 0,
-                auth_token: String::new(),
-                pid: 0,
-                supported_versions: Vec::new(),
-                build_version: String::new(),
-            },
-            tailnet_ca,
+        let spec = DaemonSpec {
+            name: test.to_owned(),
+            scratch_root: root,
+            repo_root: repo_root(),
+            bin_dir: target_bin_dir(),
+            extra_env: extra.to_vec(),
         };
-        live.handshake = live.wait_healthy();
-        live
-    }
-
-    fn wait_healthy(&mut self) -> DaemonHandshake {
-        let deadline = Instant::now() + HANG_GUARD;
-        loop {
-            let exited = self.child.try_wait().ok().flatten();
-            assert!(
-                exited.is_none(),
-                "rustling-tulipd exited during startup ({exited:?}); see {}",
-                self.config_dir().join("logs").join("daemon.log").display()
-            );
-            if let Ok(handshake) = daemon_client::read_handshake_in(&self.config_dir())
-                && handshake.pid == self.child.id()
-                && health_ok(handshake.port)
-            {
-                return handshake;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "hung: rustling-tulipd wrote no healthy daemon.json within {HANG_GUARD:?}"
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        let inner = IsolatedDaemon::start(spec).unwrap_or_else(|err| panic!("{err}"));
+        Self { inner, tailnet_ca }
     }
 
     /// Makes the fake tailscale's `whois` answer that every peer belongs to
@@ -213,7 +151,7 @@ impl LiveDaemon {
     /// [`Self::start_remote`]. The shim reads its state on every run, so the
     /// next `whois` already answers so.
     pub fn make_peers_non_owners(&self) {
-        let path = self.root.join("fake-tailscale").join("state.json");
+        let path = self.dir().join("fake-tailscale").join("state.json");
         let text = std::fs::read_to_string(&path).expect("read the fake tailscale's state");
         let mut state: Value =
             serde_json::from_str(&text).expect("the fake tailscale's state is JSON");
@@ -228,46 +166,43 @@ impl LiveDaemon {
     /// The daemon's log as written so far; empty before the daemon made the
     /// file, which a poll for a line reads as "not logged yet".
     pub fn daemon_log(&self) -> String {
-        let path = self.config_dir().join("logs").join("daemon.log");
-        match std::fs::read_to_string(&path) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-            read => read
-                .map_err(|err| format!("{}: {err}", path.display()))
-                .expect("reading the daemon log"),
-        }
+        self.inner
+            .daemon_log()
+            .map_err(|err| format!("{}: {err}", self.config_dir().join("logs").display()))
+            .expect("reading the daemon log")
     }
 
     /// Whether the daemon still answers `GET /health` on its loopback port.
     pub fn answers_health(&self) -> bool {
-        health_ok(self.handshake.port)
+        self.inner.answers_health()
     }
 
     /// The test's scratch dir; fixtures go here.
     pub fn dir(&self) -> &Path {
-        &self.root
+        self.inner.dir()
     }
 
     pub fn config_dir(&self) -> PathBuf {
-        self.root.join("config")
+        self.inner.config_dir()
     }
 
     /// The home folder `agent`'s fake CLI names in its `home_env`: where the
     /// daemon and the sessions it spawns look for that agent's files, in
     /// place of the user's own.
     pub fn agent_home(&self, agent: &AgentId) -> PathBuf {
-        agent_home(&self.root, agent)
+        self.inner.agent_home(agent)
     }
 
     /// The daemon's binary cache: the tracers, and a daemon it respawns,
     /// run from copies here named `<name>-<hash>.exe`.
     pub fn binaries_dir(&self) -> PathBuf {
-        self.root.join("binaries")
+        self.inner.binaries_dir()
     }
 
     /// The daemon's `RUSTLING_TULIP_TAILNET_DIR`, where `tailscale cert`
     /// writes the listener's certificate.
     pub fn tailnet_dir(&self) -> PathBuf {
-        self.root.join("tailnet")
+        self.inner.tailnet_dir()
     }
 
     /// A TLS client config whose only root is the test CA of a daemon from
@@ -293,22 +228,25 @@ impl LiveDaemon {
     /// The variables that isolate a process to this daemon, to set on a
     /// child with `Command::envs`.
     pub fn envs(&self) -> &[(&'static str, OsString)] {
-        &self.envs
+        self.inner.envs()
     }
 
     pub fn handshake(&self) -> &DaemonHandshake {
-        &self.handshake
+        self.inner.handshake()
     }
 
     /// Force-kills the daemon alone, leaving its tracers running, as a crash
     /// would.
     pub fn kill(&mut self) {
-        self.child.kill().expect("kill rustling-tulipd");
-        self.child.wait().expect("reap rustling-tulipd");
+        self.inner.kill().expect("kill and reap rustling-tulipd");
     }
 
     /// Kills the daemon and every tracer it started, as a reboot would, then
     /// starts a new daemon on the same directories.
+    #[expect(
+        clippy::panic,
+        reason = "a daemon that does not start again fails the spec with the launcher's own message"
+    )]
     pub fn restart_after_reboot(&mut self) {
         self.kill();
         let binaries = self.binaries_dir();
@@ -328,17 +266,16 @@ impl LiveDaemon {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
-        self.child = spawn_daemon(&self.envs);
-        self.handshake = self.wait_healthy();
+        self.inner.respawn().unwrap_or_else(|err| panic!("{err}"));
     }
 
     /// Stops the daemon the way a user would, with `rustling-tulipd shutdown`
     /// under its isolation variables, and waits for its process to exit.
     pub fn shut_down_by_cli(&mut self) {
-        let mut command = Command::new(daemon_binary());
+        let mut command = Command::new(self.inner.daemon_exe());
         command
             .arg("shutdown")
-            .envs(self.envs.iter().map(|(key, value)| (*key, value)))
+            .envs(self.envs().iter().map(|(key, value)| (*key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -350,7 +287,8 @@ impl LiveDaemon {
         );
         let deadline = Instant::now() + HANG_GUARD;
         while self
-            .child
+            .inner
+            .child_mut()
             .try_wait()
             .expect("poll rustling-tulipd")
             .is_none()
@@ -374,16 +312,16 @@ impl LiveDaemon {
     /// while the daemon is torn down never has a bridge start a new daemon
     /// that nothing stops.
     pub fn fake_ssh(&self, fail: Option<(i32, &str)>) -> FakeSsh {
-        let dir = self.root.join("fake-ssh");
+        let dir = self.dir().join("fake-ssh");
         std::fs::create_dir_all(&dir).expect("create the fake ssh's dir");
         let env: serde_json::Map<String, Value> = self
-            .envs
+            .envs()
             .iter()
             .map(|(key, value)| ((*key).to_owned(), json!(value.to_string_lossy())))
             .collect();
         let log = dir.join("argv.jsonl");
         let state = json!({
-            "bridge": daemon_binary(),
+            "bridge": self.inner.daemon_exe(),
             "env": env,
             "fail": fail.map(|(code, stderr)| json!({ "code": code, "stderr": stderr })),
             "log": log,
@@ -423,7 +361,7 @@ impl LiveDaemon {
 
     /// A git repo under the test dir with one commit on `main`.
     pub fn git_fixture(&self) -> PathBuf {
-        let repo = self.root.join("fixture");
+        let repo = self.dir().join("fixture");
         std::fs::create_dir_all(&repo).expect("create the fixture repo dir");
         git(&repo, &["init", "-q", "-b", "main"]);
         git(
@@ -461,36 +399,6 @@ pub fn commit_all(repo: &Path, message: &str) {
             message,
         ],
     );
-}
-
-impl Drop for LiveDaemon {
-    fn drop(&mut self) {
-        let config = self.config_dir();
-        let tracers = sidecar_tracer_pids(&config);
-        let ours = self.child.id();
-        let respawned = daemon_client::read_handshake_in(&config)
-            .ok()
-            .map(|handshake| handshake.pid)
-            .filter(|pid| *pid != ours);
-        if matches!(self.child.try_wait(), Ok(None)) {
-            kill_tree(ours);
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
-        // The tracers and a respawned daemon run from copies in this
-        // daemon's own binaries dir; a pid whose image lies anywhere else
-        // was reused by another process, the user's tracers included.
-        let binaries = self.binaries_dir();
-        let pids = respawned.into_iter().chain(tracers);
-        for pid in pids.filter(|pid| image_under(*pid, &binaries)) {
-            kill_tree(pid);
-        }
-        // A failed spec keeps its dir: the daemon and client logs are under
-        // `config/logs/`.
-        if !std::thread::panicking() {
-            remove_dir_retrying(&self.root);
-        }
-    }
 }
 
 /// The variable naming the fake ssh's state file.
@@ -608,48 +516,6 @@ impl FakeSsh {
     }
 }
 
-/// What a `PATH` stub prints before its arguments.
-pub const STUB_MARKER: &str = "[rt-e2e agent stub]";
-
-/// A `program` in `dir` that prints [`STUB_MARKER`] and its arguments, so a
-/// shell the daemon starts never runs the user's real CLI.
-#[cfg(windows)]
-fn write_path_stub(dir: &Path, program: &str) {
-    let script = format!("@echo off\r\necho {STUB_MARKER} %*\r\n");
-    std::fs::write(dir.join(format!("{program}.cmd")), script).expect("write the PATH stub");
-}
-
-#[cfg(not(windows))]
-fn write_path_stub(dir: &Path, program: &str) {
-    use std::os::unix::fs::PermissionsExt as _;
-    let path = dir.join(program);
-    let script = format!("#!/bin/sh\necho '{STUB_MARKER}' \"$@\"\n");
-    std::fs::write(&path, script).expect("write the PATH stub");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("make the PATH stub executable");
-}
-
-/// `plugin`'s fake CLI; the live tier runs no agent without one.
-#[expect(clippy::panic, reason = "the failure names the agent that has no fake")]
-fn fake_cli(plugin: &dyn AgentPlugin) -> FakeCli {
-    let id = &plugin.descriptor().id.0;
-    plugin
-        .fake_cli()
-        .unwrap_or_else(|| panic!("agent {id} has no fake CLI for the live tier"))
-}
-
-/// `<root>/<agent id>-home`: the folder `agent`'s fake `home_env` names.
-fn agent_home(root: &Path, agent: &AgentId) -> PathBuf {
-    root.join(format!("{}-home", agent.0))
-}
-
-/// `PATH` with the stubs' dir first.
-fn path_with_stub(root: &Path) -> OsString {
-    let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let dirs = std::iter::once(root.join("fake-bin")).chain(std::env::split_paths(&inherited));
-    std::env::join_paths(dirs).expect("PATH entries hold no separator")
-}
-
 /// The `MagicDNS` name the fake tailscale gives the host, without its trailing
 /// dot: the name its certificate is for and a tailnet client dials.
 pub const REMOTE_HOST: &str = "localhost";
@@ -658,34 +524,15 @@ const OWNER_USER_ID: i64 = 2;
 /// The variable naming the fake tailscale's state file.
 const FAKE_TAILSCALE_STATE_ENV: &str = "RUSTLING_TULIP_FAKE_TAILSCALE_STATE";
 
-/// `<repo>/.tmp/native-e2e/<test>-<pid>/`, emptied, with the daemon's
-/// directories, each registered agent's home folder and its `PATH` stub made.
+/// `<repo>/.tmp/native-e2e/<test>-<pid>/`, emptied; [`IsolatedDaemon::start`]
+/// makes the daemon's directories, each registered agent's home folder and
+/// its `PATH` stub in it.
 fn scratch_root(test: &str) -> PathBuf {
     let root = repo_root()
         .join(".tmp")
         .join("native-e2e")
         .join(format!("{test}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    for sub in [
-        "config",
-        "binaries",
-        "worktrees",
-        "tailnet",
-        "ui",
-        "fake-bin",
-    ] {
-        std::fs::create_dir_all(root.join(sub)).expect("create the test's scratch dirs");
-    }
-    for plugin in agent_registry::all() {
-        let fake = fake_cli(*plugin);
-        if fake.home_env.is_some() {
-            std::fs::create_dir_all(agent_home(&root, &plugin.descriptor().id))
-                .expect("create the agent's home folder");
-        }
-        if let Some(program) = fake.path_stub {
-            write_path_stub(&root.join("fake-bin"), program);
-        }
-    }
     root
 }
 
@@ -728,72 +575,17 @@ impl TestCa {
     }
 }
 
-/// A loopback port nothing listens on right now.
-pub fn free_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .and_then(|listener| listener.local_addr())
-        .expect("bind a free loopback port")
-        .port()
+/// What a `PATH` stub prints before its arguments.
+pub const STUB_MARKER: &str = dev_daemon::STUB_MARKER;
+
+/// Force-kills `pid` and, on Windows, every process under it.
+pub fn kill_tree(pid: u32) {
+    dev_daemon::kill_tree(pid);
 }
 
-fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
-    let fake_tailscale = if cfg!(windows) {
-        "fake-tailscale.cmd"
-    } else {
-        "fake-tailscale.sh"
-    };
-    let fake_tailscale = repo_root()
-        .join("tools")
-        .join("e2e")
-        .join("fake-tailscale")
-        .join(fake_tailscale);
-    let mut envs = vec![
-        (
-            "RUSTLING_TULIP_CONFIG_DIR",
-            root.join("config").into_os_string(),
-        ),
-        (
-            "RUSTLING_TULIP_BINARIES_DIR",
-            root.join("binaries").into_os_string(),
-        ),
-        (
-            "RUSTLING_TULIP_WORKTREES_DIR",
-            root.join("worktrees").into_os_string(),
-        ),
-        (
-            "RUSTLING_TULIP_TRACER_PIPE_PREFIX",
-            OsString::from(format!("rt-native-e2e-{}-{test}", std::process::id())),
-        ),
-        ("RUSTLING_TULIP_SHELL", test_shell()),
-        ("RUSTLING_TULIP_SHELL_INTEGRATION", OsString::from("0")),
-        // The tailnet listener's CLI and certificate dir: never the user's
-        // Tailscale or their real certificate, even with remote access off.
-        ("RUSTLING_TULIP_TAILSCALE", fake_tailscale.into_os_string()),
-        (
-            "RUSTLING_TULIP_TAILNET_DIR",
-            root.join("tailnet").into_os_string(),
-        ),
-        // A shell the daemon starts finds the agents' stubs before any real
-        // CLI.
-        ("PATH", path_with_stub(root)),
-        // The tracer the daemon copies into its binaries dir: the one built
-        // beside it, never the installed app's.
-        (
-            "RUSTLING_TULIP_BIN_TEMPLATES",
-            target_bin_dir().into_os_string(),
-        ),
-    ];
-    // Every registered agent runs its fake, with its home under the test's
-    // root: never the user's real CLI or its files.
-    for plugin in agent_registry::all() {
-        let fake = fake_cli(*plugin);
-        envs.push((plugin.program_env_var(), fake.shim.into_os_string()));
-        if let Some(home_env) = fake.home_env {
-            let home = agent_home(root, &plugin.descriptor().id);
-            envs.push((home_env, home.into_os_string()));
-        }
-    }
-    envs
+/// A loopback port nothing listens on right now.
+pub fn free_port() -> u16 {
+    dev_daemon::free_port().expect("bind a free loopback port")
 }
 
 fn same_path(a: &str, b: &str) -> bool {
@@ -814,188 +606,6 @@ fn git(dir: &Path, args: &[&str]) {
         .status()
         .expect("run git (is it on PATH?)");
     assert!(status.success(), "git {args:?} failed: {status}");
-}
-
-/// A plain `GET /health` over loopback; true on a 200.
-fn health_ok(port: u16) -> bool {
-    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
-    let mut reply = String::new();
-    let _ = stream.read_to_string(&mut reply);
-    reply.starts_with("HTTP/1.1 200")
-}
-
-/// The tracer pids the daemon's session sidecars name.
-fn sidecar_tracer_pids(config: &Path) -> HashSet<u32> {
-    let Ok(entries) = std::fs::read_dir(config.join("sessions")) else {
-        return HashSet::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| std::fs::read_to_string(entry.path().join("meta.json")).ok())
-        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
-        .filter_map(|meta| meta["tracer_pid"].as_u64())
-        .filter_map(|pid| u32::try_from(pid).ok())
-        .collect()
-}
-
-fn remove_dir_retrying(dir: &Path) {
-    for _ in 0..20 {
-        if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    tracing::warn!("could not remove {}", dir.display());
-}
-
-#[cfg(windows)]
-fn no_console(command: &mut Command) {
-    use std::os::windows::process::CommandExt as _;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn no_console(_command: &mut Command) {}
-
-/// Force-kills `pid` and, on Windows, every process under it.
-pub fn kill_tree(pid: u32) {
-    kill(pid, true);
-}
-
-/// Force-kills `pid` alone, leaving the processes under it to whatever
-/// owns them (a tracer's child dies with the tracer's kill-on-close job).
-pub fn kill_process(pid: u32) {
-    kill(pid, false);
-}
-
-/// Force-kills `pid`, with its tree when `tree` is set. A process that is
-/// already gone is not an error.
-#[cfg(windows)]
-fn kill(pid: u32, tree: bool) {
-    let pid = pid.to_string();
-    let mut command = Command::new("taskkill");
-    command.args(["/PID", &pid, "/F"]);
-    if tree {
-        command.arg("/T");
-    }
-    command.stdout(Stdio::null()).stderr(Stdio::null());
-    no_console(&mut command);
-    let _ = command.status();
-}
-
-/// Force-kills `pid`; `kill` has no tree walk, so `tree` changes nothing.
-#[cfg(not(windows))]
-fn kill(pid: u32, _tree: bool) {
-    let _ = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .status();
-}
-
-/// Whether process `pid` runs an image under `dir`, so a pid read from a
-/// file is never killed after another process reused it.
-fn image_under(pid: u32, dir: &Path) -> bool {
-    image_path(pid).is_some_and(|image| path_under(&image, dir))
-}
-
-/// Every running process whose image lies under `dir`, with that image.
-pub fn processes_under(dir: &Path) -> Vec<(u32, PathBuf)> {
-    all_pids()
-        .into_iter()
-        .filter_map(|pid| {
-            image_path(pid)
-                .filter(|image| path_under(image, dir))
-                .map(|image| (pid, image))
-        })
-        .collect()
-}
-
-/// Whether `path` lies inside `dir`, compared as Windows compares paths.
-fn path_under(path: &Path, dir: &Path) -> bool {
-    let norm = |p: &Path| {
-        let text = p.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
-        let text = text.strip_prefix("\\\\?\\").unwrap_or(&text).to_owned();
-        text.trim_end_matches('\\').to_owned()
-    };
-    norm(path)
-        .strip_prefix(&norm(dir))
-        .is_some_and(|rest| rest.starts_with('\\'))
-}
-
-/// The full path of the image process `pid` runs, when it can be read.
-#[cfg(windows)]
-fn image_path(pid: u32) -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStringExt as _;
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
-    };
-    use windows::core::PWSTR;
-    // SAFETY: opens a query-only handle, closed below.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-    let mut buffer = vec![0_u16; 32_768];
-    let mut len = u32::try_from(buffer.len()).ok()?;
-    // SAFETY: the buffer and its length are locals that outlive the call.
-    let read = unsafe {
-        QueryFullProcessImageNameW(
-            process,
-            PROCESS_NAME_WIN32,
-            PWSTR(buffer.as_mut_ptr()),
-            &raw mut len,
-        )
-    };
-    // SAFETY: the handle OpenProcess returned, closed once.
-    let _ = unsafe { CloseHandle(process) };
-    read.ok()?;
-    buffer.truncate(usize::try_from(len).ok()?);
-    Some(PathBuf::from(OsString::from_wide(&buffer)))
-}
-
-#[cfg(not(windows))]
-fn image_path(pid: u32) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
-}
-
-/// The id of every running process.
-#[cfg(windows)]
-fn all_pids() -> Vec<u32> {
-    use windows::Win32::System::ProcessStatus::EnumProcesses;
-    let mut pids = vec![0_u32; 1024];
-    loop {
-        let Ok(size) = u32::try_from(pids.len() * size_of::<u32>()) else {
-            return Vec::new();
-        };
-        let mut needed = 0;
-        // SAFETY: `pids` holds `size` bytes and outlives the call.
-        if unsafe { EnumProcesses(pids.as_mut_ptr(), size, &raw mut needed) }.is_err() {
-            return Vec::new();
-        }
-        if needed < size {
-            pids.truncate(usize::try_from(needed).unwrap_or(0) / size_of::<u32>());
-            return pids;
-        }
-        pids.resize(pids.len() * 2, 0);
-    }
-}
-
-#[cfg(not(windows))]
-fn all_pids() -> Vec<u32> {
-    std::fs::read_dir("/proc")
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// The client side of a live harness: the root view's own command sender and

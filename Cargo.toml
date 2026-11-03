@@ -10,6 +10,7 @@ members = [
     "crates/agents/api",
     "crates/agents/claude",
     "crates/agents/registry",
+    "crates/dev-daemon",
     "apps/native",
 ]
 
@@ -41,6 +42,7 @@ tailnet = { path = "crates/tailnet" }
 agent-api = { path = "crates/agents/api" }
 agent-claude = { path = "crates/agents/claude" }
 agent-registry = { path = "crates/agents/registry" }
+dev-daemon = { path = "crates/dev-daemon" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

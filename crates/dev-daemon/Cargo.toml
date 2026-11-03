@@ -1,0 +1,36 @@
+[package]
+name = "dev-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "An isolated rustling-tulipd under a .tmp folder, for development tools and the native client's live tests; never shipped"
+publish = false
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Every registered agent runs its fake CLI (`FakeCli`, behind `test-support`),
+# never the user's real one.
+agent-api = { workspace = true, features = ["test-support"] }
+agent-registry = { workspace = true, features = ["test-support"] }
+# The `.tmp` refusal (`isolation::check_isolated`) and the handshake read.
+daemon-client = { workspace = true }
+protocol = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# The clean-up's process walk: `EnumProcesses` and the image path of a pid.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

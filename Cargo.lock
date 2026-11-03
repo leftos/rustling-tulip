@@ -1806,6 +1806,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dev-daemon"
+version = "0.7.0-alpha"
+dependencies = [
+ "agent-api",
+ "agent-registry",
+ "daemon-client",
+ "protocol",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5615,6 +5629,7 @@ dependencies = [
  "base64",
  "chrono",
  "daemon-client",
+ "dev-daemon",
  "embed-resource",
  "encoding_rs",
  "futures",
