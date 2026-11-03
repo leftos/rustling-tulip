@@ -100,25 +100,46 @@ pub(crate) async fn spawn_with_tracer(
     );
 
     let log_path = tracer_log_path(dirs, &spec.session_id);
-    let tracer_pid = spawn_tracer_process(&TracerLaunch {
+    let mut tracer_process = spawn_tracer_process(&TracerLaunch {
         tracer,
         spec: &spec,
         pipe_name: &pipe,
         log_path: log_path.as_deref(),
         owner: &dirs.config,
     })?;
+    let tracer_pid = tracer_process.pid();
     info!(tracer_pid, pipe = %pipe, "tracer_client: tracer process started");
 
-    let client = connect_with_retry(&pipe).await?;
-    #[cfg(windows)]
-    check_connected_tracer(&client, &pipe, tracer_pid)?;
-    let (handle, _negotiated_version) = handshake_and_wire(
-        client,
-        spec.session_id.clone(),
-        Some(tracer_pid),
-        expected_output_subscribers,
-    )
-    .await?;
+    // A failure from here on leaves a tracer (and its child) nobody will
+    // attach to, so it is stopped through the handle it was spawned with:
+    // never through the pid the pipe reports, which may be a squatter's.
+    let wired: anyhow::Result<_> = async {
+        let client = connect_with_retry(&pipe).await?;
+        #[cfg(windows)]
+        check_connected_tracer(&client, &pipe, tracer_pid)?;
+        handshake_and_wire(
+            client,
+            spec.session_id.clone(),
+            Some(tracer_pid),
+            expected_output_subscribers,
+        )
+        .await
+    }
+    .await;
+    let (handle, _negotiated_version) = match wired {
+        Ok(wired) => wired,
+        Err(err) => {
+            tracer_process.terminate();
+            warn!(
+                tracer_pid,
+                ?err,
+                "tracer_client: spawn failed after the tracer started; stopping it"
+            );
+            return Err(err);
+        }
+    };
+    // Dropping the guard closes its handles and leaves the tracer running.
+    drop(tracer_process);
 
     Ok(TracerSpawn {
         handle,
@@ -480,23 +501,62 @@ fn tracer_command(launch: &TracerLaunch<'_>) -> std::process::Command {
 /// `RUSTLING_TULIP_TRACER_LOG` set it routes its `tracing_subscriber` output
 /// to that file.
 #[cfg(windows)]
-fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<u32> {
+fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<TracerProcess> {
     let invocation = tracer_invocation(launch);
-    crate::spawn_detached::spawn_detached(
+    let child = crate::spawn_detached::spawn_detached(
         launch.tracer,
         &invocation.args,
         &invocation.env_set,
         &invocation.env_remove,
     )
-    .with_context(|| format!("spawning tracer process {}", launch.tracer.display()))
+    .with_context(|| format!("spawning tracer process {}", launch.tracer.display()))?;
+    Ok(TracerProcess { child })
 }
 
 #[cfg(not(windows))]
-fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<u32> {
+fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<TracerProcess> {
     let child = tracer_command(launch)
         .spawn()
         .with_context(|| format!("spawning tracer process {}", launch.tracer.display()))?;
-    Ok(child.id())
+    Ok(TracerProcess { child })
+}
+
+/// The tracer process a spawn started, held until the spawn is wired so a
+/// failure can end that very process. Dropping it leaves the tracer running.
+struct TracerProcess {
+    #[cfg(windows)]
+    child: crate::spawn_detached::OwnedChild,
+    #[cfg(not(windows))]
+    child: std::process::Child,
+}
+
+impl TracerProcess {
+    fn pid(&self) -> u32 {
+        #[cfg(windows)]
+        {
+            self.child.pid()
+        }
+        #[cfg(not(windows))]
+        {
+            self.child.id()
+        }
+    }
+
+    /// Ends the tracer through the handle it was spawned with. A failure is
+    /// logged, never raised: the spawn's own error is the one returned.
+    #[cfg(windows)]
+    fn terminate(&mut self) {
+        self.child.terminate();
+    }
+
+    /// Ends the tracer through the handle it was spawned with. A failure is
+    /// logged, never raised: the spawn's own error is the one returned.
+    #[cfg(not(windows))]
+    fn terminate(&mut self) {
+        if let Err(err) = self.child.kill() {
+            warn!(?err, pid = self.child.id(), "terminating the tracer failed");
+        }
+    }
 }
 
 /// The per-session tracer log path, `<dirs.config>/logs/tracer-<id>.log`,

@@ -345,7 +345,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let (exit_broadcast_tx, _exit_broadcast_rx) = broadcast::channel::<i32>(4);
     let exit_broadcast_for_child = exit_broadcast_tx.clone();
     let mut child_killer = child.clone_killer();
-    let child_wait = tokio::task::spawn_blocking(move || {
+    let mut child_wait = tokio::task::spawn_blocking(move || {
         debug!("supervisor: child waiter blocking on child.wait()");
         let status = child.wait();
         let code = match status {
@@ -411,6 +411,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         }
     });
 
+    // Kept for the never-served path below, which stops the child the same
+    // way a `Stop` frame does.
+    let never_served_stop_tx = stop_tx.clone();
+
     // Local-socket accept loop.
     let accept_cfg = AcceptConfig {
         pipe_name: cfg.pipe_name.clone(),
@@ -422,12 +426,39 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         stop_tx,
         exit_broadcast: exit_broadcast_tx,
     };
-    let pipe_accept = tokio::spawn(accept_loop(accept_cfg));
+    let mut pipe_accept = tokio::spawn(accept_loop(accept_cfg));
 
     // Block on child exit. Once the child is gone we let the pipe accept loop
     // finish whatever its current connection is doing (with the Exited frame
-    // already broadcast), then abort it.
-    let exit_code = child_wait.await.unwrap_or(-1);
+    // already broadcast), then abort it. The accept loop only returns when it
+    // never bound the pipe (once bound it loops forever): no daemon can ever
+    // reach this session, so the child is stopped and the tracer exits with
+    // an error instead of waiting on it.
+    let (exit_code, never_served) = tokio::select! {
+        code = &mut child_wait => (code.unwrap_or(-1), false),
+        accepted = &mut pipe_accept => match accepted {
+            Ok(()) => {
+                error!(
+                    pipe = %cfg.pipe_name,
+                    "supervisor: the pipe was never served; stopping the child and exiting"
+                );
+                if never_served_stop_tx.send(()).is_err() {
+                    warn!("supervisor: the stop handler is gone; cannot stop the child");
+                }
+                (child_wait.await.unwrap_or(-1), true)
+            }
+            // A panic after the pipe was bound may have ended a live
+            // session's accept loop; its child is kept, as before.
+            Err(join_error) => {
+                error!(
+                    ?join_error,
+                    pipe = %cfg.pipe_name,
+                    "supervisor: the accept task ended abnormally; keeping the child"
+                );
+                (child_wait.await.unwrap_or(-1), false)
+            }
+        }
+    };
     info!(exit_code, "supervisor: child exited; shutting down");
     let watchdog = ShutdownWatchdog::start(SHUTDOWN_WATCHDOG_DEADLINES.to_vec());
 
@@ -495,6 +526,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         overflowed,
         "supervisor: exiting"
     );
+    if never_served {
+        return Err(anyhow::anyhow!(
+            "tracer pipe {} was never served",
+            cfg.pipe_name
+        ));
+    }
     Ok(())
 }
 

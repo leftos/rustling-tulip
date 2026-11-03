@@ -18,9 +18,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, bail, ensure};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use interprocess::local_socket::GenericNamespaced;
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tracer_protocol::{
@@ -307,6 +307,32 @@ async fn a_session_starts_with_no_daemon_attached() -> anyhow::Result<()> {
     remove_test_dir(&case.dir).await
 }
 
+#[tokio::test]
+async fn a_tracer_whose_pipe_is_taken_exits_non_zero() -> anyhow::Result<()> {
+    let case = Case::new()?;
+    let name = case.pipe_name.as_str().to_ns_name::<GenericNamespaced>()?;
+    let _squatter = ListenerOptions::new()
+        .name(name)
+        .create_tokio()
+        .context("taking the tracer's pipe name first")?;
+    let mut tracer = case.spawn_tracer("ping -n 600 127.0.0.1 >nul")?;
+
+    let exited = wait_for_exit(&mut tracer).await?;
+    let Some(code) = exited else {
+        bail!(
+            "hung: the tracer whose pipe is taken did not exit within {HANG_GUARD:?} (log: {})",
+            case.dir.join("tracer.log").display()
+        );
+    };
+    ensure!(
+        code != 0,
+        "the tracer whose pipe is taken exited with code 0"
+    );
+
+    drop(tracer);
+    remove_test_dir(&case.dir).await
+}
+
 /// A handle closed when dropped.
 struct OwnedHandle(HANDLE);
 
@@ -314,6 +340,17 @@ impl Drop for OwnedHandle {
     fn drop(&mut self) {
         // SAFETY: the handle was opened by this module and is closed once.
         let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// A string a Win32 call allocated with `LocalAlloc`, freed when dropped.
+struct LocalString(PWSTR);
+
+impl Drop for LocalString {
+    fn drop(&mut self) {
+        // SAFETY: the string was allocated by the conversion that filled it
+        // and is freed once, here.
+        unsafe { LocalFree(Some(HLOCAL(self.0.0.cast()))) };
     }
 }
 
@@ -362,9 +399,10 @@ fn own_token_sid_and_elevation() -> anyhow::Result<(String, bool)> {
     // SAFETY: `sid` is the valid user SID read above; `wide` receives a
     // LocalAlloc'd string freed below.
     unsafe { ConvertSidToStringSidW(sid, &raw mut wide) }.context("converting the user SID")?;
-    let sid_text = unsafe { U16CStr::from_ptr_str(wide.0.cast_const()) }.to_string()?;
-    // SAFETY: `wide` is the string the conversion allocated.
-    unsafe { LocalFree(Some(HLOCAL(wide.0.cast()))) };
+    let wide = LocalString(wide);
+    // SAFETY: `wide` is the NUL-terminated string the conversion allocated,
+    // alive until `wide` drops.
+    let sid_text = unsafe { U16CStr::from_ptr_str(wide.0.0.cast_const()) }.to_string()?;
 
     let label = token_information(token.0, TokenIntegrityLevel, "integrity label")?;
     // SAFETY: as for the user SID, with a TOKEN_MANDATORY_LABEL.
@@ -436,9 +474,10 @@ async fn pipe_sddl(pipe_name: &str) -> anyhow::Result<String> {
     // SAFETY: `descriptor` is the descriptor GetSecurityInfo allocated.
     unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
     converted.context("converting the pipe's descriptor to SDDL")?;
-    let text = unsafe { U16CStr::from_ptr_str(sddl.0.cast_const()) }.to_string()?;
-    // SAFETY: `sddl` is the string the conversion allocated.
-    unsafe { LocalFree(Some(HLOCAL(sddl.0.cast()))) };
+    let sddl = LocalString(sddl);
+    // SAFETY: `sddl` is the NUL-terminated string the conversion allocated,
+    // alive until `sddl` drops.
+    let text = unsafe { U16CStr::from_ptr_str(sddl.0.0.cast_const()) }.to_string()?;
     Ok(text)
 }
 

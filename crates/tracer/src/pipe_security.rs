@@ -81,10 +81,23 @@ fn user_sid(token: HANDLE) -> anyhow::Result<String> {
     // SAFETY: `sid` is the valid user SID read above; `wide` receives a
     // LocalAlloc'd string freed below.
     unsafe { ConvertSidToStringSidW(sid, &raw mut wide) }.context("converting the user SID")?;
-    let text = unsafe { U16CStr::from_ptr_str(wide.0.cast_const()) }.to_string()?;
-    // SAFETY: `wide` is the string the conversion allocated.
-    let _ = unsafe { LocalFree(Some(HLOCAL(wide.0.cast()))) };
+    let wide = LocalString(wide);
+    // SAFETY: `wide` is the NUL-terminated string the conversion allocated,
+    // alive until `wide` drops.
+    let text = unsafe { U16CStr::from_ptr_str(wide.0.0.cast_const()) }.to_string()?;
     Ok(text)
+}
+
+/// A string a Win32 call allocated with `LocalAlloc`, freed when dropped, so
+/// every path out of the caller frees it.
+struct LocalString(PWSTR);
+
+impl Drop for LocalString {
+    fn drop(&mut self) {
+        // SAFETY: the string was allocated by the conversion that filled it
+        // and is freed once, here.
+        let _ = unsafe { LocalFree(Some(HLOCAL(self.0.0.cast()))) };
+    }
 }
 
 /// The last sub-authority of `token`'s integrity label: the level's RID.

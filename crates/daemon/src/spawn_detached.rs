@@ -17,7 +17,8 @@ use std::path::Path;
 use tracing::warn;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, PROCESS_INFORMATION,
+    STARTUPINFOW, TerminateProcess,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -27,14 +28,18 @@ const SPACE: u16 = b' ' as u16;
 const TAB: u16 = b'\t' as u16;
 const EQUALS: u16 = b'=' as u16;
 
-/// Starts `program` with `args` and no inherited handles, and returns its pid.
+/// Starts `program` with `args` and no inherited handles, and returns the
+/// child with its process handle kept, so the caller can end the very process
+/// it started: a pid looked up later may name another process once this one
+/// has exited.
 ///
 /// A console program gets a hidden console of its own (`CREATE_NO_WINDOW`,
 /// no `STARTF_USESTDHANDLES`), and its std handles are that console's.
 ///
 /// The child's environment is the daemon's with `set` applied and then
 /// `remove`, so a name in both is removed; names compare case-insensitively.
-/// The child's process and thread handles are closed before this returns.
+/// The child's process and thread handles are closed when the returned
+/// [`OwnedChild`] drops.
 ///
 /// # Errors
 ///
@@ -45,9 +50,34 @@ pub(crate) fn spawn_detached(
     args: &[OsString],
     set: &[(OsString, OsString)],
     remove: &[OsString],
-) -> anyhow::Result<u32> {
-    let spawned = create_process(program, args, set, remove)?;
-    Ok(spawned.pid)
+) -> anyhow::Result<OwnedChild> {
+    create_process(program, args, set, remove).map(OwnedChild)
+}
+
+/// A child started by [`spawn_detached`]. Dropping it closes its
+/// handles and leaves the process running.
+pub(crate) struct OwnedChild(Spawned);
+
+// SAFETY: the process and thread handles are kernel handles, valid from any
+// thread of this process; `OwnedChild` owns them alone and only terminates
+// and closes them, so moving it to another thread (a spawn awaited on the
+// runtime's workers) shares nothing.
+unsafe impl Send for OwnedChild {}
+
+impl OwnedChild {
+    pub(crate) fn pid(&self) -> u32 {
+        self.0.pid
+    }
+
+    /// Ends the child through the handle `CreateProcessW` returned. A failure
+    /// (the child already gone, say) is logged, never raised.
+    pub(crate) fn terminate(&self) {
+        // SAFETY: `self.0.process` is the live process handle `Spawned` owns
+        // until it drops.
+        if let Err(err) = unsafe { TerminateProcess(self.0.process, 1) } {
+            warn!(?err, pid = self.0.pid, "terminating a spawned child failed");
+        }
+    }
 }
 
 /// A started child: its pid and the process and thread handles
@@ -233,7 +263,8 @@ mod tests {
     use tracing::warn;
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+        GetExitCodeProcess, OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
+        WaitForSingleObject,
     };
 
     const POWERSHELL: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
@@ -307,13 +338,35 @@ mod tests {
             .expect("bind the loopback listener");
         let addr = listener.local_addr().expect("listener address");
         let args = os_strings(&["-NoProfile", "-Command", "Start-Sleep", "-Seconds", "10"]);
-        let pid = spawn_detached(Path::new(POWERSHELL), &args, &[], &[]).expect("spawn the child");
-        let _child = KillOnDrop(pid);
+        let child =
+            spawn_detached(Path::new(POWERSHELL), &args, &[], &[]).expect("spawn the child");
+        let _kill = KillOnDrop(child.pid());
         drop(listener);
         let rebound = std::net::TcpListener::bind(addr);
         assert!(
             rebound.is_ok(),
             "the port is free once the daemon drops its listener, so the child holds no copy of it: {rebound:?}"
+        );
+    }
+
+    #[test]
+    fn an_owned_child_is_terminated_by_its_handle() {
+        let args = os_strings(&["-NoProfile", "-Command", "Start-Sleep", "60"]);
+        let child =
+            spawn_detached(Path::new(POWERSHELL), &args, &[], &[]).expect("spawn the child");
+        let pid = child.pid();
+        let _guard = KillOnDrop(pid);
+        child.terminate();
+        // SAFETY: no pointer arguments; the returned handle is closed below.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }
+            .expect("open the child to wait on it");
+        // SAFETY: `handle` was opened above with PROCESS_SYNCHRONIZE.
+        let waited = unsafe { WaitForSingleObject(handle, 60_000) };
+        // SAFETY: `handle` was opened above and is closed once, here.
+        unsafe { CloseHandle(handle) }.expect("close the child's handle");
+        assert_eq!(
+            waited, WAIT_OBJECT_0,
+            "the child has exited within a minute of terminate()"
         );
     }
 
