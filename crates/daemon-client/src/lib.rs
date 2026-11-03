@@ -27,11 +27,12 @@ mod wmi_launch;
 
 pub use proof::{Proof, ProvenConnectError, connect_proven};
 pub use supervisor::{
-    DaemonIsElevated, DaemonIsNewer, ELEVATED_DAEMON_REFUSAL, OrdinaryDaemonIncompatible,
-    PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running,
+    DaemonIsElevated, DaemonIsNewer, DaemonIsOrdinary, ELEVATED_DAEMON_REFUSAL,
+    OrdinaryDaemonIncompatible, PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running,
 };
 
 use anyhow::{Context as _, anyhow, bail};
+use profile::Profile;
 use protocol::DaemonHandshake;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -101,16 +102,17 @@ pub fn updates_dir() -> anyhow::Result<PathBuf> {
     Ok(pd.data_local_dir().join("updates"))
 }
 
-/// Path the daemon writes its handshake (`daemon.json`) to.
+/// Path the daemon this caller may use writes its handshake (`daemon.json`)
+/// to.
 ///
-/// Mirrors `daemon::paths::Dirs::ensure().handshake_file` in
-/// `crates/daemon/src/paths.rs`.
+/// The file is the one [`locate_daemon`] names: the running daemon's profile's
+/// config dir, or this caller's own profile when none runs.
 ///
 /// # Errors
 ///
-/// Fails when [`config_dir`] does.
+/// Fails when [`locate_daemon`] does.
 pub fn handshake_file() -> anyhow::Result<PathBuf> {
-    Ok(handshake_file_in(&config_dir()?))
+    Ok(handshake_file_in(&locate_daemon()?.config_dir))
 }
 
 /// Path of the handshake file (`daemon.json`) under `config_dir`.
@@ -119,16 +121,105 @@ pub fn handshake_file_in(config_dir: &Path) -> PathBuf {
     config_dir.join("daemon.json")
 }
 
-/// Read and parse `daemon.json` without checking that the daemon it names is
-/// alive.
+/// The daemon a caller may use: its profile, and the config dir its
+/// `daemon.json` lives in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedDaemon {
+    /// The profile the daemon runs in.
+    pub profile: Profile,
+    /// The config dir its `daemon.json` lives in, or would.
+    pub config_dir: PathBuf,
+}
+
+/// Find the daemon this caller may use, by its own integrity level.
+///
+/// The caller's own profile and the folder overrides give the profiles to
+/// probe, in order ([`profile::roots_to_probe`]: an elevated caller looks for
+/// an ordinary daemon of its account first, since reusing one gives no
+/// elevation). The first profile whose `daemon.json` exists and whose daemon is
+/// alive wins; a file that is there but unreadable still names its profile, so a
+/// labelled handshake an elevated daemon left behind is never skipped. A file
+/// whose daemon is gone is a crashed daemon's leftover and is passed over, so an
+/// elevated caller reaches a running elevated daemon instead of a dead ordinary
+/// one. With no live daemon in any of them, the caller's own profile is
+/// returned: the folder a daemon it starts would write to.
+///
+/// Nothing is created: no folder, no daemon. Reading a handshake and trying the
+/// instance lock is all this does, and a stale labelled one is cleared the way
+/// [`read_handshake_file`] clears it.
+///
+/// # Errors
+///
+/// Fails when this process's profile or the app's folders cannot be resolved.
+pub fn locate_daemon() -> anyhow::Result<LocatedDaemon> {
+    let caller = profile::own_profile()?;
+    let overrides = profile::Overrides::from_env()?;
+    let candidates: Vec<LocatedDaemon> = profile::roots_to_probe(caller, &overrides)?
+        .into_iter()
+        .map(|(profile, roots)| LocatedDaemon {
+            profile,
+            config_dir: roots.config,
+        })
+        .collect();
+    locate_in(&candidates, daemon_named_in, daemon_alive_in)
+        .ok_or_else(|| anyhow!("no profile to look for a daemon in"))
+}
+
+/// The first of `candidates` before the last whose config dir `exists` names a
+/// `daemon.json` and whose instance lock `alive` finds held; else the last
+/// candidate itself.
+///
+/// `candidates` come in probe order, the caller's own profile last
+/// ([`profile::roots_to_probe`]); `exists` and `alive` are given each config dir
+/// in turn. A handshake whose daemon is gone is a crashed daemon's leftover and
+/// is passed over. The last candidate is the caller's own profile, the folder a
+/// daemon it starts would write to, and is returned whether or not one runs
+/// there.
+fn locate_in(
+    candidates: &[LocatedDaemon],
+    exists: impl Fn(&Path) -> bool,
+    alive: impl Fn(&Path) -> bool,
+) -> Option<LocatedDaemon> {
+    let (own, earlier) = candidates.split_last()?;
+    earlier
+        .iter()
+        .find(|daemon| exists(&daemon.config_dir) && alive(&daemon.config_dir))
+        .cloned()
+        .or_else(|| Some(own.clone()))
+}
+
+/// Whether `config_dir` holds a `daemon.json`: any [`read_handshake_file`]
+/// outcome but a missing file counts, so a handshake this process may not read
+/// still names the profile its daemon runs in.
+fn daemon_named_in(config_dir: &Path) -> bool {
+    !matches!(
+        read_handshake_file(&handshake_file_in(config_dir)),
+        Ok(HandshakeFile::Missing(_))
+    )
+}
+
+/// Whether a daemon holds `config_dir`'s instance lock: a `daemon.json` whose
+/// lock is free is a crashed daemon's leftover, not a daemon to talk to. A lock
+/// file that is missing, or cannot be opened or checked, counts as no live
+/// daemon.
+fn daemon_alive_in(config_dir: &Path) -> bool {
+    matches!(
+        instance_lock(&handshake_file_in(config_dir)),
+        LockState::Held
+    )
+}
+
+/// Read and parse the `daemon.json` of the daemon this caller may use, without
+/// checking that the daemon it names is alive.
 ///
 /// # Errors
 ///
 /// Fails with a [`DaemonIsElevated`] when [`read_handshake_file`] does, when
-/// the file cannot be read otherwise (`read <path>: …`), or when it is not a
-/// valid handshake (`parse handshake: …`).
+/// [`locate_daemon`] fails, when the file cannot be read otherwise
+/// (`read <path>: …`), or when it is not a valid handshake
+/// (`parse handshake: …`).
 pub fn read_handshake() -> anyhow::Result<DaemonHandshake> {
-    read_handshake_in(&config_dir()?)
+    read_handshake_in(&locate_daemon()?.config_dir)
 }
 
 /// [`read_handshake`] for the daemon whose config dir is `config_dir`.
@@ -258,30 +349,51 @@ fn classify_handshake_read(
     }
 }
 
-/// Remove the handshake file at `handshake` when no daemon holds the instance
-/// lock beside it, holding that lock during the removal. A lock that cannot
-/// be opened or checked counts as a live daemon, so nothing is removed on a
-/// guess.
-fn clear_if_no_daemon(handshake: &Path) -> StaleCheck {
+/// What the instance lock beside a `daemon.json` says.
+enum LockState {
+    /// A daemon holds it, or it could not be opened or checked, which counts as
+    /// held: nothing is removed or passed over on a guess.
+    Held,
+    /// No daemon holds it. The open lock file is carried when there was one, so
+    /// a caller can act on the handshake while holding it.
+    Free(Option<std::fs::File>),
+}
+
+/// Open `handshake`'s sibling instance lock without creating it and try to take
+/// it: held means a daemon is alive. A lock that cannot be opened or checked
+/// counts as held.
+fn instance_lock(handshake: &Path) -> LockState {
     let lock_path = handshake.with_file_name(INSTANCE_LOCK_FILE);
     let lock = match std::fs::File::open(&lock_path) {
         Ok(file) => Some(file),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => {
             tracing::warn!(lock = %lock_path.display(), %err, "could not open the instance lock; counting the daemon as live");
-            return StaleCheck::DaemonLive;
+            return LockState::Held;
         }
     };
     if let Some(file) = &lock {
         match file.try_lock() {
             Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return StaleCheck::DaemonLive,
+            Err(std::fs::TryLockError::WouldBlock) => return LockState::Held,
             Err(std::fs::TryLockError::Error(err)) => {
                 tracing::warn!(lock = %lock_path.display(), %err, "could not check the instance lock; counting the daemon as live");
-                return StaleCheck::DaemonLive;
+                return LockState::Held;
             }
         }
     }
+    LockState::Free(lock)
+}
+
+/// Remove the handshake file at `handshake` when no daemon holds the instance
+/// lock beside it, holding that lock during the removal. A lock that cannot
+/// be opened or checked counts as a live daemon, so nothing is removed on a
+/// guess.
+fn clear_if_no_daemon(handshake: &Path) -> StaleCheck {
+    let lock = match instance_lock(handshake) {
+        LockState::Held => return StaleCheck::DaemonLive,
+        LockState::Free(lock) => lock,
+    };
     let removed = match std::fs::remove_file(handshake) {
         Ok(()) => StaleCheck::Removed,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => StaleCheck::Removed,
@@ -344,9 +456,58 @@ pub fn client_identity_in(dir: &Path, id_file_name: &str) -> anyhow::Result<Clie
 #[cfg(windows)]
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
-/// Force-stop the running daemon: read `daemon.json`, have the listener on its
-/// port prove it holds its token, kill the process its pid names and remove
-/// the handshake file.
+/// Whether a caller of profile `caller` may stop a daemon whose process runs as
+/// `daemon`, or whose integrity could not be read (`Err`): a caller stops a
+/// daemon of its own integrity only, since supervision never crosses integrity.
+///
+/// The daemon's integrity is its process's, not its folder's: an elevated
+/// daemon an older release left in the ordinary profile is the caller's own
+/// integrity and may be stopped. An integrity that cannot be read is not
+/// proven to be the caller's own, so it counts as ordinary and an elevated
+/// caller is refused it, as it is an ordinary daemon, and sent to an ordinary
+/// terminal instead. An ordinary caller never reaches an elevated daemon's
+/// handshake at all ([`DaemonIsElevated`]).
+///
+/// # Errors
+///
+/// [`DaemonIsOrdinary`] when an elevated caller would stop an ordinary daemon
+/// or one whose integrity cannot be read.
+pub fn may_stop(caller: Profile, daemon: anyhow::Result<Profile>) -> Result<(), DaemonIsOrdinary> {
+    let daemon = daemon.unwrap_or_else(|err| {
+        tracing::warn!(
+            err = %format!("{err:#}"),
+            "could not read the daemon's integrity; treating it as ordinary"
+        );
+        Profile::Ordinary
+    });
+    if caller == Profile::Elevated && daemon == Profile::Ordinary {
+        return Err(DaemonIsOrdinary);
+    }
+    Ok(())
+}
+
+/// Refuse the stop of `located`'s daemon when this caller may not stop it
+/// ([`may_stop`]), judged by the integrity of the process its handshake names.
+///
+/// A missing or unparseable handshake is `Ok`: there is nothing to stop, and
+/// the stop reports that on its own no-daemon path.
+///
+/// # Errors
+///
+/// [`DaemonIsOrdinary`] as [`may_stop`] returns it.
+pub fn refuse_stop_across_integrity(
+    caller: Profile,
+    located: &LocatedDaemon,
+) -> Result<(), DaemonIsOrdinary> {
+    let Ok(handshake) = read_handshake_in(&located.config_dir) else {
+        return Ok(());
+    };
+    may_stop(caller, profile::profile_of_process(handshake.pid))
+}
+
+/// Force-stop the daemon this caller may use, if [`may_stop`] allows it: read
+/// `daemon.json`, have the listener on its port prove it holds its token, kill
+/// the process its pid names and remove the handshake file.
 ///
 /// On Windows the pid is pinned by a process handle before the proof and
 /// killed through that handle, so a pid reused by another process is never
@@ -358,15 +519,19 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 ///
 /// # Errors
 ///
-/// Fails when there is no handshake on disk or it cannot be read or parsed;
-/// on Windows only, when its pid is not running (the stale file is removed)
-/// or this client may not terminate it (nothing is stopped); when its
-/// listener does not prove it is the daemon (nothing is killed; the file is
-/// removed, except when the listener did not answer at all); or when the kill
-/// fails. The file is only ever removed while it still holds the token that
-/// was read.
+/// Fails with a [`DaemonIsOrdinary`] when an elevated caller locates a daemon
+/// whose process runs ordinary or whose integrity cannot be read
+/// ([`refuse_stop_across_integrity`]), or when [`locate_daemon`] does; fails when
+/// there is no handshake on disk or it cannot be read or parsed; on Windows
+/// only, when its pid is not running (the stale file is removed) or this
+/// client may not terminate it (nothing is stopped); when its listener does
+/// not prove it is the daemon (nothing is killed; the file is removed, except
+/// when the listener did not answer at all); or when the kill fails. The file
+/// is only ever removed while it still holds the token that was read.
 pub async fn stop() -> anyhow::Result<()> {
-    stop_in(&config_dir()?).await
+    let located = locate_daemon()?;
+    refuse_stop_across_integrity(profile::own_profile()?, &located)?;
+    stop_in(&located.config_dir).await
 }
 
 /// [`stop`] for the daemon whose config dir is `config_dir`.
@@ -635,15 +800,18 @@ fn names_no_file(err: &anyhow::Error) -> bool {
 )]
 mod tests {
     use super::{
-        DaemonIsElevated, HANDSHAKE_READ_ATTEMPTS, HANDSHAKE_READ_RETRY_DELAY, HandshakeFile,
-        INSTANCE_LOCK_FILE, Proof, Shutdown, StaleCheck, classify_handshake_read,
-        clear_if_no_daemon, client_identity, handshake_file_in,
+        DaemonIsElevated, DaemonIsOrdinary, HANDSHAKE_READ_ATTEMPTS, HANDSHAKE_READ_RETRY_DELAY,
+        HandshakeFile, INSTANCE_LOCK_FILE, LocatedDaemon, Proof, Shutdown, StaleCheck,
+        classify_handshake_read, clear_if_no_daemon, client_identity, handshake_file_in, locate_in,
+        may_stop,
     };
+    use crate::profile::Profile;
     use crate::test_fakes::{
         FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
     };
+    use anyhow::anyhow;
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
     use std::time::Duration;
     use uuid::Uuid;
@@ -1130,6 +1298,147 @@ mod tests {
         assert!(
             !handshake_file_in(&scratch.0).exists(),
             "the stale daemon.json survived"
+        );
+    }
+
+    fn located(profile: Profile, config_dir: &str) -> LocatedDaemon {
+        LocatedDaemon {
+            profile,
+            config_dir: PathBuf::from(config_dir),
+        }
+    }
+
+    fn is(dir: &Path, name: &str) -> bool {
+        dir == std::path::Path::new(name)
+    }
+
+    #[test]
+    fn locate_finds_the_ordinary_daemon_first_for_an_elevated_caller() {
+        let candidates = [
+            located(Profile::Ordinary, "ordinary"),
+            located(Profile::Elevated, "elevated"),
+        ];
+
+        let found = locate_in(
+            &candidates,
+            |dir| is(dir, "ordinary") || is(dir, "elevated"),
+            |dir| is(dir, "ordinary") || is(dir, "elevated"),
+        );
+
+        assert_eq!(found, Some(located(Profile::Ordinary, "ordinary")));
+    }
+
+    #[test]
+    fn locate_finds_the_elevated_daemon_when_no_ordinary_one_runs() {
+        let candidates = [
+            located(Profile::Ordinary, "ordinary"),
+            located(Profile::Elevated, "elevated"),
+        ];
+
+        let found = locate_in(
+            &candidates,
+            |dir| is(dir, "elevated"),
+            |dir| is(dir, "elevated"),
+        );
+
+        assert_eq!(found, Some(located(Profile::Elevated, "elevated")));
+    }
+
+    #[test]
+    fn locate_falls_back_to_the_callers_own_profile() {
+        let candidates = [
+            located(Profile::Ordinary, "ordinary"),
+            located(Profile::Elevated, "elevated"),
+        ];
+
+        let found = locate_in(&candidates, |_| false, |_| false);
+
+        assert_eq!(
+            found,
+            Some(located(Profile::Elevated, "elevated")),
+            "with no daemon running the caller names its own profile's folder"
+        );
+    }
+
+    #[test]
+    fn a_dead_ordinary_daemon_falls_through_to_the_elevated_profile() {
+        let candidates = [
+            located(Profile::Ordinary, "ordinary"),
+            located(Profile::Elevated, "elevated"),
+        ];
+
+        // Both folders hold a `daemon.json`, but only the elevated one's daemon
+        // holds its instance lock: the ordinary file is a crashed daemon's.
+        let found = locate_in(&candidates, |_| true, |dir| is(dir, "elevated"));
+
+        assert_eq!(found, Some(located(Profile::Elevated, "elevated")));
+    }
+
+    #[test]
+    fn an_ordinary_caller_locates_only_the_ordinary_profile() {
+        let candidates = [located(Profile::Ordinary, "ordinary")];
+        let looked_at = std::cell::RefCell::new(Vec::new());
+
+        let found = locate_in(
+            &candidates,
+            |dir| {
+                looked_at.borrow_mut().push(dir.to_path_buf());
+                false
+            },
+            |_| false,
+        );
+
+        assert_eq!(found, Some(located(Profile::Ordinary, "ordinary")));
+        assert!(
+            looked_at.borrow().is_empty(),
+            "its own profile is returned unprobed and no other profile is looked at"
+        );
+    }
+
+    #[test]
+    fn an_elevated_caller_may_not_stop_an_ordinary_daemon() {
+        let refusal = may_stop(Profile::Elevated, Ok(Profile::Ordinary))
+            .expect_err("an elevated caller must not stop an ordinary daemon");
+
+        assert_eq!(refusal, DaemonIsOrdinary);
+        assert_eq!(
+            refusal.to_string(),
+            "the running rustling-tulip daemon runs without administrator rights; \
+             stop it from an ordinary terminal with \"rustling-tulipd shutdown\""
+        );
+    }
+
+    #[test]
+    fn a_caller_may_stop_a_daemon_of_its_own_profile() {
+        assert_eq!(may_stop(Profile::Ordinary, Ok(Profile::Ordinary)), Ok(()));
+        assert_eq!(may_stop(Profile::Elevated, Ok(Profile::Elevated)), Ok(()));
+    }
+
+    #[test]
+    fn an_elevated_caller_may_stop_an_elevated_daemon_left_in_the_ordinary_folder() {
+        // The folder is the ordinary profile's, but the process runs at the
+        // caller's own integrity, as a daemon an older release left there does.
+        assert_eq!(may_stop(Profile::Elevated, Ok(Profile::Elevated)), Ok(()));
+    }
+
+    #[test]
+    fn an_unreadable_daemon_integrity_blocks_an_elevated_stop() {
+        let refusal = may_stop(
+            Profile::Elevated,
+            Err(anyhow!("reading process 4242's integrity: access denied")),
+        );
+
+        assert_eq!(
+            refusal,
+            Err(DaemonIsOrdinary),
+            "an integrity that cannot be read is not proven to be the caller's own"
+        );
+        assert_eq!(
+            may_stop(
+                Profile::Ordinary,
+                Err(anyhow!("reading process 4242's integrity: access denied"))
+            ),
+            Ok(())
         );
     }
 }

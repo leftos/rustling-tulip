@@ -5,11 +5,13 @@
 //! way a client does — the listener proves it holds the token before the bearer
 //! `/shutdown` is sent on that proven connection — and leaves every
 //! `rt-tracer.exe` alive, so the next daemon reattaches the user's sessions.
+//! The caller's integrity decides which daemon it reaches, and it never stops
+//! one of another integrity.
 
-use daemon_client::Shutdown;
+use daemon_client::profile::Profile;
+use daemon_client::{LocatedDaemon, Shutdown};
 use std::ffi::OsString;
 use std::io::Write;
-use std::path::Path;
 use std::time::Duration;
 
 /// The whole stop — reading the handshake, the proof, the shutdown request and
@@ -27,20 +29,32 @@ pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
     args.into_iter().next().is_some_and(|arg| arg == "shutdown")
 }
 
-/// Retire the daemon the config dir's `daemon.json` names, writing one line
-/// about what happened, and return the exit code for it: `0` when a daemon
-/// stopped, none was running or a stale `daemon.json` was removed, `3` when
-/// its listener did not prove it holds the token, and `1` when the stop
-/// failed. A success goes to `out`, a failure (exit `1` or `3`) to `err`.
+/// Retire the daemon `located` names, writing one line about what happened, and
+/// return the exit code for it: `0` when a daemon stopped, none was running or
+/// a stale `daemon.json` was removed, `3` when its listener did not prove it
+/// holds the token, and `1` when the stop failed or `caller`'s profile may not
+/// stop that daemon. A success goes to `out`, a failure (exit `1` or `3`) to
+/// `err`.
+///
+/// `caller` is this process's profile: an elevated caller is refused a daemon
+/// whose process runs ordinary, or whose integrity cannot be read
+/// ([`daemon_client::refuse_stop_across_integrity`]), since supervision never
+/// crosses integrity.
 ///
 /// # Errors
 ///
 /// Fails only when the line cannot be written.
 pub async fn run(
-    config_dir: &Path,
+    located: &LocatedDaemon,
+    caller: Profile,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> anyhow::Result<u8> {
+    if let Err(refusal) = daemon_client::refuse_stop_across_integrity(caller, located) {
+        writeln!(err, "could not stop the daemon: {refusal}")?;
+        return Ok(1);
+    }
+    let config_dir = &located.config_dir;
     match tokio::time::timeout(STOP_TIMEOUT, daemon_client::shutdown_in(config_dir)).await {
         Err(_) => {
             let secs = STOP_TIMEOUT.as_secs();
@@ -81,9 +95,26 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::server::test_support::ScratchDir;
+    use std::path::Path;
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    fn located_ordinary(dir: &Path) -> LocatedDaemon {
+        LocatedDaemon {
+            profile: Profile::Ordinary,
+            config_dir: dir.to_path_buf(),
+        }
+    }
+
+    /// A `daemon.json` in `dir` naming `pid`, which no process has.
+    fn write_handshake(dir: &Path, pid: u32) {
+        let json = format!(
+            r#"{{"protocol_version":1,"port":1,"auth_token":"test-token","pid":{pid},"supported_versions":[1],"build_version":""}}"#
+        );
+        std::fs::write(daemon_client::handshake_file_in(dir), json)
+            .expect("write the handshake file");
     }
 
     #[test]
@@ -101,15 +132,45 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
 
-        let code = run(dir.path(), &mut out, &mut err)
-            .await
-            .expect("the line is written");
+        let code = run(
+            &located_ordinary(dir.path()),
+            Profile::Ordinary,
+            &mut out,
+            &mut err,
+        )
+        .await
+        .expect("the line is written");
 
         assert_eq!(code, 0);
         assert!(err.is_empty(), "nothing failed");
         assert_eq!(
             String::from_utf8(out).expect("the line is UTF-8"),
             "no daemon is running\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_refuses_a_daemon_whose_integrity_cannot_be_read_from_an_elevated_caller() {
+        let dir = ScratchDir::new("cli-shutdown-unreadable-daemon");
+        write_handshake(dir.path(), u32::MAX);
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = run(
+            &located_ordinary(dir.path()),
+            Profile::Elevated,
+            &mut out,
+            &mut err,
+        )
+        .await
+        .expect("the line is written");
+
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "nothing succeeded");
+        assert_eq!(
+            String::from_utf8(err).expect("the line is UTF-8"),
+            "could not stop the daemon: the running rustling-tulip daemon runs without \
+             administrator rights; stop it from an ordinary terminal with \"rustling-tulipd \
+             shutdown\"\n"
         );
     }
 }

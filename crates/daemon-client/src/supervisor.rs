@@ -165,6 +165,24 @@ impl std::fmt::Display for OrdinaryDaemonIncompatible {
 
 impl std::error::Error for OrdinaryDaemonIncompatible {}
 
+/// The refusal an elevated caller gets when the daemon it located runs in the
+/// ordinary profile of its account: stopping it asks for no elevation, so the
+/// caller does not do it, and supervision never crosses integrity
+/// ([`crate::may_stop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonIsOrdinary;
+
+impl std::fmt::Display for DaemonIsOrdinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the running rustling-tulip daemon runs without administrator rights; stop it from an \
+             ordinary terminal with \"rustling-tulipd shutdown\"",
+        )
+    }
+}
+
+impl std::error::Error for DaemonIsOrdinary {}
+
 /// What an elevated caller does about the daemon it found in the ordinary
 /// profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -97,7 +97,8 @@ use tracing_subscriber::EnvFilter;
 const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(5);
 
 /// Run a subcommand that talks to the daemon as a client and must come before
-/// `Dirs::ensure`, answering its exit code, or `None` when none was asked for.
+/// `Dirs::ensure` — `bridge`, the session-driving verbs, `pair` and `screen` —
+/// answering its exit code, or `None` when none was asked for.
 async fn run_folderless_client_subcommand() -> anyhow::Result<Option<std::process::ExitCode>> {
     // `rustling-tulipd bridge` relays one SSH client's protocol lines between
     // stdio and the loopback listener, starting the daemon when none runs. It
@@ -122,6 +123,25 @@ async fn run_folderless_client_subcommand() -> anyhow::Result<Option<std::proces
         let args = std::env::args_os().skip(1);
         return Ok(Some(cli_drive::run_and_report(args).await));
     }
+    // `rustling-tulipd pair` prints a one-time device pairing code from the
+    // running daemon's loopback listener and exits: no instance lock, no log
+    // rotation and no binary-cache sweep, so it is safe beside a live daemon.
+    if cli_pair::requested(std::env::args_os().skip(1)) {
+        cli_pair::attach_parent_console();
+        let handshake_file = daemon_client::handshake_file()?;
+        cli_pair::run(&handshake_file, &mut std::io::stdout().lock()).await?;
+        return Ok(Some(std::process::ExitCode::SUCCESS));
+    }
+    // `rustling-tulipd screen <session id>` prints one session's screen and
+    // its rule trace from the running daemon, beside it like `pair`.
+    if cli_screen::requested(std::env::args_os().skip(1)) {
+        cli_pair::attach_parent_console();
+        let args = std::env::args_os().skip(2);
+        let handshake_file = daemon_client::handshake_file()?;
+        return Ok(Some(
+            cli_screen::run_and_report(&handshake_file, args).await,
+        ));
+    }
     Ok(None)
 }
 
@@ -137,8 +157,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // daemon it retires.
     if cli_shutdown::requested(std::env::args_os().skip(1)) {
         cli_pair::attach_parent_console();
+        let located = daemon_client::locate_daemon()?;
+        let caller = daemon_client::profile::own_profile()?;
         let code = cli_shutdown::run(
-            &daemon_client::config_dir()?,
+            &located,
+            caller,
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         )
@@ -149,21 +172,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         return Ok(code);
     }
     let dirs = paths::Dirs::ensure()?;
-    // `rustling-tulipd pair` prints a one-time device pairing code from the
-    // running daemon's loopback listener and exits: no instance lock, no log
-    // rotation and no binary-cache sweep, so it is safe beside a live daemon.
-    if cli_pair::requested(std::env::args_os().skip(1)) {
-        cli_pair::attach_parent_console();
-        cli_pair::run(&dirs.handshake_file, &mut std::io::stdout().lock()).await?;
-        return Ok(std::process::ExitCode::SUCCESS);
-    }
-    // `rustling-tulipd screen <session id>` prints one session's screen and
-    // its rule trace from the running daemon, beside it like `pair`.
-    if cli_screen::requested(std::env::args_os().skip(1)) {
-        cli_pair::attach_parent_console();
-        let args = std::env::args_os().skip(2);
-        return Ok(cli_screen::run_and_report(&dirs.handshake_file, args).await);
-    }
     // The login `Run` entry runs the installed exe with `--detach`: hand over
     // to a cached copy and exit, without taking the instance lock, the log or
     // the binary-cache sweep from a daemon that may already serve this config
