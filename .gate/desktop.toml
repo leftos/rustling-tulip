@@ -1,5 +1,7 @@
 patterns = [
     "cargo run --manifest-path Cargo.toml -p rustling-tulip-native --example shot*",
+    "pwsh -NoProfile -File rt.ps1 native-drive-check*",
+    "pwsh -NoProfile -File ./rt.ps1 native-drive-check*",
 ]
 session = [
     "pwsh -NoProfile -File rt.ps1 native-e2e*",

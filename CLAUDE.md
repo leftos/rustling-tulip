@@ -67,7 +67,8 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 native           # build daemon + tracer, then run the native client (extra args: a session id to focus)
 .\rt.ps1 native-e2e       # native client specs (e2e_live, e2e_recover, e2e_remote, e2e_ssh, e2e_multi_host) against a real daemon, built with the e2e-loopback-peers feature, isolated under .tmp/ (fake-claude, fake-tailscale and fake-ssh need node), as one gate call that .gate/desktop.toml's `session` patterns send to a builder's console session, whose Credential Manager the sealed-secret spec needs
 .\rt.ps1 native-e2e -Test e2e_ssh -Filter 'test(/reconnect/)'   # one or more spec files (comma-separated) and a nextest filterset, in the same routed gate call
-.\rt.ps1 native-smoke     # launch the native client exe in a cloaked, never-focused window; check it connects and takes keys, and (built with the driver feature) that the driver's posted pointer input acts
+.\rt.ps1 native-smoke     # launch the native client exe in a cloaked, never-focused window; check it connects and takes keys, and (built with the driver feature) that the driver's posted pointer input acts (leaves out the live no-focus check, `native-drive-check`)
+.\rt.ps1 native-drive-check   # only the live no-focus check: a scripted drive must leave the desktop's foreground window and cursor unchanged; the gate routes it to a builder's logged-on desktop, and run on this PC it refuses unless -HandsOff
 .\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, dashboard-compact, connections, connections-ssh, menu, update, chat, summary, themes, themes-edit, multi-host, spawn-hosts, settings-hosts, settings-sounds) in .tmp\shots\
 .\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against (needs NSIS 3; tools/installer/README.md)
 .\rt.ps1 help             # usage summary
@@ -115,7 +116,7 @@ Four rules keep agents' gate runs routable:
 - An environment variable a test needs goes with `--env NAME=value`, which carries it to a routed run, never `--local`.
 - `GATE_BOX_JOB` is the gate's to set: setting it by hand makes `rt.ps1` (`Test-UnderGate`) skip its own gating.
 
-`.gate/desktop.toml` declares the routed commands that need a builder's logged-on desktop (`patterns`: `native-shot`'s `cargo run … --example shot`, which opens a window), only its console session (`session`: `rt.ps1 native-e2e`, for the Credential Manager vault) or a hidden desktop of their own (`hidden`: `rt.ps1 native-smoke`, whose cloaked window never needs the logged-on one); the PC consents to each in the gate's `remote.json`.
+`.gate/desktop.toml` declares the routed commands that need a builder's logged-on desktop (`patterns`: `native-shot`'s `cargo run … --example shot`, which opens a window, and `rt.ps1 native-drive-check`, which reads the desktop's foreground window and cursor), only its console session (`session`: `rt.ps1 native-e2e`, for the Credential Manager vault) or a hidden desktop of their own (`hidden`: `rt.ps1 native-smoke`, whose cloaked window never needs the logged-on one); the PC consents to each in the gate's `remote.json`.
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>`, Read the PNG it writes to `.tmp\shots\`, and show the user before and after shots for any visual choice.
 

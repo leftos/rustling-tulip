@@ -1162,8 +1162,10 @@ mod driven {
     use rustling_tulip_native::SIDEBAR_DEFAULT_WIDTH;
     use rustling_tulip_native::driver_gate::DRIVER_ENV;
     use serde_json::{Value, json};
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    use windows::Win32::Foundation::{HWND, POINT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
+    };
 
     use super::{
         Client, LiveDaemon, OFFSCREEN_ENV, Smoke, assert_no_layout_chooser, assert_out_of_the_way,
@@ -1357,10 +1359,10 @@ mod driven {
         assert_out_of_the_way(smoke.hwnd);
     }
 
-    #[test]
-    #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
-    fn smoke_driver_drag_moves_the_sidebar_divider() {
-        let (smoke, mut driver) = open_driven("smoke-driver-drag");
+    /// Drags the sidebar divider by [`DRAG_BY`] and waits until it lands
+    /// where the drag aimed, within [`DRAG_SLACK`], the panes keeping their
+    /// minimum width.
+    fn drag_sidebar_divider(driver: &mut Driver) {
         let bounds = driver.element("sidebar-divider")["bounds"].clone();
         let x0 = number(&bounds["x"]);
         let centre = (
@@ -1394,6 +1396,13 @@ mod driven {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+    fn smoke_driver_drag_moves_the_sidebar_divider() {
+        let (smoke, mut driver) = open_driven("smoke-driver-drag");
+        drag_sidebar_divider(&mut driver);
         assert_out_of_the_way(smoke.hwnd);
     }
 
@@ -1407,6 +1416,55 @@ mod driven {
                 .parse()
                 .ok()
         })
+    }
+
+    /// The loop typed into a pane to fill its scrollback past the first
+    /// row it shows.
+    const SCROLLBACK_LOOP: &str = "for /l %i in (1,1,200) do @echo rt-%i-";
+
+    /// Types [`SCROLLBACK_LOOP`] into `pane` and waits until the prompt row
+    /// shows it; [`submit_scrollback_loop`] submits it.
+    fn type_scrollback_loop(driver: &mut Driver, pane: &str) {
+        driver.ok("type_text", &json!({"text": SCROLLBACK_LOOP}));
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": "do @echo rt-"}}),
+            "the typed loop in the pane",
+        );
+    }
+
+    /// Submits the loop [`type_scrollback_loop`] typed into `pane` and waits
+    /// for its last line, returning the `n` of the pane's first counted row:
+    /// the loop's output fills the pane, so it has scrolled past its first
+    /// line.
+    fn submit_scrollback_loop(driver: &mut Driver, pane: &str) -> u32 {
+        driver.ok("key", &json!({"keys": "enter"}));
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": "rt-200-"}}),
+            "the loop's last line",
+        );
+        let read = driver.ok("pane_text", &json!({"pane": pane}));
+        let first = first_counted_row(&read["lines"])
+            .ok_or_else(|| format!("no rt-<n>- row in the pane: {}", read["text"]))
+            .expect("the loop's output fills the pane");
+        assert!(
+            first > 1,
+            "the pane shows the loop's first line: {}",
+            read["text"]
+        );
+        first
+    }
+
+    /// Turns the wheel three notches up over `pane` and waits for the row
+    /// above the pane's first, which was `first`.
+    fn wheel_pane_up(driver: &mut Driver, pane: &str, first: u32) {
+        driver.ok(
+            "wheel",
+            &json!({"element": format!("pane-grid-{pane}"), "notches": 3}),
+        );
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": format!("rt-{}-", first - 1)}}),
+            "the row above the pane's first after three notches up",
+        );
     }
 
     #[test]
@@ -1434,34 +1492,9 @@ mod driven {
             &json!({"pane_text": {"pane": pane, "contains": dir}}),
             "the shell's prompt",
         );
-        driver.ok(
-            "type_text",
-            &json!({"text": "for /l %i in (1,1,200) do @echo rt-%i-"}),
-        );
-        driver.ok("key", &json!({"keys": "enter"}));
-        driver.wait(
-            &json!({"pane_text": {"pane": pane, "contains": "rt-200-"}}),
-            "the loop's last line",
-        );
-        let read = driver.ok("pane_text", &json!({"pane": pane}));
-        let first = first_counted_row(&read["lines"])
-            .ok_or_else(|| format!("no rt-<n>- row in the pane: {}", read["text"]))
-            .expect("the loop's output fills the pane");
-        assert!(
-            first > 1,
-            "the pane shows the loop's first line: {}",
-            read["text"]
-        );
-
-        driver.ok(
-            "wheel",
-            &json!({"element": format!("pane-grid-{pane}"), "notches": 3}),
-        );
-
-        driver.wait(
-            &json!({"pane_text": {"pane": pane, "contains": format!("rt-{}-", first - 1)}}),
-            "the row above the pane's first after three notches up",
-        );
+        type_scrollback_loop(&mut driver, &pane);
+        let first = submit_scrollback_loop(&mut driver, &pane);
+        wheel_pane_up(&mut driver, &pane, first);
         assert_out_of_the_way(smoke.hwnd);
     }
 
@@ -1479,5 +1512,106 @@ mod driven {
             "the session row's menu",
         );
         assert_out_of_the_way(smoke.hwnd);
+    }
+
+    /// The input state of the desktop a run sits on, which a driven run must
+    /// never move: its foreground window and its cursor position.
+    #[derive(Debug, PartialEq, Eq)]
+    struct DesktopInput {
+        foreground: HWND,
+        cursor: (i32, i32),
+    }
+
+    impl DesktopInput {
+        fn read() -> Self {
+            // SAFETY: a plain query.
+            let foreground = unsafe { GetForegroundWindow() };
+            let mut cursor = POINT::default();
+            // SAFETY: an out-pointer to a local.
+            unsafe { GetCursorPos(&raw mut cursor) }.expect("read the cursor position");
+            Self {
+                foreground,
+                cursor: (cursor.x, cursor.y),
+            }
+        }
+    }
+
+    /// The desktop's foreground window and cursor are still `before`'s after
+    /// `step`, and the client's window is still out of the way.
+    fn assert_unmoved(before: &DesktopInput, hwnd: HWND, step: &str) {
+        let now = DesktopInput::read();
+        assert_eq!(
+            &now, before,
+            "the drive's {step} moved the desktop: before the drive {before:?}, after the step {now:?}"
+        );
+        assert_out_of_the_way(hwnd);
+    }
+
+    #[test]
+    #[ignore = "live: run via .\\rt.ps1 native-drive-check"]
+    fn live_drive_leaves_the_foreground_and_cursor_alone() {
+        let before = DesktopInput::read();
+        assert!(
+            !before.foreground.is_invalid(),
+            "no foreground window to compare against; run this on a logged-on desktop \
+             (rt.ps1 native-drive-check routes there)"
+        );
+        let (smoke, mut driver) = open_driven("live-drive-check");
+        assert_unmoved(&before, smoke.hwnd, "launch");
+
+        driver.element("activity-source-control");
+        driver.ok("click", &json!({"element": "activity-source-control"}));
+        wait_source_control_active(smoke.hwnd, "the driver's click on activity-source-control");
+        assert_unmoved(&before, smoke.hwnd, "click on activity-source-control");
+
+        let pane = driver.ok("state", &json!({}))["panes"][0]["id"]
+            .as_str()
+            .expect("the shell's pane")
+            .to_owned();
+        driver.ok(
+            "action",
+            &json!({"name": "focus_pane", "args": {"id": pane}}),
+        );
+        // The prompt names the scratch dir: once the pane shows it, the pane
+        // has attached its session and takes keys.
+        let dir = smoke
+            .daemon
+            .dir()
+            .file_name()
+            .expect("the scratch dir's name")
+            .to_string_lossy()
+            .into_owned();
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": dir}}),
+            "the shell's prompt",
+        );
+        driver.ok("type_text", &json!({"text": "echo rt-live-drive"}));
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": "rt-live-drive"}}),
+            "the typed text in the pane",
+        );
+        assert_unmoved(&before, smoke.hwnd, "type_text into the focused pane");
+
+        // Submit the typed line so the loop below starts on a clean prompt:
+        // its output row, not the typed command, is what shows it ran.
+        driver.ok("key", &json!({"keys": "enter"}));
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": "\nrt-live-drive\n"}}),
+            "the echo's output row",
+        );
+        assert_unmoved(&before, smoke.hwnd, "submit of the typed line");
+
+        drag_sidebar_divider(&mut driver);
+        assert_unmoved(&before, smoke.hwnd, "drag of the sidebar divider");
+
+        type_scrollback_loop(&mut driver, &pane);
+        assert_unmoved(&before, smoke.hwnd, "type_text of the loop into the pane");
+        let first = submit_scrollback_loop(&mut driver, &pane);
+        assert_unmoved(&before, smoke.hwnd, "submit of the loop");
+        wheel_pane_up(&mut driver, &pane, first);
+        assert_unmoved(&before, smoke.hwnd, "wheel over the pane");
+
+        driver.ok("screenshot", &json!({}));
+        assert_unmoved(&before, smoke.hwnd, "screenshot");
     }
 }

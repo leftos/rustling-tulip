@@ -1,0 +1,257 @@
+{
+  "rules": {
+    "arm-before-start": {
+      "declined": "a driven run is only ever launched isolated by rt-driver-mcp; joining a client started without RUSTLING_TULIP_DRIVER is excluded by design, so the owner's own client never carries the endpoint",
+      "user": "745a7a52d6a1cad1"
+    },
+    "backing-store-ratio": {
+      "declined": "no webview or canvas: gpui draws the window natively",
+      "user": "c926ca623a872aa1"
+    },
+    "build-before-launch": {
+      "repo": "f22bc7ca87f982b8",
+      "user": "b379c34bac572167"
+    },
+    "cancel-timed-out-requests": {
+      "repo": "2c86460539177bda",
+      "user": "15f5c78d07fecc84"
+    },
+    "check-action-effects": {
+      "repo": "de3bb523350bb3b0",
+      "user": "8b932e230120198d"
+    },
+    "coded-errors-never-throw": {
+      "repo": "e42e8fafebfc01b5",
+      "user": "4db7422a30f223f1"
+    },
+    "design-names-hook-surface": {
+      "repo": "78659a239b9a5b0a",
+      "user": "b59f296c1d742674"
+    },
+    "dev-flag-gates-hook": {
+      "repo": "1251257c32bc77c2",
+      "user": "b96675d8e49a867d"
+    },
+    "discovery-file-per-pid": {
+      "repo": "4e8504b268bcd42c",
+      "user": "5703da5682eac4dc"
+    },
+    "drive-owned-app-in-process": {
+      "repo": "e17cc2b0f186edaa",
+      "user": "251b272a6a8d0e5b"
+    },
+    "emulation-per-call": {
+      "declined": "no webview, so no CDP emulation",
+      "user": "3555c3f5e23d3374"
+    },
+    "error-feed-on-results": {
+      "repo": "34d2c10d3f0c6c28",
+      "user": "779511c62a903798"
+    },
+    "evaluate-returns-plain-values": {
+      "declined": "no webview or Playwright evaluate; the endpoint answers plain JSON over a pipe",
+      "user": "86f56e3be3b1aa32"
+    },
+    "fenced-hook-for-third-party-app": {
+      "declined": "rt owns the app it drives; there is no third-party app to fence",
+      "user": "b80e08d4e363fb72"
+    },
+    "fixed-tool-surface": {
+      "repo": "b644f7b13de89284",
+      "user": "b7e1581f0b353737"
+    },
+    "force-conditions-dev-panel": {
+      "repo": "466b58ae975018c4",
+      "user": "5bab8a6ad2cb8c99"
+    },
+    "friction-log-per-session": {
+      "repo": "49180dfc021f96c3",
+      "user": "66b5cb9c7a3cbc98"
+    },
+    "hook-dials-in-token": {
+      "declined": "the app hosts the endpoint and advertises it by a per-pid discovery file (discovery-file-per-pid), so the server dials in",
+      "user": "ea51e654378037b4"
+    },
+    "hook-over-scraping": {
+      "repo": "b7c2a2680c286552",
+      "user": "6089a9a2245a7544"
+    },
+    "hook-throws-when-unready": {
+      "repo": "38639c49f64b2528",
+      "user": "5be1f004c3b9e682"
+    },
+    "inject-never-commit": {
+      "declined": "the hook is compiled in behind the driver Cargo feature and switched on by RUSTLING_TULIP_DRIVER; nothing is injected per run",
+      "user": "62742adcba8347c6"
+    },
+    "install-owner-cleanup-own": {
+      "repo": "a72f37bc34de86b1",
+      "user": "3a775768199ca968"
+    },
+    "launch-isolated-lifecycle": {
+      "repo": "98ce450711982ccc",
+      "user": "62499bb81d1253b2"
+    },
+    "load-adjusted-timeouts": {
+      "repo": "c370bb64c28d475b",
+      "user": "45cd99cd2da27dd7"
+    },
+    "mark-injected-input": {
+      "declined": "Godot engine rule: device marks and a per-frame re-pick; posted messages carry no device mark gpui reads, and a cloaked never-activated window gets no real pointer input",
+      "user": "77bc05c4065fa83d"
+    },
+    "merge-inherited-webview-args": {
+      "declined": "no webview",
+      "user": "f5d059f2475ecb67"
+    },
+    "name-out-of-reach-ui": {
+      "repo": "c0445ef880aaf0a6",
+      "user": "9d5aac881fd43a0c"
+    },
+    "never-block-main-thread": {
+      "repo": "2d213053e284b162",
+      "user": "dcf14eb79d22e855"
+    },
+    "no-default-session": {
+      "repo": "4ccd6404970fc499",
+      "user": "ac1efb7959c65ea8"
+    },
+    "one-coordinate-space": {
+      "repo": "66496d32d642566c",
+      "user": "55d55375dbbace2e"
+    },
+    "one-env-switch": {
+      "repo": "e48b2d6308e62934",
+      "user": "5bfa4f85ef0398a7"
+    },
+    "one-gate-source-pinned": {
+      "repo": "2686759d2fea33a1",
+      "user": "8d4921b6c4fad4d3"
+    },
+    "one-id-registry": {
+      "repo": "ce2a84636b3cee60",
+      "user": "736abd48b579b02c"
+    },
+    "one-typed-window-global": {
+      "declined": "a webview window global reached by CDP evaluate; rt has no webview and its endpoint is a typed line protocol",
+      "user": "3dfce1bce3dba534"
+    },
+    "opt-in-by-name": {
+      "repo": "89a2a1de440b922d",
+      "user": "2b1f0d8d66993f51"
+    },
+    "own-launched-processes": {
+      "repo": "779599b4af6dc68f",
+      "user": "277bfa914d066981"
+    },
+    "posted-input-hygiene": {
+      "repo": "05605d2bdca5783a",
+      "user": "cf2273232c8a49b5"
+    },
+    "queue-file-answers": {
+      "repo": "de015e622aa5c1e1",
+      "user": "ebfaa4da3ea3e159"
+    },
+    "quiet-by-default": {
+      "repo": "f978dbf0888f718f",
+      "user": "818b37ebe7468676"
+    },
+    "real-app-over-frontend-only": {
+      "repo": "18adcacdd9ed80d3",
+      "user": "8454655860f455c9"
+    },
+    "real-devices-leak-in": {
+      "declined": "gamepad device ids; the client takes no gamepad input",
+      "user": "61bf56170dd34fe5"
+    },
+    "record-and-replay": {
+      "declined": "recording is not built and not planned in this step; the fixed-rate movie writer is a Godot engine feature",
+      "user": "12d9eb759d0c9de8"
+    },
+    "record-steady-never-minimize": {
+      "declined": "WGC window recording is not built and not planned in this step",
+      "user": "cb214e1ee0ff9370"
+    },
+    "recording-shellout-hardening": {
+      "declined": "recording is not built and not planned in this step; no ffmpeg shell-out",
+      "user": "b41a90509ac30655"
+    },
+    "refcount-shared-hook": {
+      "declined": "no shared hook file: the hook is compiled in and each driven client has its own pipe",
+      "user": "1380569a931c7157"
+    },
+    "refusals-name-the-fix": {
+      "repo": "91e022592cabd034",
+      "user": "c4299125d17cfe84"
+    },
+    "refuse-before-pressing": {
+      "repo": "9b7d903a9f8b9ae5",
+      "user": "31a82a3b4c886604"
+    },
+    "run-server-from-copy": {
+      "repo": "5a68802ebb00f61f",
+      "user": "536b0d47d02cc286"
+    },
+    "say-hands-off-first": {
+      "repo": "7050e76e14681d71",
+      "user": "4c60944bbcac704d"
+    },
+    "semantic-click-first": {
+      "repo": "6411586fb2ee5a14",
+      "user": "08c21b44dbbdf1ea"
+    },
+    "shared-wire-types": {
+      "repo": "13adbf2a9142e866",
+      "user": "bde79d8f19cf9508"
+    },
+    "stdio-protocol-only": {
+      "repo": "1efb0c97d761dac8",
+      "user": "dbd4a268b509a2fd"
+    },
+    "test-against-real-host": {
+      "repo": "76db4db57d575b85",
+      "user": "c8e911bb5647b3c2"
+    },
+    "test-server-over-stdio": {
+      "repo": "7a310762a71f5384",
+      "user": "8c8df5532748dcfb"
+    },
+    "transport-sole-stream-disposer": {
+      "declined": "a .NET NamedPipeServerStream rule on Unix; rt has no .NET host and its pipe is Windows-only",
+      "user": "abda32b30dc2e4b1"
+    },
+    "ui-post-with-request-token": {
+      "repo": "a36d5f21db4d2d68",
+      "user": "d6b8e2f928716062"
+    },
+    "unified-log-tail": {
+      "repo": "feba34ac93a633fa",
+      "user": "c3f49d783eac66ac"
+    },
+    "verify-foreground-before-real": {
+      "declined": "the driver never sends real input (SendInput): pointer input is posted to its own window and keys are dispatched in process",
+      "user": "e60071112c854833"
+    },
+    "verify-writes-read-back": {
+      "declined": "Godot engine property conversions; the endpoint has no generic property write, state changes go through named actions",
+      "user": "9775496f794e1b4d"
+    },
+    "wait-after-heavy-transition": {
+      "repo": "7366e45af38ff50f",
+      "user": "f211fee3057bfaec"
+    },
+    "wait-for-conditions": {
+      "repo": "e91ceedb80ec707f",
+      "user": "5ba0317410bb3123"
+    },
+    "waits-bounded-outcome-as-data": {
+      "repo": "1c72cfa32ef336fb",
+      "user": "c375cca2a2c76a41"
+    },
+    "what-capture-misses": {
+      "repo": "57277a931438cee4",
+      "user": "e8eee86351ab5f92"
+    }
+  },
+  "user_revision": 18
+}

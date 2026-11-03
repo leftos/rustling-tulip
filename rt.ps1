@@ -56,7 +56,15 @@
                  OS smoke specs (`smoke_window`, `--run-ignored only`): the
                  real client binary in a cloaked window that never
                  takes focus; checks it connects and that posted keys
-                 reach the shell.
+                 reach the shell. Leaves out the live drive check.
+      native-drive-check
+                 Build the daemon and tracer, then run only the live drive
+                 check of `smoke_window` (`test(/live_drive_/)`, with the
+                 `driver` feature): a scripted drive of the cloaked client
+                 must leave the desktop's foreground window and cursor where
+                 they were. .gate/desktop.toml routes it to a builder's
+                 logged-on desktop; run on this PC it refuses without
+                 -HandsOff.
       native-shot
                  Write a PNG of the native client's window showing one view
                  (`main`, `main-compact`, `source-control`, `diff`, `settings`,
@@ -102,6 +110,11 @@
     central entry) for every native source and test file, and that its
     filters name real nextest binaries and modules.
 
+.PARAMETER HandsOff
+    Applies to `native-drive-check`: lets the check run on this PC, whose
+    foreground it takes for a few seconds. Pass it only once you have stopped
+    using the mouse and keyboard.
+
 .EXAMPLE
     .\rt.ps1                       # = .\rt.ps1 launch
     .\rt.ps1 build -Release
@@ -122,7 +135,7 @@
     Justification = 'Top-level params consumed by sub-functions via $script: scope.')]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('', 'build', 'launch', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'native-e2e', 'native-smoke', 'native-shot', 'installer', 'help')]
+    [ValidateSet('', 'build', 'launch', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'native-e2e', 'native-smoke', 'native-drive-check', 'native-shot', 'installer', 'help')]
     [string]$Command = '',
 
     [switch]$Release,
@@ -149,6 +162,10 @@ param(
     # `native-e2e`: a nextest filterset narrowing the specs (passed as `-E`).
     [string]$Filter,
 
+    # `native-drive-check`: the owner has stopped using this PC's mouse and
+    # keyboard, so the check may run here.
+    [switch]$HandsOff,
+
     # Extra arguments forwarded to the underlying tool (e.g. `cargo nextest
     # run` filters). Only meaningful for `launch`, `restart`, `test`, `clippy`,
     # `fmt`, `native`, `native-shot` (the view).
@@ -162,6 +179,9 @@ $ErrorActionPreference = 'Stop'
 # verb these would swallow arguments meant for cargo or nextest.
 if ($Command -ne 'native-e2e' -and ($PSBoundParameters.ContainsKey('Test') -or $PSBoundParameters.ContainsKey('Filter'))) {
     throw '-Test and -Filter apply to native-e2e only; pass cargo''s features as --features <list>.'
+}
+if ($HandsOff -and $Command -ne 'native-drive-check') {
+    throw '-HandsOff applies to native-drive-check only.'
 }
 
 # ---------------------------------------------------------------------------
@@ -1058,12 +1078,14 @@ function Invoke-Native {
 #
 # -Features names the native client's Cargo features to build the specs
 # with: native-smoke passes driver, so its driven specs can open the client's
-# driver endpoint.
-function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name, [string]$Features) {
+# driver endpoint. -Filter is a nextest filterset narrowing the specs, passed
+# as `-E`; the re-entry runs the same verb, which passes the same filter.
+function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name, [string]$Features, [string]$Filter) {
     Assert-Nextest
     if (-not (Test-UnderGate)) {
         $reentry = @('pwsh', '-NoProfile', '-File', $PSCommandPath, $Verb)
         if ($Release) { $reentry += '-Release' }
+        if ($HandsOff) { $reentry += '-HandsOff' }
         Invoke-Gated -Slot $Slot -Name $Name -Command $reentry
         exit $LASTEXITCODE
     }
@@ -1077,6 +1099,7 @@ function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slo
         '-p', 'rustling-tulip-native', '--cargo-profile', $cargoProfile, '--run-ignored', 'only'
     ) + $targets
     if ($Features) { $specArgs += @('--features', $Features) }
+    if ($Filter) { $specArgs += @('-E', $Filter) }
     Invoke-Gated -Slot $Slot -Name $Name -Command $specArgs
     Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($names)"
 }
@@ -1133,7 +1156,22 @@ function Get-E2eTestFile {
     return $names
 }
 
-function Invoke-NativeSmoke { Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke -Features driver }
+function Invoke-NativeSmoke {
+    Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke -Features driver -Filter 'not test(/live_drive_/)'
+}
+
+# The live drive check reads the foreground window and cursor of the desktop
+# it runs on, so it is worth something only on a logged-on desktop with real
+# input state: .gate/desktop.toml `patterns` routes it to a builder's. Whether
+# the gate routes it is known only once the run has started, so the refusal
+# sits on this verb's run under the gate: a run on this PC (no GATE_BOX_JOB,
+# which only a builder sets) refuses before anything builds, unless -HandsOff.
+function Invoke-NativeDriveCheck {
+    if ((Test-UnderGate) -and -not $env:GATE_BOX_JOB -and -not $HandsOff) {
+        throw 'native-drive-check takes the foreground of this desktop for a few seconds; pass -HandsOff once you have stopped using the mouse and keyboard, or let the gate route it to a builder'
+    }
+    Invoke-NativeSpecFile -Verb native-drive-check -TestFiles 'smoke_window' -Slot light -Name drive-check -Features driver -Filter 'test(/live_drive_/)'
+}
 
 # Writes a PNG of the native client's window showing one view, over a fake
 # daemon with fixed content (apps/native/examples/shot.rs). No daemon starts,
@@ -1212,7 +1250,15 @@ Commands:
   native-smoke
              Build daemon + tracer, then run the native client's OS smoke
              specs in a cloaked window that never takes focus; checks it
-             connects and that posted keys reach the shell.
+             connects and that posted keys reach the shell. Leaves out
+             the live drive check.
+  native-drive-check [-HandsOff]
+             Build daemon + tracer, then run only the live drive check: a
+             scripted drive of the cloaked client must leave the desktop's
+             foreground window and cursor where they were. The gate routes
+             it to a builder's logged-on desktop; run on this PC it
+             refuses unless -HandsOff says you have stopped using the
+             mouse and keyboard.
   native-shot [<view>] [<out.png>] [-Out <path>]
              Write a PNG of the native client's window showing <view>
              (main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer,
@@ -1246,6 +1292,7 @@ Flags:
   -Validate          test: check tools/test-map.json.
   -Test <files>      native-e2e: the spec files to run (comma-separated).
   -Filter <set>      native-e2e: a nextest filterset (`-E`).
+  -HandsOff          native-drive-check: let it run on this PC.
 
 Examples:
   .\rt.ps1                       # build + run the native client
@@ -1278,6 +1325,7 @@ switch ($effective) {
     'native'    { Invoke-Native }
     'native-e2e'   { Invoke-NativeE2e }
     'native-smoke' { Invoke-NativeSmoke }
+    'native-drive-check' { Invoke-NativeDriveCheck }
     'native-shot'  { Invoke-NativeShot }
     'installer'    { Invoke-Installer }
     'help'      { Show-Help }
