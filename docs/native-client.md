@@ -917,6 +917,10 @@ Three tiers, all Rust tests:
 
   Posted key-downs are not ordered like a real keyboard (Space and Enter are sent at key-down while letters arrive later as `WM_CHAR`), so a stalled UI thread let them overtake queued letters. Every wait in the spec is a 120 s hang guard, never a timing assumption.
 
+  A script that posts clicks takes each point as two scalar parameters (`-X`, `-Y`), or as an array declared `[ValidateCount(2,2)]`, and refuses a point outside the window's `GetClientRect`: `pwsh -File` passes `150,108` to an `[int[]]` parameter as one string, which once put a click at x=19036. `smoke_posted_click_on_the_rail_switches_the_panel` guards that a posted click on the cloaked window acts.
+
+  A posted move is followed at once by `WM_MOUSELEAVE` (gpui's Windows event loop), so UI shown only while the pointer is over the window, such as the sidebar's hover controls, never shows under posted input; specs set it in process with `RootView::set_window_hover_override`.
+
   `smoke_keys_posted_while_the_client_stalls_reach_the_shell_in_order` suspends the client's UI thread (`SuspendThread`) right after the `o` of `echo` is posted, so the Space after it must wait for the thaw, which reproduces a load-only fault without a CPU burn.
 
   Pixels are read with `PrintWindow(PW_RENDERFULLCONTENT)` from the threaded show and probed for known UI colours and for a change in the pane after typing; the spec checks the window is still cloaked and not foreground after each capture. `smoke_window_has_noactivate_and_sits_below_foreground` checks the extended style and that the foreground window is above the smoke window in the Z order.

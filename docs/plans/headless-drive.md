@@ -85,7 +85,7 @@ Tradeoff summary: A costs a feature-gated crate surface and a maintained method 
 
 1. **S1 Cloak hardening + isolation guard** (done). Files: `apps/native/src/offscreen.rs`, `apps/native/tests/smoke_window.rs`, `crates/daemon-client/src/isolation.rs`. The window gets `WS_EX_NOACTIVATE` and the bottom of the Z order, the process exits with code 3 if the cloak fails (also for the `shot` and `diff_bench` examples), and `daemon_client::isolation::check_isolated` refuses unless the three dirs are each absolute with a `.tmp` folder strictly above them; nothing calls it until the driver endpoint (S3).
 
-   Tests: unit tests `isolated_env_refuses_a_dir_outside_tmp` and its siblings in `isolation.rs`, and the smoke spec `smoke_window_has_noactivate_and_sits_below_foreground` (windows-only, `#[ignore]`, run by `native-smoke`, which now runs four specs).
+   Tests: unit tests `isolated_env_refuses_a_dir_outside_tmp` and its siblings in `isolation.rs`, and the smoke spec `smoke_window_has_noactivate_and_sits_below_foreground` (windows-only, `#[ignore]`, run by `native-smoke`).
 2. **S2 Scripted drive-and-capture (RT-316 core) without an endpoint**. Files: new `apps/native/examples/drive.rs` (or a `shot.rs` mode) + `rt.ps1` verb `native-drive`; steps JSON `{key|click|type|wait_state|shot}`; for state waits, reuse `RootView` accessors (fake-daemon mode, `with_transport`).
 
    Red-first test: `drive_script_parses_and_rejects_unknown_step` and `drive_waits_on_state_not_sleep` (unit tests in the example, like `shot.rs` tests at :1333). Add views for the exited overlay, abandoned overlay and empty main area to `shot.rs` (RT-316 first ask) with `every_view_has_a_fixture` extended.

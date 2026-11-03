@@ -27,7 +27,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use protocol::{ClientMessage, InitLayoutKind};
 use rustling_tulip_native::palette::{ACCENT, PANEL_BG, SUNKEN};
 use rustling_tulip_native::{
-    DIVIDER_WIDTH, FOOTER_HEIGHT, NATIVE_PROTOCOL_VERSIONS, RAIL_WIDTH, SIDEBAR_DEFAULT_WIDTH,
+    DIVIDER_WIDTH, FOOTER_HEIGHT, NATIVE_PROTOCOL_VERSIONS, RAIL_ITEM_HEIGHT, RAIL_WIDTH,
+    SIDEBAR_DEFAULT_WIDTH,
 };
 use serde_json::Value;
 use support::live::{LiveDaemon, kill_tree, spawn_shell};
@@ -848,7 +849,16 @@ impl Frame {
     /// [`SUNKEN`], close to the all-black capture the other probes guard
     /// against, so only the coral bar proves the rail painted.
     fn rail_bar_seen(&self, scale: f32) -> bool {
-        (physical(RAIL_BAR_TOP, scale)..physical(RAIL_BAR_BOTTOM, scale))
+        self.rail_bar_seen_at(0, scale)
+    }
+
+    /// Whether the rail's button at `item`, counting from the top, shows its
+    /// active bar: some pixel of that button's bar strip reads [`ACCENT`].
+    fn rail_bar_seen_at(&self, item: usize, scale: f32) -> bool {
+        let item = f32::from(u16::try_from(item).expect("a rail item index"));
+        let top = physical(item * RAIL_ITEM_HEIGHT + RAIL_BAR_TOP, scale);
+        let bottom = physical(item * RAIL_ITEM_HEIGHT + RAIL_BAR_BOTTOM, scale);
+        (top..bottom)
             .any(|y| (0..physical(RAIL_BAR_WIDTH, scale)).any(|x| self.rgb((x, y)) == ACCENT))
     }
 
@@ -1086,4 +1096,43 @@ fn smoke_keys_posted_while_the_client_stalls_reach_the_shell_in_order() {
         "no {MARKER:?} line within {KEYS_TIMEOUT:?}: keys posted while the client stalled reached \
          the shell out of order"
     );
+}
+
+#[test]
+#[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+fn smoke_posted_click_on_the_rail_switches_the_panel() {
+    let smoke = open("smoke-click");
+    let hwnd = smoke.hwnd;
+    wait_connected(&smoke);
+    wait_painted(hwnd);
+    assert_no_layout_chooser(&smoke);
+    let scale = scale(hwnd);
+    // The rail stacks Sessions, Needs You and Source control from its top with
+    // no gap, so the third button's middle is two and a half items down.
+    let at = (
+        physical(RAIL_WIDTH / 2.0, scale),
+        physical(RAIL_ITEM_HEIGHT * 2.5, scale),
+    );
+    click_at(hwnd, at);
+    let deadline = Instant::now() + PAINT_TIMEOUT;
+    loop {
+        let frame = capture(hwnd);
+        let (third, first) = (
+            frame.rail_bar_seen_at(2, scale),
+            frame.rail_bar_seen_at(0, scale),
+        );
+        if third && !first {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the posted click at {at:?} (scale {scale}) did not move the rail's active bar within \
+             {PAINT_TIMEOUT:?}: Source control's strip shows {} and Sessions' strip shows {} (the \
+             active bar is the {ACCENT:06x} accent)",
+            if third { "the accent" } else { "no accent" },
+            if first { "the accent" } else { "no accent" },
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_out_of_the_way(smoke.hwnd);
 }
