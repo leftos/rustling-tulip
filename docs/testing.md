@@ -34,6 +34,14 @@ The native client has three test tiers, and the driver MCP server has a live spe
 
 The driver MCP server's other specs (`tools/rt-driver-mcp/tests/server.rs`) run in the normal nextest run. Its live spec, `driver_mcp_launch_ping_screenshot_stop`, is `#[ignore]`d: it launches a real driven client and needs the daemon, tracer and driver client built in test-release. `tools/rt-driver-mcp/live-check.ps1` builds them and runs the ignored specs, so run it as one gate job with `--slot heavy`, since it builds: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/<name>.log --timeout 3600 --slot heavy -- pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1`.
 
+## Driving the daemon's CLI from a script
+
+`rustling-tulipd` is a GUI-subsystem program: PowerShell's `&` does not wait for it and loses its output, and a redirect from `cmd` under a non-interactive SSH session lost it too. A script that runs its verbs starts it with `System.Diagnostics.ProcessStartInfo` and redirected standard output and error, then reads both and the exit code.
+
+A daemon a verb starts directly can hold a remote SSH command's channel open, so a script that starts one over SSH redirects the remote command's own output and wraps the local `ssh` in a timeout.
+
+Measuring an elevated daemon against an ordinary one on a builder needs the real ordinary profile: under a `RUSTLING_TULIP_CONFIG_DIR` override both profiles resolve to one folder. With no daemon running, rename the real ordinary config folder aside, set `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to scratch folders and `RUSTLING_TULIP_CLAUDE` to a path that does not exist, and rename the folder back afterwards. An SSH logon of an administrator is High; a Medium process comes from a scheduled task with `-LogonType Interactive -RunLevel Limited` while the console session is logged on, and a daemon such a task starts comes through the WMI launch, since the task's job refuses breakaway.
+
 ## Looking at a UI change
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path (it draws Nord, the default theme; the UI specs pin Contrast in the harness). Read the PNG, and show the user before and after shots for any visual choice.

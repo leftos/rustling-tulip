@@ -28,7 +28,7 @@ Measured on the builder: a Medium process of the account read an elevated daemon
 - [x] P2 The door: a High no-read-up label on an elevated daemon's `daemon.json`; a fail-closed integrity check on each connection to an elevated daemon (`/ws`, `/shutdown`, `/hook`) ; and `ensure_running` treating an unreadable handshake as a typed refusal that names how to reach that daemon, never as "no daemon".
 - [x] P1 Protected profile: the protected root and its checks, the profile paths and Credential Manager naming, callers by integrity (`ensure_running` and the CLI verbs), and one locator, `daemon_client::locate_daemon`, that finds the daemon file a caller reads.
 - [x] P3 Tracer pipe descriptors and the server-pid check, extending the tracer's shutdown tests.
-- [ ] Measured end to end on the builder after each step.
+- [x] Measured end to end on the builder after each step.
 
 ## Out of scope, booked
 
