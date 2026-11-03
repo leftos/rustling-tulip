@@ -14,9 +14,12 @@ It is alpha software, Windows only for now.
 - Group repos into a workspace: one session works across all of them, with their relative paths kept. A VS Code `.code-workspace` file next to a repo is offered as a workspace.
 - Every session's status has its own shape and colour: working, asking you something, finished while you were away, idle, or idle with background work still running.
 - Tab pills and, on Windows, a badge on the taskbar button count the sessions that need you, and show nothing at zero; Settings can show busy or idle counts instead.
-- The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A Windows notification fires when a session needs you or finishes (skipped when you are already looking at it), and a sound of your choice plays when one needs you: the bundled chime, your own .wav or .ogg, or none.
-- Each finished turn of a Claude session gets a one-line summary, kept across restarts, and the Finished notification is worded from it.
-- The Dashboard tab, opened from the activity rail, lists every agent session by status: what each is doing now, its context, recent activity, cost and running subagents, with a queue of the sessions waiting on you.
+- The Needs You panel lists every session waiting on you, longest wait first, with what each asks: its question, the tool it wants to run, or the plan to approve. A notification fires when a session needs you or finishes (skipped when you are already looking at it), after a wait you choose for Finished.
+- On Windows, notifications can be the app's own toasts, which answer a prompt or go to its pane without taking focus. Each kind plays its own sound, silent during Do Not Disturb: a chime from the bundled list, your own .wav or .ogg, or none.
+- Turn on session summaries in Settings › Dashboard and each finished turn of a Claude session gets a one-line summary, kept across restarts, with a daily cap on what they spend.
+- The Dashboard tab, opened from the activity rail, opens on a Compact view of every running agent by repo, with its state, work and subagents and no scrolling. Its By status view adds context, recent work, cost, a two-hour activity bar and the Linear issue named in each session's branch, with a drawer per session.
+- Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane; the header counts today's cost, tokens and commits across every session.
+- `rustling-tulipd` drives sessions from a shell or a script: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
 - Open a repo's, workspace's or tab's menu from the keyboard with Shift+F10 or the Menu key.
 - Tabs and split panes: drag a pane or a sidebar session onto a pane to split, swap or move it, rearrange a tab into a grid, and undo a closed tab or a moved pane.
 - The sidebar groups sessions by repo or by tab, in Comfortable or Compact rows, and can show every session under a repo, only the busy ones, or just a count.
@@ -28,7 +31,7 @@ It is alpha software, Windows only for now.
 - When Claude exits, its pane stays a working shell, and its Chat and Summary views turn off until Claude starts again.
 - Secret environment values you give a session are stored in Windows Credential Manager, never in a settings file.
 
-![The Dashboard tab: sessions grouped as Needs you, Working, Idle and Done, each with what it is doing now, its context, recent activity, cost and running subagents](docs/images/dashboard.png)
+![The Dashboard tab's Compact view: a queue of the sessions waiting on you, then every session by repo with its state, what it is doing now and its running subagents and background work](docs/images/dashboard.png)
 
 ### Chat and summary views
 
@@ -113,6 +116,28 @@ It is alpha software, Windows only for now.
 3. The installer is not code-signed yet, so Windows SmartScreen warns on first run: choose More info, then Run anyway.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.8.0-alpha
+
+- The Dashboard shows every running agent at a glance and answers their questions and permission prompts with one click.
+- On Windows, the app's own toasts answer a prompt or go to its pane without taking focus, with softer chimes.
+- `rustling-tulipd` drives sessions from a shell: list, spawn, send, read, wait and watch.
+- Sessions run as administrator are kept apart: programs without administrator rights can no longer start or reach them.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.8.0-alpha).
+
+## What's new in v0.7.2-alpha
+
+- A Finished toast no longer fires when a Stop hook sends the agent back to work; the session stays Working until its hooks finish.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.7.2-alpha).
+
+## What's new in v0.7.1-alpha
+
+- Finished toasts no longer fire after nearly every tool call while Claude works through a task-list item.
+- A Finished toast now waits 5 seconds and is dropped if the session starts working again.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.7.1-alpha).
 
 ## What's new in v0.7.0-alpha
 
