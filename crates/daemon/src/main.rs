@@ -18,6 +18,8 @@ mod chat_work;
 mod child_env;
 mod cli_apply_update;
 mod cli_bridge;
+mod cli_client;
+mod cli_drive;
 mod cli_pair;
 mod cli_screen;
 mod cli_shutdown;
@@ -93,6 +95,35 @@ use tracing_subscriber::EnvFilter;
 /// otherwise exit at once.
 const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(5);
 
+/// Run a subcommand that talks to the daemon as a client and must come before
+/// `Dirs::ensure`, answering its exit code, or `None` when none was asked for.
+async fn run_folderless_client_subcommand() -> anyhow::Result<Option<std::process::ExitCode>> {
+    // `rustling-tulipd bridge` relays one SSH client's protocol lines between
+    // stdio and the loopback listener, starting the daemon when none runs. It
+    // comes before `Dirs::ensure` because the daemon it starts makes its own
+    // folders, takes no instance lock and no log, and starts no tracing, so
+    // nothing but protocol lines reaches stdout. Its stdio belongs to ssh, so
+    // it attaches no console.
+    if cli_bridge::requested(std::env::args_os().skip(1)) {
+        return Ok(Some(match cli_bridge::run().await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(err) => {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr(), "rustling-tulipd bridge: {err:#}");
+                std::process::ExitCode::FAILURE
+            }
+        }));
+    }
+    // `rustling-tulipd sessions` and `read` work against the running daemon,
+    // before `Dirs::ensure` so they create no folders.
+    if cli_drive::requested(std::env::args_os().skip(1)) {
+        cli_pair::attach_parent_console();
+        let args = std::env::args_os().skip(1);
+        return Ok(Some(cli_drive::run_and_report(args).await));
+    }
+    Ok(None)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     if let Some(code) = run_update_subcommand().await? {
@@ -109,21 +140,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             cli_shutdown::run(&daemon_client::config_dir()?, &mut std::io::stdout().lock()).await?;
         return Ok(std::process::ExitCode::from(code));
     }
-    // `rustling-tulipd bridge` relays one SSH client's protocol lines between
-    // stdio and the loopback listener, starting the daemon when none runs. It
-    // comes before `Dirs::ensure` because the daemon it starts makes its own
-    // folders, takes no instance lock and no log, and starts no tracing, so
-    // nothing but protocol lines reaches stdout. Its stdio belongs to ssh, so
-    // it attaches no console.
-    if cli_bridge::requested(std::env::args_os().skip(1)) {
-        return Ok(match cli_bridge::run().await {
-            Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(err) => {
-                use std::io::Write as _;
-                let _ = writeln!(std::io::stderr(), "rustling-tulipd bridge: {err:#}");
-                std::process::ExitCode::FAILURE
-            }
-        });
+    if let Some(code) = run_folderless_client_subcommand().await? {
+        return Ok(code);
     }
     let dirs = paths::Dirs::ensure()?;
     // `rustling-tulipd pair` prints a one-time device pairing code from the

@@ -7,19 +7,13 @@
 //! also writes the grid's rows to a new file at that path, ready to become a
 //! screen-rule test fixture.
 
+use crate::cli_client::Connection;
 use anyhow::anyhow;
-use daemon_client::ProvenConnectError;
-use futures::{SinkExt as _, StreamExt as _};
-use protocol::{
-    ClientMessage, DaemonHandshake, DaemonMessage, InboundDaemonMessage,
-    SUPPORTED_PROTOCOL_VERSIONS, ScreenExplanation,
-};
+use protocol::{ClientMessage, DaemonMessage, InboundDaemonMessage, ScreenExplanation};
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// The whole exchange — reading the handshake, connecting, dumping the
 /// screen — must finish inside this, or the subcommand gives up.
@@ -39,9 +33,6 @@ const REQUEST_ID: &str = "screen";
 
 /// How the subcommand is called.
 const USAGE: &str = "usage: rustling-tulipd screen <session id> [--fixture <path>]";
-
-/// One client connection to the daemon's loopback listener.
-type ScreenSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// What the subcommand was asked to do.
 #[derive(Debug, PartialEq, Eq)]
@@ -188,74 +179,14 @@ fn write_fixture(path: &Path, grid: &[String]) -> anyhow::Result<()> {
         .map_err(|err| anyhow!("could not write {}: {err}", path.display()))
 }
 
-/// Read the handshake file and dump `session_id`'s screen over one loopback
-/// connection, opened only once the listener proves it holds the token.
+/// Dump `session_id`'s screen over one loopback connection, opened only once
+/// the listener proves it holds the token.
 async fn exchange(handshake_file: &Path, session_id: &str) -> anyhow::Result<ScreenDump> {
-    let handshake = read_handshake(handshake_file)?;
-    let port = handshake.port;
-    let stream = match daemon_client::connect_proven(
-        port,
-        &handshake.auth_token,
-        daemon_client::PROOF_TIMEOUT,
-    )
-    .await
-    {
-        Ok(stream) => stream,
-        Err(ProvenConnectError::NotProven(proof)) => {
-            return Err(anyhow!(
-                "{}",
-                crate::cli_pair::not_proven_reason(port, handshake_file, proof)
-            ));
-        }
-        Err(ProvenConnectError::Connect(err)) => {
-            return Err(anyhow!(
-                "could not reach rustling-tulipd on 127.0.0.1:{port}: {err:#}"
-            ));
-        }
-    };
-    let (mut socket, _) = tokio_tungstenite::client_async(
-        format!("ws://127.0.0.1:{port}/ws"),
-        MaybeTlsStream::Plain(stream),
-    )
-    .await
-    .map_err(|err| anyhow!("could not reach rustling-tulipd on 127.0.0.1:{port}: {err}"))?;
-    send(&mut socket, &hello(&handshake)).await?;
-    let dump = read_until_dump(&mut socket, session_id).await?;
-    let _ = socket.close(None).await;
+    let mut connection =
+        Connection::connect(handshake_file, CLIENT_NAME, daemon_client::PROOF_TIMEOUT).await?;
+    let dump = read_until_dump(&mut connection, session_id).await?;
+    connection.close().await;
     Ok(dump)
-}
-
-/// The `daemon.json` the running daemon wrote, or the error that says why
-/// there is no daemon to reach.
-fn read_handshake(path: &Path) -> anyhow::Result<DaemonHandshake> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(anyhow!(
-                "no rustling-tulipd is running: {} does not exist",
-                path.display()
-            ));
-        }
-        Err(err) => return Err(anyhow!("could not read {}: {err}", path.display())),
-    };
-    serde_json::from_slice(&bytes)
-        .map_err(|err| anyhow!("could not read {}: {err}", path.display()))
-}
-
-/// The `Hello` that opens the connection: the daemon's own token, every
-/// protocol version this build speaks, and no client identity.
-fn hello(handshake: &DaemonHandshake) -> ClientMessage {
-    ClientMessage::Hello {
-        protocol_version: SUPPORTED_PROTOCOL_VERSIONS
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or_default(),
-        protocol_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
-        auth_token: handshake.auth_token.clone(),
-        client_id: None,
-        client_name: Some(CLIENT_NAME.to_owned()),
-    }
 }
 
 /// What one daemon frame asks the subcommand to do.
@@ -312,7 +243,7 @@ fn classify(text: &str, asked: bool) -> Step {
 }
 
 /// Whether the daemon's `Welcome.features` show it can answer a dump.
-fn supports_screen_dump(features: &[String]) -> bool {
+pub(crate) fn supports_screen_dump(features: &[String]) -> bool {
     features
         .iter()
         .any(|feature| feature == FEATURE_SCREEN_DUMP)
@@ -320,7 +251,7 @@ fn supports_screen_dump(features: &[String]) -> bool {
 
 /// Refuse a daemon that lists no [`FEATURE_SCREEN_DUMP`]: it decodes no
 /// `DumpScreen`, so waiting for a reply could only run out the exchange.
-fn check_welcome(screen_dump: bool) -> anyhow::Result<()> {
+pub(crate) fn check_welcome(screen_dump: bool) -> anyhow::Result<()> {
     if screen_dump {
         Ok(())
     } else {
@@ -331,12 +262,12 @@ fn check_welcome(screen_dump: bool) -> anyhow::Result<()> {
 /// Ask for the dump once the daemon welcomes the connection, and read on past
 /// the initial state it pushes until the dump, a refusal or a close.
 async fn read_until_dump(
-    socket: &mut ScreenSocket,
+    connection: &mut Connection,
     session_id: &str,
 ) -> anyhow::Result<ScreenDump> {
     let mut asked = false;
     loop {
-        let Some(text) = next_text(socket).await else {
+        let Some(text) = connection.next_text().await else {
             return Err(anyhow!(
                 "rustling-tulipd closed the connection before sending the screen"
             ));
@@ -350,32 +281,12 @@ async fn read_until_dump(
                     session_id: session_id.to_owned(),
                     request_id: Some(REQUEST_ID.to_owned()),
                 };
-                send(socket, &ask).await?;
+                connection.send(&ask).await?;
             }
             Step::Dump(dump) => return Ok(dump),
             Step::Refused(reason) => return Err(anyhow!("{reason}")),
         }
     }
-}
-
-/// The next text frame, or `None` once the daemon closed the connection.
-async fn next_text(socket: &mut ScreenSocket) -> Option<String> {
-    loop {
-        match socket.next().await {
-            None | Some(Err(_) | Ok(Message::Close(_))) => return None,
-            Some(Ok(Message::Text(text))) => return Some(text.to_string()),
-            Some(Ok(_)) => {}
-        }
-    }
-}
-
-async fn send(socket: &mut ScreenSocket, message: &ClientMessage) -> anyhow::Result<()> {
-    let json = serde_json::to_string(message)
-        .map_err(|err| anyhow!("could not serialize a client message: {err}"))?;
-    socket
-        .send(Message::text(json))
-        .await
-        .map_err(|err| anyhow!("could not send to rustling-tulipd: {err}"))
 }
 
 #[cfg(test)]

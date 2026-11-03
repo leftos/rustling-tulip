@@ -20,6 +20,18 @@ It exits 0 when the daemon closes the WebSocket, and after stdin EOF once the da
 
 With `--fixture` it then writes the trimmed rows (LF) to exactly that path, refusing an existing file, and prints `wrote <path>`. It refuses at once against a daemon whose `Welcome.features` lack `screen_dump`, and on any failure prints one stderr line `rustling-tulipd screen: <error>` and exits 1.
 
+### Session-driving verbs
+
+`rustling-tulipd sessions` and `rustling-tulipd read` work against the running daemon over the protocol every client speaks (`crates/daemon/src/cli_drive/`, on the shared connection in `crates/daemon/src/cli_client.rs`). They create no folders, take no instance lock, start no log and never start a daemon. They act on whichever daemon `daemon.json` in the active config dir names, so `RUSTLING_TULIP_CONFIG_DIR` picks an isolated one and nothing else guards the choice. They send no `Resize` and no client id, so the user's panes and the user's clients' layouts stay as they are.
+
+`rustling-tulipd sessions [--json]` prints one tab-separated line per session: id, status (`spawning`, `idle`, `working`, `awaiting_input`, `stopped`, `error`), `bg` or `-`, agent id or `shell`, title, repo, branch. The title is the user's label, else the terminal title, else the canonical label, and a tab or line break in it prints as a space. Repo and branch come from the first member, else `-`. With `--json` it prints one array of objects with `id`, `label` (that same title), `status`, `status_since`, `background`, `agent`, `repo` and `branch`; the last three are `null` where the text shows `shell` or `-`.
+
+`rustling-tulipd read <session id> [--scrollback] [--json]` prints the session's screen as the daemon's grid has it, one row per line, at the daemon's current size. With `--json` it prints `{id, cols, rows, title, lines}`. It refuses at once against a daemon whose `Welcome.features` lack `screen_dump`.
+
+With `--scrollback` it prints the session's scrollback as UTF-8 text: a cursor-forward sequence prints as spaces (at most 512 each), a cursor-position or next-line sequence as one line break, `\r\n` and a lone `\r` as `\n`, and every other escape sequence is dropped. Bytes that are not valid UTF-8 print as U+FFFD. With `--json` it prints `{id, truncated, text}`. It closes the connection as soon as the reply arrives, since that request also starts streaming the session's output to this connection.
+
+Exit codes: 0 ok, 1 any failure, 2 usage, 5 no daemon running (`daemon.json` is missing, or no connection opens on the port it names, as after a crash). A listener that does not prove it holds the token is exit 1. A failure prints one stderr line `rustling-tulipd <verb>: <error>` and nothing on stdout. With `--json` it prints `{"error":{"code":"<code>","message":"<text>"}}` on stdout instead, the code being the daemon's (`not_found`, `no_screen`) when it sent one, else `failed`, `usage` or `no_daemon`.
+
 ## How a client starts and retires the daemon
 
 The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The spawn breaks away from the caller's job; when that job forbids breakaway it launches the daemon through WMI `Win32_Process.Create` with the caller's full environment, outside the job (`wmi_launch.rs`, bounded at 30 s), and only if that fails starts it inside the job, logging which path ran. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` + `build_version` to `daemon.json` in the config dir below; clients read that to connect.
