@@ -1355,6 +1355,7 @@ async fn spawn_interactive_session(
             },
             hub.attention_tx.clone(),
             SessionStatus::Idle,
+            pty_state::ShellLaunch::AgentTyped,
         );
     } else {
         pty_state::watch(
@@ -1576,6 +1577,7 @@ async fn spawn_plain_shell_session(
         },
         hub.attention_tx.clone(),
         SessionStatus::Idle,
+        pty_state::ShellLaunch::Plain,
     );
     // Keep `osc_title::watch` so window-title escape sequences (which pwsh
     // emits by default) are recorded as `terminal_title` annotations; the

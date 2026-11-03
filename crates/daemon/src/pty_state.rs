@@ -87,6 +87,11 @@ const CONFIRM_CAP: Duration = Duration::from_millis(700);
 /// the frame from before the change.
 const FOREIGN_WRITE_HOLD: Duration = Duration::from_millis(700);
 
+/// How long a shell the spawn typed an agent's launch line into keeps its
+/// classifier off, unless the agent shows on screen or its hooks take over
+/// first: the injector's own limit for the agent to start.
+const LAUNCH_HOLD: Duration = crate::inject::MIN_STARTUP_CAP;
+
 /// The longest a turn end stays held. Past it a settled frame showing a turn
 /// that runs, by its spinner or its title, or an overlay that hides the screen,
 /// drops the turn end; anything else lands `Idle`.
@@ -1292,6 +1297,17 @@ pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
         })
 }
 
+/// What a spawn did to a plain shell just before its watcher starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellLaunch {
+    /// A plain shell, or a reattached session: nothing was typed into it, or
+    /// whatever was typed is long over.
+    Plain,
+    /// The spawn has just typed an agent's launch line into this shell: its
+    /// echo and the agent's first paint are not a command's work.
+    AgentTyped,
+}
+
 /// Spawn a background task that sets a plain shell's status.
 ///
 /// The task feeds the shell's grid from its PTY output, in every mode. While
@@ -1317,7 +1333,11 @@ pub fn agent_up(registry: &SessionRegistry, session_id: &str) -> bool {
 /// the grid. When hooks start or stop driving the shell, the classifier's
 /// state is seeded again from the record and the screen is held off for
 /// [`FOREIGN_WRITE_HOLD`]; on every return to the classifier, its volume
-/// windows, title and silence start afresh. `streams.rules` are the screen
+/// windows, title and silence start afresh. After a spawn typed an agent's
+/// launch line into the shell (`launch` is [`ShellLaunch::AgentTyped`]), the
+/// classifier and its idle tick stay off for [`LAUNCH_HOLD`] or until the
+/// agent shows on screen, its hooks take over or it ends, so the line's echo
+/// and the agent's first paint never read as a turn. `streams.rules` are the screen
 /// rules the check reads the screen with: those of the session's agent.
 pub fn watch_plain_shell(
     registry: &Arc<SessionRegistry>,
@@ -1325,7 +1345,9 @@ pub fn watch_plain_shell(
     streams: ShellStreams,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
     initial: SessionStatus,
+    launch: ShellLaunch,
 ) {
+    let start = Instant::now();
     let ShellStreams {
         mut output,
         input_pulses,
@@ -1344,12 +1366,16 @@ pub fn watch_plain_shell(
         watch,
         input_pulses,
         state: State::seed_plain_shell(initial),
-        quiet_from: Instant::now(),
+        quiet_from: start,
         idle_checked: false,
         in_window: VecDeque::new(),
         out_window: VecDeque::new(),
         title_activity: TitleActivity::new(),
         agent_on_screen: false,
+        launching_until: match launch {
+            ShellLaunch::AgentTyped => Some(start + LAUNCH_HOLD),
+            ShellLaunch::Plain => None,
+        },
     };
     tokio::spawn(async move { watcher.run(&mut output).await });
 }
@@ -1375,6 +1401,12 @@ struct ShellWatcher {
     /// Whether the screen showed an agent for a whole window while hooks were
     /// not driving the shell: the agent started without hooks.
     agent_on_screen: bool,
+    /// The end of the launch hold of a shell the spawn typed an agent's
+    /// launch line into ([`ShellLaunch::AgentTyped`]): until then, or until
+    /// the agent shows on screen, its hooks take over or it ends, the
+    /// classifier and the idle tick stay off. `None` once the launch is over,
+    /// and for a [`ShellLaunch::Plain`] shell.
+    launching_until: Option<Instant>,
 }
 
 impl ShellWatcher {
@@ -1389,12 +1421,19 @@ impl ShellWatcher {
         }
     }
 
+    /// Whether the agent the spawn typed into the shell is still starting at
+    /// `now`: its launch line's echo and first paint are not shell activity.
+    fn launching(&self, now: Instant) -> bool {
+        self.launching_until.is_some_and(|until| now < until) && self.mode() == Mode::Shell
+    }
+
     async fn run(&mut self, output: &mut broadcast::Receiver<Vec<u8>>) {
         loop {
             let mode = self.mode();
             let next_check = self.watch.next_check();
             let next_idle_check = self.quiet_from + SHELL_IDLE_AFTER;
             let idle_due = mode == Mode::Shell
+                && !self.launching(Instant::now())
                 && !self.idle_checked
                 && plain_shell_idle_due(&self.watch.registry, &self.watch.session_id, self.state);
             // In arm order: output is fed before a due check reads the grid,
@@ -1475,7 +1514,7 @@ impl ShellWatcher {
         // counts as activity alongside command output.
         let title_changed = self.title_activity.feed(bytes);
         let due = self.watch.feed(bytes, now);
-        if mode == Mode::Shell {
+        if mode == Mode::Shell && !self.launching(now) {
             self.classify(title_changed);
         }
         if due {
@@ -1519,10 +1558,12 @@ impl ShellWatcher {
             Checked::HooksFlipped => self.hooks_flipped(now),
             Checked::AgentShown => {
                 // Agent mode reads the screen at once, from a fresh window.
+                self.launching_until = None;
                 self.agent_on_screen = true;
                 self.watch.confirm.check_at = Some(now);
             }
             Checked::AgentEnded => {
+                self.launching_until = None;
                 self.agent_on_screen = false;
                 self.reseed();
                 self.start_shell_mode(now);
@@ -1543,8 +1584,10 @@ impl ShellWatcher {
     }
 
     /// Hooks started or stopped driving the shell: drop any window, seed the
-    /// classifier from the record, and hold off the screen.
+    /// classifier from the record, and hold off the screen. The agent's
+    /// launch, if one was typed, is over.
     fn hooks_flipped(&mut self, now: Instant) {
+        self.launching_until = None;
         self.watch.confirm.hold(now);
         self.reseed();
         if self.mode() == Mode::Shell {
@@ -1880,9 +1923,9 @@ mod tests {
 )]
 mod hysteresis_tests {
     use super::{
-        AgentStreams, CHECK_DEBOUNCE, FOREIGN_WRITE_HOLD, SHELL_IDLE_AFTER, ShellStreams, State,
-        agent_up, apply_screen_status, hand_shell_back, on_plain_shell_transition, record_status,
-        watch, watch_plain_shell,
+        AgentStreams, CHECK_DEBOUNCE, FOREIGN_WRITE_HOLD, LAUNCH_HOLD, SHELL_IDLE_AFTER,
+        ShellLaunch, ShellStreams, State, agent_up, apply_screen_status, hand_shell_back,
+        on_plain_shell_transition, record_status, watch, watch_plain_shell,
     };
     use crate::paths::Dirs;
     use crate::screen::rules::{CompiledRules, rules_for};
@@ -2014,8 +2057,25 @@ mod hysteresis_tests {
     fn start_in(
         dirs: Dirs,
         plain_shell: bool,
+        record: SessionRecord,
+        rules: Arc<CompiledRules>,
+    ) -> Harness {
+        start_launching_in(dirs, plain_shell, record, rules, ShellLaunch::Plain)
+    }
+
+    /// [`start_record`] for a plain shell the spawn did `launch` to.
+    fn start_record_launching(tag: &str, record: SessionRecord, launch: ShellLaunch) -> Harness {
+        let rules = rules_for(&record.agent);
+        start_launching_in(scratch_dirs(tag), true, record, rules, launch)
+    }
+
+    /// [`start_in`] with the plain shell's launch kind `launch`.
+    fn start_launching_in(
+        dirs: Dirs,
+        plain_shell: bool,
         mut record: SessionRecord,
         rules: Arc<CompiledRules>,
+        launch: ShellLaunch,
     ) -> Harness {
         let initial = record.status;
         let screen: SharedScreen = Arc::new(Mutex::new(Screen::new(COLS, ROWS)));
@@ -2044,6 +2104,7 @@ mod hysteresis_tests {
                 },
                 attention_tx,
                 initial,
+                launch,
             );
             None
         } else {
@@ -3615,6 +3676,139 @@ mod hysteresis_tests {
             "the settled dialog did not raise the prompt"
         );
         assert_eq!(h.attentions(), 1, "one Attention on entry");
+    }
+
+    /// The line a spawn types into the hosting shell to start the agent, as
+    /// pwsh echoes it: each token coloured, then the line break. The injector
+    /// types it straight into the PTY, so no input pulse comes with it.
+    fn launch_echo() -> Vec<u8> {
+        let tokens = [
+            "Set-Location",
+            "-LiteralPath",
+            "'C:\\work';",
+            "&",
+            "'C:\\Users\\me\\.local\\bin\\claude.exe'",
+            "'--settings'",
+            "'C:\\Users\\me\\AppData\\Roaming\\leftos\\rustling-tulip\\config\\sessions\\9f3831cc-bd1d-4674-b069-09ab9a68d2c2\\hook-settings.json'",
+            "'--session-id'",
+            "'bcae3a5b-f792-4e72-b15d-0654793af913'",
+        ];
+        let line: Vec<String> = tokens
+            .iter()
+            .map(|t| format!("\x1b[93m{t}\x1b[0m"))
+            .collect();
+        format!("{}\r\n", line.join(" ")).into_bytes()
+    }
+
+    /// A shell the spawn typed an agent's launch line into.
+    fn agent_typed(tag: &str) -> Harness {
+        let mut record = test_record(SESSION);
+        record.agent_in_shell = true;
+        start_record_launching(tag, record, ShellLaunch::AgentTyped)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_launch_typed_into_the_shell_is_not_a_turn() {
+        let h = agent_typed("shell-launch-not-a-turn");
+        pass_hold().await;
+        h.chunk(launch_echo());
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the launch line's echo read as a command running"
+        );
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        assert_eq!(h.status_seq(), 0, "the launch wrote a status");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_command_typed_into_a_plain_shell_still_works() {
+        let h = start("shell-long-command", true);
+        pass_hold().await;
+        h.chunk(launch_echo());
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "a plain shell's long echo no longer reads as work"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_launched_agent_on_screen_reports_its_own_status() {
+        let mut h = agent_typed("shell-launch-agent-shown");
+        pass_hold().await;
+        h.chunk(launch_echo());
+        settle().await;
+        for _ in 0..40 {
+            h.chunk(permission_frame());
+            advance(ms(20)).await;
+        }
+        assert_ne!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a check inside a burst spotted Claude"
+        );
+        assert_eq!(h.attentions(), 0);
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the settled dialog did not raise the prompt"
+        );
+        assert_eq!(h.attentions(), 1, "one Attention on entry");
+        h.chunk(idle_frame(&[SPINNER_ROW]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the agent's spinner did not set the status"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_launch_that_never_shows_an_agent_returns_to_the_classifier() {
+        let h = agent_typed("shell-launch-lapses");
+        pass_hold().await;
+        h.chunk(launch_echo());
+        settle().await;
+        advance(LAUNCH_HOLD + Duration::from_secs(1)).await;
+        assert_eq!(h.status(), SessionStatus::Idle);
+        h.chunk(vec![b'x'; 400]);
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the classifier did not take the shell back after the launch hold"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hooks_taking_over_a_launch_report_hook_status() {
+        let h = agent_typed("shell-launch-hooks");
+        pass_hold().await;
+        h.chunk(launch_echo());
+        settle().await;
+        set_hook_working(&h, 1);
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Working, "the hooks' status");
+        h.set_record(|record| {
+            record.hook_driven = false;
+            record.status = SessionStatus::Idle;
+            record.last_hook_time = Some(2);
+        });
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Idle, "the hooks' status");
+        h.chunk(vec![b'x'; 400]);
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Working,
+            "the launch still held the classifier off after the hooks took over"
+        );
     }
 
     /// A hook-reported prompt dismissed without a hook (from another client)
