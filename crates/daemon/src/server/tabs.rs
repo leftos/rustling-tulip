@@ -410,7 +410,7 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             all,
             request_id,
         } => {
-            if let Err(err) = forget_host_panes(hub, &host, &session_ids, all) {
+            if let Err(err) = forget_host_panes(hub, client_id, &host, &session_ids, all) {
                 send_tab_failure(out_tx, &err, request_id);
             }
         }
@@ -419,7 +419,9 @@ pub(super) fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow
             rebinds,
             request_id,
         } => {
-            if let Err(err) = rebind_panes(hub, Some(&host), &rebinds) {
+            if let Err(err) =
+                rebind_panes(hub, RebindScope::Client(client_id), Some(&host), &rebinds)
+            {
                 send_tab_failure(out_tx, &err, request_id);
             }
         }
@@ -756,18 +758,63 @@ fn rehost_panes(
     written
 }
 
-/// [`close_session_panes`] for another daemon's sessions: close, across all
-/// client layouts, every pane of `host` whose session is in `session_ids`, or
-/// every pane of `host` when `all` is set. No matching pane emits nothing.
+/// Whether `tabs` holds a pane [`crate::tabs::forget_host_panes`] would close:
+/// read-only, so a sweep that matches nothing writes nothing and, from a
+/// client with no layout yet, stores none.
+fn closes_any_pane(tabs: &[TabEntry], host: &str, session_ids: &[String], all: bool) -> bool {
+    if all {
+        tabs.iter().filter_map(TabEntry::grid).any(|grid| {
+            crate::tabs::collect_panes(grid)
+                .iter()
+                .any(|pane| pane.host.as_deref() == Some(host))
+        })
+    } else {
+        session_ids
+            .iter()
+            .any(|session_id| crate::tabs::shows_session(tabs, Some(host), session_id))
+    }
+}
+
+/// [`close_session_panes`] for another daemon's sessions, on the requester's
+/// layout only: close every pane of `host` whose session is in `session_ids`,
+/// or every pane of `host` when `all` is set, then emit that client's scoped
+/// `TabUpdated` / `TabRemoved` events for what it closed. The requester's
+/// layout only: each client's saved hosts and host keys are its own, so
+/// another client's layout keeps its panes of the same key. No matching pane
+/// writes nothing and emits nothing.
 fn forget_host_panes(
     hub: &Hub,
+    client_id: &str,
     host: &str,
     session_ids: &[String],
     all: bool,
 ) -> anyhow::Result<()> {
-    close_panes_in_all_layouts(hub, |tabs| {
-        crate::tabs::forget_host_panes(tabs, host, session_ids, all)
-    })
+    let any_pane = hub.state.with_persisted(|state| {
+        state
+            .layouts
+            .get(client_id)
+            .is_some_and(|layout| closes_any_pane(&layout.tabs, host, session_ids, all))
+    });
+    if !any_pane {
+        return Ok(());
+    }
+    let mut changed: Vec<TabEntry> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let written = hub.state.mutate_client_layout(client_id, |tabs| {
+        let closed = crate::tabs::forget_host_panes(tabs, host, session_ids, all);
+        changed = closed.updated;
+        removed = closed.removed_tab_ids;
+    });
+    // [`crate::state::AppState::mutate`] changes the live state before it
+    // writes the file, so a failed write is returned only after the emit:
+    // clients must see the layout the daemon now holds.
+    for tab in changed {
+        hub.emit_tab(client_id, TabEvent::Updated(tab));
+    }
+    for tab_id in removed {
+        hub.emit_tab(client_id, TabEvent::Removed(tab_id));
+    }
+    written
 }
 
 /// Run `close` on every client's layout, then emit each client's scoped
@@ -814,47 +861,96 @@ pub(super) fn rebind_session_panes(hub: &Hub, old_id: &str, new_id: &str) {
         old_id: old_id.to_owned(),
         new_id: new_id.to_owned(),
     };
-    if let Err(err) = rebind_panes(hub, None, std::slice::from_ref(&rebind)) {
+    if let Err(err) = rebind_panes(
+        hub,
+        RebindScope::AllClients,
+        None,
+        std::slice::from_ref(&rebind),
+    ) {
         warn!(?err, "rebind_session_panes: state.mutate failed");
     }
 }
 
-/// Apply `rebinds` to the panes of `host` across every client's layout, then
-/// emit one scoped `TabUpdated` for each tab that changed. No matching pane
-/// writes nothing and emits nothing.
+/// Which clients' layouts a [`rebind_panes`] call applies to.
+#[derive(Clone, Copy)]
+enum RebindScope<'a> {
+    /// Every client's: this daemon's own sessions outlive any one client's
+    /// layout, so a resume, an auto-resume or a recovery rebinds every pane
+    /// that showed the old one.
+    AllClients,
+    /// The requester's only: another client's layout holds its own host keys,
+    /// so a host's rebinds must not rewrite them.
+    Client(&'a str),
+}
+
+/// Apply `rebinds` to the panes of `host` across the layouts `scope` names,
+/// then emit one scoped `TabUpdated` for each tab that changed, to the client
+/// whose layout it is. No matching pane writes nothing and emits nothing.
 ///
 /// [`crate::state::AppState::mutate`] changes the live state before it writes
 /// the file, so a failed write is returned only after the emit: clients must
 /// see the layout the daemon now holds.
-fn rebind_panes(hub: &Hub, host: Option<&str>, rebinds: &[HostRebind]) -> anyhow::Result<()> {
-    let any_pane = hub.state.with_persisted(|state| {
-        state.layouts.values().any(|layout| {
-            rebinds
-                .iter()
-                .any(|rebind| crate::tabs::shows_session(&layout.tabs, host, &rebind.old_id))
-        })
-    });
+fn rebind_panes(
+    hub: &Hub,
+    scope: RebindScope<'_>,
+    host: Option<&str>,
+    rebinds: &[HostRebind],
+) -> anyhow::Result<()> {
+    let shows_old = |tabs: &[TabEntry]| {
+        rebinds
+            .iter()
+            .any(|rebind| crate::tabs::shows_session(tabs, host, &rebind.old_id))
+    };
+    let any_pane = match scope {
+        RebindScope::AllClients => hub
+            .state
+            .with_persisted(|state| state.layouts.values().any(|layout| shows_old(&layout.tabs))),
+        RebindScope::Client(client_id) => hub.state.with_persisted(|state| {
+            state
+                .layouts
+                .get(client_id)
+                .is_some_and(|layout| shows_old(&layout.tabs))
+        }),
+    };
     if !any_pane {
         return Ok(());
     }
     let mut outcomes: Vec<(String, TabEntry)> = Vec::new();
-    let written = hub.state.mutate_all_layouts(|layouts| {
-        for (cid, layout) in layouts.iter_mut() {
-            let mut changed: Vec<TabEntry> = Vec::new();
-            for rebind in rebinds {
-                let tabs = &mut layout.tabs;
-                for tab in crate::tabs::rebind_session(tabs, host, &rebind.old_id, &rebind.new_id) {
-                    changed.retain(|earlier| earlier.id != tab.id);
-                    changed.push(tab);
+    let written = match scope {
+        RebindScope::AllClients => hub.state.mutate_all_layouts(|layouts| {
+            for (cid, layout) in layouts.iter_mut() {
+                for tab in rebind_in_layout(&mut layout.tabs, host, rebinds) {
+                    outcomes.push((cid.clone(), tab));
                 }
             }
-            outcomes.extend(changed.into_iter().map(|tab| (cid.clone(), tab)));
-        }
-    });
+        }),
+        RebindScope::Client(client_id) => hub.state.mutate_client_layout(client_id, |tabs| {
+            for tab in rebind_in_layout(tabs, host, rebinds) {
+                outcomes.push((client_id.to_owned(), tab));
+            }
+        }),
+    };
     for (cid, tab) in outcomes {
         hub.emit_tab(&cid, TabEvent::Updated(tab));
     }
     written
+}
+
+/// Apply `rebinds` in order to `tabs`, returning a clone of each tab whose
+/// grid changed, once per tab however many rebinds touched it.
+fn rebind_in_layout(
+    tabs: &mut [TabEntry],
+    host: Option<&str>,
+    rebinds: &[HostRebind],
+) -> Vec<TabEntry> {
+    let mut changed: Vec<TabEntry> = Vec::new();
+    for rebind in rebinds {
+        for tab in crate::tabs::rebind_session(tabs, host, &rebind.old_id, &rebind.new_id) {
+            changed.retain(|earlier| earlier.id != tab.id);
+            changed.push(tab);
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -1301,6 +1397,12 @@ mod tests {
     /// Dispatch `msg` as client `c1`, returning every message it sent to that
     /// connection. A request that answers nothing on success leaves it empty.
     async fn dispatch_all(hub: &Hub, msg: ClientMessage) -> Vec<DaemonMessage> {
+        dispatch_as(hub, "c1", msg).await
+    }
+
+    /// Dispatch `msg` as `client_id`, returning every message it sent to that
+    /// connection. A request that answers nothing on success leaves it empty.
+    async fn dispatch_as(hub: &Hub, client_id: &str, msg: ClientMessage) -> Vec<DaemonMessage> {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let (file_tx, _file_rx) = mpsc::channel(1);
         let pty_lane: Arc<PtyLane> = Arc::default();
@@ -1312,7 +1414,7 @@ mod tests {
             pty_lane: &pty_lane,
             fetches: &fetches,
             tails: &Arc::default(),
-            client_id: "c1",
+            client_id,
             client_name: None,
             connection: 1,
             auth: &local,
@@ -1328,6 +1430,18 @@ mod tests {
         let mut out = Vec::new();
         while let Ok(scoped) = rx.try_recv() {
             out.push(scoped.event);
+        }
+        out
+    }
+
+    /// Every scoped tab event the hub emitted since `rx` was made, keeping the
+    /// client each one was addressed to.
+    fn scoped_tab_events(
+        rx: &mut broadcast::Receiver<crate::server::ScopedTabEvent>,
+    ) -> Vec<crate::server::ScopedTabEvent> {
+        let mut out = Vec::new();
+        while let Ok(scoped) = rx.try_recv() {
+            out.push(scoped);
         }
         out
     }
@@ -1764,32 +1878,29 @@ mod tests {
                 .expect("seed the client layout");
         }
 
-        fn forget_doomed() -> ClientMessage {
+        fn forget_devbox() -> ClientMessage {
+            forget_all_of("ssh:devbox")
+        }
+
+        /// Forget every pane of `host`, the unsaved-host sweep's request.
+        fn forget_all_of(host: &str) -> ClientMessage {
             ClientMessage::ForgetHostSessions {
-                host: "ssh:devbox".to_string(),
-                session_ids: vec!["doomed".to_string()],
-                all: false,
+                host: host.to_string(),
+                session_ids: Vec::new(),
+                all: true,
                 request_id: None,
             }
         }
 
         #[tokio::test]
-        async fn forget_host_sessions_updates_every_client_layout() {
+        async fn forget_host_sessions_closes_only_the_requesters_panes() {
             let (hub, _scratch) = test_hub("pick-forget-host");
             seed_foreign_four_panes(&hub, "c1", Some(RearrangeLayout::Horizontal));
             seed_foreign_four_panes(&hub, "c2", None);
-
-            close_session_panes(&hub, "doomed");
-            for cid in ["c1", "c2"] {
-                assert_eq!(
-                    crate::tabs::collect_panes(only_tab(&hub, cid).grid().expect("grid")),
-                    four_panes_one_foreign(),
-                    "{cid}: a local removal leaves the foreign pane with the same id"
-                );
-            }
-
+            let other_before = hub.state.client_layout("c2");
             let mut events = hub.tab_events.subscribe();
-            dispatch_ok(&hub, forget_doomed()).await;
+
+            dispatch_ok(&hub, forget_devbox()).await;
 
             let survivors = &four_panes()[1..];
             let picked = only_tab(&hub, "c1");
@@ -1797,30 +1908,77 @@ mod tests {
                 picked.grid(),
                 crate::tabs::build_balanced(survivors, protocol::SplitDirection::Horizontal)
                     .as_ref(),
-                "the untouched tab is rebuilt evenly"
+                "the requester's untouched tab is rebuilt evenly"
             );
             assert_eq!(picked.picked_layout, Some(RearrangeLayout::Horizontal));
-            let touched = only_tab(&hub, "c2");
-            assert_eq!(touched.picked_layout, None);
             assert_eq!(
-                crate::tabs::collect_panes(touched.grid().expect("grid")),
-                survivors.to_vec()
+                hub.state.client_layout("c2"),
+                other_before,
+                "another client's layout keeps its pane of the same host key"
             );
-            let updated = super::take_tab_events(&mut events);
-            assert_eq!(updated.len(), 2, "one update per client: {updated:?}");
+            let scoped = super::scoped_tab_events(&mut events);
             assert!(
-                updated
-                    .iter()
-                    .all(|event| matches!(event, TabEvent::Updated(tab) if tab.id == "t1")),
-                "{updated:?}"
+                matches!(
+                    scoped.as_slice(),
+                    [crate::server::ScopedTabEvent { client_id, event: TabEvent::Updated(tab) }]
+                        if client_id == "c1" && tab.id == "t1"
+                ),
+                "one update, to the requester only: {scoped:?}"
             );
 
-            dispatch_ok(&hub, forget_doomed()).await;
-            let again = super::take_tab_events(&mut events);
+            dispatch_ok(&hub, forget_devbox()).await;
+            let again = super::scoped_tab_events(&mut events);
             assert!(
                 again.is_empty(),
                 "forgetting again changes nothing: {again:?}"
             );
+        }
+
+        /// A client still at its first-connect layout chooser has no layout
+        /// entry, and a sweep from it must not create one: that would skip the
+        /// chooser on its next connect.
+        #[tokio::test]
+        async fn forget_from_a_client_without_a_layout_creates_none() {
+            let (hub, _scratch) = test_hub("forget-no-layout");
+            let mut events = hub.tab_events.subscribe();
+
+            let sent = super::dispatch_as(&hub, "ghost", forget_devbox()).await;
+
+            assert!(sent.is_empty(), "nothing to refuse: {sent:?}");
+            assert!(
+                !hub.state.has_client_layout("ghost"),
+                "a sweep stores no layout for a client that has none"
+            );
+            let scoped = super::scoped_tab_events(&mut events);
+            assert!(
+                scoped.is_empty(),
+                "nothing changed, nothing sent: {scoped:?}"
+            );
+        }
+
+        /// No pane of the host: no write and no event, even with `state.json`
+        /// unwritable — a refused write would answer `tab_refused`.
+        #[tokio::test]
+        async fn a_forget_that_matches_nothing_changes_nothing() {
+            let (hub, _scratch) = test_hub("forget-no-match");
+            seed_foreign_four_panes(&hub, "c1", None);
+            let before = hub.state.client_layout("c1");
+            block_state_writes(&hub);
+            let mut events = hub.tab_events.subscribe();
+
+            let sent = dispatch_all(&hub, forget_all_of("tailnet:elsewhere")).await;
+
+            assert!(
+                sent.is_empty(),
+                "a miss writes nothing, so it cannot be refused: {sent:?}"
+            );
+            assert_eq!(
+                hub.state.client_layout("c1"),
+                before,
+                "a miss changes no layout"
+            );
+            let scoped = super::scoped_tab_events(&mut events);
+            assert!(scoped.is_empty(), "a miss sends nothing: {scoped:?}");
         }
 
         /// The panes of a tab where `old` means three different sessions:
@@ -1880,33 +2038,40 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn rebind_host_sessions_changes_every_layout() {
-            let (hub, _scratch) = test_hub("rebind-every-layout");
+        async fn rebind_host_sessions_changes_only_the_requesters_layout() {
+            let (hub, _scratch) = test_hub("rebind-requester-only");
             seed_rebind_panes(&hub, "c1");
             seed_rebind_panes(&hub, "c2");
             seed_two_pane_layout(&hub, "c3");
+            let other_before = hub.state.client_layout("c2");
+            let local_before = hub.state.client_layout("c3");
             let mut events = hub.tab_events.subscribe();
 
             dispatch_ok(&hub, rebind_old_to_new()).await;
 
-            for cid in ["c1", "c2"] {
-                assert_eq!(
-                    crate::tabs::collect_panes(only_tab(&hub, cid).grid().expect("grid")),
-                    rebound_panes(),
-                    "{cid}"
-                );
-            }
-            let updated = super::take_tab_events(&mut events);
             assert_eq!(
-                updated.len(),
-                2,
-                "one update per changed layout: {updated:?}"
+                crate::tabs::collect_panes(only_tab(&hub, "c1").grid().expect("grid")),
+                rebound_panes(),
+                "the requester's panes took the rebind"
             );
+            assert_eq!(
+                hub.state.client_layout("c2"),
+                other_before,
+                "another client's layout keeps its panes of the same host key"
+            );
+            assert_eq!(
+                hub.state.client_layout("c3"),
+                local_before,
+                "a client with no matching pane is untouched"
+            );
+            let scoped = super::scoped_tab_events(&mut events);
             assert!(
-                updated
-                    .iter()
-                    .all(|event| matches!(event, TabEvent::Updated(tab) if tab.id == "t1")),
-                "{updated:?}"
+                matches!(
+                    scoped.as_slice(),
+                    [crate::server::ScopedTabEvent { client_id, event: TabEvent::Updated(tab) }]
+                        if client_id == "c1" && tab.id == "t1"
+                ),
+                "one update, to the requester only: {scoped:?}"
             );
         }
 
@@ -1926,6 +2091,36 @@ mod tests {
             assert_eq!(panes[1], rebind_panes_fixture()[1], "the local pane stays");
             assert_eq!(panes[2], rebind_panes_fixture()[2], "another host's stays");
             assert_eq!(panes[3], rebind_panes_fixture()[3], "another session stays");
+        }
+
+        /// A resume's rebind is this daemon's own, so it spans every client's
+        /// layout: each one that showed the old session now shows the new one.
+        #[tokio::test]
+        async fn a_resume_rebind_still_changes_every_layout() {
+            let (hub, _scratch) = test_hub("resume-rebind-all");
+            seed_rebind_panes(&hub, "c1");
+            seed_rebind_panes(&hub, "c2");
+            let mut events = hub.tab_events.subscribe();
+
+            rebind_session_panes(&hub, "old", "resumed");
+
+            let mut expected = rebind_panes_fixture();
+            expected[1].session_id = Some("resumed".to_string());
+            for cid in ["c1", "c2"] {
+                assert_eq!(
+                    crate::tabs::collect_panes(only_tab(&hub, cid).grid().expect("grid")),
+                    expected,
+                    "{cid}: a resume rebinds this PC's own pane everywhere"
+                );
+            }
+            let scoped = super::scoped_tab_events(&mut events);
+            assert_eq!(scoped.len(), 2, "one update per client: {scoped:?}");
+            assert!(
+                scoped.iter().all(
+                    |scoped| matches!(&scoped.event, TabEvent::Updated(tab) if tab.id == "t1")
+                ),
+                "{scoped:?}"
+            );
         }
 
         const REHOST_FROM: &str = "a";

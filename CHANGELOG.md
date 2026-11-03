@@ -19,6 +19,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Retiring or stopping the background service never force-closes a program that doesn't own the service's connection.
 - Reconnecting to one host no longer drops another host's worktree cleanup prompts or running preset launches.
 - A remote host's layout question closes as soon as another window answers it.
+- Forgetting a host in one copy of the app no longer closes that host's panes in another copy connected to the same machine.
 - Ctrl+Left and Ctrl+Right now move a word at a time, and other Shift, Alt and Ctrl combinations with arrows, Home, End and F-keys reach programs.
 - Ctrl+Backspace now deletes the previous word in a session, as it does in Windows Terminal.
 - A Claude session with an MCP task or a monitor still running no longer shows as Finished, just as with a background shell.

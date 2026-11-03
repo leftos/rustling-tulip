@@ -3885,13 +3885,14 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
-    /// Close, in every client's layout, the panes showing sessions of another
-    /// daemon: each pane whose `host` equals `host` and whose `session_id` is
-    /// in `session_ids`, or every pane of `host` when `all` is set. A closed
-    /// pane goes the way a removed local session's pane goes: its sibling
-    /// fills the space, an emptied tab is removed and a tab still on its
-    /// picked layout is rebuilt. Idempotent: no matching pane changes
-    /// nothing and sends nothing.
+    /// Close, in this client's layout only, the panes showing sessions of
+    /// another daemon: each pane whose `host` equals `host` and whose
+    /// `session_id` is in `session_ids`, or every pane of `host` when `all` is
+    /// set. Each client's host keys are its own, so another client's layout
+    /// keeps its panes of the same key. A closed pane goes the way a removed
+    /// local session's pane goes: its sibling fills the space, an emptied tab
+    /// is removed and a tab still on its picked layout is rebuilt. Idempotent:
+    /// no matching pane changes nothing, writes nothing and sends nothing.
     ForgetHostSessions {
         host: String,
         session_ids: Vec<String>,
@@ -3901,13 +3902,15 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
-    /// Show each successor in place of the session it replaced, in every
-    /// client's layout: each pane whose `host` equals `host` and whose
-    /// `session_id` is a rebind's `old_id` takes its `new_id`. Sent only to
-    /// This PC, whose layouts hold the panes of remote hosts. A layout that
-    /// changed gets its usual [`DaemonMessage::TabUpdated`]; no matching pane
-    /// changes nothing and sends nothing. A refusal is an
-    /// [`DaemonMessage::Error`] with code `tab_refused`.
+    /// Show each successor in place of the session it replaced, in this
+    /// client's layout only: each pane whose `host` equals `host` and whose
+    /// `session_id` is a rebind's `old_id` takes its `new_id`. Each client's
+    /// host keys are its own, so another client's layout keeps its panes of
+    /// the same key. Sent only to This PC, whose layouts hold the panes of
+    /// remote hosts. A layout that changed gets its usual
+    /// [`DaemonMessage::TabUpdated`]; no matching pane changes nothing, writes
+    /// nothing and sends nothing. A refusal is an [`DaemonMessage::Error`]
+    /// with code `tab_refused`.
     RebindHostSessions {
         host: String,
         rebinds: Vec<HostRebind>,
