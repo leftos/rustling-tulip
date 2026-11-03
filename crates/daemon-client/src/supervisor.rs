@@ -30,6 +30,12 @@ pub const PROOF_TIMEOUT: Duration = Duration::from_millis(800);
 pub const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// The prefix of the file, under the watched config dir's `logs` folder, a
+/// daemon this start spawned writes the error it failed to start with to. A
+/// daemon launched through WMI gets the caller's environment but no stdio, so
+/// its stderr cannot be captured, and the elevated folders are unreadable
+/// from below; this file is the one channel left.
+const START_FAILURE_FILE: &str = "daemon-start-failure";
 
 enum ExistingDaemon {
     Compatible(DaemonHandshake),
@@ -506,6 +512,7 @@ async fn ensure_running_routed(
                             crate::logon_task::LOGON_TASK_WAIT,
                             PROOF_TIMEOUT,
                             crate::read_handshake_file,
+                            None,
                         )
                         .await
                     },
@@ -825,9 +832,47 @@ async fn spawn_current_daemon(
         .parent()
         .map(std::path::Path::to_path_buf)
         .ok_or_else(|| anyhow!("template has no parent dir"))?;
-    spawn_daemon(&current.cached, &template_dir).await?;
+    let start_failure = start_failure_file(config_dirs)?;
+    spawn_daemon(&current.cached, &template_dir, &start_failure).await?;
 
-    wait_for_handshake(config_dirs, client_versions).await
+    let waited = wait_for_handshake(config_dirs, client_versions, Some(&start_failure)).await;
+    // The file belongs to this start alone and nothing else reads it, so it
+    // goes whichever way the wait ended.
+    if let Err(err) = fs::remove_file(&start_failure)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(
+            path = %start_failure.display(),
+            %err,
+            "could not remove the start-failure file"
+        );
+    }
+    waited
+}
+
+/// This start's failure file, under the first config dir the wait watches.
+///
+/// The name carries this process's id and a counter of the starts it made, so
+/// two starts of one client never read each other's file.
+fn start_failure_file(config_dirs: &[PathBuf]) -> anyhow::Result<PathBuf> {
+    static STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let config_dir = config_dirs
+        .first()
+        .ok_or_else(|| anyhow!("no config dir to watch for the daemon's handshake"))?;
+    let start = STARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(config_dir.join("logs").join(format!(
+        "{START_FAILURE_FILE}-{}-{start}.txt",
+        std::process::id()
+    )))
+}
+
+/// The daemon's arguments at a client start: the file to write a failure to
+/// start into, which the wait below reads.
+fn daemon_start_args(start_failure: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("--start-failure-file"),
+        start_failure.as_os_str().to_owned(),
+    ]
 }
 
 /// Classify the daemon named by `daemon.json` in `config_dir`, within the
@@ -1477,10 +1522,19 @@ fn hash_prefix(bytes: &[u8]) -> String {
 }
 
 #[cfg(windows)]
-async fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
-    spawn_daemon_with(bin, &[], template_dir, crate::wmi_launch::launch)
-        .await
-        .map(drop)
+async fn spawn_daemon(
+    bin: &std::path::Path,
+    template_dir: &std::path::Path,
+    start_failure: &Path,
+) -> anyhow::Result<()> {
+    spawn_daemon_with(
+        bin,
+        &daemon_start_args(start_failure),
+        template_dir,
+        crate::wmi_launch::launch,
+    )
+    .await
+    .map(drop)
 }
 
 /// How long the WMI launch may take before the daemon is spawned inside the
@@ -1596,8 +1650,13 @@ fn spawn_daemon_with_flags(
     clippy::unused_async,
     reason = "async in step with the Windows spawn, which awaits the WMI launch"
 )]
-async fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
+async fn spawn_daemon(
+    bin: &std::path::Path,
+    template_dir: &std::path::Path,
+    start_failure: &Path,
+) -> anyhow::Result<()> {
     let mut cmd = Command::new(bin);
+    cmd.args(daemon_start_args(start_failure));
     cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1655,6 +1714,7 @@ fn classify_read(file: Result<crate::HandshakeFile, DaemonIsElevated>) -> Handsh
 async fn wait_for_handshake(
     config_dirs: &[PathBuf],
     client_versions: &[u32],
+    start_failure: Option<&Path>,
 ) -> anyhow::Result<DaemonHandshake> {
     wait_for_handshake_among(
         config_dirs,
@@ -1662,8 +1722,24 @@ async fn wait_for_handshake(
         SPAWN_WAIT_TIMEOUT,
         PROOF_TIMEOUT,
         crate::read_handshake_file,
+        start_failure,
     )
     .await
+}
+
+/// The error a daemon that failed to start left in its start-failure file
+/// `path`, when the file is there and holds more than whitespace.
+async fn start_failure_error(path: &Path) -> Option<anyhow::Error> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    warn!(
+        path = %path.display(),
+        "the daemon wrote a start-failure file; giving up on the handshake"
+    );
+    Some(anyhow!("the daemon failed to start: {text}"))
 }
 
 /// The handshake `path` holds when its listener proves it holds the token and
@@ -1712,6 +1788,7 @@ async fn wait_for_handshake_in(
     timeout: Duration,
     proof_budget: Duration,
     read: HandshakeReader,
+    start_failure: Option<&Path>,
 ) -> anyhow::Result<DaemonHandshake> {
     wait_for_handshake_among(
         std::slice::from_ref(&config_dir.to_path_buf()),
@@ -1719,6 +1796,7 @@ async fn wait_for_handshake_in(
         timeout,
         proof_budget,
         read,
+        start_failure,
     )
     .await
 }
@@ -1730,13 +1808,15 @@ async fn wait_for_handshake_in(
 /// started through WMI may not run with the caller's token. A stale file
 /// never satisfies the wait; the daemon's pid need not be the one this client
 /// spawned. A file `read` refuses ends the wait at once with that
-/// [`DaemonIsElevated`] refusal.
+/// [`DaemonIsElevated`] refusal, and so does a non-blank start-failure file at
+/// `start_failure`, which names the error the daemon failed to start with.
 async fn wait_for_handshake_among(
     config_dirs: &[PathBuf],
     client_versions: &[u32],
     timeout: Duration,
     proof_budget: Duration,
     read: HandshakeReader,
+    start_failure: Option<&Path>,
 ) -> anyhow::Result<DaemonHandshake> {
     let paths: Vec<PathBuf> = config_dirs
         .iter()
@@ -1774,6 +1854,11 @@ async fn wait_for_handshake_among(
                 return Ok(parsed);
             }
         }
+        if let Some(path) = start_failure
+            && let Some(err) = start_failure_error(path).await
+        {
+            return Err(err);
+        }
         let now = tokio::time::Instant::now();
         if now >= next_progress {
             // One-line tick per second so we can see exactly how long the
@@ -1790,6 +1875,11 @@ async fn wait_for_handshake_among(
             next_progress = now + Duration::from_secs(1);
         }
         sleep(POLL_INTERVAL).await;
+    }
+    if let Some(path) = start_failure
+        && let Some(err) = start_failure_error(path).await
+    {
+        return Err(err);
     }
     warn!(
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1813,7 +1903,10 @@ mod tests {
         path_is_under, protocol_compatible, protocol_kind, refuse_elevated, refuse_newer,
         wait_for_handshake_in,
     };
-    use super::{CurrentDaemonBinary, StartSteps, ensure_running_in, start_daemon_routed};
+    use super::{
+        CurrentDaemonBinary, START_FAILURE_FILE, StartSteps, daemon_start_args, ensure_running_in,
+        start_daemon_routed,
+    };
     #[cfg(windows)]
     use super::{spawn_daemon, spawn_daemon_with};
     use crate::HandshakeFile;
@@ -1901,6 +1994,7 @@ mod tests {
                     HANG_GUARD,
                     HANG_GUARD,
                     crate::read_handshake_file,
+                    None,
                 )
                 .await
             },
@@ -1933,6 +2027,7 @@ mod tests {
                     Duration::from_millis(300),
                     HANG_GUARD,
                     crate::read_handshake_file,
+                    None,
                 )
                 .await
             },
@@ -2181,7 +2276,7 @@ mod tests {
         );
 
         let err = block_on(wait_for_handshake_in(
-            &scratch.0, SUPPORTED, HANG_GUARD, HANG_GUARD, refused,
+            &scratch.0, SUPPORTED, HANG_GUARD, HANG_GUARD, refused, None,
         ))
         .expect_err("a refused handshake ends the wait");
 
@@ -2550,6 +2645,7 @@ mod tests {
                 HANG_GUARD,
                 HANG_GUARD,
                 crate::read_handshake_file,
+                None,
             ))
         });
         polled
@@ -2571,6 +2667,85 @@ mod tests {
             .expect("the wait accepts the proven file");
         assert_eq!(found.port, daemon.port);
         assert_eq!(found.auth_token, "good-token");
+    }
+
+    /// A daemon that failed before it could write `daemon.json` reports the
+    /// error through its start-failure file, which ends the wait at once.
+    #[test]
+    fn a_start_failure_file_ends_the_wait_with_its_text() {
+        let scratch = ScratchDir::new("wait-start-failure");
+        let failure = scratch
+            .0
+            .join("logs")
+            .join(format!("{START_FAILURE_FILE}-1-0.txt"));
+        std::fs::create_dir_all(
+            failure
+                .parent()
+                .expect("the failure file has a parent folder"),
+        )
+        .expect("create the logs folder");
+        std::fs::write(&failure, r"protected root C:\x is unsafe").expect("write the failure file");
+
+        let err = block_on(wait_for_handshake_in(
+            &scratch.0,
+            SUPPORTED,
+            Duration::from_secs(30),
+            HANG_GUARD,
+            crate::read_handshake_file,
+            Some(&failure),
+        ))
+        .expect_err("the failure file ends the wait");
+
+        assert!(
+            format!("{err:#}").contains(r"protected root C:\x is unsafe"),
+            "the wait returns the daemon's own error, not a timeout: {err:#}"
+        );
+    }
+
+    /// A failure file holding only whitespace reports no failure, so the wait
+    /// still ends on the generic timeout.
+    #[test]
+    fn a_blank_start_failure_file_is_ignored() {
+        let scratch = ScratchDir::new("wait-start-failure-blank");
+        let failure = scratch
+            .0
+            .join("logs")
+            .join(format!("{START_FAILURE_FILE}-1-0.txt"));
+        std::fs::create_dir_all(
+            failure
+                .parent()
+                .expect("the failure file has a parent folder"),
+        )
+        .expect("create the logs folder");
+        std::fs::write(&failure, " \r\n\t").expect("write the failure file");
+
+        let err = block_on(wait_for_handshake_in(
+            &scratch.0,
+            SUPPORTED,
+            Duration::from_millis(300),
+            HANG_GUARD,
+            crate::read_handshake_file,
+            Some(&failure),
+        ))
+        .expect_err("no daemon appears");
+
+        assert_eq!(
+            format!("{err:#}"),
+            "daemon failed to start within the timeout"
+        );
+    }
+
+    #[test]
+    fn daemon_start_args_name_the_failure_file() {
+        let args = daemon_start_args(Path::new(r"C:\cfg\logs\daemon-start-failure-4242-0.txt"));
+
+        assert_eq!(
+            args,
+            vec![
+                std::ffi::OsString::from("--start-failure-file"),
+                std::ffi::OsString::from(r"C:\cfg\logs\daemon-start-failure-4242-0.txt"),
+            ]
+        );
     }
 
     /// Join the test process to a fresh job with `flags` and return the job.
@@ -2645,6 +2820,7 @@ mod tests {
         block_on(spawn_daemon(
             Path::new("cmd.exe"),
             Path::new("unused-templates"),
+            Path::new("unused-start-failure"),
         ))
     }
 

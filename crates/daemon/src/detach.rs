@@ -12,7 +12,7 @@
 
 use anyhow::Context as _;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tracing::info;
@@ -20,35 +20,102 @@ use tracing_subscriber::EnvFilter;
 
 /// The one line that refuses an argument list naming no subcommand and asking
 /// for no start form, printed verbatim before anything is created.
-const USAGE: &str = "usage: rustling-tulipd [--detach | --version | <command> ...], where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch";
+const USAGE: &str = "usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch";
 
 /// How the daemon was asked to start, once every subcommand has declined
 /// the arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Launch {
-    /// No arguments: run the daemon here.
+    /// Run the daemon here.
     Start,
-    /// Exactly `--detach`: hand over to a cached copy and exit.
+    /// `--detach`: hand over to a cached copy and exit.
     Detach,
 }
 
+/// A start the arguments ask for: the form, and the file a failure to start
+/// is written to when the caller named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchRequest {
+    /// Run the daemon here, or hand over to a cached copy.
+    pub form: Launch,
+    /// The file the caller named with `--start-failure-file`.
+    pub start_failure: Option<PathBuf>,
+}
+
 /// The launch `args` (without the program name) ask for, or the one stderr
-/// line that refuses them: only `[]` and `["--detach"]` start a daemon.
+/// line that refuses them: no arguments, `--detach` alone, or a start with one
+/// `--start-failure-file <path>` in any position.
 ///
 /// # Errors
 ///
-/// Every other argument list, including `--detach` beside anything else: the
-/// usage line naming the offending argument, which the caller prints before
-/// `paths::Dirs::ensure` so a typo touches nothing.
-pub fn launch_form(args: impl IntoIterator<Item = OsString>) -> Result<Launch, String> {
+/// Every other argument list — an unknown argument, `--start-failure-file`
+/// with no value after it or given twice, `--detach` given twice, or
+/// `--start-failure-file` beside `--detach` (a launcher hands over to a cached
+/// child that never sees the file): the usage line naming the offending
+/// argument, which the caller prints before `paths::Dirs::ensure` so a typo
+/// touches nothing.
+pub fn launch_form(args: impl IntoIterator<Item = OsString>) -> Result<LaunchRequest, String> {
     let mut args = args.into_iter();
-    match args.next() {
-        None => Ok(Launch::Start),
-        Some(first) if first == "--detach" => match args.next() {
-            None => Ok(Launch::Detach),
-            Some(extra) => Err(refusal(&extra)),
-        },
-        Some(first) => Err(refusal(&first)),
+    let mut form = Launch::Start;
+    let mut start_failure = None;
+    while let Some(arg) = args.next() {
+        if arg == "--detach" {
+            if form == Launch::Detach {
+                return Err(refusal(&arg));
+            }
+            form = Launch::Detach;
+        } else if arg == "--start-failure-file" {
+            if start_failure.is_some() {
+                return Err(refusal(&arg));
+            }
+            let Some(path) = args.next() else {
+                return Err(refusal(&arg));
+            };
+            start_failure = Some(PathBuf::from(path));
+        } else {
+            return Err(refusal(&arg));
+        }
+    }
+    if form == Launch::Detach && start_failure.is_some() {
+        return Err(refusal(OsStr::new("--start-failure-file")));
+    }
+    Ok(LaunchRequest {
+        form,
+        start_failure,
+    })
+}
+
+/// Write `err`'s whole chain (`{err:#}`) to the start-failure file `path`, a
+/// daemon that failed to start tells its client what went wrong with, through
+/// a sibling temp file and a rename so a reader never sees half a message.
+pub fn write_start_failure(path: &Path, err: &anyhow::Error) {
+    let written = create_parent(path)
+        .and_then(|()| crate::atomic_file::write_atomic(path, format!("{err:#}").as_bytes()));
+    if let Err(write_err) = written {
+        // No subscriber and no stderr exist this early, so nothing else can
+        // record this.
+        tracing::error!(?write_err, path = %path.display(), "could not write the start-failure file");
+    }
+}
+
+/// Record `err` as the start failure in `start_failure`, unless the daemon
+/// already published its handshake: an error after that is a daemon that
+/// started and served, then failed, which is no start failure.
+pub fn record_start_failure(start_failure: Option<&Path>, published: bool, err: &anyhow::Error) {
+    if published {
+        return;
+    }
+    if let Some(path) = start_failure {
+        write_start_failure(path, err);
+    }
+}
+
+/// Create `path`'s parent folder, when it has one.
+fn create_parent(path: &Path) -> anyhow::Result<()> {
+    match path.parent() {
+        Some(parent) => std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display())),
+        None => Ok(()),
     }
 }
 
@@ -170,12 +237,41 @@ fn init_logging(dirs: &crate::paths::Dirs) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
-    use super::{Launch, child_command, launch_form};
+    use super::{
+        Launch, LaunchRequest, child_command, launch_form, record_start_failure,
+        write_start_failure,
+    };
     use std::ffi::{OsStr, OsString};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     const TEMPLATE_ENV: &str = "RUSTLING_TULIP_BIN_TEMPLATES";
+
+    /// A fresh folder under the repo's `.tmp/`, removed on drop.
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(tag: &str) -> Self {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join(".tmp")
+                .join(format!("detach-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create the test dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -191,23 +287,109 @@ mod tests {
     /// fails the test.
     fn refusal(arg: &str) -> String {
         format!(
-            "rustling-tulipd: unknown argument \"{arg}\"; usage: rustling-tulipd [--detach | --version | <command> ...], where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch"
+            "rustling-tulipd: unknown argument \"{arg}\"; usage: rustling-tulipd [--start-failure-file <path>] | --detach | --version | <command> ..., where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch"
         )
     }
 
+    /// The start `launch_form` returns for `form` and the file `failure`.
+    fn request(form: Launch, failure: Option<&str>) -> LaunchRequest {
+        LaunchRequest {
+            form,
+            start_failure: failure.map(PathBuf::from),
+        }
+    }
+
     #[test]
-    fn launch_form_starts_only_for_no_arguments_or_detach_alone() {
-        assert_eq!(launch_form(args(&[])), Ok(Launch::Start));
-        assert_eq!(launch_form(args(&["--detach"])), Ok(Launch::Detach));
+    fn only_a_plain_start_or_detach_alone_is_accepted() {
+        assert_eq!(launch_form(args(&[])), Ok(request(Launch::Start, None)));
+        assert_eq!(
+            launch_form(args(&["--detach"])),
+            Ok(request(Launch::Detach, None))
+        );
         for (list, offending) in [
             (&["frobnicate"][..], "frobnicate"),
             (&["sesions"][..], "sesions"),
             (&["--foo", "--detach"][..], "--foo"),
             (&["--detach", "extra"][..], "extra"),
             (&["--detached"][..], "--detached"),
+            (&["--detach", "--detach"][..], "--detach"),
         ] {
             assert_eq!(launch_form(args(list)), Err(refusal(offending)), "{list:?}");
         }
+    }
+
+    #[test]
+    fn the_start_failure_option_is_accepted_only_with_the_start_form() {
+        assert_eq!(
+            launch_form(args(&["--start-failure-file", "p"])),
+            Ok(request(Launch::Start, Some("p")))
+        );
+        for list in [
+            &["--detach", "--start-failure-file", "p"][..],
+            &["--start-failure-file", "p", "--detach"][..],
+        ] {
+            assert_eq!(
+                launch_form(args(list)),
+                Err(refusal("--start-failure-file")),
+                "{list:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_start_failure_option_without_a_value_is_refused() {
+        assert_eq!(
+            launch_form(args(&["--start-failure-file"])),
+            Err(refusal("--start-failure-file"))
+        );
+    }
+
+    #[test]
+    fn a_repeated_start_failure_option_is_refused() {
+        assert_eq!(
+            launch_form(args(&[
+                "--start-failure-file",
+                "p",
+                "--start-failure-file",
+                "q"
+            ])),
+            Err(refusal("--start-failure-file"))
+        );
+    }
+
+    #[test]
+    fn write_start_failure_writes_the_error_chain() {
+        let dir = TestDir::new("write-start-failure");
+        // The `logs` folder does not exist yet, so `write_start_failure` has
+        // to create it.
+        let path = dir.0.join("logs").join("start-failure.txt");
+        let err = anyhow::anyhow!("inner").context("outer");
+
+        write_start_failure(&path, &err);
+
+        let text = std::fs::read_to_string(&path).expect("the failure file was written");
+        assert_eq!(text, "outer: inner");
+    }
+
+    #[test]
+    fn a_start_failure_is_written_only_before_the_handshake() {
+        let dir = TestDir::new("record-start-failure");
+        let path = dir.0.join("start-failure.txt");
+        let err = anyhow::anyhow!("inner").context("outer");
+
+        record_start_failure(Some(&path), false, &err);
+        let text = std::fs::read_to_string(&path).expect("a start failure is written");
+        assert_eq!(text, "outer: inner");
+        std::fs::remove_file(&path).expect("clear the first file");
+
+        record_start_failure(Some(&path), true, &err);
+        assert!(
+            !path.exists(),
+            "an error after the handshake is no start failure"
+        );
+
+        record_start_failure(None, false, &err);
+        assert!(!path.exists(), "no file was named");
     }
 
     #[test]

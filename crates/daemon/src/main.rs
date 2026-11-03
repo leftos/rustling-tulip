@@ -84,6 +84,7 @@ use anyhow::Context as _;
 use daemon_client::capped_log;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
@@ -185,12 +186,39 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             return Ok(std::process::ExitCode::from(2));
         }
     };
+    let detach::LaunchRequest {
+        form,
+        start_failure,
+    } = launch;
+    // A daemon the client started has neither the caller's stderr nor the
+    // caller's console, so it names this file on its command line and writes
+    // the error it failed to start with there.
+    let published = AtomicBool::new(false);
+    let running = run_daemon(form, &published).await;
+    if let Err(err) = &running {
+        detach::record_start_failure(
+            start_failure.as_deref(),
+            published.load(Ordering::Relaxed),
+            err,
+        );
+    }
+    running
+}
+
+/// Run the daemon `form` asks for, once every subcommand has declined the
+/// arguments: no arguments runs it here and `--detach` hands over to a cached
+/// copy. `published` turns true once the daemon has written its handshake, so
+/// an error after that is not reported as a start failure.
+async fn run_daemon(
+    form: detach::Launch,
+    published: &AtomicBool,
+) -> anyhow::Result<std::process::ExitCode> {
     let dirs = paths::Dirs::ensure()?;
     // The login `Run` entry runs the installed exe with `--detach`: hand over
     // to a cached copy and exit, without taking the instance lock, the log or
     // the binary-cache sweep from a daemon that may already serve this config
     // dir.
-    if launch == detach::Launch::Detach {
+    if form == detach::Launch::Detach {
         detach::relaunch_from_cache(&dirs)?;
         return Ok(std::process::ExitCode::SUCCESS);
     }
@@ -298,7 +326,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dirs.sessions_dir.clone(),
     ));
 
-    let result = server::run(state, dirs, live, dead, resume_ids).await;
+    let result = server::run(state, dirs, live, dead, resume_ids, published).await;
     info!(?result, "rustling-tulipd main returning");
     result?;
     Ok(std::process::ExitCode::SUCCESS)

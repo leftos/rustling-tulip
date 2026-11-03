@@ -66,6 +66,7 @@ use protocol::{
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc};
 use tracing::{error, info, warn};
@@ -389,6 +390,7 @@ pub async fn run(
     orphans: Vec<OrphanMeta>,
     abandoned: Vec<OrphanMeta>,
     resume_ids: Vec<String>,
+    published: &AtomicBool,
 ) -> anyhow::Result<()> {
     let run_start = std::time::Instant::now();
     // A fresh loopback token every start. Remote access is off unless
@@ -509,6 +511,9 @@ pub async fn run(
         run_elapsed_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX),
         "handshake file written; daemon ready for clients"
     );
+    // From here on the daemon has started: an error is a daemon that served
+    // and then failed, which the caller does not report as a start failure.
+    published.store(true, Ordering::Relaxed);
 
     // Resume the sessions the last run lost, now that clients can connect:
     // spawning them before the bind would hold up the handshake.
