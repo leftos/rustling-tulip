@@ -4,6 +4,15 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.8.0-alpha
+
+### Highlights
+
+- The Dashboard shows every running agent at a glance and answers their questions and permission prompts with one click.
+- On Windows, the app's own toasts answer a prompt or go to its pane without taking focus, with softer chimes.
+- `rustling-tulipd` drives sessions from a shell: list, spawn, send, read, wait and watch.
+- Sessions run as administrator are kept apart: programs without administrator rights can no longer start or reach them.
+
 ### Added
 
 - The Dashboard opens on a Compact view: every running agent by repo, with its state, work and subagents, and no scrolling.
