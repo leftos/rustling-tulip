@@ -30,7 +30,8 @@
 //! Nord with its Ground edited) and `themes` (the Themes modal over Settings,
 //! over a user theme, a broken file and a file named after a built-in).
 //! `settings-sounds` shows Settings on the Notifications tab with the Needs
-//! you sound dropdown open, and `toast` a Needs you and a Finished card, as
+//! you sound dropdown open, and `toast` a Needs you card on a permission,
+//! with Allow and Deny, and a Finished card, as
 //! the app's own toasts draw them.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
@@ -71,11 +72,11 @@ use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
 use rustling_tulip_native::ui_theme::theme;
 use rustling_tulip_native::update::{LastResult, Ready, Updater};
 use rustling_tulip_native::{
-    Activity, AppToast, AppToastKind, Assets, Clock, Connection, FileFilter, FilePicker,
-    FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier,
-    NotifyKind, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView,
-    SavePicker, SystemToastPlacer, TOAST_CARD_WIDTH, ToastKind, ToastSpec, Transport, ViewerLoad,
-    bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
+    Activity, AppToast, AppToastKind, AskBlock, AskChoice, Assets, Clock, Connection, FileFilter,
+    FilePicker, FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent,
+    Notifier, NotifyKind, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps,
+    RootView, SavePicker, SystemToastPlacer, TOAST_CARD_WIDTH, ToastKind, ToastPresses, ToastSpec,
+    Transport, ViewerLoad, bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -87,7 +88,7 @@ const WINDOW_SIZE: (u16, u16) = (1000, 640);
 const DASHBOARD_WINDOW_SIZE: (u16, u16) = (2000, 900);
 
 /// The window `toast` draws its two cards in.
-const TOAST_WINDOW_SIZE: (u16, u16) = (420, 300);
+const TOAST_WINDOW_SIZE: (u16, u16) = (420, 350);
 /// The `summary` shot's window: tall enough for the split's top pane to
 /// hold the pinned card, all three lines with one open, the strip and the
 /// composer.
@@ -852,6 +853,35 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
     }
 }
 
+/// The ask block of a permission, with Allow and Deny.
+fn permission_ask() -> AskBlock {
+    let choice = |label: &str, choice| AskChoice {
+        label: label.to_owned(),
+        hint: None,
+        choice,
+    };
+    AskBlock {
+        session_id: "s1".to_owned(),
+        label: "Permission ·".to_owned(),
+        text: "Bash".to_owned(),
+        command: Some("gh pr merge 118 --squash".to_owned()),
+        since: Some(Utc::now()),
+        choices: vec![
+            choice("Allow", protocol::PromptChoice::Allow),
+            choice("Deny", protocol::PromptChoice::Deny),
+        ],
+    }
+}
+
+/// A card's controls, doing nothing: nothing presses them in a shot.
+fn idle_presses() -> ToastPresses {
+    ToastPresses {
+        answer: Rc::new(|_, _, _| {}),
+        go: Box::new(|_, _, _| {}),
+        dismiss: Box::new(|_, _, _| {}),
+    }
+}
+
 /// A Needs you card and a Finished card, as the app's own toasts draw them.
 struct ToastShot {
     needs_you: AppToast,
@@ -874,9 +904,10 @@ impl ToastShot {
                 "s1",
                 AppToastKind::NeedsYou { has_answers: false },
                 "Needs you · box",
-                "Petal: Waiting for your answer on which of the two migrations to run \
-                 first, since both of them touch the sessions table",
-            ),
+                "Petal: Waiting for your permission to merge the pull request that \
+                 moves the sessions table",
+            )
+            .waiting_on(Some(permission_ask()), None),
             finished: toast("s2", AppToastKind::Finished, "Finished", "Bramble"),
         }
     }
@@ -888,7 +919,7 @@ impl Render for ToastShot {
             div()
                 .w(px(TOAST_CARD_WIDTH))
                 .h(px(card_height(toast)))
-                .child(toast_card(toast, |_, _, _| {}, |_, _, _| {}, cx))
+                .child(toast_card(toast, false, idle_presses(), cx))
         };
         div()
             .size_full()

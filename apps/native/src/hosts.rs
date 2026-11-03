@@ -314,6 +314,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.lists_since_welcome.remove(host);
+        self.drop_host_toasts(host, cx);
         // This PC's next tab list is its next connection's: until then its
         // layout is the old one's.
         if *host == HostKey::Local {

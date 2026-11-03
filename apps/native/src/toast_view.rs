@@ -1,40 +1,211 @@
 //! What an app's own toast draws: a rounded card with a stripe by kind, its
-//! title and body, `Go to pane` and ×, and the view that holds one card in a
-//! toast window of its own. The rules are in `docs/plans/custom-toasts.md`.
+//! title and body, the prompt's command and answers, `Go to pane` and ×, and
+//! the view that holds one card in a toast window of its own. The rules are
+//! in `docs/plans/custom-toasts.md`.
 
+use std::rc::Rc;
+
+use chrono::{DateTime, Utc};
 use gpui::{
-    App, ClickEvent, Context, Div, IntoElement, MouseMoveEvent, Render, WeakEntity, Window, div,
-    prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, IntoElement, MouseMoveEvent, Render, WeakEntity,
+    Window, div, prelude::*, px,
 };
+use protocol::PromptChoice;
 
-use crate::buttons::{ButtonSize, Layer, outlined_button};
-use crate::dashboard_rows::GO_TO_PANE;
+use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
+use crate::dashboard_rows::{AskBlock, AskChoice, GO_TO_PANE};
 use crate::driver_id::DriverId as _;
-use crate::fonts::{self, ui_px};
+use crate::fonts::{self, DEFAULT_FAMILY, ui_px};
 use crate::toast_stack::{AppToast, AppToastKind};
 use crate::ui_theme::theme;
 use crate::{RootView, UI_TEXT_SIZE};
 
-/// How tall a toast is, in logical px.
+/// How tall a toast with no answers is, in logical px.
 const CARD_HEIGHT: f32 = 116.0;
+
+/// How tall a toast with answers is, in logical px.
+const ANSWERS_HEIGHT: f32 = 152.0;
+
+/// What a permission's command adds to a toast's height, in logical px.
+const COMMAND_HEIGHT: f32 = 30.0;
+
+/// What a second row of answers adds to a toast's height, in logical px.
+const SECOND_ROW_HEIGHT: f32 = 34.0;
+
+/// How many answers share a row.
+const ANSWERS_PER_ROW: usize = 2;
 
 /// How wide the card's accent stripe is, in logical px.
 const STRIPE_WIDTH: f32 = 3.0;
 
+/// The command box's text size, as the Dashboard's ask block draws it.
+const SMALL_TEXT: f32 = 11.5;
+
+/// The key hint's text size, as the Dashboard's ask block draws it.
+const CAPS_TEXT: f32 = 10.5;
+
+/// What an answered toast draws in its choices' place.
+const SENT: &str = "Sent";
+
 /// How tall `toast`'s card is, in logical px: the height it is placed at.
 #[must_use]
-pub fn card_height(_toast: &AppToast) -> f32 {
-    CARD_HEIGHT
+pub fn card_height(toast: &AppToast) -> f32 {
+    let Some(ask) = &toast.ask else {
+        return CARD_HEIGHT;
+    };
+    let choices = ask.choices.len();
+    let base = if choices == 0 {
+        CARD_HEIGHT
+    } else {
+        ANSWERS_HEIGHT
+    };
+    let command = if ask.command.is_some() {
+        COMMAND_HEIGHT
+    } else {
+        0.0
+    };
+    let second_row = if choices > ANSWERS_PER_ROW {
+        SECOND_ROW_HEIGHT
+    } else {
+        0.0
+    };
+    base + command + second_row
 }
 
-/// `toast`'s card, filling its parent: `on_go` is `Go to pane`'s press and
-/// `on_dismiss` is ×'s.
-pub fn toast_card(
-    toast: &AppToast,
-    on_go: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+/// An answer button's press: the wait it answers and the choice made.
+type AnswerPress = Rc<dyn Fn(DateTime<Utc>, PromptChoice, &mut App)>;
+
+/// A click on a control of the card.
+type ClickPress = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// What the card's controls do.
+pub struct ToastPresses {
+    /// An answer button's press.
+    pub answer: AnswerPress,
+    /// `Go to pane`'s press.
+    pub go: ClickPress,
+    /// ×'s press.
+    pub dismiss: ClickPress,
+}
+
+/// The answer button at `index`, primary when it is the first.
+fn answer_button(
+    index: usize,
+    choice: &AskChoice,
+    since: DateTime<Utc>,
+    answer: &AnswerPress,
     cx: &App,
-) -> Div {
+) -> AnyElement {
+    let t = theme(cx);
+    let offset = fonts::ui_text_size(cx);
+    let shift = fonts::ui_weight_shift(cx);
+    let make = if index == 0 {
+        primary_button
+    } else {
+        outlined_button
+    };
+    let answer = Rc::clone(answer);
+    let picked = choice.choice;
+    make(
+        offset,
+        shift,
+        &format!("toast-answer-{index}"),
+        ButtonSize::Compact,
+        true,
+        Layer::Base,
+        &t,
+    )
+    .flex_1()
+    .min_w_0()
+    .gap(px(6.0))
+    .child(
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(choice.label.clone()),
+    )
+    .when_some(choice.hint.clone(), |button, hint| {
+        button.child(
+            div()
+                .flex_none()
+                .opacity(0.65)
+                .text_size(fonts::ui_px_at(offset, CAPS_TEXT))
+                .child(hint),
+        )
+    })
+    .on_click(move |_, _, cx| answer(since, picked, cx))
+    .into_any_element()
+}
+
+/// `ask`'s command box, its choices two to a row, or, once an answer is
+/// `sent`, a disabled `Sent` in their place.
+fn answer_block(ask: &AskBlock, sent: bool, answer: &AnswerPress, cx: &App) -> Div {
+    let t = theme(cx);
+    let offset = fonts::ui_text_size(cx);
+    let shift = fonts::ui_weight_shift(cx);
+    let mut rows: Vec<AnyElement> = Vec::new();
+    if sent && !ask.choices.is_empty() {
+        rows.push(
+            outlined_button(
+                offset,
+                shift,
+                "toast-sent",
+                ButtonSize::Compact,
+                false,
+                Layer::Base,
+                &t,
+            )
+            .child(SENT)
+            .into_any_element(),
+        );
+    } else if let Some(since) = ask.since {
+        let numbered: Vec<(usize, &AskChoice)> = ask.choices.iter().enumerate().collect();
+        for row in numbered.chunks(ANSWERS_PER_ROW) {
+            let buttons = row
+                .iter()
+                .map(|(index, choice)| answer_button(*index, choice, since, answer, cx));
+            rows.push(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .children(buttons)
+                    .into_any_element(),
+            );
+        }
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .when_some(ask.command.clone(), |block, command| {
+            block.child(
+                div()
+                    .flex_none()
+                    .max_w_full()
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(gpui::rgb(t.line))
+                    .bg(gpui::rgb(t.surface))
+                    .font_family(DEFAULT_FAMILY)
+                    .font_weight(fonts::mono_weight())
+                    .text_size(fonts::ui_px_at(offset, SMALL_TEXT))
+                    .child(crate::ellipsis::truncating(
+                        "toast-command-text",
+                        gpui::StyledText::new(command),
+                    ))
+                    .driver_id(|| "toast-command".to_owned()),
+            )
+        })
+        .children(rows)
+}
+
+/// `toast`'s card, filling its parent; `sent` when an answer is out for its
+/// session.
+pub fn toast_card(toast: &AppToast, sent: bool, presses: ToastPresses, cx: &App) -> Div {
     let t = theme(cx);
     let offset = crate::fonts::ui_text_size(cx);
     let shift = crate::fonts::ui_weight_shift(cx);
@@ -53,7 +224,7 @@ pub fn toast_card(
     )
     .text_color(gpui::rgb(t.text_2))
     .child(GO_TO_PANE)
-    .on_click(on_go);
+    .on_click(presses.go);
     let dismiss = div()
         .id("toast-dismiss")
         .driver_id(|| "toast-dismiss".to_owned())
@@ -63,7 +234,11 @@ pub fn toast_card(
         .cursor_pointer()
         .text_color(gpui::rgb(t.muted))
         .child("×")
-        .on_click(on_dismiss);
+        .on_click(presses.dismiss);
+    let answers = toast
+        .ask
+        .as_ref()
+        .map(|ask| answer_block(ask, sent, &presses.answer, cx));
     let words = div()
         .flex()
         .flex_col()
@@ -87,7 +262,15 @@ pub fn toast_card(
                 .text_color(gpui::rgb(t.text_2))
                 .child(toast.body.clone()),
         )
-        .child(div().mt_auto().flex().child(go));
+        .child(
+            div()
+                .mt_auto()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .children(answers)
+                .child(div().flex().child(go)),
+        );
     div()
         .driver_id(|| "toast-card".to_owned())
         .relative()
@@ -116,6 +299,8 @@ pub fn toast_card(
 pub(crate) struct ToastView {
     root: WeakEntity<RootView>,
     toast: AppToast,
+    /// Whether an answer is out for the session, as the root view last said.
+    sent: bool,
     /// Whether the pointer rests on the toast, as last told to the root view.
     hovering: bool,
     /// Whether the window reported the pointer at its last move over the
@@ -137,14 +322,18 @@ impl ToastView {
         Self {
             root,
             toast,
+            sent: false,
             hovering: false,
             window_saw_pointer: false,
         }
     }
 
-    /// A later toast for the session takes this one's place.
-    pub(crate) fn replace(&mut self, toast: AppToast, cx: &mut Context<Self>) {
+    /// Shows `toast` as the stack now holds it, `sent` when an answer is out
+    /// for its session. The root view is not read while drawing: it is
+    /// mid-update when a toast window opens.
+    pub(crate) fn show(&mut self, toast: AppToast, sent: bool, cx: &mut Context<Self>) {
         self.toast = toast;
+        self.sent = sent;
         cx.notify();
     }
 
@@ -185,19 +374,28 @@ impl Render for ToastView {
         self.follow_window_hover(window, cx);
         let (go_root, dismiss_root) = (self.root.clone(), self.root.clone());
         let (go_key, dismiss_key) = (self.toast.key.clone(), self.toast.key.clone());
-        let card = toast_card(
-            &self.toast,
-            move |_, _, cx| RootView::toast_go_to_pane(&go_root, &go_key, cx),
-            move |_, _, cx| {
+        let answer_root = self.root.clone();
+        let session_id = self.toast.key.1.clone();
+        let presses = ToastPresses {
+            answer: Rc::new(move |since, choice, cx| {
+                let answered = answer_root.update(cx, |root, cx| {
+                    root.answer_from_dashboard(&session_id, since, choice, cx);
+                });
+                if let Err(err) = answered {
+                    tracing::debug!("toast answered after the root view went: {err:#}");
+                }
+            }),
+            go: Box::new(move |_, _, cx| RootView::toast_go_to_pane(&go_root, &go_key, cx)),
+            dismiss: Box::new(move |_, _, cx| {
                 let dismissed = dismiss_root.update(cx, |root, cx| {
                     root.dismiss_app_toast(&dismiss_key, cx);
                 });
                 if let Err(err) = dismissed {
                     tracing::debug!("toast dismissed after the root view went: {err:#}");
                 }
-            },
-            cx,
-        );
+            }),
+        };
+        let card = toast_card(&self.toast, self.sent, presses, cx);
         div()
             .id("toast-window")
             .size_full()
@@ -220,7 +418,10 @@ impl Render for ToastView {
 mod tests {
     use std::time::Instant;
 
-    use super::{CARD_HEIGHT, card_height, releases_hover};
+    use protocol::PromptChoice;
+
+    use super::{card_height, releases_hover};
+    use crate::dashboard_rows::{AskBlock, AskChoice};
     use crate::target::HostKey;
     use crate::toast_stack::{AppToast, AppToastKind, key_of};
 
@@ -251,16 +452,50 @@ mod tests {
         }
     }
 
-    #[test]
-    fn card_height_is_the_placed_height() {
-        let toast = AppToast::new(
+    fn toast() -> AppToast {
+        AppToast::new(
             key_of(&HostKey::Local, "s1"),
             AppToastKind::Finished,
             "a title".to_owned(),
             "a body".to_owned(),
             Instant::now(),
-        );
-        assert!((card_height(&toast) - CARD_HEIGHT).abs() < f32::EPSILON);
-        assert!((CARD_HEIGHT - 116.0).abs() < f32::EPSILON);
+        )
+    }
+
+    /// A toast waiting on `choices` answers, with a command when `command`.
+    fn asking(choices: u16, command: bool) -> AppToast {
+        let choice = |index| AskChoice {
+            label: format!("choice {index}"),
+            hint: None,
+            choice: PromptChoice::Option { index },
+        };
+        toast().waiting_on(
+            Some(AskBlock {
+                session_id: "s1".to_owned(),
+                label: "Permission ·".to_owned(),
+                text: "a prompt".to_owned(),
+                command: command.then(|| "gh pr merge".to_owned()),
+                since: None,
+                choices: (0..choices).map(choice).collect(),
+            }),
+            None,
+        )
+    }
+
+    #[test]
+    fn card_height_follows_what_the_card_draws() {
+        let cases = [
+            (toast(), 116.0, "no ask"),
+            (asking(0, false), 116.0, "no choices"),
+            (asking(2, false), 152.0, "one row of choices"),
+            (asking(1, false), 152.0, "one choice"),
+            (asking(2, true), 182.0, "choices and a command"),
+            (asking(0, true), 146.0, "a command and no choices"),
+            (asking(3, false), 186.0, "a second row of choices"),
+            (asking(3, true), 216.0, "a second row and a command"),
+        ];
+        for (toast, height, why) in cases {
+            assert!((card_height(&toast) - height).abs() < f32::EPSILON, "{why}");
+        }
     }
 }

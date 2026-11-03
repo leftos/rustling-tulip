@@ -28,7 +28,7 @@ Rulings below are orchestrator decisions (ship-fast profile), open to the owner.
 - [x] B: the plain-Rust toast stack (`toast_stack.rs`): keys, kinds, push-or-update, expiry, hover, overflow, placement maths, unit-tested
 - [x] C: the Windows shim (`toast_window.rs`): non-activating topmost window, work area per monitor, the user-busy check split out of `suppressed()`
 - [x] D1: the toast view and its RootView host: open, place, update and close windows, × and Go to pane, timers, `native-shot toast`
-- [ ] D2: answer buttons, the sent and refused states, dismissal on session and host changes
+- [x] D2: answer buttons, the sent and refused states, dismissal on session and host changes
 - [ ] F: docs (`docs/native-client.md` Notifications, `docs/on-disk.md`'s `native-ui.json` sentence), changelog, test-map rows; then this file's rulings are promoted and it is deleted
 
 Order: A, then B and C side by side, then D1, then D2, then F.

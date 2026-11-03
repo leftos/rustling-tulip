@@ -324,7 +324,7 @@ pub use crate::taskbar_badge::{BadgeOverlay, NoTaskbarBadge, TaskbarBadge};
 pub use crate::text_input::bind_keys;
 pub use crate::toast_stack::WIDTH as TOAST_CARD_WIDTH;
 pub use crate::toast_stack::{AppToast, AppToastKind, SessionKey, WorkArea, key_of};
-pub use crate::toast_view::{card_height, toast_card};
+pub use crate::toast_view::{ToastPresses, card_height, toast_card};
 pub use crate::toast_window::{PhysicalRect, SystemToastPlacer, ToastPlacer};
 pub use crate::undo::{TabSnapshot, UndoEntry};
 pub use crate::viewer_tab::{
@@ -1326,6 +1326,7 @@ impl RootView {
             if !window.is_window_active() {
                 root.set_link_mode(false, cx);
             }
+            root.dismiss_skipped_toasts(window.is_window_active(), cx);
         })
         .detach();
         cx.observe_window_bounds(window, |root, window, cx| {
@@ -3251,6 +3252,7 @@ impl RootView {
         {
             self.place_session(&host, &session, window, cx);
         }
+        self.dismiss_skipped_toasts(window.is_window_active(), cx);
         cx.notify();
     }
 

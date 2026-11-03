@@ -192,6 +192,7 @@ impl RootView {
                 request_id: Some(request_id),
             },
         );
+        self.refresh_app_toasts(cx);
         cx.notify();
     }
 
@@ -310,6 +311,7 @@ impl RootView {
                 ..
             } if self.dashboard_answers.refused(host, id) => {
                 tracing::warn!("the daemon refused a Dashboard answer: {message}");
+                self.refresh_app_toasts(cx);
                 self.push_toast(
                     ToastKind::Error,
                     ANSWER_REFUSED_TITLE,

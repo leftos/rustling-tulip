@@ -7,6 +7,9 @@
 
 use std::time::{Duration, Instant};
 
+use protocol::PendingInput;
+
+use crate::dashboard_rows::AskBlock;
 use crate::target::HostKey;
 
 /// A session as the notifications know it: its host and its id.
@@ -26,6 +29,10 @@ pub const NEEDS_YOU_FOR: Duration = Duration::from_secs(30);
 
 /// The longest a Needs you toast with answer buttons stays up.
 pub const NEEDS_YOU_ANSWERABLE_CAP: Duration = Duration::from_secs(600);
+
+/// The most answers a toast offers; a prompt with more is answered from its
+/// pane.
+pub const MAX_TOAST_CHOICES: usize = 3;
 
 /// How wide a toast is, in logical px.
 pub const WIDTH: f32 = 360.0;
@@ -74,6 +81,13 @@ pub struct AppToast {
     pub title: String,
     /// Its body, at most two lines.
     pub body: String,
+    /// Whether it stands for a wait its session was in when it was raised,
+    /// so it goes when that wait ends.
+    pub waiting: bool,
+    /// The prompt the session waits on, when its hooks reported one.
+    pub ask: Option<AskBlock>,
+    /// The prompt `ask` was read from, to tell when the session's moves on.
+    pub pending: Option<PendingInput>,
     /// When it was raised.
     pub raised_at: Instant,
     /// The countdown that ends it.
@@ -95,10 +109,32 @@ impl AppToast {
             kind,
             title,
             body,
+            waiting: false,
+            ask: None,
+            pending: None,
             raised_at: now,
             timer: Timer::started(kind, now),
         }
     }
+
+    /// This toast standing for a wait its session is in, on `ask`, read from
+    /// `pending`, when the prompt is known: its choices make it a toast with
+    /// answers.
+    #[must_use]
+    pub fn waiting_on(mut self, ask: Option<AskBlock>, pending: Option<PendingInput>) -> Self {
+        self.waiting = true;
+        self.kind = kind_of(ask.as_ref());
+        self.ask = ask;
+        self.pending = pending;
+        self.timer = Timer::started(self.kind, self.raised_at);
+        self
+    }
+}
+
+/// The kind of a Needs you toast on `ask`.
+fn kind_of(ask: Option<&AskBlock>) -> AppToastKind {
+    let has_answers = ask.is_some_and(|ask| !ask.choices.is_empty());
+    AppToastKind::NeedsYou { has_answers }
 }
 
 /// A toast's countdown, held still while the pointer rests on it.
@@ -143,6 +179,15 @@ impl Timer {
             self.since = now;
             self.held = true;
         }
+    }
+
+    /// Moves a countdown that ran for `from` to run for `to` as of `now`,
+    /// keeping the time already spent, so the toast's time runs from its
+    /// raise.
+    fn retarget(&mut self, from: Duration, to: Duration, now: Instant) {
+        let spent = from.saturating_sub(self.left_at(now));
+        self.left = to.saturating_sub(spent);
+        self.since = now;
     }
 
     /// Lets the countdown run on from `now`.
@@ -212,13 +257,33 @@ impl ToastStack {
         removed
     }
 
-    /// Removes the toast for `key`; returns whether one was there.
-    pub fn dismiss(&mut self, key: &SessionKey) -> bool {
+    /// Gives `key`'s toast the prompt `ask`, read from `pending`, at `now`:
+    /// its kind follows, and its countdown keeps the time already spent.
+    pub fn update_ask(
+        &mut self,
+        key: &SessionKey,
+        ask: Option<AskBlock>,
+        pending: Option<PendingInput>,
+        now: Instant,
+    ) {
+        let Some(toast) = self.items.iter_mut().find(|item| &item.key == key) else {
+            return;
+        };
+        let kind = kind_of(ask.as_ref());
+        toast.timer.retarget(toast.kind.lasts(), kind.lasts(), now);
+        toast.kind = kind;
+        toast.ask = ask;
+        toast.pending = pending;
+    }
+
+    /// Removes the toast for `key` at `now`, and the pointer's rest on it
+    /// with it; returns whether one was there.
+    pub fn dismiss(&mut self, key: &SessionKey, now: Instant) -> bool {
         let Some(index) = self.items.iter().position(|item| &item.key == key) else {
             return false;
         };
         self.items.remove(index);
-        self.hovered.retain(|hovered| hovered != key);
+        self.sync(now);
         true
     }
 
@@ -260,6 +325,20 @@ impl ToastStack {
             false
         });
         self.hovered.retain(|key| !gone.contains(key));
+        gone
+    }
+
+    /// Removes every toast of `host` at `now`, and returns their keys.
+    pub fn drop_host(&mut self, host: &HostKey, now: Instant) -> Vec<SessionKey> {
+        let mut gone = Vec::new();
+        self.items.retain(|item| {
+            if &item.key.0 != host {
+                return true;
+            }
+            gone.push(item.key.clone());
+            false
+        });
+        self.sync(now);
         gone
     }
 
@@ -351,6 +430,14 @@ mod tests {
         key_of(&HostKey::Local, session)
     }
 
+    fn boxed_key(session: &str) -> SessionKey {
+        key_of(&box_host(), session)
+    }
+
+    fn box_host() -> HostKey {
+        HostKey::Remote("box".to_owned())
+    }
+
     fn toast(session: &str, kind: AppToastKind, now: Instant) -> AppToast {
         AppToast::new(
             key(session),
@@ -365,6 +452,57 @@ mod tests {
         AppToastKind::NeedsYou {
             has_answers: answers,
         }
+    }
+
+    #[test]
+    fn drop_host_removes_only_that_hosts_toasts() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push_or_update(
+            AppToast::new(
+                boxed_key("a"),
+                needs_you(true),
+                "a".to_owned(),
+                "body".to_owned(),
+                now,
+            ),
+            now,
+        );
+        stack.push_or_update(toast("b", needs_you(true), now), now);
+        stack.push_or_update(
+            AppToast::new(
+                boxed_key("c"),
+                needs_you(true),
+                "c".to_owned(),
+                "body".to_owned(),
+                now,
+            ),
+            now,
+        );
+        assert_eq!(
+            stack.drop_host(&box_host(), now),
+            vec![boxed_key("a"), boxed_key("c")]
+        );
+        assert_eq!(stack.items().len(), 1);
+        assert_eq!(stack.items()[0].key, key("b"));
+    }
+
+    #[test]
+    fn dismissing_the_hovered_toast_keeps_the_others_time_left() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push_or_update(toast("a", AppToastKind::Finished, now), now);
+        stack.push_or_update(toast("b", AppToastKind::Finished, now), now);
+        let hovered = now + Duration::from_secs(1);
+        stack.hover(&key("a"), hovered);
+        stack.dismiss(&key("a"), now + Duration::from_secs(2));
+        let before = now + Duration::from_millis(6999);
+        assert_eq!(
+            stack.next_deadline(before),
+            Some(now + Duration::from_secs(7))
+        );
+        assert!(stack.expire(before).is_empty(), "five seconds were held");
+        assert_eq!(stack.expire(now + Duration::from_secs(7)), vec![key("b")]);
     }
 
     #[test]

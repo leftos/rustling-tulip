@@ -18,6 +18,7 @@ use crate::activity_track::Track;
 use crate::dashboard::{DashboardRow, GroupKind, HeaderCounts};
 use crate::dashboard_facts::FactsStore;
 use crate::needs_you::{self, Reason};
+use crate::sidebar::SidebarModel;
 use crate::status_glyph::{Glyph, glyph};
 use crate::ui_theme::UiTheme;
 
@@ -60,6 +61,22 @@ pub(crate) struct RowInput<'a> {
     /// summary pane has it loaded: it says which permission choices the
     /// dialog offers and their digits.
     pub(crate) prompt: Option<&'a ChatPrompt>,
+}
+
+/// A row for `session` read outside the Dashboard's model, which lists only
+/// some sessions: its sidebar leaf's label and container, else its own id.
+pub(crate) fn row_of(sidebar: &SidebarModel, session: &SessionSnapshot) -> DashboardRow {
+    let leaf = sidebar.containers().iter().find_map(|container| {
+        let leaf = container.leaves.iter().find(|leaf| leaf.id == session.id)?;
+        Some((container.name.clone(), leaf.label.clone()))
+    });
+    let (container_name, label) = leaf.unwrap_or_else(|| (String::new(), session.id.clone()));
+    DashboardRow {
+        session_id: session.id.clone(),
+        container_name,
+        label,
+        busy_excluded: session.busy_excluded,
+    }
 }
 
 /// The line under a row's state word: the highest now-line rule that applies.

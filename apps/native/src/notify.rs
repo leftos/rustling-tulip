@@ -17,11 +17,13 @@ use gpui::{
     size,
 };
 use protocol::{
-    AgentDescriptor, AlertKind, AttentionReason, DaemonMessage, KeyState, SessionMode,
-    SessionSnapshot, SessionStatus, SummarizerKey, SummarizerSettings,
+    AgentDescriptor, AlertKind, AttentionReason, DaemonMessage, KeyState, PendingInput,
+    SessionMode, SessionSnapshot, SessionStatus, SummarizerKey, SummarizerSettings,
 };
 
 use crate::RootView;
+use crate::connection::Connection;
+use crate::dashboard_rows::{AskBlock, RowInput, ask_block, row_of};
 use crate::needs_you::{self, Reason};
 use crate::offscreen;
 use crate::pairing::{PairingAction, PairingToast};
@@ -31,7 +33,8 @@ use crate::target::HostKey;
 #[cfg(windows)]
 use crate::toast_activation;
 use crate::toast_stack::{
-    AppToast, AppToastKind, SessionKey, ToastStack, WIDTH, WorkArea, key_of, place,
+    AppToast, AppToastKind, MAX_TOAST_CHOICES, SessionKey, ToastStack, WIDTH, WorkArea, key_of,
+    place,
 };
 use crate::toast_view::{ToastView, card_height};
 use crate::toast_window::{PhysicalRect, ToastPlacer, to_physical};
@@ -555,6 +558,9 @@ struct Toast<'a> {
     wanted: bool,
     /// Which sound it plays as it is raised, in place of Windows' own.
     kind: NotifyKind,
+    /// Whether an `Attention` raised it, so it stands only while the wait
+    /// that Attention announced does.
+    attention: bool,
 }
 
 /// Plays `choice`'s clip with a `kind` toast, unless Windows holds that
@@ -589,6 +595,17 @@ pub(crate) fn skips(
         NotifySkip::Focused => focused,
         NotifySkip::Never => false,
     }
+}
+
+/// Whether `session`, as it now reads, has ended the wait `toast` stands
+/// for: it left `AwaitingInput`, or waits again from another status stamp.
+fn wait_is_over(toast: &AppToast, session: &SessionSnapshot) -> bool {
+    toast.waiting
+        && (session.status != SessionStatus::AwaitingInput
+            || toast
+                .ask
+                .as_ref()
+                .is_some_and(|ask| ask.since != session.status_since))
 }
 
 /// The notification's body: the session's label, or the product name for
@@ -646,6 +663,8 @@ impl RootView {
         window_focused: bool,
         cx: &mut Context<Self>,
     ) {
+        self.drop_stale_toasts(host, msg, cx);
+        self.rebuild_toast_asks(host, msg, cx);
         if self.notifications.fold_state(host, msg) {
             return;
         }
@@ -671,6 +690,7 @@ impl RootView {
                         body: &body,
                         wanted,
                         kind: NotifyKind::NeedsYou,
+                        attention: true,
                     },
                     window_focused,
                     cx,
@@ -705,21 +725,27 @@ impl RootView {
             && session.agent.is_some()
     }
 
+    /// Whether the skip setting says the owner is looking at `session_id`
+    /// already; `window_focused` as for [`Self::notify_on`].
+    fn skips_session(&self, session_id: &str, window_focused: bool) -> bool {
+        let skip_when = self.sidebar.ui_state().notifications.skip_when;
+        // A session a pop-out shows with its active window's keyboard is on
+        // screen in a focused window of this client.
+        let in_popout = self
+            .popout_focused_session()
+            .is_some_and(|shown| shown.id == session_id);
+        skips(skip_when, window_focused || in_popout, || {
+            in_popout || self.session_on_screen(session_id)
+        })
+    }
+
     /// Raises `toast` unless its toggle is off or the skip setting says the
     /// owner is looking at the session already.
     fn raise_toast(&self, toast: &Toast<'_>, window_focused: bool, cx: &mut Context<Self>) {
         if !toast.wanted {
             return;
         }
-        let skip_when = self.sidebar.ui_state().notifications.skip_when;
-        // A session a pop-out shows with its active window's keyboard is on
-        // screen in a focused window of this client.
-        let in_popout = self
-            .popout_focused_session()
-            .is_some_and(|shown| shown.id == toast.session_id);
-        if skips(skip_when, window_focused || in_popout, || {
-            in_popout || self.session_on_screen(toast.session_id)
-        }) {
+        if self.skips_session(toast.session_id, window_focused) {
             return;
         }
         if self.sidebar.ui_state().notifications.toast_style == ToastStyle::App {
@@ -887,6 +913,7 @@ impl RootView {
                 body: &held.label,
                 wanted,
                 kind: NotifyKind::Finished,
+                attention: false,
             },
             focused,
             cx,
@@ -943,6 +970,7 @@ impl RootView {
                 body: &body,
                 wanted,
                 kind,
+                attention: false,
             },
             window_focused,
             cx,
@@ -965,6 +993,8 @@ impl RootView {
             NotifyKind::Finished => AppToastKind::Finished,
         };
         let notifier = Arc::clone(&self.notifications.notifier);
+        let attention = toast.attention;
+        let waited = attention && self.session_waits(toast.session_id);
         cx.spawn(async move |this, cx| {
             let busy = cx
                 .background_executor()
@@ -976,13 +1006,68 @@ impl RootView {
             }
             // Fails only when the view is gone, and its toasts with it.
             this.update(cx, |this, cx| {
+                if attention && this.wait_ended(&key, waited) {
+                    tracing::debug!("the wait ended first: toast {title:?} not shown");
+                    return;
+                }
                 let now = cx.background_executor().now();
-                let toast = AppToast::new(key, kind, title, body, now);
+                let waits = matches!(sound, NotifyKind::NeedsYou) && this.session_waits(&key.1);
+                let wait = waits.then(|| (this.toast_ask(&key.1), this.toast_pending(&key.1)));
+                let mut toast = AppToast::new(key, kind, title, body, now);
+                if let Some((ask, pending)) = wait {
+                    toast = toast.waiting_on(ask, pending);
+                }
                 this.show_app_toast(toast, sound, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Whether session `id` is awaiting input.
+    fn session_waits(&self, id: &str) -> bool {
+        self.sidebar
+            .session(id)
+            .is_some_and(|session| session.status == SessionStatus::AwaitingInput)
+    }
+
+    /// Whether the session `key` names ended the wait its `Attention`
+    /// announced, while the toast waited on the busy check: its host's
+    /// connection is not open, it is gone, or it `waited` and waits no more.
+    fn wait_ended(&self, key: &SessionKey, waited: bool) -> bool {
+        let open = self.conn_of(&key.0).is_some_and(Connection::is_open);
+        !open
+            || self
+                .sidebar
+                .session(&key.1)
+                .is_none_or(|session| waited && session.status != SessionStatus::AwaitingInput)
+    }
+
+    /// The prompt session `id` waits on, as its snapshot reads now.
+    fn toast_pending(&self, id: &str) -> Option<PendingInput> {
+        self.sidebar
+            .session(id)
+            .and_then(|session| session.pending_input.clone())
+    }
+
+    /// The ask block of session `id`, read as the Dashboard reads its row.
+    /// A toast offers at most [`MAX_TOAST_CHOICES`]; a prompt with more is
+    /// answered from its pane.
+    fn toast_ask(&self, id: &str) -> Option<AskBlock> {
+        let session = self.sidebar.session(id)?;
+        let row = row_of(&self.sidebar, session);
+        let mut ask = ask_block(&RowInput {
+            row: &row,
+            session,
+            facts: self.dashboard_facts.facts_for(id),
+            agents: self.sidebar.session_agents(id),
+            unseen: self.sidebar.is_unseen(id),
+            prompt: self.chat.held_prompt(id),
+        })?;
+        if ask.choices.len() > MAX_TOAST_CHOICES {
+            ask.choices.clear();
+        }
+        Some(ask)
     }
 
     /// `toast`'s title line, naming the session's host unless it is This PC.
@@ -994,28 +1079,25 @@ impl RootView {
     }
 
     /// Puts `toast` on the stack, in a new window or in place of the
-    /// session's toast, and plays its `sound`; with no work area to place it
-    /// on, there is no toast.
+    /// session's toast, and plays its `sound` if it is still up once placed;
+    /// with no work area to place it on, there is no toast.
     fn show_app_toast(&mut self, toast: AppToast, sound: NotifyKind, cx: &mut Context<Self>) {
         let Some(screen) = self.toast_screen(cx) else {
             return;
         };
         let now = cx.background_executor().now();
+        let key = toast.key.clone();
         let toasts = &mut self.notifications.toasts;
-        let dropped = toasts.stack.push_or_update(toast.clone(), now);
+        let dropped = toasts.stack.push_or_update(toast, now);
         for key in dropped {
             self.close_toast_window(&key, cx);
         }
-        if let Some(open) = self.notifications.toasts.windows.get(&toast.key) {
-            let replaced = open
-                .handle
-                .update(cx, |view, _, cx| view.replace(toast, cx));
-            if let Err(err) = replaced {
-                tracing::debug!("the toast's window had closed: {err:#}");
-            }
-        }
         self.place_app_toasts(&screen, cx);
-        self.play_sound(sound, cx);
+        self.refresh_app_toasts(cx);
+        let stack = &self.notifications.toasts.stack;
+        if stack.items().iter().any(|item| item.key == key) {
+            self.play_sound(sound, cx);
+        }
     }
 
     /// The main window, while it is open.
@@ -1058,7 +1140,8 @@ impl RootView {
         let placed = place(screen.area, &heights);
         for (index, toast) in items.iter().enumerate() {
             if !placed.iter().any(|(kept, _)| *kept == index) {
-                self.notifications.toasts.stack.dismiss(&toast.key);
+                let now = cx.background_executor().now();
+                self.notifications.toasts.stack.dismiss(&toast.key, now);
                 self.close_toast_window(&toast.key, cx);
             }
         }
@@ -1122,7 +1205,8 @@ impl RootView {
             }
             Err(err) => {
                 tracing::warn!("opening a toast window: {err:#}");
-                self.notifications.toasts.stack.dismiss(&toast.key);
+                let now = cx.background_executor().now();
+                self.notifications.toasts.stack.dismiss(&toast.key, now);
             }
         }
     }
@@ -1165,23 +1249,161 @@ impl RootView {
         for key in gone {
             self.close_toast_window(&key, cx);
         }
-        self.after_toast_change(cx);
+        Self::after_toast_change(cx);
     }
 
     /// Moves the windows to fit the stack; with no work area they stay
-    /// where they are.
-    fn after_toast_change(&mut self, cx: &mut Context<Self>) {
-        match self.toast_screen(cx) {
-            Some(screen) => self.place_app_toasts(&screen, cx),
-            None => self.arm_toast_timer(cx),
-        }
+    /// where they are. Waits for the effects to flush, as a change made
+    /// while the main window updates cannot read which monitor holds it.
+    fn after_toast_change(cx: &mut Context<Self>) {
+        let root = cx.weak_entity();
+        cx.defer(move |cx| {
+            // Fails only when the view is gone, and its toasts with it.
+            root.update(cx, |this, cx| match this.toast_screen(cx) {
+                Some(screen) => this.place_app_toasts(&screen, cx),
+                None => this.arm_toast_timer(cx),
+            })
+            .ok();
+        });
     }
 
     /// Takes `key`'s toast down.
     pub(crate) fn dismiss_app_toast(&mut self, key: &SessionKey, cx: &mut Context<Self>) {
-        self.notifications.toasts.stack.dismiss(key);
+        let now = cx.background_executor().now();
+        self.notifications.toasts.stack.dismiss(key, now);
         self.close_toast_window(key, cx);
-        self.after_toast_change(cx);
+        Self::after_toast_change(cx);
+    }
+
+    /// Takes down every toast of `host`, whose connection ended or began
+    /// anew.
+    pub(crate) fn drop_host_toasts(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let gone = self.notifications.toasts.stack.drop_host(host, now);
+        if gone.is_empty() {
+            return;
+        }
+        for key in gone {
+            self.close_toast_window(&key, cx);
+        }
+        Self::after_toast_change(cx);
+    }
+
+    /// Takes down the toasts `msg` from `host` leaves with nothing to say.
+    fn drop_stale_toasts(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        if matches!(msg, DaemonMessage::Welcome { .. }) {
+            self.drop_host_toasts(host, cx);
+            return;
+        }
+        let of_host = || {
+            let items = self.notifications.toasts.stack.items().iter();
+            items.filter(|toast| toast.key.0 == *host)
+        };
+        let stale: Vec<SessionKey> = match msg {
+            DaemonMessage::SessionRemoved { session_id } => of_host()
+                .filter(|toast| toast.key.1 == *session_id)
+                .map(|toast| toast.key.clone())
+                .collect(),
+            DaemonMessage::SessionUpdated { session, .. } => of_host()
+                .filter(|toast| toast.key.1 == session.id && wait_is_over(toast, session))
+                .map(|toast| toast.key.clone())
+                .collect(),
+            DaemonMessage::Sessions { sessions } => of_host()
+                .filter(|toast| {
+                    let listed = sessions.iter().find(|session| session.id == toast.key.1);
+                    listed.is_none_or(|session| wait_is_over(toast, session))
+                })
+                .map(|toast| toast.key.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        for key in stale {
+            self.dismiss_app_toast(&key, cx);
+        }
+    }
+
+    /// Reads again the ask of each of `host`'s toasts whose session now
+    /// waits on another prompt under the same wait, as `msg` left it: an
+    /// answer goes to the prompt that is pending, so the toast must show that
+    /// one. No sound, and its time runs on.
+    fn rebuild_toast_asks(&mut self, host: &HostKey, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        if !matches!(
+            msg,
+            DaemonMessage::SessionUpdated { .. } | DaemonMessage::Sessions { .. }
+        ) {
+            return;
+        }
+        let moved: Vec<SessionKey> = self
+            .notifications
+            .toasts
+            .stack
+            .items()
+            .iter()
+            .filter(|toast| toast.waiting && toast.key.0 == *host)
+            .filter(|toast| {
+                let session = self.sidebar.session(&toast.key.1);
+                session.is_some_and(|session| session.pending_input != toast.pending)
+            })
+            .map(|toast| toast.key.clone())
+            .collect();
+        if moved.is_empty() {
+            return;
+        }
+        let now = cx.background_executor().now();
+        for key in moved {
+            let (ask, pending) = (self.toast_ask(&key.1), self.toast_pending(&key.1));
+            let stack = &mut self.notifications.toasts.stack;
+            stack.update_ask(&key, ask, pending, now);
+        }
+        Self::after_toast_change(cx);
+        self.refresh_app_toasts(cx);
+    }
+
+    /// Takes down each Needs you toast the skip rule now skips.
+    /// `window_focused` as for [`Self::notify_on`].
+    pub(crate) fn dismiss_skipped_toasts(&mut self, window_focused: bool, cx: &mut Context<Self>) {
+        let skipped: Vec<SessionKey> = self
+            .notifications
+            .toasts
+            .stack
+            .items()
+            .iter()
+            .filter(|toast| matches!(toast.kind, AppToastKind::NeedsYou { .. }))
+            .filter(|toast| self.skips_session(&toast.key.1, window_focused))
+            .map(|toast| toast.key.clone())
+            .collect();
+        for key in skipped {
+            self.dismiss_app_toast(&key, cx);
+        }
+    }
+
+    /// Tells each open toast's view its toast as the stack holds it and
+    /// whether an answer is out for its session. Waits for the effects to
+    /// flush, as a press on a toast runs inside its window's update.
+    pub(crate) fn refresh_app_toasts(&self, cx: &mut Context<Self>) {
+        let is_out = |id: &str| {
+            self.sidebar
+                .session(id)
+                .is_some_and(|session| self.dashboard_answers.is_out(session))
+        };
+        let toasts = &self.notifications.toasts;
+        let open: Vec<(WindowHandle<ToastView>, AppToast, bool)> = toasts
+            .stack
+            .items()
+            .iter()
+            .filter_map(|toast| {
+                let window = toasts.windows.get(&toast.key)?;
+                Some((window.handle, toast.clone(), is_out(&toast.key.1)))
+            })
+            .collect();
+        cx.defer(move |cx| {
+            for (handle, toast, sent) in open {
+                let told = handle.update(cx, |view, _, cx| view.show(toast, sent, cx));
+                if let Err(err) = told {
+                    tracing::debug!("the toast's window had closed: {err:#}");
+                }
+            }
+        });
     }
 
     /// The pointer came to rest on `key`'s toast or left it.
@@ -1230,8 +1452,9 @@ impl RootView {
             .iter()
             .map(|toast| toast.key.clone())
             .collect();
+        let now = cx.background_executor().now();
         for key in keys {
-            self.notifications.toasts.stack.dismiss(&key);
+            self.notifications.toasts.stack.dismiss(&key, now);
             self.close_toast_window(&key, cx);
         }
         self.notifications.toasts.timer = None;
