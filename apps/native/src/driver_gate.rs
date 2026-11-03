@@ -10,6 +10,23 @@ use crate::offscreen::OFFSCREEN_ENV;
 /// as usual. Any other value refuses the run.
 pub const DRIVER_ENV: &str = "RUSTLING_TULIP_DRIVER";
 
+/// Set to `1` in a driven run, the client shows the app's own toast windows
+/// on the desktop it runs on, for a live check on a builder; the main window
+/// stays cloaked. Unset, empty or any other value keeps a driven run's
+/// toasts unshown, and it never refuses a run.
+pub const DRIVER_TOASTS_ENV: &str = "RUSTLING_TULIP_DRIVER_TOASTS";
+
+/// Whether a driven run shows the app's own toast windows: only a build
+/// with the driver, in a driven run (`DRIVER_ENV` exactly `1`) that sets
+/// [`DRIVER_TOASTS_ENV`] to exactly `1`. A driven run that sets it shows the
+/// app's own toast windows on the desktop it runs on, for a live check on a
+/// builder; the main window stays cloaked.
+pub fn driver_toasts_wanted(get: impl Fn(&str) -> Option<String>, built_with_driver: bool) -> bool {
+    built_with_driver
+        && get(DRIVER_ENV).as_deref() == Some("1")
+        && get(DRIVER_TOASTS_ENV).as_deref() == Some("1")
+}
+
 /// What the environment asks of this launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
@@ -71,7 +88,9 @@ mod tests {
 
     use daemon_client::isolation::ISOLATED_DIR_VARS;
 
-    use super::{DRIVER_ENV, GateDecision, OFFSCREEN_ENV, decide};
+    use super::{
+        DRIVER_ENV, DRIVER_TOASTS_ENV, GateDecision, OFFSCREEN_ENV, decide, driver_toasts_wanted,
+    };
 
     /// A stand-in for a registered agent's binary override variable.
     const AGENT_OVERRIDE_ENV: &str = "RUSTLING_TULIP_TEST_AGENT";
@@ -193,5 +212,29 @@ mod tests {
     #[test]
     fn driver_with_every_condition_drives() {
         assert_eq!(gate(&env(&[]), true), GateDecision::Drive);
+    }
+
+    /// Whether the toasts are wanted with `driver` and `toasts` as the two
+    /// variables' values (`None` unsets one) on a build with or without the
+    /// driver.
+    fn toasts(driver: Option<&str>, toasts: Option<&str>, built_with_driver: bool) -> bool {
+        let get = |name: &str| match name {
+            DRIVER_ENV => driver.map(str::to_owned),
+            DRIVER_TOASTS_ENV => toasts.map(str::to_owned),
+            _ => None,
+        };
+        driver_toasts_wanted(get, built_with_driver)
+    }
+
+    #[test]
+    fn driver_toasts_wanted_needs_both_variables_and_the_driver() {
+        assert!(toasts(Some("1"), Some("1"), true));
+        assert!(!toasts(Some("1"), None, true));
+        assert!(!toasts(Some("1"), Some(""), true));
+        assert!(!toasts(Some("1"), Some("0"), true));
+        assert!(!toasts(Some("1"), Some("yes"), true));
+        assert!(!toasts(None, Some("1"), true));
+        assert!(!toasts(Some(""), Some("1"), true));
+        assert!(!toasts(Some("1"), Some("1"), false));
     }
 }

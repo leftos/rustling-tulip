@@ -1159,17 +1159,23 @@ mod driven {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use base64::Engine as _;
+    use protocol::ClientMessage;
     use rustling_tulip_native::SIDEBAR_DEFAULT_WIDTH;
-    use rustling_tulip_native::driver_gate::DRIVER_ENV;
+    use rustling_tulip_native::driver_gate::{DRIVER_ENV, DRIVER_TOASTS_ENV};
     use serde_json::{Value, json};
-    use windows::Win32::Foundation::{HWND, POINT};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
+        EnumWindows, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
+        GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
     };
+    use windows::core::BOOL;
 
     use super::{
-        Client, LiveDaemon, OFFSCREEN_ENV, Smoke, assert_no_layout_chooser, assert_out_of_the_way,
-        open_with, wait_connected, wait_painted, wait_source_control_active,
+        B64, Client, LiveDaemon, OFFSCREEN_ENV, PROMPT_TIMEOUT, Smoke, Socket,
+        assert_no_layout_chooser, assert_out_of_the_way, connect, open_with, plain_lines,
+        read_until, scrollback, send, wait_connected, wait_painted, wait_source_control_active,
     };
 
     /// A hang guard on each wait for the driver: its discovery file, one
@@ -1192,6 +1198,21 @@ mod driven {
     /// which the daemon's variables carry, and every registered agent's
     /// override variable, set to the fake the daemon runs.
     fn launch_driven_client(daemon: &LiveDaemon) -> Client {
+        spawn_driven(driven_command(daemon))
+    }
+
+    /// [`launch_driven_client`] with the app's own toast windows shown
+    /// (`DRIVER_TOASTS_ENV`): the main window stays cloaked, its toasts show
+    /// on the desktop the run sits on.
+    fn launch_driven_client_with_toasts(daemon: &LiveDaemon) -> Client {
+        let mut command = driven_command(daemon);
+        command.env(DRIVER_TOASTS_ENV, "1");
+        spawn_driven(command)
+    }
+
+    /// The driven run's command: the daemon's variables, the cloaked window,
+    /// the driver endpoint and every registered agent's override.
+    fn driven_command(daemon: &LiveDaemon) -> Command {
         let exe = env!("CARGO_BIN_EXE_rustling-tulip-native");
         let envs = daemon.envs();
         let mut command = Command::new(exe);
@@ -1207,6 +1228,11 @@ mod driven {
                 .expect("the daemon's variables carry every agent's override");
             command.env(variable, fake);
         }
+        command
+    }
+
+    /// Starts `command` as the driven client, its standard streams closed.
+    fn spawn_driven(mut command: Command) -> Client {
         let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1335,7 +1361,12 @@ mod driven {
     /// The smoke setup with a driven client, painted and connected, and a
     /// connection to its driver pipe.
     fn open_driven(test: &str) -> (Smoke, Driver) {
-        let smoke = open_with(test, launch_driven_client);
+        open_driven_with(test, launch_driven_client)
+    }
+
+    /// [`open_driven`] with the client started by `launch`.
+    fn open_driven_with(test: &str, launch: fn(&LiveDaemon) -> Client) -> (Smoke, Driver) {
+        let smoke = open_with(test, launch);
         wait_connected(&smoke);
         wait_painted(smoke.hwnd);
         assert_no_layout_chooser(&smoke);
@@ -1613,5 +1644,266 @@ mod driven {
 
         driver.ok("screenshot", &json!({}));
         assert_unmoved(&before, smoke.hwnd, "screenshot");
+    }
+
+    /// A hang guard on the app's own toast window showing once the session
+    /// asks, not an expected duration.
+    const TOAST_TIMEOUT: Duration = Duration::from_secs(30);
+    /// What fake-claude's permission dialog asks
+    /// (`crates/agents/claude/fake/README.md`).
+    const PERMISSION_QUESTION: &str = "Do you want to proceed?";
+
+    /// Spawns a session of the default agent, whose CLI is the fake the
+    /// daemon runs, in the daemon's scratch dir over the test's own socket,
+    /// and returns its session id.
+    fn seed_fake_agent(daemon: &LiveDaemon) -> String {
+        let mut ws = connect(daemon, "rt-smoke-agent");
+        let spawn: ClientMessage = serde_json::from_value(json!({
+            "type": "spawn_session",
+            "label": null,
+            "target": {"kind": "standalone", "cwd": daemon.dir()},
+            "mode": "interactive",
+            "initial_prompt": null,
+            "dangerously_skip_permissions": false,
+            "agent": {"agent": agent_registry::default_agent(), "options": {}},
+        }))
+        .expect("a spawn request for the default agent");
+        send(&mut ws, &spawn);
+        let id = loop {
+            let updated = read_until(&mut ws, "\"type\":\"session_updated\"");
+            if updated["session"]["mode"] == json!("interactive") {
+                break updated["session"]["id"]
+                    .as_str()
+                    .expect("the spawned session's id")
+                    .to_owned();
+            }
+        };
+        let _ = ws.close(None);
+        let _ = ws.flush();
+        id
+    }
+
+    /// Polls `session`'s scrollback until a line of it passes `seen`,
+    /// failing as hung with `what` after [`PROMPT_TIMEOUT`].
+    fn wait_scrollback(ws: &mut Socket, session: &str, what: &str, seen: impl Fn(&str) -> bool) {
+        let deadline = Instant::now() + PROMPT_TIMEOUT;
+        loop {
+            if plain_lines(&scrollback(ws, session))
+                .iter()
+                .any(|line| seen(line))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hung: no {what} in session {session}'s scrollback within {PROMPT_TIMEOUT:?}"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// Writes `bytes` to `session` as the owner's keys.
+    fn type_into(ws: &mut Socket, session: &str, bytes: &[u8]) {
+        send(
+            ws,
+            &ClientMessage::SendInput {
+                session_id: session.to_owned(),
+                data_b64: B64.encode(bytes),
+                automatic: false,
+            },
+        );
+    }
+
+    unsafe extern "system" fn collect_visible(hwnd: HWND, found: LPARAM) -> BOOL {
+        // SAFETY: `found` is the `&mut (u32, Vec<HWND>)` `find_toast` passes,
+        // alive for the whole `EnumWindows` call.
+        let found = unsafe { &mut *(found.0 as *mut (u32, Vec<HWND>)) };
+        let mut pid = 0;
+        // SAFETY: plain queries on a window handle EnumWindows just gave us.
+        let visible = unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
+            IsWindowVisible(hwnd).as_bool()
+        };
+        if pid == found.0 && visible {
+            found.1.push(hwnd);
+        }
+        BOOL(1)
+    }
+
+    /// The client's visible top-level window other than its main one: the
+    /// app's own toast, once one shows.
+    fn find_toast(smoke: &Smoke) -> HWND {
+        let pid = window_pid(smoke.hwnd);
+        let log = smoke.daemon.config_dir().join("logs").join("native.log");
+        let deadline = Instant::now() + TOAST_TIMEOUT;
+        loop {
+            let mut found: (u32, Vec<HWND>) = (pid, Vec::new());
+            // SAFETY: the callback only writes through the pointer to
+            // `found`, which outlives the call.
+            let _ = unsafe { EnumWindows(Some(collect_visible), LPARAM(&raw mut found as isize)) };
+            if let Some(toast) = found.1.into_iter().find(|hwnd| *hwnd != smoke.hwnd) {
+                return toast;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hung: no toast window of the client appeared within {TOAST_TIMEOUT:?}; see {}",
+                log.display()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The toast shows on top, never activates, is not cloaked and has an
+    /// area.
+    fn assert_toast_on_top(toast: HWND) {
+        // SAFETY: a plain query on a live window.
+        let style = unsafe { GetWindowLongPtrW(toast, GWL_EXSTYLE) };
+        let bit = |flag: u32| isize::try_from(flag).expect("an extended style bit");
+        assert!(
+            style & bit(WS_EX_TOPMOST.0) != 0,
+            "the toast lacks WS_EX_TOPMOST (extended style {style:#x})"
+        );
+        assert!(
+            style & bit(WS_EX_NOACTIVATE.0) != 0,
+            "the toast lacks WS_EX_NOACTIVATE (extended style {style:#x})"
+        );
+        let mut cloaked: u32 = 0;
+        let size = u32::try_from(size_of::<u32>()).expect("u32 size");
+        // SAFETY: an out-pointer to a local of the size passed, on a live
+        // window handle.
+        unsafe { DwmGetWindowAttribute(toast, DWMWA_CLOAKED, (&raw mut cloaked).cast(), size) }
+            .expect("read the toast's cloaked state");
+        assert_eq!(cloaked, 0, "the toast window is cloaked");
+        let mut rect = RECT::default();
+        // SAFETY: an out-pointer to a local, on a live window handle.
+        unsafe { GetWindowRect(toast, &raw mut rect) }.expect("read the toast's rect");
+        assert!(
+            rect.right > rect.left && rect.bottom > rect.top,
+            "the toast window has no area: {rect:?}"
+        );
+    }
+
+    /// The Notifications page's "the app's own" choice under Show toasts as.
+    const TOAST_STYLE_APP: &str = "settings-toast-style-app";
+    /// The most wheel turns [`scroll_into_view`] makes before it gives up.
+    const SCROLL_TRIES: usize = 10;
+
+    /// The element `name` as `find` lists it now, if it does.
+    fn listed(driver: &mut Driver, name: &str) -> Option<Value> {
+        driver
+            .ok("find", &json!({"prefix": name}))
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["name"] == json!(name)))
+            .cloned()
+    }
+
+    /// Whether `row`, as `find` lists it, shows some part of itself.
+    fn shows(row: &Value) -> bool {
+        let side = |key: &str| row["visible"][key].as_f64().unwrap_or(0.0);
+        side("w") > 0.0 && side("h") > 0.0
+    }
+
+    /// Turns the wheel down over the Settings page until element `name`
+    /// shows, at most [`SCROLL_TRIES`] times, each turn followed by a short
+    /// wait for the next frame to show it; fails naming the last read.
+    fn scroll_into_view(driver: &mut Driver, name: &str) {
+        let height = number(&driver.ok("state", &json!({}))["window"]["height"]);
+        let mut last = None;
+        for _ in 0..SCROLL_TRIES {
+            let row = listed(driver, name);
+            if row.as_ref().is_some_and(shows) {
+                return;
+            }
+            if let Some(row) = &row {
+                let bounds = &row["bounds"];
+                let x = number(&bounds["x"]) + number(&bounds["w"]) / 2.0;
+                driver.ok("wheel", &json!({"x": x, "y": height / 2.0, "notches": -3}));
+            }
+            // The next frame, or the page's first: its outcome is read above.
+            driver.ok(
+                "wait_for",
+                &json!({"until": {"element": name, "visible": true}, "timeout_ms": 1000}),
+            );
+            last = row;
+        }
+        let row = listed(driver, name);
+        assert!(
+            row.as_ref().is_some_and(shows),
+            "{name} is still not visible after {SCROLL_TRIES} wheel turns down; last read \
+             {last:?}, now {row:?}"
+        );
+    }
+
+    /// Chooses the app's own toasts in Settings › Notifications through the
+    /// driver, waits for the choice to be saved, and closes Settings.
+    fn choose_app_toasts(smoke: &Smoke, driver: &mut Driver) {
+        driver.ok("action", &json!({"name": "open_settings"}));
+        driver.wait(
+            &json!({"state": "overlay", "equals": "settings"}),
+            "Settings open",
+        );
+        driver.wait(
+            &json!({"element": "settings-tab-notifications", "visible": true}),
+            "the Notifications tab",
+        );
+        driver.ok("click", &json!({"element": "settings-tab-notifications"}));
+        scroll_into_view(driver, TOAST_STYLE_APP);
+        driver.ok("click", &json!({"element": TOAST_STYLE_APP}));
+        let saved = smoke.daemon.config_dir().join("native-ui.json");
+        let deadline = Instant::now() + super::CONNECT_TIMEOUT;
+        loop {
+            let ui: Value = std::fs::read_to_string(&saved)
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+            if ui["notifications"]["toast_style"] == json!("app") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hung: {} never saved the app's own toasts: {ui}",
+                saved.display()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        driver.ok("key", &json!({"keys": "escape"}));
+        driver.wait(
+            &json!({"state": "overlay", "exists": false}),
+            "Settings closed",
+        );
+    }
+
+    #[test]
+    #[ignore = "live: run via .\\rt.ps1 native-drive-check"]
+    fn live_drive_app_toasts_show_on_top_without_focus() {
+        let before = DesktopInput::read();
+        assert!(
+            !before.foreground.is_invalid(),
+            "no foreground window to compare against; run this on a logged-on desktop \
+             (rt.ps1 native-drive-check routes there)"
+        );
+        let (smoke, mut driver) =
+            open_driven_with("live-drive-toasts", launch_driven_client_with_toasts);
+        assert_unmoved(&before, smoke.hwnd, "launch");
+        choose_app_toasts(&smoke, &mut driver);
+        assert_unmoved(&before, smoke.hwnd, "the Settings choice");
+
+        let session = seed_fake_agent(&smoke.daemon);
+        let mut ws = connect(&smoke.daemon, "rt-smoke-agent");
+        wait_scrollback(&mut ws, &session, "idle prompt box", |line| {
+            line.starts_with('\u{276f}')
+        });
+        type_into(&mut ws, &session, b"please rt-perm\r");
+        wait_scrollback(&mut ws, &session, "permission dialog", |line| {
+            line.contains(PERMISSION_QUESTION)
+        });
+
+        let toast = find_toast(&smoke);
+        assert_toast_on_top(toast);
+        assert_unmoved(&before, smoke.hwnd, "the app toast");
+
+        type_into(&mut ws, &session, b"1");
+        let _ = ws.close(None);
+        let _ = ws.flush();
     }
 }

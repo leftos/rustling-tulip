@@ -961,6 +961,8 @@ Three tiers, all Rust tests:
 
   The live no-focus check, `driven::live_drive_leaves_the_foreground_and_cursor_alone`, drives a client with `click`, `type_text`, `key`, `drag`, `wheel` and `screenshot` and asserts the desktop's foreground window and cursor position are unchanged afterwards; it fails when there is no foreground window, since an empty desktop would hide a steal. It runs only through `.\rt.ps1 native-drive-check [-HandsOff]` (`native-smoke` excludes it), which `.gate/desktop.toml` `patterns` routes to a builder's logged-on desktop and which refuses on this PC without `-HandsOff`. The drag and wheel bodies it shares with the pointer specs are helpers in `smoke_window.rs` (`drag_sidebar_divider`, `wheel_pane_up`, `type_scrollback_loop`, `submit_scrollback_loop`).
 
+  The live toast check, `driven::live_drive_app_toasts_show_on_top_without_focus`, runs through the same verb: a driven client with `RUSTLING_TULIP_DRIVER_TOASTS=1` shows the app's own toast windows while its main window stays cloaked, and the spec asserts a Needs-you toast shows visible, topmost, `WS_EX_NOACTIVATE` and not cloaked, with the foreground window and cursor unmoved. A Settings control below the fold of the smoke window is scrolled into view with `wheel` first (`scroll_into_view`).
+
   `smoke_keys_posted_while_the_client_stalls_reach_the_shell_in_order` suspends the client's UI thread (`SuspendThread`) right after the `o` of `echo` is posted, so the Space after it must wait for the thaw, which reproduces a load-only fault without a CPU burn.
 
   Pixels are read with `PrintWindow(PW_RENDERFULLCONTENT)` from the threaded show and probed for known UI colours and for a change in the pane after typing; the spec checks the window is still cloaked and not foreground after each capture. `smoke_window_has_noactivate_and_sits_below_foreground` checks the extended style and that the foreground window is above the smoke window in the Z order.
@@ -975,6 +977,8 @@ The e2e and smoke tiers are `#[ignore]`d in the normal nextest run and run only 
 ### Driver endpoint
 
 A driven run is a launch with `RUSTLING_TULIP_DRIVER=1`. The gate (`apps/native/src/driver_gate.rs`, compiled in every build) decides first in `main`, before tracing starts or any folder, log or registry entry is touched. Unset or empty, the client runs as usual. A driven run needs a build with the `driver` feature, `RUSTLING_TULIP_OFFSCREEN_WINDOW` set, the three isolated dirs passing `check_isolated`, and each registered agent's binary override variable set.
+
+A cloaked run shows none of the app's own toast windows, except a driven run that also sets `RUSTLING_TULIP_DRIVER_TOASTS=1` (`driver_gate::driver_toasts_wanted`, read at each toast): its toasts show on the desktop it runs on, for the live toast check. Any other value keeps them unshown, and it never refuses a run.
 
 Any other value of `RUSTLING_TULIP_DRIVER`, or any condition unmet, refuses the run: it logs `driver run refused: <reason>` to stderr only and exits with code 4 (`offscreen::DRIVER_REFUSED_EXIT`).
 

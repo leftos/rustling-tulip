@@ -59,10 +59,11 @@
                  reach the shell. Leaves out the live drive check.
       native-drive-check
                  Build the daemon and tracer, then run only the live drive
-                 check of `smoke_window` (`test(/live_drive_/)`, with the
+                 checks of `smoke_window` (`test(/live_drive_/)`, with the
                  `driver` feature): a scripted drive of the cloaked client
-                 must leave the desktop's foreground window and cursor where
-                 they were. .gate/desktop.toml routes it to a builder's
+                 and the app's own toast windows, each of which must leave
+                 the desktop's foreground window and cursor where they
+                 were. .gate/desktop.toml routes it to a builder's
                  logged-on desktop; run on this PC it refuses without
                  -HandsOff.
       native-shot

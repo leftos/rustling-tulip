@@ -664,6 +664,16 @@ fn sound_with_toast(
     }
 }
 
+/// Whether this driven run shows the app's own toast windows though its main
+/// window is cloaked, read from the environment at each toast
+/// ([`crate::driver_gate::driver_toasts_wanted`]).
+fn driven_toasts() -> bool {
+    crate::driver_gate::driver_toasts_wanted(
+        |name| std::env::var(name).ok(),
+        cfg!(all(feature = "driver", windows)),
+    )
+}
+
 /// Whether a notification for a session is skipped under `skip_when`:
 /// `focused` is whether the client window has the keyboard, `on_screen`
 /// answers whether a pane of its active tab shows the session, and is
@@ -1062,9 +1072,10 @@ impl RootView {
     }
 
     /// Raises `toast` as the app's own: not while the user is busy, and
-    /// never in a cloaked run. The busy check runs off the UI thread.
+    /// never in a cloaked run unless it is a driven run that asks for its
+    /// toasts. The busy check runs off the UI thread.
     fn raise_app_toast(&self, toast: &Toast<'_>, cx: &mut Context<Self>) {
-        if offscreen::requested() {
+        if offscreen::requested() && !driven_toasts() {
             tracing::debug!("offscreen window: toast {:?} not shown", toast.title);
             return;
         }
