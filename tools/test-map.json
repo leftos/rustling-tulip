@@ -570,9 +570,11 @@
       "paths": [
         "apps/native/src/notify.rs",
         "apps/native/src/toast_stack.rs",
-        "apps/native/src/toast_window.rs"
+        "apps/native/src/toast_view.rs",
+        "apps/native/src/toast_window.rs",
+        "apps/native/tests/ui/ui_toasts.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^(notify|toast_stack|toast_window)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_notifications)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(notify|toast_stack|toast_view|toast_window)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_notifications|ui_toasts)::/))"
     },
     {
       "paths": [
@@ -1466,6 +1468,12 @@
         "apps/native/src/scrollbar.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^scrollbar::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_settings::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/driver_gate.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^driver_gate::/)"
     },
     {
       "paths": [

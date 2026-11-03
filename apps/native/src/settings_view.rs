@@ -41,6 +41,7 @@ use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::sidebar::{
     CountMode, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView, ToastSound,
+    ToastStyle,
 };
 use crate::sound::{self, BundledSound, NotifyKind, SOUND_EXTENSIONS};
 use crate::spawn_view::{
@@ -280,6 +281,10 @@ const COUNT_MODE_CHOICES: [CountMode; 3] = [CountMode::NeedsYou, CountMode::Busy
 const NOTIFY_SKIP_CHOICES: [NotifySkip; 3] =
     [NotifySkip::OnScreen, NotifySkip::Focused, NotifySkip::Never];
 
+/// The Notifications tab's toast style choices, in the order they show.
+#[cfg(windows)]
+const TOAST_STYLE_CHOICES: [ToastStyle; 2] = [ToastStyle::Os, ToastStyle::App];
+
 /// An entry of a sound dropdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SoundEntry {
@@ -384,6 +389,7 @@ pub(crate) enum SettingsControl {
     FinishedSoundPlay,
     NotifyFinished,
     NotifySkip(NotifySkip),
+    ToastStyle(ToastStyle),
     SpawnTrusted,
     /// Choice `choice` of field `field` of the shown agent page's
     /// [`AgentOptions::settings_fields`]; `selector` is
@@ -486,6 +492,8 @@ impl SettingsControl {
             Self::NotifySkip(NotifySkip::OnScreen) => "settings-notify-skip-on-screen",
             Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
             Self::NotifySkip(NotifySkip::Never) => "settings-notify-skip-never",
+            Self::ToastStyle(ToastStyle::Os) => "settings-toast-style-os",
+            Self::ToastStyle(ToastStyle::App) => "settings-toast-style-app",
             Self::SpawnTrusted => "settings-spawn-trusted",
             Self::AgentChoice { selector, .. }
             | Self::AgentToggle { selector, .. }
@@ -2299,6 +2307,7 @@ impl RootView {
             SettingsControl::FinishedSoundPlay => self.play_finished_sound(cx),
             SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
+            SettingsControl::ToastStyle(style) => self.set_toast_style(style, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
             SettingsControl::AgentChoice {
                 field,
@@ -2986,7 +2995,8 @@ impl RootView {
 
     /// The Notifications tab's stops: the link, Needs you with its sound
     /// field and that field's Play (not while the sound is off), Finished
-    /// with its own sound field and Play, then the skip choices.
+    /// with its own sound field and Play, then the skip choices and, on
+    /// Windows, the toast style choices.
     fn notifications_controls(&self) -> Vec<SettingsControl> {
         let settings = &self.sidebar.ui_state().notifications;
         let mut controls = vec![
@@ -3003,6 +3013,8 @@ impl RootView {
             controls.push(SettingsControl::FinishedSoundPlay);
         }
         controls.extend(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip));
+        #[cfg(windows)]
+        controls.extend(TOAST_STYLE_CHOICES.map(SettingsControl::ToastStyle));
         controls
     }
 
@@ -3315,6 +3327,14 @@ impl RootView {
     /// it when it changed.
     fn set_notify_skip(&mut self, skip: NotifySkip, cx: &mut Context<Self>) {
         if self.sidebar.set_notify_skip(skip) {
+            self.save_ui();
+        }
+        cx.notify();
+    }
+
+    /// Sets whose toasts the client raises, saving it when it changed.
+    fn set_toast_style(&mut self, style: ToastStyle, cx: &mut Context<Self>) {
+        if self.sidebar.set_toast_style(style) {
             self.save_ui();
         }
         cx.notify();
@@ -4384,7 +4404,26 @@ impl RootView {
         .child(finished)
         .child(finished_sound)
         .child(skip_row);
+        #[cfg(windows)]
+        let section = section.child(Self::toast_style_row(settings.toast_style, focused, cx));
         vec![section.into_any_element()]
+    }
+
+    /// The row choosing whose toasts the client raises, `chosen` marked.
+    #[cfg(windows)]
+    fn toast_style_row(
+        chosen: ToastStyle,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let styles = TOAST_STYLE_CHOICES.map(|choice| {
+            let text = match choice {
+                ToastStyle::Os => "Windows notifications",
+                ToastStyle::App => "The app's own",
+            };
+            (SettingsControl::ToastStyle(choice), text, choice == chosen)
+        });
+        choice_row("Show toasts as", &styles, RowLock::Live, focused, cx).into_any_element()
     }
 
     /// The Needs you sound's dropdown with Play beside it (not while the

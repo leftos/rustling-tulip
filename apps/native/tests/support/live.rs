@@ -1264,6 +1264,7 @@ impl<'a> Harness<'a> {
         let quits = Rc::new(std::cell::Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
+        let placer = Arc::new(super::PlaceRecorder::default());
         let sounder = Arc::new(SoundRecorder::default());
         let badge = Rc::new(super::BadgeRecorder::default());
         let picker = Rc::new(PickRecorder::default());
@@ -1279,6 +1280,7 @@ impl<'a> Harness<'a> {
             quit: super::quit_recorder(&quits),
             open: opener.clone(),
             notify: notifier.clone(),
+            toast_placer: placer.clone(),
             sound: sounder.clone(),
             badge: badge.clone(),
             pick_folder: PickRecorder::picker(&picker),
@@ -1302,6 +1304,7 @@ impl<'a> Harness<'a> {
             quits,
             opener,
             notifier,
+            placer,
             sounder,
             badge,
             picker,

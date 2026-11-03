@@ -4,17 +4,17 @@
 //! Plain Rust, with no GPUI and no Win32: the view that draws the stack comes
 //! with the app's own toast windows, and every rule it needs to decide is
 //! testable here.
-#![expect(dead_code, reason = "the toast stack has no caller in the client yet")]
 
 use std::time::{Duration, Instant};
 
 use crate::target::HostKey;
 
 /// A session as the notifications know it: its host and its id.
-pub(crate) type SessionKey = (HostKey, String);
+pub type SessionKey = (HostKey, String);
 
 /// The key of session `id` on `host`.
-pub(crate) fn key_of(host: &HostKey, id: &str) -> SessionKey {
+#[must_use]
+pub fn key_of(host: &HostKey, id: &str) -> SessionKey {
     (host.clone(), id.to_owned())
 }
 
@@ -263,20 +263,6 @@ impl ToastStack {
         gone
     }
 
-    /// Removes every toast of `host`, and returns their keys.
-    pub fn drop_host(&mut self, host: &HostKey) -> Vec<SessionKey> {
-        let mut gone = Vec::new();
-        self.items.retain(|item| {
-            if &item.key.0 != host {
-                return true;
-            }
-            gone.push(item.key.clone());
-            false
-        });
-        self.hovered.retain(|key| !gone.contains(key));
-        gone
-    }
-
     /// The toasts that are up, newest last.
     #[must_use]
     pub fn items(&self) -> &[AppToast] {
@@ -363,14 +349,6 @@ mod tests {
 
     fn key(session: &str) -> SessionKey {
         key_of(&HostKey::Local, session)
-    }
-
-    fn boxed_key(session: &str) -> SessionKey {
-        key_of(&box_host(), session)
-    }
-
-    fn box_host() -> HostKey {
-        HostKey::Remote("box".to_owned())
     }
 
     fn toast(session: &str, kind: AppToastKind, now: Instant) -> AppToast {
@@ -566,39 +544,6 @@ mod tests {
             "five seconds were left when the pointer came to rest"
         );
         assert_eq!(stack.expire(now + Duration::from_secs(16)), vec![key("a")]);
-    }
-
-    #[test]
-    fn drop_host_removes_only_that_hosts_toasts() {
-        let now = Instant::now();
-        let mut stack = ToastStack::default();
-        stack.push_or_update(
-            AppToast::new(
-                boxed_key("a"),
-                needs_you(true),
-                "a".to_owned(),
-                "body".to_owned(),
-                now,
-            ),
-            now,
-        );
-        stack.push_or_update(toast("b", needs_you(true), now), now);
-        stack.push_or_update(
-            AppToast::new(
-                boxed_key("c"),
-                needs_you(true),
-                "c".to_owned(),
-                "body".to_owned(),
-                now,
-            ),
-            now,
-        );
-        assert_eq!(
-            stack.drop_host(&box_host()),
-            vec![boxed_key("a"), boxed_key("c")]
-        );
-        assert_eq!(stack.items().len(), 1);
-        assert_eq!(stack.items()[0].key, key("b"));
     }
 
     #[test]

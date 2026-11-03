@@ -1,19 +1,80 @@
 //! The Win32 half of the app's own toasts: a window placed on a monitor's
 //! work area, above every other window and never activated.
 //!
-//! Only the pixel conversion is testable here; the calls that touch a window
-//! run in the app and are proven when a toast is drawn. The rules they
-//! follow are in `docs/plans/custom-toasts.md`.
-#![expect(dead_code, reason = "the toast view has no caller in the client yet")]
+//! Only the pixel conversion and the serial queue are testable here; the
+//! calls that touch a window run in the app and are proven when a toast is
+//! drawn. The rules they follow are in `docs/plans/custom-toasts.md`.
 
-#[cfg(windows)]
 use crate::toast_stack::WorkArea;
 #[cfg(windows)]
 use windows::Win32::Foundation::HWND;
 
+/// Where a toast window goes on screen. Windows that are not the platform's
+/// have no handle, so every address here is an `Option`.
+pub trait ToastPlacer: Send + Sync {
+    /// The work area, in logical px, and the DPI of the monitor holding the
+    /// window at `near`, else of the primary monitor.
+    fn work_area(&self, near: Option<usize>) -> Option<(WorkArea, u32)>;
+
+    /// Shows a newly opened toast window on `rect`, above every other window
+    /// and never activated.
+    fn show(&self, hwnd_address: Option<usize>, rect: PhysicalRect);
+
+    /// Moves a shown toast window to `rect`.
+    fn restack(&self, hwnd_address: Option<usize>, rect: PhysicalRect);
+
+    /// The handle of `window`, the address the other calls take.
+    fn address_of(&self, window: &gpui::Window) -> Option<usize>;
+}
+
+/// The placer the client runs with: real windows on the real monitors.
+pub struct SystemToastPlacer;
+
+#[cfg(windows)]
+impl ToastPlacer for SystemToastPlacer {
+    fn work_area(&self, near: Option<usize>) -> Option<(WorkArea, u32)> {
+        work_area_logical(near.map(hwnd_at))
+    }
+
+    fn show(&self, hwnd_address: Option<usize>, rect: PhysicalRect) {
+        if let Some(address) = hwnd_address {
+            show_topmost(address, rect);
+        } else {
+            tracing::warn!("a toast window with no handle cannot be shown");
+        }
+    }
+
+    fn restack(&self, hwnd_address: Option<usize>, rect: PhysicalRect) {
+        if let Some(address) = hwnd_address {
+            move_topmost(address, rect);
+        } else {
+            tracing::warn!("a toast window with no handle cannot be moved");
+        }
+    }
+
+    fn address_of(&self, window: &gpui::Window) -> Option<usize> {
+        window_address(window)
+    }
+}
+
+#[cfg(not(windows))]
+impl ToastPlacer for SystemToastPlacer {
+    fn work_area(&self, _near: Option<usize>) -> Option<(WorkArea, u32)> {
+        None
+    }
+
+    fn show(&self, _hwnd_address: Option<usize>, _rect: PhysicalRect) {}
+
+    fn restack(&self, _hwnd_address: Option<usize>, _rect: PhysicalRect) {}
+
+    fn address_of(&self, _window: &gpui::Window) -> Option<usize> {
+        None
+    }
+}
+
 /// A rectangle in physical pixels, the unit every Win32 call here takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PhysicalRect {
+pub struct PhysicalRect {
     /// The left edge.
     pub x: i32,
     /// The top edge.
@@ -117,38 +178,138 @@ fn logical_px(value: i32, dpi: u32) -> f32 {
     physical * 96.0 / scale
 }
 
-/// Shows the window whose handle is `hwnd_address` on `rect` in physical px,
-/// above every other window and never activated.
-///
-/// The calls run on a short thread of their own: they send the window
-/// messages, and from inside the callback that opens a window gpui's state is
-/// borrowed, so those messages would be lost (as in `offscreen.rs`).
+/// The window at `address`.
 #[cfg(windows)]
-pub(crate) fn show_topmost(hwnd_address: usize, rect: PhysicalRect) {
-    let spawned = std::thread::Builder::new()
-        .name("toast-window".to_owned())
-        .spawn(move || show_and_raise(hwnd_address, rect));
-    if let Err(err) = spawned {
-        tracing::warn!("starting the thread that shows the toast window: {err}");
+fn hwnd_at(address: usize) -> HWND {
+    HWND(std::ptr::with_exposed_provenance_mut(address))
+}
+
+/// One call on a toast window, as the worker takes them.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaceCall {
+    /// Show the window at the address on the rectangle.
+    Show(usize, PhysicalRect),
+    /// Move the shown window at the address to the rectangle.
+    Move(usize, PhysicalRect),
+}
+
+/// Applies every call `calls` delivers, in the order they were sent, until
+/// each sender is gone.
+#[cfg(windows)]
+fn serve(calls: &std::sync::mpsc::Receiver<PlaceCall>, mut apply: impl FnMut(PlaceCall)) {
+    while let Ok(call) = calls.recv() {
+        apply(call);
     }
 }
 
-/// The work of [`show_topmost`], on the window whose handle is `address`.
+/// Queues `call` for the one `toast-window` thread, started on first use.
+///
+/// The calls send window messages, and with gpui's state borrowed on the UI
+/// thread those messages are lost (as in `offscreen.rs`). One queue also
+/// keeps a later move from being overwritten by an earlier show.
 #[cfg(windows)]
-fn show_and_raise(address: usize, rect: PhysicalRect) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowPos, ShowWindow,
-    };
+fn send_to_worker(call: PlaceCall) {
+    use std::sync::OnceLock;
+    use std::sync::mpsc::{Sender, channel};
 
-    let hwnd = HWND(std::ptr::with_exposed_provenance_mut(address));
-    if !crate::offscreen::never_activate(hwnd) {
-        tracing::warn!("the toast window did not take WS_EX_NOACTIVATE");
+    static WORKER: OnceLock<Option<Sender<PlaceCall>>> = OnceLock::new();
+    let worker = WORKER.get_or_init(|| {
+        let (tx, rx) = channel();
+        let spawned = std::thread::Builder::new()
+            .name("toast-window".to_owned())
+            .spawn(move || serve(&rx, apply_call));
+        match spawned {
+            Ok(_) => Some(tx),
+            Err(err) => {
+                tracing::warn!("starting the thread that places toast windows: {err}");
+                None
+            }
+        }
+    });
+    let Some(worker) = worker else {
+        tracing::warn!("no thread places toast windows: {call:?} is dropped");
         return;
+    };
+    if let Err(err) = worker.send(call) {
+        tracing::warn!("the thread that places toast windows has gone: {err}");
     }
-    // SAFETY: `hwnd` is this live window's handle and the flags keep it from
-    // being activated. `HWND_TOPMOST` is what sets `WS_EX_TOPMOST`: Windows
-    // ignores that bit in a plain style write.
-    if let Err(err) = unsafe {
+}
+
+/// Runs `call` on the worker's thread.
+#[cfg(windows)]
+fn apply_call(call: PlaceCall) {
+    match call {
+        PlaceCall::Show(address, rect) => show_and_raise(address, rect),
+        PlaceCall::Move(address, rect) => move_window(address, rect),
+    }
+}
+
+/// Shows the window whose handle is `hwnd_address` on `rect` in physical px,
+/// above every other window and never activated.
+#[cfg(windows)]
+pub(crate) fn show_topmost(hwnd_address: usize, rect: PhysicalRect) {
+    send_to_worker(PlaceCall::Show(hwnd_address, rect));
+}
+
+/// How far a window's outer rectangle reaches past its client area on each
+/// side, in physical px.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Insets {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+/// The outer rectangle that gives a window with `insets` the client area
+/// `rect`.
+#[cfg(windows)]
+fn outer_rect(rect: PhysicalRect, insets: Insets) -> PhysicalRect {
+    PhysicalRect {
+        x: rect.x - insets.left,
+        y: rect.y - insets.top,
+        width: rect.width + insets.left + insets.right,
+        height: rect.height + insets.top + insets.bottom,
+    }
+}
+
+/// The window's insets as it stands now.
+#[cfg(windows)]
+fn window_insets(hwnd: HWND) -> windows::core::Result<Insets> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+
+    let (mut outer, mut client) = (RECT::default(), RECT::default());
+    let mut origin = POINT::default();
+    // SAFETY: each call only writes its own local out parameter, and Windows
+    // rejects the handle of a window that has closed.
+    unsafe {
+        GetWindowRect(hwnd, &raw mut outer)?;
+        GetClientRect(hwnd, &raw mut client)?;
+        ClientToScreen(hwnd, &raw mut origin).ok()?;
+    }
+    let left = origin.x - outer.left;
+    let top = origin.y - outer.top;
+    Ok(Insets {
+        left,
+        top,
+        right: outer.right - outer.left - client.right - left,
+        bottom: outer.bottom - outer.top - client.bottom - top,
+    })
+}
+
+/// Puts the window's outer rectangle at `rect`, topmost and not activated.
+#[cfg(windows)]
+fn set_topmost_rect(hwnd: HWND, rect: PhysicalRect) -> windows::core::Result<()> {
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_TOPMOST, SWP_NOACTIVATE, SetWindowPos};
+
+    // SAFETY: the flags keep the window from being activated, and Windows
+    // rejects the handle of one that has closed. `HWND_TOPMOST` is what sets
+    // `WS_EX_TOPMOST`: Windows ignores that bit in a plain style write.
+    unsafe {
         SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -158,7 +319,33 @@ fn show_and_raise(address: usize, rect: PhysicalRect) {
             rect.height,
             SWP_NOACTIVATE,
         )
-    } {
+    }
+}
+
+/// Gives the window the client area `rect`, in two placings. The first takes
+/// it to `rect`'s monitor; that call waits for the window's thread, so any
+/// DPI change has landed before the insets are read. gpui hides the frame
+/// inside the outer rectangle, so the second placing reaches past `rect` by
+/// those insets.
+#[cfg(windows)]
+fn fit_client_area(hwnd: HWND, rect: PhysicalRect) -> windows::core::Result<()> {
+    set_topmost_rect(hwnd, rect)?;
+    let insets = window_insets(hwnd)?;
+    set_topmost_rect(hwnd, outer_rect(rect, insets))
+}
+
+/// The work of [`show_topmost`], on the window whose handle is `address`. A
+/// window that has closed by now fails here, logged at warn.
+#[cfg(windows)]
+fn show_and_raise(address: usize, rect: PhysicalRect) {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, ShowWindow};
+
+    let hwnd = hwnd_at(address);
+    if !crate::offscreen::never_activate(hwnd) {
+        tracing::warn!("the toast window did not take WS_EX_NOACTIVATE");
+        return;
+    }
+    if let Err(err) = fit_client_area(hwnd, rect) {
         tracing::warn!("placing the toast window on the work area: {err}");
         return;
     }
@@ -167,26 +354,17 @@ fn show_and_raise(address: usize, rect: PhysicalRect) {
 }
 
 /// Moves the shown toast whose handle is `hwnd_address` to `rect` in physical
-/// px, keeping it above every other window and never activating it. Called
-/// from the caller's thread to restack the toasts already shown.
+/// px, keeping it above every other window and never activating it.
 #[cfg(windows)]
 pub(crate) fn move_topmost(hwnd_address: usize, rect: PhysicalRect) {
-    use windows::Win32::UI::WindowsAndMessaging::{HWND_TOPMOST, SWP_NOACTIVATE, SetWindowPos};
+    send_to_worker(PlaceCall::Move(hwnd_address, rect));
+}
 
-    let hwnd = HWND(std::ptr::with_exposed_provenance_mut(hwnd_address));
-    // SAFETY: `hwnd` is a live window's handle and the flags keep it from
-    // being activated.
-    if let Err(err) = unsafe {
-        SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            SWP_NOACTIVATE,
-        )
-    } {
+/// The work of [`move_topmost`]. A window that has closed by now fails here,
+/// logged at warn.
+#[cfg(windows)]
+fn move_window(address: usize, rect: PhysicalRect) {
+    if let Err(err) = fit_client_area(hwnd_at(address), rect) {
         tracing::warn!("moving the toast window: {err}");
     }
 }
@@ -210,6 +388,79 @@ pub(crate) fn window_address(window: &gpui::Window) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{PhysicalRect, to_physical};
+
+    #[cfg(windows)]
+    #[test]
+    fn outer_rect_adds_every_inset() {
+        use super::{Insets, outer_rect};
+
+        let rect = PhysicalRect {
+            x: 1544,
+            y: 948,
+            width: 360,
+            height: 116,
+        };
+        let insets = Insets {
+            left: 8,
+            top: 1,
+            right: 7,
+            bottom: 9,
+        };
+        let outer = PhysicalRect {
+            x: 1536,
+            y: 947,
+            width: 375,
+            height: 126,
+        };
+        assert_eq!(outer_rect(rect, insets), outer);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn outer_rect_with_no_insets_is_the_rect() {
+        use super::{Insets, outer_rect};
+
+        let rect = PhysicalRect {
+            x: -1544,
+            y: 948,
+            width: 360,
+            height: 116,
+        };
+        let insets = Insets {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        assert_eq!(outer_rect(rect, insets), rect);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_worker_applies_calls_in_the_order_they_were_sent() {
+        use super::{PlaceCall, serve};
+
+        let rect = |x| PhysicalRect {
+            x,
+            y: 0,
+            width: 360,
+            height: 116,
+        };
+        let sent = [
+            PlaceCall::Show(1, rect(10)),
+            PlaceCall::Move(1, rect(20)),
+            PlaceCall::Show(2, rect(30)),
+            PlaceCall::Move(1, rect(40)),
+        ];
+        let (tx, rx) = std::sync::mpsc::channel();
+        for call in sent {
+            assert!(tx.send(call).is_ok(), "the queue is open");
+        }
+        drop(tx);
+        let mut applied = Vec::new();
+        serve(&rx, |call| applied.push(call));
+        assert_eq!(applied, sent);
+    }
 
     #[test]
     fn to_physical_scales_by_dpi() {

@@ -27,8 +27,8 @@ use rustling_tulip_native::{
     Activity, BadgeOverlay, Clip, ClipSource, Clock, Connection, ContainerKind, FileFilter,
     FilePicker, FolderPicker, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyKind,
     NotifyState, OpenFailure, OpenLocalFuture, Opener, PairingAction, PairingActionSink,
-    PairingToast, QuitFn, RootDeps, RootView, SavePicker, ScPanel, Sounder, TaskbarBadge,
-    Transport, bind_keys,
+    PairingToast, PhysicalRect, QuitFn, RootDeps, RootView, SavePicker, ScPanel, Sounder,
+    TaskbarBadge, ToastPlacer, Transport, WorkArea, bind_keys,
     remote_access::Autostart,
     spawn_net,
     target::{HostKey, Target},
@@ -1148,6 +1148,8 @@ pub struct Harness<'a> {
     opener: Arc<OpenRecorder>,
     /// The notifications attention events showed.
     notifier: Arc<NotifyRecorder>,
+    /// Where the client placed its own toast windows.
+    placer: Arc<PlaceRecorder>,
     /// The sounds the client played.
     sounder: Arc<SoundRecorder>,
     /// What the main window's taskbar badge was set to.
@@ -1457,6 +1459,51 @@ impl Notifier for NotifyRecorder {
                 .do_not_disturb
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn user_busy(&self) -> bool {
+        *self
+            .do_not_disturb
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A placer over a 1920x1080 work area at 96 DPI that only records what it
+/// was asked to place, as a spec's windows are the test platform's.
+#[derive(Default)]
+pub struct PlaceRecorder {
+    shown: Mutex<Vec<PhysicalRect>>,
+    restacked: Mutex<Vec<PhysicalRect>>,
+}
+
+impl ToastPlacer for PlaceRecorder {
+    fn work_area(&self, _near: Option<usize>) -> Option<(WorkArea, u32)> {
+        let area = WorkArea {
+            left: 0.0,
+            top: 0.0,
+            right: 1920.0,
+            bottom: 1080.0,
+        };
+        Some((area, 96))
+    }
+
+    fn show(&self, _hwnd_address: Option<usize>, rect: PhysicalRect) {
+        self.shown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(rect);
+    }
+
+    fn restack(&self, _hwnd_address: Option<usize>, rect: PhysicalRect) {
+        self.restacked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(rect);
+    }
+
+    fn address_of(&self, _window: &gpui::Window) -> Option<usize> {
+        None
     }
 }
 
@@ -2050,6 +2097,7 @@ impl<'a> Harness<'a> {
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
+        let placer = Arc::new(PlaceRecorder::default());
         let sounder = Arc::new(SoundRecorder::default());
         let badge = Rc::new(BadgeRecorder::default());
         let picker = Rc::new(PickRecorder::default());
@@ -2066,6 +2114,7 @@ impl<'a> Harness<'a> {
             quit: quit_recorder(&quits),
             open: opener.clone(),
             notify: notifier.clone(),
+            toast_placer: placer.clone(),
             sound: sounder.clone(),
             badge: badge.clone(),
             pick_folder: PickRecorder::picker(&picker),
@@ -2089,6 +2138,7 @@ impl<'a> Harness<'a> {
             quits,
             opener,
             notifier,
+            placer,
             sounder,
             badge,
             picker,
@@ -2121,6 +2171,7 @@ impl<'a> Harness<'a> {
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
+        let placer = Arc::new(PlaceRecorder::default());
         let sounder = Arc::new(SoundRecorder::default());
         let badge = Rc::new(BadgeRecorder::default());
         let picker = Rc::new(PickRecorder::default());
@@ -2137,6 +2188,7 @@ impl<'a> Harness<'a> {
             quit: quit_recorder(&quits),
             open: opener.clone(),
             notify: notifier.clone(),
+            toast_placer: placer.clone(),
             sound: sounder.clone(),
             badge: badge.clone(),
             pick_folder: PickRecorder::picker(&picker),
@@ -2160,6 +2212,7 @@ impl<'a> Harness<'a> {
             quits,
             opener,
             notifier,
+            placer,
             sounder,
             badge,
             picker,
@@ -2298,6 +2351,28 @@ impl<'a> Harness<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(host.to_owned());
+    }
+
+    /// Every toast window the client showed, as the placer was given it,
+    /// oldest first, once the view has settled.
+    pub fn toasts_shown(&mut self) -> Vec<PhysicalRect> {
+        self.cx.run_until_parked();
+        self.placer
+            .shown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Every move of a toast window already shown, oldest first, once the
+    /// view has settled.
+    pub fn toasts_restacked(&mut self) -> Vec<PhysicalRect> {
+        self.cx.run_until_parked();
+        self.placer
+            .restacked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Every notification shown, as (title, body), oldest first, once the

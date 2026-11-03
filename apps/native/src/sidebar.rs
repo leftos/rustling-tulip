@@ -2091,13 +2091,6 @@ impl SidebarModel {
     }
 
     /// Records which toasts the client raises; returns whether it changed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the Settings row that sets the toast style is not drawn yet"
-        )
-    )]
     pub fn set_toast_style(&mut self, style: ToastStyle) -> bool {
         if self.ui.notifications.toast_style == style {
             return false;

@@ -30,7 +30,8 @@
 //! Nord with its Ground edited) and `themes` (the Themes modal over Settings,
 //! over a user theme, a broken file and a file named after a built-in).
 //! `settings-sounds` shows Settings on the Notifications tab with the Needs
-//! you sound dropdown open.
+//! you sound dropdown open, and `toast` a Needs you and a Finished card, as
+//! the app's own toasts draw them.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -52,8 +53,8 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
-    App, AppContext as _, Application, AsyncApp, Bounds, Keystroke, Window, WindowBounds,
-    WindowHandle, WindowOptions, px, size,
+    App, AppContext as _, Application, AsyncApp, Bounds, Context, IntoElement, Keystroke, Render,
+    Window, WindowBounds, WindowHandle, WindowOptions, div, prelude::*, px, size,
 };
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
@@ -65,14 +66,16 @@ use rustling_tulip_native::chat::PaneView;
 use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
-use rustling_tulip_native::target::{SshHost, Target};
+use rustling_tulip_native::target::{HostKey, SshHost, Target};
 use rustling_tulip_native::theme_store::{THEMES_DIR, ThemeStore};
+use rustling_tulip_native::ui_theme::theme;
 use rustling_tulip_native::update::{LastResult, Ready, Updater};
 use rustling_tulip_native::{
-    Activity, Assets, Clock, Connection, FileFilter, FilePicker, FolderPicker, HandshakeInfo,
-    NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier, NotifyKind, NotifyState, OpenFailure,
-    Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView, SavePicker, ToastKind, ToastSpec,
-    Transport, ViewerLoad, bind_keys, remote_access::Autostart,
+    Activity, AppToast, AppToastKind, Assets, Clock, Connection, FileFilter, FilePicker,
+    FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetEvent, Notifier,
+    NotifyKind, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH, RootDeps, RootView,
+    SavePicker, SystemToastPlacer, TOAST_CARD_WIDTH, ToastKind, ToastSpec, Transport, ViewerLoad,
+    bind_keys, card_height, key_of, remote_access::Autostart, toast_card,
 };
 use serde_json::{Value, json};
 use tailnet::{PeerStatus, Status, TailnetError};
@@ -82,6 +85,9 @@ const WINDOW_SIZE: (u16, u16) = (1000, 640);
 /// The `dashboard` shot's window: wide enough for every column of the By
 /// status view.
 const DASHBOARD_WINDOW_SIZE: (u16, u16) = (2000, 900);
+
+/// The window `toast` draws its two cards in.
+const TOAST_WINDOW_SIZE: (u16, u16) = (420, 300);
 /// The `summary` shot's window: tall enough for the split's top pane to
 /// hold the pinned card, all three lines with one open, the strip and the
 /// composer.
@@ -199,11 +205,12 @@ enum View {
     SpawnHosts,
     SettingsHosts,
     SettingsDashboard,
+    Toast,
     SettingsSounds,
 }
 
 impl View {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -227,6 +234,7 @@ impl View {
         Self::SettingsHosts,
         Self::SettingsDashboard,
         Self::SettingsSounds,
+        Self::Toast,
     ];
 
     fn name(self) -> &'static str {
@@ -254,6 +262,7 @@ impl View {
             Self::SettingsHosts => "settings-hosts",
             Self::SettingsDashboard => "settings-dashboard",
             Self::SettingsSounds => "settings-sounds",
+            Self::Toast => "toast",
         }
     }
 
@@ -281,6 +290,7 @@ impl View {
     fn window_size(self) -> (u16, u16) {
         match self {
             Self::Dashboard => DASHBOARD_WINDOW_SIZE,
+            Self::Toast => TOAST_WINDOW_SIZE,
             Self::Summary => SUMMARY_WINDOW_SIZE,
             Self::Chat => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
@@ -310,6 +320,8 @@ impl View {
     /// Whether `root` shows this view.
     fn reached(self, root: &RootView) -> bool {
         match self {
+            // Drawn by `start_toast_shot`, in a window with no root view.
+            Self::Toast => true,
             Self::Main | Self::MainCompact => {
                 !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
             }
@@ -459,7 +471,8 @@ impl Shot {
             | View::SpawnHosts
             | View::SettingsHosts
             | View::SettingsDashboard
-            | View::SettingsSounds => None,
+            | View::SettingsSounds
+            | View::Toast => None,
         };
         if let Some(text) = sample_text {
             let sample = self.viewer_sample();
@@ -686,6 +699,9 @@ fn default_dir() -> Result<PathBuf> {
 fn start(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Result<()> {
     bind_keys(cx);
     fonts::register_bundled(cx);
+    if shot.view == View::Toast {
+        return start_toast_shot(shot, slot, cx);
+    }
     let (cmd_tx, cmd_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
     let now = Utc::now();
@@ -819,6 +835,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         quit: Box::new(|cx: &mut App| cx.quit()),
         open: Arc::new(NoOpener),
         notify: Arc::new(NoNotifier),
+        toast_placer: Arc::new(SystemToastPlacer),
         sound: Arc::new(rustling_tulip_native::SilentSounder),
         badge: std::rc::Rc::new(rustling_tulip_native::NoTaskbarBadge),
         pick_folder,
@@ -833,6 +850,89 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
             offers: view == View::Update,
         }),
     }
+}
+
+/// A Needs you card and a Finished card, as the app's own toasts draw them.
+struct ToastShot {
+    needs_you: AppToast,
+    finished: AppToast,
+}
+
+impl ToastShot {
+    fn new() -> Self {
+        let toast = |id: &str, kind, title: &str, body: &str| {
+            AppToast::new(
+                key_of(&HostKey::Local, id),
+                kind,
+                title.to_owned(),
+                body.to_owned(),
+                Instant::now(),
+            )
+        };
+        Self {
+            needs_you: toast(
+                "s1",
+                AppToastKind::NeedsYou { has_answers: false },
+                "Needs you · box",
+                "Petal: Waiting for your answer on which of the two migrations to run \
+                 first, since both of them touch the sessions table",
+            ),
+            finished: toast("s2", AppToastKind::Finished, "Finished", "Bramble"),
+        }
+    }
+}
+
+impl Render for ToastShot {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = |toast: &AppToast, cx: &App| {
+            div()
+                .w(px(TOAST_CARD_WIDTH))
+                .h(px(card_height(toast)))
+                .child(toast_card(toast, |_, _, _| {}, |_, _, _| {}, cx))
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .p(px(16.0))
+            .bg(gpui::rgb(theme(cx).surface))
+            .child(card(&self.needs_you, cx))
+            .child(card(&self.finished, cx))
+    }
+}
+
+/// Opens [`ToastShot`] in a cloaked window, captures it, and quits; `slot`
+/// receives the outcome. No daemon is involved.
+fn start_toast_shot(shot: Shot, slot: Rc<RefCell<Option<Result<()>>>>, cx: &mut App) -> Result<()> {
+    let window_size = shot.view.window_size();
+    let (width, height) = window_size;
+    let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
+    let handle = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                focus: false,
+                show: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                show_cloaked(window, window_size);
+                cx.new(|_| ToastShot::new())
+            },
+        )
+        .context("opening the window")?;
+    let address = handle.update(cx, |_, window, _| win32::window_address(window))??;
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(LOAD_WAIT).await;
+        let result = capture(shot.out, address, &Mutex::new(None)).await;
+        *slot.borrow_mut() = Some(result);
+        if let Err(err) = cx.update(|cx| cx.quit()) {
+            tracing::warn!("quitting after the shot: {err:#}");
+        }
+    })
+    .detach();
+    Ok(())
 }
 
 /// Opens the root view in a cloaked window that is never activated.
@@ -883,8 +983,16 @@ async fn drive_and_capture(
         bail!("the input for the {} view did not open it", view.name());
     }
     check_daemon(failure)?;
+    capture(shot.out.clone(), address, failure).await
+}
+
+/// Writes the window at `address` to `out`, on a thread of its own.
+async fn capture(
+    out: PathBuf,
+    address: usize,
+    failure: &Mutex<Option<anyhow::Error>>,
+) -> Result<()> {
     let (tx, rx) = oneshot::channel();
-    let out = shot.out.clone();
     std::thread::Builder::new()
         .name("capture".to_owned())
         .spawn(move || {
@@ -916,7 +1024,7 @@ fn drive(
     cx: &mut App,
 ) -> Result<()> {
     match view {
-        View::Main | View::MainCompact | View::MultiHost => Ok(()),
+        View::Main | View::MainCompact | View::MultiHost | View::Toast => Ok(()),
         View::SourceControl => {
             let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(
@@ -1256,6 +1364,10 @@ impl Notifier for NoNotifier {
     }
 
     fn suppressed(&self) -> bool {
+        false
+    }
+
+    fn user_busy(&self) -> bool {
         false
     }
 }

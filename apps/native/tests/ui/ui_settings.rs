@@ -22,6 +22,21 @@ use rustling_tulip_native::{
 };
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
+#[cfg(windows)]
+#[gpui::test]
+fn the_toast_style_row_sets_the_choice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-notifications");
+
+    h.click_on("settings-toast-style-app");
+    assert_eq!(saved_ui(&dir)["notifications"]["toast_style"], "app");
+
+    h.click_on("settings-toast-style-os");
+    assert_eq!(saved_ui(&dir)["notifications"]["toast_style"], "os");
+}
+
 const TAB_SELECTORS: [&str; 9] = [
     "settings-tab-general",
     "settings-tab-notifications",

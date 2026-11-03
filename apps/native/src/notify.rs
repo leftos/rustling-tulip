@@ -11,7 +11,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::Context;
+use gpui::{
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, DisplayId, Task, WeakEntity,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, point, px,
+    size,
+};
 use protocol::{
     AgentDescriptor, AlertKind, AttentionReason, DaemonMessage, KeyState, SessionMode,
     SessionSnapshot, SessionStatus, SummarizerKey, SummarizerSettings,
@@ -19,13 +23,18 @@ use protocol::{
 
 use crate::RootView;
 use crate::needs_you::{self, Reason};
+use crate::offscreen;
 use crate::pairing::{PairingAction, PairingToast};
-use crate::sidebar::{NotifySkip, ToastSound, display_label};
+use crate::sidebar::{NotifySkip, ToastSound, ToastStyle, display_label};
 use crate::sound::{self, NotifyKind, Sounder};
 use crate::target::HostKey;
 #[cfg(windows)]
 use crate::toast_activation;
-use crate::toast_stack::{SessionKey, key_of};
+use crate::toast_stack::{
+    AppToast, AppToastKind, SessionKey, ToastStack, WIDTH, WorkArea, key_of, place,
+};
+use crate::toast_view::{ToastView, card_height};
+use crate::toast_window::{PhysicalRect, ToastPlacer, to_physical};
 use crate::window_title::PRODUCT_NAME;
 
 /// The URI of Windows' notification settings page.
@@ -92,9 +101,7 @@ pub trait Notifier: Send + Sync {
     /// Whether the user is in Do Not Disturb, a presentation or a
     /// full-screen app, whatever Windows' own toast setting for this app
     /// says. Called off the UI thread.
-    fn user_busy(&self) -> bool {
-        false
-    }
+    fn user_busy(&self) -> bool;
 }
 
 /// The notifier the client runs with: Windows toasts under the client's own
@@ -252,6 +259,10 @@ impl Notifier for SystemNotifier {
     fn suppressed(&self) -> bool {
         false
     }
+
+    fn user_busy(&self) -> bool {
+        false
+    }
 }
 
 /// A notifier that shows nothing, for the cloaked smoke-tier window, which
@@ -275,6 +286,10 @@ impl Notifier for SilentNotifier {
     }
 
     fn suppressed(&self) -> bool {
+        false
+    }
+
+    fn user_busy(&self) -> bool {
         false
     }
 }
@@ -308,12 +323,51 @@ pub(crate) struct Notifications {
     alerts: HashMap<SessionKey, Alert>,
     /// The generation the next hold is given.
     next_hold: u64,
+    /// The app's own toasts and their windows.
+    toasts: ToastHost,
+}
+
+/// The app's own toasts: touched only on the UI thread.
+struct ToastHost {
+    /// Puts the windows on the screen.
+    placer: Arc<dyn ToastPlacer>,
+    /// The toasts that are up.
+    stack: ToastStack,
+    /// Each toast's open window.
+    windows: HashMap<SessionKey, ToastWindow>,
+    /// Sleeps until the stack's next deadline; replaced after every change.
+    timer: Option<Task<()>>,
+}
+
+/// One toast's open window.
+struct ToastWindow {
+    handle: WindowHandle<ToastView>,
+    /// The window's handle, for the placer.
+    address: Option<usize>,
+}
+
+/// Where the toasts go right now.
+struct ToastScreen {
+    area: WorkArea,
+    dpi: u32,
+    /// The display holding the main window.
+    display: Option<DisplayId>,
 }
 
 impl Notifications {
-    pub(crate) fn new(notifier: Arc<dyn Notifier>, sounder: Arc<dyn Sounder>) -> Self {
+    pub(crate) fn new(
+        notifier: Arc<dyn Notifier>,
+        placer: Arc<dyn ToastPlacer>,
+        sounder: Arc<dyn Sounder>,
+    ) -> Self {
         Self {
             notifier,
+            toasts: ToastHost {
+                placer,
+                stack: ToastStack::default(),
+                windows: HashMap::new(),
+                timer: None,
+            },
             sounder,
             sound_problem: None,
             finished_sound_problem: None,
@@ -494,6 +548,8 @@ impl Summaries {
 /// One toast ready to raise, unless its toggle is off or the skip setting
 /// says the owner is looking at the session already.
 struct Toast<'a> {
+    /// The host of the session it reports.
+    host: &'a HostKey,
     /// The session it reports.
     session_id: &'a str,
     title: &'a str,
@@ -612,6 +668,7 @@ impl RootView {
                     needs_you_body(self.sidebar.session(session_id), self.sidebar.agents(host));
                 self.raise_toast(
                     &Toast {
+                        host,
                         session_id,
                         title: NEEDS_YOU_TITLE,
                         body: &body,
@@ -666,6 +723,10 @@ impl RootView {
         if skips(skip_when, window_focused || in_popout, || {
             in_popout || self.session_on_screen(toast.session_id)
         }) {
+            return;
+        }
+        if self.sidebar.ui_state().notifications.toast_style == ToastStyle::App {
+            self.raise_app_toast(toast, cx);
             return;
         }
         let title = toast.title.to_owned();
@@ -811,11 +872,12 @@ impl RootView {
         let Some(held) = self.notifications.held.remove(key) else {
             return;
         };
-        let session_id = key.1.as_str();
+        let (host, session_id) = (&key.0, key.1.as_str());
         let focused = self.main_window_focused(cx);
         let wanted = self.sidebar.ui_state().notifications.finished;
         self.raise_toast(
             &Toast {
+                host,
                 session_id,
                 title: FINISHED_TITLE,
                 body: &held.label,
@@ -844,15 +906,15 @@ impl RootView {
         let Some(held) = self.notifications.held.remove(key) else {
             return;
         };
-        self.raise_alert(&key.1, &held.label, alert, window_focused, cx);
+        self.raise_alert(key, &held.label, alert, window_focused, cx);
     }
 
-    /// Raises the Finished toast about `session_id` that `alert` words, or
+    /// Raises the Finished toast about session `key` that `alert` words, or
     /// the plain one when the alert's kind words none (a template), under the
     /// toggle and skip rule as they stand now.
     fn raise_alert(
         &self,
-        session_id: &str,
+        key: &SessionKey,
         label: &str,
         alert: &Alert,
         window_focused: bool,
@@ -871,7 +933,8 @@ impl RootView {
         };
         self.raise_toast(
             &Toast {
-                session_id,
+                host: &key.0,
+                session_id: &key.1,
                 title: &title,
                 body: &body,
                 wanted,
@@ -880,6 +943,306 @@ impl RootView {
             window_focused,
             cx,
         );
+    }
+
+    /// Raises `toast` as the app's own: not while the user is busy, and
+    /// never in a cloaked run. The busy check runs off the UI thread.
+    fn raise_app_toast(&self, toast: &Toast<'_>, cx: &mut Context<Self>) {
+        if offscreen::requested() {
+            tracing::debug!("offscreen window: toast {:?} not shown", toast.title);
+            return;
+        }
+        let key = key_of(toast.host, toast.session_id);
+        let title = self.app_toast_title(toast);
+        let body = toast.body.to_owned();
+        let sound = toast.kind;
+        let kind = match sound {
+            NotifyKind::NeedsYou => AppToastKind::NeedsYou { has_answers: false },
+            NotifyKind::Finished => AppToastKind::Finished,
+        };
+        let notifier = Arc::clone(&self.notifications.notifier);
+        cx.spawn(async move |this, cx| {
+            let busy = cx
+                .background_executor()
+                .spawn(async move { notifier.user_busy() })
+                .await;
+            if busy {
+                tracing::debug!("the user is busy: toast {title:?} not shown");
+                return;
+            }
+            // Fails only when the view is gone, and its toasts with it.
+            this.update(cx, |this, cx| {
+                let now = cx.background_executor().now();
+                let toast = AppToast::new(key, kind, title, body, now);
+                this.show_app_toast(toast, sound, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `toast`'s title line, naming the session's host unless it is This PC.
+    fn app_toast_title(&self, toast: &Toast<'_>) -> String {
+        if *toast.host == HostKey::Local {
+            return toast.title.to_owned();
+        }
+        format!("{} · {}", toast.title, self.host_name(toast.host))
+    }
+
+    /// Puts `toast` on the stack, in a new window or in place of the
+    /// session's toast, and plays its `sound`; with no work area to place it
+    /// on, there is no toast.
+    fn show_app_toast(&mut self, toast: AppToast, sound: NotifyKind, cx: &mut Context<Self>) {
+        let Some(screen) = self.toast_screen(cx) else {
+            return;
+        };
+        let now = cx.background_executor().now();
+        let toasts = &mut self.notifications.toasts;
+        let dropped = toasts.stack.push_or_update(toast.clone(), now);
+        for key in dropped {
+            self.close_toast_window(&key, cx);
+        }
+        if let Some(open) = self.notifications.toasts.windows.get(&toast.key) {
+            let replaced = open
+                .handle
+                .update(cx, |view, _, cx| view.replace(toast, cx));
+            if let Err(err) = replaced {
+                tracing::debug!("the toast's window had closed: {err:#}");
+            }
+        }
+        self.place_app_toasts(&screen, cx);
+        self.play_sound(sound, cx);
+    }
+
+    /// The main window, while it is open.
+    fn main_window(&self, cx: &App) -> Option<AnyWindowHandle> {
+        let main = self.layouts.main();
+        cx.windows()
+            .into_iter()
+            .find(|window| window.window_id() == main)
+    }
+
+    /// Where the toasts go now: the work area of the monitor holding the
+    /// main window. `None`, logged at warn, when it cannot be read.
+    fn toast_screen(&self, cx: &mut Context<Self>) -> Option<ToastScreen> {
+        let placer = Arc::clone(&self.notifications.toasts.placer);
+        let main = self.main_window(cx).and_then(|main| {
+            main.update(cx, |_, window, cx| {
+                let display = window.display(cx).map(|display| display.id());
+                (placer.address_of(window), display)
+            })
+            .inspect_err(|err| tracing::debug!("reading the main window for a toast: {err:#}"))
+            .ok()
+        });
+        let (near, display) = main.unwrap_or_default();
+        let Some((area, dpi)) = placer.work_area(near) else {
+            tracing::warn!("no work area to place a toast on");
+            return None;
+        };
+        Some(ToastScreen { area, dpi, display })
+    }
+
+    /// Places every toast on `screen`, opening the windows of new ones and
+    /// moving the rest; a toast that does not fit is dismissed. Rearms the
+    /// timer, as this ends every change to the stack.
+    fn place_app_toasts(&mut self, screen: &ToastScreen, cx: &mut Context<Self>) {
+        let items = self.notifications.toasts.stack.items().to_vec();
+        let heights: Vec<(AppToastKind, f32)> = items
+            .iter()
+            .map(|toast| (toast.kind, card_height(toast)))
+            .collect();
+        let placed = place(screen.area, &heights);
+        for (index, toast) in items.iter().enumerate() {
+            if !placed.iter().any(|(kept, _)| *kept == index) {
+                self.notifications.toasts.stack.dismiss(&toast.key);
+                self.close_toast_window(&toast.key, cx);
+            }
+        }
+        for (index, (left, top)) in placed {
+            let toast = &items[index];
+            let height = card_height(toast);
+            let rect = to_physical(left, top, WIDTH, height, screen.dpi);
+            let toasts = &self.notifications.toasts;
+            if let Some(open) = toasts.windows.get(&toast.key) {
+                toasts.placer.restack(open.address, rect);
+            } else {
+                let bounds = Bounds::new(point(px(left), px(top)), size(px(WIDTH), px(height)));
+                self.open_toast_window(toast, bounds, rect, screen.display, cx);
+            }
+        }
+        self.arm_toast_timer(cx);
+    }
+
+    /// Opens `toast`'s window at `bounds` on `display` and hands it to the
+    /// placer to show on `rect`: hidden until then, so gpui never activates
+    /// it. A window that fails to open dismisses its toast.
+    fn open_toast_window(
+        &mut self,
+        toast: &AppToast,
+        bounds: Bounds<gpui::Pixels>,
+        rect: PhysicalRect,
+        display: Option<DisplayId>,
+        cx: &mut Context<Self>,
+    ) {
+        let placer = Arc::clone(&self.notifications.toasts.placer);
+        let root = cx.weak_entity();
+        let shown = toast.clone();
+        let mut address = None;
+        let opened = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: None,
+                kind: WindowKind::PopUp,
+                focus: false,
+                show: false,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id: display,
+                window_background: WindowBackgroundAppearance::Transparent,
+                ..Default::default()
+            },
+            |window, cx| {
+                address = placer.address_of(window);
+                placer.show(address, rect);
+                cx.new(|_| ToastView::new(root, shown))
+            },
+        );
+        match opened {
+            Ok(handle) => {
+                let open = ToastWindow { handle, address };
+                self.notifications
+                    .toasts
+                    .windows
+                    .insert(toast.key.clone(), open);
+            }
+            Err(err) => {
+                tracing::warn!("opening a toast window: {err:#}");
+                self.notifications.toasts.stack.dismiss(&toast.key);
+            }
+        }
+    }
+
+    /// Closes `key`'s window, if it has one. The close waits for the effects
+    /// to flush, as a press on a toast runs inside its window's update.
+    fn close_toast_window(&mut self, key: &SessionKey, cx: &mut Context<Self>) {
+        let Some(open) = self.notifications.toasts.windows.remove(key) else {
+            return;
+        };
+        cx.defer(move |cx| {
+            if let Err(err) = open
+                .handle
+                .update(cx, |_, window, _| window.remove_window())
+            {
+                tracing::debug!("the toast window was already closed: {err:#}");
+            }
+        });
+    }
+
+    /// Sleeps until the stack's next deadline, in place of the last sleep;
+    /// a held or empty stack has none.
+    fn arm_toast_timer(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let deadline = self.notifications.toasts.stack.next_deadline(now);
+        self.notifications.toasts.timer = deadline.map(|deadline| {
+            let wait = deadline.saturating_duration_since(now);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                // Fails only when the view is gone, and its toasts with it.
+                this.update(cx, Self::expire_app_toasts).ok();
+            })
+        });
+    }
+
+    /// Closes the toasts whose time is up.
+    fn expire_app_toasts(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let gone = self.notifications.toasts.stack.expire(now);
+        for key in gone {
+            self.close_toast_window(&key, cx);
+        }
+        self.after_toast_change(cx);
+    }
+
+    /// Moves the windows to fit the stack; with no work area they stay
+    /// where they are.
+    fn after_toast_change(&mut self, cx: &mut Context<Self>) {
+        match self.toast_screen(cx) {
+            Some(screen) => self.place_app_toasts(&screen, cx),
+            None => self.arm_toast_timer(cx),
+        }
+    }
+
+    /// Takes `key`'s toast down.
+    pub(crate) fn dismiss_app_toast(&mut self, key: &SessionKey, cx: &mut Context<Self>) {
+        self.notifications.toasts.stack.dismiss(key);
+        self.close_toast_window(key, cx);
+        self.after_toast_change(cx);
+    }
+
+    /// The pointer came to rest on `key`'s toast or left it.
+    pub(crate) fn hover_toast(&mut self, key: &SessionKey, hovered: bool, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let stack = &mut self.notifications.toasts.stack;
+        if hovered {
+            stack.hover(key, now);
+        } else {
+            stack.unhover(key, now);
+        }
+        self.arm_toast_timer(cx);
+    }
+
+    /// Go to pane: the main window comes to the front on `key`'s session,
+    /// and the toast goes. Runs outside the root view's update, as the main
+    /// window's update has to enter it.
+    pub(crate) fn toast_go_to_pane(root: &WeakEntity<Self>, key: &SessionKey, cx: &mut App) {
+        let main = root.read_with(cx, Self::main_window).ok().flatten();
+        let Some(main) = main else {
+            tracing::warn!("Go to pane: the main window has gone");
+            return;
+        };
+        let id = key.1.clone();
+        let target = root.clone();
+        let shown = main.update(cx, move |_, window, cx| {
+            window.activate_window();
+            target.update(cx, |root, cx| root.select_session(&id, window, cx))
+        });
+        if !matches!(shown, Ok(Ok(()))) {
+            tracing::warn!("Go to pane: the session was not shown");
+        }
+        let dismissed = root.update(cx, |root, cx| root.dismiss_app_toast(key, cx));
+        if let Err(err) = dismissed {
+            tracing::debug!("toast dismissed after the root view went: {err:#}");
+        }
+    }
+
+    /// Takes every toast down, as the main window closes.
+    pub(crate) fn close_toasts(&mut self, cx: &mut Context<Self>) {
+        let keys: Vec<SessionKey> = self
+            .notifications
+            .toasts
+            .stack
+            .items()
+            .iter()
+            .map(|toast| toast.key.clone())
+            .collect();
+        for key in keys {
+            self.notifications.toasts.stack.dismiss(&key);
+            self.close_toast_window(&key, cx);
+        }
+        self.notifications.toasts.timer = None;
+    }
+
+    /// The toasts that are up, newest last, as (session id, title).
+    #[must_use]
+    pub fn shown_toasts(&self) -> Vec<(String, String)> {
+        self.notifications
+            .toasts
+            .stack
+            .items()
+            .iter()
+            .map(|toast| (toast.key.1.clone(), toast.title.clone()))
+            .collect()
     }
 }
 

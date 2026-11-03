@@ -153,6 +153,7 @@ pub mod themes;
 mod themes_view;
 pub mod toast_activation;
 mod toast_stack;
+mod toast_view;
 mod toast_window;
 pub mod ui_theme;
 mod undo;
@@ -321,6 +322,10 @@ pub use crate::stash_view::{
 pub use crate::tabs::{TabBadge, TabPill};
 pub use crate::taskbar_badge::{BadgeOverlay, NoTaskbarBadge, TaskbarBadge};
 pub use crate::text_input::bind_keys;
+pub use crate::toast_stack::WIDTH as TOAST_CARD_WIDTH;
+pub use crate::toast_stack::{AppToast, AppToastKind, SessionKey, WorkArea, key_of};
+pub use crate::toast_view::{card_height, toast_card};
+pub use crate::toast_window::{PhysicalRect, SystemToastPlacer, ToastPlacer};
 pub use crate::undo::{TabSnapshot, UndoEntry};
 pub use crate::viewer_tab::{
     MarkdownMode, OPEN_FAILED_TITLE as VIEWER_OPEN_FAILED_TITLE, ViewerLoad, ViewerOrigin,
@@ -437,6 +442,8 @@ pub struct RootDeps {
     /// Shows the OS notifications attention events fire, on background
     /// threads.
     pub notify: Arc<dyn Notifier>,
+    /// Places the app's own toast windows on the screen.
+    pub toast_placer: Arc<dyn ToastPlacer>,
     /// Plays the Needs you sound and Settings' preview of it, on background
     /// threads.
     pub sound: Arc<dyn Sounder>,
@@ -1271,6 +1278,7 @@ impl RootView {
             } else {
                 Arc::new(SystemNotifier)
             },
+            toast_placer: Arc::new(SystemToastPlacer),
             sound: if offscreen::requested() {
                 Arc::new(SilentSounder)
             } else {
@@ -1379,6 +1387,7 @@ impl RootView {
             quit,
             open,
             notify,
+            toast_placer,
             sound,
             badge,
             pick_folder,
@@ -1553,7 +1562,7 @@ impl RootView {
             cleanup_failed: cleanup_failed::CleanupQueue::default(),
             cleanup_focus: cx.focus_handle(),
             opener: open,
-            notifications: notify::Notifications::new(notify, sound),
+            notifications: notify::Notifications::new(notify, toast_placer, sound),
             run_confirm: None,
             run_focus: cx.focus_handle(),
             sc: ScModel::default(),
@@ -1639,6 +1648,7 @@ impl RootView {
                 let close = root.on_close_requested(window, cx);
                 if close {
                     root.close_popouts(cx);
+                    root.close_toasts(cx);
                     root.clear_taskbar_badge(window);
                 }
                 close

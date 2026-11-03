@@ -359,6 +359,10 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
         "settings-notify-skip-on-screen",
         "settings-notify-skip-focused",
         "settings-notify-skip-never",
+        #[cfg(windows)]
+        "settings-toast-style-os",
+        #[cfg(windows)]
+        "settings-toast-style-app",
     ] {
         h.keys("tab");
         assert_eq!(settings_focus(&mut h), Some(stop), "each choice is a stop");
