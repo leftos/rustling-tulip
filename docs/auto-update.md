@@ -10,7 +10,7 @@ The client's side of the UI is in [native-client.md](./native-client.md) ("Updat
 
 Updates come only from the repo's GitHub Releases (`leftos/rustling-tulip`, public) over HTTPS. A download is installed only when its SHA-256 matches the `.sha256` asset of the same release.
 
-There is no owner-held signing key and no code-signing certificate; the owner ruled that out as unnecessary.
+There is no owner-held signing key. The installer and the binaries in it carry an Authenticode signature from Azure Artifact Signing (`tools/installer/README.md` "Code signing"), but the updater does not check it: the hash is the only check on a download.
 
 In scope:
 - A network attacker, stopped by TLS to GitHub plus the hash check.

@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- The Windows installer and the app's programs are signed with a verified publisher, so Windows names who made them.
+
 ### Fixed
 
 - A mistyped `rustling-tulipd` command now prints a usage error instead of starting the daemon, and `rustling-tulipd -V` prints its version.

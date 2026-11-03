@@ -1,6 +1,6 @@
 # Windows installer
 
-`rustling-tulip.nsi` is a hand-written NSIS 3 script (Modern UI 2) that packages the three release binaries into a per-user setup exe. `.\rt.ps1 installer` builds the binaries and runs `makensis`; nothing is code-signed yet, so SmartScreen warns on first run ("Windows protected your PC" → More info → Run anyway).
+`rustling-tulip.nsi` is a hand-written NSIS 3 script (Modern UI 2) that packages the three release binaries into a per-user setup exe. `.\rt.ps1 installer` builds the binaries and runs `makensis`. The three binaries and the setup exe are code-signed (see "Code signing"); the uninstaller NSIS writes at install time is not yet.
 
 ## What it installs
 
@@ -67,6 +67,24 @@ winget install NSIS.NSIS
 ```
 
 `makensis` runs with `/WX`, so any NSIS warning fails the build.
+
+## Code signing
+
+The verb signs `rustling-tulipd.exe`, `rt-tracer.exe` and `rustling-tulip-native.exe` before NSIS packs them, and the setup exe before its `.sha256` is written, with Azure Artifact Signing (the Windows SDK SignTool with the Artifact Signing dlib). Every signature is timestamped (`http://timestamp.acs.microsoft.com`), since the Public Trust certificates last about three days, and each file is verified afterwards (`Get-AuthenticodeSignature`: Valid and timestamped). The uninstaller NSIS writes at install time stays unsigned for now.
+
+Prerequisites:
+- the Windows SDK SignTool;
+- the Artifact Signing Client Tools: `winget install -e --id Microsoft.Azure.ArtifactSigningClientTools`;
+- the Azure CLI: `winget install -e --id Microsoft.AzureCLI`, signed in with `az login` as an account that holds the Signer role on the certificate profile;
+- Google Drive mounted as `G:`, holding the signing metadata file in the owner's private config on `G:`.
+
+Signing refuses on a routed builder job. `.\rt.ps1 installer -Unsigned` builds without signing, for a test build on a PC not signed in to Azure; the other verbs reject `-Unsigned`. An unsigned build has the same file name as a signed one, so check before publishing:
+
+```powershell
+Get-AuthenticodeSignature target\installer\rustling-tulip-<version>-setup.exe
+```
+
+`Status` must be `Valid` with a `TimeStamperCertificate`.
 
 ## PATH test
 

@@ -70,7 +70,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 native-smoke     # launch the native client exe in a cloaked, never-focused window; check it connects and takes keys, and (built with the driver feature) that the driver's posted pointer input acts (leaves out the live no-focus checks, `native-drive-check`)
 .\rt.ps1 native-drive-check   # only the live no-focus checks: a scripted drive, and the app's own toast windows, must leave the desktop's foreground window and cursor unchanged; the gate routes it to a builder's logged-on desktop, and run on this PC it refuses unless -HandsOff
 .\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, dashboard-compact, connections, connections-ssh, menu, update, chat, summary, themes, themes-edit, multi-host, spawn-hosts, settings-hosts, settings-sounds) in .tmp\shots\
-.\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against (needs NSIS 3; tools/installer/README.md)
+.\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against, signed with Azure Artifact Signing; `-Unsigned` for a test build (needs NSIS 3; tools/installer/README.md)
 .\rt.ps1 help             # usage summary
 pwsh -NoProfile -File tools/rt-driver-mcp/install.ps1   # build and install the rt-driver MCP server that .mcp.json starts (release build through the gate)
 pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1   # the driver MCP's live spec; run it as one gate job with --slot heavy (docs/testing.md)
@@ -180,5 +180,5 @@ Once nothing open links a design file, its durable decisions are promoted into `
 
 Don't go looking for these — they're explicitly out of scope until their plan item comes up:
 
-- **Code signing / notarization** of the native client's installer (Phase 6) and the binaries inside it — there is no signing cert, so an unsigned bundle trips SmartScreen.
+- **Notarization and macOS code signing** (RT-665). Windows signing is done: `.\rt.ps1 installer` signs the binaries and the setup exe (`tools/installer/README.md`).
 - **Sub-agent / Task-tool interception**, **attach from outside the tailnet** by internet exposure or a relay, **cloud sync** — explicit non-goals; the tailnet listener is the one way in from another machine over the network, and clients over OpenSSH are being built (`docs/plans/ssh-remote.md`; `docs/architecture.md` "Non-goals", `docs/plans/remote-access.md`). Viewing a subagent's transcript read-only is planned (Wave 10, "Subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.

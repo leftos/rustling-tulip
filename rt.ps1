@@ -76,9 +76,11 @@
                  `.tmp\shots\<view>.png` unless a second argument or -Out
                  gives another path, and prints the PNG's path.
       installer  Build the release binaries (daemon, tracer, native
-                 client), then package them into an NSIS setup exe under
-                 `target\installer\` and print its path. Always release;
-                 needs NSIS 3 (`winget install NSIS.NSIS`).
+                 client), sign them with Azure Artifact Signing, then
+                 package them into an NSIS setup exe under
+                 `target\installer\`, sign that, and print its path.
+                 Always release; needs NSIS 3 (`winget install NSIS.NSIS`)
+                 and the signing setup on this PC.
       help       Print the subcommand summary.
 
 .PARAMETER Command
@@ -115,6 +117,10 @@
     Applies to `native-drive-check`: lets the check run on this PC, whose
     foreground it takes for a few seconds. Pass it only once you have stopped
     using the mouse and keyboard.
+
+.PARAMETER Unsigned
+    Applies to `installer`: build without code signing, for a test build on
+    a PC not signed in to Azure.
 
 .EXAMPLE
     .\rt.ps1                       # = .\rt.ps1 launch
@@ -167,6 +173,10 @@ param(
     # keyboard, so the check may run here.
     [switch]$HandsOff,
 
+    # `installer`: build without code signing, for a test build on a PC not
+    # signed in to Azure.
+    [switch]$Unsigned,
+
     # Extra arguments forwarded to the underlying tool (e.g. `cargo nextest
     # run` filters). Only meaningful for `launch`, `restart`, `test`, `clippy`,
     # `fmt`, `native`, `native-shot` (the view).
@@ -183,6 +193,9 @@ if ($Command -ne 'native-e2e' -and ($PSBoundParameters.ContainsKey('Test') -or $
 }
 if ($HandsOff -and $Command -ne 'native-drive-check') {
     throw '-HandsOff applies to native-drive-check only.'
+}
+if ($Unsigned -and $Command -ne 'installer') {
+    throw '-Unsigned applies to installer only.'
 }
 
 # ---------------------------------------------------------------------------
@@ -644,10 +657,84 @@ function Get-MakensisPath {
     return $null
 }
 
+# SignTool from the highest Windows SDK installed under Windows Kits 10. $null
+# when none of them has one.
+function Get-SignToolPath {
+    $binRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+    if (-not (Test-Path $binRoot)) { return $null }
+    $versions = Get-ChildItem -Path $binRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
+        Sort-Object { [version]$_.Name } -Descending
+    foreach ($version in $versions) {
+        $candidate = Join-Path $version.FullName 'x64/signtool.exe'
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
+# Signs files with Azure Artifact Signing, then checks that each signature is
+# valid and timestamped (a Public Trust certificate lives about three days, so
+# an untimestamped signature goes invalid with it). The dlib signs in through
+# the Azure CLI's account, so this runs on the PC that is signed in: never
+# through Invoke-Gated, which may route the call to a builder.
+function Invoke-CodeSigning([string[]]$Paths) {
+    if ($env:GATE_BOX_JOB) {
+        throw 'code signing runs only on the PC signed in to Azure; run .\rt.ps1 installer there, or pass -Unsigned.'
+    }
+
+    $signTool = Get-SignToolPath
+    if (-not $signTool) {
+        throw 'Windows SDK SignTool not found under C:\Program Files (x86)\Windows Kits\10\bin: winget install -e --id Microsoft.WindowsSDK.10.0.26100'
+    }
+    $dlib = Join-Path $env:LOCALAPPDATA 'Microsoft\MicrosoftArtifactSigningClientTools\Azure.CodeSigning.Dlib.dll'
+    if (-not (Test-Path $dlib)) {
+        throw 'Artifact Signing client tools not found: winget install -e --id Microsoft.Azure.ArtifactSigningClientTools'
+    }
+    # A shell started before the Azure CLI was installed does not have it on PATH.
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+        $azDir = Join-Path $env:ProgramFiles 'Microsoft SDKs/Azure/CLI2/wbin'
+        if (-not (Test-Path (Join-Path $azDir 'az.cmd'))) {
+            throw 'Azure CLI not found: winget install -e --id Microsoft.AzureCLI, then az login'
+        }
+        $env:PATH = "$azDir;$env:PATH"
+    }
+    $metadata = 'G:\My Drive\Private Config\rustling-tulip\artifact-signing\metadata.json'
+    if (-not (Test-Path $metadata)) {
+        throw "code-signing metadata not found at $metadata (Google Drive must be mounted as G:)"
+    }
+
+    Write-Host "==> Code-signing $($Paths.Count) file(s) with Azure Artifact Signing..." -ForegroundColor Cyan
+    # The signing dlib prints the metadata file (account, endpoint, profile), which is private
+    # config: only SignTool's own outcome lines are shown, and on a failure every line but the
+    # metadata's.
+    $signOutput = & $signTool sign /fd SHA256 /tr 'http://timestamp.acs.microsoft.com' /td SHA256 /dlib $dlib /dmdf $metadata @Paths 2>&1
+    $signExit = $LASTEXITCODE
+    if ($signExit -ne 0) {
+        $signOutput | Where-Object { "$_" -notmatch 'Endpoint|CodeSigningAccountName|CertificateProfileName|codesigning\.azure\.net' } |
+            ForEach-Object { Write-Host $_ }
+        throw "code signing failed (exit $signExit); check that az login is current"
+    }
+    $signOutput | Where-Object { "$_" -match '^(Done Adding|Successfully signed|Number of files|SignTool Warning)' } |
+        ForEach-Object { Write-Host $_ }
+    foreach ($path in $Paths) {
+        $signature = Get-AuthenticodeSignature -FilePath $path
+        if ($signature.Status -ne 'Valid') {
+            throw "code signing check failed for ${path}: Status is $($signature.Status), not Valid"
+        }
+        if ($null -eq $signature.TimeStamperCertificate) {
+            throw "code signing check failed for ${path}: no TimeStamperCertificate, so the signature is not timestamped"
+        }
+    }
+}
+
 # Builds the release binaries and packages them into the NSIS setup exe.
 # Always release: an installer ships release binaries whatever -Release says.
 function Invoke-Installer {
     Assert-Tooling
+
+    if ($Unsigned) {
+        Write-Host '==> Building an UNSIGNED installer (-Unsigned)' -ForegroundColor Yellow
+    }
 
     $makensis = Get-MakensisPath
     if (-not $makensis) {
@@ -671,9 +758,19 @@ function Invoke-Installer {
     Invoke-Gated -Slot heavy -Name build-release -Command $releaseArgs
     Test-CargoExitOk 'cargo build --release -p daemon -p tracer -p rustling-tulip-native'
 
+    if (-not $Unsigned) {
+        Invoke-CodeSigning @(
+            (Join-Path $binDir "$ImageName.exe"),
+            (Join-Path $binDir "$TracerImageName.exe"),
+            (Join-Path $binDir 'rustling-tulip-native.exe')
+        )
+    }
+
     if (-not (Test-Path $installerDir)) {
         New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
     }
+    # A failure below must not leave an earlier run's `.sha256` beside a new, unsigned setup exe.
+    Remove-Item -LiteralPath "$outFile.sha256" -ErrorAction SilentlyContinue
     Write-Host "==> Packaging rustling-tulip $version with NSIS..." -ForegroundColor Cyan
     Invoke-Gated -Slot light -Name makensis -Command @(
         $makensis, '/V2', '/WX',
@@ -681,6 +778,10 @@ function Invoke-Installer {
         "/DBINDIR=$binDir", "/DOUTFILE=$outFile", $nsiScript
     )
     Test-CargoExitOk 'makensis'
+
+    if (-not $Unsigned) {
+        Invoke-CodeSigning @($outFile)
+    }
 
     # The release's `.sha256` asset, which the client's updater checks the
     # download against: `<64 lower-case hex>  <file name>`, one LF-terminated line.
@@ -1271,10 +1372,18 @@ Commands:
              <out.png> is the PNG to write; -Out says the same thing.
              Default: .tmp\shots\<view>.png. No daemon starts; the window
              stays cloaked and never takes focus.
-  installer  Build the release binaries, then package them into an NSIS
-             setup exe (target\installer\rustling-tulip-<version>-setup.exe)
-             and print its path. Always release. Needs NSIS 3:
-             `winget install NSIS.NSIS`.
+  installer [-Unsigned]
+             Build the release binaries, sign them with Azure Artifact
+             Signing, package them into an NSIS setup exe
+             (target\installer\rustling-tulip-<version>-setup.exe), sign
+             that too, and print its path. Always release. Needs NSIS 3
+             (`winget install NSIS.NSIS`) and, on this PC, SignTool
+             (`winget install -e --id Microsoft.WindowsSDK.10.0.26100`), the
+             Artifact Signing client tools (`winget install -e --id
+             Microsoft.Azure.ArtifactSigningClientTools`), the Azure CLI
+             signed in (`az login`) and the signing metadata on G:.
+             -Unsigned: build without code signing, for a test build on a
+             PC not signed in to Azure.
   help       This message.
 
 `launch` and `native` reuse a running daemon whose protocol matches, even
@@ -1294,6 +1403,7 @@ Flags:
   -Test <files>      native-e2e: the spec files to run (comma-separated).
   -Filter <set>      native-e2e: a nextest filterset (`-E`).
   -HandsOff          native-drive-check: let it run on this PC.
+  -Unsigned          installer: build without code signing.
 
 Examples:
   .\rt.ps1                       # build + run the native client
