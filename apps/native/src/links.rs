@@ -111,6 +111,11 @@ static PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
         r#"(^|[\s(\[{<])((?:[A-Za-z]:[\\/]|\\\\[^\s\\/:*?"<>|]+[\\/][^\s\\/:*?"<>|]+[\\/]|\/|\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s<>"'`|]*)"#,
     )
 });
+static BARE_NAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    compile(
+        r"(^|[\s(\[{<])([A-Za-z_][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,10}\b(?::[1-9][0-9]{0,6}(?::[1-9][0-9]{0,6})?)?)",
+    )
+});
 static TRAILING_PUNCTUATION: LazyLock<Regex> = LazyLock::new(|| compile(r"[),.;!?}\]]+$"));
 static LINE_COLUMN_SUFFIX: LazyLock<Regex> =
     LazyLock::new(|| compile(r"^(.*?)(?::([1-9][0-9]{0,6})(?::([1-9][0-9]{0,6}))?)$"));
@@ -621,8 +626,73 @@ fn detect_segment_links(segments: &[Segment]) -> Vec<TerminalLink> {
         links.push(build_link(LinkKind::Path, start_index, &trimmed, segments));
     }
 
+    // A bare name is a link only after an absolute path on the same line that
+    // names a folder: that folder is the one the name is read against.
+    for captures in BARE_NAME_PATTERN.captures_iter(&text) {
+        let Some(name) = captures.get(2) else {
+            continue;
+        };
+        let start_index = indices.at(name.start());
+        let trimmed = trim_link_candidate(name.as_str());
+        let end_index = start_index + chars_len(&trimmed);
+        if !has_letter_extension(&trimmed)
+            || overlaps_existing_link(start_index, end_index, &links)
+            || !has_base_before(&links, start_index)
+        {
+            continue;
+        }
+        links.push(build_link(LinkKind::Path, start_index, &trimmed, segments));
+    }
+
     links.sort_by_key(|link| link.start_index);
+    add_absolute_base_readings(&mut links);
     links
+}
+
+/// Gives each relative path, and each bare name, that follows an absolute
+/// path on the same line one extra first reading: the name joined to the
+/// folder of the nearest absolute path before it. Its other readings stay as
+/// they are.
+fn add_absolute_base_readings(links: &mut [TerminalLink]) {
+    for index in 0..links.len() {
+        if links[index].kind != LinkKind::Path || is_absolute_path(&links[index].target) {
+            continue;
+        }
+        let Some((folder, separator)) = nearest_base_folder(&links[..index]) else {
+            continue;
+        };
+        let Some(primary) = links[index].candidates.first().cloned() else {
+            continue;
+        };
+        let joined = TerminalLinkCandidate {
+            path: format!("{folder}{separator}{}", primary.path),
+            line: primary.line,
+            column: primary.column,
+        };
+        links[index].target.clone_from(&joined.path);
+        links[index].line = joined.line;
+        links[index].column = joined.column;
+        links[index].candidates.insert(0, joined);
+    }
+}
+
+/// Whether a path link that ends at or before `index` gives a base folder.
+fn has_base_before(links: &[TerminalLink], index: usize) -> bool {
+    links.iter().any(|link| {
+        link.kind == LinkKind::Path
+            && link.end_index <= index
+            && base_folder(&link.target).is_some()
+    })
+}
+
+/// The folder of the nearest path link in `links` that gives one, `links`
+/// being in line order, and the separator that path uses.
+fn nearest_base_folder(links: &[TerminalLink]) -> Option<(String, char)> {
+    links
+        .iter()
+        .rev()
+        .filter(|link| link.kind == LinkKind::Path)
+        .find_map(|link| base_folder(&link.target))
 }
 
 /// Where each character of an assembled line starts, so a byte offset a
@@ -795,6 +865,54 @@ fn is_bare_drive(value: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.next() == Some(':')
         && chars.next().is_none()
+}
+
+/// Whether a bare name's extension, the text after its last dot, holds a
+/// letter: `v1.2` and `1.5` are versions, not files.
+fn has_letter_extension(value: &str) -> bool {
+    let name = value.split(':').next().unwrap_or(value);
+    name.rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.chars().any(|c| c.is_ascii_alphabetic()))
+}
+
+/// Whether a path is absolute on either platform: a drive path, a UNC path, or
+/// a POSIX path from the root.
+fn is_absolute_path(value: &str) -> bool {
+    if value.starts_with('/') || value.starts_with(r"\\") {
+        return true;
+    }
+    let mut chars = value.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(drive), Some(':'), Some('/' | '\\')) if drive.is_ascii_alphabetic()
+    )
+}
+
+/// The folder an absolute path gives a bare or relative name, and the
+/// separator that path uses. A UNC path gives none: a reading joined onto it
+/// would be checked against the hosts `open.rs` allows before any lookup. A
+/// POSIX path gives none without a separator past its first character, so a
+/// slash command names no folder.
+fn base_folder(value: &str) -> Option<(String, char)> {
+    if !is_absolute_path(value) || value.starts_with(r"\\") {
+        return None;
+    }
+    let (folder, separator) = path_folder(value)?;
+    if folder.is_empty() || folder == "/" {
+        return None;
+    }
+    Some((folder, separator))
+}
+
+/// The part of `value` before its last `/` or `\`, and that separator.
+fn path_folder(value: &str) -> Option<(String, char)> {
+    let at = value.rfind(['/', '\\'])?;
+    let separator = if value.as_bytes().get(at) == Some(&b'/') {
+        '/'
+    } else {
+        '\\'
+    };
+    Some((value[..at].to_owned(), separator))
 }
 
 /// The path and its `:line:column` suffix, if it has one.
@@ -1344,5 +1462,170 @@ mod tests {
         assert_eq!(links[0].target, "src/main.rs:4٢");
         assert_eq!(links[0].line, None);
         assert_eq!(links[0].column, None);
+    }
+
+    #[test]
+    fn a_bare_name_after_an_absolute_path_reads_against_its_folder() {
+        let links = detect_links("see x:/a/b/c.html and d.html");
+
+        assert_eq!(targets(&links), ["x:/a/b/c.html", "x:/a/b/d.html"]);
+        assert_eq!(links[1].text, "d.html");
+        assert_eq!(
+            links[1].candidates,
+            vec![
+                candidate("x:/a/b/d.html", None, None),
+                candidate("d.html", None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_name_after_a_backslash_path_joins_with_a_backslash() {
+        let links = detect_links(r"x:\a\b\c.html then d.html");
+
+        assert_eq!(targets(&links), [r"x:\a\b\c.html", r"x:\a\b\d.html"]);
+        assert_eq!(
+            links[1].candidates,
+            vec![
+                candidate(r"x:\a\b\d.html", None, None),
+                candidate("d.html", None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_nearest_absolute_path_gives_the_folder() {
+        let links = detect_links("x:/a/c.html y:/p/q.txt d.html");
+
+        assert_eq!(
+            targets(&links),
+            ["x:/a/c.html", "y:/p/q.txt", "y:/p/d.html"]
+        );
+    }
+
+    #[test]
+    fn a_relative_path_after_an_absolute_path_reads_against_its_folder() {
+        let links = detect_links("x:/a/b/c.html sub/d.html");
+
+        assert_eq!(targets(&links), ["x:/a/b/c.html", "x:/a/b/sub/d.html"]);
+        assert_eq!(
+            links[1].candidates,
+            vec![
+                candidate("x:/a/b/sub/d.html", None, None),
+                candidate("sub/d.html", None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_name_keeps_its_line_reference() {
+        let links = detect_links("x:/a/b/c.html:12 d.html:3");
+
+        assert_eq!(targets(&links), ["x:/a/b/c.html", "x:/a/b/d.html"]);
+        assert_eq!(links[1].line, Some(3));
+        assert_eq!(
+            links[1].candidates,
+            vec![
+                candidate("x:/a/b/d.html", Some(3), None),
+                candidate("d.html", Some(3), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_posix_path_gives_its_folder() {
+        let links = detect_links("/home/u/a.md and d.html");
+
+        assert_eq!(targets(&links), ["/home/u/a.md", "/home/u/d.html"]);
+    }
+
+    #[test]
+    fn a_bare_name_drops_trailing_punctuation() {
+        let links = detect_links("x:/a/b/c.html, d.html.");
+
+        assert_eq!(links[1].text, "d.html");
+        assert_eq!(targets(&links), ["x:/a/b/c.html", "x:/a/b/d.html"]);
+    }
+
+    #[test]
+    fn a_bare_name_without_an_earlier_absolute_path_is_not_a_link() {
+        assert_eq!(
+            detect_links("d.html alone"),
+            [] as [crate::links::TerminalLink; 0]
+        );
+
+        let links = detect_links("d.html then x:/a/b/c.html");
+
+        assert_eq!(targets(&links), ["x:/a/b/c.html"]);
+    }
+
+    #[test]
+    fn version_numbers_are_not_bare_names() {
+        let links = detect_links("x:/a/c.html v1.2 1.5");
+
+        assert_eq!(targets(&links), ["x:/a/c.html"]);
+    }
+
+    #[test]
+    fn a_relative_path_without_an_absolute_one_keeps_its_readings() {
+        let links = detect_links("open sub/d.html");
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].candidates,
+            vec![candidate("sub/d.html", None, None)]
+        );
+    }
+
+    #[test]
+    fn a_unc_path_gives_no_base_folder() {
+        let links = detect_links(r"copied \\nas\share\x\a.txt to src/main.rs");
+
+        assert_eq!(targets(&links), [r"\\nas\share\x\a.txt", "src/main.rs"]);
+        assert_eq!(
+            links[1].candidates,
+            vec![candidate("src/main.rs", None, None)]
+        );
+
+        let links = detect_links(r"\\nas\share\x\a.txt d.html");
+
+        assert_eq!(targets(&links), [r"\\nas\share\x\a.txt"]);
+    }
+
+    #[test]
+    fn durations_and_sizes_are_not_bare_names() {
+        let links = detect_links("x:/a/lib.rs Finished in 3.21s, 1.2GB, 2.0beta");
+
+        assert_eq!(targets(&links), ["x:/a/lib.rs"]);
+    }
+
+    #[test]
+    fn a_long_extension_is_not_cut() {
+        let links = detect_links("x:/a/b.c README.markdown");
+
+        assert_eq!(targets(&links), ["x:/a/b.c", "x:/a/README.markdown"]);
+        assert_eq!(links[1].text, "README.markdown");
+        assert_eq!(
+            links[1].candidates,
+            vec![
+                candidate("x:/a/README.markdown", None, None),
+                candidate("README.markdown", None, None),
+            ]
+        );
+
+        let links = detect_links("x:/a/b.c data.abcdefghijk");
+
+        assert_eq!(targets(&links), ["x:/a/b.c"]);
+    }
+
+    #[test]
+    fn a_slash_command_is_not_an_absolute_path() {
+        let links = detect_links("Run /review on main.rs");
+
+        assert_eq!(targets(&links), ["/review"]);
+
+        let links = detect_links("see /home/u/a.md and d.html");
+
+        assert_eq!(targets(&links), ["/home/u/a.md", "/home/u/d.html"]);
     }
 }
