@@ -6,7 +6,7 @@ Design for the "A runtime dropdown of every popular agent harness" line in [MAIN
 
 The daemon runs one agent CLI, Claude, through a backend in `crates/daemon/src/agents/` (`AgentBackend`: `program_env_var`, `default_program`, `supports_headless`, `build_interactive_args`, `build_headless_args`), picked by the closed `protocol::Agent` enum (`Claude`) and its `AgentOptions` options.
 
-Codex and Cursor support was removed for the first release and returns as plugins on the agent seam ([agent-plugins.md](./agent-plugins.md)); the Codex and Cursor mentions below describe how those backends worked and the patterns they set. Every other harness is reachable only by typing its command into a plain-shell session, which gets no status, no resume, no Recover and no chip.
+Codex and Cursor support was removed for the first release and returns as plugins on the agent seam ([agent-plugins.md](../agent-plugins.md)); the Codex and Cursor mentions below describe how those backends worked and the patterns they set. Every other harness is reachable only by typing its command into a plain-shell session, which gets no status, no resume, no Recover and no chip.
 
 ## Findings
 

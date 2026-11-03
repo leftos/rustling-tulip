@@ -1,6 +1,6 @@
 # herdr-gpui: remote file links and upload-back over SSH
 
-Read 2026-10-17 from the `feat/remote-file-links` branch of the leftos fork of herdr-gpui (tip `f4a3574a`, local checkout `X:\dev\_ext\penso\herdr-gpui.wt\remote-file-links`), proposed upstream as [penso/herdr-gpui#627](https://github.com/penso/herdr-gpui/pull/627), open at the time. It is in daily use in the fork and works well. Notes are for [remote-file-transfer.md](../plans/remote-file-transfer.md).
+Read 2026-10-17 from the `feat/remote-file-links` branch of the leftos fork of herdr-gpui (tip `f4a3574a`, local checkout `X:\dev\_ext\penso\herdr-gpui.wt\remote-file-links`), proposed upstream as [penso/herdr-gpui#627](https://github.com/penso/herdr-gpui/pull/627), open at the time. It is in daily use in the fork and works well. Notes are for the file fetch in [wire-protocol.md](../wire-protocol.md).
 
 ## What it does
 
@@ -90,7 +90,7 @@ Our transport differs: the daemon already runs on the host and streams over the 
 
 - **For FT.2, the download sink:** a unique part name per fetch (`<name>.<serial>.part`, `create_new`) rather than a fixed `<file>.part`, so two fetches of one file never clobber each other; and the late "edited since synced" check before the rename, if copies are ever re-fetched over.
 - **Hash on fetch.** Having `FileFetchDone` (or `FileFetchStarted`) carry the SHA-256 the daemon read costs nothing and is the base any later write-back needs.
-- **Upload-back is new scope for us.** `remote-file-transfer.md` is download-only. If we add it, the herdr shape is a good template: a `PushFile { expect: Sha256 | Absent | Any, len }` with the daemon refusing a short body and a changed target; a temp beside the target plus `ReplaceFileW` on Windows (keeps the DACL) or rename with copied mode and group on POSIX; the pure state machine above; the two-run settle watcher; Keep both / Overwrite / Re-fetch on conflict.
+- **Upload-back is new scope for us.** The file fetch is download-only. If we add it, the herdr shape is a good template: a `PushFile { expect: Sha256 | Absent | Any, len }` with the daemon refusing a short body and a changed target; a temp beside the target plus `ReplaceFileW` on Windows (keeps the DACL) or rename with copied mode and group on POSIX; the pure state machine above; the two-run settle watcher; Keep both / Overwrite / Re-fetch on conflict.
 - **Size.** Our ruling is no cap, streamed. Herdr caps at 64 MB both ways; with upload-back, a cap on the push side bounds what a stray save of a huge file can send.
 - **Cache lifetime.** Our plan keeps downloads in a persistent per-host folder (`<data_local_dir>/remote-files/<host-id>/<repo-name>/<rel-path>`); herdr keeps a per-launch folder removed at quit, with a lock-guarded sweep for crashed runs. With upload-back, per-launch is safer: a stale copy with edits from a past run would otherwise sit there looking current. Download-only, our persistent layout is fine.
 - **Typed refusals.** One error enum mapped from a fixed set of reasons (missing, not a file, too large, symlink, conflict, incomplete, access) keeps the client's messages exact; our `FileFetchError { error }` is a free string today.

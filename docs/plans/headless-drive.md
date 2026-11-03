@@ -120,7 +120,7 @@ Rules pulled but not met get an **add** to the plan (skill "Unmet pull"), which 
 
 ## DEPENDS ON
 
-- RT-267 (agent seam): no technical dependency for S1-S5; the driver reads `RootView` state, and RT-267 moves Claude support behind `agents/` in the daemon (`docs/plans/agent-plugins.md:263`). Risk is only merge conflicts in `lib.rs`/`net.rs` and fixture message shapes (shot's `check_reply_shapes` catches wire drift).
+- RT-267 (agent seam): no technical dependency for S1-S5; the driver reads `RootView` state, and RT-267 moves Claude support behind `agents/` in the daemon (`docs/agent-plugins.md`). Risk is only merge conflicts in `lib.rs`/`net.rs` and fixture message shapes (shot's `check_reply_shapes` catches wire drift).
 - RT-35 (native download sink for fetched files): adds a file picker/sink; the driver's picker queue (`RootDeps.pick_folder/pick_file`) must cover it; no blocker.
 - RT-57 (resume sessions a reboot killed): adds a startup dialog; a driven client must start with a state that does not show it, or the driver needs a `dismiss`/force path (like the layout chooser the smoke avoids by seeding); no blocker for S1-S3.
 - RT-317 (PTY output fix, not read in this run, title only from the task text): any driven check of terminal text (`pane_text`, typing echo) is only as good as the PTY output path; do S4 `pane_text` tests after RT-317 or expect the same flake.

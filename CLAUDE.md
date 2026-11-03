@@ -111,7 +111,7 @@ Four rules keep agents' gate runs routable:
 - An environment variable a test needs goes with `--env NAME=value`, which carries it to a routed run, never `--local`.
 - `GATE_BOX_JOB` is the gate's to set: setting it by hand makes `rt.ps1` (`Test-UnderGate`) skip its own gating.
 
-`.gate/desktop.toml` declares the routed commands that need a builder's logged-on desktop (`patterns`: `native-shot`'s `cargo run … --example shot`, which opens a window) or only its console session (`session`: `rt.ps1 native-e2e`, for the Credential Manager vault); the PC consents to each in the gate's `remote.json`.
+`.gate/desktop.toml` declares the routed commands that need a builder's logged-on desktop (`patterns`: `native-shot`'s `cargo run … --example shot`, which opens a window), only its console session (`session`: `rt.ps1 native-e2e`, for the Credential Manager vault) or a hidden desktop of their own (`hidden`: `rt.ps1 native-smoke`, whose cloaked window never needs the logged-on one); the PC consents to each in the gate's `remote.json`.
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>`, Read the PNG it writes to `.tmp\shots\`, and show the user before and after shots for any visual choice.
 
