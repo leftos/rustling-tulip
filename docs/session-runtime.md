@@ -92,7 +92,7 @@ The "reuse-or-create" policy is encoded in `workspace.rs`. VS Code `.code-worksp
 
 Every interactive and plain-shell PTY child is spawned under a per-session `rt-tracer.exe` supervisor process. The daemon talks to it over an `interprocess` local socket (`tracer_protocol::socket_name`: `\\.\pipe\rt-tracer-<session-id>` on Windows, a Unix socket elsewhere).
 
-The tracer owns the master ConPTY handle and survives daemon restarts — when the daemon dies the tracer keeps draining child output to its internal ring buffer (4 MB cap, oldest-bytes-drop on overflow), and a freshly-started daemon reattaches via `tracer_client::reattach` and replays the ring to catch up.
+The tracer owns the master ConPTY handle and survives daemon restarts — when the daemon dies the tracer keeps draining child output to its internal ring buffer (4 MB cap, oldest-bytes-drop on overflow), and a freshly-started daemon reattaches via `tracer_client::reattach` and replays the ring to catch up. Spawn and reattach both refuse a pipe served by any process but the session's tracer pid (`tracer pipe {pipe} is served by pid {pid}, not the session's tracer pid {expected}`, or `tracer pipe {pipe}: the server's pid could not be read`): the spawn fails, and the reattach is abandoned like a lost tracer.
 
 Spawn site: `crates/daemon/src/tracer_client.rs::spawn`. Tracer ABI: `crates/tracer-protocol/src/lib.rs` — frozen surface; additive changes (new fields with `#[serde(default)]`, new variants with `#[serde(other)] Unknown`) are not a bump. Headless (`claude --print`) does NOT go through the tracer — it's piped stdio and lives in `crates/daemon/src/headless.rs`. The tracer binary must be present next to `rustling-tulipd.exe`: `cargo build` emits both into `target/<profile>/`.
 

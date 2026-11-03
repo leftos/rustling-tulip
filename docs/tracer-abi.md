@@ -94,6 +94,8 @@ every platform:
 - **macOS/Linux:** a Unix domain socket file under the per-user temp dir, with
   a length-bounded name to stay within the `sun_path` limit.
 
+On Windows the tracer binds its pipe with an explicit security descriptor (`crates/tracer/src/pipe_security.rs`), never the default one: an ordinary tracer's is SYSTEM and the tracer's own user, an elevated tracer's is SYSTEM and Administrators with a High no-read-up, no-write-up label, so nothing below High opens it, and neither carries an Everyone or ANONYMOUS entry. A tracer that cannot read its token or parse the descriptor logs `supervisor: could not build the pipe's security descriptor; ending accept loop` (fields `err`, `pipe`) and never binds, as on a bind failure. The daemon, on spawn and on reattach, also refuses a pipe whose server pid is not the session's tracer pid (`crates/daemon/src/tracer_client.rs`). Both are additive: no message, frame or log-line change, and not a `TRACER_VERSION` bump.
+
 `tracer_protocol::socket_name(session_id)` centralizes the format; each side
 converts it to an `interprocess` `Name` (`GenericNamespaced` on Windows,
 `GenericFilePath` on Unix). The protocol frames themselves are platform-agnostic

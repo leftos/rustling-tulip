@@ -9,6 +9,7 @@
 
 #![cfg(windows)]
 
+use std::os::windows::io::AsRawHandle as _;
 use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -21,10 +22,24 @@ use interprocess::local_socket::GenericNamespaced;
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::tokio::prelude::*;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tracer_protocol::{
     InboundTracerResponse, SUPPORTED_TRACER_VERSIONS, TRACER_VERSION, TracerHello, TracerRequest,
     TracerResponse,
 };
+use widestring::U16CStr;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Security::Authorization::{
+    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_KERNEL_OBJECT,
+};
+use windows::Win32::Security::{
+    DACL_SECURITY_INFORMATION, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+    LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_INFORMATION_CLASS,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenUser,
+};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::core::PWSTR;
 
 /// Same flag the daemon spawns the tracer with, so the tracer has no console
 /// of its own.
@@ -287,6 +302,195 @@ async fn a_session_starts_with_no_daemon_attached() -> anyhow::Result<()> {
         .context(format!(
             "hung: the replay showed no ready marker within {HANG_GUARD:?}"
         ))??;
+
+    drop(tracer);
+    remove_test_dir(&case.dir).await
+}
+
+/// A handle closed when dropped.
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle was opened by this module and is closed once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// The token information `class` as `u64` words, aligned for the structures
+/// the call returns. `what` names the information in a failure.
+fn token_information(
+    token: HANDLE,
+    class: TOKEN_INFORMATION_CLASS,
+    what: &str,
+) -> anyhow::Result<Vec<u64>> {
+    let mut needed = 0u32;
+    // SAFETY: a size query with no buffer; it fails with
+    // ERROR_INSUFFICIENT_BUFFER and sets `needed`.
+    let _ = unsafe { GetTokenInformation(token, class, None, 0, &raw mut needed) };
+    ensure!(needed > 0, "the token reported no {what} information");
+    let mut buffer = vec![0u64; usize::try_from(needed)?.div_ceil(8)];
+    // SAFETY: `buffer` holds at least `needed` bytes and outlives the call.
+    unsafe {
+        GetTokenInformation(
+            token,
+            class,
+            Some(buffer.as_mut_ptr().cast()),
+            needed,
+            &raw mut needed,
+        )
+    }
+    .with_context(|| format!("reading the token's {what} information"))?;
+    Ok(buffer)
+}
+
+/// This process's user SID and whether its token is at High integrity or
+/// above, read the way the tracer reads its own token.
+fn own_token_sid_and_elevation() -> anyhow::Result<(String, bool)> {
+    let mut token = HANDLE::default();
+    // SAFETY: the current process's pseudo-handle needs no closing; `token`
+    // receives a handle closed by `OwnedHandle`.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) }
+        .context("opening this test process's token")?;
+    let token = OwnedHandle(token);
+
+    let user = token_information(token.0, TokenUser, "user")?;
+    // SAFETY: the call filled `user` with a TOKEN_USER whose SID points into
+    // the same buffer, which is alive and aligned.
+    let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut wide = PWSTR::null();
+    // SAFETY: `sid` is the valid user SID read above; `wide` receives a
+    // LocalAlloc'd string freed below.
+    unsafe { ConvertSidToStringSidW(sid, &raw mut wide) }.context("converting the user SID")?;
+    let sid_text = unsafe { U16CStr::from_ptr_str(wide.0.cast_const()) }.to_string()?;
+    // SAFETY: `wide` is the string the conversion allocated.
+    unsafe { LocalFree(Some(HLOCAL(wide.0.cast()))) };
+
+    let label = token_information(token.0, TokenIntegrityLevel, "integrity label")?;
+    // SAFETY: as for the user SID, with a TOKEN_MANDATORY_LABEL.
+    let sid = unsafe { (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid };
+    // SAFETY: `sid` is the valid label SID read above.
+    let count = unsafe { *GetSidSubAuthorityCount(sid) };
+    ensure!(count > 0, "the integrity label has no sub-authority");
+    // SAFETY: `count - 1` is below the SID's sub-authority count.
+    let rid = unsafe { *GetSidSubAuthority(sid, u32::from(count - 1)) };
+    Ok((sid_text, rid >= 0x3000))
+}
+
+/// Opens the tracer's pipe, retrying until it exists and the tracer accepts.
+async fn open_pipe(pipe_name: &str) -> anyhow::Result<NamedPipeClient> {
+    let started = Instant::now();
+    // `interprocess` prepends `\\.\pipe\` to a namespaced name; the raw
+    // `ClientOptions` wants the whole path.
+    let path = format!(r"\\.\pipe\{pipe_name}");
+    loop {
+        match ClientOptions::new().open(&path) {
+            Ok(client) => return Ok(client),
+            Err(err) if started.elapsed() >= HANG_GUARD => {
+                return Err(err).context(format!(
+                    "hung: the tracer pipe {pipe_name} was not openable within {HANG_GUARD:?}"
+                ));
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+}
+
+/// The SDDL string of the descriptor the pipe's instance carries, DACL and
+/// mandatory label included.
+async fn pipe_sddl(pipe_name: &str) -> anyhow::Result<String> {
+    let client = open_pipe(pipe_name).await?;
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: `client` holds a valid pipe handle for the call; `descriptor`
+    // receives a LocalAlloc'd descriptor freed below.
+    let err = unsafe {
+        GetSecurityInfo(
+            HANDLE(client.as_raw_handle()),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            Some(&raw mut descriptor),
+        )
+    };
+    ensure!(
+        err.0 == 0,
+        "GetSecurityInfo on the tracer pipe failed with error {}",
+        err.0
+    );
+    let mut sddl = PWSTR::null();
+    let mut len = 0u32;
+    // SAFETY: `descriptor` is the valid descriptor read above; `sddl`
+    // receives a LocalAlloc'd string freed below.
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            &raw mut sddl,
+            Some(&raw mut len),
+        )
+    };
+    // SAFETY: `descriptor` is the descriptor GetSecurityInfo allocated.
+    unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+    converted.context("converting the pipe's descriptor to SDDL")?;
+    let text = unsafe { U16CStr::from_ptr_str(sddl.0.cast_const()) }.to_string()?;
+    // SAFETY: `sddl` is the string the conversion allocated.
+    unsafe { LocalFree(Some(HLOCAL(sddl.0.cast()))) };
+    Ok(text)
+}
+
+#[tokio::test]
+async fn the_tracer_pipe_admits_only_system_and_its_owner() -> anyhow::Result<()> {
+    let case = Case::new()?;
+    let tracer = case.spawn_tracer("ping -n 60 127.0.0.1 >nul")?;
+
+    let sddl = pipe_sddl(&case.pipe_name).await?;
+    let (own_sid, elevated) = own_token_sid_and_elevation()?;
+
+    ensure!(
+        sddl.starts_with("D:P"),
+        "the tracer pipe has no protected DACL: {sddl}"
+    );
+    for group in ["WD", "AN", "AU", "BU"] {
+        ensure!(
+            !sddl.contains(&format!(";;;{group})")),
+            "the tracer pipe admits {group}, which is not SYSTEM, Administrators or this user: {sddl}"
+        );
+    }
+    if elevated {
+        ensure!(
+            sddl.contains(";;;BA)"),
+            "an elevated tracer pipe does not admit Administrators: {sddl}"
+        );
+        ensure!(
+            sddl.contains(";;;HI)"),
+            "an elevated tracer pipe has no High mandatory label: {sddl}"
+        );
+    } else {
+        ensure!(
+            sddl.contains(&format!(";;;{own_sid})")),
+            "the tracer pipe does not admit this user's SID {own_sid}: {sddl}"
+        );
+    }
+
+    drop(tracer);
+    remove_test_dir(&case.dir).await
+}
+
+#[tokio::test]
+async fn the_tracer_pipe_reports_the_tracer_as_its_server() -> anyhow::Result<()> {
+    let case = Case::new()?;
+    let tracer = case.spawn_tracer("ping -n 60 127.0.0.1 >nul")?;
+
+    let stream = connect(&case.pipe_name).await?;
+    let observed = stream.peer_creds()?.pid();
+    ensure!(
+        observed == Some(tracer.0.id()),
+        "the tracer pipe's server pid is not the spawned tracer's: {observed:?}"
+    );
 
     drop(tracer);
     remove_test_dir(&case.dir).await

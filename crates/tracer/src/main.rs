@@ -16,6 +16,8 @@ mod cursor_query;
 mod hook;
 #[cfg(windows)]
 mod job_object;
+#[cfg(windows)]
+mod pipe_security;
 mod ring;
 mod supervisor;
 

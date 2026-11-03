@@ -7171,6 +7171,7 @@ dependencies = [
  "tracer-protocol",
  "tracing",
  "tracing-subscriber",
+ "widestring",
  "windows 0.61.3",
 ]
 

@@ -28,6 +28,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use interprocess::local_socket::ListenerOptions;
 use interprocess::local_socket::tokio::prelude::*;
+#[cfg(windows)]
+use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::Read;
 use std::path::PathBuf;
@@ -732,7 +734,26 @@ async fn accept_loop(cfg: AcceptConfig) {
     #[cfg(unix)]
     remove_stale_socket(&cfg.pipe_name);
 
-    let listener = match ListenerOptions::new().name(name).create_tokio() {
+    // Every instance `interprocess` creates from this listener carries the
+    // descriptor, so one call covers the pipe for the tracer's whole life. A
+    // token or descriptor failure never falls back to the default descriptor,
+    // which admits Everyone.
+    #[cfg(windows)]
+    let options = match crate::pipe_security::own_pipe_security_descriptor() {
+        Ok(sd) => ListenerOptions::new().name(name).security_descriptor(sd),
+        Err(err) => {
+            error!(
+                ?err,
+                pipe = %cfg.pipe_name,
+                "supervisor: could not build the pipe's security descriptor; ending accept loop"
+            );
+            return;
+        }
+    };
+    #[cfg(not(windows))]
+    let options = ListenerOptions::new().name(name);
+
+    let listener = match options.create_tokio() {
         Ok(listener) => listener,
         Err(err) => {
             error!(

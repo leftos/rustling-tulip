@@ -110,6 +110,8 @@ pub(crate) async fn spawn_with_tracer(
     info!(tracer_pid, pipe = %pipe, "tracer_client: tracer process started");
 
     let client = connect_with_retry(&pipe).await?;
+    #[cfg(windows)]
+    check_connected_tracer(&client, &pipe, tracer_pid)?;
     let (handle, _negotiated_version) = handshake_and_wire(
         client,
         spec.session_id.clone(),
@@ -136,6 +138,8 @@ pub async fn reattach(
     expected_output_subscribers: usize,
 ) -> anyhow::Result<Arc<PtyHandle>> {
     let client = connect_with_retry(pipe).await?;
+    #[cfg(windows)]
+    check_connected_tracer(&client, pipe, tracer_pid)?;
     let (handle, _negotiated_version) = handshake_and_wire(
         client,
         session_id.to_string(),
@@ -144,6 +148,33 @@ pub async fn reattach(
     )
     .await?;
     Ok(handle)
+}
+
+/// Refuse a pipe served by any process other than the tracer this session
+/// recorded: the name must belong to that tracer, never to a process that
+/// took the name first.
+#[cfg(windows)]
+fn check_tracer_server(pipe: &str, observed: Option<u32>, expected: u32) -> anyhow::Result<()> {
+    match observed {
+        Some(pid) if pid == expected => Ok(()),
+        Some(pid) => Err(anyhow!(
+            "tracer pipe {pipe} is served by pid {pid}, not the session's tracer pid {expected}"
+        )),
+        None => Err(anyhow!(
+            "tracer pipe {pipe}: the server's pid could not be read"
+        )),
+    }
+}
+
+/// [`check_tracer_server`] on a freshly connected socket, whose server pid
+/// comes from the pipe itself (`GetNamedPipeServerProcessId`).
+#[cfg(windows)]
+fn check_connected_tracer(client: &Stream, pipe: &str, expected: u32) -> anyhow::Result<()> {
+    let observed = client
+        .peer_creds()
+        .with_context(|| format!("reading the server pid of tracer pipe {pipe}"))?
+        .pid();
+    check_tracer_server(pipe, observed, expected)
 }
 
 /// The cached `rt-tracer` path a spawn will run, resolved before [`spawn`]:
@@ -1377,5 +1408,28 @@ mod tests {
         let exited = frame(&tracer_protocol::TracerResponse::Exited { code: -1 });
         let entry = history_after_tracer_frames("child-exit", exited).await;
         assert_eq!(entry.end, protocol::SessionEnd::Exited { code: -1 });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn check_tracer_server_accepts_only_the_recorded_tracer() {
+        assert!(
+            super::check_tracer_server("rt-test", Some(42), 42).is_ok(),
+            "the recorded tracer's pid is accepted"
+        );
+
+        let other = super::check_tracer_server("rt-test", Some(7), 42)
+            .expect_err("another process serving the pipe is refused");
+        assert_eq!(
+            other.to_string(),
+            "tracer pipe rt-test is served by pid 7, not the session's tracer pid 42"
+        );
+
+        let missing = super::check_tracer_server("rt-test", None, 42)
+            .expect_err("an unreadable server pid is refused");
+        assert_eq!(
+            missing.to_string(),
+            "tracer pipe rt-test: the server's pid could not be read"
+        );
     }
 }
