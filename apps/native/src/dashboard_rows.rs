@@ -10,8 +10,9 @@
 use chrono::{DateTime, Utc};
 use protocol::{
     AgentDescriptor, AgentKind, AgentNode, AgentState, ChatPrompt, ChatPromptKind, NowKind,
-    PendingInput, PendingQuestion, PromptChoice, SessionFacts, SessionMode, SessionSnapshot,
-    SessionStatus, StuckReason,
+    PendingInput, PendingQuestion, PromptChoice, PullRequestChecks, PullRequestState, RecentWork,
+    SessionFacts, SessionMember, SessionMode, SessionSnapshot, SessionStatus, StuckReason,
+    SummaryLine, SummarySource, WorkPullRequest,
 };
 
 use crate::activity_track::Track;
@@ -887,6 +888,204 @@ fn headline(session: &SessionSnapshot) -> Option<String> {
 /// `text` with every run of whitespace as one space.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The drawer's first column's heading.
+pub const DRAWER_SUMMARY: &str = "Running summary";
+/// The heading over the session's first prompt.
+pub const DRAWER_PROMPT: &str = "Prompt";
+/// The drawer's second column's heading.
+pub const DRAWER_WORK: &str = "Recent work";
+/// What an empty column of the drawer reads.
+pub const NOTHING_YET: &str = "Nothing yet";
+/// What a column reads before the daemon's first answer.
+pub const DRAWER_LOADING: &str = "Loading…";
+/// The mark on a drawer whose session ended.
+pub const DRAWER_ENDED: &str = "Session ended";
+/// The drawer's button that opens the first changed file's diff.
+pub const OPEN_DIFF: &str = "Open diff";
+/// What a drawer's error line reads before the daemon's message.
+const DRAWER_ERROR: &str = "Couldn't load the session's detail:";
+/// The minus sign of a line count, as the design writes it.
+const MINUS: char = '−';
+
+/// What the drawer last received for its session: the daemon's
+/// `SessionDetail`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DrawerDetail {
+    pub lines: Vec<SummaryLine>,
+    pub prompt: Option<String>,
+    pub work: RecentWork,
+}
+
+/// One line of the drawer's running summary: its window label, its text,
+/// then its source and age (`model, 3m ago`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrawerLine {
+    pub window: &'static str,
+    pub text: String,
+    pub meta: String,
+}
+
+/// Everything one open drawer draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrawerCells {
+    pub session_id: String,
+    /// Whether a `SessionDetail` has been received.
+    pub loaded: bool,
+    /// The summary ring, newest first.
+    pub summary: Vec<DrawerLine>,
+    /// The first prompt on one line; `None` when the daemon has none.
+    pub prompt: Option<String>,
+    /// The Recent work heading's figures; `None` with nothing changed or
+    /// landed.
+    pub work_header: Option<String>,
+    /// Commits, finished issues, uncommitted files and the pull request.
+    pub work: Vec<String>,
+    /// Whether `Open diff` shows: the session has uncommitted files.
+    pub open_diff: bool,
+    /// The session ended; what it shows is what it last received.
+    pub ended: bool,
+    /// The last request's refusal, as the drawer words it.
+    pub error: Option<String>,
+}
+
+/// What an open drawer for `session_id` draws at `now` from what it last
+/// received (`detail`) and the last refusal's message (`error`).
+pub(crate) fn drawer_cells(
+    session_id: &str,
+    detail: Option<&DrawerDetail>,
+    error: Option<&str>,
+    ended: bool,
+    now: DateTime<Utc>,
+) -> DrawerCells {
+    let empty = DrawerDetail::default();
+    let shown = detail.unwrap_or(&empty);
+    DrawerCells {
+        session_id: session_id.to_owned(),
+        loaded: detail.is_some(),
+        summary: shown
+            .lines
+            .iter()
+            .map(|line| drawer_line(line, now))
+            .collect(),
+        prompt: shown
+            .prompt
+            .as_deref()
+            .map(one_line)
+            .filter(|prompt| !prompt.is_empty()),
+        work_header: work_header(&shown.work),
+        work: work_lines(&shown.work, now),
+        open_diff: !shown.work.files.is_empty(),
+        ended,
+        error: error.map(|message| format!("{DRAWER_ERROR} {message}")),
+    }
+}
+
+/// The summary window a line made at `at` falls in at `now`: `now` under
+/// five minutes, then `5–15m`, `15–30m` and `30m+`.
+pub(crate) fn summary_window(at: DateTime<Utc>, now: DateTime<Utc>) -> &'static str {
+    match (now - at).num_minutes() {
+        ..5 => "now",
+        5..15 => "5–15m",
+        15..30 => "15–30m",
+        _ => "30m+",
+    }
+}
+
+/// One summary line as the drawer draws it.
+fn drawer_line(line: &SummaryLine, now: DateTime<Utc>) -> DrawerLine {
+    let age = format!("{} ago", format_age(line.at, now));
+    let meta = match line.source {
+        SummarySource::Model => format!("model, {age}"),
+        SummarySource::Template => format!("template, {age}"),
+        SummarySource::Unknown => age,
+    };
+    DrawerLine {
+        window: summary_window(line.at, now),
+        text: line.text.clone(),
+        meta,
+    }
+}
+
+/// The Recent work heading's figures: the changed-file count and the
+/// summed lines of the files received (`4 changed +165 −7`), or once the
+/// tree is clean what landed (`7 files · +212 −48 landed`).
+pub(crate) fn work_header(work: &RecentWork) -> Option<String> {
+    if !work.files.is_empty() {
+        let added: u64 = work.files.iter().map(|file| u64::from(file.added)).sum();
+        let deleted: u64 = work.files.iter().map(|file| u64::from(file.deleted)).sum();
+        let total = work
+            .files_total
+            .max(u32::try_from(work.files.len()).unwrap_or(u32::MAX));
+        return Some(format!("{total} changed +{added} {MINUS}{deleted}"));
+    }
+    work.landed.as_ref().map(|landed| {
+        let files = if landed.files == 1 { "file" } else { "files" };
+        format!(
+            "{} {files} · +{} {MINUS}{} landed",
+            landed.files, landed.added, landed.deleted
+        )
+    })
+}
+
+/// The Recent work lines: each commit (`abc1234 subject · 5m ago`), each
+/// issue moved to Done (`→ Done · title`), each uncommitted file
+/// (`M path +a −d`), then the pull request.
+pub(crate) fn work_lines(work: &RecentWork, now: DateTime<Utc>) -> Vec<String> {
+    let commits = work.commits.iter().map(|commit| {
+        format!(
+            "{} {} · {} ago",
+            commit.short_sha,
+            commit.subject,
+            format_age(commit.at, now)
+        )
+    });
+    let issues = work
+        .issues_done
+        .iter()
+        .map(|issue| format!("→ Done · {}", issue.title));
+    let files = work.files.iter().map(|file| {
+        format!(
+            "{} {} +{} {MINUS}{}",
+            file.status, file.path, file.added, file.deleted
+        )
+    });
+    commits
+        .chain(issues)
+        .chain(files)
+        .chain(work.pull_request.as_ref().map(pull_request_line))
+        .collect()
+}
+
+/// The pull-request line: `PR #118 · checks passed`.
+fn pull_request_line(pr: &WorkPullRequest) -> String {
+    let state = match (pr.state, pr.checks) {
+        (PullRequestState::Merged, _) => "merged",
+        (PullRequestState::Closed, _) => "closed",
+        (_, PullRequestChecks::Passed) => "checks passed",
+        (_, PullRequestChecks::Failed) => "checks failed",
+        (_, PullRequestChecks::Pending) => "checks running",
+        (_, PullRequestChecks::None | PullRequestChecks::Unknown) => "open",
+    };
+    format!("PR #{} · {state}", pr.number)
+}
+
+/// The member a drawer's file `path` lies in and the path inside it: a
+/// workspace's files carry their member's repo name before the path, a
+/// single repo's do not. `None` when no member matches.
+pub(crate) fn diff_target<'a>(
+    members: &'a [SessionMember],
+    path: &str,
+) -> Option<(&'a SessionMember, String)> {
+    if let [only] = members {
+        return Some((only, path.to_owned()));
+    }
+    members.iter().find_map(|member| {
+        path.strip_prefix(member.repo_name.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .map(|rest| (member, rest.to_owned()))
+    })
 }
 
 #[cfg(test)]
@@ -1895,5 +2094,165 @@ mod tests {
         assert!(waiting.ask.is_some());
         let elsewhere = row_cells(&input(&row, &session, None), GroupKind::Idle, at(0));
         assert_eq!(elsewhere.ask, None);
+    }
+
+    fn work_file(path: &str, status: &str, added: u32, deleted: u32) -> protocol::WorkFile {
+        protocol::WorkFile {
+            path: path.to_owned(),
+            status: status.to_owned(),
+            added,
+            deleted,
+        }
+    }
+
+    #[test]
+    fn the_work_header_sums_the_files_received_and_counts_them_all() {
+        let work = RecentWork {
+            files: vec![work_file("a.rs", "M", 160, 7), work_file("b.rs", "A", 5, 0)],
+            files_total: 4,
+            ..RecentWork::default()
+        };
+        assert_eq!(work_header(&work).as_deref(), Some("4 changed +165 −7"));
+    }
+
+    #[test]
+    fn a_clean_tree_heads_its_work_with_what_landed() {
+        let mut work = RecentWork {
+            landed: Some(protocol::WorkTotals {
+                files: 7,
+                added: 212,
+                deleted: 48,
+            }),
+            ..RecentWork::default()
+        };
+        assert_eq!(
+            work_header(&work).as_deref(),
+            Some("7 files · +212 −48 landed")
+        );
+        work.landed = Some(protocol::WorkTotals {
+            files: 1,
+            added: 2,
+            deleted: 0,
+        });
+        assert_eq!(work_header(&work).as_deref(), Some("1 file · +2 −0 landed"));
+        assert_eq!(work_header(&RecentWork::default()), None, "nothing yet");
+    }
+
+    #[test]
+    fn summary_windows_split_at_5_15_and_30_minutes() {
+        let now = at(60);
+        let windows: Vec<&str> = [60, 56, 55, 46, 45, 31, 30, 0, 61]
+            .into_iter()
+            .map(|minute| summary_window(at(minute), now))
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                "now", "now", "5–15m", "5–15m", "15–30m", "15–30m", "30m+", "30m+", "now"
+            ]
+        );
+    }
+
+    #[test]
+    fn summary_lines_read_their_window_source_and_age() {
+        let mut template = line("Read the design", 40);
+        template.source = SummarySource::Template;
+        let mut unknown = line("Older", 0);
+        unknown.source = SummarySource::Unknown;
+        let detail = DrawerDetail {
+            lines: vec![line("Wired it", 57), template, unknown],
+            prompt: Some("  Build\n the   drawer ".to_owned()),
+            work: RecentWork::default(),
+        };
+        let cells = drawer_cells("s1", Some(&detail), None, false, at(60));
+        let read: Vec<(&str, &str, &str)> = cells
+            .summary
+            .iter()
+            .map(|line| (line.window, line.text.as_str(), line.meta.as_str()))
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                ("now", "Wired it", "model, 3m ago"),
+                ("15–30m", "Read the design", "template, 20m ago"),
+                ("30m+", "Older", "1h00m ago"),
+            ]
+        );
+        assert_eq!(cells.prompt.as_deref(), Some("Build the drawer"));
+        assert!(cells.loaded);
+        assert!(!cells.open_diff);
+        assert_eq!(cells.work, Vec::<String>::new());
+    }
+
+    #[test]
+    fn work_lines_list_commits_issues_files_then_the_pull_request() {
+        let work = RecentWork {
+            commits: vec![protocol::WorkCommit {
+                sha: "abc1234567".to_owned(),
+                short_sha: "abc1234".to_owned(),
+                subject: "Add it".to_owned(),
+                at: at(55),
+            }],
+            issues_done: vec![protocol::WorkIssue {
+                key: "RT-1".to_owned(),
+                title: "Ship it".to_owned(),
+            }],
+            files: vec![work_file("src/a.rs", "D", 0, 9)],
+            files_total: 1,
+            landed: None,
+            pull_request: Some(WorkPullRequest {
+                number: 118,
+                state: PullRequestState::Merged,
+                checks: PullRequestChecks::Failed,
+            }),
+        };
+        assert_eq!(
+            work_lines(&work, at(60)),
+            vec![
+                "abc1234 Add it · 5m ago",
+                "→ Done · Ship it",
+                "D src/a.rs +0 −9",
+                "PR #118 · merged",
+            ]
+        );
+        let open = |checks| {
+            pull_request_line(&WorkPullRequest {
+                number: 7,
+                state: PullRequestState::Open,
+                checks,
+            })
+        };
+        assert_eq!(open(PullRequestChecks::Passed), "PR #7 · checks passed");
+        assert_eq!(open(PullRequestChecks::Failed), "PR #7 · checks failed");
+        assert_eq!(open(PullRequestChecks::Pending), "PR #7 · checks running");
+        assert_eq!(open(PullRequestChecks::None), "PR #7 · open");
+    }
+
+    #[test]
+    fn a_drawer_before_its_answer_reads_unloaded_and_words_its_error() {
+        let cells = drawer_cells("s1", None, Some("unknown session: s1"), true, at(0));
+        assert!(!cells.loaded);
+        assert!(cells.ended);
+        assert_eq!(cells.summary, Vec::<DrawerLine>::new());
+        assert_eq!(
+            cells.error.as_deref(),
+            Some("Couldn't load the session's detail: unknown session: s1")
+        );
+    }
+
+    #[test]
+    fn a_workspace_files_diff_target_is_its_member_without_the_prefix() {
+        let single = [member("main")];
+        let (found, path) = diff_target(&single, "src/a.rs").expect("the one member");
+        assert_eq!((found.repo_id.as_str(), path.as_str()), (REPO, "src/a.rs"));
+
+        let mut other = member("dev");
+        other.repo_id = "r2".to_owned();
+        other.repo_name = "two".to_owned();
+        let workspace = [member("main"), other];
+        let (found, path) = diff_target(&workspace, "two/src/b.rs").expect("the second member");
+        assert_eq!((found.repo_id.as_str(), path.as_str()), ("r2", "src/b.rs"));
+        assert!(diff_target(&workspace, "nine/src/c.rs").is_none());
+        assert!(diff_target(&[], "src/a.rs").is_none());
     }
 }

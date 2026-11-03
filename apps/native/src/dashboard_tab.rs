@@ -1,23 +1,28 @@
 //! The Dashboard tab on the root view: the rail button's open or focus, the
 //! `OpenDashboardTab` requests out and the tab one of them waits to
 //! activate, and the `WatchDashboard` the client keeps in step with whether
-//! the active tab is the Dashboard.
+//! the active tab is the Dashboard; and the drawers opened under By status
+//! rows, their `GetSessionDetail`s, throttled per drawer, and the replies
+//! they draw.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use gpui::{Context, Window};
+use gpui::{Context, Task, Window};
 use protocol::{
-    ClientMessage, DaemonMessage, PendingInput, PromptChoice, SessionSnapshot, TabContent,
+    ClientMessage, DaemonMessage, PendingInput, PromptChoice, SessionSnapshot, SessionStatus,
+    SessionSummary, TabContent,
 };
 
 use crate::RootView;
 use crate::connection::Connection;
 use crate::dashboard::{self, GroupKind};
 use crate::dashboard_facts::HeldTracks;
+use crate::dashboard_rows::{DrawerCells, DrawerDetail, diff_target, drawer_cells};
 use crate::diff_tab::PENDING_ACTIVATE_TTL;
 use crate::notices::ToastKind;
+use crate::source_control::ScKey;
 use crate::target::HostKey;
 
 /// The toast an `OpenDashboardTab` the daemon refused raises.
@@ -154,7 +159,301 @@ impl DashboardAnswers {
     }
 }
 
+/// The prefix of every `GetSessionDetail` id a drawer sends, so a late
+/// answer to a drawer since closed is still known as a drawer's.
+const DETAIL_PREFIX: &str = "dashboard-detail-";
+/// The least time between two `GetSessionDetail`s of one drawer.
+const DETAIL_REFETCH: Duration = Duration::from_secs(5);
+
+/// The drawer opened under one By status row: what it last received, the
+/// request it waits on, and the change it owes a fetch.
+#[derive(Default)]
+struct Drawer {
+    detail: Option<DrawerDetail>,
+    /// The last request's refusal, from the daemon.
+    error: Option<String>,
+    /// The `GetSessionDetail` whose answer the drawer draws.
+    waiting: Option<String>,
+    last_fetch: Option<Instant>,
+    /// The summary the session's snapshot carried at the last fetch, so a
+    /// snapshot that changes it is known.
+    summary: Option<SessionSummary>,
+    /// A change came inside [`DETAIL_REFETCH`] of the last fetch: the timer
+    /// that fetches once the interval is up.
+    due: Option<Task<()>>,
+}
+
+/// The open drawers, by the host and session each was opened for.
+#[derive(Default)]
+pub(crate) struct DashboardDrawers {
+    next_request: u64,
+    open: HashMap<(HostKey, String), Drawer>,
+}
+
+impl DashboardDrawers {
+    fn request_id(&mut self) -> String {
+        self.next_request += 1;
+        format!("{DETAIL_PREFIX}{}", self.next_request)
+    }
+
+    /// The open drawer on `host` that waits on `request_id`.
+    fn waiting_on(&mut self, host: &HostKey, request_id: &str) -> Option<&mut Drawer> {
+        self.open
+            .iter_mut()
+            .find(|((on, _), drawer)| on == host && drawer.waiting.as_deref() == Some(request_id))
+            .map(|(_, drawer)| drawer)
+    }
+
+    /// `host`'s connection is new: no answer to an old request will come.
+    fn reset(&mut self, host: &HostKey) {
+        for ((on, _), drawer) in &mut self.open {
+            if on == host {
+                drawer.waiting = None;
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for DashboardDrawers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DashboardDrawers")
+            .field("next_request", &self.next_request)
+            .field("open", &self.open.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// Whether `session` has ended, a session its host no longer lists
+/// included: its drawer keeps what it last showed.
+fn ended(session: Option<&SessionSnapshot>) -> bool {
+    session.is_none_or(|session| {
+        matches!(
+            session.status,
+            SessionStatus::Stopped | SessionStatus::Error
+        )
+    })
+}
+
+/// Whether a reply's `request_id` is a drawer's `GetSessionDetail`'s.
+fn is_drawer_request(request_id: Option<&str>) -> bool {
+    request_id.is_some_and(|id| id.starts_with(DETAIL_PREFIX))
+}
+
 impl RootView {
+    /// The drawer key of `session_id`: its host while one lists it, else
+    /// the host of a drawer open for it, so a vanished session's drawer is
+    /// still found.
+    fn drawer_key(&self, session_id: &str) -> (HostKey, String) {
+        let host = self
+            .sidebar
+            .find_session(session_id)
+            .map(|(host, _)| host)
+            .or_else(|| {
+                self.dashboard_drawers
+                    .open
+                    .keys()
+                    .find(|(_, id)| id == session_id)
+                    .map(|(host, _)| host.clone())
+            })
+            .unwrap_or(HostKey::Local);
+        (host, session_id.to_owned())
+    }
+
+    /// Asks again for the detail of every drawer open on `host` that has
+    /// none yet: the new connection will not answer the old request.
+    fn refetch_empty_drawers(&mut self, host: &HostKey) {
+        let empty: Vec<(HostKey, String)> = self
+            .dashboard_drawers
+            .open
+            .iter()
+            .filter(|((on, _), drawer)| on == host && drawer.detail.is_none())
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &empty {
+            self.fetch_drawer(key);
+        }
+    }
+
+    /// A By status row's click: opens the drawer under `session_id`'s row
+    /// and asks for its detail, or closes the open one.
+    pub(crate) fn toggle_dashboard_drawer(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let key = self.drawer_key(session_id);
+        if self.dashboard_drawers.open.remove(&key).is_none() {
+            let summary = self
+                .sidebar
+                .session(session_id)
+                .and_then(|session| session.summary.clone());
+            self.dashboard_drawers.open.insert(
+                key.clone(),
+                Drawer {
+                    summary,
+                    ..Drawer::default()
+                },
+            );
+            self.fetch_drawer(&key);
+        }
+        cx.notify();
+    }
+
+    /// What the drawer under `session_id`'s row draws; `None` while it is
+    /// closed.
+    #[must_use]
+    pub fn dashboard_drawer(&self, session_id: &str) -> Option<DrawerCells> {
+        let key = self.drawer_key(session_id);
+        let drawer = self.dashboard_drawers.open.get(&key)?;
+        Some(drawer_cells(
+            session_id,
+            drawer.detail.as_ref(),
+            drawer.error.as_deref(),
+            ended(self.sidebar.session(session_id)),
+            Utc::now(),
+        ))
+    }
+
+    /// The drawer's `Open diff`: the first changed file's diff, in the
+    /// tree of the member it lies in.
+    pub(crate) fn open_drawer_diff(&mut self, session_id: &str) {
+        let key = self.drawer_key(session_id);
+        let Some(path) = self
+            .dashboard_drawers
+            .open
+            .get(&key)
+            .and_then(|drawer| drawer.detail.as_ref())
+            .and_then(|detail| detail.work.files.first())
+            .map(|file| file.path.clone())
+        else {
+            return;
+        };
+        let Some(session) = self.sidebar.session(session_id) else {
+            return;
+        };
+        let Some((member, in_member)) = diff_target(&session.members, &path) else {
+            tracing::warn!(session_id, path, "no member of the session holds the file");
+            return;
+        };
+        let target = ScKey::for_member(member, self.sidebar.repos_of(&key.0));
+        self.open_diff(&target, &in_member, None);
+    }
+
+    /// Sends the drawer at `key` a `GetSessionDetail` now.
+    fn fetch_drawer(&mut self, key: &(HostKey, String)) {
+        let request_id = self.dashboard_drawers.request_id();
+        let now = (self.now)();
+        let Some(drawer) = self.dashboard_drawers.open.get_mut(key) else {
+            return;
+        };
+        drawer.waiting = Some(request_id.clone());
+        drawer.last_fetch = Some(now);
+        drawer.due = None;
+        self.send_to(
+            &key.0,
+            ClientMessage::GetSessionDetail {
+                session_id: key.1.clone(),
+                request_id: Some(request_id),
+            },
+        );
+    }
+
+    /// `session_id`'s facts or summary changed on `host`: its open drawer
+    /// fetches again, at once when [`DETAIL_REFETCH`] has passed since its
+    /// last fetch, else once it has. An ended session's drawer keeps what
+    /// it shows.
+    fn drawer_session_changed(&mut self, host: &HostKey, session_id: &str, cx: &mut Context<Self>) {
+        if ended(self.sidebar.session(session_id)) {
+            return;
+        }
+        let key = (host.clone(), session_id.to_owned());
+        let now = (self.now)();
+        let Some(drawer) = self.dashboard_drawers.open.get_mut(&key) else {
+            return;
+        };
+        if drawer.due.is_some() {
+            return;
+        }
+        let since = drawer
+            .last_fetch
+            .map_or(DETAIL_REFETCH, |at| now.saturating_duration_since(at));
+        if since >= DETAIL_REFETCH {
+            self.fetch_drawer(&key);
+            return;
+        }
+        let delay = DETAIL_REFETCH.saturating_sub(since);
+        drawer.due = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            // Fails only when the view is gone, and the drawer with it.
+            this.update(cx, |this, _| this.fetch_drawer(&key)).ok();
+        }));
+    }
+
+    /// A snapshot of `session` arrived from `host`: a summary other than
+    /// the one its drawer last fetched for is a change.
+    fn drawer_snapshot(
+        &mut self,
+        host: &HostKey,
+        session: &SessionSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (host.clone(), session.id.clone());
+        let Some(drawer) = self.dashboard_drawers.open.get_mut(&key) else {
+            return;
+        };
+        if drawer.summary == session.summary {
+            return;
+        }
+        drawer.summary.clone_from(&session.summary);
+        self.drawer_session_changed(host, &session.id, cx);
+    }
+
+    /// Folds a drawer's `SessionDetail` or refusal in; a reply to a drawer
+    /// since closed, or to a request since replaced, is dropped. Returns
+    /// whether the message was a drawer's.
+    fn on_drawer_reply(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match msg {
+            DaemonMessage::SessionDetail {
+                session_id,
+                lines,
+                prompt,
+                work,
+                request_id: Some(id),
+            } if is_drawer_request(Some(id)) => {
+                let Some(drawer) = self.dashboard_drawers.waiting_on(host, id) else {
+                    tracing::debug!(session_id, id, "dropping a detail no open drawer waits on");
+                    return true;
+                };
+                drawer.waiting = None;
+                drawer.error = None;
+                drawer.detail = Some(DrawerDetail {
+                    lines: lines.clone(),
+                    prompt: prompt.clone(),
+                    work: work.clone(),
+                });
+                cx.notify();
+                true
+            }
+            DaemonMessage::Error {
+                message,
+                request_id: Some(id),
+                ..
+            } if is_drawer_request(Some(id)) => {
+                let Some(drawer) = self.dashboard_drawers.waiting_on(host, id) else {
+                    tracing::debug!(id, message, "dropping a refusal no open drawer waits on");
+                    return true;
+                };
+                tracing::warn!(id, message, "the daemon refused a drawer's detail");
+                drawer.waiting = None;
+                drawer.error = Some(message.clone());
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// An ask block's choice button: sends `choice` for `session_id`'s
     /// prompt, chosen against the snapshot's status stamp `since`, to the
     /// session's host, and holds the session's buttons until that wait
@@ -238,7 +537,20 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.on_drawer_reply(host, msg, cx) {
+            return true;
+        }
         match msg {
+            DaemonMessage::SessionUpdated { session, .. } => {
+                self.drawer_snapshot(host, session, cx);
+                false
+            }
+            DaemonMessage::Sessions { sessions } => {
+                for session in sessions {
+                    self.drawer_snapshot(host, session, cx);
+                }
+                false
+            }
             DaemonMessage::Welcome { .. } => {
                 // A new connection holds no watch, and the facts held are the
                 // old connection's. The open requests are the layout home's.
@@ -246,13 +558,15 @@ impl RootView {
                     self.dashboard_opens.reset();
                 }
                 self.dashboard_answers.reset(host);
+                self.dashboard_drawers.reset(host);
+                self.refetch_empty_drawers(host);
                 self.dashboard_watch.remove(host);
                 self.dashboard_facts.clear(host);
                 self.dashboard_tracks.clear(host);
                 self.sync_dashboard_watch();
                 false
             }
-            DaemonMessage::DashboardFacts { .. } => {
+            DaemonMessage::DashboardFacts { facts, .. } => {
                 // Facts for a watch this client ended are the daemon's answer
                 // to nothing: held, they would show a tab nobody is watching.
                 if !self.dashboard_watch.contains(host) {
@@ -260,6 +574,10 @@ impl RootView {
                 }
                 self.dashboard_facts.apply(host, msg);
                 self.prune_dashboard_facts(host);
+                // The daemon sends only the facts that changed.
+                for changed in facts {
+                    self.drawer_session_changed(host, &changed.session_id, cx);
+                }
                 cx.notify();
                 true
             }
@@ -382,6 +700,7 @@ impl RootView {
             self.dashboard_opens = DashboardOpens::default();
         }
         self.dashboard_answers.reset(host);
+        self.dashboard_drawers.reset(host);
         self.dashboard_watch.remove(host);
         self.dashboard_facts.clear(host);
         self.dashboard_tracks.clear(host);
@@ -390,8 +709,15 @@ impl RootView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ANSWERS_CAP, DashboardAnswers};
+    use super::{ANSWERS_CAP, DashboardAnswers, is_drawer_request};
     use crate::target::HostKey;
+
+    #[test]
+    fn only_a_drawers_own_request_ids_are_claimed() {
+        assert!(is_drawer_request(Some("dashboard-detail-3")));
+        assert!(!is_drawer_request(Some("someone-else-1")));
+        assert!(!is_drawer_request(None));
+    }
 
     #[test]
     fn the_answers_remembered_are_capped_dropping_the_oldest() {

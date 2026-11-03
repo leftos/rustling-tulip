@@ -17,7 +17,7 @@ use protocol::{
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::{
     COMPACT_EMPTY_TEXT, ChipKind, CompactBlock, CompactRow, DashboardColumns, DashboardEntry,
-    RowCells, RunKind, Tally, enable_band_probe,
+    DrawerCells, RowCells, RunKind, Tally, enable_band_probe,
 };
 use serde_json::json;
 use support::{
@@ -676,16 +676,422 @@ fn a_queue_chip_click_scrolls_its_row_into_view(cx: &mut TestAppContext) {
     );
 }
 
+/// The `GetSessionDetail`s the client sent since the last read, as
+/// `(session, request id)`.
+fn detail_requests(h: &mut Harness<'_>) -> Vec<(String, String)> {
+    h.sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::GetSessionDetail {
+                session_id,
+                request_id,
+            } => Some((
+                session_id,
+                request_id.expect("a drawer's request carries an id"),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Clicks `id`'s row open and returns the one `GetSessionDetail` it sent.
+fn open_drawer(h: &mut Harness<'_>, id: &str) -> String {
+    h.sent();
+    h.click_on(&format!("dashboard-row-{id}"));
+    let requests = detail_requests(h);
+    assert_eq!(requests.len(), 1, "one detail request: {requests:?}");
+    assert_eq!(requests[0].0, id);
+    requests[0].1.clone()
+}
+
+/// The drawer the view draws under `id`'s row, `None` while it is closed.
+fn drawer(h: &mut Harness<'_>, id: &str) -> Option<DrawerCells> {
+    h.root(|root, _| root.dashboard_drawer(id))
+}
+
+/// Two uncommitted files, a commit, a finished issue and an open pull
+/// request whose checks passed.
+fn busy_work() -> serde_json::Value {
+    json!({
+        "commits": [{
+            "sha": "abc1234567890",
+            "short_sha": "abc1234",
+            "subject": "Add the drawer",
+            "at": minutes_ago(10),
+        }],
+        "issues_done": [{ "key": "RT-1", "title": "Ship it" }],
+        "files": [
+            { "path": "src/a.rs", "status": "M", "added": 12, "deleted": 3 },
+            { "path": "src/b.rs", "status": "A", "added": 4, "deleted": 0 },
+        ],
+        "files_total": 2,
+        "pull_request": { "number": 118, "state": "open", "checks": "passed" },
+    })
+}
+
+/// The daemon's `SessionDetail` for `id`, answering `request_id`: two
+/// summary lines, a prompt over two lines and `work`.
+fn detail_reply(id: &str, request_id: &str, work: &serde_json::Value) -> DaemonMessage {
+    serde_json::from_value(json!({
+        "type": "session_detail",
+        "session_id": id,
+        "lines": [
+            { "text": "Wired the drawer", "at": minutes_ago(3), "source": "model" },
+            { "text": "Read the design", "at": minutes_ago(20), "source": "template" },
+        ],
+        "prompt": "Build the\n  drawer",
+        "work": work,
+        "request_id": request_id,
+    }))
+    .expect("session detail fixture")
+}
+
 #[gpui::test]
-fn a_row_click_opens_its_pane(cx: &mut TestAppContext) {
+fn a_row_click_toggles_its_drawer(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
     show_dashboard(&mut h);
     h.click_on("dashboard-row-s1");
     assert_eq!(
         h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("d1".to_owned()),
+        "the Dashboard stays shown"
+    );
+    assert!(drawer(&mut h, "s1").is_some(), "the drawer is open");
+    assert!(drawn(&mut h, "dashboard-drawer-s1"));
+}
+
+#[gpui::test]
+fn the_drawers_go_to_pane_opens_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    h.click_on("dashboard-row-s1");
+    h.click_on("dashboard-drawer-s1-go-to-pane");
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
         Some("t1".to_owned()),
         "the session's pane is shown"
+    );
+}
+
+#[gpui::test]
+fn opening_a_drawer_sends_get_session_detail(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    open_drawer(&mut h, "s1");
+    let cells = drawer(&mut h, "s1").expect("the drawer is open");
+    assert!(!cells.loaded, "nothing has answered yet");
+}
+
+#[gpui::test]
+fn a_session_detail_reply_draws_in_the_drawer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    let request_id = open_drawer(&mut h, "s1");
+    h.send(detail_reply("s1", &request_id, &busy_work()));
+
+    let cells = drawer(&mut h, "s1").expect("the drawer is open");
+    assert!(cells.loaded);
+    let summary: Vec<(&str, &str, &str)> = cells
+        .summary
+        .iter()
+        .map(|line| (line.window, line.text.as_str(), line.meta.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("now", "Wired the drawer", "model, 3m ago"),
+            ("15–30m", "Read the design", "template, 20m ago"),
+        ]
+    );
+    assert_eq!(cells.prompt.as_deref(), Some("Build the drawer"));
+    assert_eq!(cells.work_header.as_deref(), Some("2 changed +16 −3"));
+    assert_eq!(
+        cells.work,
+        vec![
+            "abc1234 Add the drawer · 10m ago",
+            "→ Done · Ship it",
+            "M src/a.rs +12 −3",
+            "A src/b.rs +4 −0",
+            "PR #118 · checks passed",
+        ]
+    );
+    assert!(!cells.ended);
+    assert_eq!(cells.error, None);
+    for part in [
+        "",
+        "-summary",
+        "-prompt",
+        "-work",
+        "-go-to-pane",
+        "-open-diff",
+    ] {
+        assert!(
+            drawn(&mut h, &format!("dashboard-drawer-s1{part}")),
+            "dashboard-drawer-s1{part} is drawn"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_second_click_closes_the_drawer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    open_drawer(&mut h, "s1");
+    h.click_on("dashboard-row-s1");
+    assert!(drawer(&mut h, "s1").is_none(), "the drawer is closed");
+    assert!(
+        detail_requests(&mut h).is_empty(),
+        "closing asks for nothing"
+    );
+}
+
+#[gpui::test]
+fn an_ended_sessions_drawer_stays_marked_ended(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    let request_id = open_drawer(&mut h, "s1");
+    h.send(detail_reply("s1", &request_id, &busy_work()));
+    assert!(!drawn(&mut h, "dashboard-drawer-s1-ended"));
+
+    update(
+        &mut h,
+        session("s1").in_repo("r1").status("stopped").build(),
+    );
+    h.send(facts_message(vec![facts("s1").context(40).build()]));
+    h.advance(std::time::Duration::from_secs(6));
+
+    let cells = drawer(&mut h, "s1").expect("the drawer stays open");
+    assert!(cells.ended, "marked ended");
+    assert_eq!(cells.summary.len(), 2, "its last content is kept");
+    assert_eq!(cells.work_header.as_deref(), Some("2 changed +16 −3"));
+    assert!(drawn(&mut h, "dashboard-drawer-s1-ended"));
+    assert!(
+        detail_requests(&mut h).is_empty(),
+        "an ended session's drawer asks for nothing more"
+    );
+}
+
+#[gpui::test]
+fn open_diff_opens_the_first_changed_file(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let s1 = session("s1")
+        .members(&[("r1", "main", "D:/src/r1")])
+        .status("working")
+        .build();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![s1]));
+    show_dashboard(&mut h);
+    let request_id = open_drawer(&mut h, "s1");
+    h.send(detail_reply("s1", &request_id, &busy_work()));
+    h.click_on("dashboard-drawer-s1-open-diff");
+    let opens: Vec<(String, String, Option<String>, Option<String>)> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::OpenDiffTab {
+                repo_id,
+                path,
+                against,
+                worktree_path,
+                ..
+            } => Some((repo_id, path, against, worktree_path)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opens,
+        vec![("r1".to_owned(), "src/a.rs".to_owned(), None, None)],
+        "the first changed file's diff, in the session's tree"
+    );
+}
+
+#[gpui::test]
+fn open_diff_is_absent_with_no_changed_files(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    let request_id = open_drawer(&mut h, "s1");
+    let landed = json!({
+        "commits": [{
+            "sha": "abc1234567890",
+            "short_sha": "abc1234",
+            "subject": "Add the drawer",
+            "at": minutes_ago(10),
+        }],
+        "landed": { "files": 7, "added": 212, "deleted": 48 },
+    });
+    h.send(detail_reply("s1", &request_id, &landed));
+    let cells = drawer(&mut h, "s1").expect("the drawer is open");
+    assert!(!cells.open_diff);
+    assert_eq!(
+        cells.work_header.as_deref(),
+        Some("7 files · +212 −48 landed")
+    );
+    assert!(drawn(&mut h, "dashboard-drawer-s1-go-to-pane"));
+    assert!(!drawn(&mut h, "dashboard-drawer-s1-open-diff"));
+}
+
+#[gpui::test]
+fn a_drawer_error_reply_shows_its_error(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    let request_id = open_drawer(&mut h, "s1");
+    h.send(DaemonMessage::Error {
+        message: "unknown session: s1".to_owned(),
+        request_id: Some(request_id),
+        code: Some("NOT_FOUND".to_owned()),
+    });
+    let cells = drawer(&mut h, "s1").expect("the drawer stays open");
+    assert_eq!(
+        cells.error.as_deref(),
+        Some("Couldn't load the session's detail: unknown session: s1")
+    );
+    assert!(drawn(&mut h, "dashboard-drawer-s1-error"));
+    assert!(
+        toasts(&mut h).is_empty(),
+        "the drawer shows it, not a toast"
+    );
+}
+
+#[gpui::test]
+fn a_reply_for_a_closed_drawer_is_dropped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    let first = open_drawer(&mut h, "s1");
+    h.click_on("dashboard-row-s1");
+    h.send(detail_reply("s1", &first, &busy_work()));
+    assert!(drawer(&mut h, "s1").is_none(), "the reply opens nothing");
+
+    let second = open_drawer(&mut h, "s1");
+    assert_ne!(first, second);
+    h.send(detail_reply("s1", &first, &busy_work()));
+    h.send(DaemonMessage::Error {
+        message: "unknown session: s1".to_owned(),
+        request_id: Some(first),
+        code: Some("NOT_FOUND".to_owned()),
+    });
+    let cells = drawer(&mut h, "s1").expect("the drawer is open");
+    assert!(!cells.loaded, "the closed drawer's reply is not drawn");
+    assert_eq!(cells.error, None, "nor its error");
+    assert!(toasts(&mut h).is_empty(), "no toast for a closed drawer");
+
+    h.send(detail_reply("s1", &second, &busy_work()));
+    assert!(drawer(&mut h, "s1").expect("still open").loaded);
+}
+
+#[gpui::test]
+fn a_session_detail_with_another_request_id_leaves_the_drawer_alone(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    let request_id = open_drawer(&mut h, "s1");
+    h.send(detail_reply("s1", "someone-else-1", &busy_work()));
+    let mut unasked = detail_reply("s1", "unused", &busy_work());
+    if let DaemonMessage::SessionDetail { request_id, .. } = &mut unasked {
+        *request_id = None;
+    }
+    h.send(unasked);
+    let cells = drawer(&mut h, "s1").expect("the drawer is open");
+    assert!(
+        !cells.loaded,
+        "another request's detail is not the drawer's"
+    );
+
+    h.send(detail_reply("s1", &request_id, &busy_work()));
+    assert!(drawer(&mut h, "s1").expect("still open").loaded);
+}
+
+#[gpui::test]
+fn a_reconnect_before_the_reply_asks_again(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    let first = open_drawer(&mut h, "s1");
+    h.send_welcome(support::PROTOCOL);
+    let again = detail_requests(&mut h);
+    assert_eq!(again.len(), 1, "one new request: {again:?}");
+    assert_eq!(again[0].0, "s1");
+    assert_ne!(again[0].1, first);
+
+    h.send(detail_reply("s1", &again[0].1, &busy_work()));
+    assert!(drawer(&mut h, "s1").expect("still open").loaded);
+    h.send_welcome(support::PROTOCOL);
+    assert!(
+        detail_requests(&mut h).is_empty(),
+        "a drawer with content keeps it until the next change"
+    );
+}
+
+#[gpui::test]
+fn a_drawer_whose_session_leaves_the_list_is_marked_ended(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1"), working("s2")]));
+    show_dashboard(&mut h);
+    let request_id = open_drawer(&mut h, "s1");
+    h.send(detail_reply("s1", &request_id, &busy_work()));
+
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![working("s2")],
+    });
+    h.send(facts_message(vec![facts("s1").context(40).build()]));
+    h.advance(std::time::Duration::from_secs(6));
+
+    let cells = drawer(&mut h, "s1").expect("the drawer stays open");
+    assert!(cells.ended, "a session the list no longer holds has ended");
+    assert_eq!(cells.summary.len(), 2, "its last content is kept");
+    assert!(
+        detail_requests(&mut h).is_empty(),
+        "a vanished session's drawer asks for nothing more"
+    );
+}
+
+#[gpui::test]
+fn drawer_refetch_is_throttled_to_once_per_five_seconds(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_dashboard(&mut h);
+    let request_id = open_drawer(&mut h, "s1");
+    h.send(detail_reply("s1", &request_id, &busy_work()));
+
+    h.send(facts_message(vec![facts("s1").context(40).build()]));
+    update(
+        &mut h,
+        session("s1")
+            .in_repo("r1")
+            .status("working")
+            .summary_lines("Newer", &[("Newer line", Utc::now())])
+            .build(),
+    );
+    assert!(
+        detail_requests(&mut h).is_empty(),
+        "a change inside 5 s of the last fetch waits"
+    );
+    h.advance(std::time::Duration::from_secs(4));
+    assert!(detail_requests(&mut h).is_empty(), "4 s is still inside");
+    h.advance(std::time::Duration::from_secs(1));
+    assert_eq!(
+        detail_requests(&mut h).len(),
+        1,
+        "the changes are fetched once, when 5 s have passed"
+    );
+
+    h.advance(std::time::Duration::from_secs(10));
+    assert!(
+        detail_requests(&mut h).is_empty(),
+        "nothing changed, so nothing is fetched"
+    );
+    h.send(facts_message(vec![facts("s1").context(50).build()]));
+    assert_eq!(
+        detail_requests(&mut h).len(),
+        1,
+        "a change 5 s after the last fetch is fetched at once"
     );
 }
 
@@ -1896,16 +2302,22 @@ fn an_ended_session_is_counted_in_its_fold_row(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_row_click_in_compact_opens_its_pane(cx: &mut TestAppContext) {
+fn compact_rows_still_open_their_pane(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
     show_compact(&mut h);
+    h.sent();
     h.click_on("dashboard-compact-row-s1");
     assert_eq!(
         h.root(|root, _| root.active_tab_id().map(str::to_owned)),
         Some("t1".to_owned()),
         "the session's pane is shown"
     );
+    assert!(
+        detail_requests(&mut h).is_empty(),
+        "a Compact row opens no drawer"
+    );
+    assert!(drawer(&mut h, "s1").is_none());
 }
 
 #[gpui::test]

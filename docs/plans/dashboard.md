@@ -12,7 +12,7 @@ With many sessions open, the user has no single place that answers "what is ever
 
 ## Rulings (owner)
 
-- **Layout**: the Dashboard is lane A of the mock, dense rows: one two-line row per session (session, Linear, what it runs now, summary, agents, context, 10-minute activity, runtime and last activity, cost), questions and permissions answered inline, subagents, gates and background shells nested under a working session, and a drawer per row with the running summary timeline, recent work and the Linear detail.
+- **Layout**: the Dashboard is lane A of the mock, dense rows: one two-line row per session (session, Linear, what it runs now, summary, agents, context, 10-minute activity, runtime and last activity, cost), questions and permissions answered inline, subagents, gates and background shells nested under a working session, and a drawer per row with the running summary timeline, the prompt and recent work.
 - **No speech**: text-to-speech is dropped entirely: no voices, spoken names or alert queue.
 - **Q3 refresh**: a summary on every stop, and every 3 minutes while the Dashboard is watched for a running session whose transcript grew.
 - **Q4 placement**: the Dashboard is a tab; a rail button or shortcut opens or focuses it.
@@ -62,7 +62,7 @@ Every container is one block and nothing scrolls: the owner asked for a summary 
 - **Past the view's height it folds:** the height is estimated, and while it exceeds the view the block with the most foldable sessions (Idle with nothing of their own running, at least two) folds them into its fold row as `+N idle` with their labels. Waiting, working and unseen-finished sessions never fold.
 - **Narrow widths drop parts in order:** the issue key, then the age, and below that the chips move under the session cell.
 - **Sizes follow the UI text size.**
-- **A click on a row** shows the session's pane, as a By status row's does. A waiting row does not answer from the row: answers stay in By status and the band. A queue chip's click opens By status scrolled to that row.
+- **A click on a row** shows the session's pane; a By status row's click opens its drawer instead. A waiting row does not answer from the row: answers stay in By status and the band. A queue chip's click opens By status scrolled to that row.
 - **With no agent listed** it draws `No agents running.`
 - **Driver ids:** `dashboard-compact`, `dashboard-compact-repo-{i}` (`-name`, `-tally-*`), `dashboard-compact-row-{id}` (`-glyph`, `-label`, `-state`, `-now`, `-now-text`, `-flag-{n}`, `-issue`, `-age`), `dashboard-compact-chips-{id}`, `dashboard-compact-chip-{id}-{n}` and `dashboard-compact-fold-{i}` (`-ended`, `-idle`, `-names`).
 
@@ -147,7 +147,7 @@ The daemon words rules 2 to 6 (ages `<1m`, `5m`, `1h05m`) in `crates/daemon/src/
 
 ### Nested rows
 
-Under a Working row, and in By status under any row whose drawer is open, one row per node of its agent tree below the main agent, indented by depth with a `└` branch: the node's glyph and name (a subagent's description, a dispatch run's title with a `dispatch` tag, `bg shell <id>`, `Monitor <id>`, `In gate · heavy 1`), what it runs now or its task (`Running Bash · 1m: <command>`, `finished · 2 findings, both fixed`, `exited 1 · 12m`), its own stuck flag, and its age.
+Under a Working row (and, planned in RT-789, in By status under any row whose drawer is open), one row per node of its agent tree below the main agent, indented by depth with a `└` branch: the node's glyph and name (a subagent's description, a dispatch run's title with a `dispatch` tag, `bg shell <id>`, `Monitor <id>`, `In gate · heavy 1`), what it runs now or its task (`Running Bash · 1m: <command>`, `finished · 2 findings, both fixed`, `exited 1 · 12m`), its own stuck flag, and its age.
 
 In By status a dispatch run's row also carries its own activity track. Finished nodes stay listed, dimmed, while their session's turn lasts.
 
@@ -165,13 +165,16 @@ Buttons are offered for a single question with single choice and for a permissio
 
 ### Drawer
 
-In By status, a click on a row toggles a drawer docked under it (`.drawer`), three columns:
+In By status, a click on a row toggles a drawer docked under it (`.drawer`), two columns and buttons. The click no longer opens the pane; Compact rows, the need-you band and queue chips still do.
 
-1. **Running summary**, newest first, with its source and age (`model, 3m ago`): the session's **summary ring**, each line after its window label (`now`, `5–15m`, `15–30m`, `30m+`). Under it, **Prompt**: the session's first prompt on one line.
-2. **Recent work**, headed by the changed-file count and lines (the client sums the lines of the files it receives, at most 50, with `files_total` the full count; `4 changed +165 −7`, or `7 files · +212 −48 landed` once the worktree is clean): the commits made since the session started (short sha, subject, age), the issues it moved to Done (`→ Done · <title>`), the uncommitted files (`M`/`A`/`D`, path, `+a −d`), and a pull-request line when the branch has one (`PR #118 · checks passed`). `Nothing yet` when empty.
-3. **Linear**, with its sync state: the issue line and title; Project, Release (with its done count), Worktree, Tokens (in and out) and Started; then `Go to pane`, `Open diff` (a diff tab of the worktree) and `Open <key>` (the issue's Linear URL in the browser).
+1. **Running summary**, newest first: the session's **summary ring**, each line after its window label (`now`, `5–15m`, `15–30m`, `30m+`), its text, and its source (the model, or the template) with its age (`<model>, 3m ago`). Under it, **Prompt**: the session's first prompt on one line.
+2. **Recent work**, headed by the changed-file count and lines (the client sums the lines of the files it receives, at most 50, with `files_total` the full count; `4 changed +165 −7`, or `7 files · +212 −48 landed` once the worktree is clean): the commits made since the session started (`<sha> <subject> · <age> ago`), the issues it moved to Done (`→ Done · <title>`), the uncommitted files (`M`/`A`/`D`, path, `+a −d`), and a pull-request line when the branch has one (`PR #118 · checks passed`, the state reading `checks passed`, `checks failed`, `checks running`, `open`, `merged` or `closed`).
 
-The drawer fetches its detail when it opens and again whenever its session's facts or summary change, at most every 5 s; it is never part of the row stream (OPS-67). A drawer whose session ends keeps what it last showed, marked ended.
+An empty column reads `Nothing yet` and a column still waiting for the reply reads `Loading…`. Below the columns sit `Go to pane` and `Open diff`, which shows only when there are changed files and opens a diff tab of the first one. The drawer has no Linear column and no `Open <key>` button.
+
+The client sends `GetSessionDetail` (request ids `dashboard-detail-N`) when the drawer opens and again whenever its session's facts or summary change, at most once per 5 s per drawer: a change inside the window is not dropped but fetched when the window ends. It is never part of the row stream (OPS-67). Drawer state is keyed by host and session. Once the session stops, the drawer reads `Session ended`, keeps what it last showed and fetches no more. A refusal reads `Couldn't load the session's detail: <message>`.
+
+Driver ids are `dashboard-drawer-{id}`, with `-summary`, `-summary-{n}`, `-prompt`, `-work`, `-work-{n}`, `-go-to-pane`, `-open-diff`, `-ended` and `-error`.
 
 **Orchestrator decision (not an owner ruling):** in By repo a click on a session row switches to By status with that row's drawer open, since the additions mock gives lane rows no drawer of their own.
 
@@ -255,11 +258,11 @@ The Dashboard reads Linear through the daemon's one Linear client and issue cach
 
 **Orchestrator decision (not an owner ruling):** the Dashboard adds to that client only what its rows need:
 
-- **Detection**: besides the titles and labels LL.3 scans, the session's branch (`feat/rt-443-settings-height` gives RT-443, case-insensitive) and then its first prompt (`/nextup RT-443`). The first match is the row's issue; one issue per session, no manual override. Its identifier joins LL.3's refresh set, and a drawer opening refetches a copy older than 1 minute, as a hover does.
+- **Detection**: besides the titles and labels LL.3 scans, the session's branch (`feat/rt-443-settings-height` gives RT-443, case-insensitive) and then its first prompt (`/nextup RT-443`). The first match is the row's issue; one issue per session, no manual override. Its identifier joins LL.3's refresh set, and a hover refetches a copy older than 1 minute.
 - **Issue fields**: the card's fields (identifier, title, state and its colour, priority, project, release) and the URL; plus each release's done and total counts for the header's bars, one more query batched with LL.3's refresh. Field names are checked against Linear's schema in DB.7's brief; none is measured here.
 - **Issues Done**: keys found in the session's branch, first prompt and commit messages since it started that Linear reports completed after `started_at`.
 - **Sync age**: the oldest `fetched_at` among the listed sessions' issues.
-- **Without a key**: the Linear column shows the detected key alone, and the drawer's Linear column carries linear-links.md's no-key notice (set `LINEAR_API_KEY`).
+- **Without a key**: the Linear column shows the detected key alone, with linear-links.md's no-key notice (set `LINEAR_API_KEY`).
 
 ### Recent work
 
@@ -395,7 +398,7 @@ Added and reshaped (DB.2), each new nested enum with `#[serde(other)] Unknown`:
 - `SessionFacts { session_id, now: NowLine, agents: Vec<AgentNode>, context_percent, tokens_in, tokens_out, cost_usd, activity: Vec<u16>, stuck: Vec<StuckReason>, last_activity_at, issue: Option<String>, model }`. Its `issue` is the detected identifier; the fields come from RT-133's `LinearIssues` cache.
 
   Then `AgentNode { key, kind, name, task, activity, state, started_at, stuck, children }`, `kind` one of subagent, dispatch, shell, monitor, gate; `DayTotals { cost_usd, tokens, commits, issues_done, releases }`.
-- `ClientMessage::GetSessionDetail { session_id, request_id }`; `DaemonMessage::SessionDetail { session_id, lines, prompt, work: RecentWork, request_id }`; the drawer's Linear column reads the client's copy of RT-133's cache, and the header's release counts ride `DayTotals.releases`.
+- `ClientMessage::GetSessionDetail { session_id, request_id }`; `DaemonMessage::SessionDetail { session_id, lines, prompt, work: RecentWork, request_id }`; the header's release counts ride `DayTotals.releases`.
 - `DaemonMessage::ActivityTracks { now, hours, segments: Vec<ActivitySegment> }`, `ActivitySegment { repo, key, kind, label, activity, from, to: Option<DateTime<Utc>> }`, `kind` one of session, dispatch, hold, gap: to watchers only (see "The status-change log and the activity track").
 - `ClientMessage::AnswerPrompt { session_id, since, choice, request_id }`, answered with no reply on success and refused with an `Error` carrying the `request_id` (`not_found`, `no_screen`, `invalid_request`, `chat_refused`, `busy`).
 - `TabContent::Dashboard`, with a new `#[serde(other)] Unknown` on `TabContent`; `ClientMessage::OpenDashboardTab { id }` answered with `DashboardTabOpened { id, tab_id }`.
@@ -487,7 +490,7 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 - [x] DB.13 Answer questions and permissions from the Dashboard. `crates/daemon/src/server/dashboard.rs` (`AnswerPrompt`: the same-prompt and screen checks, the choice mapper), `crates/daemon/src/chat_answer.rs` (the runner that types it), `apps/native/src/dashboard_rows.rs` (`ask_block`), `apps/native/src/dashboard_view.rs` (the ask block and buttons), `apps/native/src/dashboard_tab.rs` (the click and the refusal toast), `apps/native/tests/ui/ui_dashboard.rs`.
 
   Proof: a daemon test that an answer types the keys, and that a changed `status_since`, a changed prompt or a missing dialog refuses it; a spec that a button sends `AnswerPrompt` and a multi-select question shows only `Go to pane`. Waits on DB.2, DB.12.
-- [ ] DB.14 Open a drawer under a Dashboard row. `apps/native/src/dashboard.rs` (open drawers, detail requests), `apps/native/src/dashboard_view.rs` (the three columns and their buttons), `apps/native/src/lib.rs` (`SessionDetail`, Open diff, Open issue), `apps/native/tests/ui/ui_dashboard.rs`. Proof: specs that a row click sends `GetSessionDetail` and draws the reply, a second click closes it, an ended session's drawer stays marked ended, and the buttons route. Waits on DB.12, SA.6, DB.6, DB.7.
+- [x] DB.14 Open a drawer under a Dashboard row. `apps/native/src/dashboard.rs` (open drawers, detail requests), `apps/native/src/dashboard_view.rs` (the three columns and their buttons), `apps/native/src/lib.rs` (`SessionDetail`, Open diff, Open issue), `apps/native/tests/ui/ui_dashboard.rs`. Proof: specs that a row click sends `GetSessionDetail` and draws the reply, a second click closes it, an ended session's drawer stays marked ended, and the buttons route. Waits on DB.12, SA.6, DB.6, DB.7.
 - [ ] DB.15 Add the Dashboard settings tab. `apps/native/src/settings_view.rs` (the tab), `apps/native/src/text_input.rs` (a masked mode), `apps/native/src/lib.rs` (`SummarizerStatus`, `SummaryTest`), `apps/native/tests/ui/ui_settings.rs`. Proof: specs that Save sends `SetSummarizerKey` and clears the field, the key state follows `SummarizerStatus`, the Linear line follows `LinearContext`, and Test shows the reply. Waits on SA.5, RT-133's LL.1 and LL.3.
 - [x] DB.16 Word the toasts from the summaries. `apps/native/src/notify.rs`, `apps/native/src/lib.rs` (the held Finished toast, the Needs you body), `apps/native/tests/ui/ui_notifications.rs`. Proof: specs that a Finished toast waits for its `WaitingAlert` and takes its title and body, falls back after the hold, and a Needs you toast carries the prompt line. Waits on SA.6.
 - [x] DB.17 Refresh working sessions' summaries while the Dashboard is watched. `crates/daemon/src/summarizer/refresh.rs` (new: the 3-minute tick, provisional lines), `crates/daemon/src/dashboard/mod.rs` (the reader's last assistant text). Proof: a paused-clock test that an unchanged transcript makes no call, a grown one makes one, and none runs with no watcher or past half the cap. Waits on SA.6, DB.5.

@@ -3,8 +3,9 @@
 //! Compact draws in `dashboard_compact_view`; By status draws here: the
 //! column header, then each group's heading and its two-line rows, a Working
 //! row's agent tree nested below it. Every text and number comes from
-//! `dashboard_rows`; this file only lays them out. A row click shows the
-//! session's pane, a queue chip click scrolls its row into view (from
+//! `dashboard_rows`; this file only lays them out. A row click toggles the
+//! drawer docked under it, whose `Go to pane` shows the session's pane and
+//! whose `Open diff` opens its first changed file; a queue chip click scrolls its row into view (from
 //! Compact it first opens By status), and while the tab is active a timer
 //! repaints the ages; the day figures shrink before the view toggle moves.
 
@@ -22,9 +23,10 @@ use crate::activity_track::{BarRun, HoldTick, RunKind, Track};
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::dashboard::{self, DashboardRow, GroupKind, HeaderCounts};
 use crate::dashboard_rows::{
-    AskBlock, AskChoice, Columns, GO_TO_PANE, HeaderFigures, NestedRow, QUEUE_HINT, QueueChip,
-    RowCells, RowInput, agent_glyph, header_figures, header_pills, queue_chips, row_cells,
-    visible_columns,
+    AskBlock, AskChoice, Columns, DASH, DRAWER_ENDED, DRAWER_LOADING, DRAWER_PROMPT,
+    DRAWER_SUMMARY, DRAWER_WORK, DrawerCells, GO_TO_PANE, HeaderFigures, NOTHING_YET, NestedRow,
+    OPEN_DIFF, QUEUE_HINT, QueueChip, RowCells, RowInput, agent_glyph, header_figures,
+    header_pills, queue_chips, row_cells, visible_columns,
 };
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
@@ -231,6 +233,9 @@ impl RootView {
                     .copied()
                     .unwrap_or(t.text_2);
                 body.push(self.dashboard_row(cells, columns, accent, cx));
+                if let Some(drawer) = self.dashboard_drawer(&cells.session_id) {
+                    body.push(drawer_element(&drawer, cx));
+                }
                 if let Some(ask) = &cells.ask {
                     let answer_out = self
                         .sidebar
@@ -440,8 +445,8 @@ impl RootView {
             })
             .child(fixed(RUN_W).child(numbers(offset, &cells.run, &cells.last, &t)))
             .child(fixed(COST_W).child(numbers(offset, &cells.cost, &cells.tokens, &t)))
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.select_session(&id, window, cx);
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.toggle_dashboard_drawer(&id, cx);
             }))
             .into_any_element()
     }
@@ -498,6 +503,243 @@ impl RootView {
             .any(|at| (now - at).num_seconds() < FRESH_BELOW_SECONDS);
         if fresh { FAST_REPAINT } else { SLOW_REPAINT }
     }
+}
+
+/// The drawer under an open row, tagged `dashboard-drawer-{id}`: an error
+/// line (`-error`) while the last request was refused; the running summary
+/// (`-summary`) over the prompt (`-prompt`) beside the recent work
+/// (`-work`); then `Go to pane` (`-go-to-pane`), `Open diff`
+/// (`-open-diff`) while the session has changed files, and the ended mark
+/// (`-ended`).
+fn drawer_element(cells: &DrawerCells, cx: &mut Context<RootView>) -> AnyElement {
+    let t = theme(cx);
+    let offset = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
+    let name = format!("dashboard-drawer-{}", cells.session_id);
+    let selector = name.clone();
+    let error = cells.error.clone().map(|error| {
+        let id = format!("{name}-error");
+        line_text(&id, &error)
+            .text_color(gpui::rgb(t.danger_text))
+            .driver_id(move || id)
+    });
+    div()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .pl(px(PAD_LEFT + GLYPH_W + GAP))
+        .pr(px(PAD_RIGHT))
+        .py(px(10.0))
+        .bg(gpui::rgb(t.surface))
+        .border_t_1()
+        .border_color(gpui::rgb(t.line))
+        .driver_id(move || selector)
+        .when_some(error, ParentElement::child)
+        .child(
+            div()
+                .flex()
+                .gap(px(24.0))
+                .child(drawer_summary_column(offset, shift, &name, cells, &t))
+                .child(drawer_work_column(offset, shift, &name, cells, &t)),
+        )
+        .child(drawer_buttons(&name, cells, cx))
+        .into_any_element()
+}
+
+/// What an empty drawer column reads: `Loading…` before the first answer,
+/// then `Nothing yet`.
+fn drawer_placeholder(cells: &DrawerCells) -> &'static str {
+    if cells.loaded {
+        NOTHING_YET
+    } else {
+        DRAWER_LOADING
+    }
+}
+
+/// A drawer column's heading, in the group headings' capitals.
+fn drawer_heading(offset: i8, shift: i8, text: &str, t: &UiTheme) -> Div {
+    div()
+        .text_size(crate::fonts::ui_px_at(offset, CAPS_TEXT))
+        .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
+        .text_color(gpui::rgb(t.text_2))
+        .child(text.to_uppercase())
+}
+
+/// The drawer's first column: the summary ring, each line after its window
+/// label and before its source and age, then the first prompt.
+fn drawer_summary_column(
+    offset: i8,
+    shift: i8,
+    name: &str,
+    cells: &DrawerCells,
+    t: &UiTheme,
+) -> Div {
+    let small = crate::fonts::ui_px_at(offset, SMALL_TEXT);
+    let lines: Vec<AnyElement> = if cells.summary.is_empty() {
+        vec![
+            div()
+                .text_color(gpui::rgb(t.subtle))
+                .child(drawer_placeholder(cells))
+                .into_any_element(),
+        ]
+    } else {
+        cells
+            .summary
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .min_w(px(0.0))
+                    .child(
+                        fixed(52.0)
+                            .text_size(small)
+                            .text_color(gpui::rgb(t.subtle))
+                            .child(line.window),
+                    )
+                    .child(
+                        flexible().child(line_text(&format!("{name}-summary-{index}"), &line.text)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(small)
+                            .text_color(gpui::rgb(t.subtle))
+                            .child(line.meta.clone()),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    };
+    let summary_id = format!("{name}-summary");
+    let prompt_id = format!("{name}-prompt");
+    let prompt = cells.prompt.clone().unwrap_or_else(|| DASH.to_owned());
+    flexible()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .driver_id(move || summary_id)
+                .child(drawer_heading(offset, shift, DRAWER_SUMMARY, t))
+                .children(lines),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(drawer_heading(offset, shift, DRAWER_PROMPT, t))
+                .child(line_text(&prompt_id, &prompt).driver_id(move || prompt_id.clone())),
+        )
+}
+
+/// The drawer's second column: its figures beside the heading, then each
+/// commit, finished issue, changed file and the pull request.
+fn drawer_work_column(offset: i8, shift: i8, name: &str, cells: &DrawerCells, t: &UiTheme) -> Div {
+    let lines: Vec<AnyElement> = if cells.work.is_empty() {
+        vec![
+            div()
+                .text_color(gpui::rgb(t.subtle))
+                .child(drawer_placeholder(cells))
+                .into_any_element(),
+        ]
+    } else {
+        cells
+            .work
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                line_text(&format!("{name}-work-{index}"), line).into_any_element()
+            })
+            .collect()
+    };
+    let work_id = format!("{name}-work");
+    flexible()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .driver_id(move || work_id)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(drawer_heading(offset, shift, DRAWER_WORK, t))
+                .when_some(cells.work_header.clone(), |heading, figures| {
+                    heading.child(
+                        div()
+                            .text_size(crate::fonts::ui_px_at(offset, SMALL_TEXT))
+                            .text_color(gpui::rgb(t.text_2))
+                            .child(figures),
+                    )
+                }),
+        )
+        .children(lines)
+}
+
+/// The drawer's buttons, `Go to pane` then `Open diff` while there are
+/// changed files, and the ended mark.
+fn drawer_buttons(name: &str, cells: &DrawerCells, cx: &mut Context<RootView>) -> Div {
+    let t = theme(cx);
+    let offset = crate::fonts::ui_text_size(cx);
+    let shift = crate::fonts::ui_weight_shift(cx);
+    let go = cells.session_id.clone();
+    let diff = cells.session_id.clone();
+    let ended_id = format!("{name}-ended");
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            outlined_button(
+                offset,
+                shift,
+                &format!("{name}-go-to-pane"),
+                ButtonSize::Compact,
+                true,
+                Layer::Base,
+                &t,
+            )
+            .text_color(gpui::rgb(t.text_2))
+            .child(GO_TO_PANE)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.select_session(&go, window, cx);
+            })),
+        )
+        .when(cells.open_diff, |row| {
+            row.child(
+                outlined_button(
+                    offset,
+                    shift,
+                    &format!("{name}-open-diff"),
+                    ButtonSize::Compact,
+                    true,
+                    Layer::Base,
+                    &t,
+                )
+                .text_color(gpui::rgb(t.text_2))
+                .child(OPEN_DIFF)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                    this.open_drawer_diff(&diff);
+                })),
+            )
+        })
+        .when(cells.ended, |row| {
+            row.child(
+                div()
+                    .text_size(crate::fonts::ui_px_at(offset, SMALL_TEXT))
+                    .text_color(gpui::rgb(t.subtle))
+                    .driver_id(move || ended_id)
+                    .child(DRAWER_ENDED),
+            )
+        })
 }
 
 /// The ask block under a waiting row, tagged `dash-ask-{id}`: its label and
