@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use protocol::{ClientMessage, MemberSpawnPreview, WorktreeReusePolicy};
 
+use crate::target::HostKey;
+
 /// How long a repo's preview waits after the last change to its fields.
 pub(crate) const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -15,16 +17,19 @@ pub(crate) const REUSE_NOTE: &str =
     "(keeps its existing fork point; the base branch is not applied)";
 pub(crate) const RECREATE_LABEL: &str = "Recreate from the base branch";
 
-/// The fields a preview answers for: the target, the trimmed branch and
-/// the trimmed base (`None` when empty).
+/// The fields a preview answers for: the target on its host, the trimmed
+/// branch and the trimmed base (`None` when empty). Two hosts' ids can
+/// coincide, so the host is part of the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreviewKey {
     Repo {
+        host: HostKey,
         repo_id: String,
         branch: String,
         base: Option<String>,
     },
     Workspace {
+        host: HostKey,
         workspace_id: String,
         branch: String,
         base: Option<String>,
@@ -38,6 +43,7 @@ impl PreviewKey {
                 repo_id,
                 branch,
                 base,
+                ..
             } => ClientMessage::PreviewSpawn {
                 repo_id: repo_id.clone(),
                 branch_name: branch.clone(),
@@ -49,6 +55,7 @@ impl PreviewKey {
                 workspace_id,
                 branch,
                 base,
+                ..
             } => ClientMessage::PreviewWorkspaceSpawn {
                 workspace_id: workspace_id.clone(),
                 branch_name: branch.clone(),
@@ -383,6 +390,7 @@ mod tests {
         PREVIEW_DEBOUNCE, Preview, PreviewKey, ReuseChoice, Tone, collision_notice, member_row,
         staleness_notice,
     };
+    use crate::target::HostKey;
 
     fn member(repo_id: &str) -> MemberSpawnPreview {
         MemberSpawnPreview {
@@ -404,11 +412,45 @@ mod tests {
     }
 
     fn repo_key(branch: &str, base: Option<&str>) -> PreviewKey {
+        repo_key_on(HostKey::Local, branch, base)
+    }
+
+    fn repo_key_on(host: HostKey, branch: &str, base: Option<&str>) -> PreviewKey {
         PreviewKey::Repo {
+            host,
             repo_id: "r1".to_owned(),
             branch: branch.to_owned(),
             base: base.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn a_preview_follows_a_move_to_the_same_repo_on_another_host() {
+        let now = Instant::now();
+        let mut preview = Preview::default();
+        preview.follow(Some(repo_key("b", None)), now);
+        preview.take_due(now + PREVIEW_DEBOUNCE);
+        assert!(preview.on_repo_reply("r1", "b", &member("r1"), None));
+        assert_eq!(preview.members().len(), 1);
+
+        let other_host = repo_key_on(HostKey::Remote("box".to_owned()), "b", None);
+        preview.follow(Some(other_host), now + PREVIEW_DEBOUNCE);
+
+        assert_eq!(
+            preview.members(),
+            [],
+            "This PC's preview is not the other host's repo"
+        );
+        assert_eq!(preview.reuse(), ReuseChoice::Reuse);
+        assert_eq!(
+            preview.due(),
+            Some(now + PREVIEW_DEBOUNCE * 2),
+            "a new request waits out the debounce"
+        );
+        assert!(matches!(
+            preview.take_due(now + PREVIEW_DEBOUNCE * 2),
+            Some(ClientMessage::PreviewSpawn { repo_id, .. }) if repo_id == "r1"
+        ));
     }
 
     #[test]
@@ -493,6 +535,7 @@ mod tests {
         let now = Instant::now();
         let mut preview = Preview::default();
         let key = PreviewKey::Workspace {
+            host: HostKey::Local,
             workspace_id: "w1".to_owned(),
             branch: "b".to_owned(),
             base: None,

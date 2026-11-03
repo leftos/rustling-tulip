@@ -217,7 +217,7 @@ impl EnvRow {
     }
 
     /// The value is an exact `${secret:…}` reference, typed or prefilled:
-    /// a value sealed on This PC.
+    /// a value sealed on the host the row came from.
     fn is_secret_reference(&self) -> bool {
         matches!(env_rows::reference(&self.value), Some(Reference::Secret(_)))
     }
@@ -251,9 +251,10 @@ pub(crate) enum EnvRowNote {
 }
 
 /// The env section's line after a target move to another host dropped its
-/// `${secret:…}` rows.
-pub(crate) const SECRET_ROWS_DROPPED_NOTE: &str =
-    "Secret rows were removed: they are sealed on This PC.";
+/// `${secret:…}` rows: they were sealed on `host_label`.
+pub(crate) fn secret_rows_dropped_note(host_label: &str) -> String {
+    format!("Secret rows were removed: they are sealed on {host_label}.")
+}
 
 pub(crate) const ENV_SAVED_NOTE: &str =
     "Saved in Windows Credential Manager; only a reference is kept.";
@@ -807,9 +808,9 @@ struct Advanced {
     /// The user opened or closed it, so it no longer follows the values.
     chosen: bool,
     env: Vec<EnvRow>,
-    /// A target move to another host dropped `${secret:…}` rows; the env
-    /// section says so until its next edit.
-    secrets_dropped: bool,
+    /// A target move to another host dropped `${secret:…}` rows, sealed on
+    /// that host; the env section's note says so until its next edit.
+    secrets_dropped: Option<String>,
 }
 
 /// Which runtime defaults the user has overridden.
@@ -1288,14 +1289,29 @@ impl SpawnForm {
             .chosen_agent()
             .is_some_and(|choice| choice.options.advanced_set());
         self.advanced.open =
-            agent_set || !self.advanced.env.is_empty() || self.advanced.secrets_dropped;
+            agent_set || !self.advanced.env.is_empty() || self.advanced.secrets_dropped.is_some();
     }
 
     /// The target moved to another host: the agents and their Settings
     /// values become that host's, a chosen agent it does not list falls
     /// back to the first it lists, and `${secret:…}` env rows go, since
-    /// their values are sealed on This PC.
-    fn follow_host(&mut self) {
+    /// their values are sealed on the host the target left.
+    fn follow_host(&mut self, from: &HostKey) {
+        self.adopt_target_agents();
+        let before = self.advanced.env.len();
+        self.advanced.env.retain(|row| !row.is_secret_reference());
+        if self.advanced.env.len() != before {
+            self.advanced.secrets_dropped = Some(secret_rows_dropped_note(&self.host_label(from)));
+            self.env_list.close();
+            self.env_list_row = None;
+        }
+    }
+
+    /// The target host's agents and their Settings values, adopted: each
+    /// agent's options are reseeded, a chosen agent the host does not list
+    /// falls back to the first it lists, and an untouched runtime takes the
+    /// target's defaults, as it would on a target change.
+    fn adopt_target_agents(&mut self) {
         let (agents, settings) = host_in(&self.hosts, self.target.host())
             .map(|h| (h.agents.clone(), h.agent_settings.clone()))
             .unwrap_or_default();
@@ -1304,21 +1320,21 @@ impl SpawnForm {
         if self.runtime.touched.agent {
             self.runtime.agent = self.listed_agent(self.runtime.agent.clone());
         }
-        let before = self.advanced.env.len();
-        self.advanced.env.retain(|row| !row.is_secret_reference());
-        if self.advanced.env.len() != before {
-            self.advanced.secrets_dropped = true;
-            self.env_list.close();
-            self.env_list_row = None;
-        }
+        self.apply_runtime_defaults();
+    }
+
+    /// `host` as the dialog's Target list names it.
+    fn host_label(&self, host: &HostKey) -> String {
+        host_in(&self.hosts, host).map_or_else(
+            || crate::sidebar::host_label(host),
+            |inputs| inputs.label.clone(),
+        )
     }
 
     /// The env section's note after a host move dropped secret rows, until
     /// the next edit there.
-    pub(crate) fn env_section_note(&self) -> Option<&'static str> {
-        self.advanced
-            .secrets_dropped
-            .then_some(SECRET_ROWS_DROPPED_NOTE)
+    pub(crate) fn env_section_note(&self) -> Option<&str> {
+        self.advanced.secrets_dropped.as_deref()
     }
 
     /// `agent` when the daemon lists it, else the first agent it lists.
@@ -1417,10 +1433,11 @@ impl SpawnForm {
         cache: &mut BranchCache,
         now: Instant,
     ) -> Vec<ClientMessage> {
-        let moved = target.host() != self.target.host();
+        let from = self.target.host().clone();
+        let moved = target.host() != &from;
         self.target = target;
         if moved {
-            self.follow_host();
+            self.follow_host(&from);
         }
         self.apply_runtime_defaults();
         self.use_worktree = self.entry_default_use_worktree();
@@ -1727,14 +1744,17 @@ impl SpawnForm {
             .filter(|base| !base.is_empty())
             .map(str::to_owned);
         Some(match &self.target {
-            Target::Repo { id: repo_id, .. } => PreviewKey::Repo {
+            Target::Repo { host, id: repo_id } => PreviewKey::Repo {
+                host: host.clone(),
                 repo_id: repo_id.clone(),
                 branch,
                 base,
             },
             Target::Workspace {
-                id: workspace_id, ..
+                host,
+                id: workspace_id,
             } => PreviewKey::Workspace {
+                host: host.clone(),
                 workspace_id: workspace_id.clone(),
                 branch,
                 base,
@@ -2088,13 +2108,19 @@ impl SpawnForm {
         cache: &mut BranchCache,
         now: Instant,
     ) -> Option<Vec<ClientMessage>> {
-        match self.hosts.iter_mut().find(|h| h.host == inputs.host) {
+        let host = inputs.host.clone();
+        match self.hosts.iter_mut().find(|h| h.host == host) {
             Some(slot) => {
                 slot.repos = inputs.repos;
                 slot.workspaces = inputs.workspaces;
+                slot.agents = inputs.agents;
+                slot.agent_settings = inputs.agent_settings;
                 slot.offline = inputs.offline;
             }
             None => self.hosts.push(inputs),
+        }
+        if host == *self.target.host() {
+            self.adopt_target_agents();
         }
         self.target_list.highlight = self.resolved_highlight();
         let targets = self.targets();
@@ -2515,7 +2541,7 @@ impl SpawnForm {
     /// The user typed in row `index`'s key field. Until the user touches
     /// the row's Secret toggle, it follows the key's name pattern.
     pub(crate) fn edit_env_key(&mut self, index: usize, text: &str) {
-        self.advanced.secrets_dropped = false;
+        self.advanced.secrets_dropped = None;
         if let Some(row) = self.advanced.env.get_mut(index) {
             text.clone_into(&mut row.key);
             let secret = is_secret_key(row.key.trim());
@@ -2529,7 +2555,7 @@ impl SpawnForm {
     /// The user typed in row `index`'s value field. A `$` typed into an
     /// empty value opens the variable-name list under it.
     pub(crate) fn edit_env_value(&mut self, index: usize, text: &str) {
-        self.advanced.secrets_dropped = false;
+        self.advanced.secrets_dropped = None;
         let Some(row) = self.advanced.env.get_mut(index) else {
             return;
         };
@@ -3089,7 +3115,7 @@ impl SpawnForm {
                 | Control::EnvSecret(_)
                 | Control::EnvReplace(_)
         ) {
-            self.advanced.secrets_dropped = false;
+            self.advanced.secrets_dropped = None;
         }
         match control {
             Control::FieldChoice { field, choice } => self.choose_option(field, choice),
@@ -3897,9 +3923,155 @@ mod tests {
             .map(|row| (row.key.as_str(), row.value.as_str()))
             .collect();
         assert_eq!(rows, [("PLAIN", "1")], "the plain row stays");
-        assert_eq!(form.env_section_note(), Some(SECRET_ROWS_DROPPED_NOTE));
+        assert_eq!(
+            form.env_section_note(),
+            Some("Secret rows were removed: they are sealed on This PC.")
+        );
         form.edit_env_value(0, "2");
         assert_eq!(form.env_section_note(), None, "gone after the next edit");
+
+        press(&mut form, &Control::EnvAdd);
+        form.edit_env_key(1, "TOKEN");
+        form.edit_env_value(1, "${secret:0123456789abcdef0123456789abcdef}");
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r1")),
+        );
+
+        assert_eq!(form.host(), &HostKey::Local);
+        assert_eq!(
+            form.env_section_note(),
+            Some("Secret rows were removed: they are sealed on box."),
+            "the note names the host the rows were sealed on"
+        );
+    }
+
+    #[test]
+    fn a_known_hosts_registry_refreshes_its_agents() {
+        let mut box_agent = agent_registry::descriptors()
+            .into_iter()
+            .next()
+            .expect("the registry lists an agent");
+        box_agent.id = AgentId("box-agent".to_owned());
+        let remote_agents = vec![box_agent];
+        let remote_runtimes: Vec<Runtime> = remote_agents
+            .iter()
+            .map(|d| Runtime::Agent(d.id.clone()))
+            .chain([Runtime::PlainShell])
+            .collect();
+        let mut setup = Setup::repos(vec![repo("r1")]);
+        setup.others = vec![box_inputs(&["r2"], Vec::new(), BTreeMap::new())];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        press(&mut form, &Control::Target(Target::repo(&box_host(), "r2")));
+        assert_eq!(
+            form.runtimes(),
+            [Runtime::PlainShell],
+            "the host listed none when the dialog opened"
+        );
+
+        let cache = &mut BranchCache::default();
+        form.set_registry(
+            box_inputs(&["r2"], remote_agents.clone(), BTreeMap::new()),
+            cache,
+            Instant::now(),
+        )
+        .expect("the target stays, so the dialog stays");
+        assert_eq!(
+            form.runtimes(),
+            remote_runtimes,
+            "the target's own host lists its agents now"
+        );
+
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r1")),
+        );
+        form.set_registry(
+            box_inputs(&["r2"], Vec::new(), BTreeMap::new()),
+            cache,
+            Instant::now(),
+        )
+        .expect("the target stays, so the dialog stays");
+        press(&mut form, &Control::Target(Target::repo(&box_host(), "r2")));
+        assert_eq!(
+            form.runtimes(),
+            [Runtime::PlainShell],
+            "the other host's refresh took its agents away"
+        );
+
+        form.set_registry(
+            box_inputs(&["r2"], remote_agents.clone(), BTreeMap::new()),
+            cache,
+            Instant::now(),
+        )
+        .expect("the target stays, so the dialog stays");
+        press(
+            &mut form,
+            &Control::Target(Target::repo(&HostKey::Local, "r1")),
+        );
+        press(&mut form, &Control::Target(Target::repo(&box_host(), "r2")));
+        assert_eq!(
+            form.runtimes(),
+            remote_runtimes,
+            "a host that reconnects while it is not the target lists its agents once picked"
+        );
+    }
+
+    #[test]
+    fn a_refreshed_agent_can_be_spawned() {
+        let mut box_agent = agent_registry::descriptors()
+            .into_iter()
+            .next()
+            .expect("the registry lists an agent");
+        box_agent.id = AgentId("box-agent".to_owned());
+        let remote_agents = vec![box_agent];
+        let agent_id = AgentId("box-agent".to_owned());
+        let mut setup = Setup::repos(vec![repo("r1")]);
+        setup.others = vec![box_inputs(&["r2"], Vec::new(), BTreeMap::new())];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        press(&mut form, &Control::Target(Target::repo(&box_host(), "r2")));
+        assert_eq!(form.runtime(), Runtime::PlainShell, "the host lists none");
+
+        form.set_registry(
+            box_inputs(&["r2"], remote_agents, BTreeMap::new()),
+            &mut BranchCache::default(),
+            Instant::now(),
+        )
+        .expect("the target stays, so the dialog stays");
+
+        assert_eq!(
+            form.runtime(),
+            Runtime::Agent(agent_id.clone()),
+            "an untouched runtime takes the first agent the host now lists"
+        );
+        assert!(
+            !form.option_fields().is_empty(),
+            "the agent's fields are listed"
+        );
+        assert_eq!(
+            form.build_request()
+                .0
+                .agent
+                .map(|selection| selection.agent),
+            Some(agent_id.clone()),
+            "the spawn names the agent"
+        );
+
+        press(
+            &mut form,
+            &Control::Runtime(Runtime::Agent(agent_id.clone())),
+        );
+        form.set_registry(
+            box_inputs(&["r2"], Vec::new(), BTreeMap::new()),
+            &mut BranchCache::default(),
+            Instant::now(),
+        )
+        .expect("the target stays, so the dialog stays");
+        assert_eq!(
+            form.runtime(),
+            Runtime::PlainShell,
+            "a chosen agent the host no longer lists is not left chosen"
+        );
     }
 
     #[test]

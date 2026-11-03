@@ -6,7 +6,7 @@ use crate::support;
 use gpui::{TestAppContext, px};
 use protocol::{AgentId, ClientMessage, DaemonMessage, SpawnRequest, SpawnTarget, SuggestTarget};
 use rustling_tulip_native::target::Target;
-use rustling_tulip_native::{Connection, NetEvent};
+use rustling_tulip_native::{Connection, NetEvent, RootView};
 use support::{Fixture, Harness, TestDir, repo, session};
 
 /// The tailnet host the specs connect beside This PC.
@@ -399,4 +399,55 @@ fn with_no_repo_on_any_host_the_dialog_is_in_its_no_repos_state(cx: &mut TestApp
 
     assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
     assert!(shows(&mut h, "spawn-no-repos-note", "No repos yet."));
+}
+
+const SEALED: &str = "${secret:0123456789abcdef0123456789abcdef}";
+
+/// Adds one env row with `key` and `value`, pasted, with Advanced open.
+fn add_env_row(h: &mut Harness<'_>, key: &str, value: &str) {
+    h.click_on("spawn-env-add");
+    h.set_clipboard(key);
+    h.keys("ctrl-v tab");
+    h.set_clipboard(value);
+    h.keys("ctrl-v");
+}
+
+#[gpui::test]
+fn a_registry_update_that_snaps_the_target_redraws_its_env_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
+    h.click_on(&format!("spawn-target-repo-r2@{REMOTE}"));
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(1400.0)));
+    h.click_on("spawn-advanced");
+    add_env_row(&mut h, "TOKEN", SEALED);
+    add_env_row(&mut h, "PLAIN", "1");
+    assert_eq!(
+        h.root(RootView::spawn_dialog_env),
+        Some(vec![
+            ("TOKEN".to_owned(), SEALED.to_owned()),
+            ("PLAIN".to_owned(), "1".to_owned()),
+        ]),
+        "both rows are drawn"
+    );
+
+    h.host(&remote())
+        .send(DaemonMessage::Repos { repos: Vec::new() });
+
+    assert_eq!(
+        selected_targets(&mut h),
+        ["spawn-target-repo-r1".to_owned()],
+        "the target snapped to This PC"
+    );
+    assert_eq!(
+        h.root(RootView::spawn_dialog_env),
+        Some(vec![("PLAIN".to_owned(), "1".to_owned())]),
+        "the row the move dropped is not drawn"
+    );
+    assert_eq!(
+        h.root(|root, _| root.spawn_dialog_env_section_note()),
+        Some("Secret rows were removed: they are sealed on box.".to_owned()),
+        "the note names the host the rows were sealed on"
+    );
 }

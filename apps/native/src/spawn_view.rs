@@ -445,8 +445,11 @@ impl RootView {
     /// The env section's note after a move to another host dropped secret
     /// rows, while the dialog is open and shows it.
     #[must_use]
-    pub fn spawn_dialog_env_section_note(&self) -> Option<&'static str> {
-        self.form_dialog()?.form.env_section_note()
+    pub fn spawn_dialog_env_section_note(&self) -> Option<String> {
+        self.form_dialog()?
+            .form
+            .env_section_note()
+            .map(str::to_owned)
     }
 
     /// The note env row `index` shows about where its value is kept, while
@@ -1459,13 +1462,18 @@ impl RootView {
             let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
                 return;
             };
-            match dialog
+            let Some(messages) = dialog
                 .form
                 .set_registry(inputs, &mut self.branch_cache, now)
-            {
-                Some(messages) => messages,
-                None => return self.close_spawn_dialog(window, cx),
-            }
+            else {
+                return self.close_spawn_dialog(window, cx);
+            };
+            // A registry change can move the target across hosts, which
+            // swaps the agents and drops `${secret:…}` rows.
+            self.sync_env_inputs(window, cx);
+            self.sync_option_inputs(window, cx);
+            self.apply_spawn_focus(window, cx);
+            messages
         } else {
             match dialog.form.on_message(host, msg) {
                 Some(messages) => messages,
@@ -3063,7 +3071,10 @@ fn env_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) 
         .map(|(index, inputs)| env_row(dialog, index, inputs, focus, cx))
         .collect();
     let empty = rows.is_empty().then(|| muted(NO_ENV, &t));
-    let dropped = dialog.form.env_section_note().map(|text| muted(text, &t));
+    let dropped = dialog
+        .form
+        .env_section_note()
+        .map(|text| muted(text.to_owned(), &t));
     let add = spawn_button(&Control::EnvAdd, OUTLINED, "+ Add env var", true, focus, cx);
     field(
         crate::fonts::ui_text_size(cx),
