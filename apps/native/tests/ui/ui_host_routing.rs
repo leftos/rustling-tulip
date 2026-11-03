@@ -7,7 +7,7 @@ use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
     AgentDescriptor, AgentId, CheckoutStrategy, ClientMessage, DaemonMessage, InitLayoutKind,
     SessionMode, SessionSnapshot, SpawnRequest, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
-    VscodeWorkspaceSuggestion, WorktreeReusePolicy,
+    VscodeWorkspaceSuggestion, WorktreeCleanupFailure, WorktreeReusePolicy,
 };
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, HeaderChipKind, NetEvent, OpenIn, OpenOutcome, PopoutKey};
@@ -657,6 +657,137 @@ fn this_pcs_tab_list_leaves_a_remote_hosts_chooser_open(cx: &mut TestAppContext)
     assert!(
         h.root(|root, _| root.layout_chooser_open()),
         "only the remote host's own answer closes its chooser"
+    );
+}
+
+/// A failed cleanup of session `id`, one worktree left on disk.
+fn cleanup_failure(id: &str) -> DaemonMessage {
+    DaemonMessage::WorktreeCleanupFailed {
+        session_id: id.to_owned(),
+        session_label: format!("feat/{id}"),
+        failures: vec![WorktreeCleanupFailure {
+            member_path: format!("C:/wts/wt.{id}/a"),
+            repo_path: "C:/src/a".to_owned(),
+            reason: "fs::remove_dir_all: access denied".to_owned(),
+            locking_processes: Vec::new(),
+        }],
+    }
+}
+
+/// The session whose failed cleanup is on screen.
+fn cleanup_on_screen(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.cleanup_failed_session().map(str::to_owned))
+}
+
+#[gpui::test]
+fn a_remote_hosts_reset_drops_only_its_cleanup_failures(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+    h.send(cleanup_failure("a1"));
+    h.host(&remote()).send(cleanup_failure("b1"));
+    assert_eq!(cleanup_on_screen(&mut h).as_deref(), Some("a1"));
+
+    h.host(&remote()).connect();
+    assert_eq!(
+        cleanup_on_screen(&mut h).as_deref(),
+        Some("a1"),
+        "This PC's failure stays on screen"
+    );
+    h.click_on("cleanup-ignore");
+
+    assert_eq!(
+        cleanup_on_screen(&mut h),
+        None,
+        "the remote host's failure went with its reset"
+    );
+}
+
+#[gpui::test]
+fn this_pcs_reset_keeps_a_remote_hosts_cleanup_failure(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+    h.host(&remote()).send(cleanup_failure("b1"));
+    h.send(cleanup_failure("a1"));
+
+    this_pc_reconnects(&mut h);
+
+    assert_eq!(
+        cleanup_on_screen(&mut h).as_deref(),
+        Some("b1"),
+        "the remote host's failure outlives This PC's reset"
+    );
+}
+
+#[gpui::test]
+fn this_pcs_reset_leaves_the_keyboard_on_a_remote_hosts_cleanup_failure(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // A repo, so the spawn dialog has something to open on.
+    let mut fixture = Fixture::single(session("a1").build());
+    fixture.repos = vec![repo("r1", "C:/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.host(&remote()).connect();
+    h.click_on("sidebar-add-session");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "This PC's spawn dialog opened"
+    );
+    h.host(&remote()).send(cleanup_failure("b1"));
+
+    this_pc_reconnects(&mut h);
+
+    assert!(
+        h.root(|root, _| root.cleanup_failed_focus()).is_some(),
+        "the remote host's failure is still up"
+    );
+    let root = h.root.clone();
+    let holds =
+        h.cx.update(|window, cx| root.read(cx).cleanup_failed_holds_keyboard(window));
+    assert!(holds, "the dialog on screen keeps the keyboard");
+    h.keys("escape");
+    assert_eq!(cleanup_on_screen(&mut h), None, "Esc ignores it");
+}
+
+#[gpui::test]
+fn a_remote_hosts_tab_list_closes_its_chooser(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+    h.host(&remote()).send(layout_question(1));
+    assert!(h.root(|root, _| root.layout_chooser_open()));
+
+    h.host(&remote())
+        .send(DaemonMessage::Tabs { tabs: Vec::new() });
+
+    assert!(
+        !h.root(|root, _| root.layout_chooser_open()),
+        "the remote host's tab list ends its question"
+    );
+}
+
+#[gpui::test]
+fn a_remote_hosts_tab_list_leaves_this_pcs_question(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+    h.send(layout_question(1));
+    h.host(&remote()).send(layout_question(1));
+    h.sent();
+    h.host(&remote()).sent();
+
+    h.host(&remote())
+        .send(DaemonMessage::Tabs { tabs: Vec::new() });
+    assert!(
+        h.root(|root, _| root.layout_chooser_open()),
+        "This PC's question still shows"
+    );
+    h.click_on("layout-choose-empty");
+
+    assert_eq!(init_count(&h.sent()), 1, "This PC is answered once");
+    assert!(
+        !h.root(|root, _| root.layout_chooser_open()),
+        "the remote host's question went with its tab list"
     );
 }
 

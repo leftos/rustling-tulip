@@ -8,6 +8,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - A mistyped `rustling-tulipd` command now prints a usage error instead of starting the daemon, and `rustling-tulipd -V` prints its version.
 - Stopping the daemon as administrator after an administrator daemon crashed now clears its leftover handshake instead of refusing to stop.
+- Reconnecting to one host no longer drops another host's worktree cleanup prompts or running preset launches.
+- A remote host's layout question closes as soon as another window answers it.
 
 ## v0.8.1-alpha
 

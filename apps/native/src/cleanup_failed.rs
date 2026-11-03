@@ -235,9 +235,10 @@ impl CleanupFailed {
 #[derive(Debug, Default)]
 pub(crate) struct CleanupQueue {
     entries: VecDeque<CleanupFailed>,
-    /// The label each session was first shown with, kept after its entry
-    /// closes, since a retry's failure names the session by its id.
-    labels: HashMap<String, String>,
+    /// The label each session of each host was first shown with, kept after
+    /// its entry closes, since a retry's failure names the session by its
+    /// id; a host's reset forgets every label of that host.
+    labels: HashMap<(HostKey, String), String>,
 }
 
 impl CleanupQueue {
@@ -252,7 +253,7 @@ impl CleanupQueue {
     ) {
         let label = self
             .labels
-            .entry(session_id.clone())
+            .entry((host.clone(), session_id.clone()))
             .or_insert(label)
             .clone();
         if let Some(entry) = self
@@ -280,10 +281,11 @@ impl CleanupQueue {
         self.entries.pop_front()
     }
 
-    /// Drops every entry and every remembered label.
-    pub(crate) fn clear(&mut self) {
-        self.entries.clear();
-        self.labels.clear();
+    /// Drops `host`'s entries and every label remembered for its sessions,
+    /// closed ones included; every other host's entries stay, in order.
+    pub(crate) fn drop_host(&mut self, host: &HostKey) {
+        self.entries.retain(|entry| entry.host != *host);
+        self.labels.retain(|(owner, _), _| owner != host);
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -467,7 +469,7 @@ mod tests {
         );
         let head = queue.head().expect("the retry's failure is queued");
         assert!(head.body().starts_with("Session feat/x stopped"));
-        queue.clear();
+        queue.drop_host(&HostKey::Local);
         queue.push(
             HostKey::Local,
             "s1".to_owned(),
@@ -478,6 +480,32 @@ mod tests {
         assert!(
             fresh.body().starts_with("Session s1 stopped"),
             "a clear forgets the labels"
+        );
+    }
+
+    #[test]
+    fn drop_host_forgets_the_labels_of_its_closed_entries() {
+        let host = HostKey::Remote("box.tail1234.ts.net".to_owned());
+        let mut queue = CleanupQueue::default();
+        queue.push(
+            host.clone(),
+            "s1".to_owned(),
+            "feat/old".to_owned(),
+            vec![failure("a", vec![])],
+        );
+        queue.pop();
+        queue.drop_host(&host);
+        queue.push(
+            host,
+            "s1".to_owned(),
+            "feat/new".to_owned(),
+            vec![failure("a", vec![])],
+        );
+        let head = queue.head().expect("queued after the reset");
+        assert!(
+            head.body().starts_with("Session feat/new stopped"),
+            "the host's reset forgets the label of its closed entry: {}",
+            head.body()
         );
     }
 

@@ -205,9 +205,10 @@ impl RootView {
         cx.notify();
     }
 
-    /// This PC's whole tab list: its chooser closes (a remote host's stays),
-    /// and the arrangement it chose, if any, lays the first tab's panes out
-    /// once.
+    /// This PC's whole tab list: its chooser closes (a remote host's stays
+    /// until that host's own tab list, which `lib.rs` routes to
+    /// [`Self::close_layout_chooser_of`]), and the arrangement it chose, if
+    /// any, lays the first tab's panes out once.
     pub(crate) fn on_tab_list(
         &mut self,
         tabs: &[TabEntry],

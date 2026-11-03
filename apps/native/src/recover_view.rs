@@ -489,19 +489,24 @@ impl RootView {
         }));
     }
 
-    /// The timeout fired: the wait ends once the clock, which may lag the
-    /// timer, says so.
+    /// The timeout fired: a host's wait ends once the clock, which may lag
+    /// the timer, says so; the timer keeps watching while another host's
+    /// request is still out.
     fn check_recover_timeout(&mut self, cx: &mut Context<Self>) {
         let now = (self.now)();
         let Some(dialog) = &mut self.recover else {
             return;
         };
-        if dialog.check_timeout(now) {
+        let timed_out = dialog.check_timeout(now);
+        let busy = dialog.is_busy();
+        if timed_out {
             tracing::warn!("recover dialog: the recovery did not answer");
-            self.recover_timer = None;
             cx.notify();
-        } else if dialog.is_busy() {
+        }
+        if busy {
             self.arm_recover_timeout(TIMEOUT_RECHECK, cx);
+        } else if timed_out {
+            self.recover_timer = None;
         }
     }
 

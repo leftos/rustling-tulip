@@ -502,10 +502,11 @@ impl RootView {
         }
     }
 
-    /// Forgets this window's running launch jobs and drops their toasts, as
-    /// a new connection must; ended jobs keep theirs.
-    pub(crate) fn reset_preset_launches(&mut self, cx: &mut Context<Self>) {
-        for key in self.preset_launches.drop_running() {
+    /// Forgets this window's running launch jobs on `host` and drops their
+    /// toasts, as that host's new connection must; ended jobs and other
+    /// hosts' jobs keep theirs.
+    pub(crate) fn reset_preset_launches(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        for key in self.preset_launches.drop_running(host) {
             let shown: Vec<u64> = self
                 .notices
                 .toasts()

@@ -894,16 +894,18 @@ impl PresetLaunches {
         }
     }
 
-    /// Forgets the running jobs, whose progress a new connection no longer
-    /// reports; returns their toasts' keys. Ended jobs keep their toasts.
-    pub fn drop_running(&mut self) -> Vec<String> {
+    /// Forgets `host`'s running jobs, whose progress its new connection no
+    /// longer reports; returns their toasts' keys. Ended jobs and other
+    /// hosts' jobs keep their toasts.
+    pub fn drop_running(&mut self, host: &HostKey) -> Vec<String> {
+        let dropped = |job: &LaunchJob| job.host == *host && job.state == JobState::Running;
         let mut keys: Vec<String> = self
             .jobs
             .iter()
-            .filter(|(_, job)| job.state == JobState::Running)
+            .filter(|(_, job)| dropped(job))
             .map(|(job_id, _)| toast_key(job_id))
             .collect();
-        self.jobs.retain(|_, job| job.state != JobState::Running);
+        self.jobs.retain(|_, job| !dropped(job));
         keys.sort();
         keys
     }
@@ -1336,7 +1338,7 @@ mod tests {
             &all_live,
             &updated(snapshot("j2", PresetLaunchJobStatus::Completed)),
         );
-        assert_eq!(launches.drop_running(), ["preset:j1"]);
+        assert_eq!(launches.drop_running(&HostKey::Local), ["preset:j1"]);
         assert_eq!(
             launches.on_message(&all_live, &progress("j1", 1, &[])),
             None,
@@ -1345,6 +1347,52 @@ mod tests {
         assert!(
             launches.press("preset:j2", SELECT.id, &all_live).is_some(),
             "the finished job keeps its buttons"
+        );
+    }
+
+    #[test]
+    fn drop_running_drops_only_that_hosts_running_jobs() {
+        let remote = HostKey::Remote("box.tail1234.ts.net".to_owned());
+        let mut launches = PresetLaunches::default();
+        launches.start(
+            "j1".to_owned(),
+            HostKey::Local,
+            "Here".to_owned(),
+            true,
+            Some(3),
+        );
+        launches.start(
+            "j2".to_owned(),
+            remote.clone(),
+            "There".to_owned(),
+            true,
+            Some(3),
+        );
+        launches.start(
+            "j3".to_owned(),
+            remote.clone(),
+            "Done".to_owned(),
+            false,
+            None,
+        );
+        launches.on_message(
+            &all_live,
+            &updated(snapshot("j3", PresetLaunchJobStatus::Completed)),
+        );
+
+        assert_eq!(launches.drop_running(&remote), ["preset:j2"]);
+        assert!(
+            launches.press("preset:j1", CANCEL.id, &all_live).is_some(),
+            "This PC's running job stays"
+        );
+        assert!(
+            launches.press("preset:j3", SELECT.id, &all_live).is_some(),
+            "the remote host's ended job stays"
+        );
+        assert_eq!(
+            launches.press("preset:j2", CANCEL.id, &all_live),
+            None,
+            "the remote host's running job is forgotten"
         );
     }
 
@@ -1645,7 +1693,7 @@ mod tests {
             "an unlisted s1 counts before a list"
         );
         assert!(
-            launches.drop_running().is_empty(),
+            launches.drop_running(&HostKey::Local).is_empty(),
             "the ended job stays on a new connection"
         );
         let list = DaemonMessage::Sessions {

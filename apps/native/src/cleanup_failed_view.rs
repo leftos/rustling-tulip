@@ -62,6 +62,12 @@ impl RootView {
             .map(|dialog| dialog.focused().selector())
     }
 
+    /// Whether the open dialog holds the keyboard.
+    #[must_use]
+    pub fn cleanup_failed_holds_keyboard(&self, window: &Window) -> bool {
+        !self.cleanup_failed.is_empty() && self.cleanup_focus.is_focused(window)
+    }
+
     /// The pids ticked for killing in the open dialog.
     #[must_use]
     pub fn cleanup_failed_ticked(&self) -> Vec<u32> {
@@ -105,13 +111,29 @@ impl RootView {
         cx.notify();
     }
 
-    /// Drops every queued failure, as a new connection does.
-    pub(crate) fn reset_cleanup_failed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Drops `host`'s queued failures, as its new connection does; another
+    /// host's stay. The keyboard leaves the dialog only when none is left.
+    pub(crate) fn reset_cleanup_failed(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.cleanup_failed.is_empty() {
             return;
         }
-        self.cleanup_failed.clear();
-        self.after_cleanup_closed(window, cx);
+        let head_before = self
+            .cleanup_failed
+            .head()
+            .map(|entry| entry.session_id().to_owned());
+        self.cleanup_failed.drop_host(host);
+        if self.cleanup_failed.is_empty() {
+            self.after_cleanup_closed(window, cx);
+        } else if head_before.as_deref()
+            != self.cleanup_failed.head().map(CleanupFailed::session_id)
+        {
+            cx.notify();
+        }
     }
 
     /// A key while the dialog is open; returns whether it was. Tab and

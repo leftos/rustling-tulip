@@ -4238,11 +4238,14 @@ impl RootView {
         if self.on_vscode_message(host, &msg, window, cx) {
             return;
         }
-        // Tabs are This PC's layout: a remote host's tab messages fold nowhere.
-        if let DaemonMessage::Tabs { tabs } = &msg
-            && *host == HostKey::Local
-        {
-            self.on_tab_list(tabs, window, cx);
+        // Tabs are This PC's layout: a remote host's tab list only ends its
+        // own layout question.
+        if let DaemonMessage::Tabs { tabs } = &msg {
+            if *host == HostKey::Local {
+                self.on_tab_list(tabs, window, cx);
+            } else {
+                self.close_layout_chooser_of(host, window, cx);
+            }
         }
         if self.fold_tabs_and_drop_stale_menus(host, &msg, window, cx) {
             return;
@@ -4598,7 +4601,9 @@ impl RootView {
         self.cwd_workspace_scans
             .retain(|(owner, _), _| owner != host);
         self.agent_tabs.drop_host(host);
+        self.reset_preset_launches(host, cx);
         if *host != HostKey::Local {
+            self.reset_cleanup_failed(host, window, cx);
             if let Some(mirrors) = self.mirrors_of_mut(host) {
                 mirrors.worktrees_root = None;
             }
@@ -4617,7 +4622,6 @@ impl RootView {
         self.close_host_path_prompt(window, cx);
         self.close_workspace_creator(window, cx);
         self.close_preset_wizard(window, cx);
-        self.reset_preset_launches(cx);
         self.launched_highlight.clear();
         self.vscode_suggestions.clear();
         self.close_appearance_editor(window, cx);
@@ -4631,7 +4635,12 @@ impl RootView {
         self.tabs.clear_layout_requests();
         self.pending_arrangement = None;
         self.close_layout_chooser_of(&HostKey::Local, window, cx);
-        self.reset_cleanup_failed(window, cx);
+        // Last but one, after every close above has handed the keyboard
+        // down: a remote host's failure still on screen takes it back.
+        self.reset_cleanup_failed(&HostKey::Local, window, cx);
+        if !self.cleanup_failed.is_empty() {
+            self.cleanup_focus.focus(window);
+        }
         self.reset_worktrees(window, cx);
     }
 

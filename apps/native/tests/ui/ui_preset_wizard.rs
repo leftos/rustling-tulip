@@ -1570,6 +1570,73 @@ fn cancelling_a_remote_launch_goes_to_that_host(cx: &mut TestAppContext) {
     );
 }
 
+/// Launches the remote host's `r2` preset and has that host report the job
+/// running; returns its job id.
+fn remote_job_running(h: &mut Harness<'_>) -> String {
+    open_remote_wizard(h, remote_preset(json!([{"kind": "file"}]), json!([])));
+    h.click_on("preset-source-file");
+    type_text(h, "E:/prompts/bugs.md");
+    h.click_on("preset-next");
+    let ClientMessage::LaunchPreset { job_id, .. } = launch_remote_from_preview(h) else {
+        panic!("a launch went out");
+    };
+    h.host(&remote())
+        .send(job(&job_id, PresetLaunchJobStatus::Spawning, 0, &[]));
+    assert!(
+        has_toast(h, &job_id),
+        "the running remote job shows its toast"
+    );
+    job_id
+}
+
+/// Whether job `job_id`'s toast is up.
+fn has_toast(h: &mut Harness<'_>, job_id: &str) -> bool {
+    let key = format!("preset:{job_id}");
+    toasts(h)
+        .into_iter()
+        .any(|toast| toast.key.as_deref() == Some(key.as_str()))
+}
+
+/// Reports This PC's connection lost and back: the connecting overlay, then
+/// its `Welcome` and its own session list again.
+fn this_pc_reconnects(h: &mut Harness<'_>) {
+    h.lose_connection();
+    h.welcome_with_features();
+    h.send_welcome(PROTOCOL);
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+    h.sent();
+}
+
+#[gpui::test]
+fn a_remote_launch_keeps_its_toast_when_this_pc_reconnects(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    let job_id = remote_job_running(&mut h);
+
+    this_pc_reconnects(&mut h);
+
+    assert!(
+        has_toast(&mut h, &job_id),
+        "This PC's reset leaves the remote host's job alone"
+    );
+}
+
+#[gpui::test]
+fn a_remote_hosts_reconnect_drops_its_running_launch_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    let job_id = remote_job_running(&mut h);
+
+    h.host(&remote()).connect();
+
+    assert!(
+        !has_toast(&mut h, &job_id),
+        "the remote host's new connection drops its running job's toast"
+    );
+}
+
 #[gpui::test]
 fn finished_toast_drops_cancel_keeps_select_and_stop_all(cx: &mut TestAppContext) {
     let dir = TestDir::new();
