@@ -22,6 +22,9 @@ const REMOTE: &str = "box.tail1234.ts.net";
 /// The daemon id the dedupe spec gives a daemon reached twice.
 const DAEMON: &str = "6f1e2d3c-0000-4000-8000-000000000002";
 
+/// What a row says on a host whose files this PC cannot open.
+const LOCAL_FILES: &str = "Not available on a remote host: this opens files on this PC";
+
 fn remote() -> Target {
     Target::tailnet(REMOTE, None)
 }
@@ -1314,5 +1317,24 @@ fn a_remote_hosts_disconnect_closes_its_checkout_prompt(cx: &mut TestAppContext)
         placements(&h.sent()),
         [],
         "the reply to the ended spawn is placed nowhere"
+    );
+}
+
+#[gpui::test]
+fn a_remote_repos_container_menu_gives_the_remote_refusal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").in_repo("r2").build());
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-explorer")),
+        Some(LOCAL_FILES.to_owned()),
+        "a remote repo's Explorer row gives the remote refusal, not the missing folder"
+    );
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-vscode")),
+        Some(LOCAL_FILES.to_owned()),
+        "and so does its VS Code row"
     );
 }

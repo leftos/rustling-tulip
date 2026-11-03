@@ -411,15 +411,18 @@ struct ContainerFacts<'a> {
     local_files_refusal: Option<&'static str>,
 }
 
-/// The state of an Explorer or VS Code row: disabled when the container has
-/// nothing to open, when this host opens no local files, or when its target
+/// The state of an Explorer or VS Code row: disabled when this host opens no
+/// local files, when the container has nothing to open, or when its target
 /// no longer exists, the first of these that holds giving the tip.
 fn open_row_state(
     has_target: bool,
     gone: Option<&'static str>,
     refusal: Option<&'static str>,
 ) -> RowState {
-    match (has_target, refusal.or(gone)) {
+    if let Some(tip) = refusal {
+        return RowState::Disabled(tip.to_owned());
+    }
+    match (has_target, gone) {
         (false, _) => RowState::Disabled(CONTAINER_NO_FOLDER_TIP.to_owned()),
         (true, Some(tip)) => RowState::Disabled(tip.to_owned()),
         (true, None) => RowState::Enabled,
@@ -4444,6 +4447,20 @@ mod tests {
             state(&groups, CONTAINER_COPY_PATH_ROW),
             Some(RowState::Enabled),
             "Copy path needs no local opener"
+        );
+    }
+
+    #[test]
+    fn open_row_state_prefers_the_refusal_over_a_missing_folder() {
+        assert_eq!(
+            open_row_state(false, None, Some(REFUSAL)),
+            RowState::Disabled(REFUSAL.to_owned()),
+            "a host that opens no local files says so, not that the folder is missing"
+        );
+        assert_eq!(
+            open_row_state(false, None, None),
+            RowState::Disabled(CONTAINER_NO_FOLDER_TIP.to_owned()),
+            "a container with no folder and no refusal says the folder is missing"
         );
     }
 
