@@ -366,6 +366,26 @@ fn driver_pane_text_reads_the_panes_rows(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn driver_pane_text_joins_soft_wrapped_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let line = format!("rt-wrap-{}-end", "x".repeat(300));
+    h.pty("s1", line.as_bytes());
+    h.cx.run_until_parked();
+
+    let read = result(&mut h, "pane_text", json!({"pane": "p1"}));
+
+    let rows = h.grid_text("p1");
+    let text = read["text"].as_str().unwrap_or_default();
+    assert!(text.contains(&line), "{text:?}");
+    assert_eq!(read["lines"], json!(rows));
+    assert!(
+        rows.iter().filter(|row| !row.is_empty()).count() > 1,
+        "the line wraps over more than one row: {rows:?}"
+    );
+}
+
+#[gpui::test]
 fn driver_pane_text_unknown_pane_lists_panes(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());

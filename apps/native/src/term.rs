@@ -799,6 +799,30 @@ impl Terminal {
         self.term.grid().display_offset()
     }
 
+    /// The rows on screen, top to bottom, as one string: a row the next
+    /// visible row continues keeps its trailing blanks and joins it with no
+    /// separator; every other row is right-trimmed and ends with a newline,
+    /// the last one excepted. Blank rows stay as empty lines.
+    pub fn visible_text(&self) -> String {
+        let offset = i32::try_from(self.display_offset()).unwrap_or(i32::MAX);
+        let rows = i32::try_from(self.size.rows).unwrap_or(i32::MAX);
+        let mut text = String::new();
+        for row in 0..rows {
+            let line = row.saturating_sub(offset);
+            let cells = self.read_row(line).text;
+            let next = line.saturating_add(1);
+            if row + 1 < rows && self.wraps(next) {
+                text.push_str(&cells);
+            } else {
+                text.push_str(cells.trim_end());
+                if row + 1 < rows {
+                    text.push('\n');
+                }
+            }
+        }
+        text
+    }
+
     /// Scrolls so that grid line `line` is the top row, as far as the
     /// history reaches; a screen line shows the live screen.
     pub fn scroll_to_line(&mut self, line: i32) {
@@ -1490,6 +1514,39 @@ mod tests {
     /// The text of grid line `line`, trailing blanks trimmed.
     fn row_text(term: &Terminal, line: i32) -> String {
         term.read_row(line).text.trim_end().to_owned()
+    }
+
+    #[test]
+    fn visible_text_joins_a_soft_wrapped_line() {
+        assert_eq!(
+            sized(b"abcdefghijKLMNO", 10, 3).visible_text(),
+            "abcdefghijKLMNO\n"
+        );
+    }
+
+    #[test]
+    fn visible_text_keeps_a_space_at_the_wrap() {
+        assert_eq!(
+            sized(b"abcdefghi XYZ", 10, 2).visible_text(),
+            "abcdefghi XYZ"
+        );
+    }
+
+    #[test]
+    fn visible_text_keeps_hard_line_breaks() {
+        assert_eq!(sized(b"ab\r\ncd", 10, 2).visible_text(), "ab\ncd");
+    }
+
+    #[test]
+    fn visible_text_reads_the_scrolled_back_rows() {
+        let mut term = sized(b"0123456789ABC\r\nline2\r\nline3\r\nline4", 10, 2);
+        assert_eq!(term.visible_text(), "line3\nline4");
+
+        term.scroll(3);
+
+        let text = term.visible_text();
+        assert_eq!(text, "0123456789ABC");
+        assert!(!text.contains("line4"), "{text:?}");
     }
 
     #[test]

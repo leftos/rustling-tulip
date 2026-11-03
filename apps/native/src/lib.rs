@@ -2615,6 +2615,14 @@ impl RootView {
         Some(slot.view().read(cx).grid_text())
     }
 
+    /// Pane `pane_id`'s visible screen as one string, a soft-wrapped line
+    /// joined with no newline where it wrapped.
+    #[must_use]
+    pub fn pane_visible_text(&self, pane_id: &str, cx: &App) -> Option<String> {
+        let slot = self.panes.get(pane_id)?;
+        Some(slot.view().read(cx).visible_text())
+    }
+
     /// Whether the sidebar has the main window's keyboard.
     #[must_use]
     pub fn sidebar_focused(&self, window: &Window) -> bool {

@@ -996,7 +996,7 @@ An error reply names a code (`unknown_method`, `bad_params`, `not_found`, `not_v
 | `find` | `prefix?` | the registry's names starting with `prefix`, sorted, each `{"name", "bounds", "visible"}` | none |
 | `key` | `keys`: one keystroke, such as `ctrl-,` | `{"pressed": keys}` | `bad_params` for more than one keystroke or an unreadable one |
 | `move` | a target (`x`, `y` or `element`) | `{"at": {"x", "y"}}` | target errors as below |
-| `pane_text` | `pane?` | `{"pane", "lines", "text"}`: the visible rows only, never scrollback; the default pane is the active tab's focused pane, else its first | `not_found` for an unknown pane (the hint lists the active tab's panes) or a tab with no pane |
+| `pane_text` | `pane?` | `{"pane", "lines", "text"}`: the visible rows only, never scrollback; `text` is those rows as one string with a soft-wrapped line joined (no newline where it wrapped), `lines` the grid rows as drawn, one string each; the default pane is the active tab's focused pane, else its first | `not_found` for an unknown pane (the hint lists the active tab's panes) or a tab with no pane |
 | `ping` | none | `{"version"}` | none |
 | `screenshot` | none | `{"path", "width", "height"}` | `refused` as above; the in-process handler also refuses it, since only the pipe answers it |
 | `state` | none | the window's size and scale, `active_tab`, `tabs`, the shown tab's `panes`, `sessions` and `overlay` | none |
@@ -1010,7 +1010,7 @@ Posted input cannot carry modifiers, since gpui reads them from `GetKeyState`: a
 
 `action` names are `open_settings`, `new_shell`, `open_spawn`, `toggle_sidebar`, `select_tab` (`{"id"}`), `focus_pane` (`{"id"}`), `show_activity` (`{"name"}`: `sessions`, `needs_you` or `source_control`) and `set_hover` (`{"value"}`: `true`, `false` or `null`).
 
-A `wait_for` predicate (`until`) is one of `{"state": "<dotted path>", "equals": <json>}`, `{"state": path, "exists": bool}`, `{"pane_text": {"pane", "contains"}}` and `{"element": "<registry name>", "visible": bool}`. A numeric path segment indexes an array, and `exists` means non-null. The loop runs in the endpoint between frames (`apps/native/src/driver/wait.rs`), so it never blocks the UI thread, and it is answered only over the pipe.
+A `wait_for` predicate (`until`) is one of `{"state": "<dotted path>", "equals": <json>}`, `{"state": path, "exists": bool}`, `{"pane_text": {"pane", "contains"}}` and `{"element": "<registry name>", "visible": bool}`. A numeric path segment indexes an array, and `exists` means non-null. `pane_text.contains` matches against the same joined `text` that `pane_text` replies, so a match survives a soft wrap. The loop runs in the endpoint between frames (`apps/native/src/driver/wait.rs`), so it never blocks the UI thread, and it is answered only over the pipe.
 
 ### Driver MCP server
 

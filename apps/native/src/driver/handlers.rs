@@ -182,7 +182,10 @@ fn pane_text(request: &Request, root: &RootView, cx: &App) -> Result<Value, Repl
     let Some(pane) = params.pane.or_else(|| root.driver_focused_pane()) else {
         return Err(request.fail(ErrorCode::NotFound, "the active tab has no pane".to_owned()));
     };
-    let Some(lines) = root.pane_grid_text(&pane, cx) else {
+    let (Some(text), Some(lines)) = (
+        root.pane_visible_text(&pane, cx),
+        root.pane_grid_text(&pane, cx),
+    ) else {
         return Err(Reply::error(
             request.id,
             ErrorCode::NotFound,
@@ -190,7 +193,7 @@ fn pane_text(request: &Request, root: &RootView, cx: &App) -> Result<Value, Repl
             Some(format!("panes: {}", root.active_pane_ids().join(", "))),
         ));
     };
-    Ok(json!({ "pane": pane, "text": lines.join("\n"), "lines": lines }))
+    Ok(json!({ "pane": pane, "text": text, "lines": lines }))
 }
 
 /// `wait_for`'s params and the predicate they write.
@@ -243,11 +246,8 @@ pub fn wait_read(
             };
             (met, found.cloned().unwrap_or(Value::Null))
         }
-        Predicate::PaneText { pane, contains } => match root.read(cx).pane_grid_text(pane, cx) {
-            Some(lines) => {
-                let text = lines.join("\n");
-                (text.contains(contains.as_str()), Value::String(text))
-            }
+        Predicate::PaneText { pane, contains } => match root.read(cx).pane_visible_text(pane, cx) {
+            Some(text) => (text.contains(contains.as_str()), Value::String(text)),
             None => (false, Value::Null),
         },
         Predicate::Element { name, visible } => {

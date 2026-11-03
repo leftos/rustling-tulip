@@ -488,6 +488,12 @@ impl TerminalPane {
         rows.iter().map(|row| row.trim_end().to_owned()).collect()
     }
 
+    /// The visible screen as one string, a soft-wrapped line joined with no
+    /// newline where it wrapped.
+    pub fn visible_text(&self) -> String {
+        self.term.visible_text()
+    }
+
     /// The marked text drawn at the cursor, if any.
     pub fn preedit(&self) -> Option<&str> {
         self.marked.as_deref()
