@@ -117,6 +117,12 @@ It is alpha software, Windows only for now.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
 
+## What's new in v0.8.1-alpha
+
+- A newly started Claude session no longer shows as Finished, or raises a Finished toast, before you have used it.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.8.1-alpha).
+
 ## What's new in v0.8.0-alpha
 
 - The Dashboard shows every running agent at a glance and answers their questions and permission prompts with one click.
