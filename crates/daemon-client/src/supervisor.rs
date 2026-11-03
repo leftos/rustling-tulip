@@ -727,10 +727,18 @@ async fn reuse_ordinary_daemon(
     for (_, roots) in ordinary {
         let existing = classify_existing_daemon(&roots.config, None, client).await;
         let daemon_profile = existing.handshake().map_or(Profile::Ordinary, |handshake| {
-            ordinary_daemon_profile(
-                handshake.pid,
-                crate::profile::profile_of_process(handshake.pid),
-            )
+            let pid = handshake.pid;
+            match crate::profile::profile_of_process(pid) {
+                Ok(Some(profile)) => profile,
+                Ok(None) => {
+                    debug!(
+                        pid,
+                        "the handshake names a pid no process has; treating it as ordinary"
+                    );
+                    Profile::Ordinary
+                }
+                Err(err) => ordinary_daemon_profile(pid, Err(err)),
+            }
         });
         match elevated_step(&existing, client.versions, daemon_profile) {
             ElevatedStep::RetireThenUseElevatedProfile => {

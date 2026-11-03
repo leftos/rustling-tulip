@@ -23,11 +23,18 @@ pub(crate) enum OpenFailure {
     NoRights(windows::core::Error),
 }
 
-/// What an `OpenProcess` error says about the pid: `ERROR_INVALID_PARAMETER`
-/// means no process has it. Any other error (`ERROR_ACCESS_DENIED` above all)
+/// Whether an `OpenProcess` error says no process has the pid:
+/// `ERROR_INVALID_PARAMETER`. Any other error (`ERROR_ACCESS_DENIED` above all)
 /// cannot rule out a live process, so it is never read as "not running".
+pub(crate) fn no_such_process(err: &windows::core::Error) -> bool {
+    err.code() == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0)
+}
+
+/// What an `OpenProcess` error says about the pid: [`no_such_process`] means no
+/// process has it; any other error cannot rule out a live process, so it is
+/// never read as "not running".
 fn open_failure(err: windows::core::Error) -> OpenFailure {
-    if err.code() == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) {
+    if no_such_process(&err) {
         OpenFailure::NotRunning
     } else {
         OpenFailure::NoRights(err)

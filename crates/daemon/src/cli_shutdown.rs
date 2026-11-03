@@ -37,9 +37,10 @@ pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
 /// `err`.
 ///
 /// `caller` is this process's profile: an elevated caller is refused a daemon
-/// whose process runs ordinary, or whose integrity cannot be read
-/// ([`daemon_client::refuse_stop_across_integrity`]), since supervision never
-/// crosses integrity.
+/// whose process runs ordinary, or a running one whose integrity cannot be
+/// read ([`daemon_client::refuse_stop_across_integrity`]), since supervision
+/// never crosses integrity. A handshake naming a pid no process has is stale:
+/// nothing runs to stop across integrity, and its file is removed.
 ///
 /// # Errors
 ///
@@ -149,9 +150,21 @@ mod tests {
         );
     }
 
+    /// A harmless Windows process that stays alive for half a minute unless
+    /// killed: a running ordinary process for a handshake to name.
+    #[cfg(windows)]
+    fn stand_in() -> std::process::Child {
+        std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a stand-in process")
+    }
+
+    #[cfg(windows)]
     #[tokio::test]
-    async fn shutdown_refuses_a_daemon_whose_integrity_cannot_be_read_from_an_elevated_caller() {
-        let dir = ScratchDir::new("cli-shutdown-unreadable-daemon");
+    async fn shutdown_removes_a_dead_elevated_daemons_handshake_for_an_elevated_caller() {
+        let dir = ScratchDir::new("cli-shutdown-dead-elevated-daemon");
         write_handshake(dir.path(), u32::MAX);
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
@@ -164,6 +177,37 @@ mod tests {
         .await
         .expect("the line is written");
 
+        assert_eq!(code, 0);
+        assert!(err.is_empty(), "nothing failed");
+        assert_eq!(
+            String::from_utf8(out).expect("the line is UTF-8"),
+            "no daemon was running; removed a stale daemon.json\n"
+        );
+        assert!(
+            !daemon_client::handshake_file_in(dir.path()).exists(),
+            "the stale handshake is gone"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn shutdown_refuses_a_running_ordinary_daemon_for_an_elevated_caller() {
+        let dir = ScratchDir::new("cli-shutdown-running-ordinary-daemon");
+        let mut child = stand_in();
+        write_handshake(dir.path(), child.id());
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = run(
+            &located_ordinary(dir.path()),
+            Profile::Elevated,
+            &mut out,
+            &mut err,
+        )
+        .await
+        .expect("the line is written");
+        let _ = child.kill();
+        let _ = child.wait();
+
         assert_eq!(code, 1);
         assert!(out.is_empty(), "nothing succeeded");
         assert_eq!(
@@ -171,6 +215,10 @@ mod tests {
             "could not stop the daemon: the running rustling-tulip daemon runs without \
              administrator rights; stop it from an ordinary terminal with \"rustling-tulipd \
              shutdown\"\n"
+        );
+        assert!(
+            daemon_client::handshake_file_in(dir.path()).exists(),
+            "the handshake is kept"
         );
     }
 }

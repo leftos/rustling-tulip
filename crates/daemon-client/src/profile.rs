@@ -53,35 +53,41 @@ pub fn own_profile() -> anyhow::Result<Profile> {
     Ok(*OWN.get_or_init(|| profile))
 }
 
-/// The profile of the running process `pid`, read from its token's integrity
-/// level.
+/// The profile of the process `pid`, read from its token's integrity level, or
+/// `None` when no process has the pid.
 ///
 /// # Errors
 ///
-/// The process could not be opened for a limited query, or its token or
-/// integrity label could not be read.
+/// The process could not be opened for a limited query for any reason but a pid
+/// no process has, or its token or integrity label could not be read.
 #[cfg(windows)]
-pub fn profile_of_process(pid: u32) -> anyhow::Result<Profile> {
+pub fn profile_of_process(pid: u32) -> anyhow::Result<Option<Profile>> {
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     // SAFETY: OpenProcess takes no pointers; the handle it returns is owned
     // by `Handle` and closed once.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
-        .with_context(|| format!("opening process {pid}"))?;
-    let process = Handle(process);
-    profile_of_token_of(process.0).with_context(|| format!("reading process {pid}'s integrity"))
+    let opened = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
+    let process = match opened {
+        Ok(handle) => Handle(handle),
+        Err(err) if crate::pinned_process::no_such_process(&err) => return Ok(None),
+        Err(err) => Err(err).with_context(|| format!("opening process {pid}"))?,
+    };
+    profile_of_token_of(process.0)
+        .with_context(|| format!("reading process {pid}'s integrity"))
+        .map(Some)
 }
 
-/// The profile of the running process `pid`: always ordinary, since other
-/// platforms have no integrity levels.
+/// The profile of the process `pid`: always ordinary, since other platforms
+/// have no integrity levels, and never `None`, which only a Windows read of a
+/// pid no process has yields.
 ///
 /// # Errors
 ///
 /// None on this platform; the Windows read can fail.
 #[cfg(not(windows))]
-pub fn profile_of_process(pid: u32) -> anyhow::Result<Profile> {
+pub fn profile_of_process(pid: u32) -> anyhow::Result<Option<Profile>> {
     let _ = pid;
-    Ok(Profile::Ordinary)
+    Ok(Some(Profile::Ordinary))
 }
 
 #[cfg(windows)]
@@ -619,6 +625,37 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pid_no_process_has_reads_as_not_running() {
+        // Windows pids are multiples of 4, so no process can have this one.
+        let pid = u32::MAX;
+        let read = profile_of_process(pid).expect("a pid no process has is not an error");
+
+        assert_eq!(
+            read, None,
+            "no process runs under {pid}, so no profile is read"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_running_process_reads_its_profile() {
+        let mut child = crate::test_fakes::stand_in();
+        let read = profile_of_process(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let profile = read
+            .expect("a running process's integrity is readable")
+            .expect("a running process has a profile");
+        assert_eq!(
+            profile,
+            own_profile().expect("this process's own profile is readable"),
+            "the stand-in runs at this test process's own integrity"
+        );
     }
 
     #[test]

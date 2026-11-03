@@ -492,7 +492,9 @@ pub fn may_stop(caller: Profile, daemon: anyhow::Result<Profile>) -> Result<(), 
 /// ([`may_stop`]), judged by the integrity of the process its handshake names.
 ///
 /// A missing or unparseable handshake is `Ok`: there is nothing to stop, and
-/// the stop reports that on its own no-daemon path.
+/// the stop reports that on its own no-daemon path. So is a handshake naming a
+/// pid no process has: nothing runs to stop across integrity, and the stop's
+/// own path removes the stale file.
 ///
 /// # Errors
 ///
@@ -504,7 +506,11 @@ pub fn refuse_stop_across_integrity(
     let Ok(handshake) = read_handshake_in(&located.config_dir) else {
         return Ok(());
     };
-    may_stop(caller, profile::profile_of_process(handshake.pid))
+    match profile::profile_of_process(handshake.pid) {
+        Ok(None) => Ok(()),
+        Ok(Some(daemon)) => may_stop(caller, Ok(daemon)),
+        Err(err) => may_stop(caller, Err(err)),
+    }
 }
 
 /// Force-stop the daemon this caller may use, if [`may_stop`] allows it: read
@@ -522,14 +528,14 @@ pub fn refuse_stop_across_integrity(
 /// # Errors
 ///
 /// Fails with a [`DaemonIsOrdinary`] when an elevated caller locates a daemon
-/// whose process runs ordinary or whose integrity cannot be read
-/// ([`refuse_stop_across_integrity`]), or when [`locate_daemon`] does; fails when
-/// there is no handshake on disk or it cannot be read or parsed; on Windows
-/// only, when its pid is not running (the stale file is removed) or this
-/// client may not terminate it (nothing is stopped); when its listener does
-/// not prove it is the daemon (nothing is killed; the file is removed, except
-/// when the listener did not answer at all); or when the kill fails. The file
-/// is only ever removed while it still holds the token that was read.
+/// whose process runs ordinary or, while running, has an integrity that cannot
+/// be read ([`refuse_stop_across_integrity`]), or when [`locate_daemon`] does;
+/// fails when there is no handshake on disk or it cannot be read or parsed; on
+/// Windows only, when its pid is not running (the stale file is removed) or
+/// this client may not terminate it (nothing is stopped); when its listener
+/// does not prove it is the daemon (nothing is killed; the file is removed,
+/// except when the listener did not answer at all); or when the kill fails.
+/// The file is only ever removed while it still holds the token that was read.
 pub async fn stop() -> anyhow::Result<()> {
     let located = locate_daemon()?;
     refuse_stop_across_integrity(profile::own_profile()?, &located)?;
@@ -1441,6 +1447,53 @@ mod tests {
                 Err(anyhow!("reading process 4242's integrity: access denied"))
             ),
             Ok(())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_elevated_stop_of_a_dead_daemon_is_not_refused() {
+        let scratch = ScratchDir::new("stop-dead-elevated");
+        // Windows pids are multiples of 4, so no process can have this one.
+        let dead_pid = u32::MAX;
+        write_handshake(&scratch.0, dead_pid, 40123, "token");
+
+        let refusal = super::refuse_stop_across_integrity(
+            Profile::Elevated,
+            &LocatedDaemon {
+                profile: Profile::Elevated,
+                config_dir: scratch.0.clone(),
+            },
+        );
+
+        assert_eq!(
+            refusal,
+            Ok(()),
+            "nothing runs to stop across integrity; the stop's own path removes the stale file"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_elevated_stop_of_a_running_ordinary_pid_is_refused() {
+        let scratch = ScratchDir::new("stop-running-ordinary");
+        let mut child = stand_in();
+        write_handshake(&scratch.0, child.id(), 40123, "token");
+
+        let refusal = super::refuse_stop_across_integrity(
+            Profile::Elevated,
+            &LocatedDaemon {
+                profile: Profile::Elevated,
+                config_dir: scratch.0.clone(),
+            },
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            refusal,
+            Err(DaemonIsOrdinary),
+            "a running ordinary daemon is not an elevated caller's to stop"
         );
     }
 }

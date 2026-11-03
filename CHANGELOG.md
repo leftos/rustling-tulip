@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - A mistyped `rustling-tulipd` command now prints a usage error instead of starting the daemon, and `rustling-tulipd -V` prints its version.
+- Stopping the daemon as administrator after an administrator daemon crashed now clears its leftover handshake instead of refusing to stop.
 
 ## v0.8.1-alpha
 
