@@ -35,6 +35,9 @@ task-checklist.ts
 # The retired Tauri app's files, named by the UX audit
 utils/a11y.ts
 GitPanel.tsx
+# The activity log's daemon file and the sealed env-row index, both under the config dir
+activity/daemon.json
+env-secrets.json
 # Summarizer runtime files under the config dir and session dirs
 summary.json
 summarizer-spend.json
