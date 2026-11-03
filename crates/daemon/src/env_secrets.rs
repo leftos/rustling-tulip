@@ -22,6 +22,7 @@ use crate::spawn_plan::SpawnFailure;
 use crate::user_env::Secret;
 use anyhow::Context as _;
 use chrono::{DateTime, TimeDelta, Utc};
+use daemon_client::profile::{Profile, credential_service};
 use keyring_core::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -441,8 +442,9 @@ struct Context {
 
 fn context() -> anyhow::Result<Context> {
     let config = paths::config_dir()?;
+    let profile = daemon_client::profile::own_profile()?;
     Ok(Context {
-        service: service_for(&config),
+        service: service_for(profile, &config),
         index: config.join(INDEX_FILE),
     })
 }
@@ -452,24 +454,29 @@ fn context() -> anyhow::Result<Context> {
 ///
 /// # Errors
 ///
-/// Fails when the config dir cannot be resolved.
+/// Fails when the config dir or this process's profile cannot be resolved.
 pub(crate) fn service() -> anyhow::Result<String> {
-    Ok(service_for(&paths::config_dir()?))
+    let profile = daemon_client::profile::own_profile()?;
+    Ok(service_for(profile, &paths::config_dir()?))
 }
 
-/// The service entries are filed under for `config_dir`: the plain name, or its
-/// per-config-dir variant while the override is set.
-fn service_for(config_dir: &Path) -> String {
-    if !std::env::var(CONFIG_DIR_VAR).is_ok_and(|value| !value.is_empty()) {
-        return SERVICE.to_owned();
-    }
-    let mut hex = String::with_capacity(64);
-    for byte in Sha256::digest(config_dir.to_string_lossy().as_bytes()) {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex.truncate(SERVICE_HASH_LEN);
-    format!("{SERVICE}:{hex}")
+/// The service entries are filed under for a daemon of `profile` using
+/// `config_dir`: the plain name, or its per-config-dir variant while the
+/// override is set, each with the elevated suffix for an elevated daemon
+/// ([`daemon_client::profile::credential_service`]).
+fn service_for(profile: Profile, config_dir: &Path) -> String {
+    let hash = std::env::var(CONFIG_DIR_VAR)
+        .is_ok_and(|value| !value.is_empty())
+        .then(|| {
+            let mut hex = String::with_capacity(64);
+            for byte in Sha256::digest(config_dir.to_string_lossy().as_bytes()) {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+            }
+            hex.truncate(SERVICE_HASH_LEN);
+            hex
+        });
+    credential_service(profile, SERVICE, hash.as_deref())
 }
 
 fn seal_value(key: &str, value: &str) -> anyhow::Result<String> {
@@ -909,7 +916,7 @@ mod tests {
     #[test]
     fn the_service_name_differs_when_the_config_dir_is_overridden() {
         let (_lock, _dir) = scratch("service");
-        let overridden = service_for(&paths::config_dir().expect("resolves"));
+        let overridden = service_for(Profile::Ordinary, &paths::config_dir().expect("resolves"));
         assert!(overridden.starts_with("rustling-tulip:"), "{overridden}");
         let hashed = overridden.trim_start_matches("rustling-tulip:");
         assert_eq!(hashed.len(), SERVICE_HASH_LEN);
@@ -921,7 +928,7 @@ mod tests {
         // SAFETY: ENV_LOCK is held, so nothing else reads the variable.
         unsafe { std::env::remove_var(CONFIG_DIR_VAR) };
         assert_eq!(
-            service_for(&paths::config_dir().expect("resolves")),
+            service_for(Profile::Ordinary, &paths::config_dir().expect("resolves")),
             SERVICE,
             "the production service is the plain name"
         );
@@ -1044,7 +1051,10 @@ mod tests {
     fn delete_clears_a_line_whose_credential_is_gone() {
         let (_lock, _dir) = scratch("delete-gone");
         let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
-        let service = service_for(&paths::config_dir().expect("the config dir resolves"));
+        let service = service_for(
+            Profile::Ordinary,
+            &paths::config_dir().expect("the config dir resolves"),
+        );
         Entry::new(&service, &user("EXAMPLE_API_KEY", &id))
             .expect("the credential is built")
             .delete_credential()
@@ -1561,7 +1571,10 @@ mod tests {
     fn collect_unreferenced_drops_a_line_whose_credential_is_gone() {
         let (_lock, _dir) = scratch("collect-gone");
         let id = seal("EXAMPLE_API_KEY", VALUE_SENTINEL).expect("seals");
-        let service = service_for(&paths::config_dir().expect("the config dir resolves"));
+        let service = service_for(
+            Profile::Ordinary,
+            &paths::config_dir().expect("the config dir resolves"),
+        );
         Entry::new(&service, &user("EXAMPLE_API_KEY", &id))
             .expect("the credential is built")
             .delete_credential()

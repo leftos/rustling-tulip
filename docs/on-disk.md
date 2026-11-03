@@ -11,7 +11,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
   They are `worktrees_root_override`, `keep_awake_mode`: `"off"`, `"when_busy"` (the default) or `"always"`, `agent_commands`: `{"<agent serde name>": {"program", "args"}}` for the Settings launch command, only agents that set one, a blank pair removing the entry, `agent_settings`: `{"<agent id>": {<option>: <value>}}`, each agent's validated Settings page values.
 - `state.json.corrupt-<UTC stamp>` — a `state.json` that failed to parse, moved aside (or its bytes written beside it) before the daemon starts on defaults; the 3 newest are kept, and the secret sweep counts the `${secret:<id>}` references a text scan finds in each, so no sealed value they name is deleted (`crates/daemon/src/state.rs` `keep_corrupt_state`, `crates/daemon/src/main.rs`).
 - `daemon.json` — handshake (port + auth_token + pid + supported_versions + build_version, the daemon's package version); written on daemon start, removed on graceful shutdown. An elevated daemon (token at High integrity or above) writes it with a High no-read-up, no-write-up mandatory label (`S:(ML;;NRNW;;;HI)`) and a DACL made of the folder's inheritable entries stored as explicit ones, so a lower-integrity process cannot read it; a client that is denied reads it as `docs/daemon-cli.md` ("An elevated daemon") says (`crates/daemon/src/integrity.rs`, `daemon_client::read_handshake_file`).
-- `daemon-id` — this daemon's stable id, a bare UUID with no newline, sent in `Welcome.daemon_id`. Created on the first start; a file that is empty or not a UUID is replaced with a new id (warn "the daemon id file is empty or not a UUID; replacing it with a new id"), and one that cannot be read or written fails startup with "loading the daemon id" (`crates/daemon/src/daemon_id.rs`, `paths.rs` `daemon_id_file`).
+- `daemon-id` — this daemon's stable id, a bare UUID with no newline, sent in `Welcome.daemon_id`. Created on the first start; a file that is empty or not a UUID is replaced with a new id (warn "the daemon id file is empty or not a UUID; replacing it with a new id"), and one that cannot be read or written fails startup with "loading the daemon id" (`crates/daemon/src/daemon_id.rs`, `paths.rs` `resolve_daemon_id_file`).
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring. `hook-settings.json` sits beside them for an interactive Claude spawn (passed as `--settings`) and for a recovered shell with a hook agent and a conversation id; a graceful stop deletes it with the sidecar.
 
   `summary.json` sits beside `meta.json` too: the session's summary ring as a protocol `SessionSummary` whose `lines` is the whole ring (at most 12 lines, none older than 2 hours, newest first). It is written atomically right after each ring update and only while `meta.json` exists (it never creates the folder), restored by the orphan, reattached and abandoned inserts (a missing, corrupt or emptied ring restores no summary), and deleted with the sidecar (`crates/daemon/src/summarizer/turns.rs`, `crates/daemon/src/session.rs`).
@@ -116,6 +116,24 @@ The Dashboard summarizer runs the agent's CLI in a fifth machine-local root besi
 A fetch writes a hidden `.fetch-<launch stamp>-<n>.part` beside the target and renames it over the target when the file is done; a failed or cancelled fetch deletes its part. Nothing under it is ever pruned (`apps/native/src/file_fetch.rs`).
 
 A fetched `.html` or `.htm` page that opens when done brings the relative media it names with it, saved at the same `<host>/<repo-name>/<rel-path>` place (never outside the repo root) and each fetched again if already on disk (`apps/native/src/html_media.rs`, `docs/native-client.md` "Fetched files").
+
+## An elevated daemon's protected profile
+
+A daemon whose token is at High integrity or above keeps its config dir (with `state.json`, `sessions/`, `daemon.json` and the logs), binaries, worktrees, `daemon-id`, tailnet and summarizer under one protected root, `%LOCALAPPDATA%\leftos\rustling-tulip\data\elevated\` (`{data_local}\elevated\{config|binaries|worktrees|daemon-id|tailnet|summarizer}`). An override variable (`RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_WORKTREES_DIR`, `RUSTLING_TULIP_BINARIES_DIR`, `RUSTLING_TULIP_TAILNET_DIR`) still beats it for the folder it names. An ordinary daemon's paths are unchanged (`crates/daemon-client/src/profile.rs`, `crates/daemon/src/paths.rs`).
+
+The root is created owned by Administrators with a protected DACL for SYSTEM and Administrators only and a High no-read-up, no-write-up, no-execute-up label (`O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:(ML;OICI;NRNWNX;;;HI)`), which everything under it inherits. An ordinary process of the account can neither read nor write anything in it, so an ordinary editor cannot open an elevated session's worktree. The daemon holds the root open for its lifetime, so no process can rename or delete it while it runs (`crates/daemon/src/protected_root.rs`).
+
+The profile starts empty: presets, history, devices and sessions of the ordinary profile are not imported, because importing files an ordinary process can write is the write-up the root removes. The ordinary profile's data stays where it is.
+
+An elevated daemon refuses to start when the root, or a set `RUSTLING_TULIP_CONFIG_DIR` or `RUSTLING_TULIP_BINARIES_DIR` folder, fails the check. The error reads `protected root <path> is unsafe: <reason>; delete it from an elevated terminal and start again`, or `protected root <path> is not a plain folder; delete it from an elevated terminal and start again`. The reasons:
+- `the owner is <owner>, not Administrators or SYSTEM`
+- `its permissions inherit from the parent folder`
+- `its permissions allow more than Administrators and SYSTEM`
+- `it has no High integrity label that refuses reads and writes from below`
+
+A daemon that cannot read its own token's integrity level fails to start (`opening this process's token` or `reading this process's integrity label`), and one that cannot resolve the app's folders fails with `could not resolve the app's folders`. These checks run before the daemon opens its log, so for "the elevated daemon will not start" run `rustling-tulipd` from an elevated terminal and read the error it prints, not `daemon.log` (a daemon a client starts has its stderr discarded, so the client only sees it never answer); an unsafe root is fixed by deleting it from an elevated terminal.
+
+Its Credential Manager entries are filed under the service `rustling-tulip:elevated` (`rustling-tulip:elevated:<8 hex>` under a config override); see `docs/env-secrets.md`.
 
 ## Core files and atomic writes
 

@@ -16,6 +16,7 @@ pub mod device_tokens;
 pub mod isolation;
 #[cfg(windows)]
 mod pinned_process;
+pub mod profile;
 mod proof;
 mod supervisor;
 #[cfg(test)]

@@ -20,20 +20,12 @@ use std::path::Path;
 /// that refuses reads, writes and execution from a lower integrity. The owner
 /// is named because a machine policy may otherwise make the creating user the
 /// owner, which [`check_root`] refuses.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
 pub(crate) const PROTECTED_ROOT_SDDL: &str =
     "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:(ML;OICI;NRNWNX;;;HI)";
 
 /// The security of a folder that could be the protected root, as read back
 /// from its descriptor: the parts [`check_root`] compares, kept free of any
 /// Windows API so the check is testable anywhere.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
 #[derive(Debug)]
 pub(crate) struct RootSecurity {
     /// The owner's SID, `S-1-5-…`.
@@ -49,10 +41,6 @@ pub(crate) struct RootSecurity {
 
 /// One DACL entry: the trustee it names, what it grants or denies, and the
 /// flags that carry it to the folder's children.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
 #[derive(Debug)]
 pub(crate) struct AceEntry {
     /// Whether the entry allows access rather than denying it.
@@ -68,10 +56,6 @@ pub(crate) struct AceEntry {
 
 /// The mandatory label ACE: its integrity RID, the upward-rights mask and the
 /// inheritance flags.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
 #[derive(Debug)]
 pub(crate) struct LabelEntry {
     /// The RID of the label SID, `S-1-16-<rid>`.
@@ -83,10 +67,6 @@ pub(crate) struct LabelEntry {
 }
 
 /// Why a folder is refused as the protected root.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RootRefusal {
     /// Someone other than Administrators or SYSTEM owns it.
@@ -181,22 +161,27 @@ pub(crate) fn check_root(sec: &RootSecurity) -> Result<(), RootRefusal> {
 #[cfg(windows)]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
+    expect(
+        dead_code,
+        reason = "Dirs::ensure holds each folder before checking it: create_if_missing, open_held, check_handle"
+    )
 )]
 pub(crate) fn create_or_check(path: &Path) -> anyhow::Result<()> {
-    use std::os::windows::fs::MetadataExt as _;
+    create_if_missing(path)?;
+    check_existing(path)
+}
 
-    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
+/// Create the protected root at `path` when nothing is there, its parents
+/// with the default descriptor. Whatever is already there is left as it is,
+/// for [`check_handle`] to judge through a handle the caller holds.
+///
+/// # Errors
+///
+/// The folder could not be created, or `path` could not be read.
+#[cfg(windows)]
+pub(crate) fn create_if_missing(path: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(meta) => {
-            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 || !meta.is_dir() {
-                anyhow::bail!(
-                    "protected root {} is not a plain folder; delete it from an elevated terminal and start again",
-                    path.display()
-                );
-            }
-        }
+        Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             if let Some(parent) = path
                 .parent()
@@ -211,7 +196,7 @@ pub(crate) fn create_or_check(path: &Path) -> anyhow::Result<()> {
             return Err(err).with_context(|| format!("reading {}", path.display()));
         }
     }
-    check_existing(path)
+    Ok(())
 }
 
 /// Create `path` as a new folder carrying [`PROTECTED_ROOT_SDDL`] from its
@@ -262,30 +247,45 @@ fn create_protected_dir(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Check the folder at `path` as it is now: one handle yields both the
-/// object's attributes and its security, so a reparse point swapped in after
-/// an earlier look is refused here rather than followed to its target.
+/// Check the folder at `path` as it is now, through a handle of its own
+/// ([`open_held`], closed on return).
 ///
 /// # Errors
 ///
-/// The folder could not be opened or read, it is a reparse point or not a
-/// folder, or its security is not what [`check_root`] accepts.
+/// The folder could not be opened, or [`check_handle`] refuses it.
 #[cfg(windows)]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
+    expect(dead_code, reason = "only create_or_check and the tests check by path")
 )]
 fn check_existing(path: &Path) -> anyhow::Result<()> {
+    let handle = open_held(path)?;
+    check_handle(handle.raw(), path)
+}
+
+/// Check the folder `handle` holds open, named `path` in the refusal: one
+/// handle yields both the object's attributes and its security, so a reparse
+/// point swapped in after an earlier look is refused here rather than
+/// followed to its target, and the folder checked is the folder held.
+///
+/// # Errors
+///
+/// The folder could not be read, it is a reparse point or not a folder, or its
+/// security is not what [`check_root`] accepts.
+#[cfg(windows)]
+pub(crate) fn check_handle(
+    handle: windows::Win32::Foundation::HANDLE,
+    path: &Path,
+) -> anyhow::Result<()> {
     use windows::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         GetFileInformationByHandle,
     };
 
-    let handle = open_folder(path)?;
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    // SAFETY: `handle` is an open folder handle this function owns; `info`
+    // SAFETY: `handle` is an open folder handle the caller holds; `info`
     // receives that object's attributes.
-    unsafe { GetFileInformationByHandle(handle.0, &raw mut info) }
+    unsafe { GetFileInformationByHandle(handle, &raw mut info) }
         .with_context(|| format!("reading the attributes of {}", path.display()))?;
     let reparse = (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0;
     let directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
@@ -295,7 +295,7 @@ fn check_existing(path: &Path) -> anyhow::Result<()> {
             path.display()
         );
     }
-    let sec = read_security(handle.0)
+    let sec = read_security(handle)
         .with_context(|| format!("reading the security of {}", path.display()))?;
     check_root(&sec).map_err(|refusal| {
         anyhow!(
@@ -305,14 +305,22 @@ fn check_existing(path: &Path) -> anyhow::Result<()> {
     })
 }
 
-/// `path` opened as the object it names, without following a reparse point.
-/// Backup semantics are what let a folder be opened at all.
+/// `path` opened as the object it names, without following a reparse point,
+/// sharing read and write but not delete: while the handle is open the folder
+/// cannot be renamed or deleted, so no process can move it aside and put its
+/// own folder at that path. Listing access is what makes the open take part
+/// in share-mode checks (an open asking only for attribute access does not);
+/// `READ_CONTROL` lets [`check_handle`] read its descriptor. Backup semantics
+/// are what let a folder be opened at all.
+///
+/// # Errors
+///
+/// The folder could not be opened.
 #[cfg(windows)]
-fn open_folder(path: &Path) -> anyhow::Result<OwnedHandle> {
+pub(crate) fn open_held(path: &Path) -> anyhow::Result<OwnedHandle> {
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        READ_CONTROL,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
     };
     use windows::core::HSTRING;
 
@@ -322,8 +330,8 @@ fn open_folder(path: &Path) -> anyhow::Result<OwnedHandle> {
     let handle = unsafe {
         CreateFileW(
             &name,
-            READ_CONTROL.0 | FILE_READ_ATTRIBUTES.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            READ_CONTROL.0 | FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
@@ -334,13 +342,23 @@ fn open_folder(path: &Path) -> anyhow::Result<OwnedHandle> {
     Ok(OwnedHandle(handle))
 }
 
-/// A handle [`open_folder`] opened, closed once when dropped.
+/// A handle [`open_held`] opened, closed once when dropped unless the caller
+/// keeps it for the life of the process ([`OwnedHandle::into_raw`]).
 #[cfg(windows)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
-struct OwnedHandle(windows::Win32::Foundation::HANDLE);
+pub(crate) struct OwnedHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl OwnedHandle {
+    /// The handle, still owned by this guard.
+    pub(crate) fn raw(&self) -> windows::Win32::Foundation::HANDLE {
+        self.0
+    }
+
+    /// The handle, no longer closed by this guard: the caller keeps it open.
+    pub(crate) fn into_raw(self) -> windows::Win32::Foundation::HANDLE {
+        std::mem::ManuallyDrop::new(self).0
+    }
+}
 
 #[cfg(windows)]
 impl Drop for OwnedHandle {
@@ -355,10 +373,6 @@ impl Drop for OwnedHandle {
 /// A security descriptor [`read_security`] had `GetSecurityInfo` allocate,
 /// freed once when dropped.
 #[cfg(windows)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
 struct OwnedDescriptor(windows::Win32::Security::PSECURITY_DESCRIPTOR);
 
 #[cfg(windows)]
@@ -375,10 +389,6 @@ impl Drop for OwnedDescriptor {
 /// Read the owner, DACL and mandatory label of the object `handle` names into
 /// [`RootSecurity`].
 #[cfg(windows)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
 fn read_security(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<RootSecurity> {
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
@@ -558,10 +568,6 @@ fn label_entry(sacl: *const windows::Win32::Security::ACL) -> anyhow::Result<Opt
 ///
 /// The directory could not be created.
 #[cfg(not(windows))]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into Dirs by RT-784 P1 part B")
-)]
 pub(crate) fn create_or_check(path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path)
         .with_context(|| format!("creating the protected root {}", path.display()))?;

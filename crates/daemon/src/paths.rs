@@ -1,8 +1,7 @@
 //! Configuration / state directory layout.
 
-use anyhow::{Context as _, anyhow};
-use directories::ProjectDirs;
-use std::ffi::OsStr;
+use anyhow::Context as _;
+use daemon_client::profile::{self, Overrides, Profile, ProfileRoots};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -154,58 +153,30 @@ mod dir_tests {
     }
 
     #[test]
-    fn tailnet_dir_is_data_local_and_honours_the_override() {
-        let data_local = std::env::temp_dir().join("rt-data-local");
-        let override_dir = std::env::temp_dir().join("rt-e2e-tailnet");
-        let from_data_local = || Ok(data_local.clone());
-        assert_eq!(
-            tailnet_dir_from(None, from_data_local).expect("resolve without override"),
-            data_local.join("tailnet")
-        );
-        assert_eq!(
-            tailnet_dir_from(Some(OsStr::new("")), from_data_local)
-                .expect("resolve empty override"),
-            data_local.join("tailnet"),
-            "an empty override falls back to the data-local dir"
-        );
-        assert_eq!(
-            tailnet_dir_from(Some(override_dir.as_os_str()), from_data_local)
-                .expect("resolve override"),
-            override_dir
-        );
-    }
-
-    #[test]
-    fn daemon_id_file_is_data_local_unless_the_config_dir_is_overridden() {
-        let data_local = std::env::temp_dir().join("rt-data-local");
-        let config = std::env::temp_dir().join("rt-roaming-config");
-        let from_data_local = || Ok(data_local.clone());
-        assert_eq!(
-            daemon_id_file_from(false, &config, from_data_local).expect("resolve by default"),
-            data_local.join("daemon-id"),
-            "the id stays on this machine, out of the roaming config dir"
-        );
-        assert_eq!(
-            daemon_id_file_from(true, &config, || Err(anyhow!(
-                "data-local dir not consulted"
-            )))
-            .expect("resolve with the config dir overridden"),
-            config.join("daemon-id"),
-            "an overridden config dir keeps the id inside it"
-        );
-    }
-
-    #[test]
-    fn summarizer_dir_is_data_local_summarizer_and_is_created() {
+    fn summarizer_dir_is_created() {
         let data_local =
             std::env::temp_dir().join(format!("rt-summarizer-data-local-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_local);
-        let dir = ensure_summarizer_dir_in(&data_local).expect("create the summarizer dir");
-        assert_eq!(dir, data_local.join("summarizer"));
+        let wanted = data_local.join("summarizer");
+        let dir = ensure_summarizer_dir(wanted.clone()).expect("create the summarizer dir");
+        assert_eq!(dir, wanted);
         assert!(dir.is_dir(), "{}", dir.display());
-        let again = ensure_summarizer_dir_in(&data_local).expect("an existing dir resolves");
+        let again = ensure_summarizer_dir(wanted).expect("an existing dir resolves");
         assert_eq!(again, dir);
         let _ = std::fs::remove_dir_all(&data_local);
+    }
+
+    #[test]
+    fn profile_rule_agrees_with_integrity_elevation() {
+        use crate::integrity::IntegrityLevel;
+
+        for rid in [0x1000, 0x2000, 0x2100, 0x3000, 0x4000] {
+            assert_eq!(
+                profile::profile_for_rid(rid) == Profile::Elevated,
+                IntegrityLevel::from_rid(rid).is_elevated(),
+                "{rid:#x}"
+            );
+        }
     }
 
     #[test]
@@ -250,19 +221,103 @@ mod tests {
         assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
     }
 
+    /// A fresh folder path for one test, cleared of a previous run's copy.
+    fn scratch(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("rt-profile-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
     #[test]
-    #[expect(clippy::expect_used, reason = "a failed resolve fails the test loudly")]
-    fn relative_config_dir_override_is_made_absolute() {
-        let out = config_dir_override(r"rel\config").expect("resolve override");
-        assert!(out.is_absolute(), "{out:?}");
-        assert_eq!(
-            out,
-            std::env::current_dir()
-                .expect("current dir")
-                .join(r"rel\config")
+    #[expect(clippy::expect_used, reason = "a failed setup fails the test loudly")]
+    fn an_elevated_dirs_check_refuses_a_preexisting_default_root() {
+        let data_local = scratch("default-root");
+        let roots = profile::roots_for(
+            Profile::Elevated,
+            &Overrides::default(),
+            &data_local.join("config"),
+            &data_local,
         );
-        let absolute = config_dir_override(r"C:\abs\config").expect("resolve override");
-        assert_eq!(absolute, PathBuf::from(r"C:\abs\config"));
+        let root = roots.root.clone().expect("an elevated profile has a root");
+        std::fs::create_dir_all(&root).expect("create an ordinary folder at the root");
+        let err = guard_elevated(&roots, &Overrides::default())
+            .expect_err("an ordinary folder is no protected root");
+        let text = format!("{err:#}");
+        assert!(text.contains("is unsafe"), "unexpected refusal: {text}");
+        let _ = std::fs::remove_dir_all(&data_local);
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "a failed setup fails the test loudly")]
+    fn the_elevated_root_cannot_be_renamed_while_held() {
+        let dir = scratch("held");
+        let aside = scratch("held-aside");
+        std::fs::create_dir_all(&dir).expect("create the folder");
+        let held = crate::protected_root::open_held(&dir).expect("hold the folder");
+        let renamed = std::fs::rename(&dir, &aside);
+        drop(held);
+        assert!(
+            renamed.is_err(),
+            "a held folder was renamed to {}",
+            aside.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&aside);
+    }
+
+    /// The guard holds every folder it checks before it checks any, so a
+    /// refused root still leaves the config override held.
+    #[test]
+    #[expect(clippy::expect_used, reason = "a failed setup fails the test loudly")]
+    fn a_checked_override_is_held() {
+        let data_local = scratch("held-override");
+        let config = scratch("held-override-config");
+        let aside = scratch("held-override-aside");
+        let overrides = Overrides {
+            config: Some(config.clone()),
+            ..Overrides::default()
+        };
+        let roots = profile::roots_for(
+            Profile::Elevated,
+            &overrides,
+            &data_local.join("config"),
+            &data_local,
+        );
+        let root = roots.root.clone().expect("an elevated profile has a root");
+        std::fs::create_dir_all(&root).expect("create the root");
+        std::fs::create_dir_all(&config).expect("create the config override");
+        let _ = guard_elevated(&roots, &overrides);
+        assert!(
+            std::fs::rename(&config, &aside).is_err(),
+            "the checked config override was renamed to {}",
+            aside.display()
+        );
+    }
+
+    /// The refusal comes from a check on the handle the guard holds: the
+    /// refused folder is still held afterwards.
+    #[test]
+    #[expect(clippy::expect_used, reason = "a failed setup fails the test loudly")]
+    fn the_check_runs_on_the_held_handle() {
+        let data_local = scratch("held-check");
+        let aside = scratch("held-check-aside");
+        let roots = profile::roots_for(
+            Profile::Elevated,
+            &Overrides::default(),
+            &data_local.join("config"),
+            &data_local,
+        );
+        let root = roots.root.clone().expect("an elevated profile has a root");
+        std::fs::create_dir_all(&root).expect("create an ordinary folder at the root");
+        let err = guard_elevated(&roots, &Overrides::default())
+            .expect_err("an ordinary folder is no protected root");
+        let text = format!("{err:#}");
+        assert!(text.contains("is unsafe"), "unexpected refusal: {text}");
+        assert!(
+            std::fs::rename(&root, &aside).is_err(),
+            "the refused root was not held: renamed to {}",
+            aside.display()
+        );
     }
 
     #[test]
@@ -273,17 +328,39 @@ mod tests {
 }
 
 impl Dirs {
+    /// Resolve this daemon's folders by its profile and create them. An
+    /// elevated daemon first creates its protected root, and the config and
+    /// binaries overrides when set, holds each open so it cannot be renamed
+    /// aside, and checks each through the handle that holds it
+    /// ([`guard_elevated`]); only then are the subfolders created.
+    ///
+    /// # Errors
+    ///
+    /// A folder could not be resolved or created, or an elevated daemon's
+    /// protected root (or an override it checks) is refused.
     pub fn ensure() -> anyhow::Result<Self> {
-        let config = config_dir()?;
+        let (profile, roots) = profile::roots()?;
+        if profile == Profile::Elevated {
+            let overrides = Overrides::from_env()?;
+            guard_elevated(&roots, &overrides)?;
+        }
+
+        let config = roots.config;
         std::fs::create_dir_all(&config).context("creating config dir")?;
 
         let sessions_dir = config.join("sessions");
         std::fs::create_dir_all(&sessions_dir).context("creating sessions dir")?;
 
-        let worktrees_dir = resolve_worktrees_dir()?;
+        // Worktrees are machine-local rather than in the roaming config dir:
+        // they can be large and shouldn't sync. An override lets the e2e
+        // harness keep them inside its per-run tmpdir.
+        let worktrees_dir = roots.worktrees;
         std::fs::create_dir_all(&worktrees_dir).context("creating worktrees dir")?;
 
-        let binaries_dir = resolve_binaries_dir()?;
+        // The content-addressed binary cache, machine-local beside the
+        // worktrees. `crates/daemon-client` resolves the ordinary path
+        // independently so the daemon and its clients share one cache.
+        let binaries_dir = roots.binaries;
         std::fs::create_dir_all(&binaries_dir).context("creating binaries dir")?;
 
         Ok(Self {
@@ -339,38 +416,99 @@ pub fn devices_file(dirs: &Dirs) -> PathBuf {
     dirs.config.join("devices.json")
 }
 
+/// The folders an elevated daemon protects: its root, and the config and
+/// binaries overrides when they are set, since an ordinary process could have
+/// made any of them first.
+fn protected_folders<'a>(roots: &'a ProfileRoots, overrides: &Overrides) -> Vec<&'a Path> {
+    let mut folders = Vec::with_capacity(3);
+    if let Some(root) = &roots.root {
+        folders.push(root.as_path());
+    }
+    if overrides.config.is_some() {
+        folders.push(roots.config.as_path());
+    }
+    if overrides.binaries.is_some() {
+        folders.push(roots.binaries.as_path());
+    }
+    folders
+}
+
+/// Before an elevated daemon creates any folder: for each protected folder
+/// ([`protected_folders`]), create it when missing and take a hold on it that
+/// refuses a rename or delete for the life of the process
+/// ([`crate::protected_root::open_held`]); then check each folder through the
+/// handle that holds it ([`crate::protected_root::check_handle`]), so the
+/// folder checked is the folder held and none can be swapped in between. A
+/// second call checks again through the handles the first one took.
+///
+/// # Errors
+///
+/// A folder could not be created or opened, or the first held folder the
+/// check refuses.
+#[cfg(windows)]
+fn guard_elevated(roots: &ProfileRoots, overrides: &Overrides) -> anyhow::Result<()> {
+    use crate::protected_root::{check_handle, create_if_missing, open_held};
+    use windows::Win32::Foundation::HANDLE;
+
+    /// Each held folder and its raw handle value, never closed.
+    static HELD: std::sync::Mutex<Vec<(PathBuf, usize)>> = std::sync::Mutex::new(Vec::new());
+
+    let folders = protected_folders(roots, overrides);
+    let mut handles = Vec::with_capacity(folders.len());
+    {
+        let mut held = HELD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for folder in &folders {
+            let known = held
+                .iter()
+                .find(|(path, _)| path.as_path() == *folder)
+                .map(|&(_, raw)| raw);
+            let raw = if let Some(raw) = known {
+                raw
+            } else {
+                create_if_missing(folder)?;
+                let raw = open_held(folder)?.into_raw().0.addr();
+                held.push((folder.to_path_buf(), raw));
+                raw
+            };
+            handles.push(raw);
+        }
+    }
+    for (folder, raw) in folders.into_iter().zip(handles) {
+        check_handle(HANDLE(std::ptr::without_provenance_mut(raw)), folder)?;
+    }
+    Ok(())
+}
+
+/// Before an elevated daemon creates any folder: create or check each
+/// protected folder ([`protected_folders`]). No other platform lets an open
+/// handle refuse a rename, so nothing is held.
+///
+/// # Errors
+///
+/// The first folder [`crate::protected_root::create_or_check`] refuses.
+#[cfg(not(windows))]
+fn guard_elevated(roots: &ProfileRoots, overrides: &Overrides) -> anyhow::Result<()> {
+    for folder in protected_folders(roots, overrides) {
+        crate::protected_root::create_or_check(folder)?;
+    }
+    Ok(())
+}
+
 /// This daemon's stable id file, a bare UUID with no newline (see
-/// [`crate::daemon_id`]): `<data_local>/daemon-id`, machine-local, so two
-/// machines sharing a roaming profile never report one id. While
+/// [`crate::daemon_id`]), from the profile
+/// ([`daemon_client::profile::roots_for`]): `<data_local>/daemon-id` for an
+/// ordinary daemon, machine-local, so two machines sharing a roaming profile
+/// never report one id; `<elevated root>/daemon-id` for an elevated one. While
 /// `RUSTLING_TULIP_CONFIG_DIR` overrides the config dir it is
 /// `<config>/daemon-id`, so an isolated daemon keeps its id in its own tree.
 ///
 /// # Errors
 ///
-/// The data-local dir could not be resolved.
-pub fn resolve_daemon_id_file(dirs: &Dirs) -> anyhow::Result<PathBuf> {
-    let config_overridden =
-        std::env::var_os("RUSTLING_TULIP_CONFIG_DIR").is_some_and(|value| !value.is_empty());
-    daemon_id_file_from(config_overridden, &dirs.config, || {
-        let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
-            .ok_or_else(|| anyhow!("could not resolve the daemon id directory"))?;
-        Ok(pd.data_local_dir().to_path_buf())
-    })
-}
-
-/// `daemon-id` under `config` when the config dir is overridden, else under
-/// the data-local dir.
-fn daemon_id_file_from(
-    config_overridden: bool,
-    config: &Path,
-    data_local: impl FnOnce() -> anyhow::Result<PathBuf>,
-) -> anyhow::Result<PathBuf> {
-    let dir = if config_overridden {
-        config.to_path_buf()
-    } else {
-        data_local()?
-    };
-    Ok(dir.join("daemon-id"))
+/// The profile or the app's folders could not be resolved.
+pub fn resolve_daemon_id_file(_dirs: &Dirs) -> anyhow::Result<PathBuf> {
+    Ok(profile::roots()?.1.daemon_id)
 }
 
 /// The summarizer's spend ledger: `<config>/summarizer-spend.json`, the
@@ -394,108 +532,43 @@ pub fn session_summary_file(dirs: &Dirs, session_id: &str) -> PathBuf {
     dirs.sessions_dir.join(session_id).join("summary.json")
 }
 
-/// Resolve the tailnet listener's certificate dir, honoring
-/// `RUSTLING_TULIP_TAILNET_DIR` when set (used by e2e isolation). Falls back
-/// to `<data_local>/leftos/rustling-tulip/data/tailnet/`: the private key
-/// `tailscale cert` writes stays machine-local and never roams.
+/// Resolve the tailnet listener's certificate dir by the profile, honoring
+/// `RUSTLING_TULIP_TAILNET_DIR` when set (used by e2e isolation): an ordinary
+/// daemon's is `<data_local>/leftos/rustling-tulip/data/tailnet/`, so the
+/// private key `tailscale cert` writes stays machine-local and never roams; an
+/// elevated daemon's is under its protected root.
 pub fn resolve_tailnet_dir() -> anyhow::Result<PathBuf> {
-    let override_dir = std::env::var_os("RUSTLING_TULIP_TAILNET_DIR");
-    tailnet_dir_from(override_dir.as_deref(), || {
-        let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
-            .ok_or_else(|| anyhow!("could not resolve tailnet directory"))?;
-        Ok(pd.data_local_dir().to_path_buf())
-    })
+    Ok(profile::roots()?.1.tailnet)
 }
 
-/// The tailnet dir an override value names, else `tailnet` under the
-/// data-local dir. An empty override counts as unset.
-fn tailnet_dir_from(
-    override_dir: Option<&OsStr>,
-    data_local: impl FnOnce() -> anyhow::Result<PathBuf>,
-) -> anyhow::Result<PathBuf> {
-    match override_dir {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ => Ok(data_local()?.join("tailnet")),
-    }
-}
-
-/// The summarizer's working folder, `<data_local>/summarizer`
-/// (`%LOCALAPPDATA%\leftos\rustling-tulip\data\summarizer\` on Windows),
-/// created if missing. An agent's summarizer program runs in it, so no
-/// project's settings or instruction files apply to a summary.
+/// The summarizer's working folder by the profile, created if missing: an
+/// ordinary daemon's is `<data_local>/summarizer`
+/// (`%LOCALAPPDATA%\leftos\rustling-tulip\data\summarizer\` on Windows), an
+/// elevated daemon's is under its protected root. An agent's summarizer
+/// program runs in it, so no project's settings or instruction files apply to
+/// a summary.
 pub(crate) fn resolve_summarizer_dir() -> anyhow::Result<PathBuf> {
-    let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| anyhow!("could not resolve the summarizer directory"))?;
-    ensure_summarizer_dir_in(pd.data_local_dir())
+    ensure_summarizer_dir(profile::roots()?.1.summarizer)
 }
 
-/// `summarizer` under `data_local`, created if missing.
-fn ensure_summarizer_dir_in(data_local: &Path) -> anyhow::Result<PathBuf> {
-    let dir = data_local.join("summarizer");
+/// `dir`, created if missing.
+fn ensure_summarizer_dir(dir: PathBuf) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating the summarizer dir {}", dir.display()))?;
     Ok(dir)
 }
 
-/// Resolve the config directory, honoring `RUSTLING_TULIP_CONFIG_DIR` when
-/// set. The override lets the e2e harness point at a per-run tmpdir so test
-/// runs never write to the user's real `%APPDATA%`. When unset (the
-/// production path), falls back to `ProjectDirs::from("dev", "leftos",
-/// "rustling-tulip").config_dir()`.
+/// Resolve the config directory by the profile, honoring
+/// `RUSTLING_TULIP_CONFIG_DIR` when set, made absolute against the current
+/// directory. The override lets the e2e harness point at a per-run tmpdir so
+/// test runs never write to the user's real `%APPDATA%`. When unset, an
+/// ordinary daemon's is `ProjectDirs::from("dev", "leftos",
+/// "rustling-tulip").config_dir()` and an elevated daemon's is under its
+/// protected root.
 ///
 /// Callers that need the subdirectories too want [`Dirs::ensure`] instead.
 pub(crate) fn config_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(value) = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
-        && !value.is_empty()
-    {
-        return config_dir_override(&value);
-    }
-    let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| anyhow!("could not resolve config directory"))?;
-    Ok(pd.config_dir().to_path_buf())
-}
-
-/// The config dir a `RUSTLING_TULIP_CONFIG_DIR` value names, made absolute
-/// against the current directory: tracers carry the config dir as their
-/// owner, and a relative one would name a different dir from their cwd.
-fn config_dir_override(value: &str) -> anyhow::Result<PathBuf> {
-    std::path::absolute(value)
-        .with_context(|| format!("resolving RUSTLING_TULIP_CONFIG_DIR={value} to an absolute path"))
-}
-
-/// Resolve the worktrees root, honoring `RUSTLING_TULIP_WORKTREES_DIR` when
-/// set. The override lets the e2e harness keep worktrees inside its per-run
-/// tmpdir. When unset, falls back to `ProjectDirs::data_local_dir()` joined
-/// with `worktrees` — `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees\`
-/// on Windows; equivalent under `~/.local/share/...` on Linux. Worktrees are
-/// deliberately under `data_local_dir` (machine-local) rather than the
-/// roaming `config_dir` — they can be large and shouldn't sync.
-fn resolve_worktrees_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(value) = std::env::var("RUSTLING_TULIP_WORKTREES_DIR")
-        && !value.is_empty()
-    {
-        return Ok(PathBuf::from(value));
-    }
-    let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| anyhow!("could not resolve worktrees directory"))?;
-    Ok(pd.data_local_dir().join("worktrees"))
-}
-
-/// Resolve the cached-binary root, honoring `RUSTLING_TULIP_BINARIES_DIR` when
-/// set (used by e2e isolation). Falls back to
-/// `<data_local>/leftos/rustling-tulip/data/binaries/` — same root as
-/// worktrees, machine-local and known-writable. `crates/daemon-client`
-/// resolves the same path independently so the daemon and its clients share
-/// one cache.
-pub fn resolve_binaries_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(value) = std::env::var("RUSTLING_TULIP_BINARIES_DIR")
-        && !value.is_empty()
-    {
-        return Ok(PathBuf::from(value));
-    }
-    let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| anyhow!("could not resolve binaries directory"))?;
-    Ok(pd.data_local_dir().join("binaries"))
+    Ok(profile::roots()?.1.config)
 }
 
 /// The template directory `RUSTLING_TULIP_BIN_TEMPLATES` names, as
