@@ -17,6 +17,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Stopping the daemon as administrator after an administrator daemon crashed now clears its leftover handshake instead of refusing to stop.
 - Reconnecting to one host no longer drops another host's worktree cleanup prompts or running preset launches.
 - A remote host's layout question closes as soon as another window answers it.
+- Ctrl+Left and Ctrl+Right now move a word at a time, and other Shift, Alt and Ctrl combinations with arrows, Home, End and F-keys reach programs.
 
 ## v0.8.1-alpha
 

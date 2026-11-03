@@ -1,7 +1,7 @@
 //! Keystroke → bytes the PTY expects (xterm conventions), and the app keys
 //! that switch the focused pane's view.
 
-use gpui::Keystroke;
+use gpui::{Keystroke, Modifiers};
 
 use crate::chat::ViewKey;
 
@@ -23,6 +23,29 @@ pub fn pane_view_key(ks: &Keystroke) -> Option<ViewKey> {
         None
     }
 }
+
+/// Keys whose xterm sequence takes a modifier parameter: the `CSI 1 ; m`
+/// forms end in their final byte, the `CSI n ; m ~` forms in `~`.
+const MODIFIABLE_KEYS: &[(&str, &str, char)] = &[
+    ("home", "1", 'H'),
+    ("end", "1", 'F'),
+    ("f1", "1", 'P'),
+    ("f2", "1", 'Q'),
+    ("f3", "1", 'R'),
+    ("f4", "1", 'S'),
+    ("insert", "2", '~'),
+    ("delete", "3", '~'),
+    ("pageup", "5", '~'),
+    ("pagedown", "6", '~'),
+    ("f5", "15", '~'),
+    ("f6", "17", '~'),
+    ("f7", "18", '~'),
+    ("f8", "19", '~'),
+    ("f9", "20", '~'),
+    ("f10", "21", '~'),
+    ("f11", "23", '~'),
+    ("f12", "24", '~'),
+];
 
 /// Keys that send a fixed sequence regardless of terminal mode.
 const FIXED_KEYS: &[(&str, &[u8])] = &[
@@ -58,6 +81,9 @@ const FIXED_KEYS: &[(&str, &[u8])] = &[
 /// `app_cursor` is the terminal's DECCKM mode: arrows send `ESC O x` instead of `ESC [ x`.
 pub fn to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = ks.modifiers;
+    if let Some(bytes) = modified_key(ks.key.as_str(), m) {
+        return Some(bytes);
+    }
     if let Some(bytes) = named_key(ks.key.as_str(), m.shift, app_cursor) {
         return Some(prefix_alt(m.alt, bytes));
     }
@@ -109,6 +135,30 @@ fn arrow_letter(key: &str) -> Option<char> {
         "left" => Some('D'),
         _ => None,
     }
+}
+
+/// xterm's modifier parameter: 1, plus 1 for Shift, 2 for Alt and 4 for
+/// Ctrl. `None` when none of the three is held.
+fn modifier_parameter(m: Modifiers) -> Option<u8> {
+    let value = u8::from(m.shift) + 2 * u8::from(m.alt) + 4 * u8::from(m.control);
+    (value > 0).then_some(value + 1)
+}
+
+/// The sequence an arrow, Home/End, Insert/Delete, PageUp/PageDown or a
+/// function key sends with Shift, Alt or Ctrl held, as xterm and Windows
+/// Terminal send it: `CSI 1 ; m X`, or `CSI n ; m ~`. Ctrl+Left is
+/// `ESC [ 1 ; 5 D`, which programs read as a word left. These forms are
+/// always CSI, whatever the cursor-key mode.
+fn modified_key(key: &str, m: Modifiers) -> Option<Vec<u8>> {
+    let param = modifier_parameter(m)?;
+    let (number, last) = match arrow_letter(key) {
+        Some(letter) => ("1", letter),
+        None => MODIFIABLE_KEYS
+            .iter()
+            .find(|(name, _, _)| *name == key)
+            .map(|(_, number, last)| (*number, *last))?,
+    };
+    Some(format!("\x1b[{number};{param}{last}").into_bytes())
 }
 
 fn named_key(key: &str, shift: bool, app_cursor: bool) -> Option<Vec<u8>> {
@@ -217,6 +267,87 @@ mod tests {
                 "{name} app cursor"
             );
         }
+    }
+
+    fn mods(shift: bool, alt: bool, control: bool) -> Modifiers {
+        Modifiers {
+            shift,
+            alt,
+            control,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ctrl_arrows_send_the_modifier_parameter_in_either_cursor_mode() {
+        for app_cursor in [false, true] {
+            assert_eq!(
+                to_bytes(&with(key("left"), ctrl()), app_cursor),
+                Some(b"\x1b[1;5D".to_vec()),
+                "ctrl+left, app cursor {app_cursor}"
+            );
+            assert_eq!(
+                to_bytes(&with(key("right"), ctrl()), app_cursor),
+                Some(b"\x1b[1;5C".to_vec()),
+                "ctrl+right, app cursor {app_cursor}"
+            );
+        }
+    }
+
+    #[test]
+    fn modifier_parameter_counts_shift_alt_and_ctrl() {
+        let cases: [(Modifiers, &[u8]); 7] = [
+            (mods(true, false, false), b"\x1b[1;2A"),
+            (mods(false, true, false), b"\x1b[1;3A"),
+            (mods(true, true, false), b"\x1b[1;4A"),
+            (mods(false, false, true), b"\x1b[1;5A"),
+            (mods(true, false, true), b"\x1b[1;6A"),
+            (mods(false, true, true), b"\x1b[1;7A"),
+            (mods(true, true, true), b"\x1b[1;8A"),
+        ];
+        for (modifiers, seq) in cases {
+            assert_eq!(
+                bytes(&with(key("up"), modifiers)),
+                Some(seq.to_vec()),
+                "{modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modified_navigation_and_function_keys_send_the_parameter() {
+        let cases: [(&str, Modifiers, &[u8]); 8] = [
+            ("home", ctrl(), b"\x1b[1;5H"),
+            ("end", shift(), b"\x1b[1;2F"),
+            ("delete", ctrl(), b"\x1b[3;5~"),
+            ("insert", alt(), b"\x1b[2;3~"),
+            ("pageup", shift(), b"\x1b[5;2~"),
+            ("pagedown", ctrl(), b"\x1b[6;5~"),
+            ("f1", shift(), b"\x1b[1;2P"),
+            ("f12", ctrl(), b"\x1b[24;5~"),
+        ];
+        for (name, modifiers, seq) in cases {
+            assert_eq!(
+                bytes(&with(key(name), modifiers)),
+                Some(seq.to_vec()),
+                "{name} {modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keys_without_a_modifier_form_keep_their_bytes() {
+        assert_eq!(bytes(&with(key("tab"), shift())), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(bytes(&with(key("tab"), ctrl())), Some(b"\t".to_vec()));
+        assert_eq!(
+            bytes(&with(key("backspace"), alt())),
+            Some(b"\x1b\x7f".to_vec())
+        );
+        assert_eq!(bytes(&with(key("enter"), ctrl())), Some(b"\r".to_vec()));
+        assert_eq!(
+            bytes(&with(key("escape"), alt())),
+            Some(b"\x1b\x1b".to_vec())
+        );
     }
 
     #[test]
