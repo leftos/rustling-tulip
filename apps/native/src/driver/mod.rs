@@ -16,3 +16,4 @@ pub mod handlers;
 pub mod pipe;
 pub mod protocol;
 pub mod registry;
+pub mod wait;

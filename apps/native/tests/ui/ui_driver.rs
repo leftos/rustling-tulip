@@ -4,17 +4,41 @@
 
 use crate::support;
 
-use gpui::TestAppContext;
-use rustling_tulip_native::driver::handlers::handle;
+use gpui::{Modifiers, TestAppContext};
+use rustling_tulip_native::driver::handlers::{handle, wait_read};
 use rustling_tulip_native::driver::protocol::{ErrorCode, Failure, Outcome, Reply, Request};
+use rustling_tulip_native::driver::wait::parse_predicate;
 use serde_json::{Value, json};
-use support::{Fixture, Harness, TestDir, repo, session};
+use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 
 /// Repos `r1` and `r2`, one session of `r1` alone in pane `p1` of tab `t1`.
 fn two_repos() -> Fixture {
     let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
     fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
     fixture
+}
+
+/// Sessions `s1` and `s2` in panes `p1` of tab `t1` and `p2` of tab `t2`.
+fn two_tabs() -> Fixture {
+    Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ],
+        ..Fixture::default()
+    }
+}
+
+/// `two_repos`, `s1`'s scrollback answered, its pane clicked so it holds
+/// the keyboard, and everything sent so far drained.
+fn focused_pane<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &two_repos());
+    h.answer_scrollback("s1", b"");
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    h
 }
 
 /// The reply to `method` with `params`, sent once the window has settled.
@@ -78,7 +102,7 @@ fn driver_unknown_method_lists_methods(cx: &mut TestAppContext) {
     assert_eq!(failed.message, "unknown method: nope");
     assert_eq!(
         failed.hint.as_deref(),
-        Some("methods: find, key, ping, screenshot, state")
+        Some("methods: action, find, key, pane_text, ping, screenshot, state, type_text, wait_for")
     );
 }
 
@@ -176,5 +200,183 @@ fn driver_state_lists_tabs_and_sessions(cx: &mut TestAppContext) {
             && window["height"].as_f64().is_some_and(|height| height > 0.0)
             && window["scale"].as_f64().is_some_and(|scale| scale > 0.0),
         "the window's logical size and scale: {window}"
+    );
+}
+
+#[gpui::test]
+fn driver_type_text_reaches_the_focused_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = focused_pane(cx, &dir);
+
+    let typed = result(&mut h, "type_text", json!({"text": "echo hi"}));
+
+    assert_eq!(typed, json!({"typed": 7}));
+    let sent = h.sent_input("s1");
+    assert!(
+        sent.ends_with(b"echo hi"),
+        "the pane's session got the text: {:?}",
+        String::from_utf8_lossy(&sent)
+    );
+}
+
+#[gpui::test]
+fn driver_type_text_refuses_control_characters_and_types_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = focused_pane(cx, &dir);
+
+    let failed = failure(&mut h, "type_text", json!({"text": "a\nb"}));
+
+    assert_eq!(failed.code, ErrorCode::BadParams);
+    assert_eq!(
+        failed.hint.as_deref(),
+        Some("type_text takes printable text; press Enter, Tab or Escape with key")
+    );
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "a refused text types nothing"
+    );
+}
+
+#[gpui::test]
+fn driver_pane_text_reads_the_panes_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    h.pty("s1", b"hello\r\nworld");
+    h.cx.run_until_parked();
+
+    let read = result(&mut h, "pane_text", json!({"pane": "p1"}));
+
+    let rows = h.grid_text("p1");
+    assert_eq!(rows.first().map(String::as_str), Some("hello"), "{rows:?}");
+    assert_eq!(read["pane"], json!("p1"));
+    assert_eq!(read["lines"], json!(rows));
+    assert_eq!(read["text"], json!(rows.join("\n")));
+    assert_eq!(
+        result(&mut h, "pane_text", json!({})),
+        read,
+        "the focused pane is read by default"
+    );
+}
+
+#[gpui::test]
+fn driver_pane_text_unknown_pane_lists_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    let failed = failure(&mut h, "pane_text", json!({"pane": "nope"}));
+
+    assert_eq!(failed.code, ErrorCode::NotFound);
+    assert_eq!(failed.hint.as_deref(), Some("panes: p1"));
+}
+
+#[gpui::test]
+fn driver_action_open_settings_opens_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    let done = result(&mut h, "action", json!({"name": "open_settings"}));
+
+    assert_eq!(done, json!({"action": "open_settings"}));
+    assert_eq!(
+        result(&mut h, "state", json!({}))["overlay"],
+        json!("settings")
+    );
+}
+
+#[gpui::test]
+fn driver_action_unknown_name_lists_actions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    let failed = failure(&mut h, "action", json!({"name": "nope"}));
+
+    assert_eq!(failed.code, ErrorCode::BadParams);
+    assert_eq!(
+        failed.hint.as_deref(),
+        Some(
+            "actions: open_settings, new_shell, open_spawn, toggle_sidebar, select_tab, \
+             focus_pane, show_activity, set_hover"
+        )
+    );
+}
+
+#[gpui::test]
+fn driver_action_select_tab_switches_the_active_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    assert_eq!(
+        result(&mut h, "state", json!({}))["active_tab"],
+        json!("t1")
+    );
+
+    result(
+        &mut h,
+        "action",
+        json!({"name": "select_tab", "args": {"id": "t2"}}),
+    );
+
+    assert_eq!(
+        result(&mut h, "state", json!({}))["active_tab"],
+        json!("t2")
+    );
+}
+
+#[gpui::test]
+fn driver_action_select_tab_unknown_id_is_not_found(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+
+    let failed = failure(
+        &mut h,
+        "action",
+        json!({"name": "select_tab", "args": {"id": "t9"}}),
+    );
+
+    assert_eq!(failed.code, ErrorCode::NotFound);
+    assert_eq!(failed.hint.as_deref(), Some("tabs: t1, t2"));
+    assert_eq!(
+        result(&mut h, "state", json!({}))["active_tab"],
+        json!("t1")
+    );
+}
+
+#[gpui::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a spec fails with the message of the precondition it lost"
+)]
+fn driver_wait_read_sees_the_settings_overlay(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let predicate = parse_predicate(&json!({"state": "overlay", "equals": "settings"}))
+        .expect("a well-formed predicate");
+    let root = h.root.clone();
+    let before =
+        h.cx.update(|window, cx| wait_read(&predicate, &root, window, cx));
+    assert_eq!(before, (false, Value::Null), "no overlay yet");
+
+    result(&mut h, "key", json!({"keys": "ctrl-,"}));
+
+    let after =
+        h.cx.update(|window, cx| wait_read(&predicate, &root, window, cx));
+    assert_eq!(after, (true, json!("settings")));
+}
+
+#[gpui::test]
+fn driver_wait_for_rejects_a_malformed_predicate(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    let failed = failure(
+        &mut h,
+        "wait_for",
+        json!({"until": {"state": "overlay", "equals": "settings", "exists": true}}),
+    );
+
+    assert_eq!(failed.code, ErrorCode::BadParams);
+    assert!(
+        failed.message.contains("give equals or exists, not both"),
+        "{}",
+        failed.message
     );
 }

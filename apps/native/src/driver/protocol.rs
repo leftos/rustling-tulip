@@ -10,7 +10,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Every method a request may name, sorted.
-pub const METHODS: [&str; 5] = ["find", "key", "ping", "screenshot", "state"];
+pub const METHODS: [&str; 9] = [
+    "action",
+    "find",
+    "key",
+    "pane_text",
+    "ping",
+    "screenshot",
+    "state",
+    "type_text",
+    "wait_for",
+];
 
 /// One call from a driver client.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -159,6 +169,44 @@ pub struct FindParams {
     pub prefix: Option<String>,
 }
 
+/// `type_text`'s params: the printable text to type into what holds focus.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypeTextParams {
+    pub text: String,
+}
+
+/// `pane_text`'s params: the pane to read, else the active tab's focused
+/// pane.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaneTextParams {
+    #[serde(default)]
+    pub pane: Option<String>,
+}
+
+/// `action`'s params: the named action and its arguments, when it takes
+/// any.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionParams {
+    pub name: String,
+    #[serde(default)]
+    pub args: Option<Value>,
+}
+
+/// `wait_for`'s params: the predicate to wait on, how long to wait at
+/// most and how often to read it, in milliseconds.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitParams {
+    pub until: Value,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub interval_ms: Option<u64>,
+}
+
 /// Why a request's params were refused, as its `bad_params` reply says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParamError {
@@ -268,7 +316,7 @@ mod tests {
                 "error": {
                     "code": "unknown_method",
                     "message": "unknown method: nope",
-                    "hint": "methods: find, key, ping, screenshot, state",
+                    "hint": "methods: action, find, key, pane_text, ping, screenshot, state, type_text, wait_for",
                 },
             })
         );

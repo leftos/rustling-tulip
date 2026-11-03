@@ -18,6 +18,7 @@ use crate::driver::capture;
 use crate::driver::handlers;
 use crate::driver::pipe::{self, Call};
 use crate::driver::protocol::{ErrorCode, Outcome, Reply, Request};
+use crate::driver::wait::{Step, WaitLoop};
 
 /// How long a reply waits for the frame drawn after its request.
 const FRAME_WAIT: Duration = Duration::from_secs(5);
@@ -104,6 +105,9 @@ async fn answer(
     cx: &mut AsyncApp,
 ) -> Reply {
     let id = request.id;
+    if request.method == "wait_for" {
+        return wait_for(request, handle, root, cx).await;
+    }
     let (drawn, frame) = oneshot::channel();
     let handled = cx.update_window(handle, |_, window, cx| {
         let root = root.upgrade()?;
@@ -133,6 +137,35 @@ async fn answer(
             *shots += 1;
             let timeout = cx.background_executor().timer(CAPTURE_WAIT);
             screenshot(id, address, *shots, timeout).await
+        }
+    }
+}
+
+/// The reply to a `wait_for`: its predicate read in one window update per
+/// poll, with a background timer between polls, so the UI thread is never
+/// blocked. A read-only poll changes nothing, so no frame is awaited.
+async fn wait_for(
+    request: &Request,
+    handle: AnyWindowHandle,
+    root: &WeakEntity<RootView>,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let (params, predicate) = match handlers::wait_request(request) {
+        Ok(parsed) => parsed,
+        Err(reply) => return reply,
+    };
+    let wait = WaitLoop::new(&params, Instant::now());
+    loop {
+        let read = cx.update_window(handle, |_, window, cx| {
+            let root = root.upgrade()?;
+            Some(handlers::wait_read(&predicate, &root, window, cx))
+        });
+        let Ok(Some((met, last))) = read else {
+            return refused(request.id, "the window is closed");
+        };
+        match wait.step(met, last, Instant::now()) {
+            Step::Done(result) => return Reply::ok(request.id, result),
+            Step::Again(sleep) => cx.background_executor().timer(sleep).await,
         }
     }
 }

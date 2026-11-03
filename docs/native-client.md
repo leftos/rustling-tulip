@@ -961,3 +961,21 @@ Each line is one request in the format of `apps/native/src/driver/protocol.rs`, 
 Once a frame has drawn with the window cloaked, the client writes its discovery file `%TEMP%\rustling-tulip-driver\<pid>.json` (`{"pid", "pipe", "started_at", "version"}`, `started_at` being the process creation time as a `FILETIME`) by temp file and rename. It removes the file when the app quits, and first deletes each file there whose pid is not running or whose `started_at` is not that pid's creation time.
 
 `screenshot` takes no params. It captures the cloaked window with `PrintWindow` on a worker thread to `<config dir>/driver-shots/<pid>-<n>.png`, `<n>` counting from 1 in each run, and replies `{"path", "width", "height"}`. It refuses a window that is not shown, is not cloaked by the client (`DWM_CLOAKED_APP`), is the foreground window, belongs to another process, or captured black, and a capture that does not finish within 10 s. The discovery file waits for the same shown and app-cloaked state, and for the pipe's listener to exist.
+
+An error reply names a code (`unknown_method`, `bad_params`, `not_found`, `not_visible` or `refused`), a message and sometimes a hint. The methods, sorted:
+
+| Method | Params | Result | Errors |
+|---|---|---|---|
+| `action` | `name`, `args?` | `{"action": name}` | `bad_params` for an unknown name (the hint lists the names); `refused` for `open_spawn` while another dialog is open; `not_found` for an unknown tab or pane id |
+| `find` | `prefix?` | the registry's names starting with `prefix`, sorted, each `{"name", "bounds", "visible"}` | none |
+| `key` | `keys`: one keystroke, such as `ctrl-,` | `{"pressed": keys}` | `bad_params` for more than one keystroke or an unreadable one |
+| `pane_text` | `pane?` | `{"pane", "lines", "text"}`: the visible rows only, never scrollback; the default pane is the active tab's focused pane, else its first | `not_found` for an unknown pane (the hint lists the active tab's panes) or a tab with no pane |
+| `ping` | none | `{"version"}` | none |
+| `screenshot` | none | `{"path", "width", "height"}` | `refused` as above; the in-process handler also refuses it, since only the pipe answers it |
+| `state` | none | the window's size and scale, `active_tab`, `tabs`, the shown tab's `panes`, `sessions` and `overlay` | none |
+| `type_text` | `text` | `{"typed": n}`, one printable character per keystroke, into whatever holds focus | `bad_params` for any control character (U+0000 to U+001F, U+007F), the hint saying to press Enter, Tab or Escape with `key` |
+| `wait_for` | `until`, `timeout_ms?` (default 5000, clamped to 100..=60000), `interval_ms?` (default 100, clamped to 20..=1000) | always ok: `{"met", "waited_ms", "last"}`, `last` being the final value the predicate read | `bad_params` ("bad until: ...") for a malformed predicate |
+
+`action` names are `open_settings`, `new_shell`, `open_spawn`, `toggle_sidebar`, `select_tab` (`{"id"}`), `focus_pane` (`{"id"}`), `show_activity` (`{"name"}`: `sessions`, `needs_you` or `source_control`) and `set_hover` (`{"value"}`: `true`, `false` or `null`).
+
+A `wait_for` predicate (`until`) is one of `{"state": "<dotted path>", "equals": <json>}`, `{"state": path, "exists": bool}`, `{"pane_text": {"pane", "contains"}}` and `{"element": "<registry name>", "visible": bool}`. A numeric path segment indexes an array, and `exists` means non-null. The loop runs in the endpoint between frames (`apps/native/src/driver/wait.rs`), so it never blocks the UI thread, and it is answered only over the pipe.
