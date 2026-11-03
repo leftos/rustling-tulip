@@ -84,7 +84,7 @@ One native window shows This PC and every saved tailnet and SSH host at once; th
 
   A newer client retires an older-build daemon, and never retires a newer one (see [auto-update.md](./auto-update.md)).
 
-  Each session's lifecycle task (`session.rs` `attach_lifecycle`) is the single consumer of its PTY output: it forwards each chunk to every attached client's own channel (`deliver_chunk`), then appends it to the scrollback ring, so a `LoadScrollback` snapshot and the live output after it meet with no gap. A client fed from a fresh `broadcast` receiver instead would miss whatever arrives while the snapshot reads the file, and a lost ConPTY startup `ESC[6n` leaves the child blocked forever.
+  Each session's lifecycle task (`session.rs` `attach_lifecycle`) is the single consumer of its PTY output: it forwards each chunk to every attached client's own channel (`deliver_chunk`), then appends it to the scrollback ring, so a `LoadScrollback` snapshot and the live output after it meet with no gap. A client fed from a fresh `broadcast` receiver instead would miss whatever arrives while the snapshot reads the file, and a session on an older tracer loses its ConPTY startup `ESC[6n`, which blocks the child forever.
 
   The session's exit travels through the same lifecycle queue as its last item (`Chunk | Exited`), so every output chunk reaches clients and scrollback before the task handles the exit inline (`handle_exit`): the history entry, `Stopped`, and clearing the pending scrollback snapshot request.
 

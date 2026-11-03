@@ -21,6 +21,7 @@
 //!   it missed during the outage. After the snapshot, live output is forwarded
 //!   as it arrives.
 
+use crate::cursor_query::{CURSOR_AT_ORIGIN, CursorQuery};
 use crate::ring::OutputRing;
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -223,15 +224,21 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         attached: None,
     }));
 
+    let (pty_input_tx, mut pty_input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
     // PTY reader thread: push to ring; if a daemon is attached, forward bytes
     // through the bounded channel. `blocking_send` backpressures the reader
     // (and through it, the child) when the daemon is slow to drain.
     let shared_for_reader = Arc::clone(&shared);
+    let reply_tx = pty_input_tx.clone();
     let reader_handle = std::thread::spawn(move || {
         debug!("supervisor: PTY reader thread started; about to enter read loop");
         let mut buf = [0u8; 4096];
         let mut total_bytes = 0u64;
         let mut read_count = 0u64;
+        // Only `ConPTY` waits on the startup query; a Unix child's `ESC[6n` is
+        // its own and stays untouched.
+        let mut scanner = cfg!(windows).then(CursorQuery::new);
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -252,22 +259,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                             "supervisor: first PTY read"
                         );
                     }
-                    let chunk = buf[..n].to_vec();
-                    let attached = {
-                        let Ok(mut state) = shared_for_reader.lock() else {
-                            warn!("supervisor: shared state poisoned; exiting reader");
-                            break;
-                        };
-                        state.ring.push(&chunk);
-                        state.attached.clone()
-                    };
-                    if let Some(tx) = attached
-                        && tx.blocking_send(chunk).is_err()
-                    {
-                        // Receiver dropped; pipe handler will reset attached
-                        // when it sees disconnect. Just continue — bytes still
-                        // land in the ring for next reconnect.
-                        debug!("supervisor: pipe sender closed; bytes buffered in ring");
+                    let chunk = scan_output(scanner.as_mut(), &buf[..n], &reply_tx);
+                    if !publish_output(&shared_for_reader, chunk) {
+                        return;
                     }
                 }
                 Err(err) => {
@@ -279,10 +273,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 }
             }
         }
+        if let Some(scanner) = scanner.as_mut() {
+            publish_output(&shared_for_reader, scanner.finish());
+        }
     });
 
     // PTY writer thread: serializes input writes onto the master.
-    let (pty_input_tx, mut pty_input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = std::thread::spawn(move || {
         debug!("supervisor: PTY writer thread started");
         let mut writer = writer;
@@ -498,6 +494,51 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "supervisor: exiting"
     );
     Ok(())
+}
+
+/// The output of one PTY read. With a `scanner`, the startup cursor query is
+/// removed and answered here, before anything that can stall on a slow daemon.
+/// The reply goes straight to the PTY: it is no key, so it skips what the
+/// daemon does for `SendInput`.
+fn scan_output(
+    scanner: Option<&mut CursorQuery>,
+    bytes: &[u8],
+    reply_tx: &mpsc::UnboundedSender<Vec<u8>>,
+) -> Vec<u8> {
+    let Some(scanner) = scanner else {
+        return bytes.to_vec();
+    };
+    let scanned = scanner.feed(bytes);
+    if scanned.answer && reply_tx.send(CURSOR_AT_ORIGIN.to_vec()).is_err() {
+        warn!("supervisor: PTY writer gone; the startup cursor query went unanswered");
+    }
+    scanned.output
+}
+
+/// Pushes `chunk` to the ring and forwards it to the attached daemon. An empty
+/// chunk does neither. Returns `false` when the shared state is poisoned and
+/// the reader must stop.
+fn publish_output(shared: &Mutex<SharedOutput>, chunk: Vec<u8>) -> bool {
+    if chunk.is_empty() {
+        return true;
+    }
+    let attached = {
+        let Ok(mut state) = shared.lock() else {
+            warn!("supervisor: shared state poisoned; exiting reader");
+            return false;
+        };
+        state.ring.push(&chunk);
+        state.attached.clone()
+    };
+    if let Some(tx) = attached
+        && tx.blocking_send(chunk).is_err()
+    {
+        // Receiver dropped; pipe handler will reset attached when it sees
+        // disconnect. Just continue — bytes still land in the ring for next
+        // reconnect.
+        debug!("supervisor: pipe sender closed; bytes buffered in ring");
+    }
+    true
 }
 
 /// Wait for the PTY reader thread to reach EOF, up to

@@ -110,6 +110,10 @@ So does an agent that runs through cmd.exe (a `.cmd` or `.bat` shim, or cmd.exe 
 
 A hosted launch logs "spawn_interactive_session: the agent is typed into the shell".
 
+ConPTY sends a cursor-position query (`ESC[6n`) at startup and paints nothing until it is answered. On Windows the tracer answers that one query with `ESC[1;1R` and removes it before the ring (`cursor_query.rs`), since a session may start with no pane, no client or no daemon: a preset, an auto-resume, another device or `rustling-tulipd spawn`.
+
+The daemon cannot answer in its place, because `clients` is normally empty at the first chunk, holds forwarders with no terminal, and looks empty during a resync. The tracer stops looking at the first byte outside a CSI sequence, so a child's own query is never eaten. A client's terminal answers every later query, and `feed_history` still answers the startup query of a session on an older tracer.
+
 ## Live git watcher
 
 The watcher is `crates/daemon/src/git_watch.rs`. Each registered repo gets a recursive `notify`-based watcher with a 750 ms debounce. Inside the debouncer callback, `classify_event` filters paths against a hand-maintained allowlist: only `.git/index`, `.git/HEAD`, `.git/refs/**`, `.git/reftable/**` (a reftable-backend repo's refs; it wakes the stash refresh too), a handful of in-progress operation markers, and any non-excluded working-tree path can wake the refresher.

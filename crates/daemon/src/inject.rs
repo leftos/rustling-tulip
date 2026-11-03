@@ -527,7 +527,8 @@ impl StartupRule {
 
     /// A shell, whose prompt prints in one short burst. The byte gate skips
     /// a lone terminal query (the pseudo console's 4-byte `ESC[6n`), which comes before
-    /// the shell has started.
+    /// the shell has started. The tracer answers and removes that query, so only a
+    /// session on an older tracer shows it here.
     const SHELL_PROMPT: Self = Self {
         min_wait: Duration::ZERO,
         quiet_for: SHELL_PROMPT_QUIET_FOR,

@@ -985,11 +985,14 @@ impl TerminalPane {
     }
 
     /// Feeds replayed history. A cursor-position query at its very end is
-    /// still waiting for its answer (`ConPTY` sends one at startup and writes
-    /// nothing until it is answered), so it is answered as live output is,
+    /// still waiting for its answer, so it is answered as live output is,
     /// unless `output_follows`: output after it means another client has
     /// answered it already. Every earlier query was answered when it was
     /// first made.
+    ///
+    /// The tracer answers and removes `ConPTY`'s startup query, so this path
+    /// serves sessions on older tracers, where `ConPTY` writes nothing until a
+    /// client answers it.
     ///
     /// Known limit: the query is answered a second time when another client
     /// already answered it and the child has printed nothing since, or when

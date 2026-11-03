@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use gpui::{TestAppContext, px, size};
 use protocol::{
     ChatEntry, ClientMessage, DaemonMessage, InitLayoutKind, PendingInput, PendingQuestion,
@@ -512,14 +513,9 @@ fn wait_chat(
     }
 }
 
-/// Registers the daemon's fixture repo, spawns the default agent (the fake
-/// claude) in it, and waits for its prompt box and `Idle`. Returns the pane
-/// the session landed in and the session's id.
-fn spawn_fake_claude(
-    h: &mut Harness<'_>,
-    client: &LiveClient,
-    daemon: &LiveDaemon,
-) -> (String, String) {
+/// Registers the daemon's fixture repo and has the daemon spawn the default
+/// agent (the fake claude) in it.
+fn request_fake_claude(h: &mut Harness<'_>, client: &LiveClient, daemon: &LiveDaemon) {
     let node = Command::new("node")
         .arg("--version")
         .output()
@@ -538,11 +534,81 @@ fn spawn_fake_claude(
     client.send(spawn_default_agent_in_place(
         &repo_id.expect("the repo was registered"),
     ));
+}
+
+/// Spawns the fake claude and waits for its prompt box and `Idle`. Returns the
+/// pane the session landed in and the session's id.
+fn spawn_fake_claude(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    daemon: &LiveDaemon,
+) -> (String, String) {
+    request_fake_claude(h, client, daemon);
     let pane = place_first_session(h, client);
     let id = wait_snapshot(h, client, "the claude session", |_| true).id;
     wait_claude_prompt(h, &pane);
     wait_status(h, client, 0, &id, SessionStatus::Idle);
     (pane, id)
+}
+
+/// Waits until the session's persisted scrollback holds `want`, asking the
+/// daemon for it again until it does.
+fn wait_scrollback(h: &mut Harness<'_>, client: &LiveClient, session_id: &str, want: &str) {
+    let deadline = Instant::now() + HANG_GUARD;
+    for attempt in 0.. {
+        let request_id = format!("scrollback-{attempt}");
+        client.send(ClientMessage::LoadScrollback {
+            session_id: session_id.to_owned(),
+            request_id: Some(request_id.clone()),
+        });
+        let mut data = None;
+        h.wait_until("the scrollback reply", |_| {
+            data = client.take_message(|msg| match msg {
+                DaemonMessage::Scrollback {
+                    request_id: Some(id),
+                    data_b64,
+                    ..
+                } if *id == request_id => Some(data_b64.clone()),
+                _ => None,
+            });
+            data.is_some()
+        });
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.expect("the wait just found it"))
+            .expect("scrollback is base64");
+        let text = String::from_utf8_lossy(&bytes);
+        if text.contains(want) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "hung: waited {HANG_GUARD:?} for {want:?} in the scrollback; it holds {text:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// No pane ever shows this session, so no terminal answers `ConPTY`'s startup
+/// query. fake-claude echoes a slash line whole, so a stray reply that reaches
+/// it would change the echoed line.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn an_unattended_agent_session_starts_and_takes_one_line(cx: &mut TestAppContext) {
+    let daemon = LiveDaemon::start("unattended");
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+
+    request_fake_claude(&mut h, &client, &daemon);
+    let id = wait_snapshot(&mut h, &client, "the claude session", |_| true).id;
+    wait_scrollback(&mut h, &client, &id, "[fake-claude] ready");
+
+    client.send(ClientMessage::SendInput {
+        session_id: id.clone(),
+        data_b64: base64::engine::general_purpose::STANDARD.encode("/rt-one-line\r"),
+        automatic: false,
+    });
+    wait_scrollback(&mut h, &client, &id, "[fake-claude] echo: /rt-one-line");
+    assert_eq!(h.first_pane(), None, "this spec's session has no pane");
 }
 
 /// Splits `pane` with a second pane on session `session_id` to its right

@@ -34,6 +34,11 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// busy machine only makes the run slower; reaching it means a hang.
 const HANG_GUARD: Duration = Duration::from_secs(120);
 const READY_MARKER: &str = "RT_TRACER_READY";
+/// `ConPTY`'s startup cursor-position query, which the tracer answers and
+/// removes.
+const CURSOR_QUERY: &str = "\x1b[6n";
+/// The file the no-daemon child creates, in its working directory.
+const STARTED_FILE: &str = "started.marker";
 const CDB_PATH: &str = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe";
 /// How long the stack capture of an already hung tracer may run; it only
 /// shapes the failure report.
@@ -57,10 +62,39 @@ fn unique_suffix() -> String {
     format!("{}-{nanos}", std::process::id())
 }
 
-fn spawn_tracer(session_id: &str, pipe_name: &str, dir: &Path) -> anyhow::Result<TracerProcess> {
-    let script = format!(
-        "start /b ping -n 60 127.0.0.1 >nul & echo {READY_MARKER} & ping -n 60 127.0.0.1 >nul"
-    );
+/// The names one test's tracer goes by, and its own directory.
+struct Case {
+    session_id: String,
+    pipe_name: String,
+    dir: PathBuf,
+}
+
+impl Case {
+    fn new() -> anyhow::Result<Self> {
+        let suffix = unique_suffix();
+        let session_id = format!("shutdown-test-{suffix}");
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(&session_id);
+        std::fs::create_dir_all(&dir).context("creating test dir")?;
+        Ok(Self {
+            session_id,
+            pipe_name: format!("rt-tracer-test-{suffix}"),
+            dir,
+        })
+    }
+
+    /// Starts the tracer with `script` as its child's `cmd.exe /c` command
+    /// line.
+    fn spawn_tracer(&self, script: &str) -> anyhow::Result<TracerProcess> {
+        spawn_tracer(&self.session_id, &self.pipe_name, &self.dir, script)
+    }
+}
+
+fn spawn_tracer(
+    session_id: &str,
+    pipe_name: &str,
+    dir: &Path,
+    script: &str,
+) -> anyhow::Result<TracerProcess> {
     let child = Command::new(env!("CARGO_BIN_EXE_rt-tracer"))
         .arg("--session-id")
         .arg(session_id)
@@ -108,39 +142,77 @@ where
     Ok(())
 }
 
-/// Read Output frames until the child has printed [`READY_MARKER`], which it
-/// does only after the background `ping` is running. `ConPTY` opens with a
-/// cursor-position query and renders nothing until it is answered, so the
-/// query gets a reply the way a terminal would give one.
-async fn wait_for_ready<R, W>(reader: &mut R, writer: &mut W) -> anyhow::Result<()>
+/// Read Output frames until the child has printed [`READY_MARKER`], failing at
+/// once on the frame that shows [`CURSOR_QUERY`]. Sends nothing, so the child
+/// starts only if the tracer answered the query itself.
+async fn read_to_ready<R>(reader: &mut R) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncBufRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
 {
     let mut output = String::new();
-    let mut answered_cursor_query = false;
     let mut line = String::new();
     loop {
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
-            bail!("tracer closed the socket before the child was ready");
+            bail!("tracer closed the socket before the child was ready; output {output:?}");
         }
         if let InboundTracerResponse::Known(TracerResponse::Output { data_b64 }) =
             InboundTracerResponse::from_json_str(line.trim_end())?
         {
             output.push_str(&String::from_utf8_lossy(&B64.decode(data_b64)?));
-            if !answered_cursor_query && output.contains("\x1b[6n") {
-                answered_cursor_query = true;
-                let reply = TracerRequest::Input {
-                    data_b64: B64.encode("\x1b[1;1R"),
-                };
-                write_line(writer, &reply).await?;
-            }
+            ensure!(
+                !output.contains(CURSOR_QUERY),
+                "the startup query reached the daemon: {output:?}"
+            );
             if output.contains(READY_MARKER) {
                 return Ok(());
             }
         }
     }
+}
+
+/// Connects to the tracer and completes the handshake.
+async fn attach(
+    pipe_name: &str,
+) -> anyhow::Result<(
+    BufReader<tokio::io::ReadHalf<Stream>>,
+    tokio::io::WriteHalf<Stream>,
+)> {
+    let stream = connect(pipe_name).await?;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+
+    let hello = TracerHello {
+        version: TRACER_VERSION,
+        supported: SUPPORTED_TRACER_VERSIONS.to_vec(),
+    };
+    write_line(&mut write_half, &hello).await?;
+    let mut welcome = String::new();
+    ensure!(
+        reader.read_line(&mut welcome).await? > 0,
+        "tracer closed the socket before Welcome"
+    );
+    Ok((reader, write_half))
+}
+
+/// Waits for the child to create `path`, failing at once if the tracer exits.
+async fn wait_for_file(path: &Path, tracer: &mut TracerProcess) -> anyhow::Result<()> {
+    let started = Instant::now();
+    while !path.exists() {
+        if let Some(status) = tracer.0.try_wait()? {
+            bail!(
+                "the tracer exited ({status}) before {} appeared",
+                path.display()
+            );
+        }
+        ensure!(
+            started.elapsed() < HANG_GUARD,
+            "hung: {} did not appear within {HANG_GUARD:?}",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
 }
 
 async fn wait_for_exit(tracer: &mut TracerProcess) -> anyhow::Result<Option<i32>> {
@@ -156,29 +228,14 @@ async fn wait_for_exit(tracer: &mut TracerProcess) -> anyhow::Result<Option<i32>
 
 #[tokio::test]
 async fn tracer_exits_after_stop_while_a_grandchild_holds_the_console() -> anyhow::Result<()> {
-    let suffix = unique_suffix();
-    let session_id = format!("shutdown-test-{suffix}");
-    let pipe_name = format!("rt-tracer-test-{suffix}");
-    let dir: PathBuf = Path::new(env!("CARGO_TARGET_TMPDIR")).join(&session_id);
-    std::fs::create_dir_all(&dir).context("creating test dir")?;
-
-    let mut tracer = spawn_tracer(&session_id, &pipe_name, &dir)?;
-    let stream = connect(&pipe_name).await?;
-    let (read_half, mut write_half) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read_half);
-
-    let hello = TracerHello {
-        version: TRACER_VERSION,
-        supported: SUPPORTED_TRACER_VERSIONS.to_vec(),
-    };
-    write_line(&mut write_half, &hello).await?;
-    let mut welcome = String::new();
-    ensure!(
-        reader.read_line(&mut welcome).await? > 0,
-        "tracer closed the socket before Welcome"
+    let case = Case::new()?;
+    let script = format!(
+        "start /b ping -n 60 127.0.0.1 >nul & echo {READY_MARKER} & ping -n 60 127.0.0.1 >nul"
     );
+    let mut tracer = case.spawn_tracer(&script)?;
+    let (mut reader, mut write_half) = attach(&case.pipe_name).await?;
 
-    tokio::time::timeout(HANG_GUARD, wait_for_ready(&mut reader, &mut write_half))
+    tokio::time::timeout(HANG_GUARD, read_to_ready(&mut reader))
         .await
         .context(format!(
             "hung: the child printed no ready marker within {HANG_GUARD:?}"
@@ -188,14 +245,51 @@ async fn tracer_exits_after_stop_while_a_grandchild_holds_the_console() -> anyho
 
     let exited = wait_for_exit(&mut tracer).await?;
     if exited.is_none() {
-        let stacks = capture_stacks(&tracer, &dir).await;
+        let stacks = capture_stacks(&tracer, &case.dir).await;
         bail!(
             "hung: the tracer did not exit within {HANG_GUARD:?} after Stop (log: {}, {stacks})",
-            dir.join("tracer.log").display()
+            case.dir.join("tracer.log").display()
         );
     }
     drop(tracer);
-    remove_test_dir(&dir).await
+    remove_test_dir(&case.dir).await
+}
+
+#[tokio::test]
+async fn the_startup_query_never_reaches_the_daemon() -> anyhow::Result<()> {
+    let case = Case::new()?;
+    let script = format!("echo {READY_MARKER} & ping -n 600 127.0.0.1 >nul");
+    let tracer = case.spawn_tracer(&script)?;
+    let (mut reader, _write_half) = attach(&case.pipe_name).await?;
+
+    tokio::time::timeout(HANG_GUARD, read_to_ready(&mut reader))
+        .await
+        .context(format!(
+            "hung: the child printed no ready marker within {HANG_GUARD:?}"
+        ))??;
+
+    drop(tracer);
+    remove_test_dir(&case.dir).await
+}
+
+#[tokio::test]
+async fn a_session_starts_with_no_daemon_attached() -> anyhow::Result<()> {
+    let case = Case::new()?;
+    let script =
+        format!("echo {READY_MARKER} & type nul > {STARTED_FILE} & ping -n 600 127.0.0.1 >nul");
+    let mut tracer = case.spawn_tracer(&script)?;
+
+    wait_for_file(&case.dir.join(STARTED_FILE), &mut tracer).await?;
+
+    let (mut reader, _write_half) = attach(&case.pipe_name).await?;
+    tokio::time::timeout(HANG_GUARD, read_to_ready(&mut reader))
+        .await
+        .context(format!(
+            "hung: the replay showed no ready marker within {HANG_GUARD:?}"
+        ))??;
+
+    drop(tracer);
+    remove_test_dir(&case.dir).await
 }
 
 /// Dump every thread's stack of the hung tracer with cdb, non-invasively, into

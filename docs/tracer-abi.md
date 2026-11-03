@@ -31,6 +31,8 @@ Every interactive and plain-shell PTY child is spawned under `rt-tracer` (`crate
 | `Exited { code }` | child process exited |
 | `Error { message }` | async error not tied to a specific request |
 
+On Windows the tracer answers ConPTY's startup cursor query (`ESC[6n`) itself and removes it from the output, so it reaches neither the ring nor an `Output` frame. No frame changes for this.
+
 ### Handshake
 
 The daemon sends `TracerHello { version, supported }` as the first message after

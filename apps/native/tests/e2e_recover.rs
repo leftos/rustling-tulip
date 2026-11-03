@@ -33,10 +33,6 @@ use support::live::{
 
 /// The conversation the recovered shell resumes.
 const SHELL_CONVERSATION: &str = "abc-123";
-/// `DSR 6`: the pseudo console asks where the cursor is.
-const CURSOR_POSITION_QUERY: &str = "\x1b[6n";
-/// The answer to [`CURSOR_POSITION_QUERY`]: row 1, column 1.
-const CURSOR_AT_ORIGIN: &[u8] = b"\x1b[1;1R";
 /// The line the tracer logs with the program and args it spawns.
 const SPAWN_LINE: &str = "about to spawn child";
 /// The line the tracer logs once its child is in the kill-on-close job, so
@@ -432,21 +428,10 @@ fn wait_scrollback_contains(
     want: &str,
 ) {
     let deadline = Instant::now() + HANG_GUARD;
-    let mut answered = false;
     for attempt in 0.. {
         let text = scrollback(h, client, session_id, &format!("scrollback-{attempt}"));
         if text.contains(want) {
             return;
-        }
-        // ConPTY asks where the cursor is and holds the shell's output until
-        // a terminal answers; no pane shows this session, so answer here.
-        if !answered && text.contains(CURSOR_POSITION_QUERY) {
-            client.send(ClientMessage::SendInput {
-                session_id: session_id.to_owned(),
-                data_b64: base64::engine::general_purpose::STANDARD.encode(CURSOR_AT_ORIGIN),
-                automatic: true,
-            });
-            answered = true;
         }
         assert!(
             Instant::now() < deadline,
@@ -989,10 +974,7 @@ fn live_a_sealed_secret_reaches_the_child_and_no_file(cx: &mut TestAppContext) {
 }
 
 /// Types `/env <name>` into `session_id` and waits, up to [`HANG_GUARD`], for
-/// fake-claude's `RT_ENV <name> <report>` answer. Unlike
-/// [`wait_scrollback_contains`] it never answers the pseudo console's cursor
-/// query: the session has printed its banner, so that query was answered, and
-/// a second answer would reach fake-claude as input ahead of the next line.
+/// fake-claude's `RT_ENV <name> <report>` answer.
 fn wait_env_report(
     h: &mut Harness<'_>,
     client: &LiveClient,
