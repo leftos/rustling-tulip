@@ -244,7 +244,8 @@ impl RootView {
             .retain_shown(|key| toasts.iter().any(|toast| toast.key.as_deref() == Some(key)));
     }
 
-    /// Button `action` on toast `id`: a preset job's goes to its registry.
+    /// Button `action` on toast `id`: a preset job's goes to its registry,
+    /// and the installed update's What's new opens its changelog.
     fn press_toast_action(
         &mut self,
         id: u64,
@@ -263,6 +264,15 @@ impl RootView {
         };
         if job_id_of(&key).is_some() {
             self.press_preset_toast_action(&key, action, window, cx);
+        } else if key == crate::update_view::INSTALLED_TOAST_KEY
+            && action == crate::update_view::WHATS_NEW_ACTION
+        {
+            // Only the main window draws the What's new window.
+            if self.is_main_window(window) {
+                self.whats_new_installed(window, cx);
+            } else {
+                self.open_in_main_window(cx, Self::whats_new_installed);
+            }
         }
     }
 

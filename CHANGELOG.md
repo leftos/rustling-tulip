@@ -7,6 +7,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - The Windows installer and the app's programs are signed with a verified publisher, so Windows names who made them.
+- A What's new button on the update notices shows the release notes for every version since the one you last had.
 
 ### Fixed
 

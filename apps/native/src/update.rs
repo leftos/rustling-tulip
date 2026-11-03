@@ -21,11 +21,15 @@ pub const FEED_BASE_VAR: &str = "RUSTLING_TULIP_UPDATE_FEED";
 /// What a download whose SHA-256 differs from its release's fails with.
 pub const HASH_MISMATCH: &str = "the download's SHA-256 does not match its release";
 
-/// The feed's path below its base URL.
-const FEED_PATH: &str = "/repos/leftos/rustling-tulip/releases";
+/// The feed's path below its base URL: 100 releases a page, so a changelog
+/// covering a long gap between updates reaches every release.
+const FEED_PATH: &str = "/repos/leftos/rustling-tulip/releases?per_page=100";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// A bound on one whole request, the installer's download included.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// A bound on the changelog's one feed request, which a reader waits on in
+/// the What's new window.
+const CHANGELOG_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A release newer than the running client that the feed offers, with both
 /// its assets' download URLs.
@@ -39,6 +43,10 @@ pub struct Offer {
     pub sha256_url: String,
     /// `rustling-tulip-<version>-setup.exe`.
     pub installer_name: String,
+    /// The changelog from the running version up to this one, as
+    /// [`changelog_text`] joins it; empty until `pick` fills it from the
+    /// feed's other releases.
+    pub notes: String,
 }
 
 /// A downloaded installer whose SHA-256 matched its release. `file` is held
@@ -52,14 +60,19 @@ pub struct Ready {
     pub path: PathBuf,
     /// The handle the hash was read through.
     pub file: File,
+    /// The changelog from the version the update was offered over, as
+    /// [`changelog_text`] joins it.
+    pub notes: String,
 }
 
-/// One release in the feed; only the fields the pick reads.
+/// One release in the feed; only the fields the pick and the changelog read.
 #[derive(Debug, Deserialize)]
 struct Release {
     tag_name: String,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     assets: Vec<Asset>,
 }
@@ -102,12 +115,14 @@ fn decode_releases(json: &str) -> anyhow::Result<Vec<Release>> {
 
 /// See [`parse_releases`].
 fn pick(releases: &[Release], current: &semver::Version) -> Option<Offer> {
-    releases
+    let mut offer = releases
         .iter()
         .filter(|release| !release.draft)
         .filter_map(offer_of)
         .filter(|offer| offer.version > *current)
-        .max_by(|a, b| a.version.cmp(&b.version))
+        .max_by(|a, b| a.version.cmp(&b.version))?;
+    offer.notes = changelog_text(&notes_between(releases, Some(current), &offer.version));
+    Some(offer)
 }
 
 /// The offer `release` makes: its tag `v<version>` parsed, and both assets
@@ -129,7 +144,83 @@ fn offer_of(release: &Release) -> Option<Offer> {
         installer_url: url_of(&installer_name)?,
         sha256_url: url_of(&sha256_name)?,
         installer_name,
+        notes: String::new(),
     })
+}
+
+/// One release's notes, from its feed body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseNotes {
+    /// The release's version, from its `v<version>` tag.
+    pub version: semver::Version,
+    /// The release's notes, with `\r\n` turned into `\n` and trimmed.
+    pub body: String,
+}
+
+impl ReleaseNotes {
+    /// The notes `release` carries: its tag parsed as `v<version>` and its
+    /// body normalized; `None` when the tag is not `v<version>` or the body
+    /// is empty.
+    fn of(release: &Release) -> Option<Self> {
+        let version = semver::Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
+        let body = release.body.as_deref()?.replace("\r\n", "\n");
+        let body = body.trim().to_owned();
+        if body.is_empty() {
+            return None;
+        }
+        Some(Self { version, body })
+    }
+}
+
+/// The notes of every release in `releases` in range, newest first: newer
+/// than `after` and no newer than `through`, or `through` alone when `after`
+/// is unknown. A draft, a tag that is not `v<version>` and a release without
+/// notes are left out.
+fn notes_between(
+    releases: &[Release],
+    after: Option<&semver::Version>,
+    through: &semver::Version,
+) -> Vec<ReleaseNotes> {
+    let in_range = |version: &semver::Version| match after {
+        Some(after) => version > after && version <= through,
+        None => version == through,
+    };
+    let mut notes: Vec<ReleaseNotes> = releases
+        .iter()
+        .filter(|release| !release.draft)
+        .filter_map(ReleaseNotes::of)
+        .filter(|notes| in_range(&notes.version))
+        .collect();
+    notes.sort_by_key(|notes| std::cmp::Reverse(notes.version.clone()));
+    notes
+}
+
+/// The changelog `notes` join to, newest first: for each release its
+/// `## v<version>` heading, a blank line and its body, releases separated by
+/// one blank line, with no trailing newline. No notes is the empty string.
+#[must_use]
+pub fn changelog_text(notes: &[ReleaseNotes]) -> String {
+    notes
+        .iter()
+        .map(|notes| format!("## v{}\n\n{}", notes.version, notes.body))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The changelog from the feed `json`: every release after `after` and up to
+/// `through`, as [`changelog_text`] joins them. The pure entry the tests use;
+/// [`parse_releases`] logs a feed that does not decode, this returns it.
+///
+/// # Errors
+///
+/// Fails when the feed does not decode.
+pub fn parse_changelog(
+    json: &str,
+    after: Option<&semver::Version>,
+    through: &semver::Version,
+) -> anyhow::Result<String> {
+    let releases = decode_releases(json)?;
+    Ok(changelog_text(&notes_between(&releases, after, through)))
 }
 
 /// The SHA-256 a release's `.sha256` asset holds: exactly
@@ -223,10 +314,18 @@ async fn check_then_download(
 }
 
 fn http_client(current: &semver::Version) -> anyhow::Result<reqwest::Client> {
+    http_client_within(current, REQUEST_TIMEOUT)
+}
+
+/// The update HTTP client, each whole request bounded by `timeout`.
+fn http_client_within(
+    current: &semver::Version,
+    timeout: Duration,
+) -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(format!("rustling-tulip/{current}"))
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(timeout)
         .build()
         .context("building the update HTTP client")
 }
@@ -236,9 +335,14 @@ async fn fetch_offer(
     current: &semver::Version,
     feed_base: &str,
 ) -> anyhow::Result<Option<Offer>> {
+    let body = fetch_feed(http, feed_base).await?;
+    Ok(pick(&decode_releases(&body)?, current))
+}
+
+/// The feed's body from `feed_base`.
+async fn fetch_feed(http: &reqwest::Client, feed_base: &str) -> anyhow::Result<String> {
     let url = format!("{}{FEED_PATH}", feed_base.trim_end_matches('/'));
-    let body = http
-        .get(&url)
+    http.get(&url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
@@ -246,8 +350,40 @@ async fn fetch_offer(
         .with_context(|| format!("fetching the release feed {url}"))?
         .text()
         .await
-        .with_context(|| format!("reading the release feed {url}"))?;
-    Ok(pick(&decode_releases(&body)?, current))
+        .with_context(|| format!("reading the release feed {url}"))
+}
+
+/// Fetches the feed at `feed_base` and returns the changelog for the releases
+/// after `after` and up to `through`, as [`changelog_text`] joins them. The
+/// request runs on a thread of its own with a current-thread runtime; this
+/// blocks until it finishes, so call it from a background task.
+///
+/// # Errors
+///
+/// Fails when the feed cannot be fetched or decoded.
+pub fn fetch_changelog(
+    after: Option<&semver::Version>,
+    through: &semver::Version,
+    feed_base: &str,
+) -> anyhow::Result<String> {
+    let (after, through, feed_base) = (after.cloned(), through.clone(), feed_base.to_owned());
+    let worker = std::thread::Builder::new()
+        .name("update-changelog".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("building the update thread's runtime")?;
+            runtime.block_on(async {
+                let http = http_client_within(&through, CHANGELOG_TIMEOUT)?;
+                let body = fetch_feed(&http, &feed_base).await?;
+                parse_changelog(&body, after.as_ref(), &through)
+            })
+        })
+        .context("spawning the update thread")?;
+    worker
+        .join()
+        .map_err(|_| anyhow!("the update thread panicked"))?
 }
 
 /// Downloads `offer` into a fresh `updates_root/<version>-<8 random hex>`
@@ -307,6 +443,7 @@ async fn fetch_and_verify(
         version: offer.version.clone(),
         path,
         file,
+        notes: offer.notes.clone(),
     })
 }
 
@@ -431,12 +568,31 @@ impl std::error::Error for AlreadyRunning {}
 /// What the client's window checks, installs and reads back through, so the
 /// specs replace it.
 pub trait Updater {
+    /// Whether this build checks the feed and records the version it runs.
+    /// An inactive build neither announces an install nor saves its version,
+    /// so a dev build over the installed client's layout leaves the saved
+    /// version alone.
+    fn is_active(&self) -> bool;
+
     /// Checks the feed for a release newer than `current` and, when there is
     /// one, downloads and verifies it.
     fn check(
         &self,
         current: &semver::Version,
     ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<Ready>>>;
+
+    /// The changelog for the releases after `after` and up to `through`, for
+    /// the What's new button the update notices show.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the feed cannot be fetched or decoded, or in a build that
+    /// does not check for updates.
+    fn changelog(
+        &self,
+        after: Option<semver::Version>,
+        through: semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<String>>;
 
     /// Starts `ready`'s installer for an update.
     ///
@@ -480,6 +636,10 @@ impl SystemUpdater {
 }
 
 impl Updater for SystemUpdater {
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
     fn check(
         &self,
         current: &semver::Version,
@@ -509,6 +669,33 @@ impl Updater for SystemUpdater {
             spawned.context("spawning the update check")?;
             rx.await
                 .map_err(|_| anyhow!("the update check ended without an answer"))?
+        }
+        .boxed()
+    }
+
+    fn changelog(
+        &self,
+        after: Option<semver::Version>,
+        through: semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<String>> {
+        use futures::FutureExt as _;
+        if !self.active {
+            return futures::future::ready(Err(anyhow!(
+                "this build does not check for updates (a dev build needs {FEED_BASE_VAR})"
+            )))
+            .boxed();
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("update-changelog".to_owned())
+            .spawn(move || {
+                // The receiver is gone only when the window closed.
+                let _ = tx.send(fetch_changelog(after.as_ref(), &through, &feed_base()));
+            });
+        async move {
+            spawned.context("spawning the changelog fetch")?;
+            rx.await
+                .map_err(|_| anyhow!("the changelog fetch ended without an answer"))?
         }
         .boxed()
     }
@@ -700,7 +887,8 @@ mod lock {
 )]
 mod tests {
     use super::{
-        FEED_PATH, HASH_MISMATCH, Ready, check_and_download, parse_releases, parse_sha256,
+        FEED_PATH, HASH_MISMATCH, Ready, check_and_download, fetch_changelog, parse_changelog,
+        parse_releases, parse_sha256,
     };
     use serde_json::{Value, json};
     use sha2::{Digest as _, Sha256};
@@ -736,6 +924,12 @@ mod tests {
     fn complete(tag: &str, base: &str) -> Value {
         let name = installer_name(tag);
         release(tag, &[format!("{name}.sha256"), name], base)
+    }
+
+    /// `release` with its notes set to `body`.
+    fn with_body(mut release: Value, body: &str) -> Value {
+        release["body"] = json!(body);
+        release
     }
 
     fn feed(releases: Vec<Value>) -> String {
@@ -955,6 +1149,9 @@ mod tests {
             })
     }
 
+    /// The notes `release_routes` serves with its release.
+    const RELEASE_NOTES: &str = "### Added\n\n- an update's notes";
+
     /// One release, `version`, serving `installer` and a `.sha256` of `hashed`.
     fn release_routes(
         version: &'static str,
@@ -963,10 +1160,11 @@ mod tests {
     ) -> impl FnOnce(&str) -> Routes {
         move |base| {
             let name = format!("rustling-tulip-{version}-setup.exe");
+            let tag = format!("v{version}");
             vec![
                 (
                     FEED_PATH.to_owned(),
-                    feed(vec![complete(&format!("v{version}"), base)]).into_bytes(),
+                    feed(vec![with_body(complete(&tag, base), RELEASE_NOTES)]).into_bytes(),
                 ),
                 (
                     format!("/dl/{name}.sha256"),
@@ -1121,5 +1319,158 @@ mod tests {
             .open(&path)
             .expect("the file opens for write once Ready is dropped");
         remove(&root);
+    }
+
+    /// [`fetch_changelog`] against `server`, off this thread and bounded by
+    /// [`HANG_GUARD`].
+    fn fetched_changelog(
+        server: &FeedServer,
+        after: Option<&str>,
+        through: &str,
+    ) -> anyhow::Result<String> {
+        let (done_tx, done) = mpsc::channel();
+        let (base, after, through) = (server.base.clone(), after.map(v), v(through));
+        std::thread::spawn(move || {
+            let _ = done_tx.send(fetch_changelog(after.as_ref(), &through, &base));
+        });
+        done.recv_timeout(HANG_GUARD)
+            .expect("hung: fetch_changelog never returned")
+    }
+
+    #[test]
+    fn changelog_covers_every_release_after_the_last_version_newest_first() {
+        let json = feed(vec![
+            with_body(complete("v0.5.0-alpha", BASE), "five"),
+            with_body(complete("v0.6.0-alpha", BASE), "six"),
+            with_body(complete("v0.7.0-alpha", BASE), "seven"),
+            with_body(complete("v0.8.0-alpha", BASE), "eight"),
+        ]);
+
+        let text = parse_changelog(&json, Some(&v("0.5.0-alpha")), &v("0.7.0-alpha"))
+            .expect("the feed decodes");
+
+        assert_eq!(text, "## v0.7.0-alpha\n\nseven\n\n## v0.6.0-alpha\n\nsix");
+    }
+
+    #[test]
+    fn changelog_with_no_last_version_is_the_new_release_alone() {
+        let json = feed(vec![
+            with_body(complete("v0.6.0-alpha", BASE), "six"),
+            with_body(complete("v0.7.0-alpha", BASE), "seven"),
+        ]);
+
+        let text = parse_changelog(&json, None, &v("0.7.0-alpha")).expect("the feed decodes");
+
+        assert_eq!(text, "## v0.7.0-alpha\n\nseven");
+    }
+
+    #[test]
+    fn changelog_includes_a_release_without_installer_assets() {
+        let json = feed(vec![with_body(release("v0.6.0", &[], BASE), "six")]);
+
+        let text = parse_changelog(&json, None, &v("0.6.0")).expect("the feed decodes");
+
+        assert_eq!(text, "## v0.6.0\n\nsix");
+    }
+
+    #[test]
+    fn changelog_leaves_out_drafts_bad_tags_and_empty_notes() {
+        let mut draft = with_body(complete("v0.6.0", BASE), "a draft");
+        draft["draft"] = json!(true);
+        let mut null_body = complete("v0.7.0", BASE);
+        null_body["body"] = Value::Null;
+        let json = feed(vec![
+            with_body(complete("v0.5.0", BASE), "kept"),
+            draft,
+            with_body(release("nightly", &[], BASE), "a nightly"),
+            null_body,
+            with_body(complete("v0.8.0", BASE), "  \n"),
+        ]);
+
+        let text =
+            parse_changelog(&json, Some(&v("0.4.0")), &v("0.8.0")).expect("the feed decodes");
+
+        assert_eq!(text, "## v0.5.0\n\nkept");
+    }
+
+    #[test]
+    fn changelog_turns_crlf_into_lf_and_trims() {
+        let json = feed(vec![with_body(
+            complete("v0.6.0", BASE),
+            "\r\n### Fixed\r\n\r\n- a fix\r\n",
+        )]);
+
+        let text = parse_changelog(&json, None, &v("0.6.0")).expect("the feed decodes");
+
+        assert_eq!(text, "## v0.6.0\n\n### Fixed\n\n- a fix");
+    }
+
+    #[test]
+    fn an_empty_range_is_an_empty_changelog() {
+        let json = feed(vec![with_body(complete("v0.6.0", BASE), "six")]);
+
+        let text =
+            parse_changelog(&json, Some(&v("0.6.0")), &v("0.6.0")).expect("the feed decodes");
+
+        assert!(text.is_empty(), "{text:?}");
+    }
+
+    #[test]
+    fn a_feed_that_does_not_decode_is_a_changelog_error() {
+        assert!(parse_changelog("not json", None, &v("0.6.0")).is_err());
+    }
+
+    #[test]
+    fn an_offer_carries_the_notes_since_the_running_version() {
+        let json = feed(vec![
+            with_body(complete("v0.5.0", BASE), "five"),
+            with_body(complete("v0.6.0", BASE), "six"),
+            with_body(complete("v0.7.0", BASE), "seven"),
+        ]);
+
+        let offer = parse_releases(&json, &v("0.5.0")).expect("an offer");
+
+        assert_eq!(offer.version, v("0.7.0"));
+        assert_eq!(offer.notes, "## v0.7.0\n\nseven\n\n## v0.6.0\n\nsix");
+    }
+
+    #[test]
+    fn a_downloaded_update_carries_its_notes() {
+        let server = serve(release_routes("0.6.0", INSTALLER, INSTALLER));
+        let root = scratch("notes");
+
+        let ready = check(&server, "0.5.0", &root)
+            .expect("the download verifies")
+            .expect("an update is ready");
+
+        assert_eq!(ready.notes, format!("## v0.6.0\n\n{RELEASE_NOTES}"));
+        remove(&root);
+    }
+
+    #[test]
+    fn fetch_changelog_reads_the_range_from_the_feed() {
+        let server = serve(|base| {
+            vec![(
+                FEED_PATH.to_owned(),
+                feed(vec![
+                    with_body(complete("v0.5.0", base), "five"),
+                    with_body(complete("v0.6.0", base), "six"),
+                    with_body(complete("v0.7.0", base), "seven"),
+                ])
+                .into_bytes(),
+            )]
+        });
+
+        let text = fetched_changelog(&server, Some("0.5.0"), "0.7.0").expect("the feed decodes");
+
+        assert_eq!(text, "## v0.7.0\n\nseven\n\n## v0.6.0\n\nsix");
+        assert_eq!(FeedServer::paths(&server.requests()), [FEED_PATH]);
+    }
+
+    #[test]
+    fn fetch_changelog_fails_when_the_feed_is_missing() {
+        let server = serve(|_base| Vec::new());
+
+        assert!(fetched_changelog(&server, None, "0.7.0").is_err());
     }
 }

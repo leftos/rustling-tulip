@@ -59,6 +59,7 @@ The views:
 - `connections-ssh`: its `+ Add host` form switched to SSH after a passing Test connection.
 - `menu`: the sessions panel's ⋯ menu open over the repo rows with a toast over the panes.
 - `update`: the footer's `Update {version} ready` notice.
+- `update-notes`: the What's new window over a ready 0.99.0.
 - `chat`: a session pane in Chat mode with its chat drawn over a two-question prompt card whose options carry descriptions and an open Tail box on the running Bash card.
 - `summary`: one in Summary mode with a line open under a pinned permission card.
 - `themes`: the Themes modal over Settings, on the row after the theme in use, with a user theme, a broken file and a file named after a built-in.

@@ -516,6 +516,14 @@ pub struct UiState {
     /// The Dashboard tab's choices.
     #[serde(deserialize_with = "dashboard_or_default")]
     pub dashboard: DashboardSettings,
+    /// The client version the last launch with an active updater ran as;
+    /// `None` until such a launch wrote it. A launch that finds an older one
+    /// says what changed. A launch whose updater is inactive (a dev build)
+    /// leaves it alone, since a dev build shares the installed client's
+    /// layout and would otherwise overwrite its version, and the installed
+    /// client would then announce an update that never happened.
+    #[serde(default)]
+    pub last_installed_version: Option<String>,
 }
 
 /// What a session's entry under `session_views` holds when its last view
@@ -1072,7 +1080,7 @@ pub struct GeneralSettings {
     pub sessions_under_repos: SessionsUnderRepos,
     /// How the repos view orders its repo and workspace rows.
     pub repo_sort: RepoSort,
-    /// Whether the client checks for updates at launch and every 24 h;
+    /// Whether the client checks for updates at launch and every hour;
     /// Settings' Check now checks either way.
     pub check_updates: bool,
 }
@@ -1182,6 +1190,7 @@ impl Default for UiState {
             host_session_counts: BTreeMap::new(),
             session_views: SessionViews::default(),
             dashboard: DashboardSettings::default(),
+            last_installed_version: None,
         }
     }
 }
@@ -2448,6 +2457,11 @@ impl SidebarModel {
         }
         self.ui.quick_shell_dir = dir.map(str::to_owned);
         true
+    }
+
+    /// Records the client version this launch runs as.
+    pub fn set_last_installed_version(&mut self, version: &str) {
+        self.ui.last_installed_version = Some(version.to_owned());
     }
 
     /// The folder Add repo's picker opens at, once a repo was added.
@@ -5275,6 +5289,7 @@ pub(crate) mod tests {
                     BTreeMap::from([("s1".to_owned(), PaneView::Summary)]),
                 )]),
             },
+            last_installed_version: Some("0.8.1-alpha".to_owned()),
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
@@ -7266,6 +7281,22 @@ pub(crate) mod tests {
             "the file picker's own folder round-trips too"
         );
         assert_eq!(&loaded, model.ui_state());
+    }
+
+    #[test]
+    fn an_old_ui_file_has_no_last_installed_version() {
+        let dir = TestDir::new("no-last-installed-version");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "sidebar_collapsed": true, "quick_shell_dir": "C:\\work" }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(loaded.sidebar_collapsed, "the rest of the file still loads");
+        assert_eq!(
+            loaded.last_installed_version, None,
+            "an older file names no last installed version"
+        );
     }
 
     #[test]

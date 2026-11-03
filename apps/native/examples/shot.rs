@@ -32,7 +32,9 @@
 //! `settings-sounds` shows Settings on the Notifications tab with the Needs
 //! you sound dropdown open, and `toast` a Needs you card on a permission,
 //! with Allow and Deny, and a Finished card, as
-//! the app's own toasts draw them.
+//! the app's own toasts draw them. `update` shows Settings scrolled to its
+//! update rows with a ready update in the footer, and `update-notes` the
+//! What's new window the footer's button opens over that ready update.
 //! The PNG goes to
 //! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
 //! the window's layout file is kept beside it in `.ui/` and cleared on every
@@ -201,6 +203,7 @@ enum View {
     ConnectionsSsh,
     Menu,
     Update,
+    UpdateNotes,
     Chat,
     Summary,
     Themes,
@@ -214,7 +217,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 25] = [
+    const ALL: [Self; 26] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -230,6 +233,7 @@ impl View {
         Self::ConnectionsSsh,
         Self::Menu,
         Self::Update,
+        Self::UpdateNotes,
         Self::Chat,
         Self::Summary,
         Self::Themes,
@@ -259,6 +263,7 @@ impl View {
             Self::ConnectionsSsh => "connections-ssh",
             Self::Menu => "menu",
             Self::Update => "update",
+            Self::UpdateNotes => "update-notes",
             Self::Chat => "chat",
             Self::Summary => "summary",
             Self::Themes => "themes",
@@ -276,7 +281,9 @@ impl View {
     /// to draw before the next: the add form opens from the picker, its SSH
     /// segment is pressed once drawn, and its Host field takes typing only
     /// once drawn; the update shot checks and opens Settings, then moves the
-    /// keyboard to Check now, which scrolls the update rows into view; a
+    /// keyboard to Check now, which scrolls the update rows into view; the
+    /// update-notes shot checks, then opens the What's new window over the
+    /// update it found; a
     /// summary line opens only once the lines have arrived; the Themes
     /// modal opens over Settings once drawn, and takes its Down once drawn;
     /// the editor opens on the modal once drawn, its input takes the keyboard
@@ -287,7 +294,7 @@ impl View {
             Self::ConnectionsSsh => 4,
             Self::Themes | Self::Chat | Self::SettingsDashboard => 3,
             Self::ThemesEdit => 5,
-            Self::Update | Self::Summary => 2,
+            Self::Update | Self::UpdateNotes | Self::Summary => 2,
             _ => 1,
         }
     }
@@ -382,6 +389,9 @@ impl View {
             }
             Self::Menu => root.sidebar_more_open() && !root.toasts().is_empty(),
             Self::Update => root.settings_open() && root.update_footer_text().is_some(),
+            Self::UpdateNotes => {
+                root.whats_new_open() && root.whats_new_text().as_deref() == Some(SHOT_NOTES)
+            }
             Self::SettingsDashboard => {
                 root.settings_open()
                     && root.settings_tab() == "Dashboard"
@@ -471,6 +481,7 @@ impl Shot {
             | View::ConnectionsSsh
             | View::Menu
             | View::Update
+            | View::UpdateNotes
             | View::Chat
             | View::Summary
             | View::Themes
@@ -487,7 +498,7 @@ impl Shot {
             return std::fs::write(&sample, text)
                 .with_context(|| format!("writing {}", sample.display()));
         }
-        if self.view == View::Update {
+        if matches!(self.view, View::Update | View::UpdateNotes) {
             let installer = self.ui_dir.join(SHOT_INSTALLER);
             return std::fs::write(&installer, b"stand-in installer")
                 .with_context(|| format!("writing {}", installer.display()));
@@ -856,7 +867,7 @@ fn deps(view: View, local: HostPair, remote: Option<HostPair>, ui_dir: &Path) ->
         tokens: Arc::new(MemoryTokens::default()),
         updater: Arc::new(ShotUpdater {
             installer: ui_dir.join(SHOT_INSTALLER),
-            offers: view == View::Update,
+            offers: matches!(view, View::Update | View::UpdateNotes),
         }),
     }
 }
@@ -1128,6 +1139,7 @@ fn drive(
         View::ConnectionsSsh => drive_connections_ssh(step, window, cx),
         View::Menu => open_menu(window, cx),
         View::Update => drive_update(step, address, window, cx),
+        View::UpdateNotes => drive_update_notes(step, window, cx),
         View::SettingsDashboard => drive_settings_dashboard(step, address, window, cx),
         View::Chat if step == 2 => win32::wheel_down(address, CHAT_TAIL_POINT, CHAT_TAIL_NOTCHES),
         View::Chat => {
@@ -1189,6 +1201,22 @@ fn drive_update(step: usize, address: usize, window: &mut Window, cx: &mut App) 
         return press("ctrl-,", window, cx);
     }
     win32::wheel_down(address, SETTINGS_PAGE_POINT, SETTINGS_PAGE_NOTCHES)
+}
+
+/// Step `step` of the `update-notes` shot: Check now, which the shot's
+/// updater answers with a ready 0.99.0, then the What's new window the
+/// footer's button opens over it.
+fn drive_update_notes(step: usize, window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    if step == 0 {
+        root.update(cx, RootView::check_for_updates_now);
+        return Ok(());
+    }
+    root.update(cx, |root, cx| root.whats_new_ready(window, cx));
+    Ok(())
 }
 
 /// Opens Settings and walks the tab list down to the Dashboard tab; once it
@@ -1271,6 +1299,9 @@ fn shot_summary_test(request_id: Option<String>) -> DaemonMessage {
     }
 }
 
+/// The notes every update shot's offer and changelog answer carry.
+const SHOT_NOTES: &str = "## v0.99.0\n\n### Added\n\n- A What's new button on the update notices shows what changed since the version you had.\n\n### Fixed\n\n- Remote hosts keep their own cleanup and launch notices across a reconnect.";
+
 /// An updater whose every check finds 0.99.0 ready at `installer` in the
 /// `update` shot and nothing in any other, which starts nothing and has no
 /// last result.
@@ -1281,6 +1312,11 @@ struct ShotUpdater {
 }
 
 impl Updater for ShotUpdater {
+    /// The shot's window never records a version or announces an install.
+    fn is_active(&self) -> bool {
+        false
+    }
+
     fn check(&self, _current: &semver::Version) -> BoxFuture<'static, Result<Option<Ready>>> {
         if !self.offers {
             return futures::future::ready(Ok(None)).boxed();
@@ -1293,6 +1329,7 @@ impl Updater for ShotUpdater {
                     version: semver::Version::new(0, 99, 0),
                     path,
                     file,
+                    notes: SHOT_NOTES.to_owned(),
                 })
             });
         futures::future::ready(ready).boxed()
@@ -1300,6 +1337,15 @@ impl Updater for ShotUpdater {
 
     fn start_installer(&self, _ready: &Ready) -> Result<()> {
         bail!("the shot starts no installer")
+    }
+
+    fn changelog(
+        &self,
+        _after: Option<semver::Version>,
+        _through: semver::Version,
+    ) -> BoxFuture<'static, Result<String>> {
+        use futures::FutureExt as _;
+        futures::future::ready(Ok(SHOT_NOTES.to_owned())).boxed()
     }
 
     fn read_last_result(&self) -> Option<LastResult> {

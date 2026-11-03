@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -1549,8 +1549,9 @@ enum InstallAnswer {
     AlreadyRunning,
 }
 
-/// An updater that answers the checks, installer starts and last result a
-/// spec set, and records each call; it reaches no feed and runs nothing.
+/// An updater that answers the checks, installer starts, the changelog and the
+/// last result a spec set, and records each call; it reaches no feed and runs
+/// nothing.
 pub struct UpdaterRecorder {
     /// The release a check offers: its version and the installer file a
     /// `Ready` holds open.
@@ -1559,9 +1560,18 @@ pub struct UpdaterRecorder {
     check_error: Mutex<Option<String>>,
     install: Mutex<InstallAnswer>,
     last_result: Mutex<Option<LastResult>>,
+    /// The notes a check's `Ready` carries.
+    notes: Mutex<String>,
+    /// Each changelog call's `(after, through)` versions.
+    changelog_calls: Mutex<Vec<(Option<String>, String)>>,
+    /// The answer a changelog call gives.
+    changelog_answer: Mutex<Result<String, String>>,
     checks: AtomicUsize,
     installs: Mutex<Vec<PathBuf>>,
     last_result_reads: AtomicUsize,
+    /// Whether the updater checks for updates and records the version: on
+    /// unless a spec makes it inactive.
+    inactive: AtomicBool,
 }
 
 impl Default for UpdaterRecorder {
@@ -1571,9 +1581,13 @@ impl Default for UpdaterRecorder {
             check_error: Mutex::new(None),
             install: Mutex::new(InstallAnswer::Started),
             last_result: Mutex::new(None),
+            notes: Mutex::new(String::new()),
+            changelog_calls: Mutex::new(Vec::new()),
+            changelog_answer: Mutex::new(Ok(String::new())),
             checks: AtomicUsize::new(0),
             installs: Mutex::new(Vec::new()),
             last_result_reads: AtomicUsize::new(0),
+            inactive: AtomicBool::new(false),
         }
     }
 }
@@ -1616,6 +1630,21 @@ impl UpdaterRecorder {
         *locked(&self.last_result) = Some(result);
     }
 
+    /// Checks offer these notes on the `Ready` they answer with.
+    pub fn set_offer_notes(&self, notes: &str) {
+        notes.clone_into(&mut locked(&self.notes));
+    }
+
+    /// Changelog calls answer `answer`.
+    pub fn answer_changelog(&self, answer: Result<&str, &str>) {
+        *locked(&self.changelog_answer) = answer.map(str::to_owned).map_err(str::to_owned);
+    }
+
+    /// Each changelog call's `(after, through)` versions, oldest first.
+    pub fn changelog_calls(&self) -> Vec<(Option<String>, String)> {
+        locked(&self.changelog_calls).clone()
+    }
+
     /// How many checks ran.
     pub fn checks(&self) -> usize {
         self.checks.load(Ordering::SeqCst)
@@ -1624,6 +1653,12 @@ impl UpdaterRecorder {
     /// The installer each start was asked to run, oldest first.
     pub fn installs(&self) -> Vec<PathBuf> {
         locked(&self.installs).clone()
+    }
+
+    /// The updater stops checking and recording the version, as a build
+    /// that does not check for updates does.
+    pub fn set_inactive(&self) {
+        self.inactive.store(true, Ordering::SeqCst);
     }
 
     /// How many times the last result was read.
@@ -1647,11 +1682,16 @@ impl UpdaterRecorder {
             version,
             path,
             file,
+            notes: locked(&self.notes).clone(),
         }))
     }
 }
 
 impl Updater for UpdaterRecorder {
+    fn is_active(&self) -> bool {
+        !self.inactive.load(Ordering::SeqCst)
+    }
+
     fn check(
         &self,
         _current: &semver::Version,
@@ -1659,6 +1699,22 @@ impl Updater for UpdaterRecorder {
         use futures::FutureExt as _;
         self.checks.fetch_add(1, Ordering::SeqCst);
         futures::future::ready(self.answer_check()).boxed()
+    }
+
+    fn changelog(
+        &self,
+        after: Option<semver::Version>,
+        through: semver::Version,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<String>> {
+        use futures::FutureExt as _;
+        locked(&self.changelog_calls)
+            .push((after.map(|after| after.to_string()), through.to_string()));
+        let answer = locked(&self.changelog_answer).clone();
+        futures::future::ready(match answer {
+            Ok(text) => Ok(text),
+            Err(error) => Err(anyhow::anyhow!("{error}")),
+        })
+        .boxed()
     }
 
     fn start_installer(&self, ready: &Ready) -> anyhow::Result<()> {

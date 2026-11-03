@@ -15,10 +15,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{TestAppContext, px};
+use gpui::{Modifiers, TestAppContext, VisualTestContext, px};
 use rustling_tulip_native::NetCommand;
 use rustling_tulip_native::update::LastResult;
-use support::{Fixture, Harness, TestDir, UpdaterRecorder, pane, session, tab};
+use rustling_tulip_native::{
+    PopoutKey, Toast, ToastAction, ToastKind, ToastSpec, toast_action_selector,
+};
+use serde_json::json;
+use support::{Fixture, Harness, TestDir, UpdaterRecorder, pane, seed_ui, session, tab};
 
 const CHECK_EVERY: Duration = Duration::from_hours(1);
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -378,6 +382,299 @@ fn a_failed_update_says_it_did_not_install(cx: &mut TestAppContext) {
             Some(message.to_owned())
         )]
     );
+}
+
+/// Whether the What's new window is open, its title and its text.
+fn whats_new(h: &mut Harness<'_>) -> (bool, Option<String>, Option<String>) {
+    h.root(|root, _| {
+        (
+            root.whats_new_open(),
+            root.whats_new_title(),
+            root.whats_new_text(),
+        )
+    })
+}
+
+/// The toast an installed update raises at launch.
+fn installed_toast(h: &mut Harness<'_>) -> Toast {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .find(|toast| toast.key.as_deref() == Some("update-installed"))
+            .cloned()
+    })
+    .expect("the installed toast shows")
+}
+
+/// Presses the installed toast's What's new.
+fn press_toast_whats_new(h: &mut Harness<'_>) {
+    let id = installed_toast(h).id;
+    h.click_on(&toast_action_selector(id, "whats-new"));
+    h.cx.run_until_parked();
+}
+
+fn installed_over(from: Option<&str>, to: &str) -> LastResult {
+    LastResult {
+        from: from.map(str::to_owned),
+        to: to.to_owned(),
+        ok: true,
+        message: format!("updated to {to}"),
+    }
+}
+
+/// Presses `selector` in the pop-out window.
+fn click_in_popout(popout: &mut VisualTestContext, selector: &str) {
+    popout.run_until_parked();
+    let name: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    let bounds = popout
+        .debug_bounds(name)
+        .expect("the control is drawn in the pop-out");
+    popout.simulate_click(bounds.center(), Modifiers::none());
+    popout.run_until_parked();
+}
+
+#[gpui::test]
+fn whats_new_from_a_toast_in_a_popout_opens_in_the_main_window(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_last_result(installed_over(Some("0.1.0"), "0.99.0"));
+    updater.answer_changelog(Ok("## v0.99.0\n\n- two"));
+    let mut h = opened(cx, &dir, &updater);
+    let launched = installed_toast(&mut h).id;
+    h.click_on(&format!("toast-close-{launched}"));
+    let key = PopoutKey::Pane {
+        tab_id: "t1".to_owned(),
+        pane_id: "p1".to_owned(),
+    };
+    h.root_update(move |root, window, cx| root.open_popout(key, window, cx));
+    let mut popout = h.popout_window();
+
+    // A toast raised after a press in the pop-out shows there.
+    click_in_popout(&mut popout, "popout-toolbar-p1");
+    let id = h.root_update(|root, _, cx| {
+        root.push_toast_spec(
+            ToastSpec {
+                kind: ToastKind::Info,
+                title: "Updated to 0.99.0".to_owned(),
+                detail: None,
+                key: Some("update-installed".to_owned()),
+                sticky: true,
+                actions: vec![ToastAction {
+                    id: "whats-new",
+                    label: "What's new",
+                    danger: false,
+                }],
+            },
+            cx,
+        )
+    });
+    click_in_popout(&mut popout, &toast_action_selector(id, "whats-new"));
+    h.cx.run_until_parked();
+
+    assert!(h.root(|root, _| root.whats_new_open()));
+    assert!(
+        h.root_update(|root, window, _| root.whats_new_has_keyboard(window)),
+        "the main window, which draws the What's new window, holds the keyboard"
+    );
+}
+
+#[gpui::test]
+fn closing_whats_new_over_settings_hands_the_keyboard_back_to_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_offer_notes("## v0.99.0\n\n- one");
+    let mut h = ready_update(cx, &dir, &updater);
+
+    press_in_settings(&mut h, "settings-whats-new");
+    h.click_on("whats-new-close");
+
+    assert!(!whats_new(&mut h).0, "Close closes the window");
+    assert_eq!(
+        h.root_update(|root, window, cx| root.settings_focus(window, cx)),
+        Some("list"),
+        "Settings' tab list holds the keyboard again"
+    );
+}
+
+#[gpui::test]
+fn a_ready_update_offers_whats_new_in_the_footer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_offer_notes("## v0.99.0\n\n- one");
+    let mut h = ready_update(cx, &dir, &updater);
+
+    assert!(
+        drawn(&mut h, "footer-whats-new"),
+        "the footer offers What's new"
+    );
+    h.click_on("footer-whats-new");
+
+    assert_eq!(
+        whats_new(&mut h),
+        (
+            true,
+            Some("What's new in 0.99.0".to_owned()),
+            Some("## v0.99.0\n\n- one".to_owned())
+        )
+    );
+    h.click_on("whats-new-close");
+    assert!(!whats_new(&mut h).0, "Close closes the window");
+}
+
+#[gpui::test]
+fn settings_offers_whats_new_beside_restart(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_offer_notes("## v0.99.0\n\n- one");
+    let mut h = ready_update(cx, &dir, &updater);
+
+    press_in_settings(&mut h, "settings-whats-new");
+
+    assert_eq!(
+        whats_new(&mut h),
+        (
+            true,
+            Some("What's new in 0.99.0".to_owned()),
+            Some("## v0.99.0\n\n- one".to_owned())
+        )
+    );
+    assert!(
+        updater.changelog_calls().is_empty(),
+        "the notes were in hand"
+    );
+}
+
+#[gpui::test]
+fn a_successful_update_toast_offers_whats_new(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_last_result(installed_over(Some("0.1.0"), "0.99.0"));
+    updater.answer_changelog(Ok("## v0.99.0\n\n- two"));
+    let mut h = opened(cx, &dir, &updater);
+
+    let toast = installed_toast(&mut h);
+    assert!(toast.sticky, "the installed toast waits for its reader");
+    let actions: Vec<(&str, &str)> = toast
+        .actions
+        .iter()
+        .map(|action| (action.id, action.label))
+        .collect();
+    assert_eq!(actions, [("whats-new", "What's new")]);
+
+    press_toast_whats_new(&mut h);
+
+    assert_eq!(
+        updater.changelog_calls(),
+        [(Some("0.1.0".to_owned()), "0.99.0".to_owned())]
+    );
+    assert_eq!(
+        whats_new(&mut h),
+        (
+            true,
+            Some("What's new in 0.99.0".to_owned()),
+            Some("## v0.99.0\n\n- two".to_owned())
+        )
+    );
+}
+
+#[gpui::test]
+fn the_saved_version_starts_the_changelog_range(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "last_installed_version": "0.5.0" }));
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_last_result(installed_over(Some("0.1.0"), "0.99.0"));
+    let mut h = opened(cx, &dir, &updater);
+
+    press_toast_whats_new(&mut h);
+
+    assert_eq!(
+        updater.changelog_calls(),
+        [(Some("0.5.0".to_owned()), "0.99.0".to_owned())]
+    );
+}
+
+#[gpui::test]
+fn a_changelog_that_cannot_load_says_so(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_last_result(installed_over(Some("0.1.0"), "0.99.0"));
+    updater.answer_changelog(Err("rate limited"));
+    let mut h = opened(cx, &dir, &updater);
+
+    press_toast_whats_new(&mut h);
+
+    assert_eq!(
+        whats_new(&mut h).2.as_deref(),
+        Some("Couldn't load the changelog: rate limited")
+    );
+    assert!(
+        drawn(&mut h, "whats-new-releases"),
+        "the window offers the releases page"
+    );
+}
+
+#[gpui::test]
+fn a_manual_install_over_an_older_version_says_updated_to(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "last_installed_version": "0.0.1" }));
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+
+    let toast = installed_toast(&mut h);
+    assert_eq!(toast.title, format!("Updated to {CURRENT}"));
+    assert_eq!(
+        toast
+            .actions
+            .iter()
+            .map(|action| action.id)
+            .collect::<Vec<_>>(),
+        ["whats-new"]
+    );
+
+    press_toast_whats_new(&mut h);
+
+    assert_eq!(
+        updater.changelog_calls(),
+        [(Some("0.0.1".to_owned()), CURRENT.to_owned())]
+    );
+}
+
+/// Only a build that checks for updates records the version it runs: a dev
+/// build over the installed client's layout leaves the saved version alone,
+/// so the installed client's next launch says nothing about an update that
+/// never happened.
+#[gpui::test]
+fn an_inactive_updater_neither_announces_nor_records_the_version(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, &json!({ "last_installed_version": "0.0.1" }));
+    let updater = Arc::new(UpdaterRecorder::default());
+    updater.set_inactive();
+    let mut h = opened(cx, &dir, &updater);
+
+    assert!(toasts(&mut h).is_empty(), "an inactive build says nothing");
+    assert_eq!(
+        saved_ui(&dir)["last_installed_version"],
+        "0.0.1",
+        "the saved version is left alone"
+    );
+}
+
+#[gpui::test]
+fn a_first_run_or_relaunch_says_nothing_and_saves_the_version(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &dir, &updater);
+
+    assert!(toasts(&mut h).is_empty(), "a first run says nothing");
+    assert_eq!(saved_ui(&dir)["last_installed_version"], CURRENT);
+    drop(h);
+
+    let relaunch = TestDir::new();
+    seed_ui(&relaunch, &json!({ "last_installed_version": CURRENT }));
+    let updater = Arc::new(UpdaterRecorder::default());
+    let mut h = opened(cx, &relaunch, &updater);
+
+    assert!(toasts(&mut h).is_empty(), "a relaunch says nothing");
 }
 
 /// The selector the footer's version text carries.

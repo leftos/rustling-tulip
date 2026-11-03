@@ -260,6 +260,15 @@ pub(crate) fn prepare_answer(composed: &Composed, cancel: &AtomicBool) -> MdDoc 
     flatten(document, cancel)
 }
 
+/// Markdown `source` that comes from no file, such as release notes, parsed
+/// into rows, its code coloured as [`prepare`] colours it.
+pub(crate) fn prepare_text(source: &str) -> MdDoc {
+    flatten(
+        md_blocks::parse(source, Path::new("")),
+        &AtomicBool::new(false),
+    )
+}
+
 /// `document`'s blocks as rows.
 fn flatten(document: md_blocks::Document, cancel: &AtomicBool) -> MdDoc {
     let md_blocks::Document { blocks } = document;

@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use futures::FutureExt as _;
 use futures::future::Shared;
-use gpui::{AnyElement, ClickEvent, Context, Task, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, Task, Window, div, prelude::*, px};
 
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
-use crate::notices::ToastKind;
+use crate::notices::{ToastAction, ToastKind, ToastSpec};
 use crate::ui_theme::theme;
 use crate::update::{AlreadyRunning, LastResult, Ready, Updater};
 use crate::{FOOTER_PILL_HEIGHT, FOOTER_PILL_TEXT_SIZE, RootView, tagged_text};
@@ -33,6 +33,11 @@ const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const ALREADY_RUNNING_TITLE: &str = "An update is already running";
 const START_FAILED_TITLE: &str = "Couldn't start the update";
 const RESTART_LABEL: &str = "Restart to update";
+const WHATS_NEW_LABEL: &str = "What's new";
+/// The key of the toast an installed update raises at launch.
+pub(crate) const INSTALLED_TOAST_KEY: &str = "update-installed";
+/// The installed toast's button that opens the What's new window.
+pub(crate) const WHATS_NEW_ACTION: &str = "whats-new";
 
 /// What the last check found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +61,9 @@ pub(crate) struct UpdateUi {
     /// The launch's result toast, then the checks at launch and every hour,
     /// sooner after a failure.
     schedule: Option<Task<()>>,
+    /// The changelog range the installed toast's What's new shows: after
+    /// the version replaced, when known, through the one installed.
+    installed_range: Option<(Option<semver::Version>, semver::Version)>,
 }
 
 impl UpdateUi {
@@ -66,6 +74,7 @@ impl UpdateUi {
             last: LastCheck::NotChecked,
             checking: None,
             schedule: None,
+            installed_range: None,
         }
     }
 }
@@ -104,25 +113,112 @@ impl RootView {
         }));
     }
 
-    /// The outcome the installer's `apply-update` recorded, as a toast.
+    /// The outcome the installer's `apply-update` recorded, as a toast; with
+    /// none, a client newer than the version the last launch saved was
+    /// installed by hand, and says so too. Either installed toast offers the
+    /// changelog from the version replaced. Then this launch's version is
+    /// saved as the last one, in a build that checks for updates: an inactive
+    /// one leaves the saved version alone, so a dev build over the installed
+    /// client's layout never makes it announce an update that never happened.
     fn announce_last_update(&mut self, cx: &mut Context<Self>) {
-        let Some(LastResult {
-            from,
-            to,
-            ok,
-            message,
-        }) = self.update.updater.read_last_result()
-        else {
+        let active = self.update.updater.is_active();
+        let previous = self
+            .sidebar
+            .ui_state()
+            .last_installed_version
+            .as_deref()
+            .and_then(|version| semver::Version::parse(version).ok());
+        match self.update.updater.read_last_result() {
+            Some(LastResult {
+                from, to, ok: true, ..
+            }) => {
+                tracing::info!(?from, %to, "update: installed");
+                let range = semver::Version::parse(&to).ok().map(|through| {
+                    let after = previous.filter(|previous| *previous < through).or_else(|| {
+                        from.as_deref()
+                            .and_then(|from| semver::Version::parse(from).ok())
+                    });
+                    (after, through)
+                });
+                self.announce_installed(&to, range, cx);
+            }
+            Some(LastResult {
+                from,
+                to,
+                ok: false,
+                message,
+            }) => {
+                tracing::warn!(?from, %to, %message, "update: did not install");
+                let title = format!("Update to {to} didn't install");
+                self.push_toast(ToastKind::Error, &title, Some(message), cx);
+            }
+            None => {
+                if active
+                    && let (Some(previous), Ok(current)) =
+                        (previous, semver::Version::parse(CLIENT_VERSION))
+                    && previous < current
+                {
+                    tracing::info!(%previous, %current, "update: installed over an older version");
+                    self.announce_installed(CLIENT_VERSION, Some((Some(previous), current)), cx);
+                }
+            }
+        }
+        if active {
+            self.sidebar.set_last_installed_version(CLIENT_VERSION);
+            self.save_ui();
+        }
+    }
+
+    /// The sticky `Updated to {to}` toast, offering What's new over `range`
+    /// when there is one.
+    fn announce_installed(
+        &mut self,
+        to: &str,
+        range: Option<(Option<semver::Version>, semver::Version)>,
+        cx: &mut Context<Self>,
+    ) {
+        let actions = if range.is_some() {
+            vec![ToastAction {
+                id: WHATS_NEW_ACTION,
+                label: WHATS_NEW_LABEL,
+                danger: false,
+            }]
+        } else {
+            Vec::new()
+        };
+        self.update.installed_range = range;
+        self.push_toast_spec(
+            ToastSpec {
+                kind: ToastKind::Info,
+                title: format!("Updated to {to}"),
+                detail: None,
+                key: Some(INSTALLED_TOAST_KEY.to_owned()),
+                sticky: true,
+                actions,
+            },
+            cx,
+        );
+    }
+
+    /// The installed toast's What's new: the window opens loading the
+    /// changelog of the installed range from the feed.
+    pub(crate) fn whats_new_installed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((after, through)) = self.update.installed_range.clone() else {
             return;
         };
-        if ok {
-            tracing::info!(?from, %to, "update: installed");
-            self.push_toast(ToastKind::Info, &format!("Updated to {to}"), None, cx);
-        } else {
-            tracing::warn!(?from, %to, %message, "update: did not install");
-            let title = format!("Update to {to} didn't install");
-            self.push_toast(ToastKind::Error, &title, Some(message), cx);
-        }
+        let version = through.to_string();
+        let fetch = self.update.updater.changelog(after, through);
+        self.open_whats_new_fetching(version, fetch, window, cx);
+    }
+
+    /// The ready update's What's new: the window opens on the notes the
+    /// check brought.
+    pub fn whats_new_ready(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ready) = &self.update.ready else {
+            return;
+        };
+        let (version, notes) = (ready.version.to_string(), ready.notes.clone());
+        self.open_whats_new(version, &notes, window, cx);
     }
 
     /// The check at launch, every hour and on a retry: skipped while
@@ -261,10 +357,26 @@ impl RootView {
         )
     }
 
-    /// The footer's notice and its Restart to update button, at the right
-    /// edge, once an update is ready.
+    /// The footer's notice and its What's new and Restart to update buttons,
+    /// at the right edge, once an update is ready.
     pub(crate) fn update_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let text = self.update_footer_text()?;
+        let whats_new = outlined_button(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "footer-whats-new",
+            ButtonSize::Compact,
+            true,
+            Layer::Base,
+            &theme(cx),
+        )
+        .min_h(crate::fonts::ui_px(cx, FOOTER_PILL_HEIGHT))
+        .py(px(0.0))
+        .text_size(crate::fonts::ui_px(cx, FOOTER_PILL_TEXT_SIZE))
+        .child(WHATS_NEW_LABEL)
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.whats_new_ready(window, cx);
+        }));
         let button = outlined_button(
             crate::fonts::ui_text_size(cx),
             crate::fonts::ui_weight_shift(cx),
@@ -288,6 +400,7 @@ impl RootView {
                 .items_center()
                 .gap(px(8.0))
                 .child(tagged_text("footer-update-text", text))
+                .child(whats_new)
                 .child(button)
                 .into_any_element(),
         )
@@ -309,6 +422,26 @@ impl RootView {
         .child(RESTART_LABEL)
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             this.restart_to_update(cx);
+        }));
+        Some(button.into_any_element())
+    }
+
+    /// Settings' What's new button, beside Restart to update, once an
+    /// update is ready; it opens the window as the footer's button does.
+    pub(crate) fn settings_whats_new_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.update.ready.as_ref()?;
+        let button = outlined_button(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "settings-whats-new",
+            ButtonSize::Regular,
+            true,
+            Layer::Floating,
+            &theme(cx),
+        )
+        .child(WHATS_NEW_LABEL)
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.whats_new_ready(window, cx);
         }));
         Some(button.into_any_element())
     }

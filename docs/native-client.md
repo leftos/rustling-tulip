@@ -730,17 +730,19 @@ A toast is a rounded card in the app's theme: an accent stripe (the rail's Askin
 
 The client updates itself from published releases; the mechanism (trust model, feed, verify, file swap, daemon takeover) is in [auto-update.md](./auto-update.md). Updates are for this PC only: no daemon message, tailnet peer or SSH host triggers or feeds it.
 
-It checks at launch and every 24 h, skipped while an update is ready, and downloads a newer release in the background (`update_view.rs`). A dev build checks only when `RUSTLING_TULIP_UPDATE_FEED` is set.
+It checks at launch and every hour, skipped while an update is ready, and downloads a newer release in the background (`update_view.rs`). A dev build checks only when `RUSTLING_TULIP_UPDATE_FEED` is set.
 
-When a verified installer is ready, the footer shows the notice `Update {version} ready` (`footer-update-text`) with a `Restart to update` button (`footer-update`). Nothing installs until that press.
+When a verified installer is ready, the footer shows the notice `Update {version} ready` (`footer-update-text`) with an outlined `What's new` button (`footer-whats-new`, which opens the What's new window on the ready update's notes) and a `Restart to update` button (`footer-update`). Nothing installs until the press of `Restart to update`.
 
 The press starts the installer detached and quits through the Keep-sessions-running path, so sessions keep running in their tracers and the new client comes back on the new version. A second update while one runs is refused with the toast `An update is already running`; an installer that cannot be started gives the toast `Couldn't start the update`.
 
 Settings → General has an Updates section: a `Check for updates` toggle (`settings-general-check-updates`, saved as `general.check_updates`, default on; off stops the automatic checks and downloads).
 
-The section also has a `Version {version}` line (`settings-update-version`), a last-check line (`settings-update-last-check`: `Not checked yet`, `Up to date`, `Update {version} ready` or `Last check failed: {error}`) and a `Check now` button, which checks whether the toggle is on or off and is disabled while a check runs.
+The section also has a `Version {version}` line (`settings-update-version`), a last-check line (`settings-update-last-check`: `Not checked yet`, `Up to date`, `Update {version} ready` or `Last check failed: {error}`) and a `Check now` button, which checks whether the toggle is on or off and is disabled while a check runs. While an update is ready the section also has a `What's new` button (`settings-whats-new`) beside `Restart to update`.
 
-The first launch after an update reads the result once: the toast `Updated to {version}`, or `Update to {version} didn't install` with the recorded message as its detail, after which the ready update is offered again. The `--updated-from <version>` launch argument that marks it is stripped before the client reads its other arguments.
+The first launch after an update reads the result once: the toast `Updated to {version}` (also after a manual install over an older saved version; sticky, so only its × closes it, with a `What's new` action that opens the What's new window on the changelog from the replaced version through the installed one, in the main window when raised from a pop-out), or `Update to {version} didn't install` with the recorded message as its detail, after which the ready update is offered again. The `--updated-from <version>` launch argument that marks it is stripped before the client reads its other arguments.
+
+The What's new window (`whats_new_view.rs`) is a modal titled `What's new in {version}` with a scrolling Markdown body whose web links open in the browser, a `Close` button and Esc to close. It shows `Loading the changelog…` while the fetch runs (it times out after 30 s), `No release notes for this version.` when there are none, and on failure `Couldn't load the changelog` with the error and an `Open the releases page` button. Where the notes come from is in [auto-update.md](./auto-update.md) ("What's new").
 
 ## Session recovery
 

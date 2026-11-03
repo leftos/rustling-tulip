@@ -4744,7 +4744,8 @@ impl RootView {
                 .flex()
                 .gap(px(8.0))
                 .child(check_now)
-                .children(self.settings_restart_button(cx)),
+                .children(self.settings_restart_button(cx))
+                .children(self.settings_whats_new_button(cx)),
         )
     }
 

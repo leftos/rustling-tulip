@@ -169,6 +169,7 @@ mod viewer_tab_view;
 mod viewer_text;
 mod vscode_suggestion;
 mod vscode_suggestion_view;
+mod whats_new_view;
 mod window_layouts;
 mod window_state;
 mod window_title;
@@ -258,6 +259,7 @@ use crate::themes_view::ThemesModal;
 use crate::ui_theme::{UiTheme, theme};
 use crate::undo::UndoShelf;
 use crate::vscode_suggestion::VscodeSuggestions;
+use crate::whats_new_view::WhatsNew;
 use crate::window_layouts::WindowLayouts;
 use crate::window_state::{RestoreRect, WindowState};
 use crate::workspace_creator_view::WorkspaceCreatorDialog;
@@ -1087,6 +1089,9 @@ pub struct RootView {
     host_path_prompt: Option<HostPathDialog>,
     /// The Add repo prompt's keyboard focus when its path field has it not.
     host_path_focus: FocusHandle,
+    /// The What's new window, while open.
+    whats_new: Option<WhatsNew>,
+    whats_new_focus: FocusHandle,
     /// Quick-shell folders waiting for the spawn they came with to land.
     quick_shell_saves: PendingQuickShell,
     /// Branch names the daemon suggested, per repo or workspace.
@@ -1560,6 +1565,8 @@ impl RootView {
             ssh_tester: Arc::new(SystemSsh),
             host_path_prompt: None,
             host_path_focus: cx.focus_handle(),
+            whats_new: None,
+            whats_new_focus: cx.focus_handle(),
             shell_generation: 0,
             quick_shell_saves: PendingQuickShell::default(),
             branch_cache: BranchCache::default(),
@@ -2569,6 +2576,7 @@ impl RootView {
             || self.open_in_main(Overlay::EmptyPaneMenu)
             || self.connection_picker.is_some()
             || self.themes_modal.is_some()
+            || self.whats_new.is_some()
     }
 
     /// Whether a pane of the tab on screen shows `session_id` with nothing
@@ -4856,6 +4864,10 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
+        if self.on_whats_new_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.on_discard_confirm_key(ks, window, cx) {
             cx.stop_propagation();
             return;
@@ -5348,6 +5360,7 @@ impl Render for RootView {
             .children(self.appearance_editor_layer(window, cx))
             .children(self.settings_layer(window, cx))
             .children(self.themes_layer(window, cx))
+            .children(self.whats_new_layer(cx))
             .children(self.worktrees_manager_layer(window, cx))
             .children(self.recover_layer(window, cx))
             .children(self.pairing_layer(cx))
