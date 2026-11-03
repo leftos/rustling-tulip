@@ -18,6 +18,7 @@ pub mod isolation;
 mod pinned_process;
 pub mod profile;
 mod proof;
+pub mod protected_root;
 mod supervisor;
 #[cfg(test)]
 mod test_fakes;
@@ -26,8 +27,8 @@ mod wmi_launch;
 
 pub use proof::{Proof, ProvenConnectError, connect_proven};
 pub use supervisor::{
-    DaemonIsElevated, DaemonIsNewer, ELEVATED_DAEMON_REFUSAL, PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT,
-    ensure_running,
+    DaemonIsElevated, DaemonIsNewer, ELEVATED_DAEMON_REFUSAL, OrdinaryDaemonIncompatible,
+    PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running,
 };
 
 use anyhow::{Context as _, anyhow, bail};

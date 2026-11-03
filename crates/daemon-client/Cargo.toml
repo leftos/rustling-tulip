@@ -48,9 +48,14 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # COM, OLE, RPC, Variant and WMI: `src/wmi_launch.rs` starts the daemon through
 # `Win32_Process.Create` when the caller's job forbids breakaway.
 # `Win32_Security`: `src/profile.rs` reads this process's token integrity level.
+# `Win32_Security_Authorization` and `Win32_Storage_FileSystem`:
+# `src/protected_root.rs` creates the protected root from its SDDL, opens and
+# holds it, and reads its descriptor back.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Ole",
     "Win32_System_Rpc",

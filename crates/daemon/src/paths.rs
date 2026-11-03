@@ -1,7 +1,7 @@
 //! Configuration / state directory layout.
 
 use anyhow::Context as _;
-use daemon_client::profile::{self, Overrides, Profile, ProfileRoots};
+use daemon_client::profile::{self, Overrides, Profile};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -221,105 +221,6 @@ mod tests {
         assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
     }
 
-    /// A fresh folder path for one test, cleared of a previous run's copy.
-    fn scratch(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("rt-profile-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        path
-    }
-
-    #[test]
-    #[expect(clippy::expect_used, reason = "a failed setup fails the test loudly")]
-    fn an_elevated_dirs_check_refuses_a_preexisting_default_root() {
-        let data_local = scratch("default-root");
-        let roots = profile::roots_for(
-            Profile::Elevated,
-            &Overrides::default(),
-            &data_local.join("config"),
-            &data_local,
-        );
-        let root = roots.root.clone().expect("an elevated profile has a root");
-        std::fs::create_dir_all(&root).expect("create an ordinary folder at the root");
-        let err = guard_elevated(&roots, &Overrides::default())
-            .expect_err("an ordinary folder is no protected root");
-        let text = format!("{err:#}");
-        assert!(text.contains("is unsafe"), "unexpected refusal: {text}");
-        let _ = std::fs::remove_dir_all(&data_local);
-    }
-
-    #[test]
-    #[expect(clippy::expect_used, reason = "a failed setup fails the test loudly")]
-    fn the_elevated_root_cannot_be_renamed_while_held() {
-        let dir = scratch("held");
-        let aside = scratch("held-aside");
-        std::fs::create_dir_all(&dir).expect("create the folder");
-        let held = crate::protected_root::open_held(&dir).expect("hold the folder");
-        let renamed = std::fs::rename(&dir, &aside);
-        drop(held);
-        assert!(
-            renamed.is_err(),
-            "a held folder was renamed to {}",
-            aside.display()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&aside);
-    }
-
-    /// The guard holds every folder it checks before it checks any, so a
-    /// refused root still leaves the config override held.
-    #[test]
-    #[expect(clippy::expect_used, reason = "a failed setup fails the test loudly")]
-    fn a_checked_override_is_held() {
-        let data_local = scratch("held-override");
-        let config = scratch("held-override-config");
-        let aside = scratch("held-override-aside");
-        let overrides = Overrides {
-            config: Some(config.clone()),
-            ..Overrides::default()
-        };
-        let roots = profile::roots_for(
-            Profile::Elevated,
-            &overrides,
-            &data_local.join("config"),
-            &data_local,
-        );
-        let root = roots.root.clone().expect("an elevated profile has a root");
-        std::fs::create_dir_all(&root).expect("create the root");
-        std::fs::create_dir_all(&config).expect("create the config override");
-        let _ = guard_elevated(&roots, &overrides);
-        assert!(
-            std::fs::rename(&config, &aside).is_err(),
-            "the checked config override was renamed to {}",
-            aside.display()
-        );
-    }
-
-    /// The refusal comes from a check on the handle the guard holds: the
-    /// refused folder is still held afterwards.
-    #[test]
-    #[expect(clippy::expect_used, reason = "a failed setup fails the test loudly")]
-    fn the_check_runs_on_the_held_handle() {
-        let data_local = scratch("held-check");
-        let aside = scratch("held-check-aside");
-        let roots = profile::roots_for(
-            Profile::Elevated,
-            &Overrides::default(),
-            &data_local.join("config"),
-            &data_local,
-        );
-        let root = roots.root.clone().expect("an elevated profile has a root");
-        std::fs::create_dir_all(&root).expect("create an ordinary folder at the root");
-        let err = guard_elevated(&roots, &Overrides::default())
-            .expect_err("an ordinary folder is no protected root");
-        let text = format!("{err:#}");
-        assert!(text.contains("is unsafe"), "unexpected refusal: {text}");
-        assert!(
-            std::fs::rename(&root, &aside).is_err(),
-            "the refused root was not held: renamed to {}",
-            aside.display()
-        );
-    }
-
     #[test]
     fn leaves_volume_guid_alone() {
         let p = r"\\?\Volume{12345678-1234-1234-1234-123456789012}\dir";
@@ -332,7 +233,8 @@ impl Dirs {
     /// elevated daemon first creates its protected root, and the config and
     /// binaries overrides when set, holds each open so it cannot be renamed
     /// aside, and checks each through the handle that holds it
-    /// ([`guard_elevated`]); only then are the subfolders created.
+    /// ([`daemon_client::profile::ensure_protected`]); only then are the
+    /// subfolders created.
     ///
     /// # Errors
     ///
@@ -342,7 +244,7 @@ impl Dirs {
         let (profile, roots) = profile::roots()?;
         if profile == Profile::Elevated {
             let overrides = Overrides::from_env()?;
-            guard_elevated(&roots, &overrides)?;
+            profile::ensure_protected(&roots, &overrides)?;
         }
 
         let config = roots.config;
@@ -414,86 +316,6 @@ impl Dirs {
 #[must_use]
 pub fn devices_file(dirs: &Dirs) -> PathBuf {
     dirs.config.join("devices.json")
-}
-
-/// The folders an elevated daemon protects: its root, and the config and
-/// binaries overrides when they are set, since an ordinary process could have
-/// made any of them first.
-fn protected_folders<'a>(roots: &'a ProfileRoots, overrides: &Overrides) -> Vec<&'a Path> {
-    let mut folders = Vec::with_capacity(3);
-    if let Some(root) = &roots.root {
-        folders.push(root.as_path());
-    }
-    if overrides.config.is_some() {
-        folders.push(roots.config.as_path());
-    }
-    if overrides.binaries.is_some() {
-        folders.push(roots.binaries.as_path());
-    }
-    folders
-}
-
-/// Before an elevated daemon creates any folder: for each protected folder
-/// ([`protected_folders`]), create it when missing and take a hold on it that
-/// refuses a rename or delete for the life of the process
-/// ([`crate::protected_root::open_held`]); then check each folder through the
-/// handle that holds it ([`crate::protected_root::check_handle`]), so the
-/// folder checked is the folder held and none can be swapped in between. A
-/// second call checks again through the handles the first one took.
-///
-/// # Errors
-///
-/// A folder could not be created or opened, or the first held folder the
-/// check refuses.
-#[cfg(windows)]
-fn guard_elevated(roots: &ProfileRoots, overrides: &Overrides) -> anyhow::Result<()> {
-    use crate::protected_root::{check_handle, create_if_missing, open_held};
-    use windows::Win32::Foundation::HANDLE;
-
-    /// Each held folder and its raw handle value, never closed.
-    static HELD: std::sync::Mutex<Vec<(PathBuf, usize)>> = std::sync::Mutex::new(Vec::new());
-
-    let folders = protected_folders(roots, overrides);
-    let mut handles = Vec::with_capacity(folders.len());
-    {
-        let mut held = HELD
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for folder in &folders {
-            let known = held
-                .iter()
-                .find(|(path, _)| path.as_path() == *folder)
-                .map(|&(_, raw)| raw);
-            let raw = if let Some(raw) = known {
-                raw
-            } else {
-                create_if_missing(folder)?;
-                let raw = open_held(folder)?.into_raw().0.addr();
-                held.push((folder.to_path_buf(), raw));
-                raw
-            };
-            handles.push(raw);
-        }
-    }
-    for (folder, raw) in folders.into_iter().zip(handles) {
-        check_handle(HANDLE(std::ptr::without_provenance_mut(raw)), folder)?;
-    }
-    Ok(())
-}
-
-/// Before an elevated daemon creates any folder: create or check each
-/// protected folder ([`protected_folders`]). No other platform lets an open
-/// handle refuse a rename, so nothing is held.
-///
-/// # Errors
-///
-/// The first folder [`crate::protected_root::create_or_check`] refuses.
-#[cfg(not(windows))]
-fn guard_elevated(roots: &ProfileRoots, overrides: &Overrides) -> anyhow::Result<()> {
-    for folder in protected_folders(roots, overrides) {
-        crate::protected_root::create_or_check(folder)?;
-    }
-    Ok(())
 }
 
 /// This daemon's stable id file, a bare UUID with no newline (see

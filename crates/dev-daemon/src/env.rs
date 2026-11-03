@@ -103,11 +103,27 @@ pub(crate) fn env_value(envs: &[(&'static str, OsString)], name: &str) -> Option
         .map(|(_, value)| value.clone())
 }
 
+/// The scratch folders an elevated daemon checks as protected folders (its
+/// config and binaries overrides), so an elevated run creates them protected.
+const PROTECTED_SCRATCH_DIRS: [&str; 2] = ["config", "binaries"];
+
 /// Makes the daemon's directories under `root`, each registered agent's
 /// home folder and its `PATH` stub, keeping whatever `root` already holds.
+/// When this process is elevated, the config and binaries dirs are made (or
+/// checked) as protected roots, as the elevated daemon it starts requires of
+/// its overrides.
 pub(crate) fn make_scratch_dirs(root: &Path) -> Result<(), LaunchError> {
+    let elevated = daemon_client::profile::own_profile().map_err(|err| LaunchError::Scratch {
+        path: root.to_path_buf(),
+        source: std::io::Error::other(format!("reading this process's integrity: {err:#}")),
+    })? == daemon_client::profile::Profile::Elevated;
     for sub in SCRATCH_DIRS {
-        create_dir(&root.join(sub))?;
+        let path = root.join(sub);
+        if elevated && PROTECTED_SCRATCH_DIRS.contains(&sub) {
+            create_protected_dir(&path)?;
+        } else {
+            create_dir(&path)?;
+        }
     }
     for plugin in agent_registry::all() {
         let fake = fake_cli(*plugin)?;
@@ -125,6 +141,15 @@ fn create_dir(path: &Path) -> Result<(), LaunchError> {
     std::fs::create_dir_all(path).map_err(|source| LaunchError::Scratch {
         path: path.to_path_buf(),
         source,
+    })
+}
+
+/// Creates `path` as a protected root, or checks the one already there
+/// ([`daemon_client::protected_root::create_or_check`]).
+fn create_protected_dir(path: &Path) -> Result<(), LaunchError> {
+    daemon_client::protected_root::create_or_check(path).map_err(|err| LaunchError::Scratch {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(format!("{err:#}")),
     })
 }
 

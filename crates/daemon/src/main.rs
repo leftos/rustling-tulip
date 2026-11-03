@@ -49,7 +49,6 @@ mod orphan;
 mod osc_title;
 mod paths;
 mod presets;
-mod protected_root;
 mod pty;
 mod pty_state;
 mod registry;

@@ -20,14 +20,14 @@ use std::path::Path;
 /// that refuses reads, writes and execution from a lower integrity. The owner
 /// is named because a machine policy may otherwise make the creating user the
 /// owner, which [`check_root`] refuses.
-pub(crate) const PROTECTED_ROOT_SDDL: &str =
+pub const PROTECTED_ROOT_SDDL: &str =
     "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:(ML;OICI;NRNWNX;;;HI)";
 
 /// The security of a folder that could be the protected root, as read back
 /// from its descriptor: the parts [`check_root`] compares, kept free of any
 /// Windows API so the check is testable anywhere.
 #[derive(Debug)]
-pub(crate) struct RootSecurity {
+pub struct RootSecurity {
     /// The owner's SID, `S-1-5-…`.
     pub owner: String,
     /// Whether the DACL is protected from the parent folder's inheritable
@@ -42,7 +42,7 @@ pub(crate) struct RootSecurity {
 /// One DACL entry: the trustee it names, what it grants or denies, and the
 /// flags that carry it to the folder's children.
 #[derive(Debug)]
-pub(crate) struct AceEntry {
+pub struct AceEntry {
     /// Whether the entry allows access rather than denying it.
     pub allow: bool,
     /// The entry's trustee, `S-1-5-…`.
@@ -57,7 +57,7 @@ pub(crate) struct AceEntry {
 /// The mandatory label ACE: its integrity RID, the upward-rights mask and the
 /// inheritance flags.
 #[derive(Debug)]
-pub(crate) struct LabelEntry {
+pub struct LabelEntry {
     /// The RID of the label SID, `S-1-16-<rid>`.
     pub rid: u32,
     /// The `SYSTEM_MANDATORY_LABEL_NO_*_UP` bits it sets.
@@ -68,7 +68,7 @@ pub(crate) struct LabelEntry {
 
 /// Why a folder is refused as the protected root.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RootRefusal {
+pub enum RootRefusal {
     /// Someone other than Administrators or SYSTEM owns it.
     Owner(String),
     /// Its DACL inherits from the parent folder, so a lower-integrity process
@@ -105,7 +105,7 @@ impl std::fmt::Display for RootRefusal {
 /// # Errors
 ///
 /// The first way `sec` differs from the protected descriptor.
-pub(crate) fn check_root(sec: &RootSecurity) -> Result<(), RootRefusal> {
+pub fn check_root(sec: &RootSecurity) -> Result<(), RootRefusal> {
     /// `S-1-5-32-544`: the built-in Administrators group.
     const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
     /// `S-1-5-18`: SYSTEM.
@@ -159,14 +159,7 @@ pub(crate) fn check_root(sec: &RootSecurity) -> Result<(), RootRefusal> {
 /// The folder could not be created or read, or it is a reparse point, not a
 /// folder, or not the security [`check_root`] accepts.
 #[cfg(windows)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Dirs::ensure holds each folder before checking it: create_if_missing, open_held, check_handle"
-    )
-)]
-pub(crate) fn create_or_check(path: &Path) -> anyhow::Result<()> {
+pub fn create_or_check(path: &Path) -> anyhow::Result<()> {
     create_if_missing(path)?;
     check_existing(path)
 }
@@ -179,7 +172,7 @@ pub(crate) fn create_or_check(path: &Path) -> anyhow::Result<()> {
 ///
 /// The folder could not be created, or `path` could not be read.
 #[cfg(windows)]
-pub(crate) fn create_if_missing(path: &Path) -> anyhow::Result<()> {
+pub fn create_if_missing(path: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -254,10 +247,6 @@ fn create_protected_dir(path: &Path) -> anyhow::Result<()> {
 ///
 /// The folder could not be opened, or [`check_handle`] refuses it.
 #[cfg(windows)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only create_or_check and the tests check by path")
-)]
 fn check_existing(path: &Path) -> anyhow::Result<()> {
     let handle = open_held(path)?;
     check_handle(handle.raw(), path)
@@ -273,10 +262,7 @@ fn check_existing(path: &Path) -> anyhow::Result<()> {
 /// The folder could not be read, it is a reparse point or not a folder, or its
 /// security is not what [`check_root`] accepts.
 #[cfg(windows)]
-pub(crate) fn check_handle(
-    handle: windows::Win32::Foundation::HANDLE,
-    path: &Path,
-) -> anyhow::Result<()> {
+pub fn check_handle(handle: windows::Win32::Foundation::HANDLE, path: &Path) -> anyhow::Result<()> {
     use windows::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         GetFileInformationByHandle,
@@ -317,7 +303,7 @@ pub(crate) fn check_handle(
 ///
 /// The folder could not be opened.
 #[cfg(windows)]
-pub(crate) fn open_held(path: &Path) -> anyhow::Result<OwnedHandle> {
+pub fn open_held(path: &Path) -> anyhow::Result<OwnedHandle> {
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
         FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
@@ -345,17 +331,19 @@ pub(crate) fn open_held(path: &Path) -> anyhow::Result<OwnedHandle> {
 /// A handle [`open_held`] opened, closed once when dropped unless the caller
 /// keeps it for the life of the process ([`OwnedHandle::into_raw`]).
 #[cfg(windows)]
-pub(crate) struct OwnedHandle(windows::Win32::Foundation::HANDLE);
+pub struct OwnedHandle(windows::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
 impl OwnedHandle {
     /// The handle, still owned by this guard.
-    pub(crate) fn raw(&self) -> windows::Win32::Foundation::HANDLE {
+    #[must_use]
+    pub fn raw(&self) -> windows::Win32::Foundation::HANDLE {
         self.0
     }
 
     /// The handle, no longer closed by this guard: the caller keeps it open.
-    pub(crate) fn into_raw(self) -> windows::Win32::Foundation::HANDLE {
+    #[must_use]
+    pub fn into_raw(self) -> windows::Win32::Foundation::HANDLE {
         std::mem::ManuallyDrop::new(self).0
     }
 }
@@ -568,7 +556,7 @@ fn label_entry(sacl: *const windows::Win32::Security::ACL) -> anyhow::Result<Opt
 ///
 /// The directory could not be created.
 #[cfg(not(windows))]
-pub(crate) fn create_or_check(path: &Path) -> anyhow::Result<()> {
+pub fn create_or_check(path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path)
         .with_context(|| format!("creating the protected root {}", path.display()))?;
     Ok(())
@@ -799,8 +787,8 @@ mod tests {
     )]
     #[test]
     fn creating_the_root_then_checking_it_passes() {
-        let elevated =
-            crate::integrity::own_level().is_ok_and(crate::integrity::IntegrityLevel::is_elevated);
+        let elevated = crate::profile::own_profile()
+            .is_ok_and(|profile| profile == crate::profile::Profile::Elevated);
         if !elevated {
             eprintln!("skipped: needs an elevated test process");
             return;

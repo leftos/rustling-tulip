@@ -3,6 +3,7 @@
 
 #[cfg(windows)]
 use crate::pinned_process::{OpenFailure, PinnedProcess};
+use crate::profile::{Profile, ProfileRoots};
 use crate::proof::{self, Proof};
 use crate::{handshake_file_in, remove_handshake_holding_token};
 use anyhow::{Context as _, anyhow};
@@ -147,6 +148,106 @@ fn refuse_elevated(existing: &ExistingDaemon) -> anyhow::Result<()> {
     }
 }
 
+/// The refusal an elevated client gets when an ordinary daemon of its account
+/// runs and speaks none of its protocol versions. An elevated client never
+/// retires an ordinary daemon, and never starts an elevated one beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrdinaryDaemonIncompatible;
+
+impl std::fmt::Display for OrdinaryDaemonIncompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "an ordinary rustling-tulip daemon is running that this app cannot talk to; stop it \
+             from an ordinary terminal with \"rustling-tulipd shutdown\", then start this app again",
+        )
+    }
+}
+
+impl std::error::Error for OrdinaryDaemonIncompatible {}
+
+/// What an elevated caller does about the daemon it found in the ordinary
+/// profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElevatedStep {
+    /// Use the ordinary daemon: it gives no elevation.
+    Reuse,
+    /// Stop: an ordinary daemon runs that the caller cannot talk to.
+    Refuse(OrdinaryDaemonIncompatible),
+    /// No ordinary daemon runs: go on to the elevated profile.
+    UseElevatedProfile,
+    /// An elevated daemon an older release left in the ordinary profile: it
+    /// runs at the caller's own integrity, so the caller retires it, then
+    /// goes on to the elevated profile.
+    RetireThenUseElevatedProfile,
+}
+
+/// The profile of the daemon an elevated caller found in the ordinary
+/// profile, as `read` from its process `pid`'s token. A read that fails is
+/// logged and counts as ordinary, so the caller never retires a daemon whose
+/// integrity it could not prove to be its own.
+fn ordinary_daemon_profile(pid: u32, read: anyhow::Result<Profile>) -> Profile {
+    read.unwrap_or_else(|err| {
+        warn!(
+            pid,
+            err = %format!("{err:#}"),
+            "could not read the integrity of the daemon in the ordinary profile; treating it as ordinary"
+        );
+        Profile::Ordinary
+    })
+}
+
+/// What an elevated caller does about an ordinary daemon of kind `ordinary`
+/// whose protocol it speaks when `protocol_ok`. A proven ordinary daemon is
+/// reused whatever its build while the caller speaks its protocol, and
+/// refused otherwise: an elevated caller never retires it (supervision never
+/// crosses integrity) and never starts a daemon beside it. A proven daemon
+/// whose process runs as `daemon_profile` Elevated is an older release's
+/// elevated daemon left in the ordinary profile: it is the caller's own
+/// integrity, so it is retired and the caller goes on to the elevated
+/// profile. A handshake an elevated reader cannot read is not expected; it
+/// counts as no daemon.
+fn elevated_caller_action(
+    ordinary: ExistingKind,
+    protocol_ok: bool,
+    daemon_profile: Profile,
+) -> ElevatedStep {
+    match ordinary {
+        // A proven daemon running at the caller's own integrity, whatever its
+        // build or protocol: an older release's elevated daemon.
+        ExistingKind::Compatible
+        | ExistingKind::StaleBinary
+        | ExistingKind::OlderBuild
+        | ExistingKind::NewerBuild
+        | ExistingKind::Incompatible
+            if daemon_profile == Profile::Elevated =>
+        {
+            ElevatedStep::RetireThenUseElevatedProfile
+        }
+        ExistingKind::Compatible | ExistingKind::StaleBinary => ElevatedStep::Reuse,
+        ExistingKind::OlderBuild | ExistingKind::NewerBuild if protocol_ok => ElevatedStep::Reuse,
+        ExistingKind::OlderBuild | ExistingKind::NewerBuild | ExistingKind::Incompatible => {
+            ElevatedStep::Refuse(OrdinaryDaemonIncompatible)
+        }
+        ExistingKind::ElevatedUnreadable | ExistingKind::Missing => {
+            ElevatedStep::UseElevatedProfile
+        }
+    }
+}
+
+/// [`elevated_caller_action`] for the daemon `existing` found in the ordinary
+/// profile, running as `daemon_profile`, judged by a client speaking
+/// `client_versions`.
+fn elevated_step(
+    existing: &ExistingDaemon,
+    client_versions: &[u32],
+    daemon_profile: Profile,
+) -> ElevatedStep {
+    let protocol_ok = existing
+        .handshake()
+        .is_some_and(|handshake| protocol_compatible(handshake, client_versions));
+    elevated_caller_action(existing.kind(), protocol_ok, daemon_profile)
+}
+
 /// How a daemon's build version orders against the client's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuildOrder {
@@ -271,12 +372,24 @@ fn spawn_lock() -> &'static Mutex<()> {
 /// Concurrent callers serialize on a process-wide lock so only one of them
 /// spawns.
 ///
+/// The caller's own integrity picks the profiles it looks in
+/// ([`crate::profile::roots_to_probe`]). An ordinary caller uses the ordinary
+/// profile only. An elevated caller first reuses a proven ordinary daemon of
+/// its account whose protocol it speaks, whatever its build, and refuses one
+/// it cannot talk to; only when none runs does it use the elevated profile,
+/// whose protected folders it creates or checks first. Everything above about
+/// retiring and spawning happens within the caller's own profile only, with
+/// its binary cache.
+///
 /// # Errors
 ///
 /// Fails with a [`DaemonIsNewer`] when the running daemon is a newer build
-/// than this client, and with a [`DaemonIsElevated`] when
+/// than this client, with a [`DaemonIsElevated`] when
 /// [`crate::read_handshake_file`] refuses `daemon.json`, here or while waiting
-/// for a spawned daemon. Fails when `client_build` is not a semver version, the
+/// for a spawned daemon, and with an [`OrdinaryDaemonIncompatible`] when an
+/// elevated caller finds an ordinary daemon it cannot talk to. Fails when this
+/// process's profile or folders cannot be resolved, the elevated profile's
+/// protected folders are refused, `client_build` is not a semver version, the
 /// daemon binary is needed but cannot be located or cached, a stale daemon
 /// cannot be stopped, the spawn fails, or the new daemon does not report a
 /// healthy handshake within the spawn timeout.
@@ -286,14 +399,40 @@ pub async fn ensure_running(
 ) -> anyhow::Result<DaemonHandshake> {
     let client_build = semver::Version::parse(client_build)
         .with_context(|| format!("this client's version {client_build:?} is not semver"))?;
+    let client = Client {
+        versions: client_versions,
+        build: &client_build,
+    };
+    let caller = crate::profile::own_profile()?;
+    let overrides = crate::profile::Overrides::from_env()?;
+    let probed = crate::profile::roots_to_probe(caller, &overrides)?;
+    // The caller's own profile is the last one probed; any before it are
+    // ordinary profiles an elevated caller may only reuse a daemon from.
+    let Some(((own, own_roots), others)) = probed.split_last() else {
+        return Err(anyhow!("no profile to look for a daemon in"));
+    };
+    let config_dirs: Vec<PathBuf> = probed
+        .iter()
+        .map(|(_, roots)| roots.config.clone())
+        .collect();
+
+    if let Some(handshake) = reuse_ordinary_daemon(others, client, false).await? {
+        return Ok(handshake);
+    }
+    if *own == Profile::Elevated {
+        // Before anything in this client creates a folder of the profile.
+        crate::profile::ensure_protected(own_roots, &overrides)?;
+    }
+    let config_dir = &own_roots.config;
+    let binaries_dir = &own_roots.binaries;
     // Best-effort: the running executable is compared against the path the
     // cache would hold only to log a reuse across builds; a binary is located
     // for real only to spawn.
-    let expected = expected_daemon_path();
+    let expected = expected_daemon_path(binaries_dir);
     let cached = expected.as_deref();
 
     // Fast path: a healthy daemon that is reused.
-    let existing = classify_existing_daemon(cached, client_versions, &client_build).await;
+    let existing = classify_existing_daemon(config_dir, cached, client).await;
     if let Some(handshake) = reused_handshake(&existing, "reusing running daemon") {
         return Ok(handshake);
     }
@@ -301,9 +440,12 @@ pub async fn ensure_running(
     // Slow path: a spawn or graceful replacement might be needed. Take the
     // global lock so concurrent callers serialize. Once we hold it, re-check
     // the handshake -- the caller ahead of us may have spawned the daemon
-    // already.
+    // already, in any profile the spawn wait polls.
     let _guard = spawn_lock().lock().await;
-    let existing = classify_existing_daemon(cached, client_versions, &client_build).await;
+    if let Some(handshake) = reuse_ordinary_daemon(others, client, true).await? {
+        return Ok(handshake);
+    }
+    let existing = classify_existing_daemon(config_dir, cached, client).await;
     if let Some(handshake) =
         reused_handshake(&existing, "reusing daemon spawned by concurrent caller")
     {
@@ -313,23 +455,96 @@ pub async fn ensure_running(
     refuse_elevated(&existing)?;
     // Resolve before retiring, so a missing binary never leaves the user with
     // no daemon at all.
-    let current = resolve_current_daemon_binary()?;
+    let current = resolve_current_daemon_binary(binaries_dir)?;
     if action_for(existing.kind()) == Action::RetireThenSpawn
         && let Some(handshake) = existing.handshake()
     {
-        retire_daemon(handshake, retire_reason(existing.kind()), client_versions).await?;
+        retire_daemon(
+            config_dir,
+            handshake,
+            retire_reason(existing.kind()),
+            client_versions,
+        )
+        .await?;
     }
-    spawn_current_daemon(&current, client_versions).await
+    spawn_current_daemon(&current, &config_dirs, client_versions).await
 }
 
-fn resolve_current_daemon_binary() -> anyhow::Result<CurrentDaemonBinary> {
+/// For an elevated caller: the handshake of a proven daemon in one of the
+/// ordinary profiles `ordinary` that the caller reuses, `None` when none runs
+/// there, or the [`OrdinaryDaemonIncompatible`] refusal. The one daemon ever
+/// retired here is an elevated daemon an older release left in the ordinary
+/// profile (the caller's own integrity), and only when `may_retire` (the
+/// caller holds the spawn lock); without it such a daemon counts as none
+/// running, and the caller re-checks under the lock. Nothing is reaped or
+/// spawned here. An ordinary caller passes no profile.
+async fn reuse_ordinary_daemon(
+    ordinary: &[(Profile, ProfileRoots)],
+    client: Client<'_>,
+    may_retire: bool,
+) -> anyhow::Result<Option<DaemonHandshake>> {
+    for (_, roots) in ordinary {
+        let existing = classify_existing_daemon(&roots.config, None, client).await;
+        let daemon_profile = existing.handshake().map_or(Profile::Ordinary, |handshake| {
+            ordinary_daemon_profile(
+                handshake.pid,
+                crate::profile::profile_of_process(handshake.pid),
+            )
+        });
+        match elevated_step(&existing, client.versions, daemon_profile) {
+            ElevatedStep::RetireThenUseElevatedProfile => {
+                if may_retire && let Some(handshake) = existing.handshake() {
+                    info!(
+                        pid = handshake.pid,
+                        port = handshake.port,
+                        daemon_build = %handshake.build_version,
+                        config_dir = %roots.config.display(),
+                        "retiring an elevated daemon left in the ordinary profile"
+                    );
+                    retire_daemon_in(
+                        &roots.config,
+                        handshake,
+                        PROOF_TIMEOUT,
+                        SHUTDOWN_WAIT_TIMEOUT,
+                    )
+                    .await?;
+                }
+            }
+            ElevatedStep::Reuse => {
+                if let Some(handshake) = existing.handshake() {
+                    info!(
+                        port = handshake.port,
+                        protocol_version = handshake.protocol_version,
+                        daemon_build = %handshake.build_version,
+                        "reusing an ordinary daemon from an elevated client"
+                    );
+                    return Ok(Some(handshake.clone()));
+                }
+            }
+            ElevatedStep::Refuse(refusal) => return Err(anyhow::Error::new(refusal)),
+            ElevatedStep::UseElevatedProfile => {
+                if existing.kind() == ExistingKind::ElevatedUnreadable {
+                    warn!(
+                        config_dir = %roots.config.display(),
+                        "an elevated client may not read the ordinary profile's daemon.json; using its own profile"
+                    );
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_current_daemon_binary(binaries_dir: &Path) -> anyhow::Result<CurrentDaemonBinary> {
     let template = locate_daemon_binary()?;
-    let cached = cache_daemon_binary(&template)?;
+    let cached = cache_daemon_binary(&template, binaries_dir)?;
     Ok(CurrentDaemonBinary { template, cached })
 }
 
+/// Spawn `current` and wait for a ready handshake in any of `config_dirs`.
 async fn spawn_current_daemon(
     current: &CurrentDaemonBinary,
+    config_dirs: &[PathBuf],
     client_versions: &[u32],
 ) -> anyhow::Result<DaemonHandshake> {
     let cache_dir = current
@@ -363,29 +578,17 @@ async fn spawn_current_daemon(
         .ok_or_else(|| anyhow!("template has no parent dir"))?;
     spawn_daemon(&current.cached, &template_dir).await?;
 
-    wait_for_handshake(client_versions).await
+    wait_for_handshake(config_dirs, client_versions).await
 }
 
-/// Classify the daemon named by `daemon.json` in the config dir; see
-/// [`classify_existing_daemon_in`].
+/// Classify the daemon named by `daemon.json` in `config_dir`, within the
+/// proof budget; see [`classify_existing_daemon_in`].
 async fn classify_existing_daemon(
+    config_dir: &Path,
     current_daemon: Option<&Path>,
-    client_versions: &[u32],
-    client_build: &semver::Version,
+    client: Client<'_>,
 ) -> ExistingDaemon {
-    match crate::config_dir() {
-        Ok(config_dir) => {
-            let client = Client {
-                versions: client_versions,
-                build: client_build,
-            };
-            classify_existing_daemon_in(&config_dir, current_daemon, client, PROOF_TIMEOUT).await
-        }
-        Err(err) => {
-            debug!("no config dir, so no daemon to classify: {err:#}");
-            ExistingDaemon::Missing
-        }
-    }
+    classify_existing_daemon_in(config_dir, current_daemon, client, PROOF_TIMEOUT).await
 }
 
 /// Classify the daemon named by `config_dir`'s `daemon.json`: read once, and
@@ -533,9 +736,10 @@ fn daemon_exe_matches_expected(actual: &Path, expected: &Path) -> bool {
     normalize_process_path(actual) == normalize_process_path(expected)
 }
 
-/// Retire the daemon `handshake` names from the config dir's `daemon.json`;
+/// Retire the daemon `handshake` names from `config_dir`'s `daemon.json`;
 /// see [`retire_daemon_in`].
 async fn retire_daemon(
+    config_dir: &Path,
     handshake: &DaemonHandshake,
     reason: &str,
     client_versions: &[u32],
@@ -550,8 +754,7 @@ async fn retire_daemon(
         reason,
         "retiring running daemon before spawning current version"
     );
-    let config_dir = crate::config_dir()?;
-    retire_daemon_in(&config_dir, handshake, PROOF_TIMEOUT, SHUTDOWN_WAIT_TIMEOUT).await
+    retire_daemon_in(config_dir, handshake, PROOF_TIMEOUT, SHUTDOWN_WAIT_TIMEOUT).await
 }
 
 /// Retire the daemon `handshake` (read from `config_dir`'s `daemon.json`)
@@ -951,34 +1154,33 @@ fn cached_file_name(template: &Path, bytes: &[u8]) -> String {
     }
 }
 
-/// Where the cached copy of `template` lives, or would once cached, without
-/// copying anything into the cache.
-fn cached_daemon_path(template: &Path) -> anyhow::Result<PathBuf> {
+/// Where the cached copy of `template` lives in `binaries_dir`, or would once
+/// cached, without copying anything into the cache.
+fn cached_daemon_path(template: &Path, binaries_dir: &Path) -> anyhow::Result<PathBuf> {
     let bytes =
         fs::read(template).with_context(|| format!("reading template {}", template.display()))?;
-    Ok(resolve_binaries_dir()?.join(cached_file_name(template, &bytes)))
+    Ok(binaries_dir.join(cached_file_name(template, &bytes)))
 }
 
-/// Best effort: the cache path this build's daemon runs from, so a running
-/// daemon from a different build can be told apart. `None` when no local
-/// daemon binary is found, which only skips that comparison.
-fn expected_daemon_path() -> Option<PathBuf> {
+/// Best effort: the path in `binaries_dir` this build's daemon runs from, so a
+/// running daemon from a different build can be told apart. `None` when no
+/// local daemon binary is found, which only skips that comparison.
+fn expected_daemon_path(binaries_dir: &Path) -> Option<PathBuf> {
     locate_daemon_binary()
-        .and_then(|template| cached_daemon_path(&template))
+        .and_then(|template| cached_daemon_path(&template, binaries_dir))
         .inspect_err(|err| debug!("not comparing the running daemon's build: {err:#}"))
         .ok()
 }
 
-/// Copy the daemon template into the content-addressed cache and return the
-/// cached path. Spawning from the cached copy means the shipped template can
-/// be replaced (rebuild, NSIS reinstall) without colliding with a running
-/// daemon — the running process retains a handle on the cached file, the
-/// shipped one is unlocked. The cache is shared with the daemon's
-/// `binary_cache` module (resolved by the same `directories::ProjectDirs`
-/// call) and pruned by the daemon at startup.
-fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
-    let cache_dir = resolve_binaries_dir()?;
-    fs::create_dir_all(&cache_dir)
+/// Copy the daemon template into the content-addressed cache `cache_dir` and
+/// return the cached path. Spawning from the cached copy means the shipped
+/// template can be replaced (rebuild, NSIS reinstall) without colliding with a
+/// running daemon — the running process retains a handle on the cached file,
+/// the shipped one is unlocked. The cache is the profile's binaries dir
+/// ([`crate::profile::ProfileRoots::binaries`]), shared with the daemon's
+/// `binary_cache` module and pruned by the daemon at startup.
+fn cache_daemon_binary(template: &Path, cache_dir: &Path) -> anyhow::Result<PathBuf> {
+    fs::create_dir_all(cache_dir)
         .with_context(|| format!("creating cache dir {}", cache_dir.display()))?;
 
     let bytes =
@@ -1010,19 +1212,6 @@ fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
     }
     info!(cached = %cached.display(), "daemon binary cache: populated");
     Ok(cached)
-}
-
-/// Resolve the cached-binary root. Mirrors `resolve_binaries_dir` in
-/// `crates/daemon/src/paths.rs` so the daemon and its clients share one cache.
-fn resolve_binaries_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(value) = std::env::var("RUSTLING_TULIP_BINARIES_DIR")
-        && !value.is_empty()
-    {
-        return Ok(PathBuf::from(value));
-    }
-    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| anyhow!("could not resolve binaries directory"))?;
-    Ok(pd.data_local_dir().join("binaries"))
 }
 
 fn hash_prefix(bytes: &[u8]) -> String {
@@ -1212,11 +1401,14 @@ fn classify_read(file: Result<crate::HandshakeFile, DaemonIsElevated>) -> Handsh
     }
 }
 
-/// Wait for the config dir's `daemon.json` to name a ready daemon; see
-/// [`wait_for_handshake_in`].
-async fn wait_for_handshake(client_versions: &[u32]) -> anyhow::Result<DaemonHandshake> {
-    wait_for_handshake_in(
-        &crate::config_dir()?,
+/// Wait for the `daemon.json` of any of `config_dirs` to name a ready daemon;
+/// see [`wait_for_handshake_among`].
+async fn wait_for_handshake(
+    config_dirs: &[PathBuf],
+    client_versions: &[u32],
+) -> anyhow::Result<DaemonHandshake> {
+    wait_for_handshake_among(
+        config_dirs,
         client_versions,
         SPAWN_WAIT_TIMEOUT,
         PROOF_TIMEOUT,
@@ -1263,11 +1455,8 @@ async fn ready_handshake(
     Ok(None)
 }
 
-/// Wait up to `timeout` for `config_dir`'s `daemon.json` (read with `read`)
-/// to name a daemon that proves it holds the file's token and speaks one of
-/// `client_versions`. A stale file never satisfies the wait; the daemon's pid
-/// need not be the one this client spawned. A file `read` refuses ends the
-/// wait at once with that [`DaemonIsElevated`] refusal.
+/// [`wait_for_handshake_among`] over the one dir `config_dir`.
+#[cfg(test)]
 async fn wait_for_handshake_in(
     config_dir: &Path,
     client_versions: &[u32],
@@ -1275,42 +1464,76 @@ async fn wait_for_handshake_in(
     proof_budget: Duration,
     read: HandshakeReader,
 ) -> anyhow::Result<DaemonHandshake> {
-    let path = handshake_file_in(config_dir);
+    wait_for_handshake_among(
+        std::slice::from_ref(&config_dir.to_path_buf()),
+        client_versions,
+        timeout,
+        proof_budget,
+        read,
+    )
+    .await
+}
+
+/// Wait up to `timeout` for the `daemon.json` (read with `read`) of any of
+/// `config_dirs`, polled in order each round, to name a daemon that proves it
+/// holds the file's token and speaks one of `client_versions`; the first
+/// ready one wins. Every profile the caller may use is polled, since a daemon
+/// started through WMI may not run with the caller's token. A stale file
+/// never satisfies the wait; the daemon's pid need not be the one this client
+/// spawned. A file `read` refuses ends the wait at once with that
+/// [`DaemonIsElevated`] refusal.
+async fn wait_for_handshake_among(
+    config_dirs: &[PathBuf],
+    client_versions: &[u32],
+    timeout: Duration,
+    proof_budget: Duration,
+    read: HandshakeReader,
+) -> anyhow::Result<DaemonHandshake> {
+    let paths: Vec<PathBuf> = config_dirs
+        .iter()
+        .map(|dir| handshake_file_in(dir))
+        .collect();
     let started = tokio::time::Instant::now();
     let deadline = started + timeout;
     let mut next_progress = started + Duration::from_secs(1);
     let mut warned_incompatible = false;
     while tokio::time::Instant::now() < deadline {
-        let ready = ready_handshake(
-            &path,
-            client_versions,
-            &mut warned_incompatible,
-            proof_budget,
-            read,
-        )
-        .await;
-        let ready = match ready {
-            Ok(ready) => ready,
-            Err(refusal) => {
-                warn!(%refusal, "wait_for_handshake: an elevated daemon's handshake is refused; giving up");
-                return Err(anyhow::Error::new(refusal));
+        for path in &paths {
+            let ready = ready_handshake(
+                path,
+                client_versions,
+                &mut warned_incompatible,
+                proof_budget,
+                read,
+            )
+            .await;
+            let ready = match ready {
+                Ok(ready) => ready,
+                Err(refusal) => {
+                    warn!(%refusal, "wait_for_handshake: an elevated daemon's handshake is refused; giving up");
+                    return Err(anyhow::Error::new(refusal));
+                }
+            };
+            if let Some(parsed) = ready {
+                info!(
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    port = parsed.port,
+                    protocol_version = parsed.protocol_version,
+                    handshake = %path.display(),
+                    "wait_for_handshake: daemon ready"
+                );
+                return Ok(parsed);
             }
-        };
-        if let Some(parsed) = ready {
-            info!(
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                port = parsed.port,
-                protocol_version = parsed.protocol_version,
-                "wait_for_handshake: daemon ready"
-            );
-            return Ok(parsed);
         }
         let now = tokio::time::Instant::now();
         if now >= next_progress {
             // One-line tick per second so we can see exactly how long the
             // supervisor waited vs when the daemon actually appeared. Without
             // this the only signal was a single failure message at timeout.
-            let handshake_exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+            let mut handshake_exists = false;
+            for path in &paths {
+                handshake_exists |= tokio::fs::try_exists(path).await.unwrap_or(false);
+            }
             debug!(
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 handshake_exists, "wait_for_handshake: still waiting"
@@ -1334,14 +1557,17 @@ async fn wait_for_handshake_in(
 )]
 mod tests {
     use super::{
-        Action, Client, DaemonIsElevated, ExistingDaemon, ExistingKind, HandshakeRead, action_for,
-        classify_existing_daemon_in, classify_proven, classify_read, daemon_exe_matches_expected,
-        dev_workspace_root, is_daemon_image, path_is_under, protocol_compatible, protocol_kind,
-        refuse_elevated, refuse_newer, wait_for_handshake_in,
+        Action, Client, DaemonIsElevated, ElevatedStep, ExistingDaemon, ExistingKind,
+        HandshakeRead, OrdinaryDaemonIncompatible, action_for, classify_existing_daemon_in,
+        classify_proven, classify_read, daemon_exe_matches_expected, dev_workspace_root,
+        elevated_caller_action, elevated_step, is_daemon_image, ordinary_daemon_profile,
+        path_is_under, protocol_compatible, protocol_kind, refuse_elevated, refuse_newer,
+        wait_for_handshake_in,
     };
     #[cfg(windows)]
     use super::{spawn_daemon, spawn_daemon_with};
     use crate::HandshakeFile;
+    use crate::profile::{Overrides, Profile, profiles_to_probe, roots_to_probe_in};
     use crate::supervisor::retire_daemon_in;
     use crate::test_fakes::{
         FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
@@ -1678,6 +1904,182 @@ mod tests {
             HANG_GUARD,
         ));
         assert_eq!(existing.kind(), ExistingKind::Incompatible);
+    }
+
+    /// The ordinary daemon `scratch`'s `daemon.json` names, of `build` and
+    /// speaking `versions`, proven by `fake`, as an elevated caller judges it.
+    fn elevated_step_on(
+        scratch: &ScratchDir,
+        fake: &FakeListener,
+        build: &str,
+        versions: &[u32],
+    ) -> (ExistingKind, ElevatedStep) {
+        elevated_step_as(scratch, fake, build, versions, Profile::Ordinary)
+    }
+
+    /// [`elevated_step_on`] for a daemon whose process runs as `daemon_profile`.
+    fn elevated_step_as(
+        scratch: &ScratchDir,
+        fake: &FakeListener,
+        build: &str,
+        versions: &[u32],
+        daemon_profile: Profile,
+    ) -> (ExistingKind, ElevatedStep) {
+        let file = DaemonHandshake {
+            build_version: build.to_owned(),
+            ..handshake_naming(4242, fake.port, "good-token", versions)
+        };
+        write_daemon_json(&scratch.0, &file);
+        let existing = block_on(classify_existing_daemon_in(
+            &scratch.0,
+            None,
+            client(),
+            HANG_GUARD,
+        ));
+        (
+            existing.kind(),
+            elevated_step(&existing, SUPPORTED, daemon_profile),
+        )
+    }
+
+    #[test]
+    fn an_elevated_caller_retires_an_elevated_daemon_left_in_the_ordinary_profile() {
+        let scratch = ScratchDir::new("elevated-left-behind");
+        let fake = FakeListener::proving("good-token");
+        for build in [CLIENT_BUILD, "0.0.1", "999.0.0"] {
+            for versions in [SUPPORTED, &[0][..]] {
+                let (_, step) =
+                    elevated_step_as(&scratch, &fake, build, versions, Profile::Elevated);
+                assert_eq!(
+                    step,
+                    ElevatedStep::RetireThenUseElevatedProfile,
+                    "an elevated daemon of build {build} speaking {versions:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unreadable_daemon_integrity_counts_as_ordinary() {
+        let unread = ordinary_daemon_profile(4242, Err(anyhow::anyhow!("access is denied")));
+        assert_eq!(unread, Profile::Ordinary);
+        assert_eq!(
+            ordinary_daemon_profile(4242, Ok(Profile::Elevated)),
+            Profile::Elevated
+        );
+        assert_eq!(
+            ordinary_daemon_profile(4242, Ok(Profile::Ordinary)),
+            Profile::Ordinary
+        );
+        // With its integrity unread, the daemon gets the ordinary rule: reused
+        // or refused, never retired.
+        assert_eq!(
+            elevated_caller_action(ExistingKind::OlderBuild, true, unread),
+            ElevatedStep::Reuse
+        );
+        assert_eq!(
+            elevated_caller_action(ExistingKind::Incompatible, false, unread),
+            ElevatedStep::Refuse(OrdinaryDaemonIncompatible)
+        );
+    }
+
+    #[test]
+    fn an_elevated_caller_reuses_a_running_ordinary_daemon_of_any_build() {
+        let scratch = ScratchDir::new("elevated-reuse");
+        let fake = FakeListener::proving("good-token");
+        for (build, kind) in [
+            (CLIENT_BUILD, ExistingKind::Compatible),
+            ("0.0.1", ExistingKind::OlderBuild),
+            ("999.0.0", ExistingKind::NewerBuild),
+        ] {
+            assert_eq!(
+                elevated_step_on(&scratch, &fake, build, SUPPORTED),
+                (kind, ElevatedStep::Reuse),
+                "an ordinary daemon of build {build}"
+            );
+        }
+        assert_eq!(
+            elevated_caller_action(ExistingKind::StaleBinary, true, Profile::Ordinary),
+            ElevatedStep::Reuse
+        );
+    }
+
+    #[test]
+    fn an_elevated_caller_refuses_an_ordinary_daemon_it_cannot_talk_to() {
+        let scratch = ScratchDir::new("elevated-refuse");
+        let fake = FakeListener::proving("good-token");
+        for (build, kind) in [
+            (CLIENT_BUILD, ExistingKind::Incompatible),
+            ("0.0.1", ExistingKind::OlderBuild),
+            ("999.0.0", ExistingKind::NewerBuild),
+        ] {
+            assert_eq!(
+                elevated_step_on(&scratch, &fake, build, &[0]),
+                (kind, ElevatedStep::Refuse(OrdinaryDaemonIncompatible)),
+                "an ordinary daemon of build {build} speaking none of the client's versions"
+            );
+        }
+        assert_eq!(
+            OrdinaryDaemonIncompatible.to_string(),
+            "an ordinary rustling-tulip daemon is running that this app cannot talk to; stop it \
+             from an ordinary terminal with \"rustling-tulipd shutdown\", then start this app again"
+        );
+    }
+
+    #[test]
+    fn an_elevated_caller_goes_to_its_own_profile_when_no_ordinary_daemon_runs() {
+        let empty = ScratchDir::new("elevated-none");
+        let existing = block_on(classify_existing_daemon_in(
+            &empty.0,
+            None,
+            client(),
+            HANG_GUARD,
+        ));
+        assert_eq!(existing.kind(), ExistingKind::Missing);
+        assert_eq!(
+            elevated_step(&existing, SUPPORTED, Profile::Ordinary),
+            ElevatedStep::UseElevatedProfile
+        );
+
+        let stale = ScratchDir::new("elevated-stale");
+        let fake = FakeListener::healthy();
+        write_daemon_json(
+            &stale.0,
+            &handshake_naming(4242, fake.port, "stale-token", SUPPORTED),
+        );
+        let existing = block_on(classify_existing_daemon_in(
+            &stale.0,
+            None,
+            client(),
+            HANG_GUARD,
+        ));
+        assert_eq!(existing.kind(), ExistingKind::Missing);
+        assert_eq!(
+            elevated_step(&existing, SUPPORTED, Profile::Ordinary),
+            ElevatedStep::UseElevatedProfile,
+            "a file naming no live daemon is no ordinary daemon"
+        );
+
+        assert_eq!(
+            elevated_caller_action(ExistingKind::ElevatedUnreadable, false, Profile::Ordinary),
+            ElevatedStep::UseElevatedProfile
+        );
+    }
+
+    #[test]
+    fn an_ordinary_caller_never_probes_the_elevated_profile() {
+        assert_eq!(profiles_to_probe(Profile::Ordinary), &[Profile::Ordinary]);
+        let scratch = ScratchDir::new("ordinary-probe");
+        let probed = roots_to_probe_in(
+            Profile::Ordinary,
+            &Overrides::default(),
+            &scratch.0.join("config"),
+            &scratch.0,
+        );
+        assert_eq!(probed.len(), 1, "{probed:?}");
+        assert_eq!(probed[0].0, Profile::Ordinary);
+        assert_eq!(probed[0].1.root, None);
+        assert_eq!(probed[0].1.config, scratch.0.join("config"));
     }
 
     #[test]
