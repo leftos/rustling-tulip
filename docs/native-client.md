@@ -997,3 +997,21 @@ An error reply names a code (`unknown_method`, `bad_params`, `not_found`, `not_v
 `action` names are `open_settings`, `new_shell`, `open_spawn`, `toggle_sidebar`, `select_tab` (`{"id"}`), `focus_pane` (`{"id"}`), `show_activity` (`{"name"}`: `sessions`, `needs_you` or `source_control`) and `set_hover` (`{"value"}`: `true`, `false` or `null`).
 
 A `wait_for` predicate (`until`) is one of `{"state": "<dotted path>", "equals": <json>}`, `{"state": path, "exists": bool}`, `{"pane_text": {"pane", "contains"}}` and `{"element": "<registry name>", "visible": bool}`. A numeric path segment indexes an array, and `exists` means non-null. The loop runs in the endpoint between frames (`apps/native/src/driver/wait.rs`), so it never blocks the UI thread, and it is answered only over the pipe.
+
+### Driver MCP server
+
+`tools/rt-driver-mcp/` is a stdio MCP server (hand-rolled JSON-RPC 2.0, one message per line) over the driver endpoint, so an agent can launch an isolated client, drive it and look at it. The repo's `.mcp.json` registers it as `rt-driver`, started by `tools/rt-driver-mcp/launch.ps1`. It is a development tool, never in the installer.
+
+`launch.ps1` runs the installed copy and never builds. `tools/rt-driver-mcp/install.ps1` builds the release exe through the gate, copies it to `%LOCALAPPDATA%\leftos\rustling-tulip\data\driver-mcp\<version>-<first 12 hex of its SHA-256>\` (an existing folder is left alone) and names that folder in `current.txt` beside them. With nothing installed, `launch.ps1` exits saying to run `install.ps1`. A running server keeps its own folder, so an install never replaces it.
+
+Tools, a fixed surface of five, all keyed by a session name the caller picks (there is no default session):
+
+- `launch {session, build_dir?, repo_root?}`: takes a **shadow copy** of the driven client, the daemon and the tracer from the build dir (default `target/test-release`) into `<repo_root>/.tmp/driver/<session>-<server pid>/bin/`, starts an `IsolatedDaemon` (`crates/dev-daemon`) under that folder, starts the client from the copy with `RUSTLING_TULIP_DRIVER=1` and `RUSTLING_TULIP_OFFSCREEN_WINDOW=1`, waits for its discovery file and pings it. A build dir without the driver build is refused, the message naming the build commands. It replies `{session, pid, pipe, scratch}`.
+- `call {session, method, params?}`: any endpoint method; an unknown one is refused listing the methods.
+- `batch {session, steps}`: calls the steps in order and stops at the first error, replying `{passed, steps, failedAt}`.
+- `screenshot {session}`: the endpoint's `screenshot` as MCP image content (the PNG) plus its path.
+- `stop {session}`: stops that session's client and daemon.
+
+A tool failure is a result with `isError`, never a JSON-RPC error. An endpoint or session error appends the **error feed**: the last 20 lines of the session's `native.log`. When stdin closes, the server stops every session. Its own log goes to stderr and to `<repo_root>/.tmp/driver/rt-driver-mcp-<pid>.log`; stdout carries only JSON-RPC.
+
+The live spec `driver_mcp_launch_ping_screenshot_stop` (`tools/rt-driver-mcp/tests/server.rs`, `#[ignore]`d) launches a real session, pings it, takes a screenshot and stops it; [testing.md](./testing.md) gives its command. The modules are `tools.rs` (the tools), `launch.rs` (shadow copy, spawn, discovery), `session.rs` (a live session and the feed), `pipe.rs` (the endpoint's pipe client) and `rpc.rs` (the JSON-RPC loop).

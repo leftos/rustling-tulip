@@ -146,7 +146,13 @@
       "paths": [
         "crates/dev-daemon/**"
       ],
-      "filter": "package(dev-daemon) | package(rustling-tulip-native)"
+      "filter": "package(dev-daemon) | package(rustling-tulip-native) | package(rt-driver-mcp)"
+    },
+    {
+      "paths": [
+        "tools/rt-driver-mcp/**"
+      ],
+      "filter": "package(rt-driver-mcp)"
     },
     {
       "paths": [

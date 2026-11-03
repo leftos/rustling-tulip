@@ -44,6 +44,7 @@ tools/
   e2e/fake-ssh/ - fake `ssh` shim for the native e2e tier's SSH specs
   e2e/fake-tailscale/ - fake `tailscale` CLI shim for the native e2e tier's remote specs
   installer/    - the NSIS installer script
+  rt-driver-mcp/ - the `rt-driver` MCP server that launches and drives an isolated native client; never shipped
 docs/
   README.md     - this page: the docs start page and the glossary
   architecture.md - components, what the product does, task index
@@ -146,6 +147,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
 - **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment, then the user and system environment, at spawn; only the reference is stored and echoed; see Secret reference.
 - **Error code**: the snake_case `code` string on a `DaemonMessage::Error`, from the catalogue in `crates/protocol/src/error_codes.rs`; a client branches on it, never on the message text, and keeps an unknown code as an opaque string.
+- **Error feed**: the last 20 lines of a driven session's `native.log`, which the driver MCP server appends to every endpoint or session error it returns; see `docs/native-client.md` ("Driver MCP server").
 - **ES.1, ES.9**: step ids of the finished secrets-in-env-rows design (ES sealing steps), named in commit messages; its decisions are in `docs/env-secrets.md`.
 - **Fan-out**: an agent splitting a task into independent parts, each run by a worker in its own worktree.
 - **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
@@ -281,6 +283,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Session facts**: the per-session record the daemon sends only to connections watching a Dashboard (`DashboardFacts`): now line, agent tree, context, tokens, cost, activity counts, stuck reasons and issue.
 - **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
 - **Session ref**: the native client's `SessionRef`, a (host, session id) pair; a pane, a slot and a pop-out name their session by it, so one id on two hosts is two sessions (`apps/native/src/tabs.rs`).
+- **Shadow copy**: the copy of a driver build's client, daemon and tracer that the driver MCP server's `launch` runs from under `.tmp/driver/`, so a rebuild never meets a locked exe; see `docs/native-client.md` ("Driver MCP server").
 - **Shared client core**: the planned Rust crate holding the tailnet connect and host profiles, used by both the native client's remote mode and the mobile app.
 - **Spend cap**: the summarizer's daily cap in dollars (default $1.00): Working refreshes stop at half of it and Stop summaries become templates at the full cap, which is soft, so a call already running finishes; `docs/plans/dashboard.md` ("Privacy, cache, cap and fallbacks").
 - **Spend ledger**: the summarizer's per-day spend record, `summarizer-spend.json` in the config dir (`{"date", "spent_usd"}` for the current local day); see [on-disk.md](on-disk.md).

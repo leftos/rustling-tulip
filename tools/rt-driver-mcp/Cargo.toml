@@ -1,0 +1,39 @@
+[package]
+name = "rt-driver-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "A stdio MCP server that launches an isolated, driven native client and calls its driver endpoint; a development tool, never shipped"
+publish = false
+
+[[bin]]
+name = "rt-driver-mcp"
+path = "src/main.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+# The screenshot's PNG as MCP image content.
+base64 = "0.22"
+# The `.tmp` refusal, shared with the client's driver gate.
+daemon-client = { workspace = true }
+# The isolated daemon a session's client connects to, and the process walk.
+dev-daemon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# The client's creation time (`GetProcessTimes`), matched against its
+# discovery file's `started_at`.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }

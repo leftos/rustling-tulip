@@ -10,7 +10,7 @@ On a paused tokio clock (`#[tokio::test(start_paused = true)]`) a `timeout` or `
 
 ## Test tiers
 
-The native client has three test tiers:
+The native client has three test tiers, and the driver MCP server has a live spec of its own:
 
 - **UI specs** — `cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui` (filter by module: `ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon.
 
@@ -31,6 +31,8 @@ The native client has three test tiers:
 
   Every live daemon gets `RUSTLING_TULIP_TAILSCALE` (the fake-tailscale shim) and `RUSTLING_TULIP_TAILNET_DIR` (`<root>/tailnet`), so no spec reaches the real Tailscale or the real certificate dir.
 - **OS smoke** — `.\rt.ps1 native-smoke`: builds daemon + tracer in test-release and launches the native client exe in a cloaked window that never takes focus, under `nextest --run-ignored only` (`tests/smoke_window.rs`) and checks it connects and that posted keys reach the shell. `native-smoke` takes no test filter, and a failed spec keeps its dir under `.tmp/native-e2e/<test>-<pid>/`, whose `sessions/<id>/scrollback.bin` is the exact PTY output.
+
+The driver MCP server's other specs (`tools/rt-driver-mcp/tests/server.rs`) run in the normal nextest run. Its live spec, `driver_mcp_launch_ping_screenshot_stop`, is `#[ignore]`d: it launches a real driven client and needs the daemon, tracer and driver client built in test-release. `tools/rt-driver-mcp/live-check.ps1` builds them and runs the ignored specs, so run it as one gate job with `--slot heavy`, since it builds: `pwsh -NoProfile -File tools/gate.ps1 run --log .tmp/<name>.log --timeout 3600 --slot heavy -- pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1`.
 
 ## Looking at a UI change
 

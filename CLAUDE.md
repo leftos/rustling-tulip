@@ -23,6 +23,7 @@ apps/native/            binary = rustling-tulip-native (thin main.rs over a lib,
 crates/agents/claude/fake/ fake-claude CLI shim the Claude plugin hands the native e2e tier through fake_cli
 tools/e2e/fake-tailscale/ fake `tailscale` CLI shim (whoami, whois, status, cert from a JSON state file) used by the live tier's remote specs
 tools/e2e/fake-ssh/     fake `ssh` shim (checks the client's argv, then runs `rustling-tulipd bridge` locally) used by the live tier's SSH specs
+tools/rt-driver-mcp/    package rt-driver-mcp (never in the installer): the stdio MCP server `rt-driver` (registered in .mcp.json) that launches an isolated driven native client and calls its driver endpoint; see docs/native-client.md "Driver MCP server"
 README.md               the user-facing feature showcase and install steps, refreshed each release (docs/release.md)
 CHANGELOG.md            what changed in each release, for users; each landed item adds its bullet under Unreleased
 docs/README.md          the docs start page: one line per doc under docs/, the developer layout, build and run notes, and the glossary
@@ -70,6 +71,8 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 native-shot main # PNG of the client window over a fake daemon (views: main, main-compact, source-control, diff, settings, settings-claude, spawn, viewer, viewer-md, dashboard, dashboard-compact, connections, connections-ssh, menu, update, chat, summary, themes, themes-edit, multi-host, spawn-hosts, settings-hosts, settings-sounds) in .tmp\shots\
 .\rt.ps1 installer        # release build, then the NSIS installer at target\installer\rustling-tulip-<version>-setup.exe and its .sha256 beside it, which the app's updater checks a download against (needs NSIS 3; tools/installer/README.md)
 .\rt.ps1 help             # usage summary
+pwsh -NoProfile -File tools/rt-driver-mcp/install.ps1   # build and install the rt-driver MCP server that .mcp.json starts (release build through the gate)
+pwsh -NoProfile -File tools/rt-driver-mcp/live-check.ps1   # the driver MCP's live spec; run it as one gate job with --slot heavy (docs/testing.md)
 ```
 
 Raw cargo equivalents when you need them:

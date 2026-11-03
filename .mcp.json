@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "rt-driver": {
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "tools/rt-driver-mcp/launch.ps1"]
+    }
+  }
+}

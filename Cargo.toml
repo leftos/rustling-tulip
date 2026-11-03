@@ -12,6 +12,7 @@ members = [
     "crates/agents/registry",
     "crates/dev-daemon",
     "apps/native",
+    "tools/rt-driver-mcp",
 ]
 
 [workspace.package]
