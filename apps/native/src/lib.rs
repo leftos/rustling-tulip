@@ -6,6 +6,7 @@
 //! over their own transport with [`RootView::with_transport`].
 
 mod activity_bar;
+mod activity_track;
 mod agent_options;
 mod agent_options_view;
 pub mod appearance;
@@ -258,6 +259,9 @@ use crate::window_layouts::WindowLayouts;
 use crate::window_state::{RestoreRect, WindowState};
 use crate::workspace_creator_view::WorkspaceCreatorDialog;
 
+pub use crate::activity_track::{
+    BarRun, HoldTick, LegendEntry, LegendMark, RunKind, Track, legend as activity_track_legend,
+};
 pub use crate::assets::Assets;
 pub use crate::changes_view::{
     DiscardConfirmView, ScAction, ScBucketRow, ScButton, ScFileRow, ScFolderRow, ScTreeRow,
@@ -1144,6 +1148,7 @@ pub struct RootView {
     dashboard_watch: HashSet<HostKey>,
     /// The Dashboard's facts, as the daemon last streamed them.
     dashboard_facts: dashboard_facts::HostFacts,
+    dashboard_tracks: dashboard_facts::HostTracks,
     /// The Dashboard body's scroll, which a queue chip moves to its row.
     dashboard_scroll: gpui::ScrollHandle,
     /// Repaints the Dashboard while its tab is active, so the ages count.
@@ -1568,6 +1573,7 @@ impl RootView {
             dashboard_answers: dashboard_tab::DashboardAnswers::default(),
             dashboard_watch: HashSet::new(),
             dashboard_facts: dashboard_facts::HostFacts::default(),
+            dashboard_tracks: dashboard_facts::HostTracks::default(),
             dashboard_scroll: gpui::ScrollHandle::new(),
             dashboard_timer: None,
             dashboard_width: None,

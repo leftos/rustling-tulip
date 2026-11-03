@@ -693,6 +693,19 @@ pub fn facts_message(facts: Vec<protocol::SessionFacts>) -> DaemonMessage {
     }
 }
 
+/// An `ActivityTracks` message: the whole two-hour window as of `now`.
+pub fn activity_tracks_message(
+    now: DateTime<Utc>,
+    hours: u32,
+    segments: Vec<protocol::ActivitySegment>,
+) -> DaemonMessage {
+    DaemonMessage::ActivityTracks {
+        now,
+        hours,
+        segments,
+    }
+}
+
 /// A `SummarizerStatus` fixture: summaries on, provider `p1` with a stored
 /// key, nothing spent and the cap not reached.
 pub fn summarizer_status() -> SummarizerStatusBuilder {

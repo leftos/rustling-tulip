@@ -14,6 +14,7 @@ use protocol::{
     SessionStatus, StuckReason,
 };
 
+use crate::activity_track::Track;
 use crate::dashboard::{DashboardRow, GroupKind, HeaderCounts};
 use crate::dashboard_facts::FactsStore;
 use crate::needs_you::{self, Reason};
@@ -425,6 +426,8 @@ pub struct RowCells {
     pub ask: Option<AskBlock>,
     /// The rows its agent tree adds below it: only under a Working row.
     pub nested: Vec<NestedRow>,
+    /// The Last 2 h column; `None` while no record of the session is held.
+    pub track: Option<Track>,
 }
 
 /// What the row of `input`, listed in group `kind`, draws at `now`. A
@@ -476,6 +479,7 @@ pub(crate) fn row_cells(input: &RowInput<'_>, kind: GroupKind, now: DateTime<Utc
             (GroupKind::Working, Some(facts)) => nested_rows(&facts.agents, now),
             _ => Vec::new(),
         },
+        track: None,
     }
 }
 
@@ -814,8 +818,8 @@ fn chip_prompt(input: &RowInput<'_>) -> String {
 }
 
 /// The columns a view `view_width_px` wide shows: they drop in the order
-/// Summary, Linear, the ten-minute bars, Agents as the view narrows, so the
-/// view never scrolls sideways.
+/// the two-hour track, Summary, Linear, the ten-minute bars, Agents as the
+/// view narrows, so the view never scrolls sideways.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -826,11 +830,13 @@ pub struct Columns {
     pub linear: bool,
     pub activity: bool,
     pub agents: bool,
+    pub track: bool,
 }
 
 /// Which columns fit a view `view_width_px` wide.
 pub(crate) fn visible_columns(view_width_px: f32) -> Columns {
     Columns {
+        track: view_width_px >= 1550.0,
         summary: view_width_px >= 1400.0,
         linear: view_width_px >= 1200.0,
         activity: view_width_px >= 1050.0,
@@ -1546,11 +1552,15 @@ mod tests {
                 summary: true,
                 linear: true,
                 activity: true,
-                agents: true
+                agents: true,
+                track: true
             }
         );
+        let trackless = visible_columns(1549.0);
+        assert!(!trackless.track);
+        assert!(trackless.summary);
         let narrow = visible_columns(1399.0);
-        assert!(!narrow.summary);
+        assert!(!narrow.track && !narrow.summary);
         assert!(narrow.linear && narrow.activity && narrow.agents);
         let narrower = visible_columns(1199.0);
         assert!(!narrower.summary && !narrower.linear);

@@ -81,7 +81,7 @@ use tailnet::{PeerStatus, Status, TailnetError};
 const WINDOW_SIZE: (u16, u16) = (1000, 640);
 /// The `dashboard` shot's window: wide enough for every column of the By
 /// status view.
-const DASHBOARD_WINDOW_SIZE: (u16, u16) = (1800, 900);
+const DASHBOARD_WINDOW_SIZE: (u16, u16) = (2000, 900);
 /// The `summary` shot's window: tall enough for the split's top pane to
 /// hold the pinned card, all three lines with one open, the strip and the
 /// composer.
@@ -1333,6 +1333,7 @@ impl Fixture {
         check_reply_shapes(now)?;
         if view == View::Dashboard {
             dashboard_facts(now)?;
+            dashboard_tracks(now)?;
         }
         Ok(Self {
             repos,
@@ -1821,7 +1822,12 @@ impl FakeDaemon {
             ClientMessage::ListBranches { repo_id } => parse_message(branches(repo_id))?,
             ClientMessage::OpenViewerTab { id, path } => return viewer_opened(id, path),
             ClientMessage::OpenDashboardTab { id } => return dashboard_opened(id),
-            ClientMessage::WatchDashboard { on: true } => dashboard_facts(self.now)?,
+            ClientMessage::WatchDashboard { on: true } => {
+                return Ok(vec![
+                    dashboard_facts(self.now)?,
+                    dashboard_tracks(self.now)?,
+                ]);
+            }
             ClientMessage::TestSummary { request_id } => shot_summary_test(request_id.clone()),
             ClientMessage::SuggestBranchName { target, request_id } => {
                 DaemonMessage::BranchNameSuggestion {
@@ -2258,6 +2264,44 @@ fn dashboard_rows(rows: &mut Vec<Row>) {
         minutes: 25,
         extra: json!({ "exit_code": 0 }),
     });
+}
+
+/// The tracks the `dashboard` shot's watch is sent, as of `now`: a working
+/// session in a gate after a restart gap, one that asks, and one idle.
+fn dashboard_tracks(now: DateTime<Utc>) -> Result<DaemonMessage> {
+    let ago = |minutes: i64| now - chrono::Duration::minutes(minutes);
+    let stretch = |session: &str, activity: &str, from: i64, to: Option<i64>| {
+        json!({
+            "repo": "tulip", "key": format!("session-{session}"), "kind": "session",
+            "label": session, "activity": activity, "from": ago(from), "to": to.map(ago),
+        })
+    };
+    let mark = |session: &str, kind: &str, from: i64, to: Option<i64>| {
+        json!({
+            "repo": "tulip", "key": format!("session-{session}"), "kind": kind,
+            "label": session, "from": ago(from), "to": to.map(ago),
+        })
+    };
+    parse_message(json!({
+        "type": "activity_tracks",
+        "now": now,
+        "hours": 2,
+        "segments": [
+            mark("s-petal", "gap", 120, Some(85)),
+            stretch("s-petal", "idle", 85, Some(70)),
+            stretch("s-petal", "working", 70, Some(40)),
+            stretch("s-petal", "asking", 40, Some(30)),
+            stretch("s-petal", "working", 30, None),
+            mark("s-petal", "hold", 52, Some(47)),
+            mark("s-petal", "hold", 4, None),
+            stretch("s-ask", "working", 100, Some(12)),
+            stretch("s-ask", "asking", 12, None),
+            stretch("s-recover", "idle", 120, None),
+            stretch("s-metar", "idle", 120, Some(60)),
+            stretch("s-metar", "working", 60, Some(15)),
+            stretch("s-metar", "idle", 15, None),
+        ],
+    }))
 }
 
 /// The facts the `dashboard` shot's watch is sent, as of `now`: the

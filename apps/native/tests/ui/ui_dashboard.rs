@@ -6,12 +6,20 @@
 
 use crate::support;
 
-use chrono::{DateTime, Duration, Utc};
-use gpui::{TestAppContext, px, size};
-use protocol::{AgentState, ClientMessage, DaemonMessage, PromptChoice, SessionSnapshot, TabEntry};
-use rustling_tulip_native::{DashboardColumns, DashboardEntry, RowCells, enable_band_probe};
+use chrono::{DateTime, Duration, Local, Utc};
+use gpui::{Modifiers, TestAppContext, px, size};
+use protocol::{
+    ActivitySegment, AgentState, ClientMessage, DaemonMessage, PromptChoice, SegmentActivity,
+    SegmentKind, SessionSnapshot, TabEntry,
+};
+use rustling_tulip_native::{
+    DashboardColumns, DashboardEntry, RowCells, RunKind, enable_band_probe,
+};
 use serde_json::json;
-use support::{Fixture, Harness, TestDir, facts, facts_message, pane, repo, session, tab};
+use support::{
+    Fixture, Harness, TestDir, activity_tracks_message, facts, facts_message, pane, repo, session,
+    tab,
+};
 
 /// Each group's heading and its session ids, in order.
 fn groups(h: &mut Harness<'_>) -> Vec<(&'static str, Vec<String>)> {
@@ -398,6 +406,7 @@ fn each_column_shows_its_field(cx: &mut TestAppContext) {
             linear: true,
             activity: true,
             agents: true,
+            track: true,
         },
         "a wide view draws every column"
     );
@@ -828,6 +837,7 @@ fn narrow_views_drop_columns_in_order(cx: &mut TestAppContext) {
                 linear: width >= 1200.0,
                 activity: width >= 1050.0,
                 agents: width >= 950.0,
+                track: width >= 1550.0,
             },
             "a view {width} px wide"
         );
@@ -1106,4 +1116,256 @@ fn band_wait_without_an_ask_goes_to_its_pane(cx: &mut TestAppContext) {
         Some("t1".to_owned()),
         "the session's pane is shown"
     );
+}
+
+/// A wire segment of session `id`'s track.
+fn segment(
+    id: &str,
+    kind: SegmentKind,
+    activity: Option<SegmentActivity>,
+    from: DateTime<Utc>,
+    to: Option<DateTime<Utc>>,
+) -> ActivitySegment {
+    ActivitySegment {
+        repo: "r1".to_owned(),
+        key: format!("session-{id}"),
+        kind,
+        label: id.to_owned(),
+        activity,
+        from,
+        to,
+    }
+}
+
+fn stretch(
+    id: &str,
+    activity: SegmentActivity,
+    from: DateTime<Utc>,
+    to: Option<DateTime<Utc>>,
+) -> ActivitySegment {
+    segment(id, SegmentKind::Session, Some(activity), from, to)
+}
+
+fn send_tracks(h: &mut Harness<'_>, segments: Vec<ActivitySegment>) {
+    h.send(activity_tracks_message(Utc::now(), 2, segments));
+}
+
+/// The kinds of the runs `id`'s bar draws, left to right.
+fn run_kinds(h: &mut Harness<'_>, id: &str) -> Vec<RunKind> {
+    cells(h, id)
+        .track
+        .expect("the session has a track")
+        .runs
+        .iter()
+        .map(|run| run.kind)
+        .collect()
+}
+
+#[gpui::test]
+fn scripted_segments_draw_in_the_last_2h_column(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("w1")]));
+    show_dashboard(&mut h);
+    assert!(!drawn(&mut h, "dashboard-track-caption=w1"));
+
+    // The working stretch is closed, so its caption does not follow the clock.
+    let base = Utc::now();
+    send_tracks(
+        &mut h,
+        vec![
+            stretch(
+                "w1",
+                SegmentActivity::Idle,
+                minutes_ago(80),
+                Some(minutes_ago(70)),
+            ),
+            stretch(
+                "w1",
+                SegmentActivity::Asking,
+                minutes_ago(70),
+                Some(base - Duration::minutes(46)),
+            ),
+            stretch(
+                "w1",
+                SegmentActivity::Working,
+                base - Duration::minutes(46),
+                Some(base),
+            ),
+            segment("w1", SegmentKind::Hold, None, minutes_ago(5), None),
+        ],
+    );
+
+    assert_eq!(
+        run_kinds(&mut h, "w1"),
+        [RunKind::Idle, RunKind::Asking, RunKind::Working]
+    );
+    let track = cells(&mut h, "w1").track.expect("a track");
+    assert_eq!(track.short, "busy 46m · in gate");
+    assert_eq!(track.ticks.len(), 1);
+    assert!(drawn(&mut h, "dashboard-track-caption=w1"));
+    let cell = h.bounds("dashboard-track=w1");
+    let spark = h.bounds("dashboard-spark-w1");
+    assert!(
+        cell.left() >= spark.right(),
+        "the column sits after the ten-minute bars"
+    );
+    let caption = h.bounds("dashboard-track-caption=w1");
+    assert!(caption.top() >= cell.top() + px(8.0), "the bar is on top");
+}
+
+#[gpui::test]
+fn an_unseen_turns_idle_stretch_draws_finished(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &on_dashboard(vec![working("shown"), working("unseen")]),
+    );
+    show_dashboard(&mut h);
+    let idle = |id: &str, from, to| stretch(id, SegmentActivity::Idle, minutes_ago(from), to);
+    let turn = |id: &str| {
+        vec![
+            idle(id, 60, Some(minutes_ago(30))),
+            stretch(
+                id,
+                SegmentActivity::Working,
+                minutes_ago(30),
+                Some(minutes_ago(10)),
+            ),
+            idle(id, 10, None),
+        ]
+    };
+    send_tracks(&mut h, turn("unseen"));
+    assert_eq!(
+        run_kinds(&mut h, "unseen"),
+        [RunKind::Idle, RunKind::Working, RunKind::Idle],
+        "a working session has nothing unseen"
+    );
+
+    update(&mut h, session("unseen").in_repo("r1").build());
+
+    assert_eq!(
+        run_kinds(&mut h, "unseen"),
+        [RunKind::Idle, RunKind::Working, RunKind::Finished],
+        "only the last stretch draws finished"
+    );
+}
+
+#[gpui::test]
+fn a_gap_draws_hatched_with_its_note(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("w1")]));
+    show_dashboard(&mut h);
+    // The working stretch is closed, so its caption does not follow the clock.
+    let base = Utc::now();
+    let start = base - Duration::minutes(60);
+    send_tracks(
+        &mut h,
+        vec![
+            segment("w1", SegmentKind::Gap, None, minutes_ago(130), Some(start)),
+            stretch("w1", SegmentActivity::Working, start, Some(base)),
+        ],
+    );
+
+    let hhmm = start.with_timezone(&Local).format("%H:%M");
+    let note = format!("no record before {hhmm} · the daemon restarted");
+    let track = cells(&mut h, "w1").track.expect("a track");
+    assert_eq!(track.note.as_deref(), Some(note.as_str()));
+    assert_eq!(track.long, format!("since {hhmm} · busy 1h00m of 2h"));
+    assert_eq!(run_kinds(&mut h, "w1"), [RunKind::Gap, RunKind::Working]);
+    assert!(drawn(&mut h, "dashboard-track-gap=w1"));
+
+    let tip = format!("tooltip={note}");
+    assert!(!drawn(&mut h, &tip), "the note waits for the mouse");
+    let gap = h.bounds("dashboard-track-gap=w1");
+    h.hover(gap.center(), Modifiers::none());
+    h.advance(std::time::Duration::from_millis(600));
+    assert!(drawn(&mut h, &tip), "resting on the bar shows its note");
+}
+
+#[gpui::test]
+fn tracks_after_unwatch_are_dropped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("w1")]));
+    show_dashboard(&mut h);
+    let segments = vec![stretch(
+        "w1",
+        SegmentActivity::Working,
+        minutes_ago(10),
+        None,
+    )];
+    send_tracks(&mut h, segments.clone());
+    assert!(cells(&mut h, "w1").track.is_some());
+
+    h.click_on("tab-t1");
+    assert!(
+        cells(&mut h, "w1").track.is_none(),
+        "leaving the Dashboard clears what was held"
+    );
+
+    send_tracks(&mut h, segments);
+    assert!(
+        cells(&mut h, "w1").track.is_none(),
+        "a message for a watch this client ended is dropped"
+    );
+}
+
+#[gpui::test]
+fn the_column_drops_at_narrow_widths(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("w1")]));
+    h.cx.simulate_resize(size(px(1500.0), px(1200.0)));
+    h.click_on("tab-d1");
+    h.cx.run_until_parked();
+    send_tracks(
+        &mut h,
+        vec![stretch(
+            "w1",
+            SegmentActivity::Working,
+            minutes_ago(10),
+            None,
+        )],
+    );
+    assert!(cells(&mut h, "w1").track.is_some());
+
+    let width = h.bounds("dashboard-body").size.width / px(1.0);
+    assert!(width < 1550.0, "the view is {width} px wide");
+    assert!(!h.root(|root, _| root.dashboard_columns()).track);
+    // Only the caption can say so: gpui keeps what it painted before, and the
+    // frame before the first layout draws every column, the empty cell included.
+    assert!(!drawn(&mut h, "dashboard-track-caption=w1"));
+
+    h.cx.simulate_resize(size(px(2000.0), px(1200.0)));
+    assert!(h.root(|root, _| root.dashboard_columns()).track);
+    assert!(drawn(&mut h, "dashboard-track=w1"));
+    assert!(drawn(&mut h, "dashboard-track-caption=w1"));
+}
+
+#[gpui::test]
+fn no_tracks_yet_draws_an_empty_cell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("w1"), working("w2")]));
+    show_dashboard(&mut h);
+
+    assert!(cells(&mut h, "w1").track.is_none());
+    assert!(
+        drawn(&mut h, "dashboard-track=w1"),
+        "the cell holds its place"
+    );
+    assert!(!drawn(&mut h, "dashboard-track-caption=w1"));
+
+    send_tracks(
+        &mut h,
+        vec![stretch(
+            "w1",
+            SegmentActivity::Working,
+            minutes_ago(10),
+            None,
+        )],
+    );
+
+    assert!(drawn(&mut h, "dashboard-track-caption=w1"));
+    assert!(cells(&mut h, "w2").track.is_none(), "a session not listed");
+    assert!(drawn(&mut h, "dashboard-track=w2"));
+    assert!(!drawn(&mut h, "dashboard-track-caption=w2"));
 }

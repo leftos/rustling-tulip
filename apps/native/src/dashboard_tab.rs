@@ -15,6 +15,7 @@ use protocol::{
 use crate::RootView;
 use crate::connection::Connection;
 use crate::dashboard::{self, GroupKind};
+use crate::dashboard_facts::HeldTracks;
 use crate::diff_tab::PENDING_ACTIVATE_TTL;
 use crate::notices::ToastKind;
 use crate::target::HostKey;
@@ -246,6 +247,7 @@ impl RootView {
                 self.dashboard_answers.reset(host);
                 self.dashboard_watch.remove(host);
                 self.dashboard_facts.clear(host);
+                self.dashboard_tracks.clear(host);
                 self.sync_dashboard_watch();
                 false
             }
@@ -257,6 +259,26 @@ impl RootView {
                 }
                 self.dashboard_facts.apply(host, msg);
                 self.prune_dashboard_facts(host);
+                cx.notify();
+                true
+            }
+            DaemonMessage::ActivityTracks {
+                now,
+                hours,
+                segments,
+            } => {
+                // As with the facts: a watch this client ended is owed nothing.
+                if !self.dashboard_watch.contains(host) {
+                    return true;
+                }
+                self.dashboard_tracks.apply(
+                    host,
+                    HeldTracks {
+                        now: *now,
+                        hours: *hours,
+                        segments: segments.clone(),
+                    },
+                );
                 cx.notify();
                 true
             }
@@ -345,6 +367,7 @@ impl RootView {
                 // what is held is stale; the next watch is sent every fact.
                 self.dashboard_watch.remove(&host);
                 self.dashboard_facts.clear(&host);
+                self.dashboard_tracks.clear(&host);
             }
             self.send_to(&host, ClientMessage::WatchDashboard { on });
         }
@@ -359,6 +382,7 @@ impl RootView {
         self.dashboard_answers.reset(host);
         self.dashboard_watch.remove(host);
         self.dashboard_facts.clear(host);
+        self.dashboard_tracks.clear(host);
     }
 }
 

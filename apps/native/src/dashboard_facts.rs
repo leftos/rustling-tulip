@@ -9,8 +9,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use protocol::{DaemonMessage, DayTotals, SessionFacts};
+use protocol::{ActivitySegment, DaemonMessage, DayTotals, SessionFacts};
 
+use crate::activity_track::{Track, TrackWindow, session_track};
 use crate::target::HostKey;
 
 /// The facts a Dashboard watcher holds: one entry per session, the day's
@@ -146,6 +147,67 @@ impl HostFacts {
         if let Some((_, store)) = self.stores.iter_mut().find(|(key, _)| key == host) {
             store.clear();
         }
+    }
+}
+
+/// One host's latest `ActivityTracks` message.
+#[derive(Debug, Clone)]
+pub(crate) struct HeldTracks {
+    pub(crate) now: DateTime<Utc>,
+    pub(crate) hours: u32,
+    pub(crate) segments: Vec<ActivitySegment>,
+}
+
+impl HeldTracks {
+    /// `session_id`'s track as of `render_now`: the daemon sends only when a
+    /// stretch opens or closes, so the window ends at the later of the
+    /// message's `now` and the render's.
+    pub(crate) fn track_for(
+        &self,
+        session_id: &str,
+        render_now: DateTime<Utc>,
+        unseen: bool,
+    ) -> Option<Track> {
+        let window = TrackWindow::new(self.now.max(render_now), self.hours);
+        session_track(
+            &self.segments,
+            &format!("session-{session_id}"),
+            window,
+            unseen,
+        )
+    }
+}
+
+/// The Dashboard's activity tracks from every host the window watches. Each
+/// message carries the whole window, so it replaces that host's copy.
+#[derive(Debug, Default)]
+pub(crate) struct HostTracks {
+    hosts: Vec<(HostKey, HeldTracks)>,
+}
+
+impl HostTracks {
+    /// Replaces `host`'s copy with `tracks`.
+    pub(crate) fn apply(&mut self, host: &HostKey, tracks: HeldTracks) {
+        self.clear(host);
+        self.hosts.push((host.clone(), tracks));
+    }
+
+    /// `session_id`'s track from whichever host sent one; session ids are
+    /// unique across hosts.
+    pub(crate) fn track_for(
+        &self,
+        session_id: &str,
+        render_now: DateTime<Utc>,
+        unseen: bool,
+    ) -> Option<Track> {
+        self.hosts
+            .iter()
+            .find_map(|(_, held)| held.track_for(session_id, render_now, unseen))
+    }
+
+    /// Forgets `host`'s tracks: its fresh watch is sent them again.
+    pub(crate) fn clear(&mut self, host: &HostKey) {
+        self.hosts.retain(|(key, _)| key != host);
     }
 }
 

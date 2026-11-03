@@ -291,6 +291,12 @@
     },
     {
       "paths": [
+        "apps/native/src/activity_track.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^activity_track::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_dashboard::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/dashboard_view.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::ui) & test(/^ui_dashboard::/)"

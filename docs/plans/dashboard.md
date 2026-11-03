@@ -491,6 +491,8 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
 - [ ] DB.22 Draw the two-hour activity track. `apps/native/src/activity_track.rs` (new: bars, gate ticks, the hatched gap and its note, the legend, the long and short captions), `apps/native/src/dashboard.rs` (the client's tracks from `ActivityTracks`, an open stretch extended to now, finished while unseen), `apps/native/src/dashboard_view.rs` (By status's `Last 2 h` column, a dispatch row's track), `apps/native/src/palette.rs`, `apps/native/tests/ui/ui_dashboard.rs`.
 
   Proof: unit tests for the busy union, `gate held now` and `last gate N ago`, `since HH:MM` and `idle for 2h`; a spec that scripted segments draw in the column and an unseen turn's idle stretch draws finished. Waits on DB.12, DB.20.
+
+  Built for sessions; a dispatch run's track is RT-733 and gate holds are RT-732.
 - [ ] DB.23 Draw the need-you band. `apps/native/src/dashboard_band_view.rs` (new: Need you with ask blocks, the accounts card, Questions by repo, the calm state), `apps/native/src/dashboard.rs` (the band model and the needs-you count rule), `apps/native/src/activity_bar.rs` and `apps/native/src/tab_bar.rs` (the badge follows the rule), `apps/native/src/dashboard_view.rs` (the queue strip's accounts and questions chips), `apps/native/tests/ui/ui_dashboard.rs`.
 
   Proof: specs that waits run longest first with working answer buttons, Questions never raise the badge, a dry fleet adds one and a later run-dry does not, and the calm state shows with nothing due. Waits on DB.11, DB.13, the accounts fleet verdict (RT-39 and RT-66, [accounts.md](./accounts.md) CA.4 and CA.5) and the board's Questions (RT-56).

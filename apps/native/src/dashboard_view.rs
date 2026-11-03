@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, StyledText, canvas, div,
-    prelude::*, px,
+    AnyElement, Bounds, ClickEvent, Context, Div, FontWeight, PathBuilder, Pixels, SharedString,
+    StyledText, Window, canvas, div, point, prelude::*, px, relative,
 };
 use protocol::{SessionMode, SessionStatus};
 
+use crate::activity_track::{BarRun, HoldTick, RunKind, Track};
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
 use crate::dashboard::{self, DashboardRow, GroupKind, HeaderCounts};
 use crate::dashboard_rows::{
@@ -26,10 +27,10 @@ use crate::dashboard_rows::{
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
-use crate::status_glyph::{GlyphSize, Shape, glyph, glyph_view};
+use crate::status_glyph::{Glyph, GlyphSize, Shape, glyph, glyph_view};
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
-use crate::{RootView, UI_TEXT_SIZE};
+use crate::{RootView, UI_TEXT_SIZE, tooltip};
 
 /// The grid's columns, as the mock sizes them; Now and Summary share what is
 /// left.
@@ -39,6 +40,7 @@ const LINEAR_W: f32 = 248.0;
 const AGENTS_W: f32 = 104.0;
 const CONTEXT_W: f32 = 74.0;
 const ACTIVITY_W: f32 = 70.0;
+const TRACK_W: f32 = 150.0;
 const RUN_W: f32 = 72.0;
 const COST_W: f32 = 66.0;
 const GAP: f32 = 12.0;
@@ -54,6 +56,13 @@ const CAPS_TEXT: f32 = 10.5;
 /// The context bar's size.
 const BAR_W: f32 = 38.0;
 const BAR_H: f32 = 5.0;
+/// The two-hour bar's height.
+const TRACK_BAR_H: f32 = 8.0;
+/// A hold tick's width.
+const TICK_W: f32 = 2.0;
+/// The gap hatch's spacing along the bar and its stroke.
+const HATCH_STEP: f32 = 4.0;
+const HATCH_STROKE: f32 = 1.0;
 /// A finished nested node draws this opaque.
 const DIMMED: f32 = 0.55;
 /// The repaint interval while some age is under a minute.
@@ -89,7 +98,17 @@ impl RootView {
                     .rows(kind)
                     .iter()
                     .filter_map(|row| self.dashboard_row_input(row))
-                    .map(|input| row_cells(&input, kind, now))
+                    .map(|input| {
+                        let track = self.dashboard_tracks.track_for(
+                            &input.row.session_id,
+                            now,
+                            input.unseen,
+                        );
+                        RowCells {
+                            track,
+                            ..row_cells(&input, kind, now)
+                        }
+                    })
                     .collect();
                 (kind.heading(), rows)
             })
@@ -210,6 +229,30 @@ impl RootView {
             .into_any_element()
     }
 
+    /// The status glyph of the row for session `id`.
+    fn row_glyph(&self, id: &str, t: &UiTheme) -> Glyph {
+        self.sidebar.session(id).map_or_else(
+            || {
+                glyph(
+                    SessionStatus::Idle,
+                    false,
+                    SessionMode::Interactive,
+                    false,
+                    t,
+                )
+            },
+            |s| {
+                glyph(
+                    s.status,
+                    s.background,
+                    s.mode,
+                    self.sidebar.is_unseen(&s.id),
+                    t,
+                )
+            },
+        )
+    }
+
     /// One listed session's two-line row.
     fn dashboard_row(
         &self,
@@ -222,26 +265,7 @@ impl RootView {
         let offset = crate::fonts::ui_text_size(cx);
         let id = cells.session_id.clone();
         let name = format!("dashboard-row-{id}");
-        let mark = self.sidebar.session(&id).map_or_else(
-            || {
-                glyph(
-                    SessionStatus::Idle,
-                    false,
-                    SessionMode::Interactive,
-                    false,
-                    &theme(cx),
-                )
-            },
-            |s| {
-                glyph(
-                    s.status,
-                    s.background,
-                    s.mode,
-                    self.sidebar.is_unseen(&s.id),
-                    &theme(cx),
-                )
-            },
-        );
+        let mark = self.row_glyph(&id, &t);
         let asking = format!("{name}-asking");
         let selector = name.clone();
         grid_line(div().id(SharedString::from(name.clone())))
@@ -310,6 +334,9 @@ impl RootView {
             .child(fixed(CONTEXT_W).child(context_cell(offset, cells, &t)))
             .when(columns.activity, |row| {
                 row.child(fixed(ACTIVITY_W).child(activity_cell(cells, &t)))
+            })
+            .when(columns.track, |row| {
+                row.child(track_cell(offset, cells, &t))
             })
             .child(fixed(RUN_W).child(numbers(offset, &cells.run, &cells.last, &t)))
             .child(fixed(COST_W).child(numbers(offset, &cells.cost, &cells.tokens, &t)))
@@ -527,22 +554,25 @@ fn ask_choice_button(
     .into_any_element()
 }
 
-/// Notes the view's laid-out width and redraws when it changed, so the
-/// columns follow a resize.
+/// Notes the view's laid-out width; a change redraws after the frame, since
+/// gpui drops a notify made while it draws, so the columns follow a resize.
 fn width_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     let root = cx.entity();
     canvas(
         move |bounds, _, cx| {
             let width = bounds.size.width / px(1.0);
-            root.update(cx, |this, cx| {
-                if this
+            let moved = root.update(cx, |this, _| {
+                let moved = this
                     .dashboard_width
-                    .is_none_or(|held| (held - width).abs() > 0.5)
-                {
+                    .is_none_or(|held| (held - width).abs() > 0.5);
+                if moved {
                     this.dashboard_width = Some(width);
-                    cx.notify();
                 }
+                moved
             });
+            if moved {
+                cx.defer(move |cx| root.update(cx, |_, cx| cx.notify()));
+            }
         },
         |_, (), _, _| {},
     )
@@ -765,6 +795,106 @@ fn activity_cell(cells: &RowCells, t: &UiTheme) -> Div {
         }))
 }
 
+/// The Last 2 h cell: the bar over its short caption, empty while no record
+/// of the session is held.
+fn track_cell(offset: i8, cells: &RowCells, t: &UiTheme) -> Div {
+    let id = cells.session_id.as_str();
+    let selector = format!("dashboard-track={id}");
+    fixed(TRACK_W)
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .driver_id(move || selector)
+        .when_some(cells.track.as_ref(), |cell, track| {
+            cell.child(track_bar(id, track, t))
+                .child(track_caption(offset, id, &track.short, t))
+        })
+}
+
+fn track_caption(offset: i8, id: &str, short: &str, t: &UiTheme) -> Div {
+    let name = format!("dashboard-track-caption={id}");
+    line_text(&name, short)
+        .text_size(crate::fonts::ui_px_at(offset, SMALL_TEXT))
+        .text_color(gpui::rgb(t.subtle))
+        .driver_id(move || name)
+}
+
+/// The two-hour bar: its runs, its hold ticks over them, and a gap's note as
+/// its tooltip.
+fn track_bar(id: &str, track: &Track, t: &UiTheme) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("dashboard-track-bar-{id}")))
+        .relative()
+        .flex_none()
+        .w_full()
+        .h(px(TRACK_BAR_H))
+        .overflow_hidden()
+        .children(track.runs.iter().map(|run| track_run(id, run, t)))
+        .children(track.ticks.iter().map(|tick| hold_tick(*tick, t)))
+        .when_some(track.note.clone(), |bar, note| bar.tooltip(tooltip(note)))
+}
+
+/// One run of the bar, placed by its fractions.
+fn track_run(id: &str, run: &BarRun, t: &UiTheme) -> AnyElement {
+    let placed = div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(relative(run.start))
+        .w(relative(run.width))
+        .min_w(px(1.0));
+    let colour = match run.kind {
+        RunKind::Working => t.working,
+        RunKind::Asking => t.asking,
+        RunKind::Finished => t.waiting,
+        RunKind::Idle => t.line,
+        RunKind::Gap => {
+            let selector = format!("dashboard-track-gap={id}");
+            let line = t.line;
+            return placed
+                .driver_id(move || selector)
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, (), window, _| paint_hatch(bounds, line, window),
+                    )
+                    .size_full(),
+                )
+                .into_any_element();
+        }
+    };
+    placed.bg(gpui::rgb(colour)).into_any_element()
+}
+
+/// A gate hold's mark, brighter while the hold is open.
+fn hold_tick(tick: HoldTick, t: &UiTheme) -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(relative(tick.at))
+        .w(px(TICK_W))
+        .bg(gpui::rgb(if tick.open { t.text } else { t.text_2 }))
+}
+
+/// Thin 45° strokes across `bounds`, each cut off at its edges.
+fn paint_hatch(bounds: Bounds<Pixels>, colour: u32, window: &mut Window) {
+    let width = bounds.size.width / px(1.0);
+    let height = bounds.size.height / px(1.0);
+    let mut foot = -height;
+    while foot < width {
+        let (left, right) = (foot.max(0.0), (foot + height).min(width));
+        let mut path = PathBuilder::stroke(px(HATCH_STROKE));
+        path.move_to(bounds.origin + point(px(left), px(height - (left - foot))));
+        path.line_to(bounds.origin + point(px(right), px(height - (right - foot))));
+        match path.build() {
+            Ok(path) => window.paint_path(path, gpui::rgb(colour)),
+            Err(err) => tracing::warn!("the track's gap hatch did not build: {err:?}"),
+        }
+        foot += HATCH_STEP;
+    }
+}
+
 /// A right-aligned pair of figures, the second smaller and quieter.
 fn numbers(offset: i8, first: &str, second: &str, t: &UiTheme) -> Div {
     div()
@@ -801,7 +931,8 @@ fn nested_row(
             GAP + ACTIVITY_W
         } else {
             0.0
-        };
+        }
+        + if columns.track { GAP + TRACK_W } else { 0.0 };
     let indent = 12.0 + if nested.depth > 0 { 18.0 } else { 0.0 };
     let task = line_text(&format!("{name}-task"), &nested.task).text_color(gpui::rgb(t.text_2));
     let task = if nested.mono {
@@ -936,6 +1067,9 @@ fn column_header(offset: i8, shift: i8, columns: Columns, t: &UiTheme) -> Div {
         .child(fixed(CONTEXT_W).child(caps("CONTEXT")))
         .when(columns.activity, |line| {
             line.child(fixed(ACTIVITY_W).child(caps("10 MIN")))
+        })
+        .when(columns.track, |line| {
+            line.child(fixed(TRACK_W).child(caps("LAST 2 H")))
         })
         .child(fixed(RUN_W).flex().justify_end().child(caps("RUN · LAST")))
         .child(fixed(COST_W).flex().justify_end().child(caps("COST")))
