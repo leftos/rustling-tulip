@@ -60,7 +60,10 @@ pub(crate) fn task_name(user_sid: &str) -> String {
 /// as the user `user_sid`, inside their existing interactive logon, at least
 /// privilege, hidden, on demand only, with no time limit, at priority 4
 /// (normal class, normal I/O and memory priority; the scheduler's default 7
-/// runs below normal, and the daemon's children inherit it).
+/// runs below normal, and the daemon's children inherit it). Its security
+/// descriptor gives Administrators and SYSTEM full access and the user read
+/// and delete only, so the user's own uninstaller can delete a task an
+/// elevated logon registered, while the user cannot rewrite it.
 #[cfg_attr(
     not(windows),
     expect(dead_code, reason = "the task route runs on Windows only")
@@ -72,6 +75,9 @@ pub(crate) fn task_xml(user_sid: &str, exe: &Path, work_dir: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <SecurityDescriptor>D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRSD;;;{sid})</SecurityDescriptor>
+  </RegistrationInfo>
   <Principals>
     <Principal id="Author">
       <UserId>{sid}</UserId>
@@ -571,6 +577,20 @@ mod tests {
         assert!(
             !xml.contains("<Triggers>"),
             "the task has no trigger:\n{xml}"
+        );
+    }
+
+    #[test]
+    fn task_xml_lets_the_user_delete_the_task_but_not_change_it() {
+        let dir = Path::new(r"C:\Program Files\rustling-tulip");
+        let xml = task_xml(SID, &dir.join("rustling-tulipd.exe"), dir);
+        assert!(xml.contains("<RegistrationInfo>"), "{xml}");
+        let descriptor = format!(
+            "<SecurityDescriptor>D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRSD;;;{SID})</SecurityDescriptor>"
+        );
+        assert!(
+            xml.contains(&descriptor),
+            "{descriptor} missing from:\n{xml}"
         );
     }
 
