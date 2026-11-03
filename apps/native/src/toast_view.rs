@@ -1,7 +1,7 @@
 //! What an app's own toast draws: a rounded card with a stripe by kind, its
 //! title and body, the prompt's command and answers, `Go to pane` and ×, and
 //! the view that holds one card in a toast window of its own. The rules are
-//! in `docs/plans/custom-toasts.md`.
+//! in `docs/native-client.md` "The app's own toasts".
 
 use std::rc::Rc;
 

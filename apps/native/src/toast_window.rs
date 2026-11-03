@@ -3,7 +3,8 @@
 //!
 //! Only the pixel conversion and the serial queue are testable here; the
 //! calls that touch a window run in the app and are proven when a toast is
-//! drawn. The rules they follow are in `docs/plans/custom-toasts.md`.
+//! drawn. The rules they follow are in `docs/native-client.md` "The app's
+//! own toasts".
 
 use crate::toast_stack::WorkArea;
 #[cfg(windows)]

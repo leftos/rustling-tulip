@@ -680,7 +680,7 @@ Stopped and errored sessions raise no toast: their `Stopped` and `Error` attenti
 
 The Dashboard tab, after Notifications, sets each host's Dashboard summaries (`summarizer_settings.rs` keeps each host's `SummarizerStatus`): Summarize sessions, the provider with its privacy line, the key source (a masked Key field with Save and Clear, or an environment variable applied on Enter) and the key state, the daily cap (Enter applies; 0 or more) with today's spend, and Test. Each change is built from the last settings sent to that host, so quick changes never undo each other. An unsaved key is dropped when Settings closes, the tab changes or the host changes. A daemon whose key source this app does not know locks every control but Test, with "This host's daemon is newer than this app; update the app to change these settings."
 
-The Notifications tab reads, top to bottom: a `Needs you` toggle, its `Needs you sound` row, a `Finished` toggle, its `Finished sound` row, a `Hold a Finished toast for` row (`None`, `2 s`, `5 s` the default, `10 s` or `20 s`, shown only while the `Finished` toggle is on), and a `Skip notifications when` row: `Session on screen` (the default), `Window focused` or `Never`.
+The Notifications tab reads, top to bottom: a `Needs you` toggle, its `Needs you sound` row, a `Finished` toggle, its `Finished sound` row, a `Hold a Finished toast for` row (`None`, `2 s`, `5 s` the default, `10 s` or `20 s`, shown only while the `Finished` toggle is on), and a `Skip notifications when` row: `Session on screen` (the default), `Window focused` or `Never`. Under it, on Windows only, a `Show toasts as` row: `Windows notifications` (the default) or `The app's own`.
 
 Each sound row is one dropdown listing `Off`, every bundled sound (`BundledSound` in `sound.rs`, sources in `apps/native/assets/sounds/README.md`) and `Custom file…`, with the chosen `.wav` or `.ogg` path under it and a `Play` preview hidden while Off. The list opens below its field at a fixed 240 px and scrolls, one list at a time; Enter or Space opens and chooses, Up and Down move, Esc closes the list and leaves Settings open, and Tab closes it and walks on.
 
@@ -702,9 +702,27 @@ Every toast but the pairing toast is raised with `<audio silent="true"/>` (`toas
 
 Window focused skips whenever the window is focused, and Never never skips, for both toasts. Each window decides for itself, and a session marked "Don't count as busy" still notifies.
 
-The settings are `notifications.awaiting_input`, `notifications.finished` (on unless turned off), `notifications.needs_you_sound` and `notifications.finished_sound` (`"off"`, `"default"` or `{"custom": path}`; a missing or unknown value loads as `"default"`, an unknown one with a warn line) `notifications.toast_style` (`"os"`, the default, or `"app"`; a missing or unknown value loads as `"os"`) and `notifications.skip_when` (`on_screen`, `focused` or `never`) in `native-ui.json`.
+The settings are `notifications.awaiting_input`, `notifications.finished` (on unless turned off), `notifications.needs_you_sound` and `notifications.finished_sound` (`"off"`, `"default"` or `{"custom": path}`; a missing or unknown value loads as `"default"`, an unknown one with a warn line), `notifications.toast_style` (`"os"`, the default, or `"app"`; a missing or unknown value loads as `"os"`) and `notifications.skip_when` (`on_screen`, `focused` or `never`) in `native-ui.json`.
 
-Both `toast_style` values raise the OS toast until the Settings row and the app's own toast windows land. An unknown or non-string `skip_when` loads as `on_screen` with a warn line in `native.log`, and the rest of the file still loads. The tab also shows Windows' read-only toast state with a link to Windows' settings.
+An unknown or non-string `skip_when` or `toast_style` loads as its default with a warn line in `native.log`, and the rest of the file still loads. The tab also shows Windows' read-only toast state with a link to Windows' settings.
+
+### The app's own toasts
+
+With `toast_style` `"app"`, the Needs you and Finished toasts are the client's own windows and never also the OS's; pairing toasts stay OS toasts. The two styles share `raise_toast`'s gate: the toggles, the skip rule and the sound. A summarizer-worded Finished toast is the same toast in either style.
+
+An app toast also waits on `Notifier::user_busy` (the Do Not Disturb read above), run off the UI thread, and is not shown when the session's wait ended while that check ran. Windows' per-app toast setting does not apply to it, and no toast window opens in a cloaked (`RUSTLING_TULIP_OFFSCREEN_WINDOW`) run. Its sound is the app's own clip, played once the toast is placed on the stack; it has no OS sound.
+
+Each toast is one GPUI window (`WindowKind::PopUp`, no titlebar, transparent, not movable or resizable) opened hidden. `toast_window.rs` shows it from a short-lived worker thread, since GPUI's window state is borrowed while the window opens: `never_activate` (shared with `offscreen.rs`) gives it `WS_EX_NOACTIVATE`, `SetWindowPos(HWND_TOPMOST, …, SWP_NOACTIVATE)` makes it topmost, and `ShowWindow(SW_SHOWNOACTIVATE)` shows it. A toast never takes focus, and the code never activates the window.
+
+The stack sits in the bottom-right of the work area (`rcWork`) of the monitor holding the main window, else the primary monitor, newest nearest the corner: 360 logical px wide, 8 px apart, 16 px from the edges, at most 4 shown. A fifth drops the oldest Finished toast first, else the oldest of any kind, so a Needs you stays while a Finished could go; a stack too tall for the work area drops the same way. With no readable work area no toast shows.
+
+Toasts are keyed by (host, session id): a later toast for a session replaces its earlier one in place and restarts its timer. A Finished toast lasts 6 s and a Needs you without answer buttons 30 s. A Needs you with answer buttons lasts until it is answered, closed with ×, its session leaves `AwaitingInput` or stamps a new `status_since`, the session is removed, or the skip rule now skips it, with a 10-minute cap. Resting the pointer on any toast holds every timer.
+
+The answer buttons are the Dashboard's ask block (`dashboard_rows::ask_block`): Allow and Deny for a permission, or the options of a single single-choice question when there are no more than 3. They go through `answer_from_dashboard`, so a remote host's session routes as it does from the Dashboard. A sent answer reads `Sent` until the snapshot moves, a refusal brings the buttons back, and a prompt moving to another under the same wait rebuilds the buttons without a new sound. Any other prompt shows `Go to pane` alone, which brings the main window forward on the session and closes the toast.
+
+A host's toasts close when it disconnects or sends a new `Welcome`, and every toast closes with the main window. A session from a host other than This PC adds `· <host name>` to the title.
+
+A toast is a rounded card in the app's theme: an accent stripe (the rail's Asking colour for Needs you, muted for Finished), a title line, a body of up to two lines, the permission command in a mono box, the choices two to a row, then `Go to pane`, with × at the top right. There is no animation.
 
 ## Updates
 

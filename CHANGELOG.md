@@ -9,6 +9,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The Dashboard opens on a Compact view: every running agent by repo, with its state, work and subagents, and no scrolling.
 - Answer a session's question or permission prompt from the Dashboard with one click, or jump to its pane.
 - Settings has a Dashboard page: turn session summaries on, pick the provider, store its key, set a daily cap and test it.
+- On Windows, Settings › Notifications › Show toasts as can switch to the app's own toasts, which answer a prompt or go to its pane without taking focus.
 - Finished toasts play the app's own sound instead of Windows', with their own chime, .wav or .ogg, or none, and stay silent during Do Not Disturb.
 - Pick each toast's sound from a list of chimes in Settings › Notifications; the defaults are new, softer mallet chimes.
 - Choose how long a Finished toast waits before it shows in Settings › Notifications, from none to 20 seconds.
