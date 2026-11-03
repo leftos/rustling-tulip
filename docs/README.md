@@ -334,6 +334,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Waiting devices**: the owner's list of tailnet devices whose pairing request awaits approval, in Settings → Remote access; its model is `apps/native/src/pairing.rs` and its views are in `apps/native/src/pairing_view.rs`.
 - **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
 - **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
+- **WNF**: Windows Notification Facility, the undocumented state-publish channel the shell uses; the client reads its quiet-hours state (`WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED`) to see Windows 11 Do Not Disturb.
 - **Worker**: a subagent or rustling-tulip session running one brief in one worktree.
 - **Working refresh**: the summary refresh of a working session while the Dashboard is watched, made from the transcript's last assistant text.
 - **Worktree seeding**: preparing a new worktree before its agent starts by copying the ignored files a repo lists, linking shared folders and running its setup script; a planned idea (RT-71, `docs/plans/borrowed-ideas.md`).

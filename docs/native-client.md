@@ -678,6 +678,12 @@ The row's default carries ` (default)`, and choosing it saves `"default"`, so a 
 
 A sound plays once per toast the toggle and skip rule let through, on its own thread through `sound.rs`, and not while Windows holds the toast back (the app's notifications off, Do Not Disturb or Focus Assist, a presentation or a full-screen app). A summarizer alert worded "needs your answer" plays the Needs you sound; every other Finished toast plays the Finished sound.
 
+`Notifier::user_busy` holds the app's own toasts and every chime back on two reads. `SHQueryUserNotificationState` covers a presentation, a full-screen app and the busy states, but reads `QUNS_ACCEPTS_NOTIFICATIONS` with Windows 11 Do Not Disturb on. So it also reads the shell's quiet-hours WNF state, `WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED`: level 0 is off and any other level holds toasts back, Priority apps not being honoured.
+
+A failed WNF read fails open, so toasts show, and logs one warning per process.
+
+To check this without the Settings UI, switch Do Not Disturb through the shell's `IQuietHoursSettings.UserSelectedProfile` (undocumented COM, CLSID `F53321FA-34F8-4B7F-B9A3-361877CB94CF`) and restore the original profile afterwards.
+
 One clip plays and at most one waits, so a burst plays at most two. A Needs you clip replaces a waiting Finished clip and is never dropped for one, and turning a kind's sound Off drops only that kind's waiting clip.
 
 Session on screen skips when the client window is focused and a pane of the active tab shows the session; an active diff tab, or any dialog, modal or pane menu open over the panes, means nothing is on screen.

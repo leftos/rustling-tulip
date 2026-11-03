@@ -165,18 +165,21 @@ impl Notifier for SystemNotifier {
     }
 
     fn user_busy(&self) -> bool {
-        match user_takes_notifications() {
+        let busy = match user_takes_notifications() {
             Ok(takes) => !takes,
             Err(err) => {
                 tracing::debug!("could not read whether the user takes notifications: {err}");
                 false
             }
-        }
+        };
+        busy || do_not_disturb_on()
     }
 }
 
-/// Whether the user takes notifications now: not in Do Not Disturb, a
-/// presentation or a full-screen app.
+/// Whether Windows lets notifications through now: not a presentation, a
+/// full-screen app or a game, and not the first hour after signing in or
+/// upgrading. Do Not Disturb is not part of this state; [`do_not_disturb_on`]
+/// reads it from the quiet-hours state.
 #[cfg(windows)]
 fn user_takes_notifications() -> windows::core::Result<bool> {
     use windows::Win32::UI::Shell::SHQueryUserNotificationState;
@@ -185,14 +188,95 @@ fn user_takes_notifications() -> windows::core::Result<bool> {
     Ok(takes_notifications(state))
 }
 
-/// Whether `state` has the user taking notifications: only
-/// `QUNS_ACCEPTS_NOTIFICATIONS` does, while Do Not Disturb, a presentation,
-/// a full-screen app, a locked screen and the rest hold them back.
+/// Whether `state` has Windows letting notifications through: only
+/// `QUNS_ACCEPTS_NOTIFICATIONS` does, while a presentation, a full-screen app,
+/// a game, a locked screen, the first hour after signing in or upgrading and
+/// the rest hold them back. `QUNS_QUIET_TIME` is that first hour, not Do Not
+/// Disturb, which this state does not report.
 #[cfg(windows)]
 pub(crate) fn takes_notifications(
     state: windows::Win32::UI::Shell::QUERY_USER_NOTIFICATION_STATE,
 ) -> bool {
     state == windows::Win32::UI::Shell::QUNS_ACCEPTS_NOTIFICATIONS
+}
+
+/// The shell's quiet-hours state, which Windows 11's Do Not Disturb sets: its
+/// value is the active profile's level, 0 when Do Not Disturb is off.
+#[cfg(windows)]
+const WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED: u64 = 0x0D83_063E_A3BF_1C75;
+
+// The one read of that state: the `windows` crate has no binding for it.
+#[cfg(windows)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    /// Reads the data a WNF state holds. The state name is passed as a `u64`,
+    /// which has the layout of `WNF_STATE_NAME { Data: [u32; 2] }` on
+    /// little-endian x64.
+    fn NtQueryWnfStateData(
+        state_name: *const u64,
+        type_id: *const core::ffi::c_void,
+        explicit_scope: *const core::ffi::c_void,
+        change_stamp: *mut u32,
+        buffer: *mut core::ffi::c_void,
+        buffer_size: *mut u32,
+    ) -> windows::Win32::Foundation::NTSTATUS;
+}
+
+/// The level of the quiet-hours profile that is active now: 0 when Do Not
+/// Disturb is off.
+#[cfg(windows)]
+fn quiet_hours_level() -> windows::core::Result<u32> {
+    let mut level = 0u32;
+    let mut size = 4u32;
+    let mut change_stamp = 0u32;
+    // SAFETY: the call reads only the state name, which outlives it, and
+    // writes the two out parameters through pointers to live locals of the
+    // size it is told the buffer has.
+    let status = unsafe {
+        NtQueryWnfStateData(
+            &WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED,
+            core::ptr::null(),
+            core::ptr::null(),
+            &raw mut change_stamp,
+            (&raw mut level).cast(),
+            &raw mut size,
+        )
+    };
+    windows::core::HRESULT::from_nt(status.0).ok()?;
+    if size != 4 {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::E_UNEXPECTED,
+            format!("quiet hours state holds {size} bytes, not 4"),
+        ));
+    }
+    Ok(level)
+}
+
+/// Whether the quiet-hours `level` holds this app's own toasts back: 0 is the
+/// Unrestricted profile, and any other level, one not seen yet included, is a
+/// restricting profile.
+#[cfg(windows)]
+pub(crate) fn dnd_blocks(level: u32) -> bool {
+    level != 0
+}
+
+/// Whether Windows 11's Do Not Disturb is on. A read that fails counts as off,
+/// so the toasts show.
+#[cfg(windows)]
+fn do_not_disturb_on() -> bool {
+    match quiet_hours_level() {
+        Ok(level) => dnd_blocks(level),
+        Err(err) => {
+            static DND_READ_FAILED: std::sync::Once = std::sync::Once::new();
+            DND_READ_FAILED.call_once(|| {
+                tracing::warn!(
+                    "could not read whether Do Not Disturb is on; toasts show as if it were off: \
+                     {err}"
+                );
+            });
+            false
+        }
+    }
 }
 
 /// Shows the toast `xml` under the app id toasts are raised under, handing
@@ -1658,5 +1742,28 @@ mod tests {
             );
         }
         assert!(takes_notifications(QUNS_ACCEPTS_NOTIFICATIONS));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn do_not_disturb_off_lets_toasts_through() {
+        assert!(!dnd_blocks(0), "level 0 is the Unrestricted profile");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn do_not_disturb_on_holds_toasts_back() {
+        assert!(
+            dnd_blocks(1),
+            "level 1 is Priority only, Windows 11's Do Not Disturb"
+        );
+        assert!(dnd_blocks(2), "level 2 is Alarms only");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unknown_quiet_hours_level_holds_toasts_back() {
+        assert!(dnd_blocks(3));
+        assert!(dnd_blocks(u32::MAX));
     }
 }
