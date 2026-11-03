@@ -579,6 +579,16 @@ mod tests {
                 include_str!("fixtures/v71-agents-running.txt"),
                 "background_shell",
             ),
+            (
+                "v194-agent-view-chat-about-this-typed",
+                include_str!("fixtures/v194-agent-view-chat-about-this-typed.txt"),
+                "background_shell",
+            ),
+            (
+                "v198-main-up-lands-on-tasks-pill",
+                include_str!("fixtures/v198-main-up-lands-on-tasks-pill.txt"),
+                "background_shell",
+            ),
         ];
         for (name, text, rule) in shown {
             assert_eq!(
@@ -644,6 +654,40 @@ mod tests {
             "  ⏵⏵ auto mode on · 1 shell still running",
         ] {
             assert!(!rule.is_match(other), "read as a shell count: {other:?}");
+        }
+    }
+
+    #[test]
+    fn background_rule_reads_monitors_and_mcp_tasks() {
+        let capture = include_str!("fixtures/v03-ready.txt");
+        let mode_line = "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents";
+        assert!(capture.contains(mode_line));
+        for footer in [
+            "  ⏵⏵ auto mode on · 1 MCP task · ← 2 agents",
+            "  ⏵⏵ auto mode on · 3 MCP tasks · ← 2 agents",
+            "  ⏵⏵ auto mode on · 2 monitors · ← 2 agents",
+            "  ⏸ manual mode on · 1 monitor",
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · 1 shell, 2 monitors · ← 2 agents",
+            "  ⏵⏵ auto mode on · 2 background tasks · ← 2 agents",
+        ] {
+            let text = capture.replace(mode_line, footer);
+            assert_eq!(
+                read_background_claude(&text).as_deref(),
+                Some("background_shell"),
+                "{footer:?}: background work not read"
+            );
+        }
+        let rule = line_rule("background_shell");
+        for other in [
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents",
+            "  ⏸ manual mode on",
+            "  MCP tools · /mcp (loaded on-demand)",
+            "Running 1 MCP task…",
+            "  ⏵⏵ auto mode on · 1 Artifact comment monitor",
+            "  ⏵⏵ auto mode on · 1 MCP task still running",
+            "  ⏵⏵ auto mode on · 2 local agents",
+        ] {
+            assert!(!rule.is_match(other), "read as background work: {other:?}");
         }
     }
 

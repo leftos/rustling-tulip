@@ -6,7 +6,8 @@
 //! guards does, gives the reading. An overlay rule keeps whatever state the
 //! session already has, since the overlay is drawn over a turn that may be
 //! running or done. The two background rules read the footer apart from the
-//! state rules: a shell count on the mode line, or a running subagent's row.
+//! state rules: a background-work count on the mode line (shells, monitors,
+//! MCP tasks), or a running subagent's row.
 
 use agent_api::{LineMatcher, ReadySignal, ScreenRegion, ScreenRule, ScreenRules, ScreenVerdict};
 use std::sync::LazyLock;
@@ -49,10 +50,13 @@ pub(crate) fn is_spinner_line(row: &str) -> bool {
 /// own.
 const HOOKS_RUNNING: &str = r"^\s*[·✢*✶✻✽✳]\s+\S.*\(running \p{L}+ hooks…";
 
-/// The mode line under the prompt box counting the shells still running in
-/// the background: the mode's glyph, then `· 1 shell` or `· N shells` as one
-/// of its `·`-separated items.
-const BACKGROUND_SHELLS: &str = r"^\s*(?:⏵⏵|⏸) .* · \d+ shells?(?: ·.*)?\s*$";
+/// The mode line under the prompt box counting the work still running in the
+/// background: the mode's glyph, then one `·`-separated item per kind of work,
+/// drawn as Claude Code 2.1.317 renders it: `· 1 shell`/`· N shells`,
+/// `· 1 monitor`/`· N monitors`, `· 1 MCP task`/`· N MCP tasks`, or
+/// `· N background tasks` when several kinds run together. Shells and monitors
+/// share an item, joined with a comma (`· 1 shell, 2 monitors`).
+const BACKGROUND_SHELLS: &str = r"^\s*(?:⏵⏵|⏸) .* · \d+ (?:shells?|monitors?|MCP tasks?|background tasks?)(?:, \d+ (?:shells?|monitors?))*(?: ·.*)?\s*$";
 
 /// A running subagent's row in the panel under the prompt box: the hollow
 /// marker, the agent type, two spaces, its task, then its elapsed time and
