@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Fixed
+
+- A newly started Claude session no longer shows as Finished, or raises a Finished toast, before you have used it.
+
 ## v0.8.0-alpha
 
 ### Highlights

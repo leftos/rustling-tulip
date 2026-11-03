@@ -246,6 +246,7 @@ async fn reattach_one(
                     },
                     outlets.attention_tx.clone(),
                     restored,
+                    pty_state::ShellLaunch::Plain,
                 );
             } else {
                 pty_state::watch(

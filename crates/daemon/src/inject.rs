@@ -68,7 +68,7 @@ const STARTUP_MIN_WAIT: Duration = Duration::from_secs(3);
 /// path but protects burst launches whose preset declares a tight cap
 /// (the bundled `smoke-inline` preset historically used 6000 ms, which
 /// is too tight under load).
-const MIN_STARTUP_CAP: Duration = Duration::from_secs(15);
+pub(crate) const MIN_STARTUP_CAP: Duration = Duration::from_secs(15);
 
 /// How long a shell's output must be silent before its prompt counts as
 /// printed, under [`InjectorStartup::ShellPrompt`].
