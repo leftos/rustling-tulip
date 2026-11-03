@@ -1,13 +1,18 @@
-//! The session-driving verbs: `sessions` and `read`, thin subcommands over
-//! the protocol every client speaks.
+//! The session-driving verbs: `sessions`, `read`, `spawn`, `send`, `kill`,
+//! `wait` and `watch`, thin subcommands over the protocol every client speaks.
 //!
 //! They act on whichever daemon the active config dir's `daemon.json` names.
 //! They send no `Resize` and no client identity, so the user's panes and
 //! layouts stay as they are.
 
 mod args;
+mod keys;
 mod render;
 mod scrollback;
+#[cfg(test)]
+mod verb_tests;
+mod verbs;
+mod waiting;
 
 use crate::cli_client::{Connection, NoDaemon, Welcome};
 use anyhow::anyhow;
@@ -15,11 +20,14 @@ use args::{Command, Verb};
 use base64::Engine as _;
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// The whole exchange must finish inside this, or the verb gives up.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A spawn must answer inside this: it may check out and start a process.
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The request id a verb asks with, so its reply is told apart.
 const REQUEST_ID: &str = "drive";
@@ -27,24 +35,35 @@ const REQUEST_ID: &str = "drive";
 const EXIT_OK: u8 = 0;
 const EXIT_FAILED: u8 = 1;
 const EXIT_USAGE: u8 = 2;
+const EXIT_TIMED_OUT: u8 = 4;
 const EXIT_NO_DAEMON: u8 = 5;
 
 const CODE_FAILED: &str = "failed";
 const CODE_USAGE: &str = "usage";
 const CODE_NO_DAEMON: &str = "no_daemon";
+const CODE_TIMED_OUT: &str = "timed_out";
+const CODE_ENDED: &str = "ended";
+const CODE_CHECKOUT_CONFIRM: &str = "checkout_confirm";
+
+/// The words that name a verb.
+const VERBS: [&str; 7] = ["sessions", "read", "spawn", "send", "kill", "wait", "watch"];
 
 /// The waits a verb allows.
 #[derive(Debug, Clone, Copy)]
 struct Budgets {
     /// How long the listener has to prove it holds the token.
     proof: Duration,
-    /// How long the whole exchange has.
+    /// How long the connection has to open, and a verb that takes a bounded
+    /// exchange has to finish it.
     exchange: Duration,
+    /// How long `spawn` has.
+    spawn: Duration,
 }
 
 const BUDGETS: Budgets = Budgets {
     proof: daemon_client::PROOF_TIMEOUT,
     exchange: EXCHANGE_TIMEOUT,
+    spawn: SPAWN_TIMEOUT,
 };
 
 /// Why a verb failed: what it prints, and the process's exit code.
@@ -81,6 +100,32 @@ impl Failure {
         }
     }
 
+    fn unknown_session(session_id: &str) -> Self {
+        Self::refused(
+            Some(protocol::error_codes::NOT_FOUND.to_owned()),
+            format!("unknown session: {session_id}"),
+        )
+    }
+
+    fn ended(session_id: &str) -> Self {
+        Self::refused(
+            Some(CODE_ENDED.to_owned()),
+            format!("session {session_id} ended"),
+        )
+    }
+
+    fn checkout_confirm(message: String) -> Self {
+        Self::refused(Some(CODE_CHECKOUT_CONFIRM.to_owned()), message)
+    }
+
+    fn timed_out(message: String) -> Self {
+        Self {
+            code: CODE_TIMED_OUT.to_owned(),
+            message,
+            exit: EXIT_TIMED_OUT,
+        }
+    }
+
     /// The failure a connection or protocol error stands for.
     fn from_error(err: &anyhow::Error) -> Self {
         let message = format!("{err:#}");
@@ -100,14 +145,15 @@ impl Failure {
 pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
     args.into_iter()
         .next()
-        .is_some_and(|arg| arg == "sessions" || arg == "read")
+        .is_some_and(|arg| VERBS.iter().any(|verb| arg == *verb))
 }
 
 /// Run the verb in `args`, the daemon's arguments from the verb on, against
 /// the active config dir's daemon, on this process's stdout and stderr.
 pub async fn run_and_report(args: impl IntoIterator<Item = OsString>) -> std::process::ExitCode {
     let args: Vec<OsString> = args.into_iter().collect();
-    let result = execute(daemon_client::handshake_file, &args, BUDGETS).await;
+    let mut stdout = std::io::stdout();
+    let result = execute(daemon_client::handshake_file, &args, BUDGETS, &mut stdout).await;
     let code = report(
         &args,
         result,
@@ -133,7 +179,7 @@ fn report(
         },
         Err(failure) => failure,
     };
-    if args.iter().any(|arg| arg == "--json") {
+    if args::json_errors(args) {
         let line = render::error_json(&failure.code, &failure.message);
         let _ = out.write_all(line.as_bytes());
     } else {
@@ -144,48 +190,92 @@ fn report(
     failure.exit
 }
 
-/// Parse `args`, find the handshake file through `handshake_file` and run the
-/// verb inside the exchange budget, answering what it prints.
+/// Parse `args`, find the handshake file through `handshake_file`, open one
+/// connection and run the verb over it, answering what is left to print. A
+/// verb that follows a session writes its lines to `out` as they come.
+/// Closing the connection also ends any forwarder the verb's request started.
 async fn execute(
     handshake_file: impl FnOnce() -> anyhow::Result<PathBuf>,
     args: &[OsString],
     budgets: Budgets,
+    out: &mut impl std::io::Write,
 ) -> Result<String, Failure> {
     let command = args::parse(args.iter().cloned()).map_err(Failure::usage)?;
     let handshake_file = handshake_file().map_err(|err| Failure::from_error(&err))?;
-    let seconds = budgets.exchange.as_secs();
-    tokio::time::timeout(
-        budgets.exchange,
-        exchange(&handshake_file, &command, budgets.proof),
-    )
-    .await
-    .map_err(|_| Failure::failed(format!("rustling-tulipd did not answer within {seconds} s")))?
-}
-
-/// Open one connection, run the verb over it and close it, which also ends
-/// any forwarder the verb's request started.
-async fn exchange(
-    handshake_file: &Path,
-    command: &Command,
-    proof: Duration,
-) -> Result<String, Failure> {
     let client_name = format!("rustling-tulipd {}", command.verb.name());
-    let (mut connection, welcome) = Connection::open(handshake_file, &client_name, proof)
-        .await
+    let opened = Connection::open(&handshake_file, &client_name, budgets.proof);
+    let (mut connection, welcome) = within(budgets.exchange, opened)
+        .await?
         .map_err(|err| Failure::from_error(&err))?;
-    let printed = match &command.verb {
-        Verb::Sessions => sessions(&mut connection, command.json).await,
-        Verb::Read {
-            session_id,
-            scrollback: false,
-        } => read_screen(&mut connection, &welcome, session_id, command.json).await,
-        Verb::Read {
-            session_id,
-            scrollback: true,
-        } => read_scrollback(&mut connection, session_id, command.json).await,
+    let verb = run_verb(&mut connection, &welcome, &command, out);
+    let printed = match verb_budget(&command.verb, budgets) {
+        Some(budget) => within(budget, verb).await.and_then(|printed| printed),
+        None => verb.await,
     };
     connection.close().await;
     printed
+}
+
+/// Await `work`, or fail once `budget` has passed.
+async fn within<T>(budget: Duration, work: impl Future<Output = T>) -> Result<T, Failure> {
+    tokio::time::timeout(budget, work).await.map_err(|_| {
+        let seconds = budget.as_secs();
+        Failure::failed(format!("rustling-tulipd did not answer within {seconds} s"))
+    })
+}
+
+/// The time `verb` has; `wait` and `watch` keep their own.
+fn verb_budget(verb: &Verb, budgets: Budgets) -> Option<Duration> {
+    match verb {
+        Verb::Spawn(_) => Some(budgets.spawn),
+        Verb::Wait { .. } | Verb::Watch { .. } => None,
+        Verb::Sessions | Verb::Read { .. } | Verb::Send { .. } | Verb::Kill { .. } => {
+            Some(budgets.exchange)
+        }
+    }
+}
+
+async fn run_verb(
+    connection: &mut Connection,
+    welcome: &Welcome,
+    command: &Command,
+    out: &mut impl std::io::Write,
+) -> Result<String, Failure> {
+    let json = command.json;
+    match &command.verb {
+        Verb::Sessions => sessions(connection, json).await,
+        Verb::Read {
+            session_id,
+            scrollback: false,
+        } => read_screen(connection, welcome, session_id, json).await,
+        Verb::Read {
+            session_id,
+            scrollback: true,
+        } => read_scrollback(connection, session_id, json).await,
+        Verb::Spawn(options) => verbs::spawn(connection, options, json).await,
+        Verb::Send {
+            session_id,
+            payload,
+        } => verbs::send(connection, welcome, session_id, payload, json).await,
+        Verb::Kill { session_id } => verbs::kill(connection, session_id, json).await,
+        Verb::Wait {
+            session_id,
+            until,
+            timeout,
+        } => {
+            let request = verbs::WaitRequest {
+                session_id,
+                until,
+                limit: *timeout,
+                json,
+            };
+            verbs::wait(connection, welcome, &request).await
+        }
+        Verb::Watch {
+            session_id,
+            timeout,
+        } => verbs::watch(connection, session_id, *timeout, json, out).await,
+    }
 }
 
 /// The `Sessions` message the daemon pushes after its `Welcome`.
@@ -252,10 +342,7 @@ async fn read_scrollback(
 ) -> Result<String, Failure> {
     let sessions = initial_sessions(connection).await?;
     if !sessions.iter().any(|session| session.id == session_id) {
-        return Err(Failure::refused(
-            Some(protocol::error_codes::NOT_FOUND.to_owned()),
-            format!("unknown session: {session_id}"),
-        ));
+        return Err(Failure::unknown_session(session_id));
     }
     ask(
         connection,
@@ -335,32 +422,49 @@ fn closed_early(what: &str) -> Failure {
     clippy::expect_used,
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::history::test_support::record;
     use crate::server::test_support::{ScratchDir, serve_loopback, test_hub, unproven_listener};
     use protocol::{DaemonHandshake, SUPPORTED_PROTOCOL_VERSIONS, SessionMode};
+    use std::path::Path;
 
     /// The only bound on a test's waits: a hang guard.
-    const HANG_GUARD: Duration = Duration::from_secs(120);
+    pub(in crate::cli_drive) const HANG_GUARD: Duration = Duration::from_secs(120);
 
     const TEST_BUDGETS: Budgets = Budgets {
         proof: HANG_GUARD,
         exchange: HANG_GUARD,
+        spawn: HANG_GUARD,
     };
 
     /// What a finished verb left behind.
-    struct Outcome {
-        exit: u8,
-        out: String,
-        err: String,
+    pub(in crate::cli_drive) struct Outcome {
+        pub(in crate::cli_drive) exit: u8,
+        pub(in crate::cli_drive) out: String,
+        pub(in crate::cli_drive) err: String,
     }
 
-    async fn run_verb(handshake_file: &Path, list: &[&str]) -> Outcome {
+    pub(in crate::cli_drive) async fn run_verb(handshake_file: &Path, list: &[&str]) -> Outcome {
+        run_verb_into(handshake_file, list, Vec::new()).await
+    }
+
+    /// [`run_verb`] with the lines the verb streams going to `lines`. The
+    /// answer it prints at the end lands in the outcome.
+    pub(in crate::cli_drive) async fn run_verb_into(
+        handshake_file: &Path,
+        list: &[&str],
+        mut lines: impl std::io::Write,
+    ) -> Outcome {
         let args: Vec<OsString> = list.iter().map(OsString::from).collect();
         let result = tokio::time::timeout(
             HANG_GUARD,
-            execute(|| Ok(handshake_file.to_owned()), &args, TEST_BUDGETS),
+            execute(
+                || Ok(handshake_file.to_owned()),
+                &args,
+                TEST_BUDGETS,
+                &mut lines,
+            ),
         )
         .await
         .expect("hung: the verb did not finish");
@@ -374,7 +478,7 @@ mod tests {
     }
 
     /// A handshake file for the test hub listening on `port`.
-    fn handshake_file(scratch: &ScratchDir, port: u16) -> PathBuf {
+    pub(in crate::cli_drive) fn handshake_file(scratch: &ScratchDir, port: u16) -> PathBuf {
         let handshake = DaemonHandshake {
             protocol_version: SUPPORTED_PROTOCOL_VERSIONS
                 .iter()
@@ -461,7 +565,13 @@ mod tests {
     #[tokio::test]
     async fn a_handshake_path_failure_reports_as_a_failure() {
         let args: Vec<OsString> = ["sessions", "--json"].iter().map(OsString::from).collect();
-        let result = execute(|| Err(anyhow!("no config dir")), &args, TEST_BUDGETS).await;
+        let result = execute(
+            || Err(anyhow!("no config dir")),
+            &args,
+            TEST_BUDGETS,
+            &mut Vec::new(),
+        )
+        .await;
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
         let exit = report(&args, result, &mut out, &mut err);

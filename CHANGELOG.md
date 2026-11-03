@@ -12,6 +12,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Pick each toast's sound from a list of chimes in Settings › Notifications; the defaults are new, softer mallet chimes.
 - The Dashboard header shows today's cost, tokens and commits across every session, kept through daemon restarts.
 - The Dashboard shows each session's last two hours as a bar with a short caption, beside its ten-minute activity.
+- `rustling-tulipd` can drive sessions from a shell: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
 - The Dashboard's Issue column shows the Linear key named in a session's branch.
 
 ### Fixed

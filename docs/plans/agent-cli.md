@@ -6,6 +6,8 @@ VelaTerm's version: `src-tauri/src/agent/cli_client.rs` (hidden `vlx-term` subco
 
 Builds on [hook-status.md](./hook-status.md) (HS.3's shim, HS.4's loopback-only router, HS.7's kept last message).
 
+RT-761's `rustling-tulipd` session-driving verbs ([daemon-cli.md](../daemon-cli.md)) are the owner's full-token CLI over the WebSocket. This plan shares their verb names, `--json` fields and exit codes, never their transport or binary.
+
 ## Problem
 
 An agent in one session can't start, instruct or read another session. A user who wants a task fanned out across worktrees spawns each session by hand, pastes each prompt, and carries results between panes. This design gives a session a small CLI for that.

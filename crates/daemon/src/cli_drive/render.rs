@@ -1,6 +1,7 @@
 //! What the session-driving verbs print: plain text and `--json`. Nothing
 //! here touches a socket.
 
+use super::waiting::Line;
 use protocol::{SessionSnapshot, SessionStatus};
 use serde_json::json;
 
@@ -15,7 +16,7 @@ fn title(session: &SessionSnapshot) -> &str {
 }
 
 /// The name `status` carries on the wire.
-fn status_name(status: SessionStatus) -> &'static str {
+pub fn status_name(status: SessionStatus) -> &'static str {
     match status {
         SessionStatus::Spawning => "spawning",
         SessionStatus::Idle => "idle",
@@ -100,6 +101,53 @@ pub fn scrollback_text(text: &str) -> String {
 pub fn scrollback_json(id: &str, truncated: bool, text: &str) -> String {
     let scrollback = json!({ "id": id, "truncated": truncated, "text": text });
     format!("{scrollback}\n")
+}
+
+/// A spawned session as one line of JSON.
+pub fn spawned_json(session: &SessionSnapshot) -> String {
+    let spawned = json!({
+        "id": session.id,
+        "label": title(session),
+        "status": status_name(session.status),
+    });
+    format!("{spawned}\n")
+}
+
+/// The session a verb acted on, as one line of JSON.
+pub fn id_json(id: &str) -> String {
+    format!("{}\n", json!({ "id": id }))
+}
+
+/// The status a wait reached, as one line of JSON.
+pub fn status_json(id: &str, status: SessionStatus) -> String {
+    format!("{}\n", json!({ "id": id, "status": status_name(status) }))
+}
+
+/// The screen row a wait matched, as one line of JSON.
+pub fn line_json(id: &str, line: &str) -> String {
+    format!("{}\n", json!({ "id": id, "line": line }))
+}
+
+/// One `watch` line: when the status began, or `-` when the daemon never set
+/// it, the status, `bg` or `-`, and the status's sequence number.
+pub fn watch_text(line: &Line) -> String {
+    let since = line
+        .status_since
+        .map_or_else(|| "-".to_owned(), |since| since.to_rfc3339());
+    let status = status_name(line.status);
+    let background = if line.background { "bg" } else { "-" };
+    format!("{since} {status} {background} seq={}\n", line.status_seq)
+}
+
+/// One `watch` line as one line of JSON.
+pub fn watch_json(line: &Line) -> String {
+    let change = json!({
+        "status_since": line.status_since,
+        "status": status_name(line.status),
+        "background": line.background,
+        "status_seq": line.status_seq,
+    });
+    format!("{change}\n")
 }
 
 /// A failure as one line of JSON.

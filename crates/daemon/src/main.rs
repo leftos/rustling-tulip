@@ -114,8 +114,8 @@ async fn run_folderless_client_subcommand() -> anyhow::Result<Option<std::proces
             }
         }));
     }
-    // `rustling-tulipd sessions` and `read` work against the running daemon,
-    // before `Dirs::ensure` so they create no folders.
+    // The session-driving verbs work against the running daemon, before
+    // `Dirs::ensure` so they create no folders.
     if cli_drive::requested(std::env::args_os().skip(1)) {
         cli_pair::attach_parent_console();
         let args = std::env::args_os().skip(1);

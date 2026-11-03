@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use support::Harness;
 use support::live::{
     HANG_GUARD, LiveClient, LiveDaemon, kill_tree, processes_under, spawn_default_agent_in_place,
-    spawn_shell,
+    spawn_shell, target_bin_dir,
 };
 
 /// Waits until the view's latest state is open on `daemon`'s port with no
@@ -133,6 +133,61 @@ fn live_connects_and_reports_connected(cx: &mut TestAppContext) {
     let labels = client.footer_labels();
     let last = labels.last().expect("the view was sent a state");
     assert_eq!(last, "0 sessions", "footer labels: {labels:?}");
+}
+
+/// Runs one `rustling-tulipd` verb against `daemon`, under its isolation
+/// variables, and returns what it printed.
+fn drive(daemon: &LiveDaemon, args: &[&str]) -> String {
+    let binary = target_bin_dir().join(format!("rustling-tulipd{}", std::env::consts::EXE_SUFFIX));
+    let output = Command::new(binary)
+        .args(args)
+        .envs(daemon.envs().iter().map(|(key, value)| (*key, value)))
+        .output()
+        .expect("run rustling-tulipd");
+    assert!(
+        output.status.success(),
+        "rustling-tulipd {args:?}: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("the verbs print UTF-8")
+}
+
+#[test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn cli_drives_a_shell() {
+    let daemon = LiveDaemon::start("cli-drive");
+    let guard = HANG_GUARD.as_secs().to_string();
+    let scratch = daemon.dir().to_string_lossy().into_owned();
+
+    let spawned = drive(&daemon, &["spawn", "--cwd", &scratch]);
+    let id = spawned.trim();
+    drive(
+        &daemon,
+        &["wait", id, "--text", "(?m)>$", "--timeout", &guard],
+    );
+    drive(&daemon, &["send", id, "--", "echo rt761-marker"]);
+    drive(
+        &daemon,
+        &[
+            "wait",
+            id,
+            "--text",
+            "(?m)^rt761-marker$",
+            "--timeout",
+            &guard,
+        ],
+    );
+
+    let screen = drive(&daemon, &["read", id]);
+    assert!(
+        screen.lines().any(|row| row.trim() == "rt761-marker"),
+        "{screen}"
+    );
+
+    drive(&daemon, &["kill", id]);
+    let listed = drive(&daemon, &["sessions"]);
+    assert!(listed.starts_with(&format!("{id}\tstopped\t")), "{listed}");
 }
 
 #[gpui::test]

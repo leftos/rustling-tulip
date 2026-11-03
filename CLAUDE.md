@@ -41,7 +41,7 @@ Read the matching doc before changing or debugging its area; each holds rules th
 - [docs/wire-protocol.md](docs/wire-protocol.md): any `ClientMessage` or `DaemonMessage`: the handshake, `Welcome.features`, `request_id` echoes, `Error` codes, chat messages, resize claims, tailnet connection rules.
 - [docs/session-runtime.md](docs/session-runtime.md): session status (hooks, screen rules, `Working`, `AwaitingInput`, `Idle`, `background`), orphan recovery and tracer reattach, the chat mirror, an agent typed into the shell, workspace spawns, the git watcher.
 - [docs/testing.md](docs/testing.md): writing or running UI specs and the live and smoke tiers, the fake CLIs, what each `native-shot` view draws, nextest settings, paused-clock tests.
-- [docs/daemon-cli.md](docs/daemon-cli.md): the `rustling-tulipd` subcommands (`pair`, `shutdown`, `apply-update`, `bridge`, `screen`), their exit codes and output, and how a client starts, retires or refuses a daemon.
+- [docs/daemon-cli.md](docs/daemon-cli.md): the `rustling-tulipd` subcommands (`pair`, `shutdown`, `apply-update`, `bridge`, `screen`, and the session-driving verbs `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`), their exit codes and output, and how a client starts, retires or refuses a daemon.
 
 ## Common commands
 
