@@ -61,11 +61,11 @@ pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
 }
 
 /// True when the daemon's arguments ask for its version: the first argument is
-/// exactly `--version`.
+/// exactly `--version` or `-V`.
 pub fn version_requested(args: impl IntoIterator<Item = OsString>) -> bool {
     args.into_iter()
         .next()
-        .is_some_and(|arg| arg == "--version")
+        .is_some_and(|arg| arg == "--version" || arg == "-V")
 }
 
 /// Write `rustling-tulipd <version>` to `out`.
@@ -1148,5 +1148,16 @@ mod tests {
             String::from_utf8(out).expect("the line is UTF-8"),
             format!("rustling-tulipd {VERSION}\n")
         );
+    }
+
+    #[test]
+    fn version_requested_matches_the_short_flag() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        for list in [&["-V"][..], &["--version"][..]] {
+            assert!(version_requested(args(list)), "{list:?}");
+        }
+        for list in [&["-v"][..], &["--ver"][..], &[][..], &["apply-update"][..]] {
+            assert!(!version_requested(args(list)), "{list:?}");
+        }
     }
 }

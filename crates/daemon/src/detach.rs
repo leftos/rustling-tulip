@@ -1,4 +1,5 @@
-//! The daemon's `--detach` relaunch path.
+//! The daemon's start forms ([`launch_form`]) and its `--detach` relaunch
+//! path.
 //!
 //! The "start on login" setting writes an HKCU `Run` entry pointing at the
 //! installed `rustling-tulipd.exe`, so at login Windows starts that file
@@ -6,21 +7,58 @@
 //! installer or rebuild. With `--detach` that launch becomes a short-lived
 //! launcher instead: it copies itself into the content-addressed binaries
 //! cache and spawns the cached copy, exactly as the clients do, then exits.
-//! Without the flag the daemon behaves as before.
+//! With no arguments the daemon runs in place; any other argument list that
+//! no subcommand took is refused with a usage line.
 
 use anyhow::Context as _;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// True when `--detach` is one of the daemon's arguments (`args` is the
-/// argument list without the program name). Any other argument is ignored, as
-/// it is today.
-pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
-    args.into_iter().any(|arg| arg == "--detach")
+/// The one line that refuses an argument list naming no subcommand and asking
+/// for no start form, printed verbatim before anything is created.
+const USAGE: &str = "usage: rustling-tulipd [--detach | --version | <command> ...], where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch";
+
+/// How the daemon was asked to start, once every subcommand has declined
+/// the arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// No arguments: run the daemon here.
+    Start,
+    /// Exactly `--detach`: hand over to a cached copy and exit.
+    Detach,
+}
+
+/// The launch `args` (without the program name) ask for, or the one stderr
+/// line that refuses them: only `[]` and `["--detach"]` start a daemon.
+///
+/// # Errors
+///
+/// Every other argument list, including `--detach` beside anything else: the
+/// usage line naming the offending argument, which the caller prints before
+/// `paths::Dirs::ensure` so a typo touches nothing.
+pub fn launch_form(args: impl IntoIterator<Item = OsString>) -> Result<Launch, String> {
+    let mut args = args.into_iter();
+    match args.next() {
+        None => Ok(Launch::Start),
+        Some(first) if first == "--detach" => match args.next() {
+            None => Ok(Launch::Detach),
+            Some(extra) => Err(refusal(&extra)),
+        },
+        Some(first) => Err(refusal(&first)),
+    }
+}
+
+/// The usage line naming `arg` as the argument no start form or subcommand
+/// took.
+fn refusal(arg: &OsStr) -> String {
+    format!(
+        "rustling-tulipd: unknown argument \"{}\"; {USAGE}",
+        arg.to_string_lossy()
+    )
 }
 
 /// Cache this executable and start the cached copy in its place, then return
@@ -133,7 +171,7 @@ fn init_logging(dirs: &crate::paths::Dirs) {
 
 #[cfg(test)]
 mod tests {
-    use super::{child_command, requested};
+    use super::{Launch, child_command, launch_form};
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
@@ -149,12 +187,27 @@ mod tests {
             .and_then(|(_, value)| value.map(OsString::from))
     }
 
+    /// The refusal line for `arg`, spelled out so a change to the wording
+    /// fails the test.
+    fn refusal(arg: &str) -> String {
+        format!(
+            "rustling-tulipd: unknown argument \"{arg}\"; usage: rustling-tulipd [--detach | --version | <command> ...], where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch"
+        )
+    }
+
     #[test]
-    fn requested_matches_the_detach_flag_only() {
-        assert!(requested(args(&["--detach"])));
-        assert!(requested(args(&["--foo", "--detach"])));
-        assert!(!requested(Vec::<OsString>::new()));
-        assert!(!requested(args(&["--detached"])));
+    fn launch_form_starts_only_for_no_arguments_or_detach_alone() {
+        assert_eq!(launch_form(args(&[])), Ok(Launch::Start));
+        assert_eq!(launch_form(args(&["--detach"])), Ok(Launch::Detach));
+        for (list, offending) in [
+            (&["frobnicate"][..], "frobnicate"),
+            (&["sesions"][..], "sesions"),
+            (&["--foo", "--detach"][..], "--foo"),
+            (&["--detach", "extra"][..], "extra"),
+            (&["--detached"][..], "--detached"),
+        ] {
+            assert_eq!(launch_form(args(list)), Err(refusal(offending)), "{list:?}");
+        }
     }
 
     #[test]

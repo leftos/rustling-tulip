@@ -171,12 +171,26 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     if let Some(code) = run_folderless_client_subcommand().await? {
         return Ok(code);
     }
+    // Every subcommand has declined the arguments, so only a start form may
+    // remain here: `[]` runs the daemon and `["--detach"]` hands over to a
+    // cached copy. Anything else — a mistyped subcommand above all — is
+    // refused before `Dirs::ensure`, so it creates no folder, takes no lock,
+    // rotates no log and touches no running daemon.
+    let launch = match detach::launch_form(std::env::args_os().skip(1)) {
+        Ok(launch) => launch,
+        Err(line) => {
+            use std::io::Write as _;
+            cli_pair::attach_parent_console();
+            let _ = writeln!(std::io::stderr(), "{line}");
+            return Ok(std::process::ExitCode::from(2));
+        }
+    };
     let dirs = paths::Dirs::ensure()?;
     // The login `Run` entry runs the installed exe with `--detach`: hand over
     // to a cached copy and exit, without taking the instance lock, the log or
     // the binary-cache sweep from a daemon that may already serve this config
     // dir.
-    if detach::requested(std::env::args_os().skip(1)) {
+    if launch == detach::Launch::Detach {
         detach::relaunch_from_cache(&dirs)?;
         return Ok(std::process::ExitCode::SUCCESS);
     }

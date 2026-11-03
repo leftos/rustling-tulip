@@ -10,7 +10,9 @@ The `rustling-tulipd` subcommands, and how a client starts, retires or refuses a
 
 `rustling-tulipd apply-update --from <staging> --to <dir> [--old-version <v>] [--update] [--relaunch]` is what the installer runs from the staged daemon to swap the installed files (`crates/daemon/src/cli_apply_update.rs`, `docs/auto-update.md`): it stops the daemon, renames each file to `.old` and the staged one into place, rolls every file back on a failure, writes `last-result.json`, and with `--relaunch` starts the client.
 
-Its exit codes: 0 applied, 1 bad arguments, 2 the daemon would not stop, 3 an exe still runs from the install folder, 4 another update holds the lock, 5 a file failed and was rolled back. `rustling-tulipd --version` prints the daemon's version.
+Its exit codes: 0 applied, 1 bad arguments, 2 the daemon would not stop, 3 an exe still runs from the install folder, 4 another update holds the lock, 5 a file failed and was rolled back. `rustling-tulipd --version` and `-V` print `rustling-tulipd <version>` and exit 0.
+
+The daemon starts only for no arguments or exactly `--detach` (the login Run entry and the logon task). Any other argument list that no subcommand took prints one stderr line, `rustling-tulipd: unknown argument "<arg>"; usage: rustling-tulipd [--detach | --version | <command> ...], where <command> is apply-update, bridge, kill, pair, read, screen, send, sessions, shutdown, spawn, wait or watch`, and exits 2, before any folder, lock, log or daemon start. `<arg>` is the first argument, or the second when the first is `--detach`, so `--detach` beside anything else is a usage error (`crates/daemon/src/detach.rs` `launch_form`, `crates/daemon/src/main.rs`).
 
 `rustling-tulipd bridge` is what an SSH client runs on the host: it relays one compact JSON protocol message per line between its stdin and stdout and the loopback daemon's WebSocket, starting the daemon first when none runs (`daemon_client::ensure_running_for_bridge`, "How a client starts and retires the daemon") and filling the `Hello` token from the host's handshake so the token never leaves the host (`crates/daemon/src/cli_bridge.rs`).
 
