@@ -51,8 +51,11 @@ pub async fn run() -> anyhow::Result<()> {
     stop_inheriting_stdio();
     run_with(
         async || {
-            daemon_client::ensure_running(SUPPORTED_PROTOCOL_VERSIONS, env!("CARGO_PKG_VERSION"))
-                .await
+            daemon_client::ensure_running_for_bridge(
+                SUPPORTED_PROTOCOL_VERSIONS,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .await
         },
         stdin_reader(),
         tokio::io::stdout(),

@@ -14,6 +14,7 @@ pub mod autostart;
 pub mod capped_log;
 pub mod device_tokens;
 pub mod isolation;
+mod logon_task;
 #[cfg(windows)]
 mod pinned_process;
 pub mod profile;
@@ -29,6 +30,7 @@ pub use proof::{Proof, ProvenConnectError, connect_proven};
 pub use supervisor::{
     DaemonIsElevated, DaemonIsNewer, DaemonIsOrdinary, ELEVATED_DAEMON_REFUSAL,
     OrdinaryDaemonIncompatible, PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running,
+    ensure_running_for_bridge,
 };
 
 use anyhow::{Context as _, anyhow, bail};

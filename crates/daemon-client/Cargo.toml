@@ -51,6 +51,8 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # `Win32_Security_Authorization` and `Win32_Storage_FileSystem`:
 # `src/protected_root.rs` creates the protected root from its SDDL, opens and
 # holds it, and reads its descriptor back.
+# `Win32_System_RemoteDesktop`: `src/logon_task.rs` reads the caller's session
+# and looks for the user's interactive session (`WTSEnumerateSessionsW`).
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -58,6 +60,7 @@ windows = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Ole",
+    "Win32_System_RemoteDesktop",
     "Win32_System_Rpc",
     "Win32_System_Threading",
     "Win32_System_Variant",

@@ -1,6 +1,7 @@
 //! Locate and (if needed) spawn the rustling-tulipd binary, then return its
 //! handshake to the caller.
 
+use crate::logon_task::StartRoute;
 #[cfg(windows)]
 use crate::pinned_process::{OpenFailure, PinnedProcess};
 use crate::profile::{Profile, ProfileRoots};
@@ -415,6 +416,48 @@ pub async fn ensure_running(
     client_versions: &[u32],
     client_build: &str,
 ) -> anyhow::Result<DaemonHandshake> {
+    ensure_running_routed(client_versions, client_build, StartFor::Client).await
+}
+
+/// [`ensure_running`] for `rustling-tulipd bridge`, run over an SSH logon.
+///
+/// It reuses a daemon exactly as [`ensure_running`] does. Only when it would
+/// start one, and this process runs in session 0 while its user also has an
+/// interactive session on the host, it starts the daemon inside that logon
+/// through the user's on-demand scheduled task (`\leftos\rustling-tulip\daemon-<SID>`),
+/// so the daemon runs at the user's ordinary integrity with a working
+/// Credential Manager vault, and returns the ordinary profile's daemon once
+/// it reports ready within 20 seconds. When the task cannot be registered or
+/// run, or no daemon appears in time, it starts the daemon here as
+/// [`ensure_running`] does. The task is never stopped or deleted here.
+///
+/// # Errors
+///
+/// As [`ensure_running`]; a failure of the task route is logged and falls
+/// back to the direct start.
+pub async fn ensure_running_for_bridge(
+    client_versions: &[u32],
+    client_build: &str,
+) -> anyhow::Result<DaemonHandshake> {
+    ensure_running_routed(client_versions, client_build, StartFor::Bridge).await
+}
+
+/// Which caller [`ensure_running_routed`] starts a daemon for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartFor {
+    /// The native client and every other caller: start the daemon here.
+    Client,
+    /// `rustling-tulipd bridge`: the logon task route first, when it applies.
+    Bridge,
+}
+
+/// [`ensure_running_in`] for this process's profile and overrides, starting
+/// a daemon the way `start_for` names.
+async fn ensure_running_routed(
+    client_versions: &[u32],
+    client_build: &str,
+    start_for: StartFor,
+) -> anyhow::Result<DaemonHandshake> {
     let client_build = semver::Version::parse(client_build)
         .with_context(|| format!("this client's version {client_build:?} is not semver"))?;
     let client = Client {
@@ -424,6 +467,103 @@ pub async fn ensure_running(
     let caller = crate::profile::own_profile()?;
     let overrides = crate::profile::Overrides::from_env()?;
     let probed = crate::profile::roots_to_probe(caller, &overrides)?;
+    ensure_running_in(
+        client,
+        &probed,
+        &overrides,
+        async |current: CurrentDaemonBinary, config_dirs: Vec<PathBuf>| match start_for {
+            StartFor::Client => spawn_current_daemon(&current, &config_dirs, client_versions).await,
+            StartFor::Bridge => {
+                start_for_bridge(&current, &config_dirs, client_versions, &overrides).await
+            }
+        },
+    )
+    .await
+}
+
+/// The bridge's start: through the user's logon task when
+/// [`crate::logon_task::this_process_route`] says so, else (or when that
+/// fails) here.
+async fn start_for_bridge(
+    current: &CurrentDaemonBinary,
+    config_dirs: &[PathBuf],
+    client_versions: &[u32],
+    overrides: &crate::profile::Overrides,
+) -> anyhow::Result<DaemonHandshake> {
+    let override_set = *overrides != crate::profile::Overrides::default();
+    let (route, session) = crate::logon_task::this_process_route(override_set);
+    start_daemon_routed(
+        route,
+        async || crate::logon_task::start_in_user_logon(&current.template, session).await,
+        async || {
+            let ordinary = ordinary_config_dir(overrides)?;
+            wait_for_handshake_among(
+                &[ordinary],
+                client_versions,
+                crate::logon_task::LOGON_TASK_WAIT,
+                PROOF_TIMEOUT,
+                crate::read_handshake_file,
+            )
+            .await
+        },
+        async || spawn_current_daemon(current, config_dirs, client_versions).await,
+    )
+    .await
+}
+
+/// The ordinary profile's config dir under `overrides`.
+fn ordinary_config_dir(overrides: &crate::profile::Overrides) -> anyhow::Result<PathBuf> {
+    crate::profile::roots_to_probe(Profile::Ordinary, overrides)?
+        .into_iter()
+        .next()
+        .map(|(_, roots)| roots.config)
+        .ok_or_else(|| anyhow!("no ordinary profile to wait for a daemon in"))
+}
+
+/// Start a daemon by `route`: for [`StartRoute::LogonTask`], `start_task`
+/// then `wait_ordinary` for the ordinary profile's ready daemon, which is
+/// returned; when either fails, or for [`StartRoute::Direct`], `start_here`.
+async fn start_daemon_routed(
+    route: StartRoute,
+    start_task: impl AsyncFnOnce() -> anyhow::Result<()>,
+    wait_ordinary: impl AsyncFnOnce() -> anyhow::Result<DaemonHandshake>,
+    start_here: impl AsyncFnOnce() -> anyhow::Result<DaemonHandshake>,
+) -> anyhow::Result<DaemonHandshake> {
+    if route == StartRoute::LogonTask {
+        let started = match start_task().await {
+            Ok(()) => wait_ordinary().await,
+            Err(err) => Err(err),
+        };
+        match started {
+            Ok(handshake) => {
+                info!(
+                    pid = handshake.pid,
+                    port = handshake.port,
+                    "daemon started in the user's logon"
+                );
+                return Ok(handshake);
+            }
+            Err(err) => warn!(
+                err = %format!("{err:#}"),
+                "could not start the daemon in the user's logon; starting it here"
+            ),
+        }
+    }
+    start_here().await
+}
+
+/// Return the handshake of a healthy daemon `client` can speak to among the
+/// `probed` profiles (the caller's own last), starting one with `start` (given
+/// the located binary and every probed config dir) when none is reused; see
+/// [`ensure_running`].
+async fn ensure_running_in(
+    client: Client<'_>,
+    probed: &[(Profile, ProfileRoots)],
+    overrides: &crate::profile::Overrides,
+    start: impl AsyncFnOnce(CurrentDaemonBinary, Vec<PathBuf>) -> anyhow::Result<DaemonHandshake>,
+) -> anyhow::Result<DaemonHandshake> {
+    let client_versions = client.versions;
+    let client_build = client.build;
     // The caller's own profile is the last one probed; any before it are
     // ordinary profiles an elevated caller may only reuse a daemon from.
     let Some(((own, own_roots), others)) = probed.split_last() else {
@@ -439,7 +579,7 @@ pub async fn ensure_running(
     }
     if *own == Profile::Elevated {
         // Before anything in this client creates a folder of the profile.
-        crate::profile::ensure_protected(own_roots, &overrides)?;
+        crate::profile::ensure_protected(own_roots, overrides)?;
     }
     let config_dir = &own_roots.config;
     let binaries_dir = &own_roots.binaries;
@@ -469,7 +609,7 @@ pub async fn ensure_running(
     {
         return Ok(handshake);
     }
-    refuse_newer(&existing, &client_build)?;
+    refuse_newer(&existing, client_build)?;
     refuse_elevated(&existing)?;
     // Resolve before retiring, so a missing binary never leaves the user with
     // no daemon at all.
@@ -485,7 +625,7 @@ pub async fn ensure_running(
         )
         .await?;
     }
-    spawn_current_daemon(&current, &config_dirs, client_versions).await
+    start(current, config_dirs).await
 }
 
 /// For an elevated caller: the handshake of a proven daemon in one of the
@@ -1582,15 +1722,18 @@ mod tests {
         path_is_under, protocol_compatible, protocol_kind, refuse_elevated, refuse_newer,
         wait_for_handshake_in,
     };
+    use super::{ensure_running_in, start_daemon_routed};
     #[cfg(windows)]
     use super::{spawn_daemon, spawn_daemon_with};
     use crate::HandshakeFile;
+    use crate::logon_task::StartRoute;
     use crate::profile::{Overrides, Profile, profiles_to_probe, roots_to_probe_in};
     use crate::supervisor::retire_daemon_in;
     use crate::test_fakes::{
         FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
     };
     use protocol::DaemonHandshake;
+    use std::cell::Cell;
     #[cfg(windows)]
     use std::ffi::OsString;
     #[cfg(windows)]
@@ -1638,6 +1781,146 @@ mod tests {
                 semver::Version::parse(CLIENT_BUILD).expect("the crate version is semver")
             }),
         }
+    }
+
+    /// What the direct start hands back in the bridge's route tests.
+    fn started_here() -> DaemonHandshake {
+        handshake_naming(7777, 1, "started-here", SUPPORTED)
+    }
+
+    #[test]
+    fn the_bridge_returns_the_ordinary_daemon_the_task_started() {
+        let ordinary = ScratchDir::new("bridge-task-ok");
+        let fake = FakeListener::proving("task-token");
+        let task_ran = Cell::new(false);
+        let here = Cell::new(false);
+        let got = block_on(start_daemon_routed(
+            StartRoute::LogonTask,
+            async || {
+                // The task's daemon reports ready in the ordinary profile.
+                let handshake = handshake_naming(4242, fake.port, "task-token", SUPPORTED);
+                write_daemon_json(&ordinary.0, &handshake);
+                task_ran.set(true);
+                Ok(())
+            },
+            async || {
+                wait_for_handshake_in(
+                    &ordinary.0,
+                    SUPPORTED,
+                    HANG_GUARD,
+                    HANG_GUARD,
+                    crate::read_handshake_file,
+                )
+                .await
+            },
+            async || {
+                here.set(true);
+                Ok(started_here())
+            },
+        ))
+        .expect("the task's daemon is returned");
+        assert!(task_ran.get(), "the task was never run");
+        assert!(!here.get(), "a daemon was started here as well");
+        assert_eq!((got.pid, got.port), (4242, fake.port));
+    }
+
+    #[test]
+    fn the_bridge_falls_back_to_a_direct_start_when_the_task_daemon_never_appears() {
+        let ordinary = ScratchDir::new("bridge-task-silent");
+        let task_ran = Cell::new(false);
+        let got = block_on(start_daemon_routed(
+            StartRoute::LogonTask,
+            async || {
+                // Registered and run, but no logon runs it: no daemon appears.
+                task_ran.set(true);
+                Ok(())
+            },
+            async || {
+                wait_for_handshake_in(
+                    &ordinary.0,
+                    SUPPORTED,
+                    Duration::from_millis(300),
+                    HANG_GUARD,
+                    crate::read_handshake_file,
+                )
+                .await
+            },
+            async || Ok(started_here()),
+        ))
+        .expect("the direct start's daemon is returned");
+        assert!(task_ran.get(), "the task route was never tried");
+        assert_eq!(got.auth_token, "started-here");
+    }
+
+    #[test]
+    fn the_bridge_falls_back_when_the_task_cannot_be_registered() {
+        let tried = Cell::new(false);
+        let waited = Cell::new(false);
+        let got = block_on(start_daemon_routed(
+            StartRoute::LogonTask,
+            async || {
+                tried.set(true);
+                Err(anyhow::anyhow!(
+                    "schtasks /Create failed (exit code: 1): ERROR: Access is denied."
+                ))
+            },
+            async || {
+                waited.set(true);
+                Err(anyhow::anyhow!("not reached"))
+            },
+            async || Ok(started_here()),
+        ))
+        .expect("the direct start's daemon is returned");
+        assert!(tried.get(), "the task route was never tried");
+        assert!(!waited.get(), "waited for a task that was never registered");
+        assert_eq!(got.auth_token, "started-here");
+    }
+
+    #[test]
+    fn the_bridge_reuses_a_running_daemon_without_touching_the_task() {
+        let scratch = ScratchDir::new("bridge-fast-path");
+        let fake = FakeListener::proving("good-token");
+        let config = scratch.0.join("config");
+        std::fs::create_dir_all(&config).expect("create the config dir");
+        write_daemon_json(
+            &config,
+            &handshake_naming(4242, fake.port, "good-token", SUPPORTED),
+        );
+        let overrides = Overrides {
+            config: Some(config),
+            binaries: Some(scratch.0.join("binaries")),
+            ..Overrides::default()
+        };
+        let probed = roots_to_probe_in(
+            Profile::Ordinary,
+            &overrides,
+            &scratch.0.join("roaming"),
+            &scratch.0.join("local"),
+        );
+        let touched = Cell::new(false);
+        let got = block_on(ensure_running_in(
+            client(),
+            &probed,
+            &overrides,
+            async |_, _| {
+                start_daemon_routed(
+                    StartRoute::LogonTask,
+                    async || {
+                        touched.set(true);
+                        Ok(())
+                    },
+                    async || {
+                        touched.set(true);
+                        Err(anyhow::anyhow!("not reached"))
+                    },
+                    async || Err(anyhow::anyhow!("no daemon is started")),
+                )
+                .await
+            },
+        ))
+        .expect("the running daemon is reused");
+        assert!(!touched.get(), "the task was touched for a running daemon");
+        assert_eq!((got.pid, got.port), (4242, fake.port));
     }
 
     /// A handshake of `build` speaking `supported_versions`.

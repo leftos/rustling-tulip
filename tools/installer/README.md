@@ -46,7 +46,7 @@ Every `rt-tracer.exe` supervisor survives, so a reinstall over a client with ses
 
 ## What uninstall removes and keeps
 
-Removed: the three exes, `user-path.ps1`, `uninstall.exe`, the install directory, both shortcuts, the `rustling-tulip-daemon` autostart value, the toast activator's `HKCU\Software\Classes\CLSID\{354BE9DC-…}` key and the uninstall registry key.
+Removed: the three exes, `user-path.ps1`, `uninstall.exe`, the install directory, both shortcuts, the `rustling-tulip-daemon` autostart value, the toast activator's `HKCU\Software\Classes\CLSID\{354BE9DC-…}` key, the uninstall registry key and the scheduled task `\leftos\rustling-tulip\daemon-{user SID}` that `rustling-tulipd bridge` may have registered (deleted right after the daemon is stopped; none is not an error).
 
 Before it deletes the files, the uninstaller runs `user-path.ps1 -Remove`, which removes every user PATH entry naming the install directory (same comparison), leaves every other entry and its order as they were, deletes the `Path` value if nothing is left, and broadcasts `WM_SETTINGCHANGE`. It prints `Removed <dir> from the user PATH.` or `<dir> is not on the user PATH.`; a failure is logged the same way as on install and the uninstall carries on.
 

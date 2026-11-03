@@ -277,6 +277,16 @@ SectionEnd
 Section "Uninstall"
   !insertmacro RT_STOP_DAEMON
 
+  ; The scheduled task `rustling-tulipd bridge` registers to start the daemon
+  ; in this user's logon (crates/daemon-client/src/logon_task.rs, `task_name`:
+  ; \leftos\rustling-tulip\daemon-<user SID>). `$$` passes a literal `$` to
+  ; PowerShell.
+  Push $0
+  nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; Unregister-ScheduledTask -TaskPath '\leftos\rustling-tulip\' -TaskName ('daemon-' + $$sid) -Confirm:$$false -ErrorAction SilentlyContinue"`
+  Pop $0
+  DetailPrint "deleting the daemon's scheduled task exited with $0"
+  Pop $0
+
   DeleteRegValue HKCU "${RUNKEY}" "${RUNVALUE}"
   DeleteRegKey HKCU "${TOASTCLSIDKEY}"
   !insertmacro RT_USER_PATH Remove $INSTDIR

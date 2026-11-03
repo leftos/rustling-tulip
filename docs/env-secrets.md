@@ -44,9 +44,9 @@ The `SpawnSession` pre-check refuses it before a checkout confirm and before any
 
 ## A daemon started from an SSH login
 
-A daemon started from a key-based SSH login (logon type 3, as `rustling-tulipd bridge` starts one when none runs) cannot use Credential Manager: every read, save and delete fails with Windows error 1312, `ERROR_NO_SUCH_LOGON_SESSION` (`env_secrets::is_no_logon_session`). A spawn that needs a secret reference, or has a secret row to seal, is refused with "This daemon cannot reach Windows Credential Manager because it was started from an SSH login. Start rustling-tulip on this PC from the desktop app or the login autostart to use saved secrets."
+When the user is also logged on at the host (an Active or Disconnected session), `rustling-tulipd bridge` starts the daemon through a scheduled task in that logon instead, and that daemon uses Credential Manager normally (`docs/daemon-cli.md`). Only when it has no such session, or the task fails, does it start the daemon directly, and then a daemon started from a key-based SSH login (logon type 3) cannot use Credential Manager: every read, save and delete fails with Windows error 1312, `ERROR_NO_SUCH_LOGON_SESSION` (`env_secrets::is_no_logon_session`). A spawn that needs a secret reference, or has a secret row to seal, is refused with "This daemon cannot reach Windows Credential Manager because it was started from an SSH login. Start rustling-tulip on this PC from the desktop app or the login autostart to use saved secrets."
 
-The summarizer's stored key reads as `unreachable` rather than `missing`, and saving or clearing one, or running the Test summary, fails with the same message. To avoid it, start the daemon on the host from the desktop app or the login autostart before connecting over SSH; the bridge then uses that daemon.
+The summarizer's stored key reads as `unreachable` rather than `missing`, and saving or clearing one, or running the Test summary, fails with the same message. To avoid it, be logged on at the host, or start the daemon there from the desktop app or the login autostart before connecting over SSH; the bridge then uses or starts an ordinary daemon.
 
 ## Existing files and cleanup
 

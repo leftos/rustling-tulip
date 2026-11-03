@@ -23,6 +23,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - Dragging the sidebar's edge no longer jumps it past the pointer; the edge now follows the mouse.
 - A daemon running as administrator no longer lets programs without administrator rights start or reach its sessions; they are told to run as administrator.
+- Sessions a remote client starts over SSH on a Windows host where you are signed in no longer run as administrator, and can use saved keys.
 - A session started while no pane shows it, from a preset, auto-resume or another device, now starts instead of hanging.
 - A running app checks for updates every hour instead of once a day, and Settings offers Restart to update as soon as a check finds one.
 
