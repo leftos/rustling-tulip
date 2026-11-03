@@ -8,14 +8,15 @@
 
 use crate::support;
 
-use gpui::{Modifiers, TestAppContext, point, px};
+use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
 use protocol::{
     AttentionReason, ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SpawnConfig,
     SpawnTarget, SplitDirection, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion,
     WorktreeReusePolicy,
 };
 use rustling_tulip_native::{
-    Activity, DETACHED_BANNER, RepoFilter, RuntimeIcon, SidebarView, TabPill, resume_all_label,
+    Activity, DETACHED_BANNER, DIVIDER_WIDTH, RAIL_WIDTH, RepoFilter, RuntimeIcon, SidebarView,
+    TabPill, resume_all_label,
 };
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
@@ -328,7 +329,9 @@ fn sidebar_divider_clamps_persists_and_restores(cx: &mut TestAppContext) {
         (drag_to(&mut h, window - 10.0) - (window - 200.0)).abs() < 0.5,
         "clamped to window - 200"
     );
-    assert!((drag_to(&mut h, 400.0) - 400.0).abs() < 0.5);
+    // The sidebar starts right of the rail, so its width is the pointer's
+    // distance from the rail.
+    assert!((drag_to(&mut h, RAIL_WIDTH + 400.0) - 400.0).abs() < 0.5);
     let saved: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("native-ui.json")).expect("native-ui.json"),
     )
@@ -356,6 +359,40 @@ fn sidebar_divider_clamps_persists_and_restores(cx: &mut TestAppContext) {
     );
     h.click_on("activity-sessions");
     assert_eq!(h.bounds("sidebar-panel").size.width, px(400.0));
+}
+
+#[gpui::test]
+fn dragging_the_sidebar_divider_moves_it_by_the_drag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    // The divider's left edge follows the pointer, so a press at its centre
+    // lands it at most half its width off the drag.
+    let slack = DIVIDER_WIDTH / 2.0 + 1.0;
+    let x0 = h.bounds("sidebar-divider").origin.x / px(1.0);
+    let from = h.center("sidebar-divider");
+
+    h.cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    h.cx.simulate_mouse_move(
+        point(from.x + px(10.0), from.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    h.cx.run_until_parked();
+    let first = h.bounds("sidebar-divider").origin.x / px(1.0) - x0;
+    assert!(
+        (first - 10.0).abs() <= slack,
+        "a first move of 10 px moved the divider {first} px"
+    );
+
+    let to = point(from.x + px(80.0), from.y);
+    h.cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    h.cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    h.cx.run_until_parked();
+    let moved = h.bounds("sidebar-divider").origin.x / px(1.0) - x0;
+    assert!(
+        (moved - 80.0).abs() <= slack,
+        "an 80 px drag moved the divider {moved} px"
+    );
 }
 
 #[gpui::test]

@@ -370,7 +370,7 @@ impl RootView {
 
     /// Changes the rail's panel by `change`, closing the menus the change
     /// would strand.
-    fn change_activity(
+    pub(crate) fn change_activity(
         &mut self,
         change: impl FnOnce(&mut SidebarModel),
         window: &mut Window,

@@ -17,6 +17,7 @@ use crate::RootView;
 use crate::driver::capture;
 use crate::driver::handlers;
 use crate::driver::pipe::{self, Call};
+use crate::driver::pointer::window_address;
 use crate::driver::protocol::{ErrorCode, Outcome, Reply, Request};
 use crate::driver::wait::{Step, WaitLoop};
 
@@ -210,17 +211,6 @@ async fn wait_for_frame(frame: oneshot::Receiver<()>, cx: &AsyncApp) -> Frame {
         Either::Left((Ok(()), _)) => Frame::Drawn,
         Either::Left((Err(_), _)) => Frame::Closed,
         Either::Right(((), _)) => Frame::TimedOut,
-    }
-}
-
-/// The address of `window`'s Win32 handle, read fresh, which crosses
-/// threads where an `HWND` cannot.
-fn window_address(window: &Window) -> Result<usize, String> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    // `Window::window_handle` is gpui's own handle; the raw one is the trait's.
-    match HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
-        Ok(RawWindowHandle::Win32(handle)) => Ok(handle.hwnd.get().cast_unsigned()),
-        other => Err(format!("the window has no Win32 handle ({other:?})")),
     }
 }
 

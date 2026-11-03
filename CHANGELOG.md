@@ -20,6 +20,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ### Fixed
 
+- Dragging the sidebar's edge no longer jumps it past the pointer; the edge now follows the mouse.
 - A session started while no pane shows it, from a preset, auto-resume or another device, now starts instead of hanging.
 - A running app checks for updates every hour instead of once a day, and Settings offers Restart to update as soon as a check finds one.
 

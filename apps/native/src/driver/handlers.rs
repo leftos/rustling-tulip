@@ -8,9 +8,10 @@ use gpui::{App, Bounds, Context, Entity, Keystroke, Modifiers, Pixels, Window};
 use serde_json::{Value, json};
 
 use crate::RootView;
+use crate::driver::pointer;
 use crate::driver::protocol::{
-    ActionParams, ErrorCode, FindParams, KeyParams, PaneTextParams, ParamError, Reply, Request,
-    TypeTextParams, WaitParams,
+    ActionParams, ClickParams, DragParams, ErrorCode, FindParams, KeyParams, MoveParams,
+    PaneTextParams, ParamError, Reply, Request, Target, TypeTextParams, WaitParams, WheelParams,
 };
 use crate::driver::registry::{self, Entry};
 use crate::driver::wait::{PREDICATE_SHAPES, Predicate, StateTest, parse_predicate, value_at};
@@ -48,6 +49,10 @@ pub fn handle(
             "screenshot is answered only over the driver pipe".to_owned(),
         )),
         "wait_for" => wait_for(request),
+        "click" => click(request, window, cx),
+        "move" => move_to(request, window, cx),
+        "drag" => drag(request, window, cx),
+        "wheel" => wheel(request, window, cx),
         _ => return Reply::unknown_method(request.id, &request.method),
     };
     outcome.map_or_else(|failed| failed, |result| Reply::ok(request.id, result))
@@ -254,6 +259,203 @@ pub fn wait_read(
     }
 }
 
+/// What a pointer request carrying `modifiers` is refused with: gpui reads
+/// them from the keyboard's state, which a posted message cannot set.
+const MODIFIERS_HINT: &str =
+    "posted pointer input cannot carry modifiers; press a chord with key, or use action";
+
+/// The most names a `not_found` hint lists.
+const NEAR_NAMES: usize = 10;
+
+/// The `refused` reply to a pointer request with `modifiers`, whatever
+/// their value.
+fn refuse_modifiers(request: &Request) -> Result<(), Reply> {
+    if request.params.get("modifiers").is_some() {
+        return Err(Reply::error(
+            request.id,
+            ErrorCode::Refused,
+            format!("{} cannot press modifiers", request.method),
+            Some(MODIFIERS_HINT.to_owned()),
+        ));
+    }
+    Ok(())
+}
+
+/// The logical window point `target` aims at: a point inside the window,
+/// or the centre of an element's visible part in the latest frame.
+fn resolve(
+    request: &Request,
+    target: &Target,
+    window: &Window,
+    cx: &App,
+) -> Result<(f32, f32), Reply> {
+    match target {
+        Target::Point { x, y } => {
+            let size = window.viewport_size();
+            let (width, height) = (f32::from(size.width), f32::from(size.height));
+            if (0.0..width).contains(x) && (0.0..height).contains(y) {
+                Ok((*x, *y))
+            } else {
+                Err(bad_params(
+                    request,
+                    ParamError {
+                        message: format!(
+                            "the point ({x}, {y}) is outside the {width}x{height} window"
+                        ),
+                        hint: None,
+                    },
+                ))
+            }
+        }
+        Target::Element(name) => element_centre(request, name, window, cx),
+    }
+}
+
+/// The centre of the visible part of element `name`.
+fn element_centre(
+    request: &Request,
+    name: &str,
+    window: &Window,
+    cx: &App,
+) -> Result<(f32, f32), Reply> {
+    let id = window.window_handle().window_id();
+    let Some(entry) = registry::lookup(cx, id, name) else {
+        return Err(Reply::error(
+            request.id,
+            ErrorCode::NotFound,
+            format!("no element {name}"),
+            Some(near_names(&registry::names(cx, id), name)),
+        ));
+    };
+    if entry.visible.is_empty() {
+        return Err(request.fail(
+            ErrorCode::NotVisible,
+            format!("{name} is painted, but a clipping ancestor hides all of it"),
+        ));
+    }
+    let visible = entry.visible;
+    Ok((
+        f32::from(visible.origin.x) + f32::from(visible.size.width) / 2.0,
+        f32::from(visible.origin.y) + f32::from(visible.size.height) / 2.0,
+    ))
+}
+
+/// The hint for a name the latest frame did not paint: up to
+/// [`NEAR_NAMES`] painted names sharing its longest prefix that ends at a
+/// `-` or `:`, else the first painted names.
+fn near_names(names: &[String], name: &str) -> String {
+    let cuts = name
+        .char_indices()
+        .filter(|(_, ch)| matches!(ch, '-' | ':'))
+        .map(|(at, ch)| at + ch.len_utf8());
+    for cut in cuts.rev() {
+        let prefix = &name[..cut];
+        let near: Vec<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|painted| painted.starts_with(prefix))
+            .take(NEAR_NAMES)
+            .collect();
+        if !near.is_empty() {
+            return format!(r#"names starting with "{prefix}": {}"#, near.join(", "));
+        }
+    }
+    let first: Vec<&str> = names.iter().map(String::as_str).take(NEAR_NAMES).collect();
+    format!("painted names: {}", first.join(", "))
+}
+
+/// The window's handle and scale, for posting: refused when it has no
+/// Win32 handle.
+fn posting_window(request: &Request, window: &Window) -> Result<(usize, f32), Reply> {
+    let address = pointer::window_address(window)
+        .map_err(|reason| request.fail(ErrorCode::Refused, reason))?;
+    Ok((address, window.scale_factor()))
+}
+
+fn post(request: &Request, address: usize, messages: &[pointer::Posted]) -> Result<(), Reply> {
+    pointer::post(address, messages).map_err(|reason| request.fail(ErrorCode::Refused, reason))
+}
+
+fn point(at: (f32, f32)) -> Value {
+    json!({ "x": at.0, "y": at.1 })
+}
+
+/// Clicks the params' button at their target, once or twice.
+fn click(request: &Request, window: &Window, cx: &App) -> Result<Value, Reply> {
+    let params: ClickParams = request.params()?;
+    let (target, button, count) = params
+        .read()
+        .map_err(|refused| bad_params(request, refused))?;
+    refuse_modifiers(request)?;
+    let at = resolve(request, &target, window, cx)?;
+    let (address, scale) = posting_window(request, window)?;
+    post(
+        request,
+        address,
+        &pointer::click_messages(pointer::physical(at, scale), button, count),
+    )?;
+    Ok(json!({ "at": point(at) }))
+}
+
+/// Moves the pointer to the params' target.
+fn move_to(request: &Request, window: &Window, cx: &App) -> Result<Value, Reply> {
+    let params: MoveParams = request.params()?;
+    let target = params
+        .target()
+        .map_err(|refused| bad_params(request, refused))?;
+    refuse_modifiers(request)?;
+    let at = resolve(request, &target, window, cx)?;
+    let (address, scale) = posting_window(request, window)?;
+    post(
+        request,
+        address,
+        &pointer::move_messages(pointer::physical(at, scale)),
+    )?;
+    Ok(json!({ "at": point(at) }))
+}
+
+/// Drags with the left button from the params' `from` to their `to`.
+fn drag(request: &Request, window: &Window, cx: &App) -> Result<Value, Reply> {
+    let params: DragParams = request.params()?;
+    let (from, to, steps) = params
+        .read()
+        .map_err(|refused| bad_params(request, refused))?;
+    refuse_modifiers(request)?;
+    let from = resolve(request, &from, window, cx)?;
+    let to = resolve(request, &to, window, cx)?;
+    let (address, scale) = posting_window(request, window)?;
+    let path: Vec<(i32, i32)> = pointer::drag_path(from, to, steps)
+        .into_iter()
+        .map(|at| pointer::physical(at, scale))
+        .collect();
+    post(
+        request,
+        address,
+        &pointer::drag_messages(pointer::physical(from, scale), &path),
+    )?;
+    Ok(json!({ "from": point(from), "to": point(to) }))
+}
+
+/// Turns the wheel the params' notches at their target.
+fn wheel(request: &Request, window: &Window, cx: &App) -> Result<Value, Reply> {
+    let params: WheelParams = request.params()?;
+    let (target, notches) = params
+        .read()
+        .map_err(|refused| bad_params(request, refused))?;
+    refuse_modifiers(request)?;
+    let at = resolve(request, &target, window, cx)?;
+    let (address, scale) = posting_window(request, window)?;
+    let client = pointer::physical(at, scale);
+    let screen = pointer::client_to_screen(address, client)
+        .map_err(|reason| request.fail(ErrorCode::Refused, reason))?;
+    post(
+        request,
+        address,
+        &pointer::wheel_messages(client, screen, notches),
+    )?;
+    Ok(json!({ "at": point(at) }))
+}
+
 /// One named action and its arguments.
 #[derive(Debug)]
 enum Action {
@@ -415,7 +617,9 @@ impl RootView {
             Action::ToggleSidebar => self.toggle_sidebar(window, cx),
             Action::SelectTab(tab_id) => self.driver_select_tab(&tab_id, window, cx)?,
             Action::FocusPane(pane_id) => self.driver_focus_pane(&pane_id, window, cx)?,
-            Action::ShowActivity(item) => self.driver_show_activity(item, window, cx),
+            Action::ShowActivity(item) => {
+                self.change_activity(|sidebar| sidebar.show_activity(item), window, cx);
+            }
             Action::SetHover(hovered) => self.set_window_hover_override(hovered, cx),
         }
         cx.notify();
@@ -477,33 +681,5 @@ impl RootView {
         self.tabs.focus_pane(&tab_id, pane_id);
         self.after_tabs_change(window, cx);
         Ok(())
-    }
-
-    /// Shows `item`'s rail panel as the rail does: the menus the switch
-    /// would strand close, and an unfold gives the panes their new width.
-    fn driver_show_activity(
-        &mut self,
-        item: Activity,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_shell_menu(window, cx);
-        self.close_sc_picker(window, cx);
-        self.close_sc_file_menu(window, cx);
-        self.close_more_menu(window, cx);
-        let was_collapsed = self.sidebar.is_collapsed();
-        self.sidebar.show_activity(item);
-        if was_collapsed {
-            self.mark_active_panes_resized(cx);
-        }
-        if item != Activity::Sessions {
-            self.detached_stop_all.disarm();
-            self.row_focus = None;
-            self.hovered_container = None;
-        }
-        self.drag = None;
-        self.save_ui();
-        self.seed_history();
-        self.arm_needs_you_repaint(cx);
     }
 }

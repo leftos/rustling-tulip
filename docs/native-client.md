@@ -955,6 +955,8 @@ Three tiers, all Rust tests:
 
   A posted move is followed at once by `WM_MOUSELEAVE` (gpui's Windows event loop), so UI shown only while the pointer is over the window, such as the sidebar's hover controls, never shows under posted input; specs set it in process with `RootView::set_window_hover_override`.
 
+  `.\rt.ps1 native-smoke` builds and runs the smoke specs with `--features driver`. The driven specs launch the exe as a driven run (`RUSTLING_TULIP_DRIVER=1`) and use the endpoint's pointer methods: `driven::smoke_driver_click_switches_the_rail_panel`, `driven::smoke_driver_drag_moves_the_sidebar_divider`, `driven::smoke_driver_wheel_scrolls_a_pane_back` and `driven::smoke_driver_right_click_opens_a_menu`.
+
   `smoke_keys_posted_while_the_client_stalls_reach_the_shell_in_order` suspends the client's UI thread (`SuspendThread`) right after the `o` of `echo` is posted, so the Space after it must wait for the thaw, which reproduces a load-only fault without a CPU burn.
 
   Pixels are read with `PrintWindow(PW_RENDERFULLCONTENT)` from the threaded show and probed for known UI colours and for a change in the pane after typing; the spec checks the window is still cloaked and not foreground after each capture. `smoke_window_has_noactivate_and_sits_below_foreground` checks the extended style and that the foreground window is above the smoke window in the Z order.
@@ -985,14 +987,22 @@ An error reply names a code (`unknown_method`, `bad_params`, `not_found`, `not_v
 | Method | Params | Result | Errors |
 |---|---|---|---|
 | `action` | `name`, `args?` | `{"action": name}` | `bad_params` for an unknown name (the hint lists the names); `refused` for `open_spawn` while another dialog is open; `not_found` for an unknown tab or pane id |
+| `click` | a target (`x`, `y` or `element`), `button?`: `left` (default) or `right`, `count?`: 1 (default) or 2 | `{"at": {"x", "y"}}` in logical px | target errors as below; `bad_params` for a `count` other than 1 or 2 or an unknown `button` |
+| `drag` | `from`, `to`: each a target object, `steps?`: 2..=64 (default 8) | `{"from", "to"}`, each a point | target errors as below, prefixed `from:` or `to:`; `bad_params` for `steps` outside 2..=64. Every step moves more than 3 px when the distance allows |
 | `find` | `prefix?` | the registry's names starting with `prefix`, sorted, each `{"name", "bounds", "visible"}` | none |
 | `key` | `keys`: one keystroke, such as `ctrl-,` | `{"pressed": keys}` | `bad_params` for more than one keystroke or an unreadable one |
+| `move` | a target (`x`, `y` or `element`) | `{"at": {"x", "y"}}` | target errors as below |
 | `pane_text` | `pane?` | `{"pane", "lines", "text"}`: the visible rows only, never scrollback; the default pane is the active tab's focused pane, else its first | `not_found` for an unknown pane (the hint lists the active tab's panes) or a tab with no pane |
 | `ping` | none | `{"version"}` | none |
 | `screenshot` | none | `{"path", "width", "height"}` | `refused` as above; the in-process handler also refuses it, since only the pipe answers it |
 | `state` | none | the window's size and scale, `active_tab`, `tabs`, the shown tab's `panes`, `sessions` and `overlay` | none |
 | `type_text` | `text` | `{"typed": n}`, one printable character per keystroke, into whatever holds focus | `bad_params` for any control character (U+0000 to U+001F, U+007F), the hint saying to press Enter, Tab or Escape with `key` |
 | `wait_for` | `until`, `timeout_ms?` (default 5000, clamped to 100..=60000), `interval_ms?` (default 100, clamped to 20..=1000) | always ok: `{"met", "waited_ms", "last"}`, `last` being the final value the predicate read | `bad_params` ("bad until: ...") for a malformed predicate |
+| `wheel` | a target (`x`, `y` or `element`), `notches`: ±1..=273, positive scrolling up | `{"at": {"x", "y"}}` | target errors as below; `bad_params` for 0 or a count out of range |
+
+The pointer methods (`click`, `drag`, `move`, `wheel`; `apps/native/src/driver/pointer.rs`) post window messages to the client's own hwnd, with logical px converted to physical client pixels, and each adds `"drawn": false` when the frame wait times out. A target is a point (`x` and `y`) or an `element` (a registry name, aimed at the centre of its visible box), never both. `bad_params` covers a missing or double target ("give a point or an element to aim at", "... not both"), a half point ("a point needs both x and y"), a non-finite number and a point outside the window ("the point (x, y) is outside the WxH window"). An unknown element is `not_found` ("no element <name>", the hint listing near names), an element a clipping ancestor hides is `not_visible`, and a window with no handle is `refused`.
+
+Posted input cannot carry modifiers, since gpui reads them from `GetKeyState`: any pointer request with `modifiers` is `refused` ("posted pointer input cannot carry modifiers; press a chord with key, or use action"). A posted move is followed by `WM_MOUSELEAVE`, so hover-only UI needs `action` `set_hover`. Posted pointer input reaches only a real window, so the in-process UI specs cover the refusals only, and the driven smoke specs prove the rest on the real exe.
 
 `action` names are `open_settings`, `new_shell`, `open_spawn`, `toggle_sidebar`, `select_tab` (`{"id"}`), `focus_pane` (`{"id"}`), `show_activity` (`{"name"}`: `sessions`, `needs_you` or `source_control`) and `set_hover` (`{"value"}`: `true`, `false` or `null`).
 

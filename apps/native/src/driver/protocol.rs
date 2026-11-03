@@ -10,16 +10,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Every method a request may name, sorted.
-pub const METHODS: [&str; 9] = [
+pub const METHODS: [&str; 13] = [
     "action",
+    "click",
+    "drag",
     "find",
     "key",
+    "move",
     "pane_text",
     "ping",
     "screenshot",
     "state",
     "type_text",
     "wait_for",
+    "wheel",
 ];
 
 /// One call from a driver client.
@@ -207,6 +211,220 @@ pub struct WaitParams {
     pub interval_ms: Option<u64>,
 }
 
+/// Which mouse button a `click` presses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Button {
+    #[default]
+    Left,
+    Right,
+}
+
+/// Where a pointer method aims: a point in logical window pixels, or the
+/// centre of a registry element's visible part.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    Point { x: f32, y: f32 },
+    Element(String),
+}
+
+/// The target a request writes as `x` and `y`, or as `element`: exactly
+/// one of the two, and a point's coordinates finite.
+fn target(x: Option<f32>, y: Option<f32>, element: Option<&str>) -> Result<Target, ParamError> {
+    let refused = |message: &str| ParamError {
+        message: message.to_owned(),
+        hint: Some(r#"aim with {"x": <px>, "y": <px>} or {"element": "<name>"}"#.to_owned()),
+    };
+    match (x, y, element) {
+        (None, None, Some(name)) => Ok(Target::Element(name.to_owned())),
+        (Some(x), Some(y), None) if x.is_finite() && y.is_finite() => Ok(Target::Point { x, y }),
+        (Some(_), Some(_), None) => Err(refused("x and y must be finite numbers")),
+        (None, None, None) => Err(refused("give a point or an element to aim at")),
+        (_, _, Some(_)) => Err(refused("give a point or an element, not both")),
+        _ => Err(refused("a point needs both x and y")),
+    }
+}
+
+/// A target object: `drag`'s `from` and `to`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetParams {
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
+    #[serde(default)]
+    pub element: Option<String>,
+}
+
+impl TargetParams {
+    /// The target these params write.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong when they write neither a point nor an element, or
+    /// both, or a point that is not finite.
+    pub fn target(&self) -> Result<Target, ParamError> {
+        target(self.x, self.y, self.element.as_deref())
+    }
+}
+
+/// `click`'s params: the target, the button (left by default) and how many
+/// clicks, 1 or 2. `modifiers` is read only to refuse the request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClickParams {
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
+    #[serde(default)]
+    pub element: Option<String>,
+    #[serde(default)]
+    pub button: Option<Button>,
+    #[serde(default)]
+    pub count: Option<u8>,
+    #[serde(default)]
+    pub modifiers: Option<Value>,
+}
+
+impl ClickParams {
+    /// The target, the button and the click count these params write.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the target, or a count other than 1 or 2.
+    pub fn read(&self) -> Result<(Target, Button, u8), ParamError> {
+        let target = target(self.x, self.y, self.element.as_deref())?;
+        let count = self.count.unwrap_or(1);
+        if !(1..=2).contains(&count) {
+            return Err(ParamError {
+                message: format!("count is {count}; a click counts 1 or 2"),
+                hint: None,
+            });
+        }
+        Ok((target, self.button.unwrap_or_default(), count))
+    }
+}
+
+/// `move`'s params: the target. `modifiers` is read only to refuse the
+/// request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveParams {
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
+    #[serde(default)]
+    pub element: Option<String>,
+    #[serde(default)]
+    pub modifiers: Option<Value>,
+}
+
+impl MoveParams {
+    /// The target these params write.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the target.
+    pub fn target(&self) -> Result<Target, ParamError> {
+        target(self.x, self.y, self.element.as_deref())
+    }
+}
+
+/// The fewest and most moves a `drag` takes between its press and its
+/// release, and how many it takes by default.
+pub const DRAG_STEPS: std::ops::RangeInclusive<u8> = 2..=64;
+const DEFAULT_DRAG_STEPS: u8 = 8;
+
+/// `drag`'s params: where the left button goes down and where it comes up,
+/// and how many moves lie between. `modifiers` is read only to refuse the
+/// request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DragParams {
+    pub from: TargetParams,
+    pub to: TargetParams,
+    #[serde(default)]
+    pub steps: Option<u8>,
+    #[serde(default)]
+    pub modifiers: Option<Value>,
+}
+
+impl DragParams {
+    /// The two targets and the step count these params write.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with either target, or a step count outside
+    /// [`DRAG_STEPS`].
+    pub fn read(&self) -> Result<(Target, Target, u8), ParamError> {
+        let from = self.from.target().map_err(|refused| ParamError {
+            message: format!("from: {}", refused.message),
+            hint: refused.hint,
+        })?;
+        let to = self.to.target().map_err(|refused| ParamError {
+            message: format!("to: {}", refused.message),
+            hint: refused.hint,
+        })?;
+        let steps = self.steps.unwrap_or(DEFAULT_DRAG_STEPS);
+        if !DRAG_STEPS.contains(&steps) {
+            return Err(ParamError {
+                message: format!(
+                    "steps is {steps}; a drag takes {} to {} steps",
+                    DRAG_STEPS.start(),
+                    DRAG_STEPS.end()
+                ),
+                hint: None,
+            });
+        }
+        Ok((from, to, steps))
+    }
+}
+
+/// The most notches one `wheel` turns either way: its delta, 120 a notch,
+/// must fit the message's signed 16-bit word.
+pub const MAX_NOTCHES: i32 = 273;
+
+/// `wheel`'s params: the target and the notches to turn, positive up (away
+/// from the user). `modifiers` is read only to refuse the request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WheelParams {
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
+    #[serde(default)]
+    pub element: Option<String>,
+    pub notches: i32,
+    #[serde(default)]
+    pub modifiers: Option<Value>,
+}
+
+impl WheelParams {
+    /// The target and the notches these params write.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the target, or notches that are zero or past
+    /// [`MAX_NOTCHES`] either way.
+    pub fn read(&self) -> Result<(Target, i32), ParamError> {
+        let target = target(self.x, self.y, self.element.as_deref())?;
+        if self.notches == 0 || self.notches.unsigned_abs() > MAX_NOTCHES.unsigned_abs() {
+            return Err(ParamError {
+                message: format!(
+                    "notches is {}; turn 1 to {MAX_NOTCHES} notches, positive up, negative down",
+                    self.notches
+                ),
+                hint: None,
+            });
+        }
+        Ok((target, self.notches))
+    }
+}
+
 /// Why a request's params were refused, as its `bad_params` reply says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParamError {
@@ -268,7 +486,7 @@ impl KeyParams {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{ErrorCode, Failure, FindParams, KeyParams, Outcome, Reply, Request};
+    use super::{ErrorCode, Failure, FindParams, KeyParams, Outcome, Reply, Request, WheelParams};
 
     fn request(text: &str) -> Request {
         Request::decode(text).expect("a request")
@@ -316,7 +534,7 @@ mod tests {
                 "error": {
                     "code": "unknown_method",
                     "message": "unknown method: nope",
-                    "hint": "methods: action, find, key, pane_text, ping, screenshot, state, type_text, wait_for",
+                    "hint": "methods: action, click, drag, find, key, move, pane_text, ping, screenshot, state, type_text, wait_for, wheel",
                 },
             })
         );
@@ -386,6 +604,25 @@ mod tests {
         assert_eq!(
             refused.hint.as_deref(),
             Some("send ctrl-k, then ctrl-s, as two requests")
+        );
+    }
+
+    #[test]
+    fn wheel_refuses_i32_min_notches() {
+        let params = WheelParams {
+            x: None,
+            y: None,
+            element: Some("pane-grid-p1".to_owned()),
+            notches: i32::MIN,
+            modifiers: None,
+        };
+        let refused = params
+            .read()
+            .expect_err("i32::MIN notches are refused before anything is posted");
+        assert!(
+            refused.message.contains("notches is"),
+            "{}",
+            refused.message
         );
     }
 

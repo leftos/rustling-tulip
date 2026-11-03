@@ -551,6 +551,11 @@ struct Smoke {
 }
 
 fn open(test: &str) -> Smoke {
+    open_with(test, launch_client)
+}
+
+/// The smoke setup, with the client started by `launch`.
+fn open_with(test: &str, launch: fn(&LiveDaemon) -> Client) -> Smoke {
     // SAFETY: sets this process's DPI mode, so window sizes read in physical
     // pixels; a second call in the same process fails harmlessly because the
     // mode is already set.
@@ -559,7 +564,7 @@ fn open(test: &str) -> Smoke {
     let session = seed_shell(&daemon);
     seed_layout(&daemon);
     pin_contrast(&daemon);
-    let client = launch_client(&daemon);
+    let client = launch(&daemon);
     let hwnd = find_window(client.0.id());
     assert_out_of_the_way(hwnd);
     Smoke {
@@ -1114,6 +1119,14 @@ fn smoke_posted_click_on_the_rail_switches_the_panel() {
         physical(RAIL_ITEM_HEIGHT * 2.5, scale),
     );
     click_at(hwnd, at);
+    wait_source_control_active(hwnd, &format!("the posted click at {at:?}"));
+    assert_out_of_the_way(smoke.hwnd);
+}
+
+/// Captures the window until the rail's active bar has moved from Sessions
+/// to Source control, the effect of `click`, a description of the click.
+fn wait_source_control_active(hwnd: HWND, click: &str) {
+    let scale = scale(hwnd);
     let deadline = Instant::now() + PAINT_TIMEOUT;
     loop {
         let frame = capture(hwnd);
@@ -1122,11 +1135,11 @@ fn smoke_posted_click_on_the_rail_switches_the_panel() {
             frame.rail_bar_seen_at(0, scale),
         );
         if third && !first {
-            break;
+            return;
         }
         assert!(
             Instant::now() < deadline,
-            "the posted click at {at:?} (scale {scale}) did not move the rail's active bar within \
+            "{click} (scale {scale}) did not move the rail's active bar within \
              {PAINT_TIMEOUT:?}: Source control's strip shows {} and Sessions' strip shows {} (the \
              active bar is the {ACCENT:06x} accent)",
             if third { "the accent" } else { "no accent" },
@@ -1134,5 +1147,337 @@ fn smoke_posted_click_on_the_rail_switches_the_panel() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_out_of_the_way(smoke.hwnd);
+}
+
+/// The driven smoke specs: the client as a driven run, steered through its
+/// driver pipe, whose pointer methods post window messages to its window.
+#[cfg(feature = "driver")]
+mod driven {
+    use std::fs::{File, OpenOptions};
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use rustling_tulip_native::SIDEBAR_DEFAULT_WIDTH;
+    use rustling_tulip_native::driver_gate::DRIVER_ENV;
+    use serde_json::{Value, json};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    use super::{
+        Client, LiveDaemon, OFFSCREEN_ENV, Smoke, assert_no_layout_chooser, assert_out_of_the_way,
+        open_with, wait_connected, wait_painted, wait_source_control_active,
+    };
+
+    /// A hang guard on each wait for the driver: its discovery file, one
+    /// reply, or an effect read back through it; not an expected duration.
+    const DRIVER_TIMEOUT: Duration = Duration::from_secs(60);
+    /// How long a spec's `wait_for` waits at most, inside [`DRIVER_TIMEOUT`].
+    const WAIT_FOR_MS: u64 = 30_000;
+    /// The sidebar's narrowest width (`MIN_WIDTH` in
+    /// `apps/native/src/sidebar.rs`): `clamp_width` keeps the panes at least
+    /// this wide too.
+    const SIDEBAR_MIN_WIDTH: f64 = 200.0;
+    /// How far the drag spec moves the sidebar divider, in logical pixels.
+    const DRAG_BY: f64 = 80.0;
+    /// How close the divider must land to where the drag aimed.
+    const DRAG_SLACK: f64 = 4.0;
+
+    /// The client binary as a driven run: [`super::launch_client`]'s cloaked
+    /// window with the driver endpoint on. The driver gate
+    /// (`apps/native/src/driver_gate.rs`) also needs the isolated folders,
+    /// which the daemon's variables carry, and every registered agent's
+    /// override variable, set to the fake the daemon runs.
+    fn launch_driven_client(daemon: &LiveDaemon) -> Client {
+        let exe = env!("CARGO_BIN_EXE_rustling-tulip-native");
+        let envs = daemon.envs();
+        let mut command = Command::new(exe);
+        command
+            .envs(envs.iter().map(|(key, value)| (*key, value.as_os_str())))
+            .env(OFFSCREEN_ENV, "1")
+            .env(DRIVER_ENV, "1");
+        for plugin in agent_registry::all() {
+            let variable = plugin.program_env_var();
+            let (_, fake) = envs
+                .iter()
+                .find(|(key, _)| *key == variable)
+                .expect("the daemon's variables carry every agent's override");
+            command.env(variable, fake);
+        }
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("launch rustling-tulip-native as a driven run");
+        Client(child)
+    }
+
+    /// The id of the process that owns `hwnd`.
+    fn window_pid(hwnd: HWND) -> u32 {
+        let mut pid = 0;
+        // SAFETY: a plain query on a live window, into a local.
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
+        pid
+    }
+
+    /// One connection to a driven client's pipe, one request at a time.
+    struct Driver {
+        /// The pipe, held here between calls; a call lends it to the thread
+        /// that reads its reply.
+        pipe: Option<BufReader<File>>,
+        next_id: u64,
+    }
+
+    impl Driver {
+        /// Connects to client `pid`'s pipe once its discovery file shows
+        /// the endpoint is up.
+        fn connect(pid: u32) -> Self {
+            let discovery = std::env::temp_dir()
+                .join("rustling-tulip-driver")
+                .join(format!("{pid}.json"));
+            let deadline = Instant::now() + DRIVER_TIMEOUT;
+            while !discovery.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "hung: no discovery file {} within {DRIVER_TIMEOUT:?}",
+                    discovery.display()
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let pipe = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(format!(r"\\.\pipe\rt-driver-{pid}"))
+                .expect("open the driver pipe");
+            Self {
+                pipe: Some(BufReader::new(pipe)),
+                next_id: 1,
+            }
+        }
+
+        /// The reply to `method` with `params`. The reply is read on a
+        /// thread of its own, so a client that never answers fails the spec
+        /// after [`DRIVER_TIMEOUT`]; the write happens first, since a
+        /// synchronous pipe handle runs one read or write at a time.
+        fn call(&mut self, method: &str, params: &Value) -> Value {
+            let id = self.next_id;
+            self.next_id += 1;
+            let mut pipe = self.pipe.take().expect("no call is in flight");
+            let request = json!({"id": id, "method": method, "params": params});
+            let mut line = serde_json::to_string(&request).expect("encode a driver request");
+            line.push('\n');
+            pipe.get_mut()
+                .write_all(line.as_bytes())
+                .expect("write to the driver pipe");
+            let (sent, replied) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut reply = String::new();
+                let read = pipe.read_line(&mut reply).map(|_| reply);
+                let _ = sent.send((pipe, read));
+            });
+            let (pipe, read) = replied
+                .recv_timeout(DRIVER_TIMEOUT)
+                .map_err(|_| format!("hung: no reply to {request} within {DRIVER_TIMEOUT:?}"))
+                .expect("the driver answers");
+            self.pipe = Some(pipe);
+            let reply: Value = serde_json::from_str(&read.expect("read the driver pipe"))
+                .expect("a JSON driver reply");
+            assert_eq!(
+                reply["id"],
+                json!(id),
+                "the reply answers {request}: {reply}"
+            );
+            reply
+        }
+
+        /// The result of `method` with `params`, failing the spec with the
+        /// error it got instead.
+        fn ok(&mut self, method: &str, params: &Value) -> Value {
+            let reply = self.call(method, params);
+            assert!(
+                reply.get("error").is_none(),
+                "{method} {params} failed: {reply}"
+            );
+            reply["result"].clone()
+        }
+
+        /// Waits with `wait_for` until `until` holds, failing the spec with
+        /// the last value read when it does not within [`WAIT_FOR_MS`].
+        fn wait(&mut self, until: &Value, what: &str) {
+            let waited = self.ok(
+                "wait_for",
+                &json!({"until": until, "timeout_ms": WAIT_FOR_MS}),
+            );
+            assert_eq!(
+                waited["met"],
+                json!(true),
+                "{what}: {until} did not hold within {WAIT_FOR_MS} ms; last read {}",
+                waited["last"]
+            );
+        }
+
+        /// The element `name` as `find` lists it.
+        fn element(&mut self, name: &str) -> Value {
+            let found = self.ok("find", &json!({"prefix": name}));
+            found
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["name"] == json!(name)))
+                .cloned()
+                .ok_or_else(|| format!("find lists no {name}: {found}"))
+                .expect("the element is painted")
+        }
+    }
+
+    /// The smoke setup with a driven client, painted and connected, and a
+    /// connection to its driver pipe.
+    fn open_driven(test: &str) -> (Smoke, Driver) {
+        let smoke = open_with(test, launch_driven_client);
+        wait_connected(&smoke);
+        wait_painted(smoke.hwnd);
+        assert_no_layout_chooser(&smoke);
+        let driver = Driver::connect(window_pid(smoke.hwnd));
+        (smoke, driver)
+    }
+
+    fn number(value: &Value) -> f64 {
+        value.as_f64().expect("a number")
+    }
+
+    #[test]
+    #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+    fn smoke_driver_click_switches_the_rail_panel() {
+        let (smoke, mut driver) = open_driven("smoke-driver-click");
+        driver.element("activity-source-control");
+
+        driver.ok("click", &json!({"element": "activity-source-control"}));
+
+        wait_source_control_active(smoke.hwnd, "the driver's click on activity-source-control");
+        assert_out_of_the_way(smoke.hwnd);
+    }
+
+    #[test]
+    #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+    fn smoke_driver_drag_moves_the_sidebar_divider() {
+        let (smoke, mut driver) = open_driven("smoke-driver-drag");
+        let bounds = driver.element("sidebar-divider")["bounds"].clone();
+        let x0 = number(&bounds["x"]);
+        let centre = (
+            x0 + number(&bounds["w"]) / 2.0,
+            number(&bounds["y"]) + number(&bounds["h"]) / 2.0,
+        );
+        let width = number(&driver.ok("state", &json!({}))["window"]["width"]);
+        // The sidebar starts at its default width and stops where the panes
+        // keep their minimum.
+        let room = width - SIDEBAR_MIN_WIDTH - f64::from(SIDEBAR_DEFAULT_WIDTH);
+        let expected = x0 + DRAG_BY.min(room);
+
+        driver.ok(
+            "drag",
+            &json!({
+                "from": {"element": "sidebar-divider"},
+                "to": {"x": centre.0 + DRAG_BY, "y": centre.1},
+            }),
+        );
+
+        let deadline = Instant::now() + DRIVER_TIMEOUT;
+        loop {
+            let x = number(&driver.element("sidebar-divider")["bounds"]["x"]);
+            if (x - expected).abs() <= DRAG_SLACK {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the drag from x {x0} by {DRAG_BY} left the divider at x {x}, not within \
+                 {DRAG_SLACK} px of {expected}, after {DRIVER_TIMEOUT:?}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_out_of_the_way(smoke.hwnd);
+    }
+
+    /// The `n` of the first visible row that reads `rt-<n>-`.
+    fn first_counted_row(lines: &Value) -> Option<u32> {
+        lines.as_array()?.iter().find_map(|line| {
+            line.as_str()?
+                .trim()
+                .strip_prefix("rt-")?
+                .strip_suffix('-')?
+                .parse()
+                .ok()
+        })
+    }
+
+    #[test]
+    #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+    fn smoke_driver_wheel_scrolls_a_pane_back() {
+        let (smoke, mut driver) = open_driven("smoke-driver-wheel");
+        let pane = driver.ok("state", &json!({}))["panes"][0]["id"]
+            .as_str()
+            .expect("the shell's pane")
+            .to_owned();
+        driver.ok(
+            "action",
+            &json!({"name": "focus_pane", "args": {"id": pane}}),
+        );
+        // The prompt names the scratch dir: once the pane shows it, the pane
+        // has attached its session and takes keys.
+        let dir = smoke
+            .daemon
+            .dir()
+            .file_name()
+            .expect("the scratch dir's name")
+            .to_string_lossy()
+            .into_owned();
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": dir}}),
+            "the shell's prompt",
+        );
+        driver.ok(
+            "type_text",
+            &json!({"text": "for /l %i in (1,1,200) do @echo rt-%i-"}),
+        );
+        driver.ok("key", &json!({"keys": "enter"}));
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": "rt-200-"}}),
+            "the loop's last line",
+        );
+        let read = driver.ok("pane_text", &json!({"pane": pane}));
+        let first = first_counted_row(&read["lines"])
+            .ok_or_else(|| format!("no rt-<n>- row in the pane: {}", read["text"]))
+            .expect("the loop's output fills the pane");
+        assert!(
+            first > 1,
+            "the pane shows the loop's first line: {}",
+            read["text"]
+        );
+
+        driver.ok(
+            "wheel",
+            &json!({"element": format!("pane-grid-{pane}"), "notches": 3}),
+        );
+
+        driver.wait(
+            &json!({"pane_text": {"pane": pane, "contains": format!("rt-{}-", first - 1)}}),
+            "the row above the pane's first after three notches up",
+        );
+        assert_out_of_the_way(smoke.hwnd);
+    }
+
+    #[test]
+    #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
+    fn smoke_driver_right_click_opens_a_menu() {
+        let (smoke, mut driver) = open_driven("smoke-driver-menu");
+        let row = format!("leaf-{}", smoke.session);
+        driver.element(&row);
+
+        driver.ok("click", &json!({"element": row, "button": "right"}));
+
+        driver.wait(
+            &json!({"state": "overlay", "equals": "menu"}),
+            "the session row's menu",
+        );
+        assert_out_of_the_way(smoke.hwnd);
+    }
 }

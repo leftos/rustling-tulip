@@ -3,9 +3,10 @@
 //! [`registry`] knows where every element named with
 //! [`crate::driver_id::DriverId`] was painted in each window's latest frame;
 //! [`protocol`] is the wire format of a driver request and its reply, and
-//! [`handlers`] answers each request against the main window. On Windows,
-//! [`endpoint`] serves those requests over [`pipe`] in a driven run and
-//! answers `screenshot` through [`capture`].
+//! [`handlers`] answers each request against the main window, posting
+//! pointer input through [`pointer`]. On Windows, [`endpoint`] serves those
+//! requests over [`pipe`] in a driven run and answers `screenshot` through
+//! [`capture`].
 
 #[cfg(windows)]
 pub mod capture;
@@ -14,6 +15,7 @@ pub mod endpoint;
 pub mod handlers;
 #[cfg(windows)]
 pub mod pipe;
+pub mod pointer;
 pub mod protocol;
 pub mod registry;
 pub mod wait;

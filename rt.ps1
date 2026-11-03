@@ -1055,7 +1055,11 @@ function Invoke-Native {
 # client window. The build and the specs run as one gate call, re-entering
 # this script under the gate: gated separately, the build and the specs could
 # run on different machines, leaving the specs without the daemon binary.
-function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name) {
+#
+# -Features names the native client's Cargo features to build the specs
+# with: native-smoke passes driver, so its driven specs can open the client's
+# driver endpoint.
+function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slot, [string]$Name, [string]$Features) {
     Assert-Nextest
     if (-not (Test-UnderGate)) {
         $reentry = @('pwsh', '-NoProfile', '-File', $PSCommandPath, $Verb)
@@ -1072,6 +1076,7 @@ function Invoke-NativeSpecFile([string]$Verb, [string[]]$TestFiles, [string]$Slo
         'cargo', 'nextest', 'run', '--manifest-path', $ManifestPath,
         '-p', 'rustling-tulip-native', '--cargo-profile', $cargoProfile, '--run-ignored', 'only'
     ) + $targets
+    if ($Features) { $specArgs += @('--features', $Features) }
     Invoke-Gated -Slot $Slot -Name $Name -Command $specArgs
     Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($names)"
 }
@@ -1128,7 +1133,7 @@ function Get-E2eTestFile {
     return $names
 }
 
-function Invoke-NativeSmoke { Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke }
+function Invoke-NativeSmoke { Invoke-NativeSpecFile -Verb native-smoke -TestFiles 'smoke_window' -Slot light -Name smoke -Features driver }
 
 # Writes a PNG of the native client's window showing one view, over a fake
 # daemon with fixed content (apps/native/examples/shot.rs). No daemon starts,

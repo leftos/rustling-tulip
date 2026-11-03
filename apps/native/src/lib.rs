@@ -3667,8 +3667,10 @@ impl RootView {
         let at = (event.position.x / px(1.0), event.position.y / px(1.0));
         match &mut self.drag {
             Some(Drag::Sidebar) => {
+                // The sidebar starts right of the rail, so its width is the
+                // pointer's distance from the rail.
                 let window_width = window.viewport_size().width / px(1.0);
-                self.sidebar.set_width(at.0, window_width);
+                self.sidebar.set_width(at.0 - RAIL_WIDTH, window_width);
                 self.mark_active_panes_resized(cx);
             }
             Some(Drag::Divider {

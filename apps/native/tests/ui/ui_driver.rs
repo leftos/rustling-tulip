@@ -102,8 +102,115 @@ fn driver_unknown_method_lists_methods(cx: &mut TestAppContext) {
     assert_eq!(failed.message, "unknown method: nope");
     assert_eq!(
         failed.hint.as_deref(),
-        Some("methods: action, find, key, pane_text, ping, screenshot, state, type_text, wait_for")
+        Some(
+            "methods: action, click, drag, find, key, move, pane_text, ping, screenshot, state, \
+             type_text, wait_for, wheel"
+        )
     );
+}
+
+/// What a pointer request with `modifiers` is refused with.
+const MODIFIERS_HINT: &str =
+    "posted pointer input cannot carry modifiers; press a chord with key, or use action";
+
+#[gpui::test]
+fn driver_pointer_with_modifiers_is_refused(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+    let row = json!({"element": "container-repo:r1"});
+
+    for (method, params) in [
+        (
+            "click",
+            json!({"element": "container-repo:r1", "modifiers": {"control": true}}),
+        ),
+        (
+            "click",
+            json!({"element": "container-repo:r1", "modifiers": null}),
+        ),
+        (
+            "move",
+            json!({"element": "container-repo:r1", "modifiers": {"shift": true}}),
+        ),
+        (
+            "wheel",
+            json!({"element": "container-repo:r1", "notches": 1, "modifiers": {"shift": true}}),
+        ),
+        (
+            "drag",
+            json!({"from": row, "to": {"element": "container-repo:r2"}, "modifiers": {}}),
+        ),
+    ] {
+        let failed = failure(&mut h, method, params.clone());
+        assert_eq!(failed.code, ErrorCode::Refused, "{method} {params}");
+        assert_eq!(
+            failed.hint.as_deref(),
+            Some(MODIFIERS_HINT),
+            "{method} {params}"
+        );
+    }
+}
+
+#[gpui::test]
+fn driver_pointer_unknown_element_is_not_found(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    let failed = failure(&mut h, "click", json!({"element": "container-repo:nope"}));
+
+    assert_eq!(failed.code, ErrorCode::NotFound);
+    assert_eq!(failed.message, "no element container-repo:nope");
+    let hint = failed.hint.unwrap_or_default();
+    assert!(
+        hint.starts_with(r#"names starting with "container-repo:": "#),
+        "{hint}"
+    );
+    for name in ["container-repo:r1", "container-repo:r2"] {
+        assert!(hint.contains(name), "{name} is listed: {hint}");
+    }
+}
+
+#[gpui::test]
+fn driver_pointer_needs_one_target(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    for (method, params) in [
+        ("click", json!({})),
+        (
+            "click",
+            json!({"x": 10, "y": 10, "element": "container-repo:r1"}),
+        ),
+        ("click", json!({"x": 10})),
+        // JSON has no NaN: serde_json writes it as null, a missing x.
+        ("click", json!({"x": f64::NAN, "y": 10})),
+        ("move", json!({"x": 1.0e300, "y": 10})),
+        ("move", json!({"x": -1, "y": 10})),
+        ("wheel", json!({"notches": 1})),
+        ("drag", json!({"from": {}, "to": {"x": 10, "y": 10}})),
+        (
+            "drag",
+            json!({"from": {"x": 10, "y": 10, "element": "container-repo:r1"}, "to": {"x": 20, "y": 10}}),
+        ),
+    ] {
+        let failed = failure(&mut h, method, params.clone());
+        assert_eq!(failed.code, ErrorCode::BadParams, "{method} {params}");
+    }
+}
+
+#[gpui::test]
+fn driver_click_bad_button_is_bad_params(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_repos());
+
+    for params in [
+        json!({"element": "container-repo:r1", "button": "middle"}),
+        json!({"element": "container-repo:r1", "count": 3}),
+        json!({"element": "container-repo:r1", "count": 0}),
+    ] {
+        let failed = failure(&mut h, "click", params.clone());
+        assert_eq!(failed.code, ErrorCode::BadParams, "{params}");
+    }
 }
 
 #[gpui::test]
