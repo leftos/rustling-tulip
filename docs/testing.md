@@ -38,7 +38,8 @@ To look at a UI change, run `.\rt.ps1 native-shot <view>`: it writes a PNG of th
 
 The views:
 
-- `main`, `source-control`, `diff`, `settings`, `settings-claude`, `viewer`, `viewer-md`, `dashboard`: those screens as named.
+- `main`, `source-control`, `diff`, `settings`, `settings-claude`, `viewer`, `viewer-md`, `dashboard`: those screens as named; `dashboard` is seeded to the By status view.
+- `dashboard-compact`: the Dashboard's Compact view over scripted agents in several repos, a workspace and a folder, at 1920x1080.
 - `main-compact`: the sidebar's Compact leaves.
 - `settings-dashboard`: Settings on its Dashboard tab with a keyed provider, a stored key, some spend and a Test result.
 - `spawn`: the spawn dialog with its Target list open.

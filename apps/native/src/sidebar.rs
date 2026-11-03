@@ -513,6 +513,9 @@ pub struct UiState {
     /// a new pane showing the session opens in it.
     #[serde(default)]
     pub session_views: SessionViews,
+    /// The Dashboard tab's choices.
+    #[serde(deserialize_with = "dashboard_or_default")]
+    pub dashboard: DashboardSettings,
 }
 
 /// What a session's entry under `session_views` holds when its last view
@@ -920,19 +923,56 @@ pub enum ToastStyle {
     App,
 }
 
+/// The Dashboard tab's saved choices; a file without them, as every release
+/// before this one wrote, gets the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardSettings {
+    /// The view the tab draws.
+    #[serde(deserialize_with = "dashboard_view_or_default")]
+    pub view: DashboardView,
+}
+
+/// The view the Dashboard tab draws. Saved as `"compact"` or `"by_status"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardView {
+    /// One line per agent, with no scrolling.
+    #[default]
+    Compact,
+    /// The grouped two-line rows.
+    ByStatus,
+}
+
+/// Reads `dashboard` so that a value that is not its object loads as the
+/// default and never fails the rest of the file.
+fn dashboard_or_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<DashboardSettings, D::Error> {
+    read_choice(deserializer, "dashboard", "the default")
+}
+
+/// Reads `dashboard.view` so that any value that is not a known choice loads
+/// as Compact and never fails the rest of the file.
+fn dashboard_view_or_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<DashboardView, D::Error> {
+    read_choice(deserializer, "dashboard.view", "compact")
+}
+
 /// Reads `needs_you_sound` so that any value that is not a known choice
 /// loads as the default and never fails the rest of the file.
 fn sound_or_default<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<ToastSound, D::Error> {
-    read_choice(deserializer, "needs_you_sound", "default")
+    read_choice(deserializer, "notifications.needs_you_sound", "default")
 }
 
 /// Reads `finished_sound` as `needs_you_sound` is read.
 fn finished_sound_or_default<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<ToastSound, D::Error> {
-    read_choice(deserializer, "finished_sound", "default")
+    read_choice(deserializer, "notifications.finished_sound", "default")
 }
 
 /// Reads `skip_when` so that any value that is not a known choice (null, a
@@ -941,7 +981,7 @@ fn finished_sound_or_default<'de, D: serde::Deserializer<'de>>(
 fn skip_or_default<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<NotifySkip, D::Error> {
-    read_choice(deserializer, "skip_when", "on_screen")
+    read_choice(deserializer, "notifications.skip_when", "on_screen")
 }
 
 /// Reads `toast_style` so that any value that is not a known choice loads as
@@ -949,7 +989,7 @@ fn skip_or_default<'de, D: serde::Deserializer<'de>>(
 fn toast_style_or_default<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<ToastStyle, D::Error> {
-    read_choice(deserializer, "toast_style", "os")
+    read_choice(deserializer, "notifications.toast_style", "os")
 }
 
 /// The finished grace a file without `finished_grace_secs` loads.
@@ -985,9 +1025,7 @@ where
     Ok(match T::deserialize(&value) {
         Ok(choice) => choice,
         Err(err) => {
-            tracing::warn!(
-                "notifications.{key} {value} is not a known choice ({err}); using {fallback}"
-            );
+            tracing::warn!("{key} {value} is not a known choice ({err}); using {fallback}");
             T::default()
         }
     })
@@ -1143,6 +1181,7 @@ impl Default for UiState {
             saved_hosts: Vec::new(),
             host_session_counts: BTreeMap::new(),
             session_views: SessionViews::default(),
+            dashboard: DashboardSettings::default(),
         }
     }
 }
@@ -1748,6 +1787,20 @@ impl SidebarModel {
         self.slice_mut(host)
             .session_order
             .insert(container_id.to_owned(), ordered_ids.to_vec());
+    }
+
+    /// The view the Dashboard tab draws.
+    pub fn dashboard_view(&self) -> DashboardView {
+        self.ui.dashboard.view
+    }
+
+    /// Records the view the Dashboard tab draws; returns whether it changed.
+    pub fn set_dashboard_view(&mut self, view: DashboardView) -> bool {
+        if self.ui.dashboard.view == view {
+            return false;
+        }
+        self.ui.dashboard.view = view;
+        true
     }
 
     /// How the sessions panel groups its sessions.
@@ -5213,6 +5266,9 @@ pub(crate) mod tests {
             },
             saved_hosts: Vec::new(),
             host_session_counts: BTreeMap::new(),
+            dashboard: DashboardSettings {
+                view: DashboardView::ByStatus,
+            },
             session_views: SessionViews {
                 hosts: BTreeMap::from([(
                     "local".to_owned(),
@@ -7061,6 +7117,28 @@ pub(crate) mod tests {
         );
         assert!(!ui.notifications.finished, "the saved toggle survives");
         assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+    }
+
+    #[test]
+    fn a_file_without_a_dashboard_view_loads_compact() {
+        let dir = TestDir::new("dashboard-view-released");
+        let file = v0_5_1_alpha_ui_file();
+        assert!(file.get("dashboard").is_none(), "no release wrote it");
+        let ui = load_released(&dir, &file);
+        assert_eq!(ui.dashboard.view, DashboardView::Compact);
+        assert_eq!(ui.sidebar_view, SidebarView::Tabs, "the rest still loads");
+        for view in [json!("repo"), json!(7), serde_json::Value::Null] {
+            let mut file = v0_5_1_alpha_ui_file();
+            file["dashboard"] = json!({ "view": view });
+            let ui = load_released(&dir, &file);
+            assert_eq!(ui.dashboard.view, DashboardView::Compact, "{view}");
+            assert_eq!(ui.sidebar_view, SidebarView::Tabs, "{view}");
+        }
+        let mut file = v0_5_1_alpha_ui_file();
+        file["dashboard"] = json!(3);
+        let ui = load_released(&dir, &file);
+        assert_eq!(ui.dashboard.view, DashboardView::Compact);
+        assert_eq!(ui.sidebar_view, SidebarView::Tabs);
     }
 
     #[test]

@@ -89,6 +89,8 @@ const DASHBOARD_WINDOW_SIZE: (u16, u16) = (2000, 900);
 
 /// The window `toast` draws its two cards in.
 const TOAST_WINDOW_SIZE: (u16, u16) = (420, 350);
+/// The `dashboard-compact` shot's window: the 1080p the view must fit.
+const DASHBOARD_COMPACT_WINDOW_SIZE: (u16, u16) = (1920, 1080);
 /// The `summary` shot's window: tall enough for the split's top pane to
 /// hold the pinned card, all three lines with one open, the strip and the
 /// composer.
@@ -194,6 +196,7 @@ enum View {
     Viewer,
     ViewerMd,
     Dashboard,
+    DashboardCompact,
     Connections,
     ConnectionsSsh,
     Menu,
@@ -211,7 +214,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 24] = [
+    const ALL: [Self; 25] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -222,6 +225,7 @@ impl View {
         Self::Viewer,
         Self::ViewerMd,
         Self::Dashboard,
+        Self::DashboardCompact,
         Self::Connections,
         Self::ConnectionsSsh,
         Self::Menu,
@@ -250,6 +254,7 @@ impl View {
             Self::Viewer => "viewer",
             Self::ViewerMd => "viewer-md",
             Self::Dashboard => "dashboard",
+            Self::DashboardCompact => "dashboard-compact",
             Self::Connections => "connections",
             Self::ConnectionsSsh => "connections-ssh",
             Self::Menu => "menu",
@@ -292,6 +297,7 @@ impl View {
         match self {
             Self::Dashboard => DASHBOARD_WINDOW_SIZE,
             Self::Toast => TOAST_WINDOW_SIZE,
+            Self::DashboardCompact => DASHBOARD_COMPACT_WINDOW_SIZE,
             Self::Summary => SUMMARY_WINDOW_SIZE,
             Self::Chat => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
@@ -340,7 +346,7 @@ impl View {
                         .viewer_tab(VIEWER_TAB)
                         .is_some_and(|tab| tab.load() == ViewerLoad::Loaded)
             }
-            Self::Dashboard => {
+            Self::Dashboard | Self::DashboardCompact => {
                 root.active_tab_id() == Some(DASHBOARD_TAB)
                     && root
                         .dashboard_view_rows()
@@ -460,6 +466,7 @@ impl Shot {
             | View::SettingsClaude
             | View::Spawn
             | View::Dashboard
+            | View::DashboardCompact
             | View::Connections
             | View::ConnectionsSsh
             | View::Menu
@@ -490,6 +497,7 @@ impl Shot {
         }
         let state = match self.view {
             View::MainCompact => compact_ui_state(),
+            View::Dashboard => json!({ "dashboard": { "view": "by_status" } }),
             View::Connections | View::ConnectionsSsh => connections_ui_state(),
             View::MultiHost | View::SpawnHosts | View::SettingsHosts => multi_host_ui_state(),
             _ => return Ok(()),
@@ -1087,7 +1095,7 @@ fn drive(
             Ok(())
         }
         View::SpawnHosts => press("ctrl-shift-n", window, cx),
-        View::Dashboard => {
+        View::Dashboard | View::DashboardCompact => {
             let y = (DASHBOARD_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(
                 clippy::cast_possible_truncation,
@@ -1451,8 +1459,11 @@ impl Fixture {
         }))
         .context("the fixture's workspaces")?;
         let mut rows = session_rows();
-        if view == View::Dashboard {
+        if matches!(view, View::Dashboard | View::DashboardCompact) {
             dashboard_rows(&mut rows);
+        }
+        if view == View::DashboardCompact {
+            compact_rows(&mut rows);
         }
         let sessions = rows
             .into_iter()
@@ -1474,7 +1485,7 @@ impl Fixture {
             }));
         }
         check_reply_shapes(now)?;
-        if view == View::Dashboard {
+        if matches!(view, View::Dashboard | View::DashboardCompact) {
             dashboard_facts(now)?;
             dashboard_tracks(now)?;
         }
@@ -2409,6 +2420,71 @@ fn dashboard_rows(rows: &mut Vec<Row>) {
     });
 }
 
+/// The `dashboard-compact` shot's other agents, about twenty in all across
+/// the repos and the workspace; `dashboard_facts` gives three of them chips.
+fn compact_rows(rows: &mut Vec<Row>) {
+    let more = [
+        (
+            "s-c1",
+            "Fold the Done group",
+            "working",
+            DECK_SERVER,
+            DECK_SERVER_PATH,
+        ),
+        (
+            "s-c2",
+            "Measure the height probe",
+            "idle",
+            DECK_SERVER,
+            DECK_SERVER_PATH,
+        ),
+        ("s-c3", "Port the replay parser", "working", YAAT, YAAT_PATH),
+        (
+            "s-c4",
+            "Trim the arrival loader",
+            "working",
+            YAAT,
+            YAAT_PATH,
+        ),
+        (
+            "s-c5",
+            "Rewrite the scenario docs",
+            "working",
+            DECK_CLIENT,
+            DECK_CLIENT_PATH,
+        ),
+        (
+            "s-c6",
+            "Card text pass",
+            "idle",
+            DECK_CLIENT,
+            DECK_CLIENT_PATH,
+        ),
+        ("s-c7", "Spike the hold pattern UI", "idle", YAAT, YAAT_PATH),
+        ("s-c8", "Sort the strip bay", "idle", YAAT, YAAT_PATH),
+        (
+            "s-c9",
+            "Add runway crossing checks",
+            "idle",
+            YAAT,
+            YAAT_PATH,
+        ),
+        ("s-c10", "Daemon spawn verbs", "working", TULIP, TULIP_PATH),
+    ];
+    let mut minutes = 3;
+    for (id, label, status, repo, path) in more {
+        rows.push(Row {
+            id,
+            label,
+            status,
+            members: json!([member(repo, "feat/compact-fleet", path)]),
+            minutes,
+            extra: json!({}),
+        });
+        minutes += 4;
+    }
+}
+
 /// The tracks the `dashboard` shot's watch is sent, as of `now`: a working
 /// session in a gate after a restart gap, one that asks, and one idle.
 fn dashboard_tracks(now: DateTime<Utc>) -> Result<DaemonMessage> {
@@ -2452,7 +2528,7 @@ fn dashboard_tracks(now: DateTime<Utc>) -> Result<DaemonMessage> {
 /// dispatch run, and its context reads hot.
 fn dashboard_facts(now: DateTime<Utc>) -> Result<DaemonMessage> {
     let ago = |minutes: i64| now - chrono::Duration::minutes(minutes);
-    parse_message(json!({
+    let message = json!({
         "type": "dashboard_facts",
         "facts": [
             {
@@ -2548,8 +2624,54 @@ fn dashboard_facts(now: DateTime<Utc>) -> Result<DaemonMessage> {
         ],
         "totals": {},
         "linear_synced_at": null,
-    }))
-    .context("the Dashboard facts")
+    });
+    parse_message(with_compact_facts(message, now)).context("the Dashboard facts")
+}
+
+/// `message` with `compact_facts` added to its facts.
+fn with_compact_facts(mut message: Value, now: DateTime<Utc>) -> Value {
+    if let Some(facts) = message["facts"].as_array_mut() {
+        facts.extend(compact_facts(now));
+    }
+    message
+}
+
+/// The facts of the `dashboard-compact` shot's own agents: one runs five
+/// nodes (a finished and a failed one among them), one three, and an idle
+/// one keeps a dev server running.
+fn compact_facts(now: DateTime<Utc>) -> [Value; 3] {
+    let ago = |minutes: i64| now - chrono::Duration::minutes(minutes);
+    [
+        json!({
+            "session_id": "s-c1",
+            "now": { "kind": "running_tool", "text": "Running Bash · ssh mac-1" },
+            "agents": [
+                { "key": "subagent:c1", "kind": "subagent", "name": "Explore", "task": "reading the routes", "state": "running", "started_at": ago(6) },
+                { "key": "subagent:c2", "kind": "subagent", "name": "code-review", "task": "3 findings", "state": "finished", "started_at": ago(5) },
+                { "key": "bg:c3", "kind": "shell", "name": "gate: clippy", "task": "2 warnings", "state": "failed", "started_at": ago(4) },
+                { "key": "gate:c4", "kind": "gate", "name": "gate: probe", "task": "40s", "state": "running", "started_at": ago(2) },
+                { "key": "dispatch:c5", "kind": "dispatch", "name": "deepseek: gate-88", "task": "fix round 2", "state": "running", "started_at": ago(1) },
+            ],
+            "issue": "DLV-52",
+        }),
+        json!({
+            "session_id": "s-c3",
+            "now": { "kind": "running_tool", "text": "Running Bash · dotnet build" },
+            "agents": [
+                { "key": "subagent:c6", "kind": "subagent", "name": "implementer", "task": "porting the frame reader", "state": "running", "started_at": ago(8) },
+                { "key": "subagent:c7", "kind": "subagent", "name": "Explore", "task": "read the old parser", "state": "finished", "started_at": ago(7) },
+                { "key": "bg:c8", "kind": "shell", "name": "gate: dotnet build", "task": "1m", "state": "running", "started_at": ago(1) },
+            ],
+            "issue": "YAAT-590",
+        }),
+        json!({
+            "session_id": "s-c7",
+            "now": { "kind": "unknown", "text": "" },
+            "agents": [
+                { "key": "bg:c9", "kind": "shell", "name": "npm dev", "task": ":5174", "state": "running", "started_at": ago(39) },
+            ],
+        }),
+    ]
 }
 
 /// The screen a session's scrollback replays.

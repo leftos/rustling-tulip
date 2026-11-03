@@ -2,23 +2,27 @@
 //! over scripted snapshots (the Answer rule included), and the header counts,
 //! busy-excluded sessions left out of the Working count; then the By status
 //! view the tab draws: its header, queue strip, rows and nested rows, read
-//! through the cells the view renders from and the ids it tags.
+//! through the cells the view renders from and the ids it tags; last the
+//! Compact view: its repo blocks, rows and chips, its fit with no scrolling
+//! either way, its folds, clicks and toggle.
 
 use crate::support;
 
 use chrono::{DateTime, Duration, Local, Utc};
-use gpui::{Modifiers, TestAppContext, px, size};
+use gpui::{Font, FontWeight, Modifiers, TestAppContext, TextRun, black, font, px, size};
 use protocol::{
     ActivitySegment, AgentState, ClientMessage, DaemonMessage, PromptChoice, SegmentActivity,
     SegmentKind, SessionSnapshot, TabEntry,
 };
+use rustling_tulip_native::fonts;
 use rustling_tulip_native::{
-    DashboardColumns, DashboardEntry, RowCells, RunKind, enable_band_probe,
+    COMPACT_EMPTY_TEXT, ChipKind, CompactBlock, CompactRow, DashboardColumns, DashboardEntry,
+    RowCells, RunKind, Tally, enable_band_probe,
 };
 use serde_json::json;
 use support::{
     Fixture, Harness, TestDir, activity_tracks_message, facts, facts_message, pane, repo, session,
-    tab,
+    tab, workspace,
 };
 
 /// Each group's heading and its session ids, in order.
@@ -237,14 +241,20 @@ fn on_dashboard(sessions: Vec<SessionSnapshot>) -> Fixture {
     }
 }
 
-/// Widens the window so every column fits, then shows the Dashboard tab.
-fn show_dashboard(h: &mut Harness<'_>) {
+/// Widens the window so every column fits, then opens the Dashboard tab.
+fn open_dashboard(h: &mut Harness<'_>) {
     h.cx.simulate_resize(size(px(1920.0), px(1200.0)));
     h.click_on("tab-d1");
     assert_eq!(
         h.root(|root, _| root.active_tab_id().map(str::to_owned)),
         Some("d1".to_owned())
     );
+}
+
+/// Opens the Dashboard tab on its By status view.
+fn show_dashboard(h: &mut Harness<'_>) {
+    open_dashboard(h);
+    h.click_on("dashboard-view-by-status");
 }
 
 /// The cells the view draws for `id`'s row.
@@ -1316,6 +1326,7 @@ fn the_column_drops_at_narrow_widths(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("w1")]));
     h.cx.simulate_resize(size(px(1500.0), px(1200.0)));
     h.click_on("tab-d1");
+    h.click_on("dashboard-view-by-status");
     h.cx.run_until_parked();
     send_tracks(
         &mut h,
@@ -1368,4 +1379,941 @@ fn no_tracks_yet_draws_an_empty_cell(cx: &mut TestAppContext) {
     assert!(cells(&mut h, "w2").track.is_none(), "a session not listed");
     assert!(drawn(&mut h, "dashboard-track=w2"));
     assert!(!drawn(&mut h, "dashboard-track-caption=w2"));
+}
+
+/// Opens the Dashboard in its default view, Compact; By status is never drawn,
+/// so a check that its body is not drawn is not read from stale bounds.
+fn show_compact(h: &mut Harness<'_>) {
+    open_dashboard(h);
+    assert!(drawn(h, "dashboard-compact"), "Compact is the default");
+}
+
+fn compact_blocks(h: &mut Harness<'_>) -> Vec<CompactBlock> {
+    h.root(rustling_tulip_native::RootView::dashboard_compact_blocks)
+}
+
+fn compact_rows(h: &mut Harness<'_>) -> Vec<CompactRow> {
+    compact_blocks(h)
+        .into_iter()
+        .flat_map(|block| block.rows)
+        .collect()
+}
+
+/// The block of the container named `name`.
+fn block_named(h: &mut Harness<'_>, name: &str) -> CompactBlock {
+    compact_blocks(h)
+        .into_iter()
+        .find(|block| block.name == name)
+        .expect("the container has a block")
+}
+
+/// The row of session `id`.
+fn compact_row(h: &mut Harness<'_>, id: &str) -> CompactRow {
+    compact_rows(h)
+        .into_iter()
+        .find(|row| row.session_id == id)
+        .expect("the session has a row")
+}
+
+/// `count` sessions in repo `repo` with ids `{prefix}-{n}` in `status`.
+fn sessions_in(repo: &str, prefix: &str, status: &str, count: usize) -> Vec<SessionSnapshot> {
+    (0..count)
+        .map(|index| {
+            session(&format!("{prefix}-{index}"))
+                .in_repo(repo)
+                .status(status)
+                .build()
+        })
+        .collect()
+}
+
+/// `sessions` over repos `r1` to `r4` and workspace `w1` (over `r5`, so
+/// the four repos keep their own containers), with a terminal tab and the
+/// Dashboard tab.
+fn fleet_fixture(sessions: Vec<SessionSnapshot>) -> Fixture {
+    let mut fixture = on_dashboard(sessions);
+    fixture.repos = (1..=5)
+        .map(|n| repo(&format!("r{n}"), &format!("D:/src/r{n}")))
+        .collect();
+    fixture.workspaces = vec![workspace("w1", &["r5"])];
+    fixture
+}
+
+/// Two subagents, the second finished, a failed shell, a gate and a queued
+/// dispatch run.
+fn five_nodes() -> serde_json::Value {
+    json!([
+        { "key": "subagent:1", "kind": "subagent", "name": "implementer", "task": "editing footer.rs", "state": "running", "started_at": minutes_ago(4) },
+        { "key": "subagent:2", "kind": "subagent", "name": "Explore", "task": "mapped status spans", "state": "finished", "started_at": minutes_ago(3) },
+        { "key": "bg:1", "kind": "shell", "name": "gate: clippy", "task": "2 warnings", "state": "failed", "started_at": minutes_ago(2) },
+        { "key": "gate:1", "kind": "gate", "name": "gate: nextest", "task": "41%", "state": "running", "started_at": minutes_ago(2) },
+        { "key": "dispatch:1", "kind": "dispatch", "name": "deepseek: RT-771", "task": "queued", "state": "queued", "started_at": minutes_ago(1) },
+    ])
+}
+
+/// The selectors of every row, chips cell and chip of `rows`.
+fn row_parts(rows: &[CompactRow]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|row| {
+            let id = &row.session_id;
+            let mut parts = vec![
+                format!("dashboard-compact-row-{id}"),
+                format!("dashboard-compact-chips-{id}"),
+            ];
+            parts.extend((0..row.chips.len()).map(|n| format!("dashboard-compact-chip-{id}-{n}")));
+            parts
+        })
+        .collect()
+}
+
+/// Whether a view `width` px wide draws the issue key and the age: the
+/// session cell is up to 642 px while the chips keep 260, at least 360, and
+/// the whole row when under 200 px would be left beside it; the key needs 560
+/// and the age 470.
+fn keeps_issue_and_age(width: f32) -> (bool, bool) {
+    let rows = width - 20.0 - 150.0;
+    let session = if rows - 360.0 < 200.0 {
+        rows
+    } else {
+        (rows - 260.0).clamp(360.0, 642.0)
+    };
+    (session >= 560.0, session >= 470.0)
+}
+
+fn saved_view(dir: &TestDir) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    let file: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    file["dashboard"]["view"].clone()
+}
+
+/// Thirty sessions over four repos and the workspace; the first three in
+/// `r1` wait on the user when `waiting`, else they work.
+fn thirty_sessions(waiting: bool) -> Vec<SessionSnapshot> {
+    let first = if waiting { "awaiting_input" } else { "working" };
+    let mut fleet = [
+        sessions_in("r1", "ask", first, 3),
+        sessions_in("r1", "work", "working", 5),
+        sessions_in("r2", "build", "working", 8),
+        sessions_in("r3", "idle", "idle", 7),
+        sessions_in("r4", "port", "working", 4),
+    ]
+    .concat();
+    fleet.extend((0..3).map(|n| {
+        session(&format!("deck-{n}"))
+            .in_workspace("w1")
+            .status("working")
+            .build()
+    }));
+    fleet
+}
+
+/// Opens Compact over `fleet` at 1920 by 1080 and checks its five blocks.
+fn compact_at_1080p<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    fleet: Vec<SessionSnapshot>,
+) -> Harness<'a> {
+    let mut h = Harness::with(cx, dir, &fleet_fixture(fleet));
+    show_compact(&mut h);
+    h.cx.simulate_resize(size(px(1920.0), px(1080.0)));
+    assert_eq!(
+        compact_blocks(&mut h)
+            .iter()
+            .map(|block| block.name.clone())
+            .collect::<Vec<_>>(),
+        ["w1", "r1", "r2", "r3", "r4"],
+        "four repos and the workspace"
+    );
+    h
+}
+
+/// Asserts each of `selectors` is drawn and ends inside the view, which
+/// ends inside the 1080 px window, and that nothing scrolls.
+fn drawn_inside_the_view(h: &mut Harness<'_>, selectors: &[String]) {
+    let view = h.bounds("dashboard-compact");
+    assert!(view.bottom() <= px(1080.0), "the view ends in the window");
+    for selector in selectors {
+        assert!(drawn(h, selector), "{selector} is drawn");
+        let part = h.bounds(selector);
+        assert!(
+            part.bottom() <= view.bottom(),
+            "{selector} ends at {} past the view's {}",
+            part.bottom(),
+            view.bottom()
+        );
+    }
+    assert!(!drawn(h, "dashboard-body"), "no scroll container");
+    assert!(!drawn(h, "dashboard-columns"), "no column header");
+}
+
+fn row_selectors(rows: &[CompactRow]) -> Vec<String> {
+    rows.iter()
+        .map(|row| format!("dashboard-compact-row-{}", row.session_id))
+        .collect()
+}
+
+#[gpui::test]
+fn twenty_five_sessions_fit_a_1080p_window_as_rows(cx: &mut TestAppContext) {
+    let fleet: Vec<SessionSnapshot> = thirty_sessions(false)
+        .into_iter()
+        .filter(|session| !(3..8).any(|n| session.id == format!("build-{n}")))
+        .collect();
+    assert_eq!(fleet.len(), 25);
+    let dir = TestDir::new();
+    let mut h = compact_at_1080p(cx, &dir, fleet);
+    let rows = compact_rows(&mut h);
+    let room = h.bounds("dashboard-compact").size.height;
+    assert_eq!(
+        rows.len(),
+        25,
+        "every session has its row in a view {room:?} tall"
+    );
+    let blocks = compact_blocks(&mut h);
+    assert!(
+        blocks.iter().all(|block| !block.has_fold_row()),
+        "nothing folds, so no fold row"
+    );
+    for block in &blocks {
+        assert!(!drawn(
+            &mut h,
+            &format!("dashboard-compact-fold-{}", block.index)
+        ));
+    }
+    drawn_inside_the_view(&mut h, &row_selectors(&rows));
+}
+
+#[gpui::test]
+fn thirty_sessions_stay_inside_a_1080p_window_with_no_scrolling(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = compact_at_1080p(cx, &dir, thirty_sessions(false));
+    let blocks = compact_blocks(&mut h);
+    let rows = compact_rows(&mut h);
+    let folded: usize = blocks.iter().map(|block| block.folded.len()).sum();
+    assert_eq!(rows.len() + folded, 30, "every session is a row or folded");
+    let mut selectors = row_selectors(&rows);
+    selectors.extend(
+        blocks
+            .iter()
+            .filter(|block| block.has_fold_row())
+            .map(|block| format!("dashboard-compact-fold-{}", block.index)),
+    );
+    drawn_inside_the_view(&mut h, &selectors);
+}
+
+#[gpui::test]
+fn thirty_sessions_with_waits_fold_and_never_clip_at_1080p(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = compact_at_1080p(cx, &dir, thirty_sessions(true));
+    assert!(
+        drawn(&mut h, "dashboard-queue-strip"),
+        "the queue strip shows"
+    );
+    let blocks = compact_blocks(&mut h);
+    let rows = compact_rows(&mut h);
+    let folded: usize = blocks.iter().map(|block| block.folded.len()).sum();
+    assert_eq!(rows.len() + folded, 30, "every session is a row or folded");
+    assert_eq!(
+        rows.iter().filter(|row| row.asking).count(),
+        3,
+        "every waiting session keeps its row"
+    );
+    let mut selectors = row_selectors(&rows);
+    selectors.extend(
+        blocks
+            .iter()
+            .filter(|block| block.has_fold_row())
+            .map(|block| format!("dashboard-compact-fold-{}", block.index)),
+    );
+    drawn_inside_the_view(&mut h, &selectors);
+}
+
+#[gpui::test]
+fn nothing_passes_the_right_edge_at_any_width(cx: &mut TestAppContext) {
+    let fleet = vec![
+        working("w1"),
+        session("w2")
+            .in_repo("r1")
+            .status("working")
+            .status_since(minutes_ago(14))
+            .build(),
+        session("i1")
+            .in_repo("r2")
+            .status_since(minutes_ago(30))
+            .build(),
+        session("deck")
+            .in_workspace("w1")
+            .status("working")
+            .status_since(minutes_ago(9))
+            .build(),
+    ];
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fleet_fixture(fleet));
+    h.cx.simulate_resize(size(px(1000.0), px(700.0)));
+    h.click_on("tab-d1");
+    assert!(drawn(&mut h, "dashboard-compact"), "Compact is the default");
+    let long = "Running Bash · 1m: cargo nextest run --workspace ".repeat(6);
+    h.send(facts_message(vec![
+        facts("w1")
+            .agents(five_nodes())
+            .issue("RT-773")
+            .now("running_tool", &long)
+            .build(),
+        facts("w2").issue("RT-455").build(),
+        facts("deck").agents(five_nodes()).build(),
+    ]));
+
+    // Narrowest first: bounds outlive an element, so a part a wider view
+    // draws could not be shown missing after it.
+    for (wide, high) in [(1000.0, 700.0), (1280.0, 800.0), (1920.0, 1080.0)] {
+        h.cx.simulate_resize(size(px(wide), px(high)));
+        let rows = compact_rows(&mut h);
+        assert_eq!(rows.len(), 4, "every session has its row at {wide}");
+        let view = h.bounds("dashboard-compact");
+        assert!(view.right() <= px(wide), "{view:?} in {wide}");
+        for selector in row_parts(&rows) {
+            assert!(drawn(&mut h, &selector), "{selector} is drawn at {wide}");
+            let part = h.bounds(&selector);
+            assert!(
+                part.right() <= view.right(),
+                "{selector} ends at {} past the view's {} at {wide}",
+                part.right(),
+                view.right()
+            );
+        }
+        let (issue, age) = keeps_issue_and_age(view.size.width / px(1.0));
+        for row in &rows {
+            let part = |name: &str| format!("dashboard-compact-row-{}-{name}", row.session_id);
+            assert_eq!(drawn(&mut h, &part("issue")), issue, "the key at {wide}");
+            assert_eq!(drawn(&mut h, &part("age")), age, "the age at {wide}");
+        }
+    }
+}
+
+#[gpui::test]
+fn a_working_session_draws_its_agent_tree_as_chips(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("w1")]));
+    show_compact(&mut h);
+    h.send(facts_message(vec![
+        facts("w1").agents(five_nodes()).build(),
+    ]));
+
+    let row = compact_row(&mut h, "w1");
+    let keys: Vec<String> = row.chips.iter().map(|chip| chip.key.clone()).collect();
+    assert_eq!(
+        keys,
+        ["subagent:1", "subagent:2", "bg:1", "gate:1", "dispatch:1"]
+    );
+    let nested: Vec<String> = cells(&mut h, "w1")
+        .nested
+        .into_iter()
+        .map(|nested| nested.key)
+        .collect();
+    assert_eq!(keys, nested, "the nodes and order By status nests");
+    assert_eq!(
+        row.chips.iter().map(|chip| chip.kind).collect::<Vec<_>>(),
+        [
+            ChipKind::Agent,
+            ChipKind::Agent,
+            ChipKind::Shell,
+            ChipKind::Shell,
+            ChipKind::Dispatch
+        ]
+    );
+    assert_eq!(row.chips[1].state, AgentState::Finished);
+    assert_eq!(row.chips[2].state, AgentState::Failed);
+
+    let cell = h.bounds("dashboard-compact-chips-w1");
+    for n in 0..5 {
+        let selector = format!("dashboard-compact-chip-w1-{n}");
+        assert!(drawn(&mut h, &selector), "{selector} is drawn");
+        let chip = h.bounds(&selector);
+        assert!(
+            chip.left() >= cell.left()
+                && chip.right() <= cell.right()
+                && chip.top() >= cell.top()
+                && chip.bottom() <= cell.bottom(),
+            "{selector} at {chip:?} inside {cell:?}"
+        );
+    }
+    let block = compact_blocks(&mut h).remove(0);
+    assert!(!block.has_fold_row());
+    assert!(
+        !drawn(&mut h, &format!("dashboard-compact-fold-{}", block.index)),
+        "nothing folded or ended, no fold row"
+    );
+}
+
+#[gpui::test]
+fn the_repo_cell_names_its_container_and_tallies_its_sessions(cx: &mut TestAppContext) {
+    let fleet = vec![
+        session("ask")
+            .in_repo("r1")
+            .status("awaiting_input")
+            .build(),
+        working("work"),
+        session("idle").in_repo("r1").build(),
+        session("idle2").in_repo("r1").build(),
+        session("deck").in_workspace("w1").status("working").build(),
+    ];
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fleet_fixture(fleet));
+    show_compact(&mut h);
+
+    let blocks = compact_blocks(&mut h);
+    assert_eq!(blocks.len(), 2, "only containers with a listed session");
+    assert!(
+        blocks.windows(2).all(|pair| pair[0].index < pair[1].index),
+        "in the sidebar's order"
+    );
+    let repo = block_named(&mut h, "r1");
+    assert!(!repo.is_workspace());
+    assert_eq!(repo.tag(), "REPO");
+    assert_eq!(
+        repo.tally,
+        Tally {
+            asking: 1,
+            working: 1,
+            done: 0,
+            idle: 2
+        }
+    );
+    assert_eq!(repo.sessions(), 4);
+    let space = block_named(&mut h, "w1");
+    assert!(space.is_workspace());
+    assert_eq!(space.tag(), "WORKSPACE");
+    assert_eq!(space.tally.working, 1);
+
+    for block in [&repo, &space] {
+        let name = format!("dashboard-compact-repo-{}", block.index);
+        assert!(drawn(&mut h, &name), "{name} is drawn");
+        assert!(drawn(&mut h, &format!("{name}-name")), "{name}'s name");
+        let tally = block.tally;
+        for (state, count) in [
+            ("asking", tally.asking),
+            ("working", tally.working),
+            ("done", tally.done),
+            ("idle", tally.idle),
+        ] {
+            assert_eq!(
+                drawn(&mut h, &format!("{name}-tally-{state}")),
+                count > 0,
+                "{name}'s {state} count {count}"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn a_short_window_folds_idle_sessions_and_draws_nothing_below_the_view(cx: &mut TestAppContext) {
+    let mut fleet = vec![
+        session("ask")
+            .in_repo("r1")
+            .status("awaiting_input")
+            .build(),
+        session("busy").in_repo("r1").build(),
+    ];
+    fleet.extend(sessions_in("r1", "idle", "idle", 12));
+    fleet.extend(sessions_in("r2", "work", "working", 3));
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fleet_fixture(fleet));
+    show_compact(&mut h);
+    h.send(facts_message(vec![
+        facts("busy")
+            .agents(json!([
+                { "key": "bg:1", "kind": "shell", "name": "npm dev", "task": ":5174", "state": "running", "started_at": minutes_ago(9) },
+            ]))
+            .build(),
+    ]));
+    h.cx.simulate_resize(size(px(1920.0), px(500.0)));
+
+    let r1 = block_named(&mut h, "r1");
+    assert_eq!(
+        r1.folded.len(),
+        12,
+        "every idle session with nothing running"
+    );
+    assert_eq!(r1.idle_text().as_deref(), Some("+12 idle"));
+    assert_eq!(
+        r1.rows
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["ask", "busy"],
+        "Needs you and the idle session with a running shell stay"
+    );
+    assert_eq!(
+        block_named(&mut h, "r2").rows.len(),
+        3,
+        "Working never folds"
+    );
+    let fold = format!("dashboard-compact-fold-{}", r1.index);
+    assert!(drawn(&mut h, &fold), "the fold row is drawn");
+    assert!(drawn(&mut h, &format!("{fold}-idle")));
+
+    let view = h.bounds("dashboard-compact");
+    assert!(view.bottom() <= px(500.0), "the view ends in the window");
+    let mut selectors: Vec<String> = compact_rows(&mut h)
+        .iter()
+        .map(|row| format!("dashboard-compact-row-{}", row.session_id))
+        .collect();
+    selectors.push(fold);
+    for selector in selectors {
+        assert!(drawn(&mut h, &selector), "{selector} is drawn");
+        assert!(
+            h.bounds(&selector).bottom() <= view.bottom(),
+            "{selector} ends below the view"
+        );
+    }
+}
+
+#[gpui::test]
+fn an_ended_session_is_counted_in_its_fold_row(cx: &mut TestAppContext) {
+    let fleet = vec![
+        working("w"),
+        session("gone").in_repo("r1").exited(0).build(),
+        session("other").in_repo("r2").status("working").build(),
+    ];
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fleet_fixture(fleet));
+    show_compact(&mut h);
+
+    let r1 = block_named(&mut h, "r1");
+    assert_eq!(r1.rows.len(), 1, "the ended session has no row");
+    assert_eq!(r1.ended_text().as_deref(), Some("+1 ended"));
+    assert_eq!(r1.idle_text(), None, "nothing folded");
+    let fold = format!("dashboard-compact-fold-{}", r1.index);
+    assert!(drawn(&mut h, &fold));
+    assert!(drawn(&mut h, &format!("{fold}-ended")));
+    assert!(!drawn(&mut h, &format!("{fold}-idle")));
+    assert!(!drawn(&mut h, "dashboard-compact-row-gone"));
+    let r2 = block_named(&mut h, "r2");
+    assert!(!r2.has_fold_row());
+    assert!(
+        !drawn(&mut h, &format!("dashboard-compact-fold-{}", r2.index)),
+        "no fold row with nothing folded or ended"
+    );
+}
+
+#[gpui::test]
+fn a_row_click_in_compact_opens_its_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_compact(&mut h);
+    h.click_on("dashboard-compact-row-s1");
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t1".to_owned()),
+        "the session's pane is shown"
+    );
+}
+
+#[gpui::test]
+fn the_view_toggle_is_remembered(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![working("s1")]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_compact(&mut h);
+    assert!(drawn(&mut h, "dashboard-view-compact"));
+
+    h.click_on("dashboard-view-by-status");
+    assert_eq!(saved_view(&dir), "by_status", "saved at once");
+    assert!(drawn(&mut h, "dashboard-body"));
+
+    h.keys("escape");
+    h.keys("tab");
+    h.keys("left");
+    assert_eq!(
+        saved_view(&dir),
+        "compact",
+        "the keyboard reaches the toggle"
+    );
+    h.keys("enter");
+    assert_eq!(saved_view(&dir), "by_status", "Enter flips the view");
+    h.keys("escape");
+    h.keys("left");
+    assert_eq!(saved_view(&dir), "by_status", "Escape left the toggle");
+    drop(h);
+
+    let mut h = Harness::with(cx, &dir, &fixture);
+    open_dashboard(&mut h);
+    assert!(drawn(&mut h, "dashboard-body"), "the choice came back");
+    assert!(!drawn(&mut h, "dashboard-compact"));
+}
+
+#[gpui::test]
+fn a_held_enter_on_the_toggle_does_not_flip_the_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_compact(&mut h);
+    h.keys("tab");
+    h.held("enter");
+    h.held("enter");
+    assert!(
+        !drawn(&mut h, "dashboard-body"),
+        "a held Enter's repeats flip nothing"
+    );
+    h.keys("enter");
+    assert!(drawn(&mut h, "dashboard-body"), "a first Enter flips it");
+    assert_eq!(saved_view(&dir), "by_status");
+}
+
+#[gpui::test]
+fn a_queue_chip_in_compact_opens_by_status_at_the_waiting_row(cx: &mut TestAppContext) {
+    let mut sessions = vec![
+        session("ask")
+            .in_repo("r1")
+            .status("awaiting_input")
+            .build(),
+    ];
+    sessions.extend((0..40).map(|n| {
+        session(&format!("idle{n:02}"))
+            .in_repo("r1")
+            .status_since(minutes_ago(n))
+            .build()
+    }));
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(sessions));
+    show_dashboard(&mut h);
+    h.scroll_into_view("dashboard-body", "dashboard-row-idle39");
+    let body = h.bounds("dashboard-body");
+    assert!(
+        h.bounds("dashboard-row-ask").bottom() <= body.top(),
+        "the waiting row scrolled out of view"
+    );
+    h.click_on("dashboard-view-compact");
+    assert_eq!(saved_view(&dir), "compact");
+
+    h.click_on("dashboard-queue-ask");
+    assert_eq!(saved_view(&dir), "by_status", "the chip opened By status");
+    let (body, row) = (h.bounds("dashboard-body"), h.bounds("dashboard-row-ask"));
+    assert!(
+        row.top() >= body.top() && row.bottom() <= body.bottom(),
+        "the chip scrolled its row into view: {row:?} in {body:?}"
+    );
+}
+
+#[gpui::test]
+fn the_view_toggle_stays_inside_a_narrow_view_with_the_day_figures(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("w1")]));
+    show_compact(&mut h);
+    h.cx.simulate_resize(size(px(1000.0), px(800.0)));
+    h.send(DaemonMessage::DashboardFacts {
+        facts: Vec::new(),
+        totals: protocol::DayTotals {
+            cost_usd: 182.46,
+            tokens: 31_400_000,
+            commits: 48,
+            issues_done: 12,
+            releases: vec![
+                protocol::ReleaseProgress {
+                    name: "vNext".to_owned(),
+                    done: 11,
+                    total: 18,
+                },
+                protocol::ReleaseProgress {
+                    name: "vNext+1".to_owned(),
+                    done: 3,
+                    total: 21,
+                },
+            ],
+        },
+        linear_synced_at: Some(minutes_ago(2)),
+    });
+    assert!(
+        h.root(|root, _| root.dashboard_figures()).is_some(),
+        "the day figures are known"
+    );
+    assert!(drawn(&mut h, "dashboard-figures"));
+    let view = h.bounds("dashboard-view");
+    let toggle = h.bounds("dashboard-view-by-status");
+    assert!(drawn(&mut h, "dashboard-view-by-status"));
+    let header: Vec<_> = [
+        "dashboard-header",
+        "dashboard-pill-need-you",
+        "dashboard-pill-done",
+        "dashboard-figures",
+        "dashboard-view-compact",
+    ]
+    .into_iter()
+    .map(|selector| (selector, h.bounds(selector)))
+    .collect();
+    assert!(
+        toggle.right() <= view.right(),
+        "the toggle ends at {} past the view's {}: {header:?}",
+        toggle.right(),
+        view.right()
+    );
+}
+
+#[gpui::test]
+fn a_stuck_session_draws_its_flags_in_its_now_cell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_compact(&mut h);
+    h.send(facts_message(vec![
+        facts("s1")
+            .stuck(json!([
+                { "kind": "tool_failures", "count": 65_535 },
+                { "kind": "context_high" },
+            ]))
+            .build(),
+    ]));
+
+    assert_eq!(
+        compact_row(&mut h, "s1").stuck,
+        ["⚑ 65535 tool calls failed in a row", "⚑ context high"]
+    );
+    let now = h.bounds("dashboard-compact-row-s1-now");
+    for index in [0, 1] {
+        let selector = format!("dashboard-compact-row-s1-flag-{index}");
+        assert!(drawn(&mut h, &selector), "{selector} is drawn");
+        let flag = h.bounds(&selector);
+        assert!(
+            flag.left() >= now.left() && flag.right() <= now.right(),
+            "{selector} at {flag:?} inside the now cell {now:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_session_without_facts_draws_its_label_state_and_empty_cells(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &on_dashboard(vec![session("bare").in_repo("r1").build(), working("w")]),
+    );
+    show_compact(&mut h);
+
+    let bare = compact_row(&mut h, "bare");
+    assert_eq!(bare.state, "Idle");
+    assert_eq!(bare.issue, "", "no key reads empty, never a dash");
+    assert_eq!(bare.age, None);
+    assert_eq!(bare.chips, Vec::new(), "no facts, no chips");
+    assert_eq!(compact_row(&mut h, "w").now, "Thinking");
+    for part in ["glyph", "label", "state", "now", "issue", "age"] {
+        let selector = format!("dashboard-compact-row-bare-{part}");
+        assert!(drawn(&mut h, &selector), "{selector} is drawn");
+    }
+    assert!(drawn(&mut h, "dashboard-compact-chips-bare"));
+    assert!(!drawn(&mut h, "dashboard-compact-chip-bare-0"), "no chip");
+
+    h.send(facts_message(vec![facts("bare").issue("RT-1").build()]));
+    assert_eq!(
+        compact_row(&mut h, "bare").issue,
+        "RT-1",
+        "a key reads once known"
+    );
+}
+
+#[gpui::test]
+fn an_empty_fleet_draws_the_calm_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(Vec::new()));
+    open_dashboard(&mut h);
+    assert_eq!(compact_blocks(&mut h), Vec::new());
+    assert!(drawn(&mut h, "dashboard-compact-empty"));
+    assert_eq!(COMPACT_EMPTY_TEXT, "No agents running.");
+}
+
+#[gpui::test]
+fn tab_stays_in_a_focused_text_field(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    open_dashboard(&mut h);
+    h.keys("tab");
+    h.keys("right");
+    assert_eq!(
+        saved_view(&dir),
+        "by_status",
+        "the pane left behind does not hold the keyboard"
+    );
+    h.keys("escape");
+
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-rename");
+    assert_eq!(
+        h.root(|root, _| root.renaming_tab().map(str::to_owned)),
+        Some("t1".to_owned()),
+        "the rename field is open"
+    );
+    h.keys("tab");
+    h.keys("left");
+    assert_eq!(saved_view(&dir), "by_status", "the field kept Tab");
+}
+
+#[gpui::test]
+fn each_block_is_as_tall_as_the_model_estimates(cx: &mut TestAppContext) {
+    let fleet = [
+        sessions_in("r1", "one", "idle", 1),
+        sessions_in("r2", "two", "working", 2),
+        sessions_in("r3", "eight", "idle", 8),
+    ]
+    .concat();
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fleet_fixture(fleet));
+    show_compact(&mut h);
+    h.cx.simulate_resize(size(px(1920.0), px(1080.0)));
+
+    let blocks = compact_blocks(&mut h);
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.rows.len())
+            .collect::<Vec<_>>(),
+        [1, 2, 8],
+        "blocks of 1, 2 and 8 rows, nothing folded"
+    );
+    for block in &blocks {
+        let estimate = h.root(|root, cx| root.dashboard_compact_block_h(block, cx));
+        let selector = format!("dashboard-compact-repo-{}", block.index);
+        let height = h.bounds(&selector).size.height / px(1.0);
+        assert!(
+            (height - estimate).abs() <= 1.0,
+            "{selector} of {} rows is drawn {height} px tall, estimated {estimate}",
+            block.rows.len()
+        );
+    }
+}
+
+#[gpui::test]
+fn thirty_sessions_stay_inside_a_1080p_window_at_a_larger_text_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = compact_at_1080p(cx, &dir, thirty_sessions(false));
+    h.root_update(|root, _, cx| root.set_ui_text_size(3, cx));
+
+    let blocks = compact_blocks(&mut h);
+    let rows = compact_rows(&mut h);
+    let folded: usize = blocks.iter().map(|block| block.folded.len()).sum();
+    assert_eq!(rows.len() + folded, 30, "every session is a row or folded");
+    let mut selectors = row_selectors(&rows);
+    selectors.extend(
+        blocks
+            .iter()
+            .filter(|block| block.has_fold_row())
+            .map(|block| format!("dashboard-compact-fold-{}", block.index)),
+    );
+    drawn_inside_the_view(&mut h, &selectors);
+}
+
+#[gpui::test]
+fn a_narrow_view_keeps_the_label_and_state_inside_it(cx: &mut TestAppContext) {
+    let fleet = vec![waiting_on("p1", minutes_ago(2), gh_merge()), working("w1")];
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fleet_fixture(fleet));
+    show_compact(&mut h);
+    h.cx.simulate_resize(size(px(1000.0), px(700.0)));
+    let beside = 1000.0 - h.bounds("dashboard-compact").size.width / px(1.0);
+    h.cx.simulate_resize(size(px(beside + 440.0), px(700.0)));
+
+    let rows = compact_rows(&mut h);
+    assert_eq!(rows.len(), 2, "both sessions have a row");
+    let view = h.bounds("dashboard-compact");
+    let width = view.size.width / px(1.0);
+    assert!((430.0..=450.0).contains(&width), "a view {width} px wide");
+    for row in &rows {
+        for part in ["label", "state"] {
+            let selector = format!("dashboard-compact-row-{}-{part}", row.session_id);
+            assert!(drawn(&mut h, &selector), "{selector} is drawn");
+            let right = h.bounds(&selector).right();
+            assert!(
+                right <= view.right(),
+                "{selector} ends at {right} past the view's {}",
+                view.right()
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn the_state_column_fits_permission_whole(cx: &mut TestAppContext) {
+    #[cfg(debug_assertions)]
+    rustling_tulip_native::ellipsis::enable_probe();
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![waiting_on("p1", minutes_ago(2), gh_merge())]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_compact(&mut h);
+
+    assert_eq!(compact_row(&mut h, "p1").state, "Permission");
+    let measured = h.root_update(|_, window, cx| {
+        let text = "Permission";
+        let run = TextRun {
+            len: text.len(),
+            font: Font {
+                weight: fonts::ui_weight(cx, FontWeight::SEMIBOLD),
+                ..font(fonts::ui_family(cx))
+            },
+            color: black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(text.into(), fonts::ui_px(cx, 12.0), &[run], None)
+            .width
+    });
+    // A cell at least as wide as the shaped word never ends it in `…`.
+    let width = h.bounds("dashboard-compact-row-p1-state").size.width;
+    assert!(
+        width >= measured,
+        "the state cell is {width} wide, the word {measured}"
+    );
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rustling_tulip_native::ellipsis::drawn_text("dashboard-compact-row-p1-state-text")
+            .as_deref(),
+        Some("Permission"),
+        "the word is drawn whole, with no ellipsis"
+    );
+}
+
+#[gpui::test]
+fn an_idle_session_shows_its_state_word_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = on_dashboard(vec![session("calm").in_repo("r1").build()]);
+    let mut h = Harness::with(cx, &dir, &fixture);
+    show_compact(&mut h);
+
+    let row = compact_row(&mut h, "calm");
+    assert_eq!(row.state, "Idle");
+    assert_eq!(row.now, "", "the now line does not repeat the state word");
+    assert!(drawn(&mut h, "dashboard-compact-row-calm-now"));
+    assert!(
+        !drawn(&mut h, "dashboard-compact-row-calm-now-text"),
+        "the now cell draws no text"
+    );
+}
+
+#[gpui::test]
+fn escape_on_the_toggle_disarms_a_tab_close(cx: &mut TestAppContext) {
+    let closes = |h: &mut Harness<'_>| {
+        h.sent()
+            .iter()
+            .filter(|msg| matches!(msg, ClientMessage::CloseTab { tab_id } if tab_id == "t1"))
+            .count()
+    };
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &on_dashboard(vec![working("s1")]));
+    show_compact(&mut h);
+    h.sent();
+
+    h.click_on("tab-close-t1");
+    assert_eq!(closes(&mut h), 0, "the first click only arms");
+    h.keys("tab");
+    h.keys("right");
+    assert_eq!(
+        saved_view(&dir),
+        "by_status",
+        "the toggle holds the keyboard"
+    );
+    h.keys("escape");
+    h.click_on("tab-close-t1");
+    assert_eq!(
+        closes(&mut h),
+        0,
+        "Escape disarmed the close, so this click arms again"
+    );
 }

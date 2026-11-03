@@ -1,20 +1,22 @@
-//! The Dashboard tab's By status view: the header strip with its count pills
-//! and day figures, the queue strip while a session waits, the column
-//! header, then each group's heading and its two-line rows, a Working row's
-//! agent tree nested below it. Every text and number comes from
+//! The Dashboard tab: the header strip with its count pills, day figures and
+//! view toggle, the queue strip while a session waits, then the chosen view.
+//! Compact draws in `dashboard_compact_view`; By status draws here: the
+//! column header, then each group's heading and its two-line rows, a Working
+//! row's agent tree nested below it. Every text and number comes from
 //! `dashboard_rows`; this file only lays them out. A row click shows the
-//! session's pane, a queue chip click scrolls its row into view, and while
-//! the tab is active a timer repaints the ages.
+//! session's pane, a queue chip click scrolls its row into view (from
+//! Compact it first opens By status), and while the tab is active a timer
+//! repaints the ages; the day figures shrink before the view toggle moves.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::Utc;
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Div, FontWeight, PathBuilder, Pixels, SharedString,
-    StyledText, Window, canvas, div, point, prelude::*, px, relative,
+    AnyElement, Bounds, ClickEvent, Context, Div, FontWeight, Keystroke, PathBuilder, Pixels,
+    SharedString, StyledText, Window, canvas, div, point, prelude::*, px, relative,
 };
-use protocol::{SessionMode, SessionStatus};
+use protocol::{SessionMode, SessionStatus, TabContent};
 
 use crate::activity_track::{BarRun, HoldTick, RunKind, Track};
 use crate::buttons::{ButtonSize, Layer, outlined_button, primary_button};
@@ -27,6 +29,7 @@ use crate::dashboard_rows::{
 use crate::driver_id::DriverId as _;
 use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
+use crate::sidebar::DashboardView;
 use crate::status_glyph::{Glyph, GlyphSize, Shape, glyph, glyph_view};
 use crate::target::HostKey;
 use crate::ui_theme::{UiTheme, theme};
@@ -73,7 +76,7 @@ const FRESH_BELOW_SECONDS: i64 = 60;
 
 impl RootView {
     /// The facts and snapshot a listed row reads.
-    fn dashboard_row_input<'a>(&'a self, row: &'a DashboardRow) -> Option<RowInput<'a>> {
+    pub(crate) fn dashboard_row_input<'a>(&'a self, row: &'a DashboardRow) -> Option<RowInput<'a>> {
         let session = self.sidebar.session(&row.session_id)?;
         Some(RowInput {
             row,
@@ -142,15 +145,79 @@ impl RootView {
         visible_columns(self.dashboard_width.unwrap_or(f32::INFINITY))
     }
 
-    /// The Dashboard tab's body.
-    pub(crate) fn dashboard_tab_element(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Shows the Dashboard's `view`, saving the choice when it changed.
+    pub(crate) fn set_dashboard_view(&mut self, view: DashboardView, cx: &mut Context<Self>) {
+        if self.sidebar.set_dashboard_view(view) {
+            self.save_ui();
+        }
+        cx.notify();
+    }
+
+    /// The keys of the view toggle, the Dashboard's one keyboard stop, in the
+    /// main window: Tab reaches it while no drawn field or control holds the
+    /// keyboard (a pane the tab change left behind is not drawn),
+    /// Left and Right pick a view, Enter and Space flip it once per press (a
+    /// `held` repeat does nothing), and Tab or Escape leaves it, Escape also
+    /// dropping Esc's one-click arms as it does anywhere else. `false` for
+    /// any other key, so it goes on its way.
+    pub(crate) fn on_dashboard_toggle_key(
+        &mut self,
+        ks: &Keystroke,
+        held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let dashboard = self
+            .tabs
+            .active_tab()
+            .is_some_and(|tab| matches!(tab.content, TabContent::Dashboard));
+        let plain = !(ks.modifiers.control || ks.modifiers.alt || ks.modifiers.platform);
+        if !dashboard || !plain || !self.is_main_window(window) {
+            return false;
+        }
+        if !self.dashboard_toggle_focus.is_focused(window) {
+            let field_has_focus =
+                self.root_focus.contains_focused(window, cx) && !self.root_focus.is_focused(window);
+            if ks.key != "tab" || field_has_focus {
+                return false;
+            }
+            self.dashboard_toggle_focus.focus(window);
+            cx.notify();
+            return true;
+        }
+        let flipped = match self.sidebar.dashboard_view() {
+            DashboardView::Compact => DashboardView::ByStatus,
+            DashboardView::ByStatus => DashboardView::Compact,
+        };
+        match ks.key.as_str() {
+            "left" => self.set_dashboard_view(DashboardView::Compact, cx),
+            "right" => self.set_dashboard_view(DashboardView::ByStatus, cx),
+            "enter" | "space" if held => {}
+            "enter" | "space" => self.set_dashboard_view(flipped, cx),
+            "tab" => {
+                self.root_focus.focus(window);
+                cx.notify();
+            }
+            "escape" => {
+                self.disarm_escape_arms();
+                self.root_focus.focus(window);
+                cx.notify();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The By status view: its sticky column header and the scrolled body,
+    /// and where in the body each session's row sits.
+    fn by_status_body(&self, cx: &mut Context<Self>) -> ([AnyElement; 2], HashMap<String, usize>) {
         let t = theme(cx);
         let columns = self.dashboard_columns();
-        let counts = dashboard::model(&self.sidebar, &self.dashboard_facts.facts()).counts();
         let accents = self.sidebar.session_accents();
+        let groups = self.dashboard_view_rows();
+        let row_at = row_indices(&groups);
         let mut body: Vec<AnyElement> = Vec::new();
-        let mut row_at: HashMap<String, usize> = HashMap::new();
-        for (heading, rows) in self.dashboard_view_rows() {
+        for (heading, rows) in groups {
             body.push(group_heading(
                 crate::fonts::ui_text_size(cx),
                 crate::fonts::ui_weight_shift(cx),
@@ -159,7 +226,6 @@ impl RootView {
                 &t,
             ));
             for cells in &rows {
-                row_at.insert(cells.session_id.clone(), body.len());
                 let accent = accents
                     .get(cells.session_id.as_str())
                     .copied()
@@ -184,7 +250,48 @@ impl RootView {
                 }));
             }
         }
+        let header = column_header(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            columns,
+            &t,
+        )
+        .into_any_element();
+        let scrolled = div()
+            .id("dashboard-body")
+            .debug_selector(|| "dashboard-body".to_owned())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .pb(px(20.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.dashboard_scroll)
+            .children(body)
+            .into_any_element();
+        ([header, scrolled], row_at)
+    }
+
+    /// The Dashboard tab's body.
+    pub(crate) fn dashboard_tab_element(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let counts = dashboard::model(&self.sidebar, &self.dashboard_facts.facts()).counts();
         let chips = self.dashboard_queue();
+        let (view, row_at) = match self.sidebar.dashboard_view() {
+            DashboardView::Compact => {
+                let row_at = if chips.is_empty() {
+                    HashMap::new()
+                } else {
+                    row_indices(&self.dashboard_view_rows())
+                };
+                (vec![self.dashboard_compact_element(cx)], row_at)
+            }
+            DashboardView::ByStatus => {
+                let (parts, row_at) = self.by_status_body(cx);
+                (parts.into_iter().collect(), row_at)
+            }
+        };
+        let toggle = self.dashboard_view_toggle(cx);
         div()
             .relative()
             .flex()
@@ -196,41 +303,34 @@ impl RootView {
             .text_size(crate::fonts::ui_px(cx, UI_TEXT_SIZE))
             .text_color(gpui::rgb(t.text))
             .driver_id(|| "dashboard-view".to_owned())
-            .child(width_probe(cx))
-            .child(header_strip(
-                crate::fonts::ui_text_size(cx),
-                crate::fonts::ui_weight_shift(cx),
-                counts,
-                self.dashboard_figures(),
-                &theme(cx),
-            ))
+            .child(
+                header_strip(
+                    crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
+                    counts,
+                    self.dashboard_figures(),
+                    &theme(cx),
+                )
+                .child(toggle),
+            )
             .when(!chips.is_empty(), |view| {
                 view.child(queue_strip(&chips, &row_at, cx))
             })
-            .child(column_header(
-                crate::fonts::ui_text_size(cx),
-                crate::fonts::ui_weight_shift(cx),
-                columns,
-                &t,
-            ))
             .child(
                 div()
-                    .id("dashboard-body")
-                    .debug_selector(|| "dashboard-body".to_owned())
+                    .relative()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .pb(px(20.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.dashboard_scroll)
-                    .children(body),
+                    .child(size_probe(cx))
+                    .children(view),
             )
             .into_any_element()
     }
 
     /// The status glyph of the row for session `id`.
-    fn row_glyph(&self, id: &str, t: &UiTheme) -> Glyph {
+    pub(crate) fn row_glyph(&self, id: &str, t: &UiTheme) -> Glyph {
         self.sidebar.session(id).map_or_else(
             || {
                 glyph(
@@ -554,19 +654,24 @@ fn ask_choice_button(
     .into_any_element()
 }
 
-/// Notes the view's laid-out width; a change redraws after the frame, since
-/// gpui drops a notify made while it draws, so the columns follow a resize.
-fn width_probe(cx: &mut Context<RootView>) -> impl IntoElement {
+/// Notes the laid-out size of the room under the header and queue strips; a
+/// change redraws after the frame, since gpui drops a notify made while it
+/// draws, so the columns and the Compact view's capacity follow a resize.
+fn size_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     let root = cx.entity();
     canvas(
         move |bounds, _, cx| {
             let width = bounds.size.width / px(1.0);
+            let height = bounds.size.height / px(1.0);
             let moved = root.update(cx, |this, _| {
-                let moved = this
-                    .dashboard_width
-                    .is_none_or(|held| (held - width).abs() > 0.5);
+                let differs = |held: Option<f32>, size: f32| {
+                    held.is_none_or(|held| (held - size).abs() > 0.5)
+                };
+                let moved =
+                    differs(this.dashboard_width, width) || differs(this.dashboard_height, height);
                 if moved {
                     this.dashboard_width = Some(width);
+                    this.dashboard_height = Some(height);
                 }
                 moved
             });
@@ -661,7 +766,7 @@ fn session_cell(
 
 /// The state word's colour: the glyph's hue, quieter for an idle, starting
 /// or ended session.
-fn state_colour(shape: Shape, t: &UiTheme) -> u32 {
+pub(crate) fn state_colour(shape: Shape, t: &UiTheme) -> u32 {
     match shape {
         Shape::Working | Shape::Background => t.working,
         Shape::Asking => t.asking,
@@ -716,7 +821,7 @@ fn summary_cell(offset: i8, cells: &RowCells, name: &str, t: &UiTheme) -> Div {
 
 /// One stuck flag: a tag that shrinks with its line and ends in `…` rather
 /// than spilling into the next column.
-fn stuck_flag(offset: i8, shift: i8, id: &str, text: &str, t: &UiTheme) -> Div {
+pub(crate) fn stuck_flag(offset: i8, shift: i8, id: &str, text: &str, t: &UiTheme) -> Div {
     let selector = id.to_owned();
     truncating(id, StyledText::new(text.to_owned()))
         .driver_id(move || selector.clone())
@@ -1075,14 +1180,8 @@ fn column_header(offset: i8, shift: i8, columns: Columns, t: &UiTheme) -> Div {
         .child(fixed(COST_W).flex().justify_end().child(caps("COST")))
 }
 
-/// The title, the count pills and, once known, the day's figures.
-fn header_strip(
-    offset: i8,
-    shift: i8,
-    counts: HeaderCounts,
-    figures: Option<HeaderFigures>,
-    t: &UiTheme,
-) -> Div {
+/// The header's four count pills, which clip once the day figures are gone.
+fn count_pills(offset: i8, shift: i8, counts: HeaderCounts, t: &UiTheme) -> Div {
     let marks = [
         glyph(
             SessionStatus::AwaitingInput,
@@ -1152,6 +1251,23 @@ fn header_strip(
             });
     div()
         .flex()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .gap(px(4.0))
+        .text_size(crate::fonts::ui_px_at(offset, 12.0))
+        .children(pills)
+}
+
+/// The title, the count pills and, once known, the day's figures.
+fn header_strip(
+    offset: i8,
+    shift: i8,
+    counts: HeaderCounts,
+    figures: Option<HeaderFigures>,
+    t: &UiTheme,
+) -> Div {
+    div()
+        .flex()
         .flex_none()
         .items_center()
         .gap(px(14.0))
@@ -1163,21 +1279,26 @@ fn header_strip(
         .driver_id(|| "dashboard-header".to_owned())
         .child(
             div()
+                .flex_none()
                 .text_size(crate::fonts::ui_px_at(offset, 15.0))
                 .font_weight(crate::fonts::ui_weight_at(shift, FontWeight::SEMIBOLD))
                 .child("Dashboard"),
         )
+        .child(count_pills(offset, shift, counts, t))
         .child(
+            // Grows from nothing, so the figures get only the room the pills
+            // and the view toggle leave, and the pills shrink only once the
+            // figures are gone.
             div()
                 .flex()
-                .gap(px(4.0))
-                .text_size(crate::fonts::ui_px_at(offset, 12.0))
-                .children(pills),
+                .flex_1()
+                .justify_end()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .when_some(figures, |room, figures| {
+                    room.child(figures_view(offset, shift, figures, t))
+                }),
         )
-        .child(div().flex_1())
-        .when_some(figures, |strip, figures| {
-            strip.child(figures_view(offset, shift, figures, t))
-        })
 }
 
 fn figure(shift: i8, value: String, after: &'static str, t: &UiTheme) -> Div {
@@ -1219,6 +1340,9 @@ fn figures_view(offset: i8, shift: i8, figures: HeaderFigures, t: &UiTheme) -> D
     });
     div()
         .flex()
+        .flex_shrink()
+        .min_w(px(0.0))
+        .overflow_hidden()
         .items_center()
         .gap(px(16.0))
         .text_size(crate::fonts::ui_px_at(offset, 12.0))
@@ -1246,8 +1370,24 @@ fn figures_view(offset: i8, shift: i8, figures: HeaderFigures, t: &UiTheme) -> D
         })
 }
 
-/// The sessions waiting on the user, longest first, each chip scrolling its
-/// row into view, then the order's hint.
+/// Where in the By status body each session's row sits: after its group's
+/// heading, and after the rows, ask blocks and nested rows before it, as
+/// `by_status_body` pushes them.
+fn row_indices(groups: &[(&'static str, Vec<RowCells>)]) -> HashMap<String, usize> {
+    let mut row_at = HashMap::new();
+    let mut at = 0;
+    for (_, rows) in groups {
+        at += 1;
+        for cells in rows {
+            row_at.insert(cells.session_id.clone(), at);
+            at += 1 + usize::from(cells.ask.is_some()) + cells.nested.len();
+        }
+    }
+    row_at
+}
+
+/// The sessions waiting on the user, longest first, each chip opening By
+/// status and scrolling its row into view, then the order's hint.
 fn queue_strip(
     chips: &[QueueChip],
     row_at: &HashMap<String, usize>,
@@ -1305,10 +1445,13 @@ fn queue_strip(
                     .child(chip.age.clone()),
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if this.sidebar.dashboard_view() != DashboardView::ByStatus {
+                    this.set_dashboard_view(DashboardView::ByStatus, cx);
+                }
                 if let Some(index) = index {
                     this.dashboard_scroll.scroll_to_item(index);
-                    cx.notify();
                 }
+                cx.notify();
             }))
     });
     div()

@@ -303,6 +303,18 @@
     },
     {
       "paths": [
+        "apps/native/src/dashboard_compact.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^dashboard_compact::/)) | (binary_id(rustling-tulip-native::ui) & test(/^ui_dashboard::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/dashboard_compact_view.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native::ui) & test(/^ui_dashboard::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/dashboard_view.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::ui) & test(/^ui_dashboard::/)"

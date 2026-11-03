@@ -41,15 +41,30 @@ Out of this design's scope, each with its own design; the Dashboard consumes wha
 
 ## Layout
 
-Two views of the same sessions, switched by the header's `By repo | By status` toggle: **By repo** (the default, the additions mock's `laneB()`, `bandB()` and `laneRepo()`) and **By status** (the Dashboard mock's lane A, `laneA()`, with the additions mock's `Last 2 h` column).
+Three views of the same sessions, switched by the header's toggle: **Compact** (the default, see "Compact" below), **By repo** (the additions mock's `laneB()`, `bandB()` and `laneRepo()`) and **By status** (the Dashboard mock's lane A, `laneA()`, with the additions mock's `Last 2 h` column).
 
 The Dashboard mock's sample data (`const S`) is a plausible 14:32 with eight sessions in three repos; the additions mock adds the tracks (`const T`), Questions, Next up and accounts, and its state tabs show the quiet and trouble states.
 
-**Orchestrator decision (not an owner ruling):** the switch is remembered per client, in `native-ui.json` (`dashboard.view`, `"repo"` by default).
+**Orchestrator decision (not an owner ruling):** the switch is remembered per client, in `native-ui.json` (`dashboard.view`: `"compact"` or `"by_status"`). A missing key, a non-string or an unknown value loads as `"compact"`, the default on a fresh install, with the rest of the file loading.
 
 ### Header strip
 
-One band at the top of both views: the title, count pills (`N need you` in the asking colour, then working, idle, done), the day's figures (`Today $X API-equiv`, tokens, commits, issues Done), one progress bar per Linear release the listed sessions' issues belong to (`vNext 11/18`), the Linear sync age (`Linear · 1m ago`, in the danger colour with its age when Linear is unreachable) and the `By repo | By status` toggle. The toggle is not drawn until By repo exists (DB.25); the figures, release bars and sync age stay hidden while the day's totals are zero and the Linear sync time is unset.
+One band at the top of both views: the title, count pills (`N need you` in the asking colour, then working, idle, done), the day's figures (`Today $X API-equiv`, tokens, commits, issues Done), one progress bar per Linear release the listed sessions' issues belong to (`vNext 11/18`), the Linear sync age (`Linear · 1m ago`, in the danger colour with its age when Linear is unreachable) and the view toggle, today the two-way `Compact | By status` (selectors `dashboard-view-compact` and `dashboard-view-by-status`), which DB.25 widens for By repo. In a narrow view the day figures drop first, then the pills clip, so the toggle stays visible. The toggle is one keyboard stop: Tab reaches it while no field or other control holds the keyboard, Left and Right pick a view, Enter and Space flip it once per press (a held key does nothing), Tab leaves it, and Escape leaves it too and clears the armed one-click actions. The figures, release bars and sync age stay hidden while the day's totals are zero and the Linear sync time is unset.
+
+### Compact
+
+Every container is one block and nothing scrolls: the owner asked for a summary that needs no scrolling or hovering, and chose lane A, stacked lanes ([canvases/dashboard-compact/](./canvases/dashboard-compact/RECIPE.md), the mock). It draws under the header and queue strips, with no column header. Orchestrator decisions, not owner rulings:
+
+- **Blocks:** one per sidebar container (a repo or a workspace, plus a folder container tagged FOLDER) with at least one listed session, in the sidebar's order. A block is a repo cell on the left spanning its sessions (icon, name, a `REPO`, `WORKSPACE` or `FOLDER` tag, the live session count, a tally per state), then one row per session, then a wrapping cell of chips.
+- **A row:** status glyph, label, state word, now line (stuck flags first), issue key when the session has one, age. A now line that repeats the state word is not drawn.
+- **Chips:** one per agent-tree node (subagents, background shells, gates, monitors and dispatch runs), depth first as By status nests its rows; a finished chip is muted and a failed one is in the danger colour.
+- **Ended sessions** never get rows: they show as `+N ended` in the block's fold row.
+- **Past the view's height it folds:** the height is estimated, and while it exceeds the view the block with the most foldable sessions (Idle with nothing of their own running, at least two) folds them into its fold row as `+N idle` with their labels. Waiting, working and unseen-finished sessions never fold.
+- **Narrow widths drop parts in order:** the issue key, then the age, and below that the chips move under the session cell.
+- **Sizes follow the UI text size.**
+- **A click on a row** shows the session's pane, as a By status row's does. A waiting row does not answer from the row: answers stay in By status and the band. A queue chip's click opens By status scrolled to that row.
+- **With no agent listed** it draws `No agents running.`
+- **Driver ids:** `dashboard-compact`, `dashboard-compact-repo-{i}` (`-name`, `-tally-*`), `dashboard-compact-row-{id}` (`-glyph`, `-label`, `-state`, `-now`, `-now-text`, `-flag-{n}`, `-issue`, `-age`), `dashboard-compact-chips-{id}`, `dashboard-compact-chip-{id}-{n}` and `dashboard-compact-fold-{i}` (`-ended`, `-idle`, `-names`).
 
 ### The needs-you count
 
@@ -57,7 +72,7 @@ The rail button's and the tab's badge, and the `need you` pill, count the waitin
 
 **Orchestrator decision (not an owner ruling):** Linear Questions never count toward it; the accounts card adds one only while every account is dry (blocked now), not while the accounts merely run dry later at the current pace.
 
-### By repo (default)
+### By repo
 
 **Need-you band** (`.band`), three columns, washed in the asking colour while anything waits:
 
@@ -84,7 +99,7 @@ The approved lane A, below.
 
 #### Queue strip
 
-Under the header, while any session waits: one chip per waiting session, longest wait first, each with the asking glyph, the issue key (else the session label), the prompt on one line (a permission reads `<tool>: <command>`) and its age, then the accounts and questions chips. A click on a session chip scrolls its row into view.
+Under the header, while any session waits: one chip per waiting session, longest wait first, each with the asking glyph, the issue key (else the session label), the prompt on one line (a permission reads `<tool>: <command>`) and its age, then the accounts and questions chips. A click on a session chip scrolls its row into view; in Compact it opens By status scrolled to that row.
 
 **Orchestrator decision (not an owner ruling):** Ctrl+J (unbound in `apps/native/src` today) focuses the pane of the next waiting session, longest wait first, in either view, as a Needs You row click does. The waits come from `needs_you::rows` (`apps/native/src/needs_you.rs:41`), so the band, the queue, the Needs You panel and the Needs you group agree on who waits and in what order.
 
@@ -503,9 +518,9 @@ Ids: **SA** for the summarizer service, **DB** for the Dashboard. Each names its
   `apps/native/src/dashboard_lanes.rs` (new, plain Rust: lanes in sidebar order, live and total counts, captions, the No live agent table, Show all lanes), `apps/native/src/dashboard_lanes_view.rs` (new: lane head with chart and caption, session rows with nested rows, Questions and Next up, the No live agent table), `apps/native/src/lib.rs` (mounted; `Open plan` opens the Plan tab), `apps/native/tests/ui/ui_dashboard.rs`, `apps/native/examples/shot.rs` (a `dashboard-repo` view).
 
   Proof: specs that a repo with a listed session gets a lane, one without lands in the table, Show all lanes adds it faded, and Next up shows three issues and `+N more`; a `native-shot dashboard-repo` before and after. Waits on DB.22, DB.23, the board's Next up and To-do counts and the Plan tab (RT-56).
-- [ ] DB.25 Switch between By repo and By status, remembered per client. `apps/native/src/dashboard.rs` (the view), `apps/native/src/dashboard_view.rs` (the header toggle), `apps/native/src/sidebar.rs` (`native-ui.json` `dashboard.view`, `"repo"` when missing or unknown), `apps/native/src/lib.rs` (a By repo row click opens By status with that row's drawer), `apps/native/tests/ui/ui_dashboard.rs`.
+- [ ] DB.25 Switch between By repo and By status, remembered per client. The toggle, `native-ui.json` `dashboard.view` and the Compact view are built as a two-way `Compact | By status` switch (`apps/native/src/dashboard_view.rs`, `apps/native/src/sidebar.rs`); what is left is the By repo choice: `apps/native/src/dashboard.rs` (the view), the toggle's third choice, `"repo"` as a saved value, `apps/native/src/lib.rs` (a By repo row click opens By status with that row's drawer), `apps/native/tests/ui/ui_dashboard.rs`.
 
-  Proof: specs that the Dashboard opens By repo by default, the toggle switches and survives a reload of the UI state, and a lane row click lands on its drawer. Waits on DB.14, DB.24.
+  Proof: specs that the toggle offers By repo, picking it survives a reload of the UI state, and a lane row click lands on its drawer. Waits on DB.14, DB.24.
 - [ ] SA.11 Document the summarizer and the Dashboard.
 
   `docs/on-disk.md` and `CLAUDE.md` (the on-disk list gains `summarizer-spend.json`, `day-ledger.json`, the `activity/` folder and `sessions/<id>/summary.json`; `native-ui.json` gains `dashboard.view`; `state.json`'s `summarizer` block; the no-direct-API line names the DeepSeek summarizer's HTTP call).

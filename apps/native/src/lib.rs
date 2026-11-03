@@ -32,6 +32,8 @@ mod copied;
 mod copy_text;
 mod dashboard;
 mod dashboard_band_view;
+mod dashboard_compact;
+mod dashboard_compact_view;
 mod dashboard_facts;
 mod dashboard_rows;
 mod dashboard_tab;
@@ -270,6 +272,9 @@ pub use crate::changes_view::{
 pub use crate::connection::Connection;
 pub use crate::dashboard::DashboardEntry;
 pub use crate::dashboard_band_view::enable_band_probe;
+pub use crate::dashboard_compact::{
+    COMPACT_EMPTY_TEXT, ChipKind, CompactBlock, CompactChip, CompactRow, Tally,
+};
 pub use crate::dashboard_rows::{
     AskBlock, AskChoice, Columns as DashboardColumns, HeaderFigures, NestedRow, QueueChip,
     ReleaseFigure, RowCells,
@@ -1160,9 +1165,13 @@ pub struct RootView {
     dashboard_scroll: gpui::ScrollHandle,
     /// Repaints the Dashboard while its tab is active, so the ages count.
     dashboard_timer: Option<Task<()>>,
-    /// The Dashboard view's width as last laid out; `None` before the first
-    /// layout.
+    /// The width of the room under the Dashboard's strips as last laid out;
+    /// `None` before the first layout.
     dashboard_width: Option<f32>,
+    /// That room's height, which sets the Compact view's capacity.
+    dashboard_height: Option<f32>,
+    /// The keyboard stop of the Dashboard's view toggle.
+    dashboard_toggle_focus: FocusHandle,
     /// The tab active after the last tab change, so a diff or viewer tab
     /// takes the keyboard when it becomes active.
     last_active_tab: Option<String>,
@@ -1587,6 +1596,8 @@ impl RootView {
             dashboard_scroll: gpui::ScrollHandle::new(),
             dashboard_timer: None,
             dashboard_width: None,
+            dashboard_height: None,
+            dashboard_toggle_focus: cx.focus_handle(),
             last_active_tab: None,
             last_focused_session: None,
             pick_folder,
@@ -4881,7 +4892,10 @@ impl RootView {
         if self.on_settings_layer_key(event, window, cx) {
             return;
         }
-        if self.on_container_menu_key(ks, window, cx) || self.on_container_row_key(ks, window, cx) {
+        if self.on_container_menu_key(ks, window, cx)
+            || self.on_container_row_key(ks, window, cx)
+            || self.on_dashboard_toggle_key(ks, event.is_held, window, cx)
+        {
             cx.stop_propagation();
             return;
         }

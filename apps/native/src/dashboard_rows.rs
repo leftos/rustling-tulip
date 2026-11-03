@@ -41,7 +41,7 @@ const IDLE: &str = "Idle";
 /// A session that ended in an error.
 const ERROR: &str = "Error";
 /// What a column shows when nothing is known about it.
-const DASH: &str = "—";
+pub(crate) const DASH: &str = "—";
 
 /// What a row's text is read from: the listed session, its snapshot, the
 /// daemon's facts for it, the client's unseen flag and the agent plugins'
