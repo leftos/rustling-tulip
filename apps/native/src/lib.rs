@@ -197,7 +197,6 @@ use gpui::{
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RepoEntry,
     SessionMode, SessionSnapshot, SuggestTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
-    WorkspaceEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -4392,7 +4391,7 @@ impl RootView {
             } => self.on_discard_preview(&session_id, &members, cx),
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
             DaemonMessage::Repos { repos } => self.on_repos(host, &repos, cx),
-            DaemonMessage::Workspaces { workspaces } => self.on_workspaces(&workspaces, window, cx),
+            msg @ DaemonMessage::Workspaces { .. } => self.on_workspaces(host, &msg, window, cx),
             msg @ DaemonMessage::KeepAwakeStatus { .. } => self.on_keep_awake_status(host, &msg),
             msg @ DaemonMessage::RemoteStatus { .. } => self.on_remote_status(host, msg, cx),
             msg @ DaemonMessage::AgentCommands { .. } => self.on_agent_commands(host, msg, cx),
@@ -4519,7 +4518,7 @@ impl RootView {
             self.on_worktrees_root_error(host, code, cx);
         }
         let inline = match request_id {
-            None => self.on_creator_error(&message, cx),
+            None => self.on_creator_error(host, &message, cx),
             Some(id) => {
                 self.on_agent_setting_refused(host, id, &message, cx);
                 self.on_summarizer_refused(host, id, &message, cx)
@@ -4534,15 +4533,21 @@ impl RootView {
     }
 
     /// The registry's workspaces after a broadcast: the panels follow, and
-    /// the workspace creator closes on the name it was waiting for.
+    /// the workspace creator closes on the name it was waiting for, when the
+    /// broadcast came from its own host.
     fn on_workspaces(
         &mut self,
-        workspaces: &[WorkspaceEntry],
+        host: &HostKey,
+        msg: &DaemonMessage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let DaemonMessage::Workspaces { workspaces } = msg else {
+            tracing::warn!("on_workspaces called with a message other than Workspaces");
+            return;
+        };
         self.on_containers_changed(cx);
-        self.settle_workspace_creator(workspaces, window, cx);
+        self.settle_workspace_creator(host, workspaces, window, cx);
     }
 
     /// The daemon asks whether to discard uncommitted changes before a
@@ -5243,15 +5248,11 @@ impl RootView {
     }
 
     /// The name the sidebar shows for a session, or its id when unknown.
+    /// A session's label reads its own host's agents.
     fn session_label(&self, id: &str) -> String {
-        self.sidebar.session(id).map_or_else(
+        self.sidebar.find_session(id).map_or_else(
             || id.to_owned(),
-            |session| {
-                crate::sidebar::display_label(
-                    session,
-                    self.sidebar.agents(&crate::target::HostKey::Local),
-                )
-            },
+            |(host, session)| crate::sidebar::display_label(session, self.sidebar.agents(&host)),
         )
     }
 }

@@ -588,9 +588,11 @@ pub fn pin_parts(entry: &str) -> (HostKey, &str) {
     }
 }
 
-/// A pin's remote host name, `None` for This PC's, and its repo id.
+/// A pin's remote host name, `None` for This PC's, and its repo id. A host
+/// key may itself hold `::` (an IPv6 SSH host), and a repo id never does, so
+/// the last `::` is the pin's separator.
 fn split_pin_entry(entry: &str) -> (Option<&str>, &str) {
-    match entry.split_once("::") {
+    match entry.rsplit_once("::") {
         Some((name, id)) => (Some(name), id),
         None => (None, entry),
     }
@@ -598,15 +600,16 @@ fn split_pin_entry(entry: &str) -> (Option<&str>, &str) {
 
 /// A collapse or height entry's remote host name, `None` for This PC's,
 /// and its repo id. This PC's key id is `<repo>::<worktree>`; a remote
-/// host's has its name and `::` before that.
+/// host's has its name and `::` before that, and the host key may itself
+/// hold `::`, so the last two separators split.
 fn split_key_entry(entry: &str) -> (Option<&str>, &str) {
     let id = entry.split('|').next().unwrap_or(entry);
-    let mut parts = id.split("::");
-    let first = parts.next().unwrap_or_default();
-    let second = parts.next();
-    match (second, parts.next()) {
-        (Some(repo), Some(_)) => (Some(first), repo),
-        _ => (None, first),
+    let mut parts = id.rsplitn(3, "::");
+    let last = parts.next().unwrap_or_default();
+    match (parts.next(), parts.next()) {
+        (Some(repo), Some(host)) => (Some(host), repo),
+        (Some(repo), None) => (None, repo),
+        (None, _) => (None, last),
     }
 }
 
@@ -1241,6 +1244,62 @@ mod tests {
             state.collapsed.keys().collect::<Vec<_>>(),
             ["r1::D:\\r1-wt|changes"],
             "This PC's entry stays"
+        );
+    }
+
+    #[test]
+    fn pins_round_trip_for_an_ipv6_ssh_host() {
+        let ipv6 = HostKey::Remote("ssh:me@fe80::1".to_owned());
+        assert_eq!(
+            pin_parts(&pin_entry(&ipv6, "r1")),
+            (ipv6, "r1"),
+            "an IPv6 host key's own :: is not the pin's separator"
+        );
+        assert_eq!(pin_parts("r1"), (HostKey::Local, "r1"));
+        assert_eq!(
+            pin_parts("box::r1"),
+            (HostKey::Remote("box".to_owned()), "r1")
+        );
+    }
+
+    #[test]
+    fn collapse_entries_of_an_ipv6_ssh_host_are_pruned_by_host() {
+        let ipv6 = HostKey::Remote("ssh:me@fe80::1".to_owned());
+        let box_host = HostKey::Remote("box".to_owned());
+        let this_pc = format!("{}|files", main_tree("r1").id());
+        let theirs = format!(
+            "{}|files",
+            stored_key(&box_host, &worktree("r1", "wt")).id()
+        );
+        let its_own = format!(
+            "{}|files",
+            stored_key(&ipv6, &worktree("r9", "D:\\r9-wt")).id()
+        );
+        let mut state = ScUiState::default();
+        for entry in [&this_pc, &theirs, &its_own] {
+            state.collapsed.insert(entry.clone(), true);
+        }
+        state.pinned_repo = Some(pin_entry(&ipv6, "r9"));
+
+        assert!(
+            state.prune(&ipv6, &[repo("r1", "D:\\r1")]),
+            "the IPv6 host dropped its unregistered r9"
+        );
+        assert_eq!(state.pinned_repo, None, "and the pin on it");
+        assert!(
+            state.collapsed.contains_key(&this_pc),
+            "This PC's entry stays: {:?}",
+            state.collapsed
+        );
+        assert!(
+            state.collapsed.contains_key(&theirs),
+            "another host's entry stays: {:?}",
+            state.collapsed
+        );
+        assert!(
+            !state.collapsed.contains_key(&its_own),
+            "the IPv6 host's own entry went: {:?}",
+            state.collapsed
         );
     }
 

@@ -1363,6 +1363,30 @@ fn a_remote_hosts_disconnect_closes_its_checkout_prompt(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn a_remote_sessions_label_uses_its_hosts_agents(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let remote_session = session("b1").agent("agent-y").label("").build();
+    let mut h = two_hosts(cx, &dir, remote_session);
+    h.host(&remote()).send(DaemonMessage::Agents {
+        agents: vec![described("agent-y", "remote-y")],
+    });
+
+    h.click_on("close-pane-p2");
+    h.click_on("pane-close-only");
+    let message = h.root(|root, _| {
+        root.undo_entries()
+            .first()
+            .map(|entry| entry.message.clone())
+    });
+
+    assert_eq!(
+        message.as_deref(),
+        Some("Closed pane \"remote-y\""),
+        "the remote session's label reads the agent its own host describes, not This PC's id"
+    );
+}
+
+#[gpui::test]
 fn a_remote_repos_container_menu_gives_the_remote_refusal(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_hosts(cx, &dir, session("b1").in_repo("r2").build());

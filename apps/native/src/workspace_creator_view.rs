@@ -395,16 +395,21 @@ impl RootView {
         cx.notify();
     }
 
-    /// The daemon's parsed suggestion: fills the folder rows, prefills the
-    /// name and keeps the form usable.
+    /// `host`'s parsed suggestion: fills the folder rows, prefills the name
+    /// and keeps the form usable. Another host's reply is not the creator's
+    /// answer and fills nothing.
     pub(crate) fn on_vscode_parsed(
         &mut self,
+        host: &HostKey,
         suggestion: VscodeWorkspaceSuggestion,
         cx: &mut Context<Self>,
     ) {
         let Some(dialog) = &mut self.workspace_creator else {
             return;
         };
+        if &dialog.host != host {
+            return;
+        }
         if !dialog.creator.parsed(suggestion) {
             // A stale reply for an earlier Browse, or nothing in flight.
             return;
@@ -415,14 +420,23 @@ impl RootView {
         cx.notify();
     }
 
-    /// An unrouted `Error` while the creator waits: a pending Create owns it
-    /// (Browse may still be in flight beside it), else a pending parse does.
-    /// Inline in the creator, and not also the generic toast. Returns whether
-    /// the creator took it.
-    pub(crate) fn on_creator_error(&mut self, message: &str, cx: &mut Context<Self>) -> bool {
+    /// An unrouted `Error` from `host` while the creator waits: a pending
+    /// Create owns it (Browse may still be in flight beside it), else a
+    /// pending parse does. Inline in the creator, and not also the generic
+    /// toast. Returns whether the creator took it; another host's error is
+    /// never the creator's answer.
+    pub(crate) fn on_creator_error(
+        &mut self,
+        host: &HostKey,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(dialog) = &mut self.workspace_creator else {
             return false;
         };
+        if &dialog.host != host {
+            return false;
+        }
         let took = if dialog.creator.has_pending_create() {
             dialog.creator.refuse(message)
         } else {
@@ -434,17 +448,19 @@ impl RootView {
         took
     }
 
-    /// Folds a `Workspaces` broadcast: closes on the submitted name, and
-    /// keeps the creator open, with its form, on a refusal.
+    /// Folds `host`'s `Workspaces` broadcast: closes on the submitted name,
+    /// and keeps the creator open, with its form, on a refusal. Another
+    /// host's list is not the creator's answer.
     pub(crate) fn settle_workspace_creator(
         &mut self,
+        host: &HostKey,
         workspaces: &[WorkspaceEntry],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let settled = match self.workspace_creator.as_mut() {
-            Some(dialog) => dialog.creator.settle(workspaces),
-            None => return,
+            Some(dialog) if &dialog.host == host => dialog.creator.settle(workspaces),
+            Some(_) | None => return,
         };
         match settled {
             Settled::Closed => self.close_workspace_creator(window, cx),

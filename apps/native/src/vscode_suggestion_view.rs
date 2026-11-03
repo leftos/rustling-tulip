@@ -38,7 +38,7 @@ impl RootView {
                 true
             }
             DaemonMessage::VscodeWorkspaceParsed { suggestion } => {
-                self.on_vscode_parsed(suggestion.clone(), cx);
+                self.on_vscode_parsed(host, suggestion.clone(), cx);
                 true
             }
             DaemonMessage::VscodeWorkspacesScanned { path, suggestions } => {

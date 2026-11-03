@@ -16,7 +16,20 @@ use std::path::PathBuf;
 
 use gpui::{TestAppContext, px};
 use protocol::{ClientMessage, DaemonMessage, VscodeWorkspaceFolder, VscodeWorkspaceSuggestion};
-use support::{Fixture, Harness, TestDir, pane, repo, tab, workspace};
+use serde_json::json;
+use support::{Fixture, Harness, TestDir, pane, repo, session, tab, workspace};
+
+/// The creator open on the focused host, named `team` with both repos
+/// ticked and submitted, waiting on its host's answer.
+fn submit_team(h: &mut Harness<'_>) {
+    open(h);
+    h.click_on("workspace-creator-name");
+    type_text(h, "team");
+    h.click_on("workspace-creator-member-r1");
+    h.click_on("workspace-creator-member-r2");
+    h.click_on("workspace-creator-create");
+    h.sent();
+}
 
 /// `repos` registered, in a single empty tab.
 fn fixture(repos: Vec<protocol::RepoEntry>) -> Fixture {
@@ -491,5 +504,162 @@ fn a_parse_failure_shows_inline_and_leaves_the_form_usable(cx: &mut TestAppConte
         h.root(|root, _| root.workspace_creator_folder_rows()).len(),
         2,
         "with its folders"
+    );
+}
+
+#[gpui::test]
+fn another_hosts_workspaces_leave_the_creator_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::saved_remote_over(cx, &dir, &two_repos(), &[]);
+    submit_team(&mut h);
+    assert!(is_open(&mut h), "the create waits on its host");
+
+    h.host(&support::saved_remote())
+        .send(DaemonMessage::Workspaces {
+            workspaces: vec![workspace("team", &["r1", "r2"])],
+        });
+    assert!(
+        is_open(&mut h),
+        "another host's list is not the answer to This PC's create"
+    );
+
+    h.send(DaemonMessage::Workspaces {
+        workspaces: vec![workspace("team", &["r1", "r2"])],
+    });
+    assert!(
+        !is_open(&mut h),
+        "This PC's own list holds the name, so the creator closes"
+    );
+}
+
+#[gpui::test]
+fn another_hosts_error_does_not_land_in_the_creator(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::saved_remote_over(cx, &dir, &two_repos(), &[]);
+    submit_team(&mut h);
+
+    h.host(&support::saved_remote()).send(DaemonMessage::Error {
+        message: "another host's request failed".to_owned(),
+        request_id: None,
+        code: None,
+    });
+    assert!(is_open(&mut h), "the create still waits");
+    assert_eq!(
+        error(&mut h),
+        None,
+        "the other host's error is not This PC's create refusal"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        ["Daemon error"],
+        "and it takes the generic path"
+    );
+
+    h.send(DaemonMessage::Error {
+        message: "another workspace already uses the name \"team\"".to_owned(),
+        request_id: None,
+        code: None,
+    });
+    assert_eq!(
+        error(&mut h).as_deref(),
+        Some("another workspace already uses the name \"team\""),
+        "This PC's own refusal lands inline"
+    );
+}
+
+#[gpui::test]
+fn another_hosts_parsed_workspace_is_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::saved_remote_over(cx, &dir, &two_repos(), &[]);
+    open(&mut h);
+    h.click_on("workspace-creator-tab-vscode");
+    h.set_picked_file(Some("C:/work/team.code-workspace"));
+    h.click_on("workspace-creator-browse");
+    h.sent();
+    assert!(h.root(|root, _| root.workspace_creator_parsing()));
+
+    h.host(&support::saved_remote())
+        .send(DaemonMessage::VscodeWorkspaceParsed {
+            suggestion: suggestion(),
+        });
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_folder_rows()),
+        [],
+        "another host's parse fills no rows"
+    );
+    assert!(
+        h.root(|root, _| root.workspace_creator_parsing()),
+        "and leaves This PC's parse pending"
+    );
+
+    h.send(DaemonMessage::VscodeWorkspaceParsed {
+        suggestion: suggestion(),
+    });
+    assert_eq!(
+        h.root(|root, _| root.workspace_creator_folder_rows()).len(),
+        2,
+        "This PC's own parse fills the rows"
+    );
+}
+
+#[gpui::test]
+fn a_remote_creator_takes_its_own_hosts_replies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = support::remote_in_pane(cx, &dir, &json!({}), &["r1", "r2"], session("b1").build());
+    submit_team(&mut h);
+    h.host(&support::saved_remote()).sent();
+
+    h.send(DaemonMessage::Workspaces {
+        workspaces: vec![workspace("team", &["r1", "r2"])],
+    });
+    assert!(
+        is_open(&mut h),
+        "This PC's list is not the answer to the remote host's create"
+    );
+
+    h.host(&support::saved_remote())
+        .send(DaemonMessage::Workspaces {
+            workspaces: vec![workspace("team", &["r1", "r2"])],
+        });
+    assert!(
+        !is_open(&mut h),
+        "the creator's own host's list holds the name, so it closes"
+    );
+
+    submit_team(&mut h);
+    h.host(&support::saved_remote()).sent();
+    assert!(is_open(&mut h), "a fresh create waits on its host");
+
+    h.send(DaemonMessage::Error {
+        message: "this PC's request failed".to_owned(),
+        request_id: None,
+        code: None,
+    });
+    assert!(is_open(&mut h), "the create still waits");
+    assert_eq!(
+        error(&mut h),
+        None,
+        "This PC's error is not the remote create's refusal"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        ["Daemon error"],
+        "and it takes the generic path"
+    );
+
+    h.host(&support::saved_remote()).send(DaemonMessage::Error {
+        message: "another workspace already uses the name \"team\"".to_owned(),
+        request_id: None,
+        code: None,
+    });
+    assert_eq!(
+        error(&mut h).as_deref(),
+        Some("another workspace already uses the name \"team\""),
+        "the creator's own host's refusal lands inline"
+    );
+    assert_eq!(
+        toasts(&mut h),
+        ["Daemon error"],
+        "the inline refusal adds no second toast"
     );
 }
