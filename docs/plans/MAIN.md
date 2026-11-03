@@ -421,7 +421,7 @@
 - [ ] RT-824 Keep native file and folder pickers off the desktop in a driven or cloaked client · release vNext
 - [ ] RT-825 Show a session's label in rustling-tulipd sessions, as the client does
 - [ ] RT-827 Fit the Dashboard header's day figures at the default window width
-- [ ] RT-828 Find why an unused spawned session shows Finished two seconds after spawn · release vNext
+- [ ] RT-830 Make the daemon's default log filter match its own tracing target
 
 ## No project
 
