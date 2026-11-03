@@ -11,7 +11,6 @@
 
 ## Wave 16 — Several hosts in one window
 
-- [ ] RT-579 Fix remote-host labels, Recover names, creator routing and IPv6 SSH keys left by MH.3 · release vNext
 - [ ] RT-620 Route the remaining session and repo lookups by their own host · release vNext
 - [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline · release vNext+1
 - [ ] RT-624 Keep a remote quick shell's remembered folder across This PC's reconnect · release vNext
@@ -41,6 +40,11 @@
 - [ ] RT-692 Scroll the spawn dialog's Target list to its highlight and keep clicks inside it from closing it
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
+- [ ] RT-844 Choose the default shell in Settings, with installed shells and a custom command · release vNext+1
+  - [ ] RT-851 Default shell: daemon setting, detection and protocol (DS.1) · release vNext+1
+  - [ ] RT-852 Default shell: native Settings row (DS.2) · release vNext+1
+  - [ ] RT-853 Default shell: host agent sessions in WSL, Nushell and fish (DS.3) · release vNext+1
+- [ ] RT-857 Send ^H for Ctrl+Backspace so it deletes the previous word · release vNext
 
 ## Wave 2b — Hook status
 
@@ -50,7 +54,6 @@
 - [ ] RT-210 Match Claude Code's hook matcher semantics in the fake CLI
 - [ ] RT-754 Decide whether the screen may end a hook-driven turn, or a working title vetoes it
 - [ ] RT-755 Log every status writer and every toast decision
-- [ ] RT-756 Read esc to interrupt, background agents and MCP tasks as Working · release vNext
 - [ ] RT-758 Make a plain shell an agent session while a hand-typed claude runs in it
 - [ ] RT-764 Stop subagent hook events starving the screen's demotion after an Esc
 - [ ] RT-766 Stop the status watcher spinning on a ShellAgent frame with no agent and no prompt
@@ -98,7 +101,6 @@
 - [ ] RT-590 Fail a spawn whose secret Credential Manager refuses, instead of hanging
 - [ ] RT-536 Host SSH remote sessions on Linux and macOS machines · release vNext+1
 - [ ] RT-540 Make a one-shot ssh bridge call return after it starts the host's daemon
-- [ ] RT-746 Read a relative file link against an absolute path earlier in the same line · release vNext
 - [ ] RT-747 Fetch a folder from a remote host, or a file's whole containing folder · release vNext
 - [ ] RT-748 Benchmark folder transfer from a remote host: packed and compressed stream vs loose files vs scp and sftp · release vNext
 - [ ] RT-821 Keep a started daemon from holding an SSH channel open, and keep redirected CLI output · release vNext
@@ -385,7 +387,6 @@
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
 - [ ] RT-630 Open a remote host's preset wizard while This PC is offline · release vNext
-- [ ] RT-632 Close five edge cases in shared-daemon ownership and pop-out moves · release vNext
 - [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext+1
   - [ ] RT-641 Wrap a tailscale CLI error inside the Connections dialog · release vNext+1
   - [ ] RT-642 Draw This PC's empty state under its host header · release vNext+1
@@ -420,16 +421,23 @@
 - [ ] RT-779 Fix the activity track's long caption and Finished stretch across a restart
 - [ ] RT-780 Hold the daemon's pipe reader until the injector subscribes
 - [ ] RT-783 Hand keys back to the window after a tab rename ends on the Dashboard
-- [ ] RT-816 Stop a tracer whose spawn failed instead of leaving it and its child running · release vNext
-- [ ] RT-817 Show why a daemon a client started failed before opening its log · release vNext
 - [ ] RT-819 Show why the native client's Stop did not stop the daemon · release vNext
-- [ ] RT-823 Stop the installed rt-driver from running the fake CLI out of the tree it was built in · release vNext
 - [ ] RT-824 Keep native file and folder pickers off the desktop in a driven or cloaked client · release vNext
 - [ ] RT-825 Show a session's label in rustling-tulipd sessions, as the client does
 - [ ] RT-827 Fit the Dashboard header's day figures at the default window width
 - [ ] RT-830 Make the daemon's default log filter match its own tracing target
 - [ ] RT-837 Record a refused daemon launch where a login start can be traced
 - [ ] RT-838 Check an elevated stop's integrity on the handshake it acts on
+- [ ] RT-843 Send Home and End in application-cursor form when DECCKM is set
+- [ ] RT-845 Stop the tracer when a spawn is cancelled mid-connect
+- [ ] RT-846 Show one notice for a rehost the daemon keeps refusing
+- [ ] RT-847 Stop a failed spawn's PTY child on macOS and Linux too
+- [ ] RT-848 Put the tracer's child in its job before it runs
+- [ ] RT-849 Close a pop-out that loses a rehost claim instead of leaving it on a dead host
+- [ ] RT-850 Read background counts on a default-mode Claude footer
+- [ ] RT-854 Refuse an isolated daemon launch whose checkout has no fake agent CLI
+- [ ] RT-855 Send a remote host's VS Code workspace suggestion to that host
+- [ ] RT-856 Match the workspace creator's replies by request id
 
 ## No project
 
@@ -441,13 +449,14 @@
 - [accounts.md](accounts.md) — RT-66, RT-277
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
-- [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217
+- [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-853
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
 - [dashboard.md](dashboard.md) — RT-28, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-760, RT-779, RT-789
+- [default-shell.md](default-shell.md) — RT-844, RT-851, RT-852, RT-853
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-793
-- [finished-toast.md](finished-toast.md) — RT-754, RT-755, RT-756, RT-757, RT-769, RT-770
+- [finished-toast.md](finished-toast.md) — RT-754, RT-755, RT-757, RT-769, RT-770
 - [gate-dashboard.md](gate-dashboard.md) — RT-64
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
