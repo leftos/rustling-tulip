@@ -40,6 +40,25 @@ fn layout_init_required_opens_the_chooser_and_sends_nothing(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn nothing_else_to_offer_takes_start_empty_without_asking(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    h.sent();
+    h.send(init_required(0, Vec::new()));
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::InitLayout {
+                kind: InitLayoutKind::Empty
+            }]
+        ),
+        "the only choice is taken without a question: {sent:?}"
+    );
+    assert!(!chooser_open(&mut h), "no chooser opens");
+}
+
+#[gpui::test]
 fn start_empty_sends_empty_and_closes(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::open(cx, &dir);

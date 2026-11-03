@@ -20,6 +20,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Changed
 
 - Session summaries stay off until you turn them on in Settings › Dashboard, since each one uses your provider's account; a saved choice is kept.
+- A new window opens straight away when there is nothing to choose, instead of asking how to start with Start empty as the only option.
 
 ## v0.7.2-alpha
 

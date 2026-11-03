@@ -6,7 +6,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke, SharedString, Stateful,
     Window, div, prelude::*, px,
 };
-use protocol::{ClientMessage, ClonableLayout, TabEntry};
+use protocol::{ClientMessage, ClonableLayout, InitLayoutKind, TabEntry};
 
 use crate::RootView;
 use crate::driver_id::DriverId as _;
@@ -54,9 +54,11 @@ impl RootView {
     }
 
     /// `host`'s daemon's `LayoutInitRequired`: the chooser opens on Start
-    /// empty and the client waits for a choice, which goes to `host`. While
-    /// another host's chooser shows, the question waits its turn, a later
-    /// one from the same host replacing it.
+    /// empty and the client waits for a choice, which goes to `host`. A
+    /// question with nothing but Start empty to offer is answered at once,
+    /// since asking would offer no choice. While another host's chooser
+    /// shows, the question waits its turn, a later one from the same host
+    /// replacing it.
     pub(crate) fn open_layout_chooser(
         &mut self,
         host: &HostKey,
@@ -73,6 +75,20 @@ impl RootView {
             clonable = clonable.len(),
             "first connect for this client: asking how to lay it out"
         );
+        let count = usize::try_from(active_session_count).unwrap_or(usize::MAX);
+        if LayoutChooser::new(has_legacy, count, clonable.clone()).only_start_empty() {
+            tracing::info!(
+                ?host,
+                "layout chooser: only Start empty is offered, taking it"
+            );
+            self.send_to(
+                host,
+                ClientMessage::InitLayout {
+                    kind: InitLayoutKind::Empty,
+                },
+            );
+            return;
+        }
         if self.layout_chooser.is_some() && self.layout_chooser_host != *host {
             self.layout_questions
                 .retain(|question| question.host != *host);
@@ -84,7 +100,6 @@ impl RootView {
             });
             return;
         }
-        let count = usize::try_from(active_session_count).unwrap_or(usize::MAX);
         self.layout_chooser = Some(LayoutChooser::new(has_legacy, count, clonable));
         self.layout_chooser_host = host.clone();
         if self.exit.is_none() {

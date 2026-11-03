@@ -144,6 +144,12 @@ impl LayoutChooser {
         out
     }
 
+    /// Whether Start empty is the only control the chooser offers, so asking
+    /// would offer no choice.
+    pub(crate) fn only_start_empty(&self) -> bool {
+        self.controls() == [Control::StartEmpty]
+    }
+
     /// The control the keyboard is on: the one last focused while it is
     /// still shown, else Start empty.
     pub(crate) fn focused(&self) -> Control {
@@ -418,6 +424,20 @@ mod tests {
         assert!(
             empty.press(&Control::Confirm, ASPECT).is_none(),
             "a control not shown does nothing"
+        );
+    }
+
+    #[test]
+    fn only_start_empty_when_nothing_else_is_offered() {
+        assert!(chooser(0).only_start_empty(), "no options");
+        assert!(!chooser(1).only_start_empty(), "one active session");
+        assert!(
+            !LayoutChooser::new(true, 0, Vec::new()).only_start_empty(),
+            "a legacy layout"
+        );
+        assert!(
+            !LayoutChooser::new(false, 0, vec![clonable("abc", None)]).only_start_empty(),
+            "a clonable layout"
         );
     }
 

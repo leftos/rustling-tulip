@@ -1229,9 +1229,9 @@ impl<'a> Harness<'a> {
     }
 
     /// Waits until each of `keys`' daemons has sent this client its tab
-    /// layout or asked how to lay out a client it has not seen, presses
-    /// Start empty on the first-connect chooser for each question, and waits
-    /// for the chooser to close, so a spec's clicks reach the window.
+    /// layout, taking Start empty on the first-connect chooser whenever one
+    /// shows (a question with nothing else to offer is answered without
+    /// asking), so a spec's clicks reach the window.
     fn start_empty_layouts(&mut self, hosts: &LiveHosts, keys: &[HostKey]) {
         let clients: Vec<LiveClient> = keys.iter().map(|key| hosts.client(key)).collect();
         let has_tabs = |client: &LiveClient| {
@@ -1239,37 +1239,15 @@ impl<'a> Harness<'a> {
                 .find_message(|msg| matches!(msg, DaemonMessage::Tabs { .. }).then_some(()))
                 .is_some()
         };
-        let asked = |client: &LiveClient| {
-            client
-                .find_message(|msg| {
-                    matches!(msg, DaemonMessage::LayoutInitRequired { .. }).then_some(())
-                })
-                .is_some()
-        };
         self.wait_until(
-            &format!("a tab layout or a first-connect question from each of {keys:?}"),
-            |_| {
-                clients
-                    .iter()
-                    .all(|client| has_tabs(client) || asked(client))
+            &format!("a tab layout for each of {keys:?}, with no chooser left open"),
+            |h| {
+                if h.root(|root, _| root.layout_chooser_open()) {
+                    h.click_on("layout-choose-empty");
+                }
+                clients.iter().all(has_tabs) && !h.root(|root, _| root.layout_chooser_open())
             },
         );
-        let asking: Vec<&LiveClient> = clients.iter().filter(|client| !has_tabs(client)).collect();
-        if asking.is_empty() {
-            return;
-        }
-        // The chooser asks one host at a time, the next host's question
-        // showing as the last one's closes.
-        for _ in &asking {
-            self.wait_until("the first-connect layout chooser to show", |h| {
-                h.root(|root, _| root.layout_chooser_open())
-            });
-            self.click_on("layout-choose-empty");
-        }
-        self.wait_until("each empty layout and the chooser closed", |h| {
-            asking.iter().all(|client| has_tabs(client))
-                && !h.root(|root, _| root.layout_chooser_open())
-        });
     }
 
     /// Opens the window over `open_host`, which `make_transport` builds

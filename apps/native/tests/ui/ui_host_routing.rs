@@ -161,7 +161,7 @@ fn a_remote_hosts_layout_question_is_answered_to_that_host(cx: &mut TestAppConte
     host.connect();
     host.send(DaemonMessage::LayoutInitRequired {
         has_legacy: false,
-        active_session_count: 0,
+        active_session_count: 1,
         clonable: Vec::new(),
     });
     h.sent();
@@ -193,6 +193,57 @@ fn a_remote_hosts_layout_question_is_answered_to_that_host(cx: &mut TestAppConte
         "the choice goes to the host that asked"
     );
     assert_eq!(inits(h.sent()), 0, "This PC is not answered");
+}
+
+#[gpui::test]
+fn a_remote_host_with_nothing_to_offer_is_answered_to_that_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    let mut host = h.host(&remote());
+    host.connect();
+    h.host(&remote()).send(DaemonMessage::LayoutInitRequired {
+        has_legacy: false,
+        active_session_count: 0,
+        clonable: Vec::new(),
+    });
+    h.sent();
+    assert!(
+        !h.root(|root, _| root.layout_chooser_open()),
+        "nothing to choose, so nothing is asked"
+    );
+    assert_eq!(
+        init_count(&h.host(&remote()).sent()),
+        1,
+        "the only choice goes to the host that asked"
+    );
+    assert_eq!(init_count(&h.sent()), 0, "This PC is not answered");
+}
+
+#[gpui::test]
+fn a_question_with_nothing_to_offer_does_not_wait_behind_another_hosts_chooser(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    h.host(&remote()).connect();
+    h.send(layout_question(1));
+    assert!(
+        h.root(|root, _| root.layout_chooser_open()),
+        "This PC's question waits for an answer"
+    );
+    h.host(&remote()).sent();
+
+    h.host(&remote()).send(layout_question(0));
+
+    assert_eq!(
+        init_count(&h.host(&remote()).sent()),
+        1,
+        "the remote host's only choice is taken at once"
+    );
+    assert!(
+        h.root(|root, _| root.layout_chooser_open()),
+        "This PC's chooser still shows"
+    );
 }
 
 /// How many connections the window opened to `target`.
@@ -557,7 +608,7 @@ fn a_remote_hosts_layout_chooser_closes_with_its_connection(cx: &mut TestAppCont
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
     h.host(&remote()).connect();
-    h.host(&remote()).send(layout_question(0));
+    h.host(&remote()).send(layout_question(1));
     assert!(h.root(|root, _| root.layout_chooser_open()));
 
     close_host(&mut h, &remote());
@@ -573,8 +624,8 @@ fn two_hosts_layout_questions_are_each_answered(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
     h.host(&remote()).connect();
-    h.send(layout_question(0));
-    h.host(&remote()).send(layout_question(0));
+    h.send(layout_question(1));
+    h.host(&remote()).send(layout_question(1));
     h.sent();
     h.host(&remote()).sent();
 
@@ -599,7 +650,7 @@ fn this_pcs_tab_list_leaves_a_remote_hosts_chooser_open(cx: &mut TestAppContext)
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
     h.host(&remote()).connect();
-    h.host(&remote()).send(layout_question(0));
+    h.host(&remote()).send(layout_question(1));
 
     h.send(DaemonMessage::Tabs { tabs: Vec::new() });
 
