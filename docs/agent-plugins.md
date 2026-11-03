@@ -243,7 +243,7 @@ Because the rules are a serde type, a plugin's rules can later load from a versi
 
 **App tests** use `agent-api`'s `TestAgent` (an id, a schema, scripted argv, hook mapping and conversation plans), so daemon and client tests prove the generic paths, the pre-create runner and the discovery poller included, without naming Claude. Claude-specific daemon assertions (DeepSeek routing, `--settings`, `--resume`) live in `agent-claude`.
 
-**The fake CLI.** Each plugin ships its own fake beside it (`crates/agents/claude/fake/`, `index.mjs` with `.cmd` and `.sh` shims), returned by `fake_cli` under `test-support`. The live harness iterates `agent-registry` and sets each plugin's `program_env_var` to its fake, so a later plugin brings its own fake without touching the harness. The live specs name "the first registered agent", never Claude.
+**The fake CLI.** Each plugin ships its own fake beside it (`crates/agents/claude/fake/`, `index.mjs` with `.cmd` and `.sh` shims), returned by `fake_cli` under `test-support`. The shim path `FakeCli` carries is relative to the workspace root, and the live harness joins it onto the checkout it was launched with, so an installed `rt-driver` runs the fake from the checkout its `launch` names rather than from the tree it was built in. The live harness iterates `agent-registry` and sets each plugin's `program_env_var` to its fake, so a later plugin brings its own fake without touching the harness. The live specs name "the first registered agent", never Claude.
 
 **The seam check.** `tools/check-agent-names.ps1`: `rg -i` for `claude|anthropic|deepseek` over `crates/`, `apps/` and `tools/`, excluding the agent crates under `crates/agents/` other than `api` and `registry`.
 

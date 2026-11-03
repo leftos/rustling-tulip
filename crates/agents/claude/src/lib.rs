@@ -237,8 +237,8 @@ impl Agent for ClaudePlugin {
         "claude"
     }
 
-    /// `fake/`'s shim, with Claude Code's home under `CLAUDE_CONFIG_DIR` and
-    /// `claude` shadowed on `PATH`.
+    /// `fake/`'s shim, relative to the workspace root, with Claude Code's
+    /// home under `CLAUDE_CONFIG_DIR` and `claude` shadowed on `PATH`.
     #[cfg(feature = "test-support")]
     fn fake_cli(&self) -> Option<agent_api::FakeCli> {
         let shim = if cfg!(windows) {
@@ -247,7 +247,9 @@ impl Agent for ClaudePlugin {
             "fake-claude.sh"
         };
         Some(agent_api::FakeCli {
-            shim: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            shim_in_repo: std::path::Path::new("crates")
+                .join("agents")
+                .join("claude")
                 .join("fake")
                 .join(shim),
             home_env: Some("CLAUDE_CONFIG_DIR"),

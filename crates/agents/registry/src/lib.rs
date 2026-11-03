@@ -76,15 +76,25 @@ mod tests {
     #[test]
     #[expect(clippy::panic, reason = "the failure names the agent that has no fake")]
     fn every_registered_plugin_has_a_fake_cli_on_disk() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap_or_else(|| panic!("the registry crate sits three folders under the workspace"));
         for registered in all() {
             let id = &registered.descriptor().id;
             let fake = registered
                 .fake_cli()
                 .unwrap_or_else(|| panic!("agent {id:?} has no fake CLI"));
             assert!(
-                fake.shim.is_file(),
+                fake.shim_in_repo.is_relative(),
+                "agent {id:?}: fake CLI shim {} must be relative to the workspace root",
+                fake.shim_in_repo.display()
+            );
+            let shim = workspace_root.join(&fake.shim_in_repo);
+            assert!(
+                shim.is_file(),
                 "agent {id:?}: fake CLI shim {} is not a file",
-                fake.shim.display()
+                shim.display()
             );
         }
     }

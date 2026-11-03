@@ -538,9 +538,10 @@ pub struct ImportedRun<O> {
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FakeCli {
-    /// The platform's shim that starts the fake: the one the agent's
+    /// The platform's shim that starts the fake, relative to the workspace
+    /// root, which the harness joins onto the checkout it runs from: the file
     /// [`Agent::program_env_var`] is pointed at.
-    pub shim: PathBuf,
+    pub shim_in_repo: PathBuf,
     /// A variable the harness points at a fresh, empty home folder per test,
     /// so the agent never reads or writes the user's own.
     pub home_env: Option<&'static str>,

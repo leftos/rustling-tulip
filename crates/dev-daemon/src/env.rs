@@ -81,10 +81,14 @@ pub(crate) fn isolated_envs(
         ),
     ];
     // Every registered agent runs its fake, with its home under the scratch
-    // root: never the user's real CLI or its files.
+    // root: never the user's real CLI or its files. The fake is the one in
+    // the checkout the launch names, not the one the harness was built in.
     for plugin in agent_registry::all() {
         let fake = fake_cli(*plugin)?;
-        envs.push((plugin.program_env_var(), fake.shim.into_os_string()));
+        envs.push((
+            plugin.program_env_var(),
+            spec.repo_root.join(&fake.shim_in_repo).into_os_string(),
+        ));
         if let Some(home_env) = fake.home_env {
             let home = agent_home(root, &plugin.descriptor().id);
             envs.push((home_env, home.into_os_string()));

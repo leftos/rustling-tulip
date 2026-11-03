@@ -393,4 +393,33 @@ mod tests {
             );
         }
     }
+
+    /// Every registered agent's fake is looked up under the repo root the
+    /// launch names, so an installed driver runs it from that checkout.
+    #[test]
+    fn an_agents_fake_runs_from_the_launch_repo_root() {
+        let scratch = repo_root()
+            .join(".tmp")
+            .join("dev-daemon-unit")
+            .join(format!("fake-root-{}", std::process::id()));
+        let other_checkout = scratch.join("other-checkout");
+        let mut spec = spec(scratch);
+        spec.repo_root = other_checkout.clone();
+        let envs = env::isolated_envs(&spec).expect("every registered agent has a fake CLI");
+        for plugin in agent_registry::all() {
+            let id = &plugin.descriptor().id;
+            let value = PathBuf::from(
+                env::env_value(&envs, plugin.program_env_var())
+                    .expect("every registered agent's program variable is set"),
+            );
+            let fake = plugin
+                .fake_cli()
+                .expect("every registered agent has a fake CLI");
+            assert_eq!(
+                value,
+                other_checkout.join(&fake.shim_in_repo),
+                "agent {id:?}: fake CLI is not the launch checkout's"
+            );
+        }
+    }
 }
