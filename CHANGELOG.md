@@ -13,6 +13,8 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Fixed
 
 - The new-session dialog keeps its fields, agents and worktree preview right when its target moves between hosts.
+- The new-session dialog greys out a host the moment it goes offline and says "{host} is offline" for it, without losing what you typed.
+- A remote host no longer flashes "No repos or workspaces yet" in the sidebar while it is still connecting.
 - A remote repo's menu now says Explorer and VS Code aren't available for a remote host, instead of saying it has no folder.
 - A mistyped `rustling-tulipd` command now prints a usage error instead of starting the daemon, and `rustling-tulipd -V` prints its version.
 - Stopping the daemon as administrator after an administrator daemon crashed now clears its leftover handshake instead of refusing to stop.

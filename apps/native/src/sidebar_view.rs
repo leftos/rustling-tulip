@@ -508,12 +508,13 @@ impl RootView {
         }
     }
 
-    /// The muted line an online remote host's group shows while its
-    /// registry holds no repo or workspace; This PC's empty registry has
-    /// the window-wide note instead.
+    /// The muted line an online remote host's group shows once its registry
+    /// has arrived and holds no repo or workspace; This PC's empty registry
+    /// has the window-wide note instead.
     fn host_no_repos_note(&self, host: &HostKey, cx: &mut Context<Self>) -> Option<AnyElement> {
         if *host == HostKey::Local
             || self.is_remote_offline(host)
+            || !self.sidebar.repos_loaded_of(host)
             || !self.sidebar.repos_of(host).is_empty()
             || !self.sidebar.workspaces_of(host).is_empty()
         {

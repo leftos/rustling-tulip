@@ -4156,6 +4156,7 @@ impl RootView {
         if *host == HostKey::Local {
             self.follow_settings_target();
         }
+        self.on_spawn_host_connection(host, window, cx);
     }
 
     /// Folds a message in to the file fetches, the diff, viewer and

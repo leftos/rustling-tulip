@@ -383,3 +383,38 @@ fn a_drop_that_changes_no_order_sends_nothing(cx: &mut TestAppContext) {
         ]
     );
 }
+
+#[gpui::test]
+fn a_remote_host_shows_no_empty_note_before_its_repo_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [{ "name": REMOTE, "port": 8787 }] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    h.host(&saved_remote()).connect();
+    h.host(&saved_remote()).send(DaemonMessage::Sessions {
+        sessions: Vec::new(),
+    });
+    h.sent();
+    h.host(&saved_remote()).sent();
+
+    let note = format!("sidebar-host-no-repos-{REMOTE}");
+    assert!(
+        !drawn(&mut h, &note),
+        "a host whose list has not arrived is not called empty"
+    );
+
+    h.host(&saved_remote())
+        .send(DaemonMessage::Repos { repos: Vec::new() });
+    h.host(&saved_remote()).send(DaemonMessage::Workspaces {
+        workspaces: Vec::new(),
+    });
+    assert!(
+        drawn(&mut h, &note),
+        "its empty registry says so once it has arrived"
+    );
+}

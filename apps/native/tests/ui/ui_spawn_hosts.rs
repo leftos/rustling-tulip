@@ -371,6 +371,69 @@ fn an_offline_hosts_targets_are_drawn_but_cannot_be_picked(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn a_host_that_drops_while_the_dialog_is_open_is_disabled_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
+    take_remote_offline(&mut h);
+    let offline = format!("spawn-target-repo-r2@{REMOTE}");
+
+    assert!(
+        drawn(&mut h, &offline),
+        "the dropped host's repo stays listed, dimmed"
+    );
+    h.click_on(&offline);
+    assert_eq!(
+        selected_targets(&mut h),
+        ["spawn-target-repo-r1".to_owned()],
+        "a click on the host that just dropped does nothing"
+    );
+}
+
+#[gpui::test]
+fn the_dialogs_own_target_survives_its_host_dropping(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &["r2"]);
+    h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
+    h.click_on(&format!("spawn-target-repo-r2@{REMOTE}"));
+    take_remote_offline(&mut h);
+
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "the dialog stays open"
+    );
+    assert!(
+        drawn(&mut h, "spawn-target-chosen=[REPO]  r2 · box"),
+        "the chosen target still names the host that dropped"
+    );
+}
+
+#[gpui::test]
+fn a_host_coming_back_online_leaves_the_no_repos_state(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &[], &["r2"]);
+    take_remote_offline(&mut h);
+    h.keys("ctrl-shift-n");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_no_repos()),
+        "the dialog waits for a repo while the only host with one is offline"
+    );
+
+    h.host(&remote()).connect();
+
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "the form replaces the no-repos state"
+    );
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_no_repos()),
+        "the dialog no longer waits for a repo"
+    );
+}
+
+#[gpui::test]
 fn spawn_dialog_no_repos_note_names_the_remote_host(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = two_hosts(cx, &dir, &["r1"], &[]);
@@ -399,6 +462,38 @@ fn with_no_repo_on_any_host_the_dialog_is_in_its_no_repos_state(cx: &mut TestApp
 
     assert!(h.root(|root, _| root.spawn_dialog_no_repos()));
     assert!(shows(&mut h, "spawn-no-repos-note", "No repos yet."));
+}
+
+#[gpui::test]
+fn with_only_an_offline_hosts_repos_the_dialog_opens_its_no_repos_state(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &[], &["r2"]);
+    take_remote_offline(&mut h);
+    h.keys("ctrl-shift-n");
+
+    assert!(
+        h.root(|root, _| root.spawn_dialog_no_repos()),
+        "a repo on an offline host cannot hold a spawn"
+    );
+    assert!(drawn(&mut h, "spawn-no-repos"), "the no-repos dialog is up");
+}
+
+#[gpui::test]
+fn an_offline_empty_host_says_it_is_offline_in_the_picker(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, &["r1"], &[]);
+    take_remote_offline(&mut h);
+    h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
+
+    assert!(
+        shows(
+            &mut h,
+            &format!("spawn-target-no-repos-{REMOTE}"),
+            "box is offline"
+        ),
+        "the empty group says the host is offline, not that it has no repos"
+    );
 }
 
 const SEALED: &str = "${secret:0123456789abcdef0123456789abcdef}";

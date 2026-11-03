@@ -1427,7 +1427,6 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let now = (self.now)();
         let registry = matches!(
             msg,
             DaemonMessage::Repos { .. } | DaemonMessage::Workspaces { .. }
@@ -1454,33 +1453,76 @@ impl RootView {
             }
             return;
         }
+        if registry {
+            self.refresh_spawn_registry(host, window, cx);
+            return;
+        }
         let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
-        let messages = if registry {
-            let inputs = self.spawn_host_inputs(host);
+        let messages = match dialog.form.on_message(host, msg) {
+            Some(messages) => messages,
+            None if suggestion => Vec::new(),
+            None => return,
+        };
+        self.send_all(messages);
+        self.after_spawn_change(cx);
+    }
+
+    /// `host`'s connection changed state: the open dialog marks whether
+    /// that host can be picked, and a dialog waiting for a repo opens its
+    /// form once some host holds one. Nothing else of the form follows, so
+    /// a host's drop never moves the target, drops its agents or fields, or
+    /// closes a locked dialog; a spawn aimed at the dropped host is refused
+    /// with the offline toast when it is asked for.
+    pub(crate) fn on_spawn_host_connection(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.spawn_dialog, Some(SpawnModal::Form(_))) {
+            let offline = self.is_remote_offline(host);
             let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
                 return;
             };
-            let Some(messages) = dialog
-                .form
-                .set_registry(inputs, &mut self.branch_cache, now)
-            else {
-                return self.close_spawn_dialog(window, cx);
-            };
-            // A registry change can move the target across hosts, which
-            // swaps the agents and drops `${secret:…}` rows.
-            self.sync_env_inputs(window, cx);
-            self.sync_option_inputs(window, cx);
-            self.apply_spawn_focus(window, cx);
-            messages
-        } else {
-            match dialog.form.on_message(host, msg) {
-                Some(messages) => messages,
-                None if suggestion => Vec::new(),
-                None => return,
+            if dialog.form.set_offline(host, offline) {
+                cx.notify();
             }
+        } else if matches!(self.spawn_dialog, Some(SpawnModal::NoRepos(_))) && self.has_repos() {
+            self.leave_no_repos(window, cx);
+        }
+    }
+
+    /// `host`'s repo or workspace list arrived: replaces that host's targets
+    /// in the open dialog, and closes it when nothing is left to spawn into.
+    /// A dialog that is not open, or is waiting for a repo, is left as it
+    /// is.
+    fn refresh_spawn_registry(
+        &mut self,
+        host: &HostKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.spawn_dialog, Some(SpawnModal::Form(_))) {
+            return;
+        }
+        let now = (self.now)();
+        let inputs = self.spawn_host_inputs(host);
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
+            return;
         };
+        let Some(messages) = dialog
+            .form
+            .set_registry(inputs, &mut self.branch_cache, now)
+        else {
+            return self.close_spawn_dialog(window, cx);
+        };
+        // The target can move across hosts, which swaps the agents and
+        // drops `${secret:…}` rows.
+        self.sync_env_inputs(window, cx);
+        self.sync_option_inputs(window, cx);
+        self.apply_spawn_focus(window, cx);
         self.send_all(messages);
         self.after_spawn_change(cx);
     }

@@ -1019,9 +1019,14 @@ pub(crate) struct TargetGroup {
 }
 
 impl TargetGroup {
-    /// The muted line a group with no target shows in its place.
+    /// The muted line a group with no target shows in its place: that its
+    /// host is offline, else that the host has no repo yet.
     pub(crate) fn no_repos_note(&self) -> String {
-        format!("No repos on {} yet.", self.label)
+        if self.offline {
+            format!("{} is offline", self.label)
+        } else {
+            format!("No repos on {} yet.", self.label)
+        }
     }
 }
 
@@ -2136,6 +2141,20 @@ impl SpawnForm {
             .or_else(|| targets.first())?
             .clone();
         Some(self.load_target(first, cache, now))
+    }
+
+    /// Marks the slot the dialog already holds for `host` offline or back
+    /// online; returns whether the flag changed. A host the dialog does not
+    /// list changes nothing, and no other part of the form moves: not the
+    /// target, its lock, its repos, workspaces, agents, settings or fields.
+    pub(crate) fn set_offline(&mut self, host: &HostKey, offline: bool) -> bool {
+        match self.hosts.iter_mut().find(|h| &h.host == host) {
+            Some(slot) if slot.offline != offline => {
+                slot.offline = offline;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Replaces the tabs; a locked tab that went away drops its lock, and a
@@ -4014,6 +4033,43 @@ mod tests {
             form.runtimes(),
             remote_runtimes,
             "a host that reconnects while it is not the target lists its agents once picked"
+        );
+    }
+
+    #[test]
+    fn set_offline_flips_only_the_flag() {
+        let mut setup = Setup::repos(vec![repo("r1")]);
+        setup.others = vec![box_inputs(&["r2"], Vec::new(), BTreeMap::new())];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        press(&mut form, &Control::Target(Target::repo(&box_host(), "r2")));
+        let target = form.target().clone();
+        let slots = form.hosts.len();
+        let agents = form.hosts[1].agents.clone();
+
+        assert!(form.set_offline(&box_host(), true), "the flag changed");
+        assert!(form.hosts[1].offline, "the host is marked offline");
+        assert!(
+            !form.set_offline(&box_host(), true),
+            "a host already offline changes nothing"
+        );
+        assert_eq!(form.hosts.len(), slots, "no slot is added");
+        assert_eq!(form.target(), &target, "the target stays");
+        assert_eq!(form.hosts[1].agents, agents, "the host's agents stay");
+
+        assert!(
+            !form.set_offline(&HostKey::Remote("other".to_owned()), true),
+            "an unknown host changes nothing"
+        );
+        assert_eq!(form.hosts.len(), slots, "and adds no slot");
+        assert!(
+            form.hosts
+                .iter()
+                .all(|h| h.host != HostKey::Remote("other".to_owned())),
+            "the unknown host is still not listed"
+        );
+        assert!(
+            form.set_offline(&box_host(), false),
+            "and the flag flips back"
         );
     }
 
@@ -6255,6 +6311,23 @@ mod tests {
             Some(text("accept_edits")),
             "the last spawn's value, not the Settings value"
         );
+    }
+
+    #[test]
+    fn an_offline_groups_note_says_it_is_offline() {
+        let offline = TargetGroup {
+            host: HostKey::Remote("box".to_owned()),
+            label: "lab".to_owned(),
+            offline: true,
+            targets: Vec::new(),
+        };
+        assert_eq!(offline.no_repos_note(), "lab is offline");
+
+        let online = TargetGroup {
+            offline: false,
+            ..offline
+        };
+        assert_eq!(online.no_repos_note(), "No repos on lab yet.");
     }
 
     #[test]

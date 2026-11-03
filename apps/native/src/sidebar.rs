@@ -1615,6 +1615,12 @@ impl SidebarModel {
         self.local.repos_loaded
     }
 
+    /// Whether `host`'s repo list has arrived; false for a remote host that
+    /// never sent one.
+    pub fn repos_loaded_of(&self, host: &HostKey) -> bool {
+        self.slice(host).is_some_and(|slice| slice.repos_loaded)
+    }
+
     /// This PC's registered workspaces, in its daemon's order.
     pub fn workspaces(&self) -> &[WorkspaceEntry] {
         &self.local.workspaces
@@ -3738,6 +3744,27 @@ pub(crate) mod tests {
         );
         assert_eq!(model.find_repo("r2").map(|(host, _)| host), Some(remote));
         assert!(model.find_repo("r3").is_none());
+    }
+
+    #[test]
+    fn a_remote_hosts_repos_are_loaded_only_once_its_list_arrives() {
+        let remote = remote_host("box");
+        let mut model = SidebarModel::default();
+        model.apply(&remote, &sessions_msg(&["b1"]));
+
+        assert!(
+            !model.repos_loaded_of(&remote),
+            "a slice made by its session list awaits its repo list"
+        );
+        model.apply(&remote, &DaemonMessage::Repos { repos: Vec::new() });
+        assert!(
+            model.repos_loaded_of(&remote),
+            "an empty list is still a list that arrived"
+        );
+        assert!(
+            !model.repos_loaded_of(&remote_host("other")),
+            "a host that sent nothing has loaded nothing"
+        );
     }
 
     #[test]
