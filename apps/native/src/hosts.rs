@@ -414,8 +414,9 @@ impl RootView {
     /// records which host it duplicates and moves the duplicate's panes to
     /// the owner. The lower [`Self::rank`] owns, This PC always; `host` is
     /// the duplicate while its own connection is not open. A `host` that
-    /// takes the daemon from its holder takes the holder's duplicates too,
-    /// so none is dialled again. Returns whether `host` itself was dropped.
+    /// takes the daemon from its holder takes the holder's duplicates too, and
+    /// a dropped `host`'s duplicates pass to the holder, so none is dialled
+    /// again. Returns whether `host` itself was dropped.
     pub(crate) fn drop_if_duplicate(
         &mut self,
         host: &HostKey,
@@ -437,15 +438,22 @@ impl RootView {
         let host_owns =
             *host == HostKey::Local || (host_open && self.rank(host) < self.rank(&holder));
         let (duplicate, owner) = if host_owns {
-            for held_by in self.duplicate_of.values_mut() {
-                if *held_by == holder {
-                    *held_by = host.clone();
-                }
-            }
             (holder, host.clone())
         } else {
             (host.clone(), holder)
         };
+        // The duplicate's own duplicates pass to the owner before it goes,
+        // so dropping it dials none of them again.
+        for held_by in self.duplicate_of.values_mut() {
+            if *held_by == duplicate {
+                held_by.clone_from(&owner);
+            }
+        }
+        // An owner once dropped as the duplicate's own duplicate would now
+        // name itself.
+        if self.duplicate_of.get(&owner) == Some(&owner) {
+            self.duplicate_of.remove(&owner);
+        }
         tracing::info!(
             ?owner,
             ?duplicate,
@@ -856,6 +864,10 @@ pub(crate) struct PaneForgets {
     /// from, with the request that carried it, kept while a pane still shows
     /// that session and until This PC refuses the request.
     rehosts: HashMap<SessionRef, String>,
+    /// The sessions whose rehost This PC refused, kept while a pane still
+    /// shows one: a refusal naming none but these waits for the next pass,
+    /// so a daemon that keeps refusing is not asked in a tight loop.
+    resent_after_refusal: HashSet<SessionRef>,
     /// The hosts a forget of every pane went out for, kept while a pane
     /// still names one.
     hosts: HashSet<HostKey>,
@@ -876,6 +888,7 @@ impl PaneForgets {
         self.sessions.clear();
         self.rebinds.clear();
         self.rehosts.clear();
+        self.resent_after_refusal.clear();
         self.hosts.clear();
         self.tabs_in = false;
         self.swept = false;
@@ -888,14 +901,55 @@ impl PaneForgets {
     }
 
     /// This PC refused `request_id`: its rehosts no longer count as in
-    /// flight, so the next pass asks again.
-    pub(crate) fn rehost_refused(&mut self, request_id: &str) {
+    /// flight, so the next pass asks again. Returns whether to ask again at
+    /// once: yes when any of its sessions is refused for the first time,
+    /// each then marked; a request whose sessions were all refused before
+    /// waits for the next pass.
+    pub(crate) fn rehost_refused(&mut self, request_id: &str) -> bool {
+        let refused: Vec<SessionRef> = self
+            .rehosts
+            .iter()
+            .filter(|(_, sent_as)| *sent_as == request_id)
+            .map(|(session, _)| session.clone())
+            .collect();
+        if refused.is_empty() {
+            return false;
+        }
         self.rehosts.retain(|_, sent_as| sent_as != request_id);
+        let mut first = false;
+        for session in refused {
+            first |= self.resent_after_refusal.insert(session);
+        }
+        first
     }
 
     /// Whether a rehost of a pane of `host` is on its way to This PC.
     fn rehost_in_flight(&self, host: &HostKey) -> bool {
         self.rehosts.keys().any(|session| session.host == *host)
+    }
+}
+
+/// Records in `forgotten`, each forgotten host's rehost target, that
+/// `host` was forgotten in favour of `target`, or of `target`'s own target
+/// when `target` was forgotten too: every host forgotten in favour of
+/// `host` now moves there as well, and no host is recorded as moving to
+/// itself.
+fn record_forgotten_rehost(
+    forgotten: &mut HashMap<HostKey, HostKey>,
+    host: HostKey,
+    target: HostKey,
+) {
+    // Every entry points at a host not itself forgotten, so one lookup
+    // resolves `target`.
+    let target = forgotten.get(&target).cloned().unwrap_or(target);
+    for to in forgotten.values_mut() {
+        if *to == host {
+            to.clone_from(&target);
+        }
+    }
+    forgotten.retain(|from, to| from != to);
+    if host != target {
+        forgotten.insert(host, target);
     }
 }
 
@@ -960,17 +1014,19 @@ impl RootView {
             ?target,
             "the forgotten host's panes move to the host that reaches its daemon"
         );
-        self.forgotten_rehost.insert(host.clone(), target);
+        record_forgotten_rehost(&mut self.forgotten_rehost, host.clone(), target);
         self.rehost_stranded_panes();
         self.duplicate_of.remove(&host);
         self.daemon_of.remove(&host);
     }
 
     /// Where the panes of `host` move: nowhere for This PC or a host the
-    /// window holds. Else the host it was forgotten in favour of, else the
-    /// held host whose open connection reaches the daemon `host` last
-    /// reached, else the lowest-ranked of This PC and the saved, switched-on
-    /// hosts known to reach that daemon.
+    /// window holds. Else the host it was forgotten in favour of (a host
+    /// forgotten in favour of one later forgotten in turn follows it to
+    /// that one's target, [`record_forgotten_rehost`]), else the held host
+    /// whose open connection reaches the daemon `host` last reached, else
+    /// the lowest-ranked of This PC and the saved, switched-on hosts known
+    /// to reach that daemon.
     pub(crate) fn rehost_target(&self, host: &HostKey) -> Option<HostKey> {
         if *host == HostKey::Local || self.hosts.get(host).is_some() {
             return None;
@@ -1002,6 +1058,9 @@ impl RootView {
         self.pane_forgets
             .rehosts
             .retain(|session, _| bindings.iter().any(|binding| binding.shows(session)));
+        self.pane_forgets
+            .resent_after_refusal
+            .retain(|session| bindings.iter().any(|binding| binding.shows(session)));
         self.forgotten_rehost
             .retain(|host, _| bindings.iter().any(|binding| binding.host == *host));
         let mut hosts: Vec<HostKey> = Vec::new();
@@ -1281,7 +1340,9 @@ pub(crate) fn content_dimmed(host: &HostKey, conn: Option<&Connection>) -> bool 
 mod tests {
     use futures::channel::mpsc::unbounded;
 
-    use super::{HostConn, Hosts, content_dimmed, host_rank};
+    use std::collections::HashMap;
+
+    use super::{HostConn, Hosts, content_dimmed, host_rank, record_forgotten_rehost};
     use crate::connection::Connection;
     use crate::target::{HostKey, Target};
 
@@ -1289,6 +1350,50 @@ mod tests {
 
     fn conn(target: Target) -> HostConn {
         HostConn::new(unbounded().0, target)
+    }
+
+    fn remote(key: &str) -> HostKey {
+        HostKey::Remote(key.to_owned())
+    }
+
+    #[test]
+    fn forgetting_a_rehost_target_passes_its_hosts_on() {
+        let mut forgotten = HashMap::new();
+        record_forgotten_rehost(&mut forgotten, remote("k"), remote("d"));
+        record_forgotten_rehost(&mut forgotten, remote("d"), remote("e"));
+        assert_eq!(
+            forgotten,
+            HashMap::from([(remote("k"), remote("e")), (remote("d"), remote("e"))]),
+            "the host forgotten in favour of d now moves to d's target"
+        );
+
+        record_forgotten_rehost(&mut forgotten, remote("e"), remote("k"));
+        assert_eq!(
+            forgotten,
+            HashMap::from([(remote("k"), remote("e")), (remote("d"), remote("e"))]),
+            "k resolves back to e, and no host is recorded as moving to itself"
+        );
+        record_forgotten_rehost(&mut forgotten, remote("x"), remote("x"));
+        assert!(!forgotten.contains_key(&remote("x")));
+    }
+
+    #[test]
+    fn forgetting_onto_a_forgotten_host_records_its_target() {
+        let mut forgotten = HashMap::new();
+        record_forgotten_rehost(&mut forgotten, remote("d"), remote("e"));
+        record_forgotten_rehost(&mut forgotten, remote("k"), remote("d"));
+        assert_eq!(
+            forgotten,
+            HashMap::from([(remote("d"), remote("e")), (remote("k"), remote("e"))]),
+            "k moves where d's panes went"
+        );
+
+        record_forgotten_rehost(&mut forgotten, remote("e"), remote("d"));
+        assert_eq!(
+            forgotten,
+            HashMap::from([(remote("d"), remote("e")), (remote("k"), remote("e"))]),
+            "a target forgotten in favour of e itself resolves back to e: no entry to itself"
+        );
     }
 
     #[test]

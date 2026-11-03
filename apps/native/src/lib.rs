@@ -239,7 +239,8 @@ use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
 use crate::sidebar::{
-    SidebarModel, UiState, can_attach, load_ui_state, normalize_fs_path, save_ui_state,
+    SavedKeyClash, SidebarModel, UiState, can_attach, load_ui_state, normalize_fs_path,
+    save_ui_state,
 };
 use crate::source_control::ScModel;
 use crate::spawn_form::{BranchCache, Lock, Prefill, Target};
@@ -2056,7 +2057,10 @@ impl RootView {
     /// them, windows and all.
     fn follow_popout_moves(&mut self, cx: &mut Context<Self>) {
         for (old, new) in self.popouts.follow_moves(&self.tabs) {
-            if self.sidebar.rekey_saved_popout(&old, new.clone()) {
+            if self
+                .sidebar
+                .rekey_saved_popout(&old, new.clone(), SavedKeyClash::KeepMoved)
+            {
                 self.schedule_ui_save(cx);
             }
             let Some(popout) = self.popout_windows.remove(&old) else {
@@ -2098,7 +2102,10 @@ impl RootView {
         };
         let new_key = PopoutKey::session(&new.host, &new.id);
         self.popouts.rekey(&old_key, new_key.clone());
-        if self.sidebar.rekey_saved_popout(&old_key, new_key.clone()) {
+        if self
+            .sidebar
+            .rekey_saved_popout(&old_key, new_key.clone(), SavedKeyClash::KeepMoved)
+        {
             self.schedule_ui_save(cx);
         }
         if let Some(popout) = self.popout_windows.remove(&old_key) {
@@ -2132,8 +2139,10 @@ impl RootView {
     /// Each open session pop-out of a host the window let go moves, in its
     /// own window, to that host's rehost target once the target has listed
     /// its session since its `Welcome`; one whose target already has a
-    /// pop-out of that session stays.
+    /// pop-out of that session, or another pop-out moving there in the same
+    /// pass, stays.
     pub(crate) fn follow_rehosted_session_popouts(&mut self, cx: &mut Context<Self>) {
+        let mut claimed: HashSet<PopoutKey> = HashSet::new();
         let moves: Vec<(SessionRef, SessionRef)> = self
             .popouts
             .keys()
@@ -2150,7 +2159,8 @@ impl RootView {
                         .sessions_of(&target)
                         .iter()
                         .any(|session| session.id == *session_id);
-                (listed && !self.popouts.is_open(&to)).then(|| {
+                let free = !self.popouts.is_open(&to) && !claimed.contains(&to);
+                (listed && free && claimed.insert(to.clone())).then(|| {
                     (
                         SessionRef::new(key.host(), session_id.clone()),
                         SessionRef::new(target, session_id.clone()),
@@ -2322,6 +2332,21 @@ impl RootView {
     #[must_use]
     pub fn popout_count(&self) -> usize {
         self.popouts.keys().len()
+    }
+
+    /// Each open session pop-out whose window the window tracks, as its
+    /// host and session id, in the order they opened.
+    #[must_use]
+    pub fn popout_window_sessions(&self) -> Vec<(HostKey, String)> {
+        self.popouts
+            .keys()
+            .iter()
+            .filter(|key| self.popout_windows.contains_key(*key))
+            .filter_map(|key| match key {
+                PopoutKey::Session { session_id, .. } => Some((key.host(), session_id.clone())),
+                PopoutKey::Pane { .. } | PopoutKey::Tab { .. } => None,
+            })
+            .collect()
     }
 
     /// The sidebar's containers for the view it shows, in the order it
@@ -3529,7 +3554,11 @@ impl RootView {
         for mut was in awaiting {
             if let Some(key) = self.rehosted_session_key(&was.key) {
                 tracing::info!(from = ?was.key, to = ?key, "a saved pop-out follows its session to the host that reaches its daemon");
-                changed |= self.sidebar.rekey_saved_popout(&was.key, key.clone());
+                changed |= self.sidebar.rekey_saved_popout(
+                    &was.key,
+                    key.clone(),
+                    SavedKeyClash::KeepExisting,
+                );
                 was.key = key;
             }
             let entry = self.followed_popout(&was);
@@ -4283,7 +4312,9 @@ impl RootView {
             } => {
                 if let Some(request_id) = &id {
                     self.pane_forgets.rebind_refused(request_id);
-                    self.pane_forgets.rehost_refused(request_id);
+                    if self.pane_forgets.rehost_refused(request_id) {
+                        self.rehost_stranded_panes();
+                    }
                 }
                 let failure = DaemonFailure {
                     message,

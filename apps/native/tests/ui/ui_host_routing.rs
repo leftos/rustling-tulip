@@ -308,6 +308,48 @@ fn a_dropped_duplicate_is_dialled_again_only_once_its_owner_closes(cx: &mut Test
     );
 }
 
+#[gpui::test]
+fn a_host_dropped_as_a_duplicate_does_not_redial_its_own_duplicates(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "saved_hosts": [
+            { "name": REMOTE, "port": 8787 },
+            { "kind": "ssh", "name": "me@devbox" },
+        ] }),
+    );
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    welcome_as_daemon(&mut h, &saved_remote());
+    welcome_as_daemon(&mut h, &ssh_box());
+    assert_eq!(
+        h.root(|root, _| root.duplicate_of(&HostKey::of(&ssh_box())).cloned()),
+        Some(HostKey::of(&saved_remote())),
+        "the tailnet host owns the daemon, the SSH host is its duplicate"
+    );
+    let mut retrying = Connection::for_target(saved_remote());
+    retrying.on_connecting();
+    h.host(&saved_remote()).event(NetEvent::State(retrying));
+    h.send(support::welcome_with_id(PROTOCOL, DAEMON));
+
+    welcome_as_daemon(&mut h, &saved_remote());
+
+    assert_eq!(
+        h.root(|root, _| root.duplicate_of(&HostKey::of(&saved_remote())).cloned()),
+        Some(HostKey::Local),
+        "the tailnet host is dropped as This PC's duplicate"
+    );
+    assert_eq!(
+        dials(&h, &ssh_box()),
+        1,
+        "the dropped host's own duplicate is not dialled again"
+    );
+    assert_eq!(
+        h.root(|root, _| root.duplicate_of(&HostKey::of(&ssh_box())).cloned()),
+        Some(HostKey::Local),
+        "the SSH host now names This PC, which holds the daemon"
+    );
+}
+
 /// Every toast's title, oldest first.
 fn toast_titles(h: &mut Harness<'_>) -> Vec<String> {
     h.root(|root, _| {

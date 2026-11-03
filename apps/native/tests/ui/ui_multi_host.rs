@@ -3334,6 +3334,229 @@ fn a_rehost_lost_with_this_pcs_connection_is_sent_again(cx: &mut TestAppContext)
     );
 }
 
+/// The request id of the one `RehostPanes` among `sent`.
+fn rehost_request_id(sent: &[ClientMessage]) -> String {
+    let ids: Vec<String> = sent
+        .iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RehostPanes { request_id, .. } => request_id.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "one rehost went out: {sent:?}");
+    ids.into_iter().next().expect("one rehost")
+}
+
+/// This PC refuses `request_id`.
+fn refuse(h: &mut Harness<'_>, request_id: String) {
+    h.send(DaemonMessage::Error {
+        message: "state write failed".to_owned(),
+        request_id: Some(request_id),
+        code: None,
+    });
+}
+
+#[gpui::test]
+fn a_refused_rehost_is_sent_again_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&ssh_pane("p9", "d1"));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["d1"]);
+    let request_id = rehost_request_id(&h.sent());
+
+    refuse(&mut h, request_id);
+
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(SSH_KEY, Some(REMOTE), &["d1"])],
+        "the refused rehost goes out again without waiting for another pass"
+    );
+}
+
+#[gpui::test]
+fn a_second_refusal_waits_for_the_next_pass(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&ssh_pane("p9", "d1"));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["d1"]);
+    let moved = [rehost(SSH_KEY, Some(REMOTE), &["d1"])];
+    let first = rehost_request_id(&h.sent());
+    refuse(&mut h, first);
+    let again = rehost_request_id(&h.sent());
+
+    refuse(&mut h, again);
+    assert!(
+        this_pc_rehosts(&mut h).is_empty(),
+        "a second refusal in a row is not answered at once"
+    );
+
+    h.send(DaemonMessage::Tabs {
+        tabs: fixture.tabs.clone(),
+    });
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        moved,
+        "This PC's next tab list sends it again"
+    );
+}
+
+#[gpui::test]
+fn a_batch_with_a_first_refusal_is_sent_again_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&split(
+        SplitDirection::Horizontal,
+        ssh_pane("p8", "d2"),
+        ssh_pane("p9", "d1"),
+    ));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["d1"]);
+    let first = rehost_request_id(&h.sent());
+    refuse(&mut h, first);
+    let again = rehost_request_id(&h.sent());
+    refuse(&mut h, again);
+    assert!(
+        this_pc_rehosts(&mut h).is_empty(),
+        "d1's second refusal waits"
+    );
+
+    remote_lists(&mut h, &["d1", "d2"]);
+    let batch = rehost_request_id(&h.sent());
+    refuse(&mut h, batch);
+
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(SSH_KEY, Some(REMOTE), &["d1", "d2"])],
+        "d2 is refused for the first time, so the batch goes out again at once"
+    );
+}
+
+/// Forgets the saved host whose Connections row is keyed `key`, then
+/// closes Connections.
+fn forget_saved(h: &mut Harness<'_>, key: &str) {
+    open_connections(h);
+    h.click_on(&format!("connections-forget-{key}"));
+    h.keys("escape");
+}
+
+#[gpui::test]
+fn a_host_forgotten_twice_rehosts_its_panes_to_the_last(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&split(
+        SplitDirection::Horizontal,
+        ssh_pane("p9", "d1"),
+        remote_pane("p8", "b1"),
+    ));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &["b1"]);
+    forget_saved(&mut h, SSH_KEY);
+    h.send(support::welcome_with_id(PROTOCOL, DAEMON));
+    h.load(&Fixture {
+        sessions: vec![session("b1").build()],
+        tabs: fixture.tabs.clone(),
+        ..Fixture::default()
+    });
+    assert_eq!(duplicate_of(&mut h, &saved_remote()), Some(HostKey::Local));
+    let moved = one_tab(&split(
+        SplitDirection::Horizontal,
+        ssh_pane("p9", "d1"),
+        pane("p8", Some("b1")),
+    ));
+    forget_saved(&mut h, REMOTE);
+    h.send(DaemonMessage::Tabs {
+        tabs: moved.tabs.clone(),
+    });
+    h.sent();
+
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("b1").build(), session("d1").build()],
+    });
+    h.send(DaemonMessage::Tabs {
+        tabs: moved.tabs.clone(),
+    });
+
+    assert_eq!(
+        this_pc_rehosts(&mut h),
+        [rehost(SSH_KEY, None, &["d1"])],
+        "the SSH host's pane follows its target's own target, This PC"
+    );
+}
+
+#[gpui::test]
+fn a_host_forgotten_in_favour_of_a_switched_off_host_keeps_waiting(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = one_tab(&ssh_pane("p9", "d1"));
+    let mut h = ssh_dropped_over(cx, &dir, &fixture, &[]);
+    forget_saved(&mut h, SSH_KEY);
+    flip_remote_switch(&mut h);
+    h.sent();
+
+    h.set_connection(dropped(Target::Local));
+    h.set_connection(this_pc_open());
+    h.send_welcome(PROTOCOL);
+    h.load(&fixture);
+
+    assert!(
+        this_pc_forgets(&mut h).is_empty(),
+        "the SSH host's panes wait for the host it was forgotten in favour of"
+    );
+}
+
+/// Saves [`REMOTE`], the SSH host and [`OTHER`], in that order, with a
+/// pop-out of session `d1` on the SSH host and on [`OTHER`].
+fn seed_three_paths_with_popouts(dir: &TestDir) {
+    let popout = |host: &str| {
+        serde_json::json!({
+            "key": { "kind": "session", "session_id": "d1", "host": host },
+            "window": null,
+        })
+    };
+    seed_ui(
+        dir,
+        &serde_json::json!({
+            "saved_hosts": [
+                { "name": REMOTE, "port": 8787 },
+                { "kind": "ssh", "name": "me@devbox" },
+                { "name": OTHER, "port": 8787 },
+            ],
+            "popouts": [popout(OTHER), popout(SSH_KEY)],
+        }),
+    );
+}
+
+#[gpui::test]
+fn two_popouts_rehosted_to_one_key_move_only_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_three_paths_with_popouts(&dir);
+    let mut h = Harness::with(cx, &dir, &Fixture::default());
+    let other = Target::tailnet(OTHER, Some(8787));
+    welcome_as(&mut h, &other, Some(DAEMON));
+    h.host(&other).send(DaemonMessage::Sessions {
+        sessions: vec![session("d1").build()],
+    });
+    let mut retrying = Connection::for_target(other.clone());
+    retrying.on_connecting();
+    h.host(&other).event(NetEvent::State(retrying));
+    welcome_as(&mut h, &ssh_box(), Some(DAEMON));
+    h.host(&ssh_box()).send(DaemonMessage::Sessions {
+        sessions: vec![session("d1").build()],
+    });
+    welcome_as(&mut h, &saved_remote(), Some(DAEMON));
+    welcome_as(&mut h, &other, Some(DAEMON));
+    assert_eq!(
+        duplicate_of(&mut h, &ssh_box()),
+        duplicate_of(&mut h, &other)
+    );
+    assert_eq!(h.window_count(), 3, "both pop-outs are open");
+
+    remote_lists(&mut h, &["d1"]);
+
+    assert_eq!(
+        h.root(|root, _| root.popout_window_sessions()),
+        [
+            (HostKey::of(&saved_remote()), "d1".to_owned()),
+            (HostKey::of(&ssh_box()), "d1".to_owned()),
+        ],
+        "the first pop-out moved; the second stays where it was, its window still tracked"
+    );
+    assert_eq!(h.window_count(), 3, "no window closed");
+}
+
 #[gpui::test]
 fn a_pane_of_an_ended_session_stays_on_its_old_key(cx: &mut TestAppContext) {
     let dir = TestDir::new();

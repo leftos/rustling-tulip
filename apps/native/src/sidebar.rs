@@ -1391,6 +1391,17 @@ pub struct HostGroup {
     pub containers: Vec<Container>,
 }
 
+/// Which saved pop-out stays when one is rekeyed onto a key already saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SavedKeyClash {
+    /// The rekeyed entry, renamed, with its placement: an open window
+    /// moved to the new key.
+    KeepMoved,
+    /// The entry already saved under the new key: the rekeyed one, still
+    /// waiting to reopen, is dropped.
+    KeepExisting,
+}
+
 /// Every daemon's registry as the sidebar sees it, one slice per host, plus
 /// the window's own layout.
 #[derive(Debug, Default)]
@@ -2293,9 +2304,25 @@ impl SidebarModel {
         true
     }
 
-    /// Gives the saved pop-out `old` the key `new`; returns whether it was
-    /// saved.
-    pub fn rekey_saved_popout(&mut self, old: &PopoutKey, new: PopoutKey) -> bool {
+    /// Gives the saved pop-out `old` the key `new`; when `new` is already
+    /// saved, `clash` says which entry stays, so no key is saved twice.
+    /// Returns whether the saved list changed. `old` onto itself changes
+    /// nothing.
+    pub fn rekey_saved_popout(
+        &mut self,
+        old: &PopoutKey,
+        new: PopoutKey,
+        clash: SavedKeyClash,
+    ) -> bool {
+        if *old == new || !self.ui.popouts.iter().any(|saved| saved.key == *old) {
+            return false;
+        }
+        if self.ui.popouts.iter().any(|saved| saved.key == new) {
+            match clash {
+                SavedKeyClash::KeepExisting => return self.forget_saved_popout(old),
+                SavedKeyClash::KeepMoved => self.ui.popouts.retain(|saved| saved.key != new),
+            }
+        }
         let Some(saved) = self.ui.popouts.iter_mut().find(|saved| saved.key == *old) else {
             return false;
         };
@@ -5467,6 +5494,84 @@ pub(crate) mod tests {
             },
             window: None,
         }
+    }
+
+    fn placed_at(x: f32) -> WindowState {
+        WindowState {
+            x,
+            y: 50.0,
+            width: 900.0,
+            height: 600.0,
+            maximized: false,
+            display_uuid: None,
+        }
+    }
+
+    #[test]
+    fn rekeying_onto_a_saved_key_drops_the_old_one() {
+        let old = SavedPopout {
+            window: Some(placed_at(40.0)),
+            ..pane_popout("t1", "p1")
+        };
+        let new = SavedPopout {
+            window: Some(placed_at(700.0)),
+            ..pane_popout("t2", "p1")
+        };
+        let mut model = SidebarModel::default();
+        model.set_saved_popouts(vec![old.clone(), new.clone()]);
+
+        assert!(model.rekey_saved_popout(&old.key, new.key.clone(), SavedKeyClash::KeepMoved));
+
+        assert_eq!(
+            model.take_saved_popouts(),
+            [SavedPopout {
+                key: new.key,
+                window: old.window,
+            }],
+            "the key is saved once, with the moved window's placement"
+        );
+    }
+
+    #[test]
+    fn a_waiting_popout_rekeyed_onto_an_open_window_keeps_the_open_windows_place() {
+        let open = SavedPopout {
+            key: PopoutKey::session(&crate::target::HostKey::Remote("e".to_owned()), "s"),
+            window: Some(placed_at(40.0)),
+        };
+        let waiting = SavedPopout {
+            key: PopoutKey::session(&crate::target::HostKey::Remote("k".to_owned()), "s"),
+            window: Some(placed_at(700.0)),
+        };
+        let mut model = SidebarModel::default();
+        model.set_saved_popouts(vec![open.clone(), waiting.clone()]);
+
+        assert!(model.rekey_saved_popout(
+            &waiting.key,
+            open.key.clone(),
+            SavedKeyClash::KeepExisting
+        ));
+
+        assert_eq!(
+            model.take_saved_popouts(),
+            [open],
+            "the open window's saved place stays; the waiting entry goes"
+        );
+    }
+
+    #[test]
+    fn rekeying_a_key_onto_itself_changes_nothing() {
+        let saved = SavedPopout {
+            window: Some(placed_at(40.0)),
+            ..pane_popout("t1", "p1")
+        };
+        let mut model = SidebarModel::default();
+        model.set_saved_popouts(vec![saved.clone()]);
+
+        for clash in [SavedKeyClash::KeepMoved, SavedKeyClash::KeepExisting] {
+            assert!(!model.rekey_saved_popout(&saved.key, saved.key.clone(), clash));
+        }
+
+        assert_eq!(model.take_saved_popouts(), [saved]);
     }
 
     #[test]

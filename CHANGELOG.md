@@ -20,6 +20,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Ctrl+Left and Ctrl+Right now move a word at a time, and other Shift, Alt and Ctrl combinations with arrows, Home, End and F-keys reach programs.
 - A Claude session with an MCP task or a monitor still running no longer shows as Finished, just as with a background shell.
 - A session that fails to start no longer leaves its agent or shell running unseen in the background.
+- Pop-out windows keep their places and follow their sessions correctly when several connections reach the same machine.
 
 ## v0.8.1-alpha
 
