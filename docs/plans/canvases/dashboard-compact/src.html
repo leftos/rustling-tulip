@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard Compact Lanes</title>
+<style>
+@font-face { font-family: Inter; font-weight: 400; src: url(fonts/Inter-Regular.ttf); }
+@font-face { font-family: Inter; font-weight: 500; src: url(fonts/Inter-Medium.ttf); }
+@font-face { font-family: Inter; font-weight: 600; src: url(fonts/Inter-SemiBold.ttf); }
+@font-face { font-family: Inter; font-weight: 700; src: url(fonts/Inter-Bold.ttf); }
+@font-face { font-family: Mono; font-weight: 400; src: url(fonts/JetBrainsMono-Regular.ttf); }
+@font-face { font-family: Mono; font-weight: 600; src: url(fonts/JetBrainsMono-SemiBold.ttf); }
+
+/* The NORD built-in (apps/native/src/builtin_themes.rs), the app's default theme and the shot's. */
+:root {
+  --ground: #2e3440; --sunken: #272d39; --surface: #363c48; --raised: #3b414d; --chip: #424854;
+  --pressed: #494f5b; --card-edge: #454b57; --line: #454b57; --line-strong: #565c68;
+  --text: #d8dee9; --text-2: #c3c9d4; --subtle: #b9bfca; --faint: #818792;
+  --working: #70a8ff; --asking: #ebcb8b; --waiting: #a3be8c; --danger: #ea6b79; --lilac: #ebace0;
+  --ask-wash: rgba(235, 203, 139, .07); --ask-border: rgba(235, 203, 139, .35);
+  --danger-wash: rgba(234, 107, 121, .10);
+  --row-h: 28px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: #1d212a; color: var(--text); padding: 22px 26px 40px; width: 1640px;
+  font: 400 12px/16px Inter, sans-serif; -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: Mono, monospace; }
+
+/* The page around the lanes. */
+h1 { font-size: 18px; line-height: 24px; font-weight: 600; margin: 0 0 4px; }
+.lede { font-size: 13px; line-height: 19px; color: var(--text-2); margin: 0 0 12px; max-width: 1120px; }
+.verdict { margin: 0 0 12px; padding: 0; list-style: none; font-size: 13px; line-height: 20px; color: var(--text); }
+.verdict b { font-weight: 600; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; color: var(--text-2); margin-bottom: 26px; }
+.legend span.item { display: inline-flex; gap: 5px; align-items: center; }
+.lane-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; font-size: 13px; line-height: 20px; }
+.lane-head .tag { font-size: 16px; font-weight: 700; color: var(--text); }
+.lane-head .name { font-weight: 600; }
+.lane-head .what { color: var(--text-2); }
+.lane-head .measure { margin-left: auto; color: var(--subtle); white-space: nowrap; }
+.lane { margin-bottom: 30px; }
+
+/* One 1588 by 860 Dashboard pane. */
+.frame {
+  width: 1588px; height: 860px; background: var(--ground); overflow: hidden;
+  display: flex; flex-direction: column; box-shadow: 0 0 0 1px var(--line-strong);
+}
+.hdr {
+  flex: none; height: 47px; padding: 0 18px; display: flex; align-items: center; gap: 14px;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+}
+.hdr .title { font-size: 15px; font-weight: 600; margin-right: 1px; }
+.pills { display: flex; gap: 4px; }
+.pill {
+  height: 28px; padding: 0 9px; border-radius: 5px; background: var(--chip); border: 1px solid transparent;
+  display: inline-flex; align-items: center; gap: 6px; color: var(--text-2);
+}
+.pill b { color: var(--text); font-weight: 600; }
+.pill.ask { background: transparent; border-color: var(--ask-border); color: var(--asking); }
+.pill.ask b { color: var(--asking); }
+.toggle { margin-left: auto; display: flex; background: var(--raised); border-radius: 5px; padding: 3px; }
+.toggle span { padding: 3px 9px; border-radius: 4px; color: var(--text-2); }
+.toggle span.on { background: var(--chip); color: var(--text); font-weight: 600; }
+
+.queue {
+  flex: none; height: 43px; padding: 0 18px; display: flex; align-items: center; gap: 9px;
+  background: #3f4349; border-bottom: 1px solid var(--line);
+}
+.queue .caps { font-size: 10.5px; font-weight: 600; letter-spacing: .3px; color: var(--asking); }
+.qchip {
+  height: 27px; padding: 0 8px; border: 1px solid var(--ask-border); border-radius: 4px; background: var(--ground);
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+}
+.qchip .key { font: 600 12px/16px Mono, monospace; }
+.qchip .age { color: var(--asking); font-weight: 600; }
+.queue .sort { margin-left: auto; color: var(--subtle); }
+
+.body { flex: 1 1 auto; min-height: 0; padding: 7px 10px 7px; overflow: hidden; position: relative; }
+
+/* Shared pieces. */
+.g { flex: none; display: block; }
+.ws { color: var(--lilac); }
+.caps-tag { font-size: 10.5px; line-height: 14px; letter-spacing: .3px; color: var(--subtle); }
+.tally { display: inline-flex; gap: 8px; align-items: center; color: var(--subtle); }
+.tally span { display: inline-flex; gap: 3px; align-items: center; }
+.word { font-weight: 600; white-space: nowrap; }
+.word.ask { color: var(--asking); } .word.work, .word.bg { color: var(--working); }
+.word.done { color: var(--waiting); } .word.idle { color: var(--subtle); font-weight: 500; }
+.lab { font-weight: 600; font-size: 12.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.now { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.issue { color: var(--subtle); white-space: nowrap; }
+.age { color: var(--subtle); white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 3px 4px; min-width: 0; align-content: flex-start; }
+.c {
+  height: 22px; padding: 0 7px 0 6px; border-radius: 4px; background: var(--chip);
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; max-width: 100%; border: 1px solid transparent;
+}
+.c .n { font-weight: 500; color: var(--text); }
+.c .w { color: var(--text-2); }
+.c.sh { background: transparent; border-color: var(--line-strong); }
+.c.sh .n { font: 400 11.5px/16px Mono, monospace; }
+.c.dp { background: rgba(235, 172, 224, .10); border-color: rgba(235, 172, 224, .30); }
+.c.dp .n { font: 400 11.5px/16px Mono, monospace; }
+.c.fin .n { color: var(--subtle); font-weight: 400; } .c.fin .w { color: var(--subtle); }
+.c.bad { border-color: var(--danger); background: var(--danger-wash); }
+.c.bad .w { color: var(--danger); }
+.c svg.kind { color: var(--subtle); }
+
+.foldrow { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.fold {
+  flex: none; height: 20px; padding: 0 7px; border-radius: 4px; background: var(--chip);
+  display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: var(--text-2);
+}
+.foldrow .names { color: var(--subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* A: one table across the view; C reuses the block with narrower cells. */
+.stack { display: flex; flex-direction: column; gap: 5px; }
+.rblock { display: flex; background: var(--sunken); border: 1px solid var(--card-edge); border-radius: 6px; min-width: 0; overflow: hidden; }
+.rcell {
+  flex: none; padding: 7px 10px; background: var(--surface); border-right: 1px solid var(--card-edge);
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+}
+.rcell .rn { display: flex; gap: 5px; align-items: center; font-size: 13px; font-weight: 600; min-width: 0; }
+.rcell .rn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rcell .meta { display: flex; gap: 6px; align-items: center; }
+.rows { flex: 1 1 auto; min-width: 0; }
+.row { display: flex; min-width: 0; border-top: 1px solid var(--card-edge); }
+.row:first-child { border-top: 0; }
+.row.isask { background: var(--ask-wash); }
+.sess { flex: none; min-width: 0; }
+.row .chips { flex: 1 1 0; padding: 3px 6px; }
+
+.a .rcell { width: 150px; }
+.a .sess {
+  width: 642px; height: var(--row-h); padding: 0 10px 0 9px; display: grid; align-items: center;
+  grid-template-columns: 12px 196px 54px minmax(0, 1fr) 64px 32px; column-gap: 8px;
+}
+.a .row { min-height: var(--row-h); }
+.a .foldrow { height: var(--row-h); padding: 0 9px; }
+
+/* B and C: balanced columns. */
+.cols { display: flex; gap: 8px; align-items: flex-start; }
+.col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.card { background: var(--sunken); border: 1px solid var(--card-edge); border-radius: 6px; overflow: hidden; }
+.card-h { display: flex; align-items: center; gap: 6px; height: 29px; padding: 0 10px; background: var(--surface); border-bottom: 1px solid var(--card-edge); }
+.card-h .rn { display: flex; gap: 5px; align-items: center; font-size: 13px; font-weight: 600; }
+.card-h .tally { margin-left: auto; }
+.cs { padding: 4px 10px 5px 9px; border-top: 1px solid var(--card-edge); }
+.cs:first-of-type { border-top: 0; }
+.cs.isask { background: var(--ask-wash); }
+.two { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; column-gap: 8px; row-gap: 1px; align-items: center; }
+.two > * { grid-row: 1; }
+.two > .g { grid-column: 1; } .two > .lab { grid-column: 2; } .two > .age { grid-column: 3; }
+.two > .l2 { grid-row: 2; grid-column: 2; display: flex; gap: 7px; min-width: 0; }
+.two > .issue { grid-row: 2; grid-column: 3; align-self: start; text-align: right; }
+.cs .chips { margin: 3px 0 0 20px; }
+.card .foldrow { padding: 6px 10px 6px 9px; border-top: 1px solid var(--card-edge); }
+
+.c-lane .rcell { width: 128px; padding: 7px 8px; }
+.c-lane .sess { width: 300px; padding: 4px 9px; }
+.c-lane .two { grid-template-columns: 12px minmax(0, 1fr) auto auto; }
+.c-lane .two > .lab { white-space: normal; }
+.c-lane .two > .issue { grid-row: 1; grid-column: 3; align-self: center; }
+.c-lane .two > .age { grid-column: 4; }
+.c-lane .two > .l2 { grid-column: 2 / -1; }
+/* Two-line session cells wrap the now line instead of cutting it, so a question is read whole. */
+.b-lane .two .now, .c-lane .two .now { white-space: normal; }
+.c-lane .row .chips { padding: 4px 6px 4px 2px; }
+.c-lane .foldrow { padding: 5px 9px; }
+
+#probe { position: absolute; left: -4000px; top: 0; }
+</style>
+</head>
+<body>
+<h1>Dashboard, Compact: a quick summary of all running agents</h1>
+<p class="lede">Repo, then its sessions, then each session's agents, subagents and background shells in a container that wraps. No scrolling, no hovering, nothing runs past the window's edge. Every figure below is measured by this page from its own layout, with the app's Inter and Nord theme, at 1588 by 860.</p>
+<ul class="verdict" id="verdict"></ul>
+<div class="legend" id="legend"></div>
+<div id="lanes"></div>
+
+<script>
+/* The same fleet in every lane: 20 sessions across 4 repos and one workspace. */
+const a = (st, n, w) => ({ k: 'a', st, n, w });
+const s = (st, n, w) => ({ k: 's', st, n, w });
+const d = (st, n, w) => ({ k: 'd', st, n, w });
+const AT_PROMPT = 'At the prompt';
+const UNSEEN = 'Turn finished · not looked at yet';
+
+const FLEET = [
+  { name: 'rustling-tulip', kind: 'REPO', sessions: [
+    { l: 'Recover dialog keys', st: 'ask', now: 'Question: bind Ctrl+R to Recover?', key: 'RT-444', age: '6m',
+      ch: [a('done', 'Explore', 'mapped keymap.rs')] },
+    { l: 'Petal footer polish', st: 'work', now: 'Running Bash · cargo nextest', key: 'RT-455', age: '2m', ch: [
+      a('run', 'implementer', 'editing footer.rs'), a('run', 'code-review', 'reading the diff'),
+      a('done', 'Explore', 'mapped status spans'), s('fail', 'gate: clippy', '2 warnings'),
+      s('run', 'gate: nextest', '41%'), d('queued', 'deepseek: RT-771', 'queued')] },
+    { l: 'Daemon spawn verbs', st: 'work', now: 'Running Edit · spawn.rs', key: 'RT-771', age: '14m',
+      ch: [a('run', 'implementer', 'wiring kill and wait'), s('run', 'gate: nextest', '12%')] },
+    { l: 'rustling-tulip', st: 'idle', now: AT_PROMPT, age: '4m', ch: [] },
+  ] },
+  { name: 'yaat', kind: 'REPO', sessions: [
+    { l: 'Flight plan parser', st: 'ask', now: 'Permission: Bash gh pr merge 118', key: 'YAAT-612', age: '3m',
+      ch: [s('done', 'gate: dotnet test', 'passed')] },
+    { l: 'Trim the arrival loader', st: 'work', now: 'Running Edit · ArrivalLoader.cs', key: 'YAAT-604', age: '15m', ch: [
+      a('run', 'implementer', 'trimming the spawn list'), a('run', 'Explore', 'finding callers'),
+      a('queued', 'code-review', 'waits on the build'), s('run', 'gate: dotnet build', '3m'), s('run', 'npm dev', ':5173')] },
+    { l: 'Port the replay parser', st: 'work', now: 'Running Bash · dotnet build', key: 'YAAT-590', age: '11m', ch: [
+      a('run', 'implementer', 'porting the frame reader'), a('done', 'Explore', 'read the old parser'), s('run', 'gate: dotnet build', '1m')] },
+    { l: 'Rewrite the scenario docs', st: 'work', now: 'Thinking', age: '19m', ch: [a('run', 'docs-writer', 'sweeping scenarios/')] },
+    { l: 'METAR parser fix', st: 'bg', now: 'Waiting on a background task', key: 'YAAT-598', age: '25m',
+      ch: [s('run', 'gate: dotnet test', 'on box-2')] },
+    { l: 'Spike the hold pattern UI', st: 'idle', now: AT_PROMPT, age: '39m', ch: [s('run', 'npm dev', ':5174')] },
+    { l: 'Add runway crossing checks', st: 'idle', now: AT_PROMPT, age: '35m', ch: [] },
+    { l: 'Sort the strip bay', st: 'idle', now: AT_PROMPT, age: '38m', ch: [] },
+    { l: 'Review the sector file', st: 'idle', now: AT_PROMPT, age: '48m', ch: [] },
+  ] },
+  { name: 'opening-hand', kind: 'REPO', sessions: [
+    { l: 'Mulligan curve sim', st: 'work', now: 'Running Bash · godot --headless', key: 'OH-118', age: '7m',
+      ch: [a('run', 'balance-analyst', 'seeds 1 to 500'), s('run', 'gate: gdunit', '6m')] },
+    { l: 'Board theme pass', st: 'done', now: UNSEEN, key: 'OH-121', age: '<1m', ch: [a('done', 'art-director', 'reviewed the palette')] },
+    { l: 'Card text pass', st: 'idle', now: AT_PROMPT, age: '31m', ch: [] },
+  ] },
+  { name: 'delve', kind: 'REPO', sessions: [
+    { l: 'Fold the Done group', st: 'work', now: 'Thinking', key: 'DLV-52', age: '3m', ch: [a('run', 'implementer', 'folding the group')] },
+    { l: 'Measure the height probe', st: 'idle', now: AT_PROMPT, age: '23m', ch: [] },
+  ] },
+  { name: 'ops + gate', kind: 'WORKSPACE', sessions: [
+    { l: 'Route gate to the Mac builder', st: 'work', now: 'Running Bash · ssh mac-1', age: '9m', ch: [
+      a('run', 'Explore', 'reading the routes'), a('done', 'code-review', '3 findings'),
+      s('run', 'gate: probe', '40s'), d('run', 'deepseek: gate-88', 'fix round 2')] },
+    { l: 'Sweep stale worktrees', st: 'done', now: UNSEEN, age: '1m', ch: [s('done', 'cleanup.ps1', '12 recycled')] },
+  ] },
+];
+
+const WORD = { ask: 'Asking', work: 'Working', bg: 'Working', done: 'Finished', idle: 'Idle' };
+
+/* The status glyphs, drawn as the shot draws them. */
+function glyph(st, size = 12) {
+  const shapes = {
+    ask: '<path d="M6 .9 11.1 6 6 11.1.9 6Z" fill="none" stroke="#ebcb8b" stroke-width="1.7" stroke-linejoin="round"/><circle cx="6" cy="6" r="1.5" fill="#ebcb8b"/>',
+    work: '<circle cx="6" cy="6" r="4.9" fill="none" stroke="#70a8ff" stroke-width="1.4"/><circle cx="6" cy="6" r="2.3" fill="#70a8ff"/>',
+    run: '<circle cx="6" cy="6" r="4.9" fill="none" stroke="#70a8ff" stroke-width="1.4"/><circle cx="6" cy="6" r="2.3" fill="#70a8ff"/>',
+    bg: '<circle cx="6" cy="6" r="4.6" fill="none" stroke="#70a8ff" stroke-width="2"/>',
+    idle: '<circle cx="6" cy="6" r="2.5" fill="#818792"/>',
+    done: '<circle cx="6" cy="6" r="4.6" fill="none" stroke="#a3be8c" stroke-width="1.7"/>',
+    queued: '<circle cx="6" cy="6" r="4.6" fill="none" stroke="#818792" stroke-width="1.5"/>',
+    fail: '<circle cx="6" cy="6" r="4" fill="#ea6b79"/>',
+  };
+  return `<svg class="g" width="${size}" height="${size}" viewBox="0 0 12 12">${shapes[st]}</svg>`;
+}
+const REPO_ICON = `<svg class="g" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#b9bfca" stroke-width="2.2" stroke-linecap="round"><circle cx="6" cy="5" r="2.6"/><circle cx="6" cy="19" r="2.6"/><circle cx="18" cy="9" r="2.6"/><path d="M6 8v8M18 12c0 3-5 3-10 4"/></svg>`;
+const WS_ICON = `<svg class="g" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#ebace0" stroke-width="2.2" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg>`;
+const SHELL_ICON = `<svg class="g kind" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m4 6 7 6-7 6M13 19h8"/></svg>`;
+const DISPATCH_ICON = `<svg class="g kind" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#ebace0" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M8 7h9v9"/></svg>`;
+
+function chip(c) {
+  const cls = ['c', c.k === 's' ? 'sh' : '', c.k === 'd' ? 'dp' : '', c.st === 'done' ? 'fin' : '', c.st === 'fail' ? 'bad' : ''].join(' ');
+  const kind = c.k === 's' ? SHELL_ICON : c.k === 'd' ? DISPATCH_ICON : '';
+  return `<span class="${cls}">${glyph(c.st, 10)}${kind}<span class="n">${c.n}</span><span class="w">${c.w}</span></span>`;
+}
+const chips = (list) => `<div class="chips">${list.map(chip).join('')}</div>`;
+
+function tally(repo) {
+  const n = (test) => repo.sessions.filter(test).length;
+  const parts = [
+    ['ask', n((x) => x.st === 'ask')],
+    ['work', n((x) => x.st === 'work' || x.st === 'bg')],
+    ['done', n((x) => x.st === 'done')],
+    ['idle', n((x) => x.st === 'idle')],
+  ];
+  return `<span class="tally">${parts.filter((p) => p[1]).map((p) => `<span>${glyph(p[0], 10)}${p[1]}</span>`).join('')}</span>`;
+}
+const repoName = (r) => `<span class="rn">${r.kind === 'WORKSPACE' ? WS_ICON : REPO_ICON}<span class="${r.kind === 'WORKSPACE' ? 'ws' : ''}">${r.name}</span></span>`;
+
+/* Sessions that a fold may hide: Idle, with nothing of theirs still running. */
+const foldable = (x) => x.st === 'idle' && !x.ch.some((c) => c.st === 'run');
+
+function foldRow(list) {
+  const names = list.map((x) => x.l).join(' · ');
+  return `<div class="foldrow"><span class="fold">${glyph('idle', 10)}+${list.length} idle</span><span class="names">${names}</span></div>`;
+}
+
+function visible(repo, folded) {
+  const hide = folded.has(repo.name) ? repo.sessions.filter(foldable) : [];
+  return { shown: repo.sessions.filter((x) => !hide.includes(x)), hide };
+}
+
+function sessA(x) {
+  return `<div class="sess">${glyph(x.st)}<span class="lab">${x.l}</span><span class="word ${x.st}">${WORD[x.st]}</span>` +
+    `<span class="now">${x.now}</span><span class="issue">${x.key || ''}</span><span class="age">${x.age}</span></div>`;
+}
+function sessTwo(x) {
+  return `<div class="two">${glyph(x.st)}<span class="lab">${x.l}</span><span class="issue">${x.key || ''}</span><span class="age">${x.age}</span>` +
+    `<div class="l2"><span class="word ${x.st}">${WORD[x.st]}</span><span class="now">${x.now}</span></div></div>`;
+}
+
+function repoBlock(repo, folded, sessHtml) {
+  const { shown, hide } = visible(repo, folded);
+  const rows = shown.map((x) => `<div class="row ${x.st === 'ask' ? 'isask' : ''}">${sessHtml(x)}${x.ch.length ? chips(x.ch) : ''}</div>`).join('');
+  const fold = hide.length ? foldRow(hide) : '';
+  return `<section class="rblock"><div class="rcell">${repoName(repo)}<div class="meta"><span class="caps-tag">${repo.kind}</span>` +
+    `<span class="caps-tag">${repo.sessions.length}</span></div>${tally(repo)}</div><div class="rows">${rows}${fold}</div></section>`;
+}
+const blockA = (repo, folded) => repoBlock(repo, folded, sessA);
+const blockC = (repo, folded) => repoBlock(repo, folded, (x) => `<div class="sess">${sessTwo(x)}</div>`);
+
+function blockB(repo, folded) {
+  const { shown, hide } = visible(repo, folded);
+  const rows = shown.map((x) => `<div class="cs ${x.st === 'ask' ? 'isask' : ''}">${sessTwo(x)}${x.ch.length ? chips(x.ch) : ''}</div>`).join('');
+  return `<section class="card"><header class="card-h">${repoName(repo)}<span class="caps-tag">${repo.kind} ${repo.sessions.length}</span>${tally(repo)}</header>` +
+    `${rows}${hide.length ? foldRow(hide) : ''}</section>`;
+}
+
+function headerHtml(repos) {
+  const n = (test) => repos.flatMap((r) => r.sessions).filter(test).length;
+  return `<div class="hdr"><span class="title">Dashboard</span><div class="pills">
+    <span class="pill ask">${glyph('ask')}<b>${n((x) => x.st === 'ask')}</b> need you</span>
+    <span class="pill">${glyph('work')}<b>${n((x) => x.st === 'work' || x.st === 'bg')}</b> working</span>
+    <span class="pill">${glyph('idle')}<b>${n((x) => x.st === 'idle')}</b> idle</span>
+    <span class="pill">${glyph('done')}<b>${n((x) => x.st === 'done')}</b> done</span>
+  </div><div class="toggle"><span class="on">Compact</span><span>By status</span></div></div>
+  <div class="queue"><span class="caps">QUEUE</span>
+    <span class="qchip">${glyph('ask')}<span class="key">RT-444</span>Keys: Bind Ctrl+R to Recover, or keep it free for the terminal?<span class="age">6m</span></span>
+    <span class="qchip">${glyph('ask')}<span class="key">Flight plan parser</span>Bash: gh pr merge 118 --squash --delete-branch<span class="age">3m</span></span>
+    <span class="sort">Oldest first</span></div>`;
+}
+
+/* Heaviest block first into the shortest column, by measured height. */
+function pack(body, repos, block, count) {
+  body.innerHTML = `<div class="cols">${'<div class="col"></div>'.repeat(count)}</div>`;
+  const cols = [...body.querySelectorAll('.col')];
+  const items = repos.map((r) => {
+    const host = document.createElement('div');
+    host.innerHTML = block(r);
+    const el = host.firstElementChild;
+    cols[0].append(el);
+    const h = el.getBoundingClientRect().height;
+    el.remove();
+    return { el, h };
+  }).sort((x, y) => y.h - x.h);
+  const heights = cols.map(() => 0);
+  for (const item of items) {
+    const i = heights.indexOf(Math.min(...heights));
+    cols[i].append(item.el);
+    heights[i] += item.h + 6;
+  }
+}
+
+const LAYOUT = {
+  A: (body, repos, folded) => {
+    body.innerHTML = `<div class="stack">${repos.map((r) => blockA(r, folded)).join('')}</div>`;
+  },
+  B: (body, repos, folded) => pack(body, repos, (r) => blockB(r, folded), 3),
+  C: (body, repos, folded) => pack(body, repos, (r) => blockC(r, folded), 2),
+};
+
+function spare(body) {
+  const box = body.getBoundingClientRect();
+  const limit = box.bottom - parseFloat(getComputedStyle(body).paddingBottom);
+  const bottoms = [...body.querySelectorAll('section')].map((el) => el.getBoundingClientRect().bottom);
+  return Math.floor(limit - Math.max(...bottoms));
+}
+
+/* Fold the repo with the most hideable sessions until the fleet fits. */
+function fit(body, repos, lane) {
+  const folded = new Set();
+  LAYOUT[lane](body, repos, folded);
+  while (spare(body) < 0) {
+    const next = repos.filter((r) => !folded.has(r.name) && r.sessions.filter(foldable).length >= 2)
+      .sort((x, y) => y.sessions.filter(foldable).length - x.sessions.filter(foldable).length)[0];
+    if (!next) break;
+    folded.add(next.name);
+    LAYOUT[lane](body, repos, folded);
+  }
+  return folded;
+}
+
+/* A fleet of n sessions with this fleet's mix: each extra is a copy of the next session in turn. */
+function grown(n) {
+  const repos = FLEET.map((r) => ({ ...r, sessions: [...r.sessions] }));
+  const all = repos.flatMap((r) => r.sessions.map((x) => [r, x]));
+  for (let i = 0; i < n - all.length; i += 1) {
+    const [r, x] = all[i % all.length];
+    r.sessions.push(x);
+  }
+  return repos;
+}
+
+function capacity(body, lane) {
+  LAYOUT[lane](body, FLEET, new Set());
+  if (spare(body) < 0) return 'fewer than 20';
+  let n = 20;
+  for (; n < 80; n += 1) {
+    LAYOUT[lane](body, grown(n + 1), new Set());
+    if (spare(body) < 0) break;
+  }
+  return n;
+}
+
+function clipped(body) {
+  const cut = [...body.querySelectorAll('.lab, .now, .rn span:last-child')].filter((el) => el.scrollWidth > el.clientWidth);
+  const wide = [...body.querySelectorAll('.chips, .c')].filter((el) => el.scrollWidth > el.clientWidth + 1);
+  return { cut: cut.map((el) => el.textContent), wide: wide.length };
+}
+
+const LANES = [
+  ['A', 'Stacked lanes', 'one table the full width of the view: repo column, session cells, then a chips cell that wraps. Repos stack vertically.'],
+  ['B', 'Repo cards', 'each repo is a card holding its sessions; chips wrap under their session. Cards flow into three balanced columns.'],
+  ['C', 'Two-column lanes', 'as A, but repos flow into two balanced columns, so session cells take two lines and chips wrap sooner.'],
+];
+
+async function main() {
+  await Promise.all(['400 12px Inter', '500 12px Inter', '600 12px Inter', '700 12px Inter', '400 12px Mono', '600 12px Mono']
+    .map((f) => document.fonts.load(f)));
+  document.getElementById('legend').innerHTML = [
+    [glyph('ask'), 'asking'], [glyph('work'), 'working'], [glyph('bg'), 'working in the background'], [glyph('idle'), 'idle'],
+    [glyph('done'), 'finished'], [glyph('queued'), 'queued'], [glyph('fail'), 'failed'],
+    [chip(a('run', 'subagent', 'what it is doing')), ''], [chip(s('run', 'background shell', 'state')), ''], [chip(d('run', 'dispatch run', 'state')), ''],
+  ].map(([g, t]) => `<span class="item">${g}${t}</span>`).join('');
+
+  const host = document.getElementById('lanes');
+  const verdict = [];
+  for (const [id, name, what] of LANES) {
+    const lane = document.createElement('section');
+    lane.className = 'lane';
+    lane.innerHTML = `<div class="lane-head"><span class="tag">${id}</span><span class="name">${name}</span><span class="what">${what}</span><span class="measure"></span></div>
+      <div class="frame ${id === 'A' ? 'a' : id === 'C' ? 'c-lane' : 'b-lane'}">${headerHtml(FLEET)}<div class="body"></div></div>`;
+    host.append(lane);
+    const body = lane.querySelector('.body');
+    const holds = capacity(body, id);
+    const folded = fit(body, FLEET, id);
+    const left = spare(body);
+    const { cut, wide } = clipped(body);
+    const hidden = FLEET.filter((r) => folded.has(r.name)).flatMap((r) => r.sessions.filter(foldable)).length;
+    const foldText = hidden ? `folds ${hidden} idle (${[...folded].join(', ')})` : 'no fold';
+    const cutText = cut.length ? `${cut.length} cut: ${cut.join(' / ')}` : 'nothing cut';
+    lane.querySelector('.measure').textContent =
+      `${20 - hidden} of 20 shown, ${foldText}, ${left} px spare, holds ${holds} unfolded, ${cutText}${wide ? `, ${wide} too wide` : ''}`;
+    verdict.push(`<li><b>${id}</b>: ${hidden ? `folds ${hidden} Idle sessions (${[...folded].join(', ')})` : 'shows all 20 with no fold'}, ` +
+      `${left} px to spare; a fleet of this mix fits unfolded up to ${holds} sessions.</li>`);
+    lane.dataset.report = JSON.stringify({ id, holds, hidden, left, cut, wide });
+  }
+  document.getElementById('verdict').innerHTML = verdict.join('');
+  document.title = 'Dashboard Compact Lanes';
+  document.body.classList.add('ready');
+}
+main();
+</script>
+</body>
+</html>
