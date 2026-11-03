@@ -16,6 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - A remote repo's menu now says Explorer and VS Code aren't available for a remote host, instead of saying it has no folder.
 - A mistyped `rustling-tulipd` command now prints a usage error instead of starting the daemon, and `rustling-tulipd -V` prints its version.
 - Stopping the daemon as administrator after an administrator daemon crashed now clears its leftover handshake instead of refusing to stop.
+- Retiring or stopping the background service never force-closes a program that doesn't own the service's connection.
 - Reconnecting to one host no longer drops another host's worktree cleanup prompts or running preset launches.
 - A remote host's layout question closes as soon as another window answers it.
 - Ctrl+Left and Ctrl+Right now move a word at a time, and other Shift, Alt and Ctrl combinations with arrows, Home, End and F-keys reach programs.

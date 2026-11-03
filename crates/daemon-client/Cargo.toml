@@ -53,8 +53,11 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # holds it, and reads its descriptor back.
 # `Win32_System_RemoteDesktop`: `src/logon_task.rs` reads the caller's session
 # and looks for the user's interactive session (`WTSEnumerateSessionsW`).
+# `Win32_NetworkManagement_IpHelper`: `src/listener_owner.rs` reads which pid
+# owns the daemon's listener (`GetExtendedTcpTable`) before a force-stop.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",

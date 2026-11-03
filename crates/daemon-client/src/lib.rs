@@ -14,6 +14,7 @@ pub mod autostart;
 pub mod capped_log;
 pub mod device_tokens;
 pub mod isolation;
+mod listener_owner;
 mod logon_task;
 #[cfg(windows)]
 mod pinned_process;
@@ -519,7 +520,9 @@ pub fn refuse_stop_across_integrity(
 ///
 /// On Windows the pid is pinned by a process handle before the proof and
 /// killed through that handle, so a pid reused by another process is never
-/// killed. Kills by pid rather than sending a `Shutdown` WS message because
+/// killed, and only when that pid owns the proven listener on the
+/// handshake's port (a failed read of the listener table counts as not
+/// owned). Kills by pid rather than sending a `Shutdown` WS message because
 /// the WS may already be closed, and a pid kill works in both states. The
 /// daemon's drop guard would normally remove `daemon.json` on graceful exit;
 /// it is removed here too so a later [`ensure_running`] doesn't mistake a
@@ -531,8 +534,9 @@ pub fn refuse_stop_across_integrity(
 /// whose process runs ordinary or, while running, has an integrity that cannot
 /// be read ([`refuse_stop_across_integrity`]), or when [`locate_daemon`] does;
 /// fails when there is no handshake on disk or it cannot be read or parsed; on
-/// Windows only, when its pid is not running (the stale file is removed) or
-/// this client may not terminate it (nothing is stopped); when its listener
+/// Windows only, when its pid is not running (the stale file is removed),
+/// this client may not terminate it, or it does not own the proven listener
+/// (in both, nothing is stopped and the file is kept); when its listener
 /// does not prove it is the daemon (nothing is killed; the file is removed,
 /// except when the listener did not answer at all); or when the kill fails.
 /// The file is only ever removed while it still holds the token that was read.
@@ -548,15 +552,27 @@ pub async fn stop() -> anyhow::Result<()> {
 ///
 /// As [`stop`].
 pub async fn stop_in(config_dir: &Path) -> anyhow::Result<()> {
-    stop_in_with(config_dir, supervisor::PROOF_TIMEOUT).await
+    stop_in_with(
+        config_dir,
+        supervisor::PROOF_TIMEOUT,
+        &listener_owner::listener_owner,
+    )
+    .await
 }
 
-/// [`stop_in`] with `proof_budget` for the listener's proof.
+/// [`stop_in`] with `proof_budget` for the listener's proof and `owner` to
+/// read which pid owns the proven listener (Windows).
 ///
 /// # Errors
 ///
 /// As [`stop`].
-pub(crate) async fn stop_in_with(config_dir: &Path, proof_budget: Duration) -> anyhow::Result<()> {
+pub(crate) async fn stop_in_with(
+    config_dir: &Path,
+    proof_budget: Duration,
+    owner: &listener_owner::OwnerLookup,
+) -> anyhow::Result<()> {
+    #[cfg(not(windows))]
+    let _ = owner;
     let path = handshake_file_in(config_dir);
     if !path.exists() {
         bail!("no daemon handshake on disk — daemon may not be running");
@@ -568,6 +584,14 @@ pub(crate) async fn stop_in_with(config_dir: &Path, proof_budget: Duration) -> a
     refuse_unproven(proof, config_dir, &parsed, &path).await?;
     #[cfg(windows)]
     {
+        if !supervisor::owns_listener(owner, &parsed) {
+            bail!(
+                "pid {} named by {} does not own the daemon's listener on 127.0.0.1:{}; nothing was stopped",
+                parsed.pid,
+                path.display(),
+                parsed.port
+            );
+        }
         pinned.terminate()?;
         if !pinned.wait(STOP_WAIT).await {
             bail!("pid {} did not exit after it was terminated", parsed.pid);
@@ -784,7 +808,15 @@ pub(crate) async fn shutdown_in_with(
             return Ok(Shutdown::Stale);
         }
     }
-    match supervisor::retire_daemon_in(config_dir, &handshake, proof_budget, shutdown_wait).await {
+    match supervisor::retire_daemon_in(
+        config_dir,
+        &handshake,
+        proof_budget,
+        shutdown_wait,
+        &listener_owner::listener_owner,
+    )
+    .await
+    {
         Ok(()) => Ok(Shutdown::Stopped),
         Err(err) => match err.downcast_ref::<supervisor::NotProven>() {
             Some(refusal) => Ok(Shutdown::NotProven(refusal.proof)),
@@ -1097,7 +1129,11 @@ mod tests {
         let mut child = stand_in();
         write_handshake(&scratch.0, child.id(), fake.port, "token");
 
-        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD));
+        let stopped = block_on(super::stop_in_with(
+            &scratch.0,
+            HANG_GUARD,
+            &crate::listener_owner::listener_owner,
+        ));
         let alive = alive_then_reaped(&mut child);
 
         let err = stopped.expect_err("an unproven listener is not stopped");
@@ -1129,7 +1165,11 @@ mod tests {
         });
         write_handshake(&scratch.0, pid, fake.port, "token");
 
-        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD));
+        let stopped = block_on(super::stop_in_with(
+            &scratch.0,
+            HANG_GUARD,
+            &crate::listener_owner::listener_owner,
+        ));
         let alive = alive_then_reaped(&mut child);
 
         stopped.expect_err("an unproven listener is not stopped");
@@ -1147,7 +1187,11 @@ mod tests {
 
         // The listener never answers, so a short proof budget only decides how
         // soon stop gives up waiting for nothing.
-        let stopped = block_on(super::stop_in_with(&scratch.0, Duration::from_millis(200)));
+        let stopped = block_on(super::stop_in_with(
+            &scratch.0,
+            Duration::from_millis(200),
+            &crate::listener_owner::listener_owner,
+        ));
         let alive = alive_then_reaped(&mut child);
 
         let err = stopped.expect_err("a silent daemon is not stopped");
@@ -1171,9 +1215,14 @@ mod tests {
         let scratch = ScratchDir::new("stop-kill");
         let fake = FakeListener::proving("token");
         let mut child = stand_in();
-        write_handshake(&scratch.0, child.id(), fake.port, "token");
+        let pid = child.id();
+        write_handshake(&scratch.0, pid, fake.port, "token");
 
-        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD));
+        // The fake listener lives in this test process, so the stand-in is
+        // named as its owner.
+        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD, &move |_| {
+            Ok(Some(pid))
+        }));
         // Reap the child whatever happened, so a failure leaves nothing behind.
         if stopped.is_err() {
             let _ = child.kill();
@@ -1189,6 +1238,39 @@ mod tests {
             !super::handshake_file_in(&scratch.0).exists(),
             "daemon.json survived"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stop_refuses_a_pid_that_does_not_own_the_proven_listener() {
+        let scratch = ScratchDir::new("stop-not-owner");
+        let fake = FakeListener::proving("token");
+        let mut child = stand_in();
+        let pid = child.id();
+        write_handshake(&scratch.0, pid, fake.port, "token");
+
+        // The proving listener lives in this test process, so the real lookup
+        // names this process, not the stand-in, as the listener's owner.
+        let stopped = block_on(super::stop_in_with(
+            &scratch.0,
+            HANG_GUARD,
+            &crate::listener_owner::listener_owner,
+        ));
+        let alive = alive_then_reaped(&mut child);
+
+        let err = stopped.expect_err("a pid that does not own the listener is not stopped");
+        let path = crate::handshake_file_in(&scratch.0);
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "pid {pid} named by {} does not own the daemon's listener on 127.0.0.1:{}; \
+                 nothing was stopped",
+                path.display(),
+                fake.port
+            )
+        );
+        assert!(alive, "the stand-in was killed");
+        assert!(path.exists(), "daemon.json was removed");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Locate and (if needed) spawn the rustling-tulipd binary, then return its
 //! handshake to the caller.
 
+use crate::listener_owner::{self, OwnerLookup};
 use crate::logon_task::StartRoute;
 #[cfg(windows)]
 use crate::pinned_process::{OpenFailure, PinnedProcess};
@@ -762,6 +763,7 @@ async fn reuse_ordinary_daemon(
                         handshake,
                         PROOF_TIMEOUT,
                         SHUTDOWN_WAIT_TIMEOUT,
+                        &listener_owner::listener_owner,
                     )
                     .await?;
                 }
@@ -1048,29 +1050,42 @@ async fn retire_daemon(
         reason,
         "retiring running daemon before spawning current version"
     );
-    retire_daemon_in(config_dir, handshake, PROOF_TIMEOUT, SHUTDOWN_WAIT_TIMEOUT).await
+    retire_daemon_in(
+        config_dir,
+        handshake,
+        PROOF_TIMEOUT,
+        SHUTDOWN_WAIT_TIMEOUT,
+        &listener_owner::listener_owner,
+    )
+    .await
 }
 
 /// Retire the daemon `handshake` (read from `config_dir`'s `daemon.json`)
 /// names: pin its pid (Windows), open a connection, have the listener prove
 /// it holds the token within `proof_budget`, then send the bearer `/shutdown`
 /// on that connection. A daemon still alive after `shutdown_wait` is
-/// force-stopped through the pin. `daemon.json` is removed only while it
+/// force-stopped through the pin only when the pinned pid owns the proven
+/// listener on the handshake's port, as `owner` reads it (Windows); a lookup
+/// that fails counts as not owned. `daemon.json` is removed only while it
 /// still holds this token.
 ///
 /// # Errors
 ///
 /// Fails when the listener does not prove itself (it is sent nothing and
 /// nothing is killed), so the caller does not replace a daemon it could not
-/// retire; when this client may not terminate the daemon and it is still
-/// running after the shutdown request; or when the force-stop fails. A pid
-/// that is no longer running is `Ok`.
+/// retire; when this client may not terminate the daemon, or the pinned pid
+/// does not own the proven listener, and it is still running after the
+/// shutdown request; or when the force-stop fails. A pid that is no longer
+/// running is `Ok`.
 pub(crate) async fn retire_daemon_in(
     config_dir: &Path,
     handshake: &DaemonHandshake,
     proof_budget: Duration,
     shutdown_wait: Duration,
+    owner: &OwnerLookup,
 ) -> anyhow::Result<()> {
+    #[cfg(not(windows))]
+    let _ = owner;
     #[cfg(windows)]
     let pinned = match PinnedProcess::open(handshake.pid) {
         Ok(pinned) => Some(pinned),
@@ -1092,18 +1107,62 @@ pub(crate) async fn retire_daemon_in(
         }
     };
     let stream = connect_then_prove(handshake, proof_budget).await?;
+    // Only a pinned pid could be force-stopped, so only then is the table read.
+    #[cfg(windows)]
+    let owns = pinned.is_some() && owns_listener(owner, handshake);
     request_shutdown(stream, handshake, proof_budget).await;
     #[cfg(windows)]
     {
         match &pinned {
-            Some(pinned) => stop_pinned(pinned, handshake, shutdown_wait).await?,
-            None => stop_by_request_only(handshake, proof_budget, shutdown_wait).await?,
+            Some(pinned) if owns => stop_pinned(pinned, handshake, shutdown_wait).await?,
+            Some(_) => {
+                warn!(
+                    pid = handshake.pid,
+                    port = handshake.port,
+                    "the pid daemon.json names does not own the proven listener; asking it to shut down only"
+                );
+                stop_by_request_only(
+                    handshake,
+                    proof_budget,
+                    shutdown_wait,
+                    RequestOnly::NotOwner,
+                )
+                .await?;
+            }
+            None => {
+                stop_by_request_only(
+                    handshake,
+                    proof_budget,
+                    shutdown_wait,
+                    RequestOnly::NoRights,
+                )
+                .await?;
+            }
         }
     }
     #[cfg(not(windows))]
     stop_unpinned(handshake, proof_budget, shutdown_wait).await?;
     remove_handshake_holding_token(config_dir, &handshake.auth_token).await;
     Ok(())
+}
+
+/// Whether the pid `handshake` names owns the listener on its port, as
+/// `owner` reads it. A lookup that fails is logged and counts as not owned,
+/// so an unreadable table never lets a force-stop through.
+#[cfg(windows)]
+pub(crate) fn owns_listener(owner: &OwnerLookup, handshake: &DaemonHandshake) -> bool {
+    match owner(handshake.port) {
+        Ok(found) => found == Some(handshake.pid),
+        Err(err) => {
+            warn!(
+                err = %format!("{err:#}"),
+                pid = handshake.pid,
+                port = handshake.port,
+                "cannot read which process owns the daemon's listener; not force-stopping it"
+            );
+            false
+        }
+    }
 }
 
 /// A connection to the daemon's port opened before its listener proved,
@@ -1183,26 +1242,45 @@ async fn request_shutdown(
     }
 }
 
-/// Waits for a daemon this client may not terminate to stop proving itself
-/// after its shutdown request.
+/// Why a retire only asks the daemon to shut down and never force-stops it.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+enum RequestOnly {
+    /// This client may not terminate the daemon's pid.
+    NoRights,
+    /// The pinned pid does not own the proven listener.
+    NotOwner,
+}
+
+/// Waits for a daemon this client will not terminate, for `why`, to stop
+/// proving itself after its shutdown request.
 ///
 /// # Errors
 ///
-/// Fails when it still proves itself after `shutdown_wait`.
+/// Fails, naming `why`, when it still proves itself after `shutdown_wait`.
 #[cfg(windows)]
 async fn stop_by_request_only(
     handshake: &DaemonHandshake,
     proof_budget: Duration,
     shutdown_wait: Duration,
+    why: RequestOnly,
 ) -> anyhow::Result<()> {
     if wait_until_unproven(handshake, proof_budget, shutdown_wait).await {
         return Ok(());
     }
-    Err(anyhow!(
-        "the daemon (pid {}) did not stop after a shutdown request, and this client may not \
-         terminate it",
-        handshake.pid
-    ))
+    Err(match why {
+        RequestOnly::NoRights => anyhow!(
+            "the daemon (pid {}) did not stop after a shutdown request, and this client may not \
+             terminate it",
+            handshake.pid
+        ),
+        RequestOnly::NotOwner => anyhow!(
+            "the daemon (pid {}) did not stop after a shutdown request, and its pid does not \
+             own the proven listener on 127.0.0.1:{}, so it was not force-stopped",
+            handshake.pid,
+            handshake.port
+        ),
+    })
 }
 
 /// Waits for the pinned daemon to exit after its shutdown request, then
@@ -1910,6 +1988,7 @@ mod tests {
     #[cfg(windows)]
     use super::{spawn_daemon, spawn_daemon_with};
     use crate::HandshakeFile;
+    use crate::listener_owner;
     use crate::logon_task::StartRoute;
     use crate::profile::{Overrides, Profile, profiles_to_probe, roots_to_probe_in};
     use crate::supervisor::retire_daemon_in;
@@ -3075,7 +3154,13 @@ mod tests {
         let file = handshake_naming(child.id(), fake.port, "token", &[0]);
         write_daemon_json(&scratch.0, &file);
 
-        let retired = block_on(retire_daemon_in(&scratch.0, &file, HANG_GUARD, HANG_GUARD));
+        let retired = block_on(retire_daemon_in(
+            &scratch.0,
+            &file,
+            HANG_GUARD,
+            HANG_GUARD,
+            &listener_owner::listener_owner,
+        ));
         let alive = child.try_wait().expect("poll the stand-in").is_none();
         let _ = child.kill();
         let _ = child.wait();
@@ -3108,6 +3193,7 @@ mod tests {
             &file,
             Duration::from_millis(200),
             HANG_GUARD,
+            &listener_owner::listener_owner,
         ));
         let alive = child.try_wait().expect("poll the stand-in").is_none();
         let _ = child.kill();
@@ -3125,16 +3211,19 @@ mod tests {
         let scratch = ScratchDir::new("retire-proven");
         let fake = FakeListener::proving("good-token");
         let mut child = stand_in();
-        let file = handshake_naming(child.id(), fake.port, "good-token", &[0]);
+        let pid = child.id();
+        let file = handshake_naming(pid, fake.port, "good-token", &[0]);
         write_daemon_json(&scratch.0, &file);
 
         // The stand-in ignores `/shutdown`, so the graceful wait always runs
-        // out and the pin's terminate is what ends it.
+        // out and the pin's terminate is what ends it. The fake listener lives
+        // in this test process, so the stand-in is named as its owner.
         let retired = block_on(retire_daemon_in(
             &scratch.0,
             &file,
             HANG_GUARD,
             Duration::from_millis(300),
+            &move |_| Ok(Some(pid)),
         ));
         if retired.is_err() {
             let _ = child.kill();
@@ -3157,6 +3246,48 @@ mod tests {
         assert!(
             !crate::handshake_file_in(&scratch.0).exists(),
             "daemon.json survived"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retire_does_not_force_stop_a_pid_that_does_not_own_the_proven_listener() {
+        let scratch = ScratchDir::new("retire-not-owner");
+        let fake = FakeListener::proving("good-token");
+        let mut child = stand_in();
+        let file = handshake_naming(child.id(), fake.port, "good-token", &[0]);
+        write_daemon_json(&scratch.0, &file);
+
+        // The proving listener lives in this test process, so the real lookup
+        // names this process, not the stand-in, as the listener's owner.
+        let retired = block_on(retire_daemon_in(
+            &scratch.0,
+            &file,
+            HANG_GUARD,
+            Duration::from_millis(300),
+            &listener_owner::listener_owner,
+        ));
+        let alive = child.try_wait().expect("poll the stand-in").is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let err = retired.expect_err("a daemon that would not stop is not reported as retired");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "the daemon (pid {}) did not stop after a shutdown request, and its pid does not \
+                 own the proven listener on 127.0.0.1:{}, so it was not force-stopped",
+                file.pid, fake.port
+            )
+        );
+        assert!(alive, "the stand-in was killed");
+        assert!(
+            fake.heads()
+                .iter()
+                .any(|head| head.starts_with("POST /shutdown ")
+                    && head.contains("\r\nAuthorization: Bearer good-token\r\n")),
+            "no bearer shutdown reached the proven daemon: {:?}",
+            fake.heads()
         );
     }
 
