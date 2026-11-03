@@ -28,23 +28,27 @@ pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
 }
 
 /// Retire the daemon the config dir's `daemon.json` names, writing one line
-/// about what happened to `out`, and return the exit code for it: `0` when a
-/// daemon stopped, none was running or a stale `daemon.json` was removed, `3`
-/// when its listener did not prove it holds the token, and `1` when the stop
-/// failed.
+/// about what happened, and return the exit code for it: `0` when a daemon
+/// stopped, none was running or a stale `daemon.json` was removed, `3` when
+/// its listener did not prove it holds the token, and `1` when the stop
+/// failed. A success goes to `out`, a failure (exit `1` or `3`) to `err`.
 ///
 /// # Errors
 ///
 /// Fails only when the line cannot be written.
-pub async fn run(config_dir: &Path, out: &mut impl Write) -> anyhow::Result<u8> {
+pub async fn run(
+    config_dir: &Path,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> anyhow::Result<u8> {
     match tokio::time::timeout(STOP_TIMEOUT, daemon_client::shutdown_in(config_dir)).await {
         Err(_) => {
             let secs = STOP_TIMEOUT.as_secs();
-            writeln!(out, "could not stop the daemon within {secs} s")?;
+            writeln!(err, "could not stop the daemon within {secs} s")?;
             Ok(1)
         }
-        Ok(Err(err)) => {
-            writeln!(out, "could not stop the daemon: {err:#}")?;
+        Ok(Err(failure)) => {
+            writeln!(err, "could not stop the daemon: {failure:#}")?;
             Ok(1)
         }
         Ok(Ok(Shutdown::NoDaemon)) => {
@@ -61,7 +65,7 @@ pub async fn run(config_dir: &Path, out: &mut impl Write) -> anyhow::Result<u8> 
         }
         Ok(Ok(Shutdown::NotProven(_))) => {
             writeln!(
-                out,
+                err,
                 "the daemon's listener did not prove it holds its token; nothing was sent"
             )?;
             Ok(NOT_PROVEN_CODE)
@@ -95,12 +99,14 @@ mod tests {
     async fn run_prints_one_line_and_exits_0_with_no_daemon() {
         let dir = ScratchDir::new("cli-shutdown-no-daemon");
         let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
 
-        let code = run(dir.path(), &mut out)
+        let code = run(dir.path(), &mut out, &mut err)
             .await
             .expect("the line is written");
 
         assert_eq!(code, 0);
+        assert!(err.is_empty(), "nothing failed");
         assert_eq!(
             String::from_utf8(out).expect("the line is UTF-8"),
             "no daemon is running\n"

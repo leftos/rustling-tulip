@@ -61,8 +61,37 @@ const ERROR_ACCESS_DENIED: i32 = 5;
 /// Creating, writing or flushing the temp file failed, or the replace did. The
 /// temp file is removed and the target keeps its old bytes.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    write_atomic_with(path, bytes, secret::create_private)
+}
+
+/// [`write_atomic`] for the handshake of an elevated daemon: on Windows the
+/// temp file is created with a High mandatory label that refuses reads and
+/// writes from below High integrity (`S:(ML;;NRNW;;;HI)`), and the replace
+/// carries the label onto the target. A DACL
+/// alone does not keep out a Medium process of the same account. Elsewhere
+/// it is [`write_atomic`].
+///
+/// # Errors
+///
+/// As [`write_atomic`]; building the label's descriptor can fail too.
+pub fn write_atomic_labelled(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        write_atomic_with(path, bytes, create_high_labelled)
+    }
+    #[cfg(not(windows))]
+    {
+        write_atomic(path, bytes)
+    }
+}
+
+fn write_atomic_with(
+    path: &Path,
+    bytes: &[u8],
+    create: fn(&Path) -> std::io::Result<std::fs::File>,
+) -> anyhow::Result<()> {
     let tmp = temp_path(path);
-    if let Err(err) = write_temp(&tmp, bytes) {
+    if let Err(err) = write_temp(&tmp, bytes, create) {
         remove_temp(&tmp);
         return Err(err).with_context(|| format!("writing {}", tmp.display()));
     }
@@ -87,10 +116,78 @@ fn temp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-fn write_temp(tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = secret::create_private(tmp)?;
+fn write_temp(
+    tmp: &Path,
+    bytes: &[u8],
+    create: fn(&Path) -> std::io::Result<std::fs::File>,
+) -> std::io::Result<()> {
+    let mut file = create(tmp)?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+/// The mandatory label an elevated daemon's handshake carries: High, no read
+/// up, no write up. The descriptor holds no DACL, so the system builds the
+/// file's DACL from the folder's inheritable entries: the file ends up with the
+/// same principals and rights as an inherited DACL would give, but stored as
+/// explicit entries, not marked inherited.
+#[cfg(windows)]
+const HIGH_LABEL_SDDL: &str = "S:(ML;;NRNW;;;HI)";
+
+/// Create `path` (a new temp file) for writing with [`HIGH_LABEL_SDDL`] set
+/// at creation, so the file is never unlabelled.
+#[cfg(windows)]
+fn create_high_labelled(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::FromRawHandle as _;
+    use windows::Win32::Foundation::{GENERIC_WRITE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows::Win32::Storage::FileSystem::{
+        CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+    use windows::core::HSTRING;
+
+    let sddl = HSTRING::from(HIGH_LABEL_SDDL);
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: `sddl` is NUL-terminated and outlives the call; `descriptor`
+    // receives a LocalAlloc'd descriptor, freed below.
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            &sddl,
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            None,
+        )
+    }
+    .map_err(std::io::Error::other)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: false.into(),
+    };
+    let name = HSTRING::from(path.as_os_str());
+    // SAFETY: `name` and `attributes` (and the descriptor it points to) stay
+    // alive for the call; the handle returned is owned by the File below.
+    let created = unsafe {
+        CreateFileW(
+            &name,
+            GENERIC_WRITE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            Some(&raw const attributes),
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    };
+    // SAFETY: the descriptor the conversion allocated, freed once, after the
+    // create that read it.
+    let _ = unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+    let handle = created.map_err(std::io::Error::other)?;
+    // SAFETY: `handle` is a valid file handle this function owns alone.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle.0) })
 }
 
 fn remove_temp(tmp: &Path) {

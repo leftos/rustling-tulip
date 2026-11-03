@@ -64,8 +64,11 @@ pub fn generate_pairing_code() -> String {
 
 /// Write a secret-bearing file so only its owner can read it.
 ///
-/// On Windows the config dir's ACL is already user-scoped, so this is the same
-/// as `fs::write`. On Unix, `fs::write` creates `0666 & ~umask` — typically
+/// On Windows the file inherits the config dir's user-scoped DACL, so this is
+/// the same as `fs::write`. That DACL keeps other accounts out but not a
+/// lower-integrity process of the same account, which is why an elevated
+/// daemon writes its handshake through
+/// [`crate::atomic_file::write_atomic_labelled`] instead. On Unix, `fs::write` creates `0666 & ~umask` — typically
 /// `0644`, i.e. world-readable — which would expose the auth token to every
 /// local user. The mode is set at creation time so a
 /// freshly created file is never briefly readable, and applied again afterwards
@@ -89,8 +92,8 @@ pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()
 
 /// Open `path` for writing, creating or truncating it, owner-only from the
 /// moment it exists: Unix `0600`, set at creation so the file is never briefly
-/// world-readable. Windows relies on the config dir's ACL, as [`write_private`]
-/// does.
+/// world-readable. Windows relies on the DACL the config dir passes down, as
+/// [`write_private`] does.
 pub(crate) fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);

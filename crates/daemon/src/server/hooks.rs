@@ -35,12 +35,19 @@ const HOOK_BODY_LIMIT: usize = 1 << 20;
 /// `X-RT-Hook-Time` (nanoseconds since the epoch) is strictly newer than the
 /// last one applied for the session. A missing or unparsable time is the
 /// oldest possible and is dropped.
+///
+/// An elevated daemon first refuses a peer below its integrity with `403`
+/// ([`super::loopback_door`]).
 pub(super) async fn hook_handler(
     State(hub): State<Hub>,
+    peer: super::PeerInfo,
     AxumPath(session_id): AxumPath<String>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Err(refusal) = super::loopback_door(&hub, peer).await {
+        return super::refused_peer_response(&refusal);
+    }
     let Some(token) = presented_bearer(&headers) else {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };

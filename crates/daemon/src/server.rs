@@ -45,6 +45,7 @@ use self::remote::{
 };
 use self::sessions::shutdown_all;
 use self::settings::start_keep_awake;
+use crate::integrity::{IntegrityLevel, LoopbackPeer, PeerIntegrity};
 use crate::orphan::OrphanMeta;
 use crate::paths::Dirs;
 use crate::session::SessionRegistry;
@@ -185,6 +186,13 @@ pub struct Hub {
     /// The turn pipeline: each session's unsummarized reports, summarized
     /// through [`Self::summarizer`] into the session's summary ring.
     pub(crate) turns: Arc<crate::summarizer::turns::Turns>,
+    /// This daemon's integrity level, read once at start. At or above High, each
+    /// request to the loopback `/ws`, `/shutdown` and `/hook` is admitted
+    /// only from a peer at or above it ([`loopback_door`]).
+    pub integrity: IntegrityLevel,
+    /// How [`loopback_door`] reads a loopback peer's integrity level;
+    /// consulted only when [`Hub::integrity`] is elevated.
+    pub peer_integrity: Arc<dyn PeerIntegrity>,
 }
 
 impl Hub {
@@ -390,6 +398,9 @@ pub async fn run(
     let remote = crate::remote_config::load(&dirs);
     let auth_token = crate::secret::generate_auth_token();
     let daemon_id = crate::daemon_id::load(&dirs).context("loading the daemon id")?;
+    let integrity = crate::integrity::own_level()
+        .map_err(|err| anyhow::anyhow!("reading this daemon's integrity level: {err}"))?;
+    info!(%integrity, elevated = integrity.is_elevated(), "daemon integrity level");
 
     let (attention_tx, attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
@@ -411,7 +422,7 @@ pub async fn run(
     // already subscribe to.
     spawn_attention_forwarder(Arc::clone(&sessions), attention_rx);
 
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (tab_events, _) = broadcast::channel(TAB_EVENT_CAPACITY);
     let (preset_events, _) = broadcast::channel(PRESET_EVENT_CAPACITY);
     let (state_events, _) = broadcast::channel(STATE_EVENT_CAPACITY);
@@ -476,10 +487,12 @@ pub async fn run(
         dashboard,
         summarizer,
         turns,
+        integrity,
+        peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
     };
     start_hub_tasks(&hub, client_count_rx);
 
-    let app = build_loopback_router(hub.clone());
+    let app = loopback_service(hub.clone());
 
     let bind_start = std::time::Instant::now();
     let listener = bind_loopback().await?;
@@ -491,7 +504,7 @@ pub async fn run(
         "rustling-tulipd listening"
     );
 
-    write_handshake(&dirs, bound.port(), &auth_token)?;
+    write_handshake(&dirs, bound.port(), &auth_token, integrity.is_elevated())?;
     info!(
         run_elapsed_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX),
         "handshake file written; daemon ready for clients"
@@ -507,21 +520,9 @@ pub async fn run(
     // Opt-in tailnet listener: started after the handshake, never awaited.
     start_remote_access(&hub, remote, shutdown_rx.clone()).await;
 
-    let shutdown_signal = async move {
-        // Returns once the Shutdown handler flips the watch to `true`. A
-        // `recv_error` means the sender was dropped (programmer error) — fall
-        // through and let axum exit naturally rather than panicking.
-        while shutdown_rx.changed().await.is_ok() {
-            if *shutdown_rx.borrow() {
-                info!("shutdown signal: watch flipped true; stopping accept loop");
-                break;
-            }
-        }
-        info!("shutdown signal: future complete");
-    };
     info!("server::run: entering axum::serve");
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
+        .with_graceful_shutdown(shutdown_signal(shutdown_rx))
         .await
         .context("axum serve failed");
     info!(?serve_result, "server::run: axum::serve returned");
@@ -530,6 +531,19 @@ pub async fn run(
     let _ = std::fs::remove_file(&dirs.handshake_file);
     info!("server::run: discovery file removed; returning");
     serve_result
+}
+
+/// Returns once the Shutdown handler flips `shutdown_rx` to `true`. A
+/// `recv_error` means the sender was dropped (programmer error) — fall
+/// through and let axum exit naturally rather than panicking.
+async fn shutdown_signal(mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+    while shutdown_rx.changed().await.is_ok() {
+        if *shutdown_rx.borrow() {
+            info!("shutdown signal: watch flipped true; stopping accept loop");
+            break;
+        }
+    }
+    info!("shutdown signal: future complete");
 }
 
 /// The loopback listener's router: `/ws`, `/health`, `/shutdown`, the `/proof`
@@ -545,7 +559,73 @@ fn build_loopback_router(hub: Hub) -> Router {
         .with_state(hub)
 }
 
-fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<()> {
+/// The loopback router served with each connection's [`LoopbackPeer`], which
+/// [`loopback_door`] reads.
+fn loopback_service(
+    hub: Hub,
+) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<Router, LoopbackPeer> {
+    build_loopback_router(hub).into_make_service_with_connect_info::<LoopbackPeer>()
+}
+
+impl
+    axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::TcpListener>>
+    for LoopbackPeer
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+        Self {
+            remote: *stream.remote_addr(),
+            local: stream.io().local_addr().ok(),
+        }
+    }
+}
+
+/// The connection's [`LoopbackPeer`], as a handler extracts it: absent when
+/// the router was not served with connect info.
+pub(super) type PeerInfo = Option<axum::Extension<axum::extract::ConnectInfo<LoopbackPeer>>>;
+
+/// Admit or refuse a loopback request. An ordinary daemon admits every
+/// request without a lookup. An elevated one reads the peer's integrity level
+/// and admits only a peer at or above its own; a request whose peer cannot be
+/// found or read is refused.
+pub(super) async fn loopback_door(
+    hub: &Hub,
+    peer: PeerInfo,
+) -> Result<(), crate::integrity::Refusal> {
+    if !hub.integrity.is_elevated() {
+        return Ok(());
+    }
+    let peer = peer.map(|axum::Extension(axum::extract::ConnectInfo(peer))| peer);
+    let lookup = match peer {
+        None => Err(crate::integrity::LookupError::new(
+            "the connection's addresses are unknown",
+        )),
+        Some(peer) => {
+            let lookup = Arc::clone(&hub.peer_integrity);
+            tokio::task::spawn_blocking(move || lookup.level_of(peer))
+                .await
+                .unwrap_or_else(|err| {
+                    Err(crate::integrity::LookupError::new(format!(
+                        "the lookup task failed: {err}"
+                    )))
+                })
+        }
+    };
+    let verdict = crate::integrity::admit_local_peer(hub.integrity, lookup);
+    if let Err(refusal) = &verdict {
+        warn!(?peer, daemon = %hub.integrity, %refusal, "loopback request refused");
+    }
+    verdict
+}
+
+/// The `403` an elevated daemon answers a refused `/shutdown` or `/hook`
+/// with, the refusal as its body.
+pub(super) fn refused_peer_response(refusal: &crate::integrity::Refusal) -> Response {
+    (StatusCode::FORBIDDEN, refusal.to_string()).into_response()
+}
+
+/// Write `daemon.json`. An elevated daemon's carries a High no-read-up label,
+/// so no process below its integrity reads the token.
+fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str, elevated: bool) -> anyhow::Result<()> {
     let pid = std::process::id();
     let payload = DaemonHandshake {
         protocol_version: PROTOCOL_VERSION,
@@ -560,11 +640,23 @@ fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<(
     // (during wdio test sessions) never write into each other's mid-write file
     // and lose a rename. The file carries the auth token, so the helper creates
     // it owner-only and the replace lands an already-restricted file.
-    crate::atomic_file::write_atomic(&dirs.handshake_file, &bytes).context("writing handshake")
+    if elevated {
+        crate::atomic_file::write_atomic_labelled(&dirs.handshake_file, &bytes)
+    } else {
+        crate::atomic_file::write_atomic(&dirs.handshake_file, &bytes)
+    }
+    .context("writing handshake")
 }
 
-async fn ws_handler(State(hub): State<Hub>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| client_session(hub, socket, AuthKind::Local))
+/// A peer the door refuses still gets its WebSocket: its `Hello` is answered
+/// with `AuthFailed` naming the refusal, which every client shows.
+async fn ws_handler(State(hub): State<Hub>, peer: PeerInfo, ws: WebSocketUpgrade) -> Response {
+    match loopback_door(&hub, peer).await {
+        Ok(()) => ws.on_upgrade(move |socket| client_session(hub, socket, AuthKind::Local)),
+        Err(refusal) => {
+            ws.on_upgrade(move |socket| handshake::refuse_local_peer(socket, refusal.to_string()))
+        }
+    }
 }
 
 /// Out-of-band graceful-shutdown trigger. Mirrors the WS
@@ -578,7 +670,12 @@ async fn ws_handler(State(hub): State<Hub>, ws: WebSocketUpgrade) -> Response {
 /// token the endpoint returns 401 — anyone with read access to the config
 /// dir can already shut us down via `taskkill`, but we still gate the soft
 /// path so a stray local script can't trip it.
-async fn shutdown_handler(State(hub): State<Hub>, headers: HeaderMap) -> Response {
+///
+/// An elevated daemon first refuses a peer below its integrity with `403`.
+async fn shutdown_handler(State(hub): State<Hub>, peer: PeerInfo, headers: HeaderMap) -> Response {
+    if let Err(refusal) = loopback_door(&hub, peer).await {
+        return refused_peer_response(&refusal);
+    }
     let Some(token) = presented_bearer(&headers) else {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
@@ -1222,5 +1319,369 @@ mod tests {
                 "{listed:?}"
             );
         }
+    }
+
+    mod elevated_door {
+        use super::super::test_support::ScratchDir;
+        use super::super::{Hub, loopback_service};
+        use super::test_hub;
+        use crate::integrity::{IntegrityLevel, LookupError, LoopbackPeer, PeerIntegrity};
+        use axum::body::Body;
+        use axum::extract::ConnectInfo;
+        use axum::http::{Request, StatusCode};
+        use futures::{SinkExt as _, StreamExt as _};
+        use protocol::{ClientMessage, DaemonMessage};
+        use std::net::{Ipv4Addr, SocketAddr};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        use tower::ServiceExt as _;
+
+        /// Only a hang guard: no test asserts how long anything took.
+        const HANG_GUARD: Duration = Duration::from_secs(120);
+
+        /// The refusal text every refused route carries.
+        const REFUSAL: &str = "this rustling-tulip daemon runs as administrator; start this app \
+             or command as administrator to use it, or stop that daemon from an elevated \
+             terminal with \"rustling-tulipd shutdown\"";
+
+        /// A peer lookup that answers `level` for every peer and counts its
+        /// calls.
+        struct FakePeers {
+            level: Result<IntegrityLevel, LookupError>,
+            calls: AtomicUsize,
+        }
+
+        impl PeerIntegrity for FakePeers {
+            fn level_of(&self, _peer: LoopbackPeer) -> Result<IntegrityLevel, LookupError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.level.clone()
+            }
+        }
+
+        /// A hub whose daemon runs at `daemon`, its peers looked up as `peer`.
+        fn door_hub(
+            tag: &str,
+            daemon: IntegrityLevel,
+            peer: Result<IntegrityLevel, LookupError>,
+        ) -> (Hub, ScratchDir, Arc<FakePeers>) {
+            let (mut hub, scratch) = test_hub(tag);
+            let peers = Arc::new(FakePeers {
+                level: peer,
+                calls: AtomicUsize::new(0),
+            });
+            hub.integrity = daemon;
+            hub.peer_integrity = Arc::clone(&peers) as Arc<dyn PeerIntegrity>;
+            (hub, scratch, peers)
+        }
+
+        /// `request` as the served router sees it: carrying its connection's
+        /// addresses.
+        fn from_peer(mut request: Request<Body>) -> Request<Body> {
+            request.extensions_mut().insert(ConnectInfo(LoopbackPeer {
+                remote: SocketAddr::from((Ipv4Addr::LOCALHOST, 50_000)),
+                local: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 40_000))),
+            }));
+            request
+        }
+
+        fn shutdown_request() -> Request<Body> {
+            Request::builder()
+                .method("POST")
+                .uri("/shutdown")
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .expect("build the shutdown request")
+        }
+
+        fn hook_request() -> Request<Body> {
+            super::super::test_support::hook_request(
+                "s1",
+                Some("test-token"),
+                Some("100"),
+                r#"{"hook_event_name":"UserPromptSubmit"}"#,
+            )
+        }
+
+        /// The status and body the loopback router answers `request` with.
+        async fn answer(hub: &Hub, request: Request<Body>) -> (StatusCode, String) {
+            let response = super::super::build_loopback_router(hub.clone())
+                .oneshot(request)
+                .await
+                .expect("the router answers");
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .expect("read the body");
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+
+        /// Serve `hub`'s loopback listener as `run` does, open `/ws`, send the
+        /// daemon's own token in a `Hello`, and return the first `Welcome` or
+        /// `AuthFailed` that comes back.
+        async fn hello_reply(hub: &Hub) -> DaemonMessage {
+            use tokio_tungstenite::tungstenite::Message;
+
+            let listener = super::super::bind_loopback()
+                .await
+                .expect("bind a scratch listener");
+            let port = listener.local_addr().expect("the bound address").port();
+            let server =
+                tokio::spawn(axum::serve(listener, loopback_service(hub.clone())).into_future());
+            let (mut client, _) =
+                tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+                    .await
+                    .expect("the WebSocket upgrade succeeds");
+            let hello = ClientMessage::Hello {
+                protocol_version: protocol::PROTOCOL_VERSION,
+                protocol_versions: protocol::SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+                auth_token: "test-token".to_owned(),
+                client_id: None,
+                client_name: None,
+            };
+            let text = serde_json::to_string(&hello).expect("serialize the Hello");
+            client
+                .send(Message::text(text))
+                .await
+                .expect("send the Hello");
+            let reply = tokio::time::timeout(HANG_GUARD, async {
+                while let Some(frame) = client.next().await {
+                    let Ok(Message::Text(text)) = frame else {
+                        continue;
+                    };
+                    let message: DaemonMessage =
+                        serde_json::from_str(text.as_str()).expect("a daemon message");
+                    if matches!(
+                        message,
+                        DaemonMessage::Welcome { .. } | DaemonMessage::AuthFailed { .. }
+                    ) {
+                        return Some(message);
+                    }
+                }
+                None
+            })
+            .await
+            .expect("the daemon answers the Hello")
+            .expect("the connection carried a Welcome or an AuthFailed before it closed");
+            server.abort();
+            reply
+        }
+
+        #[tokio::test]
+        async fn an_elevated_daemon_refuses_a_medium_peer_on_every_door() {
+            let (hub, _scratch, peers) = door_hub(
+                "elevated-medium",
+                IntegrityLevel::HIGH,
+                Ok(IntegrityLevel::MEDIUM),
+            );
+            let shutdown = hub.shutdown_tx.subscribe();
+            assert!(
+                matches!(hello_reply(&hub).await, DaemonMessage::AuthFailed { reason } if reason == REFUSAL),
+                "a Medium peer's Hello is refused with the text"
+            );
+            assert_eq!(
+                answer(&hub, from_peer(hook_request())).await,
+                (StatusCode::FORBIDDEN, REFUSAL.to_owned())
+            );
+            assert_eq!(
+                answer(&hub, from_peer(shutdown_request())).await,
+                (StatusCode::FORBIDDEN, REFUSAL.to_owned())
+            );
+            assert!(!*shutdown.borrow(), "the refused shutdown did nothing");
+            assert_eq!(
+                peers.calls.load(Ordering::SeqCst),
+                3,
+                "one lookup per request"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_elevated_daemon_refuses_when_the_peer_lookup_fails() {
+            let failed = "opening process 7: Access is denied.";
+            let (hub, _scratch, _peers) = door_hub(
+                "elevated-lookup-fails",
+                IntegrityLevel::HIGH,
+                Err(LookupError::new(failed)),
+            );
+            let shutdown = hub.shutdown_tx.subscribe();
+            let want = format!("{REFUSAL} (could not check this process's elevation: {failed})");
+            assert!(
+                matches!(hello_reply(&hub).await, DaemonMessage::AuthFailed { reason } if reason == want),
+                "a failed lookup refuses, naming the failure"
+            );
+            assert_eq!(
+                answer(&hub, from_peer(shutdown_request())).await,
+                (StatusCode::FORBIDDEN, want.clone())
+            );
+            assert_eq!(
+                answer(&hub, from_peer(hook_request())).await,
+                (StatusCode::FORBIDDEN, want)
+            );
+            let unknown = format!(
+                "{REFUSAL} (could not check this process's elevation: \
+                 the connection's addresses are unknown)"
+            );
+            assert_eq!(
+                answer(&hub, shutdown_request()).await,
+                (StatusCode::FORBIDDEN, unknown),
+                "a request without its connection's addresses is refused"
+            );
+            assert!(!*shutdown.borrow(), "no refused shutdown went through");
+        }
+
+        #[tokio::test]
+        async fn an_elevated_daemon_serves_a_high_peer() {
+            let (hub, _scratch, peers) = door_hub(
+                "elevated-high",
+                IntegrityLevel::HIGH,
+                Ok(IntegrityLevel::HIGH),
+            );
+            let shutdown = hub.shutdown_tx.subscribe();
+            let reply = hello_reply(&hub).await;
+            assert!(matches!(reply, DaemonMessage::Welcome { .. }), "{reply:?}");
+            assert_eq!(
+                answer(&hub, from_peer(hook_request())).await.0,
+                StatusCode::NO_CONTENT
+            );
+            assert_eq!(
+                answer(&hub, from_peer(shutdown_request())).await.0,
+                StatusCode::ACCEPTED
+            );
+            assert!(*shutdown.borrow(), "the High peer's shutdown went through");
+            assert_eq!(peers.calls.load(Ordering::SeqCst), 3);
+        }
+
+        #[tokio::test]
+        async fn an_unelevated_daemon_never_consults_the_peer_lookup() {
+            // The fake would refuse anyone: a call to it would show.
+            let (hub, _scratch, peers) = door_hub(
+                "unelevated",
+                IntegrityLevel::MEDIUM,
+                Ok(IntegrityLevel::LOW),
+            );
+            let reply = hello_reply(&hub).await;
+            assert!(matches!(reply, DaemonMessage::Welcome { .. }), "{reply:?}");
+            assert_eq!(
+                answer(&hub, from_peer(hook_request())).await.0,
+                StatusCode::NO_CONTENT
+            );
+            assert_eq!(
+                answer(&hub, shutdown_request()).await.0,
+                StatusCode::ACCEPTED,
+                "no connection info is needed either"
+            );
+            assert_eq!(
+                peers.calls.load(Ordering::SeqCst),
+                0,
+                "an ordinary daemon runs no lookup"
+            );
+        }
+    }
+
+    /// The token file of an elevated daemon carries a High no-read-up label,
+    /// so no process below High reads it; an ordinary daemon's carries none.
+    /// It discriminates only when the test process is elevated, which its
+    /// own token's integrity level (`GetTokenInformation`) tells.
+    #[cfg(windows)]
+    #[test]
+    #[expect(
+        clippy::print_stderr,
+        reason = "the run reports whether it ran elevated"
+    )]
+    fn an_elevated_daemons_handshake_carries_a_high_no_read_up_label() {
+        use crate::integrity::IntegrityLevel;
+
+        let (hub, _scratch) = test_hub("handshake-label");
+        let level = crate::integrity::own_level().expect("read this process's integrity level");
+        let elevated = level.is_elevated();
+        eprintln!("handshake label test: this process runs at {level}, elevated: {elevated}");
+
+        super::write_handshake(&hub.dirs, 40_123, "test-token", elevated)
+            .expect("write the handshake");
+        let path = &hub.dirs.handshake_file;
+        let stored = stored_label(path);
+        if elevated {
+            let (level, mask) = stored.expect("the stored descriptor carries a label");
+            assert_eq!(level, IntegrityLevel::HIGH);
+            assert_ne!(
+                mask & SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+                0,
+                "no read up: {mask:#x}"
+            );
+            assert_ne!(
+                mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                0,
+                "no write up: {mask:#x}"
+            );
+        } else {
+            assert_eq!(stored, None, "an ordinary daemon's file has no label");
+        }
+        let read: protocol::DaemonHandshake = serde_json::from_slice(
+            &std::fs::read(path).expect("the writing process reads its own file"),
+        )
+        .expect("the handshake parses");
+        assert_eq!(read.port, 40_123);
+    }
+
+    #[cfg(windows)]
+    const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 = 0x1;
+    #[cfg(windows)]
+    const SYSTEM_MANDATORY_LABEL_NO_READ_UP: u32 = 0x2;
+
+    /// The level and mask of the mandatory label `path`'s stored descriptor
+    /// carries, if any.
+    #[cfg(windows)]
+    fn stored_label(path: &std::path::Path) -> Option<(crate::integrity::IntegrityLevel, u32)> {
+        use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            ACL, GetAce, GetSidSubAuthority, GetSidSubAuthorityCount, LABEL_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, SYSTEM_MANDATORY_LABEL_ACE,
+        };
+        use windows::core::HSTRING;
+
+        /// `SYSTEM_MANDATORY_LABEL_ACE_TYPE`.
+        const LABEL_ACE_TYPE: u8 = 0x11;
+
+        let name = HSTRING::from(path.as_os_str());
+        let mut sacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: `name` is NUL-terminated and outlives the call; `sacl`
+        // points into `descriptor`, which is freed below after its last use.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                &name,
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                Some(&raw mut sacl),
+                &raw mut descriptor,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS, "read {}'s label", path.display());
+        // SAFETY: `sacl` is null or the descriptor's valid ACL.
+        let found = if sacl.is_null() || unsafe { (*sacl).AceCount } == 0 {
+            None
+        } else {
+            let mut ace = std::ptr::null_mut();
+            // SAFETY: the ACL holds at least one ACE.
+            unsafe { GetAce(sacl, 0, &raw mut ace) }.expect("read the label ACE");
+            // SAFETY: a label SACL holds a SYSTEM_MANDATORY_LABEL_ACE, checked
+            // by its type below.
+            let ace = unsafe { &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>() };
+            assert_eq!(ace.Header.AceType, LABEL_ACE_TYPE);
+            let sid = PSID((&raw const ace.SidStart).cast_mut().cast());
+            // SAFETY: the label's SID starts at `SidStart`, inside the ACE.
+            let count = unsafe { *GetSidSubAuthorityCount(sid) };
+            let last = u32::from(count.checked_sub(1).expect("the label SID has a RID"));
+            // SAFETY: `last` is below the SID's sub-authority count.
+            let rid = unsafe { *GetSidSubAuthority(sid, last) };
+            Some((crate::integrity::IntegrityLevel::from_rid(rid), ace.Mask))
+        };
+        // SAFETY: the descriptor GetNamedSecurityInfoW allocated, freed once.
+        let _ = unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+        found
     }
 }

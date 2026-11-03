@@ -42,6 +42,7 @@ mod host_shutdown;
 mod idle_exit;
 mod inject;
 mod instance_lock;
+mod integrity;
 mod keep_awake;
 mod lock_finder;
 mod orphan;
@@ -136,8 +137,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // daemon it retires.
     if cli_shutdown::requested(std::env::args_os().skip(1)) {
         cli_pair::attach_parent_console();
-        let code =
-            cli_shutdown::run(&daemon_client::config_dir()?, &mut std::io::stdout().lock()).await?;
+        let code = cli_shutdown::run(
+            &daemon_client::config_dir()?,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        )
+        .await?;
         return Ok(std::process::ExitCode::from(code));
     }
     if let Some(code) = run_folderless_client_subcommand().await? {

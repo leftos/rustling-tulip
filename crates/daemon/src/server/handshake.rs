@@ -51,6 +51,39 @@ pub(super) enum HelloAuth {
 
 pub const TAILNET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a loopback peer the door refused has to send its `Hello`, take
+/// the refusal and finish the closing handshake before its socket is dropped.
+const REFUSED_PEER_LIMIT: Duration = Duration::from_secs(5);
+
+/// Answer a loopback peer an elevated daemon refused
+/// ([`super::loopback_door`]): read its `Hello`, send `AuthFailed` with
+/// `reason`, and close. The `Hello` is read first so the close leaves no
+/// unread data behind, which would turn it into a reset that loses the
+/// refusal. Nothing the peer sends is acted on.
+pub(super) async fn refuse_local_peer(mut socket: axum::extract::ws::WebSocket, reason: String) {
+    let refuse = async {
+        let _hello = socket.recv().await;
+        let text = match serde_json::to_string(&DaemonMessage::AuthFailed { reason }) {
+            Ok(text) => text,
+            Err(err) => {
+                warn!(?err, "could not serialize a refusal");
+                return;
+            }
+        };
+        if socket.send(Message::Text(text.into())).await.is_err() {
+            return;
+        }
+        let _ = socket.send(Message::Close(None)).await;
+        while let Some(Ok(_)) = socket.recv().await {}
+    };
+    if tokio::time::timeout(REFUSED_PEER_LIMIT, refuse)
+        .await
+        .is_err()
+    {
+        debug!("a refused loopback peer did not finish closing; dropping its socket");
+    }
+}
+
 /// Read and check the mandatory `Hello`. A tailnet connection gets
 /// [`Hub::tailnet_handshake_timeout`] to send it; the loopback listener keeps
 /// an un-timed handshake. `Ok(None)` when the connection's `life` is

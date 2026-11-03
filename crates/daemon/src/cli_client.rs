@@ -3,7 +3,7 @@
 //! upgrade to the WebSocket and send the `Hello`.
 
 use anyhow::anyhow;
-use daemon_client::ProvenConnectError;
+use daemon_client::{HandshakeFile, ProvenConnectError};
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     ClientMessage, DaemonHandshake, DaemonMessage, InboundDaemonMessage,
@@ -164,12 +164,12 @@ impl Connection {
 /// The `daemon.json` the running daemon wrote, or the error that says why
 /// there is no daemon to reach.
 fn read_handshake(path: &Path) -> anyhow::Result<DaemonHandshake> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(NoDaemon::NoHandshake(path.to_owned()).into());
+    let bytes = match daemon_client::read_handshake_file(path)? {
+        HandshakeFile::Bytes(bytes) => bytes,
+        HandshakeFile::Missing(_) => return Err(NoDaemon::NoHandshake(path.to_owned()).into()),
+        HandshakeFile::Failed(err) => {
+            return Err(anyhow!("could not read {}: {err}", path.display()));
         }
-        Err(err) => return Err(anyhow!("could not read {}: {err}", path.display())),
     };
     serde_json::from_slice(&bytes)
         .map_err(|err| anyhow!("could not read {}: {err}", path.display()))

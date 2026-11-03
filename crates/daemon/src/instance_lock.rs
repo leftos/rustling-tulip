@@ -14,8 +14,9 @@ use std::fs::{File, TryLockError};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Name of the lock file inside the config dir.
-const LOCK_FILE: &str = "daemon.lock";
+/// Name of the lock file inside the config dir, shared with the clients,
+/// which read it to tell a live daemon from a stale handshake.
+const LOCK_FILE: &str = daemon_client::INSTANCE_LOCK_FILE;
 
 /// How long to wait between attempts while another process holds the lock.
 const RETRY_INTERVAL: Duration = Duration::from_millis(100);

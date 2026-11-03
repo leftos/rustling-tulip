@@ -9,6 +9,8 @@ The rules of the daemon/client protocol that the types in `crates/protocol/src/l
 
   A tailnet `Hello` whose token is not a valid device token (none, unknown, another node's, revoked, the daemon's own, or an unreadable store) is not an `AuthFailed`: it gets `Welcome`, then `DevicePairFailed { reason: "device not approved" }`, and stays open as a pairing connection.
 
+  An elevated daemon (token at High integrity or above) also checks each loopback `/ws` upgrade: it finds the peer's pid from the established loopback TCP row and admits only a peer whose integrity is at or above the lower of its own level and High. A lower peer, or one it cannot look up, gets `AuthFailed` carrying `daemon_client::ELEVATED_DAEMON_REFUSAL`; `/shutdown` and `/hook` answer 403 with the same text (`crates/daemon/src/integrity.rs`, `server/handshake.rs`). A tailnet connection is not checked, and an ordinary daemon checks nothing.
+
   That connection accepts only `DevicePairRequest` / `DevicePairCancel` / `DevicePairRedeem` (anything else gets the same `DevicePairFailed`), and `ListPendingDevices`, `ApproveDevice`, `DenyDevice`, `MintDevicePairCode`, `ListDevices`, `RevokeDevice` and `ForgetDevice` work on loopback only (a tailnet connection gets `Error "device approval is local-only"` for `ForgetDevice`). `DumpScreen` is loopback only too: a tailnet connection gets `Error "screen dump is local-only"`.
 
   `RevokeDevice` blocks the device and closes every served tailnet connection of it with a WebSocket Close, also when the flag write fails (the reply is then an `Error`).

@@ -35,6 +35,9 @@ enum ExistingDaemon {
     StaleBinary(DaemonHandshake),
     OlderBuild(DaemonHandshake),
     NewerBuild(DaemonHandshake),
+    /// `daemon.json` exists but this process may not read it: an elevated
+    /// daemon labelled it High integrity, and this process runs below that.
+    ElevatedUnreadable(DaemonIsElevated),
     Missing,
 }
 
@@ -47,6 +50,7 @@ enum ExistingKind {
     StaleBinary,
     OlderBuild,
     NewerBuild,
+    ElevatedUnreadable,
     Missing,
 }
 
@@ -67,6 +71,7 @@ impl ExistingDaemon {
             Self::StaleBinary(_) => ExistingKind::StaleBinary,
             Self::OlderBuild(_) => ExistingKind::OlderBuild,
             Self::NewerBuild(_) => ExistingKind::NewerBuild,
+            Self::ElevatedUnreadable(_) => ExistingKind::ElevatedUnreadable,
             Self::Missing => ExistingKind::Missing,
         }
     }
@@ -78,21 +83,67 @@ impl ExistingDaemon {
             | Self::StaleBinary(h)
             | Self::OlderBuild(h)
             | Self::NewerBuild(h) => Some(h),
-            Self::Missing => None,
+            Self::ElevatedUnreadable(_) | Self::Missing => None,
         }
     }
 }
 
 /// A healthy daemon of this client's build whose protocol the client speaks
 /// is reused whatever executable it runs. A protocol-incompatible daemon and a
-/// daemon of an older build are retired; a daemon of a newer build is never
+/// daemon of an older build are retired; a daemon of a newer build, and an
+/// elevated daemon whose handshake this process may not read, are never
 /// touched, and the client refuses to go on.
 fn action_for(existing: ExistingKind) -> Action {
     match existing {
         ExistingKind::Compatible | ExistingKind::StaleBinary => Action::Reuse,
         ExistingKind::Incompatible | ExistingKind::OlderBuild => Action::RetireThenSpawn,
-        ExistingKind::NewerBuild => Action::Refuse,
+        ExistingKind::NewerBuild | ExistingKind::ElevatedUnreadable => Action::Refuse,
         ExistingKind::Missing => Action::Spawn,
+    }
+}
+
+/// What a client below an elevated daemon's integrity is told: the daemon is
+/// unreachable from it, and how to reach or stop it. The daemon answers a
+/// lower-integrity peer with the same text.
+pub const ELEVATED_DAEMON_REFUSAL: &str = "this rustling-tulip daemon runs as administrator; \
+     start this app or command as administrator to use it, or stop that daemon from an \
+     elevated terminal with \"rustling-tulipd shutdown\"";
+
+/// The refusal a client gets when reading `daemon.json` stays denied
+/// ([`crate::read_handshake_file`]): the file carries an elevated daemon's
+/// High integrity label, and this process is below it. Such a daemon is never
+/// reaped, retired or spawned over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonIsElevated {
+    /// An elevated daemon runs: it holds the config dir's instance lock.
+    Running,
+    /// No daemon runs, but the labelled handshake an elevated one left at
+    /// this path could not be removed from this process.
+    StaleHandshake(PathBuf),
+}
+
+impl std::fmt::Display for DaemonIsElevated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Running => f.write_str(ELEVATED_DAEMON_REFUSAL),
+            Self::StaleHandshake(path) => write!(
+                f,
+                "a rustling-tulip daemon that ran as administrator left {} behind; delete it \
+                 from an elevated terminal, then start the app again",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DaemonIsElevated {}
+
+/// A [`DaemonIsElevated`] error when `existing` is an elevated daemon's
+/// handshake this process may not read, else `Ok`.
+fn refuse_elevated(existing: &ExistingDaemon) -> anyhow::Result<()> {
+    match existing {
+        ExistingDaemon::ElevatedUnreadable(refusal) => Err(anyhow::Error::new(refusal.clone())),
+        _ => Ok(()),
     }
 }
 
@@ -223,7 +274,9 @@ fn spawn_lock() -> &'static Mutex<()> {
 /// # Errors
 ///
 /// Fails with a [`DaemonIsNewer`] when the running daemon is a newer build
-/// than this client. Fails when `client_build` is not a semver version, the
+/// than this client, and with a [`DaemonIsElevated`] when
+/// [`crate::read_handshake_file`] refuses `daemon.json`, here or while waiting
+/// for a spawned daemon. Fails when `client_build` is not a semver version, the
 /// daemon binary is needed but cannot be located or cached, a stale daemon
 /// cannot be stopped, the spawn fails, or the new daemon does not report a
 /// healthy handshake within the spawn timeout.
@@ -257,6 +310,7 @@ pub async fn ensure_running(
         return Ok(handshake);
     }
     refuse_newer(&existing, &client_build)?;
+    refuse_elevated(&existing)?;
     // Resolve before retiring, so a missing binary never leaves the user with
     // no daemon at all.
     let current = resolve_current_daemon_binary()?;
@@ -336,7 +390,9 @@ async fn classify_existing_daemon(
 
 /// Classify the daemon named by `config_dir`'s `daemon.json`: read once, and
 /// classified from that parsed copy only when its listener proves it holds
-/// the copy's token; anything else is [`ExistingDaemon::Missing`].
+/// the copy's token. A file [`crate::read_handshake_file`] refuses is
+/// [`ExistingDaemon::ElevatedUnreadable`]; anything else is
+/// [`ExistingDaemon::Missing`].
 async fn classify_existing_daemon_in(
     config_dir: &Path,
     current_daemon: Option<&Path>,
@@ -344,8 +400,16 @@ async fn classify_existing_daemon_in(
     proof_budget: Duration,
 ) -> ExistingDaemon {
     match load_existing_if_alive(config_dir, proof_budget).await {
-        Some(handshake) => classify_proven(handshake, current_daemon, client),
-        None => ExistingDaemon::Missing,
+        HandshakeRead::Parsed(handshake) => classify_proven(handshake, current_daemon, client),
+        HandshakeRead::Refused(refusal) => {
+            warn!(
+                config_dir = %config_dir.display(),
+                %refusal,
+                "daemon.json exists but reading it is denied; refusing"
+            );
+            ExistingDaemon::ElevatedUnreadable(refusal)
+        }
+        HandshakeRead::NoDaemon => ExistingDaemon::Missing,
     }
 }
 
@@ -786,26 +850,28 @@ fn normalize_process_path(path: &Path) -> String {
 }
 
 /// The handshake in `config_dir`'s `daemon.json`, read once, when the listener
-/// on its port proves it holds its token; `None` otherwise.
-async fn load_existing_if_alive(
-    config_dir: &Path,
-    proof_budget: Duration,
-) -> Option<DaemonHandshake> {
-    let parsed = try_load_handshake(&handshake_file_in(config_dir)).await?;
+/// on its port proves it holds its token; [`HandshakeRead::Refused`] when
+/// reading the file is refused; [`HandshakeRead::NoDaemon`] otherwise.
+async fn load_existing_if_alive(config_dir: &Path, proof_budget: Duration) -> HandshakeRead {
+    let path = handshake_file_in(config_dir);
+    let parsed = match try_load_handshake(&path, crate::read_handshake_file).await {
+        HandshakeRead::Parsed(parsed) => parsed,
+        other => return other,
+    };
     let port = parsed.port;
     match proof::prove(port, &parsed.auth_token, proof_budget).await {
-        Proof::Proven => Some(parsed),
+        Proof::Proven => HandshakeRead::Parsed(parsed),
         proof @ (Proof::Unproven | Proof::NoResponse) => {
             info!(
                 port,
                 ?proof,
                 "daemon.json names a listener that did not prove it holds the token; treating it as no daemon"
             );
-            None
+            HandshakeRead::NoDaemon
         }
         Proof::Refused => {
             debug!(port, "stale handshake, nothing listens on its port");
-            None
+            HandshakeRead::NoDaemon
         }
     }
 }
@@ -1105,12 +1171,45 @@ async fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> 
         .context("failed to spawn daemon")
 }
 
-async fn try_load_handshake(path: &std::path::Path) -> Option<DaemonHandshake> {
-    if !path.exists() {
-        return None;
+/// What reading `daemon.json` found.
+#[derive(Debug)]
+enum HandshakeRead {
+    /// The file parsed as a handshake.
+    Parsed(DaemonHandshake),
+    /// Reading the file stays denied: an elevated daemon wrote it with a High
+    /// integrity label, and this process is below that.
+    Refused(DaemonIsElevated),
+    /// No file, or one that cannot be read or parsed for another reason.
+    NoDaemon,
+}
+
+/// How the supervisor reads `daemon.json`: [`crate::read_handshake_file`],
+/// which tests replace.
+type HandshakeReader = fn(&Path) -> Result<crate::HandshakeFile, DaemonIsElevated>;
+
+/// Read `path` with `read` off the async runtime, since a denied read is
+/// retried with pauses.
+async fn try_load_handshake(path: &Path, read: HandshakeReader) -> HandshakeRead {
+    let owned = path.to_owned();
+    match tokio::task::spawn_blocking(move || read(&owned)).await {
+        Ok(file) => classify_read(file),
+        Err(err) => {
+            warn!(path = %path.display(), %err, "the daemon.json read task failed");
+            HandshakeRead::NoDaemon
+        }
     }
-    let bytes = tokio::fs::read(path).await.ok()?;
-    serde_json::from_slice::<DaemonHandshake>(&bytes).ok()
+}
+
+/// Classify what [`crate::read_handshake_file`] found in `daemon.json`.
+fn classify_read(file: Result<crate::HandshakeFile, DaemonIsElevated>) -> HandshakeRead {
+    match file {
+        Ok(crate::HandshakeFile::Bytes(bytes)) => serde_json::from_slice::<DaemonHandshake>(&bytes)
+            .map_or(HandshakeRead::NoDaemon, HandshakeRead::Parsed),
+        Ok(crate::HandshakeFile::Missing(_) | crate::HandshakeFile::Failed(_)) => {
+            HandshakeRead::NoDaemon
+        }
+        Err(refusal) => HandshakeRead::Refused(refusal),
+    }
 }
 
 /// Wait for the config dir's `daemon.json` to name a ready daemon; see
@@ -1121,6 +1220,7 @@ async fn wait_for_handshake(client_versions: &[u32]) -> anyhow::Result<DaemonHan
         client_versions,
         SPAWN_WAIT_TIMEOUT,
         PROOF_TIMEOUT,
+        crate::read_handshake_file,
     )
     .await
 }
@@ -1128,18 +1228,28 @@ async fn wait_for_handshake(client_versions: &[u32]) -> anyhow::Result<DaemonHan
 /// The handshake `path` holds when its listener proves it holds the token and
 /// speaks one of `client_versions`. A proven but incompatible daemon is
 /// warned about once per wait (`warned` remembers it).
+///
+/// # Errors
+///
+/// The [`DaemonIsElevated`] refusal when `read` refuses the file: an elevated
+/// daemon won the start, and no wait makes it readable.
 async fn ready_handshake(
     path: &Path,
     client_versions: &[u32],
     warned: &mut bool,
     proof_budget: Duration,
-) -> Option<DaemonHandshake> {
-    let parsed = try_load_handshake(path).await?;
+    read: HandshakeReader,
+) -> Result<Option<DaemonHandshake>, DaemonIsElevated> {
+    let parsed = match try_load_handshake(path, read).await {
+        HandshakeRead::Parsed(parsed) => parsed,
+        HandshakeRead::Refused(refusal) => return Err(refusal),
+        HandshakeRead::NoDaemon => return Ok(None),
+    };
     if proof::prove(parsed.port, &parsed.auth_token, proof_budget).await != Proof::Proven {
-        return None;
+        return Ok(None);
     }
     if protocol_compatible(&parsed, client_versions) {
-        return Some(parsed);
+        return Ok(Some(parsed));
     }
     if !*warned {
         warn!(
@@ -1150,18 +1260,20 @@ async fn ready_handshake(
         );
         *warned = true;
     }
-    None
+    Ok(None)
 }
 
-/// Wait up to `timeout` for `config_dir`'s `daemon.json` to name a daemon
-/// that proves it holds the file's token and speaks one of
+/// Wait up to `timeout` for `config_dir`'s `daemon.json` (read with `read`)
+/// to name a daemon that proves it holds the file's token and speaks one of
 /// `client_versions`. A stale file never satisfies the wait; the daemon's pid
-/// need not be the one this client spawned.
+/// need not be the one this client spawned. A file `read` refuses ends the
+/// wait at once with that [`DaemonIsElevated`] refusal.
 async fn wait_for_handshake_in(
     config_dir: &Path,
     client_versions: &[u32],
     timeout: Duration,
     proof_budget: Duration,
+    read: HandshakeReader,
 ) -> anyhow::Result<DaemonHandshake> {
     let path = handshake_file_in(config_dir);
     let started = tokio::time::Instant::now();
@@ -1169,14 +1281,22 @@ async fn wait_for_handshake_in(
     let mut next_progress = started + Duration::from_secs(1);
     let mut warned_incompatible = false;
     while tokio::time::Instant::now() < deadline {
-        if let Some(parsed) = ready_handshake(
+        let ready = ready_handshake(
             &path,
             client_versions,
             &mut warned_incompatible,
             proof_budget,
+            read,
         )
-        .await
-        {
+        .await;
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(refusal) => {
+                warn!(%refusal, "wait_for_handshake: an elevated daemon's handshake is refused; giving up");
+                return Err(anyhow::Error::new(refusal));
+            }
+        };
+        if let Some(parsed) = ready {
             info!(
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 port = parsed.port,
@@ -1214,12 +1334,14 @@ async fn wait_for_handshake_in(
 )]
 mod tests {
     use super::{
-        Action, Client, ExistingKind, action_for, classify_existing_daemon_in, classify_proven,
-        daemon_exe_matches_expected, dev_workspace_root, is_daemon_image, path_is_under,
-        protocol_compatible, protocol_kind, refuse_newer, wait_for_handshake_in,
+        Action, Client, DaemonIsElevated, ExistingDaemon, ExistingKind, HandshakeRead, action_for,
+        classify_existing_daemon_in, classify_proven, classify_read, daemon_exe_matches_expected,
+        dev_workspace_root, is_daemon_image, path_is_under, protocol_compatible, protocol_kind,
+        refuse_elevated, refuse_newer, wait_for_handshake_in,
     };
     #[cfg(windows)]
     use super::{spawn_daemon, spawn_daemon_with};
+    use crate::HandshakeFile;
     use crate::supervisor::retire_daemon_in;
     use crate::test_fakes::{
         FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
@@ -1320,6 +1442,78 @@ mod tests {
     #[test]
     fn missing_spawns() {
         assert_eq!(action_for(ExistingKind::Missing), Action::Spawn);
+    }
+
+    /// A `daemon.json` whose read is denied is an elevated daemon this
+    /// process is below, never "no daemon": it is refused with the text that
+    /// names how to reach it, and never reaped, retired or spawned over.
+    #[test]
+    fn an_access_denied_handshake_read_is_an_elevated_daemon_and_refused() {
+        assert!(
+            matches!(
+                classify_read(Err(DaemonIsElevated::Running)),
+                HandshakeRead::Refused(DaemonIsElevated::Running)
+            ),
+            "a refused read is not a missing daemon"
+        );
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(matches!(
+            classify_read(Ok(HandshakeFile::Missing(missing))),
+            HandshakeRead::NoDaemon
+        ));
+        assert!(matches!(
+            classify_read(Ok(HandshakeFile::Bytes(b"not json".to_vec()))),
+            HandshakeRead::NoDaemon
+        ));
+        let bytes = serde_json::to_vec(&handshake(25, &[25])).expect("serialize a handshake");
+        assert!(matches!(
+            classify_read(Ok(HandshakeFile::Bytes(bytes))),
+            HandshakeRead::Parsed(_)
+        ));
+
+        assert_eq!(
+            action_for(ExistingKind::ElevatedUnreadable),
+            Action::Refuse,
+            "no reap, no retire, no spawn"
+        );
+        let existing = ExistingDaemon::ElevatedUnreadable(DaemonIsElevated::Running);
+        assert_eq!(existing.kind(), ExistingKind::ElevatedUnreadable);
+        assert!(existing.handshake().is_none(), "nothing to retire");
+        let refusal = refuse_elevated(&existing).expect_err("an elevated daemon is refused");
+        assert!(refusal.downcast_ref::<DaemonIsElevated>().is_some());
+        assert_eq!(
+            format!("{refusal:#}"),
+            "this rustling-tulip daemon runs as administrator; start this app or command as \
+             administrator to use it, or stop that daemon from an elevated terminal with \
+             \"rustling-tulipd shutdown\""
+        );
+        assert!(refuse_elevated(&ExistingDaemon::Missing).is_ok());
+    }
+
+    /// A client that lost the start race to an elevated daemon gets that
+    /// daemon's refusal from the spawn wait as soon as the file is refused,
+    /// not the generic timeout once the wait runs out.
+    #[test]
+    fn spawn_wait_returns_the_elevated_refusal() {
+        fn refused(_path: &Path) -> Result<HandshakeFile, DaemonIsElevated> {
+            Err(DaemonIsElevated::Running)
+        }
+        let scratch = ScratchDir::new("wait-elevated");
+        write_daemon_json(
+            &scratch.0,
+            &handshake_naming(4242, 1, "elevated-token", SUPPORTED),
+        );
+
+        let err = block_on(wait_for_handshake_in(
+            &scratch.0, SUPPORTED, HANG_GUARD, HANG_GUARD, refused,
+        ))
+        .expect_err("a refused handshake ends the wait");
+
+        assert_eq!(
+            err.downcast_ref::<DaemonIsElevated>(),
+            Some(&DaemonIsElevated::Running),
+            "the wait returns the refusal, not a timeout: {err:#}"
+        );
     }
 
     #[test]
@@ -1499,7 +1693,11 @@ mod tests {
         let dir = scratch.0.clone();
         let waiter = std::thread::spawn(move || {
             block_on(wait_for_handshake_in(
-                &dir, SUPPORTED, HANG_GUARD, HANG_GUARD,
+                &dir,
+                SUPPORTED,
+                HANG_GUARD,
+                HANG_GUARD,
+                crate::read_handshake_file,
             ))
         });
         polled

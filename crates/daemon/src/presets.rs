@@ -2972,6 +2972,8 @@ mod tests {
             dashboard,
             turns,
             summarizer,
+            integrity: crate::integrity::IntegrityLevel::MEDIUM,
+            peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
         };
         (hub, preset_rx, scratch)
     }

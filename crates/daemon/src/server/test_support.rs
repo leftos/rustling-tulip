@@ -183,6 +183,8 @@ pub(super) fn build_test_hub(
         dashboard,
         summarizer,
         turns,
+        integrity: crate::integrity::IntegrityLevel::MEDIUM,
+        peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
     };
     (hub, scratch, attention_rx)
 }

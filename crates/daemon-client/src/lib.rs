@@ -24,7 +24,10 @@ mod test_fakes;
 mod wmi_launch;
 
 pub use proof::{Proof, ProvenConnectError, connect_proven};
-pub use supervisor::{DaemonIsNewer, PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT, ensure_running};
+pub use supervisor::{
+    DaemonIsElevated, DaemonIsNewer, ELEVATED_DAEMON_REFUSAL, PROOF_TIMEOUT, SPAWN_WAIT_TIMEOUT,
+    ensure_running,
+};
 
 use anyhow::{Context as _, anyhow, bail};
 use protocol::DaemonHandshake;
@@ -119,8 +122,9 @@ pub fn handshake_file_in(config_dir: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// Fails when the file cannot be read (`read <path>: …`) or is not a valid
-/// handshake (`parse handshake: …`).
+/// Fails with a [`DaemonIsElevated`] when [`read_handshake_file`] does, when
+/// the file cannot be read otherwise (`read <path>: …`), or when it is not a
+/// valid handshake (`parse handshake: …`).
 pub fn read_handshake() -> anyhow::Result<DaemonHandshake> {
     read_handshake_in(&config_dir()?)
 }
@@ -132,8 +136,157 @@ pub fn read_handshake() -> anyhow::Result<DaemonHandshake> {
 /// As [`read_handshake`].
 pub fn read_handshake_in(config_dir: &Path) -> anyhow::Result<DaemonHandshake> {
     let path = handshake_file_in(config_dir);
-    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = match read_handshake_file(&path)? {
+        HandshakeFile::Bytes(bytes) => bytes,
+        HandshakeFile::Missing(err) | HandshakeFile::Failed(err) => {
+            return Err(anyhow::Error::new(err).context(format!("read {}", path.display())));
+        }
+    };
     serde_json::from_slice(&bytes).context("parse handshake")
+}
+
+/// Name of the daemon's single-instance lock file inside the config dir. A
+/// running daemon holds an exclusive lock on it for its whole life.
+pub const INSTANCE_LOCK_FILE: &str = "daemon.lock";
+
+/// How many times a read of `daemon.json` is attempted while it is denied,
+/// before the denial is taken for a High integrity label. Windows also denies
+/// a file that is delete-pending or being replaced, for a moment; these match
+/// the attempts and spacing the daemon's atomic replace retries the same
+/// refusal with (`MAX_ATTEMPTS` in `crates/daemon/src/atomic_file.rs`).
+pub const HANDSHAKE_READ_ATTEMPTS: u32 = 5;
+
+/// The pause between two denied reads of `daemon.json`, matching the daemon's
+/// atomic replace (`RETRY_DELAY` in `crates/daemon/src/atomic_file.rs`).
+pub const HANDSHAKE_READ_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+/// What reading `daemon.json` found, once a denied read has been classified.
+#[derive(Debug)]
+pub enum HandshakeFile {
+    /// The file's bytes.
+    Bytes(Vec<u8>),
+    /// There is no file: none was there, or the stale one an elevated daemon
+    /// left behind was removed. The error says which.
+    Missing(std::io::Error),
+    /// The read failed for another reason than a denial or a missing file.
+    Failed(std::io::Error),
+}
+
+/// What the check for a live daemon behind a denied `daemon.json` found.
+#[derive(Debug)]
+enum StaleCheck {
+    /// A daemon holds the instance lock (or the lock could not be checked,
+    /// which counts as live): the file is an elevated daemon's.
+    DaemonLive,
+    /// No daemon holds the lock, and the stale file was removed.
+    Removed,
+    /// No daemon holds the lock, but removing the stale file failed.
+    NotRemoved(std::io::Error),
+}
+
+/// Read the handshake file at `path`, the one place a client turns a denied
+/// read into a decision. A denial is retried [`HANDSHAKE_READ_ATTEMPTS`]
+/// times, [`HANDSHAKE_READ_RETRY_DELAY`] apart, since a file being replaced is
+/// denied for a moment too. A denial that persists is a High-labelled file an
+/// elevated daemon wrote: when a daemon holds the config dir's instance lock it
+/// is that daemon, and the read is refused; when none does, the file is stale
+/// and is removed (while holding the lock, so no daemon starts meanwhile), and
+/// the read reports it missing.
+///
+/// # Errors
+///
+/// [`DaemonIsElevated::Running`] when an elevated daemon runs, and
+/// [`DaemonIsElevated::StaleHandshake`] when none runs but its file could not
+/// be removed.
+pub fn read_handshake_file(path: &Path) -> Result<HandshakeFile, DaemonIsElevated> {
+    classify_handshake_read(
+        path,
+        || std::fs::read(path),
+        std::thread::sleep,
+        || clear_if_no_daemon(path),
+    )
+}
+
+/// [`read_handshake_file`] with its seams: `read` reads the file, `pause`
+/// waits between denied reads, and `clear_stale` checks for a live daemon and
+/// removes the file when there is none.
+fn classify_handshake_read(
+    path: &Path,
+    mut read: impl FnMut() -> std::io::Result<Vec<u8>>,
+    mut pause: impl FnMut(Duration),
+    clear_stale: impl FnOnce() -> StaleCheck,
+) -> Result<HandshakeFile, DaemonIsElevated> {
+    let mut attempt = 1;
+    loop {
+        match read() {
+            Ok(bytes) => return Ok(HandshakeFile::Bytes(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HandshakeFile::Missing(err));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                if attempt >= HANDSHAKE_READ_ATTEMPTS {
+                    break;
+                }
+                attempt += 1;
+                pause(HANDSHAKE_READ_RETRY_DELAY);
+            }
+            Err(err) => return Ok(HandshakeFile::Failed(err)),
+        }
+    }
+    match clear_stale() {
+        StaleCheck::DaemonLive => Err(DaemonIsElevated::Running),
+        StaleCheck::Removed => {
+            tracing::warn!(
+                path = %path.display(),
+                "removed the daemon.json an elevated daemon left behind; no daemon holds the instance lock"
+            );
+            Ok(HandshakeFile::Missing(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "removed the stale handshake an elevated daemon left behind",
+            )))
+        }
+        StaleCheck::NotRemoved(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                %err,
+                "no daemon holds the instance lock, but the daemon.json an elevated daemon left behind could not be removed"
+            );
+            Err(DaemonIsElevated::StaleHandshake(path.to_owned()))
+        }
+    }
+}
+
+/// Remove the handshake file at `handshake` when no daemon holds the instance
+/// lock beside it, holding that lock during the removal. A lock that cannot
+/// be opened or checked counts as a live daemon, so nothing is removed on a
+/// guess.
+fn clear_if_no_daemon(handshake: &Path) -> StaleCheck {
+    let lock_path = handshake.with_file_name(INSTANCE_LOCK_FILE);
+    let lock = match std::fs::File::open(&lock_path) {
+        Ok(file) => Some(file),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!(lock = %lock_path.display(), %err, "could not open the instance lock; counting the daemon as live");
+            return StaleCheck::DaemonLive;
+        }
+    };
+    if let Some(file) = &lock {
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return StaleCheck::DaemonLive,
+            Err(std::fs::TryLockError::Error(err)) => {
+                tracing::warn!(lock = %lock_path.display(), %err, "could not check the instance lock; counting the daemon as live");
+                return StaleCheck::DaemonLive;
+            }
+        }
+    }
+    let removed = match std::fs::remove_file(handshake) {
+        Ok(()) => StaleCheck::Removed,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => StaleCheck::Removed,
+        Err(err) => StaleCheck::NotRemoved(err),
+    };
+    drop(lock);
+    removed
 }
 
 /// Stable per-install client identity for per-client tab layouts.
@@ -479,7 +632,11 @@ fn names_no_file(err: &anyhow::Error) -> bool {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{Proof, Shutdown, client_identity, handshake_file_in};
+    use super::{
+        DaemonIsElevated, HANDSHAKE_READ_ATTEMPTS, HANDSHAKE_READ_RETRY_DELAY, HandshakeFile,
+        INSTANCE_LOCK_FILE, Proof, Shutdown, StaleCheck, classify_handshake_read,
+        clear_if_no_daemon, client_identity, handshake_file_in,
+    };
     use crate::test_fakes::{
         FakeListener, ScratchDir, block_on, handshake_naming, stand_in, write_daemon_json,
     };
@@ -610,6 +767,120 @@ mod tests {
 
         let message = format!("{err:#}");
         assert!(message.contains("daemon.json"), "error was: {message}");
+    }
+
+    fn denied() -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    }
+
+    /// A denied `daemon.json` with no daemon holding the instance lock is
+    /// stale: it is removed and reads as missing, or, when it cannot be
+    /// removed, named with how to delete it. A live daemon keeps the refusal.
+    #[test]
+    fn stale_labelled_handshake_with_no_live_daemon_is_cleared_or_named() {
+        let path = PathBuf::from(r"C:\config\daemon.json");
+        let classify =
+            |check: StaleCheck| classify_handshake_read(&path, denied, |_| {}, move || check);
+
+        assert_eq!(
+            classify(StaleCheck::DaemonLive).expect_err("a live daemon is refused"),
+            DaemonIsElevated::Running
+        );
+        let missing = classify(StaleCheck::Removed).expect("a removed stale file reads");
+        assert!(
+            matches!(&missing, HandshakeFile::Missing(err) if err.kind() == std::io::ErrorKind::NotFound),
+            "{missing:?}"
+        );
+        let stuck = classify(StaleCheck::NotRemoved(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )))
+        .expect_err("a stale file that stays is named");
+        assert_eq!(stuck, DaemonIsElevated::StaleHandshake(path.clone()));
+        assert_eq!(
+            stuck.to_string(),
+            r"a rustling-tulip daemon that ran as administrator left C:\config\daemon.json behind; delete it from an elevated terminal, then start the app again"
+        );
+
+        // The real check: a held instance lock is a live daemon and the file
+        // stays; once it is free, the file is removed.
+        let scratch = ScratchDir::new("stale-labelled");
+        let handshake = handshake_file_in(&scratch.0);
+        std::fs::write(&handshake, b"{}").expect("write a stand-in daemon.json");
+        let holder = std::fs::File::create(scratch.0.join(INSTANCE_LOCK_FILE))
+            .expect("create the instance lock");
+        holder.try_lock().expect("take the instance lock");
+        assert!(matches!(
+            clear_if_no_daemon(&handshake),
+            StaleCheck::DaemonLive
+        ));
+        assert!(handshake.exists(), "a live daemon's file is never removed");
+        drop(holder);
+        assert!(matches!(
+            clear_if_no_daemon(&handshake),
+            StaleCheck::Removed
+        ));
+        assert!(!handshake.exists(), "a stale file is removed");
+        assert!(
+            scratch.0.join(INSTANCE_LOCK_FILE).exists(),
+            "the lock file is left for the next daemon"
+        );
+    }
+
+    /// A denial is retried as the daemon's atomic replace retries it, and
+    /// only a denial that outlasts every attempt checks for a stale file.
+    #[test]
+    fn transient_access_denied_is_retried_before_classifying() {
+        let path = PathBuf::from("daemon.json");
+        let mut reads = 0;
+        let mut pauses = Vec::new();
+        let mut checked = false;
+        let read = classify_handshake_read(
+            &path,
+            || {
+                reads += 1;
+                if reads < 3 {
+                    denied()
+                } else {
+                    Ok(b"{}".to_vec())
+                }
+            },
+            |pause| pauses.push(pause),
+            || {
+                checked = true;
+                StaleCheck::DaemonLive
+            },
+        )
+        .expect("the third read succeeds");
+        assert!(matches!(read, HandshakeFile::Bytes(_)), "{read:?}");
+        assert!(
+            !checked,
+            "a read that succeeds never checks for a stale file"
+        );
+        assert_eq!(reads, 3);
+        assert_eq!(pauses, vec![HANDSHAKE_READ_RETRY_DELAY; 2]);
+
+        let mut reads = 0;
+        let mut pauses = 0;
+        checked = false;
+        let refused = classify_handshake_read(
+            &path,
+            || {
+                reads += 1;
+                denied()
+            },
+            |_| pauses += 1,
+            || {
+                checked = true;
+                StaleCheck::DaemonLive
+            },
+        );
+        assert_eq!(
+            refused.expect_err("a lasting denial"),
+            DaemonIsElevated::Running
+        );
+        assert_eq!(reads, HANDSHAKE_READ_ATTEMPTS);
+        assert_eq!(pauses, HANDSHAKE_READ_ATTEMPTS - 1);
+        assert!(checked, "a lasting denial checks for a live daemon");
     }
 
     #[test]

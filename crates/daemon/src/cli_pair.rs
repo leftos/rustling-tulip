@@ -194,15 +194,17 @@ pub(crate) fn not_proven_reason(port: u16, path: &Path, proof: Proof) -> String 
 /// The `daemon.json` the running daemon wrote, or the error that says why
 /// there is no daemon to reach.
 fn read_handshake(path: &Path) -> anyhow::Result<DaemonHandshake> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+    let bytes = match daemon_client::read_handshake_file(path)? {
+        daemon_client::HandshakeFile::Bytes(bytes) => bytes,
+        daemon_client::HandshakeFile::Missing(_) => {
             return Err(anyhow!(
                 "no rustling-tulipd is running: {} does not exist",
                 path.display()
             ));
         }
-        Err(err) => return Err(anyhow!("could not read {}: {err}", path.display())),
+        daemon_client::HandshakeFile::Failed(err) => {
+            return Err(anyhow!("could not read {}: {err}", path.display()));
+        }
     };
     serde_json::from_slice(&bytes)
         .map_err(|err| anyhow!("could not read {}: {err}", path.display()))
