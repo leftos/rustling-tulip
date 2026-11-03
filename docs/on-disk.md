@@ -67,7 +67,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   General includes `general.check_updates` (default on; off stops the updater's automatic checks and downloads), the sidebar's leaf density (`general.leaf_density`), the sessions it draws under repos (`general.sessions_under_repos`: `"every"` default, `"busy"`, `"none"`), how it sorts repos (`general.repo_sort`: `"needs_you"` default, `"active"`, `"manual"`; a missing key or unknown value loads as `"needs_you"`). `general.open_text_externally`, which releases up to v0.6.1-alpha wrote, is read and ignored: Ctrl+click and Ctrl+Shift+click choose the app instead.
 
-  Notifications holds the `Needs you` and `Finished` toggles (`notifications.awaiting_input` and `notifications.finished`) and the skip choice.
+  Notifications holds the `Needs you` and `Finished` toggles (`notifications.awaiting_input` and `notifications.finished`), the skip choice, and how long a Finished toast is held (`notifications.finished_grace_secs`: `0`, `2`, `5` the default, `10` or `20` seconds; a missing key loads as `5`, and any other value loads as `5` with a warning, and the rest of the file still loads).
 
   It holds the Needs you sound (`notifications.needs_you_sound`: `"off"`, `"default"`, `{"bundled": "<sound id>"}` or `{"custom": "<path to a .wav or .ogg>"}`; a missing key or an unknown value loads as `"default"`, the bundled `apps/native/assets/sounds/mallet-rising-fifth.ogg`).
 

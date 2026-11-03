@@ -682,6 +682,61 @@ fn a_late_alert_after_the_fallback_raises_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_ten_second_grace_holds_the_toast_past_five(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "finished_grace_secs": 10 }));
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(5));
+    assert!(
+        h.notified().is_empty(),
+        "five seconds is short of a ten second grace"
+    );
+    h.advance(Duration::from_secs(5));
+    assert_eq!(h.notified(), [shown("Finished", "review")]);
+}
+
+#[gpui::test]
+fn no_grace_raises_the_toast_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "finished_grace_secs": 0 }));
+    let mut h = opened(cx, &dir);
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_millis(1));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "a zero grace raises the toast in the first instant"
+    );
+}
+
+#[gpui::test]
+fn a_grace_past_the_summary_hold_raises_at_the_grace(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "finished_grace_secs": 20 }));
+    let mut h = opened(cx, &dir);
+    h.send(summarizer_status().build());
+    turn(&mut h, "s2", "review");
+    h.advance(Duration::from_secs(12));
+    assert!(
+        h.notified().is_empty(),
+        "the twelve second hold is inside the twenty second grace"
+    );
+    h.advance(Duration::from_secs(8));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "the grace ended with no summary wait left after it"
+    );
+    h.send(alert("s2", AlertKind::DoneWaiting, "tests pass"));
+    assert_eq!(
+        h.notified(),
+        [shown("Finished", "review")],
+        "the toast already went, and no second toast follows"
+    );
+}
+
+#[gpui::test]
 fn finished_without_summaries_waits_only_for_the_grace(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -1685,8 +1740,8 @@ fn choosing_off_default_and_custom_writes_the_finished_sound_key(cx: &mut TestAp
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-notify-skip-on-screen"),
-        "no Play to preview while the sound is off, so the skip choices follow"
+        Some("settings-finished-grace-0"),
+        "no Play to preview while the sound is off, so the grace row follows"
     );
 
     choose_sound(

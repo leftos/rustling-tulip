@@ -847,6 +847,14 @@ impl SpawnDefaults {
     }
 }
 
+/// The holds the Notifications tab offers for a Finished toast, in the order
+/// it shows them.
+pub(crate) const FINISHED_GRACE_CHOICES: [u32; 5] = [0, 2, 5, 10, 20];
+
+/// How long a file without `finished_grace_secs` holds a Finished toast, as
+/// every release before this one did.
+pub(crate) const DEFAULT_FINISHED_GRACE_SECS: u32 = 5;
+
 /// Which OS notifications fire. Keys this build does not know, such as
 /// the old `stopped` and `error` toggles, are dropped on load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -873,6 +881,14 @@ pub struct NotificationSettings {
     /// the key, as every release before this one wrote, keeps the OS's.
     #[serde(deserialize_with = "toast_style_or_default")]
     pub toast_style: ToastStyle,
+    /// How long a Finished toast is held before it is raised, one of
+    /// [`FINISHED_GRACE_CHOICES`] seconds; a file without the key, as every
+    /// release before this one wrote, holds it 5 s.
+    #[serde(
+        default = "default_finished_grace",
+        deserialize_with = "grace_or_default"
+    )]
+    pub finished_grace_secs: u32,
 }
 
 /// The sound a toast plays. Saved as `"off"`, `"default"`,
@@ -936,6 +952,27 @@ fn toast_style_or_default<'de, D: serde::Deserializer<'de>>(
     read_choice(deserializer, "toast_style", "os")
 }
 
+/// The finished grace a file without `finished_grace_secs` loads.
+fn default_finished_grace() -> u32 {
+    DEFAULT_FINISHED_GRACE_SECS
+}
+
+/// Reads `finished_grace_secs` so that any value that is not one of the
+/// offered holds loads as the default and never fails the rest of the file.
+fn grace_or_default<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if let Ok(secs) = u32::deserialize(&value)
+        && FINISHED_GRACE_CHOICES.contains(&secs)
+    {
+        return Ok(secs);
+    }
+    tracing::warn!(
+        "notifications.finished_grace_secs {value} is not one of \
+         {FINISHED_GRACE_CHOICES:?} seconds; using {DEFAULT_FINISHED_GRACE_SECS}"
+    );
+    Ok(DEFAULT_FINISHED_GRACE_SECS)
+}
+
 /// Reads a setting that is one of a fixed set of words, warning with `key`
 /// when its value is not a known choice and naming the default `fallback` it
 /// loads instead.
@@ -965,6 +1002,7 @@ impl Default for NotificationSettings {
             needs_you_sound: ToastSound::default(),
             finished_sound: ToastSound::default(),
             toast_style: ToastStyle::default(),
+            finished_grace_secs: DEFAULT_FINISHED_GRACE_SECS,
         }
     }
 }
@@ -2096,6 +2134,15 @@ impl SidebarModel {
             return false;
         }
         self.ui.notifications.toast_style = style;
+        true
+    }
+
+    /// Records how long a Finished toast is held; returns whether it changed.
+    pub fn set_finished_grace(&mut self, secs: u32) -> bool {
+        if self.ui.notifications.finished_grace_secs == secs {
+            return false;
+        }
+        self.ui.notifications.finished_grace_secs = secs;
         true
     }
 
@@ -5158,6 +5205,7 @@ pub(crate) mod tests {
                 needs_you_sound: ToastSound::Off,
                 finished_sound: ToastSound::Default,
                 toast_style: ToastStyle::Os,
+                finished_grace_secs: 10,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -5285,6 +5333,7 @@ pub(crate) mod tests {
                 needs_you_sound: ToastSound::Default,
                 finished_sound: ToastSound::Default,
                 toast_style: ToastStyle::Os,
+                finished_grace_secs: DEFAULT_FINISHED_GRACE_SECS,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -7042,6 +7091,61 @@ pub(crate) mod tests {
             assert_eq!(ui.notifications.toast_style, ToastStyle::Os, "{value}");
             assert_eq!(ui.notifications.skip_when, NotifySkip::Never, "{value}");
             assert!(!ui.notifications.finished, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_file_without_a_finished_grace_loads_five_seconds() {
+        let dir = TestDir::new("notify-finished-grace-released");
+        let file = v0_5_1_alpha_ui_file();
+        assert!(
+            file["notifications"].get("finished_grace_secs").is_none(),
+            "no release before this one wrote finished_grace_secs"
+        );
+        let ui = load_released(&dir, &file);
+        assert_eq!(
+            ui.notifications.finished_grace_secs,
+            DEFAULT_FINISHED_GRACE_SECS
+        );
+        assert!(
+            !ui.notifications.awaiting_input,
+            "the saved toggle survives"
+        );
+        assert!(!ui.notifications.finished, "the saved toggle survives");
+        assert_eq!(ui.notifications.skip_when, NotifySkip::Never);
+    }
+
+    #[test]
+    fn an_unknown_finished_grace_loads_five_seconds() {
+        let dir = TestDir::new("notify-finished-grace-unknown");
+        for value in [json!(7), json!(-1), json!("5"), serde_json::Value::Null] {
+            let mut file = v0_5_1_alpha_ui_file();
+            file["notifications"]["finished_grace_secs"] = value.clone();
+            let ui = load_released(&dir, &file);
+            assert_eq!(
+                ui.notifications.finished_grace_secs, DEFAULT_FINISHED_GRACE_SECS,
+                "{value}"
+            );
+            assert_eq!(ui.notifications.skip_when, NotifySkip::Never, "{value}");
+            assert!(!ui.notifications.finished, "{value}");
+        }
+    }
+
+    #[test]
+    fn the_finished_grace_round_trips() {
+        let dir = TestDir::new("notify-finished-grace-round-trip");
+        let mut model = SidebarModel::default();
+        for secs in FINISHED_GRACE_CHOICES {
+            assert!(model.set_finished_grace(secs), "{secs} s is a change");
+            assert!(!model.set_finished_grace(secs), "{secs} s again is not");
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let file: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(file["notifications"]["finished_grace_secs"], json!(secs));
+            assert_eq!(
+                load_ui_state(&dir.0).notifications.finished_grace_secs,
+                secs
+            );
         }
     }
 

@@ -30,11 +30,61 @@ fn the_toast_style_row_sets_the_choice(cx: &mut TestAppContext) {
     h.keys("ctrl-,");
     h.click_on("settings-tab-notifications");
 
+    h.scroll_into_view("settings-content", "settings-toast-style-app");
     h.click_on("settings-toast-style-app");
     assert_eq!(saved_ui(&dir)["notifications"]["toast_style"], "app");
 
     h.click_on("settings-toast-style-os");
     assert_eq!(saved_ui(&dir)["notifications"]["toast_style"], "os");
+}
+
+#[gpui::test]
+fn the_finished_grace_row_sets_the_choice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-notifications");
+    for (selector, secs) in [
+        ("settings-finished-grace-0", 0),
+        ("settings-finished-grace-2", 2),
+        ("settings-finished-grace-5", 5),
+        ("settings-finished-grace-10", 10),
+        ("settings-finished-grace-20", 20),
+    ] {
+        assert!(
+            h.bounds(selector).origin.x >= px(0.0),
+            "{selector} is painted"
+        );
+        h.click_on(selector);
+        assert_eq!(
+            saved_ui(&dir)["notifications"]["finished_grace_secs"],
+            serde_json::json!(secs)
+        );
+    }
+}
+
+#[gpui::test]
+fn the_finished_grace_row_hides_with_the_toggle(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-notifications");
+    h.click_on("settings-notify-finished");
+    assert_eq!(settings_focus(&mut h), Some("settings-notify-finished"));
+    h.keys("tab tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-notify-skip-on-screen"),
+        "the row hides with the Finished toggle"
+    );
+    h.click_on("settings-notify-finished");
+    assert_eq!(settings_focus(&mut h), Some("settings-notify-finished"));
+    h.keys("tab tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-finished-grace-0"),
+        "the row returns with the toggle"
+    );
 }
 
 const TAB_SELECTORS: [&str; 9] = [

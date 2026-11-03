@@ -40,8 +40,8 @@ use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::sidebar::{
-    CountMode, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos, SidebarView, ToastSound,
-    ToastStyle,
+    CountMode, FINISHED_GRACE_CHOICES, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos,
+    SidebarView, ToastSound, ToastStyle,
 };
 use crate::sound::{self, BundledSound, NotifyKind, SOUND_EXTENSIONS};
 use crate::spawn_view::{
@@ -389,6 +389,7 @@ pub(crate) enum SettingsControl {
     FinishedSoundPlay,
     NotifyFinished,
     NotifySkip(NotifySkip),
+    FinishedGrace(u32),
     ToastStyle(ToastStyle),
     SpawnTrusted,
     /// Choice `choice` of field `field` of the shown agent page's
@@ -492,6 +493,12 @@ impl SettingsControl {
             Self::NotifySkip(NotifySkip::OnScreen) => "settings-notify-skip-on-screen",
             Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
             Self::NotifySkip(NotifySkip::Never) => "settings-notify-skip-never",
+            Self::FinishedGrace(0) => "settings-finished-grace-0",
+            Self::FinishedGrace(2) => "settings-finished-grace-2",
+            Self::FinishedGrace(5) => "settings-finished-grace-5",
+            Self::FinishedGrace(10) => "settings-finished-grace-10",
+            // Only the offered holds are built, so no other value reaches here.
+            Self::FinishedGrace(_) => "settings-finished-grace-20",
             Self::ToastStyle(ToastStyle::Os) => "settings-toast-style-os",
             Self::ToastStyle(ToastStyle::App) => "settings-toast-style-app",
             Self::SpawnTrusted => "settings-spawn-trusted",
@@ -2307,6 +2314,7 @@ impl RootView {
             SettingsControl::FinishedSoundPlay => self.play_finished_sound(cx),
             SettingsControl::NotifyFinished => self.toggle_finished_notification(cx),
             SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
+            SettingsControl::FinishedGrace(secs) => self.set_finished_grace(secs, cx),
             SettingsControl::ToastStyle(style) => self.set_toast_style(style, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
             SettingsControl::AgentChoice {
@@ -3012,6 +3020,9 @@ impl RootView {
         if settings.finished_sound != ToastSound::Off {
             controls.push(SettingsControl::FinishedSoundPlay);
         }
+        if settings.finished {
+            controls.extend(FINISHED_GRACE_CHOICES.map(SettingsControl::FinishedGrace));
+        }
         controls.extend(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip));
         #[cfg(windows)]
         controls.extend(TOAST_STYLE_CHOICES.map(SettingsControl::ToastStyle));
@@ -3327,6 +3338,14 @@ impl RootView {
     /// it when it changed.
     fn set_notify_skip(&mut self, skip: NotifySkip, cx: &mut Context<Self>) {
         if self.sidebar.set_notify_skip(skip) {
+            self.save_ui();
+        }
+        cx.notify();
+    }
+
+    /// Sets how long a Finished toast is held, saving it when it changed.
+    fn set_finished_grace(&mut self, secs: u32, cx: &mut Context<Self>) {
+        if self.sidebar.set_finished_grace(secs) {
             self.save_ui();
         }
         cx.notify();
@@ -4386,6 +4405,9 @@ impl RootView {
             focused,
             cx,
         );
+        let grace_row = settings
+            .finished
+            .then(|| Self::finished_grace_row(settings.finished_grace_secs, focused, cx));
         let section = section(
             crate::fonts::ui_text_size(cx),
             crate::fonts::ui_weight_shift(cx),
@@ -4403,10 +4425,37 @@ impl RootView {
         .child(sound)
         .child(finished)
         .child(finished_sound)
+        .children(grace_row)
         .child(skip_row);
         #[cfg(windows)]
         let section = section.child(Self::toast_style_row(settings.toast_style, focused, cx));
         vec![section.into_any_element()]
+    }
+
+    /// The row choosing how long a Finished toast is held, `chosen` marked.
+    fn finished_grace_row(
+        chosen: u32,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let choices = FINISHED_GRACE_CHOICES.map(|secs| {
+            let text = match secs {
+                0 => "None",
+                2 => "2 s",
+                5 => "5 s",
+                10 => "10 s",
+                _ => "20 s",
+            };
+            (SettingsControl::FinishedGrace(secs), text, secs == chosen)
+        });
+        choice_row(
+            "Hold a Finished toast for",
+            &choices,
+            RowLock::Live,
+            focused,
+            cx,
+        )
+        .into_any_element()
     }
 
     /// The row choosing whose toasts the client raises, `chosen` marked.

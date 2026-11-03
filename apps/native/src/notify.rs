@@ -459,11 +459,6 @@ pub(crate) const NEEDS_YOU_TITLE: &str = "Needs you";
 /// The title of the notification a session raises when its turn ends.
 pub(crate) const FINISHED_TITLE: &str = "Finished";
 
-/// How long a turn must stay ended before its Finished toast is raised: an
-/// agent often starts again at once (a Stop hook sends it back, a background
-/// task wakes it), and a session that does raises nothing.
-pub(crate) const FINISHED_GRACE: Duration = Duration::from_secs(5);
-
 /// How long after its turn ended a Finished toast waits for its session's
 /// `WaitingAlert` before it falls back to the plain wording.
 pub(crate) const FINISHED_HOLD: Duration = Duration::from_secs(12);
@@ -489,6 +484,8 @@ struct Held {
     /// Which hold this is, so the timer of one that was dropped raises
     /// nothing once its session is held again.
     generation: u64,
+    /// How long the hold lasts before the toast is raised.
+    grace: Duration,
     /// Whether a summary can still word the toast once the grace ends.
     awaits_alert: bool,
     /// Whether the grace has ended, so an alert raises the toast at once.
@@ -787,10 +784,12 @@ impl RootView {
             .detach();
     }
 
-    /// Holds a Finished toast about `label` for session `key` through
-    /// [`FINISHED_GRACE`], and on until [`FINISHED_HOLD`] when `awaits_alert`
-    /// says a summary can still word it. A session that leaves Idle or shows
-    /// background work meanwhile drops the hold (`fold_state`).
+    /// Holds a Finished toast about `label` for session `key` through the
+    /// grace the Notifications tab sets, and on until [`FINISHED_HOLD`] after
+    /// the turn ended when `awaits_alert` says a summary can still word it. A
+    /// session that leaves Idle or shows background work meanwhile drops the
+    /// hold (`fold_state`). The setting is read when the hold starts, so a
+    /// change affects the next hold, not one already running.
     fn hold_finished(
         &mut self,
         key: SessionKey,
@@ -798,6 +797,9 @@ impl RootView {
         awaits_alert: bool,
         cx: &mut Context<Self>,
     ) {
+        let grace = Duration::from_secs(u64::from(
+            self.sidebar.ui_state().notifications.finished_grace_secs,
+        ));
         self.notifications.next_hold += 1;
         let generation = self.notifications.next_hold;
         self.notifications.held.insert(
@@ -805,12 +807,13 @@ impl RootView {
             Held {
                 label,
                 generation,
+                grace,
                 awaits_alert,
                 graced: false,
             },
         );
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(FINISHED_GRACE).await;
+            cx.background_executor().timer(grace).await;
             // Fails only when the view is gone, and the hold with it.
             this.update(cx, |this, cx| {
                 this.grace_ended(key, generation, cx);
@@ -830,6 +833,7 @@ impl RootView {
         if held.generation != generation {
             return;
         }
+        let grace = held.grace;
         if !held.awaits_alert {
             self.hold_expired(&key, generation, cx);
             return;
@@ -841,7 +845,7 @@ impl RootView {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let rest = FINISHED_HOLD.saturating_sub(FINISHED_GRACE);
+            let rest = FINISHED_HOLD.saturating_sub(grace);
             cx.background_executor().timer(rest).await;
             // Fails only when the view is gone, and the hold with it.
             this.update(cx, |this, cx| {

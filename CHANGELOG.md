@@ -10,6 +10,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Settings has a Dashboard page: turn session summaries on, pick the provider, store its key, set a daily cap and test it.
 - Finished toasts play the app's own sound instead of Windows', with their own chime, .wav or .ogg, or none in Settings › Notifications.
 - Pick each toast's sound from a list of chimes in Settings › Notifications; the defaults are new, softer mallet chimes.
+- Choose how long a Finished toast waits before it shows in Settings › Notifications, from none to 20 seconds.
 - The Dashboard header shows today's cost, tokens and commits across every session, kept through daemon restarts.
 - The Dashboard shows each session's last two hours as a bar with a short caption, beside its ten-minute activity.
 - `rustling-tulipd` can drive sessions from a shell: `sessions`, `read`, `spawn`, `send`, `kill`, `wait` and `watch`, each with `--json`.
