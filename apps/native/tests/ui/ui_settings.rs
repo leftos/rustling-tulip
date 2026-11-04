@@ -1025,6 +1025,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         "settings-ok",
         "settings-apply",
         "settings-cancel",
+        "settings-search",
     ] {
         h.keys("tab");
         assert_eq!(
@@ -1035,7 +1036,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     }
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
-    h.keys(&["shift-tab"; 11].join(" "));
+    h.keys(&["shift-tab"; 12].join(" "));
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-terminal-copy-on-selection"),
@@ -1089,7 +1090,13 @@ fn tab_walks_app_title_controls_and_space_toggles_the_count(cx: &mut TestAppCont
         settings_focus(&mut h),
         Some("settings-title-product-suffix")
     );
-    for stop in ["settings-ok", "settings-apply", "settings-cancel", "list"] {
+    for stop in [
+        "settings-ok",
+        "settings-apply",
+        "settings-cancel",
+        "settings-search",
+        "list",
+    ] {
         h.keys("tab");
         assert_eq!(settings_focus(&mut h), Some(stop));
     }
@@ -1590,6 +1597,8 @@ fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppConte
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-cancel"));
     h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-search"));
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
 
     h.click_on("settings-tab-spawn-defaults");
@@ -1914,11 +1923,16 @@ fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
         Some("settings-ok"),
         "Extra arguments is the page's last row: the footer follows"
     );
-    for stop in ["settings-apply", "settings-cancel", "list"] {
+    for stop in [
+        "settings-apply",
+        "settings-cancel",
+        "settings-search",
+        "list",
+    ] {
         h.keys("tab");
         assert_eq!(settings_focus(&mut h), Some(stop));
     }
-    h.keys("shift-tab shift-tab shift-tab shift-tab");
+    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-agent-args"),
@@ -2601,7 +2615,7 @@ fn a_field_a_when_rule_hides_keeps_the_keyboard(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
+        Some("settings-search"),
         "Tab walks on from there"
     );
 }
@@ -2890,12 +2904,24 @@ fn tab_ring_ends_on_ok_apply_cancel(cx: &mut TestAppContext) {
         "with nothing pending the ring ends on Cancel"
     );
     h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-search"),
+        "the search box comes before the tab list"
+    );
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
 
-    h.keys("shift-tab shift-tab");
+    h.keys("shift-tab shift-tab shift-tab");
     assert_eq!(settings_focus(&mut h), Some("settings-agent-args"));
     type_line(&mut h, "verbose");
-    for stop in ["settings-ok", "settings-apply", "settings-cancel", "list"] {
+    for stop in [
+        "settings-ok",
+        "settings-apply",
+        "settings-cancel",
+        "settings-search",
+        "list",
+    ] {
         h.keys("tab");
         assert_eq!(settings_focus(&mut h), Some(stop));
     }
@@ -3358,6 +3384,8 @@ fn trusted_launch_leaves_the_launch_rows_in_the_ring(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-cancel"));
     h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-search"));
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
     tab_to(&mut h, "settings-agent-program");
     type_line(&mut h, "wrapper");
@@ -3493,7 +3521,11 @@ fn tab_walks_the_appearance_stops_and_shift_tab_walks_back(cx: &mut TestAppConte
         "the footer's Cancel ends the ring"
     );
     h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-search"));
+    h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
+    h.keys("shift-tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-search"));
     h.keys("shift-tab");
     assert_eq!(settings_focus(&mut h), Some("settings-cancel"));
     for stop in ring.iter().rev() {

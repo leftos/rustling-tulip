@@ -373,11 +373,11 @@ fn notifications_tab_has_needs_you_and_finished_toggles(cx: &mut TestAppContext)
         h.keys("tab");
         assert_eq!(settings_focus(&mut h), Some(stop), "each choice is a stop");
     }
-    h.keys("tab tab tab");
+    h.keys("tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-open-windows-notifications"),
-        "past the footer's Cancel and the tab list, round to the link"
+        "past the footer's Cancel, the search box and the tab list, round to the link"
     );
     h.keys("tab space");
     assert_eq!(settings_focus(&mut h), Some("settings-notify-needs-you"));

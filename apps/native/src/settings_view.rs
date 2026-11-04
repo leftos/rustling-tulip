@@ -13,7 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, FocusHandle,
     Focusable as _, FontWeight, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    ScrollHandle, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*, px, svg,
+    ScrollHandle, SharedString, Stateful, Subscription, Window, canvas, div, point, prelude::*, px,
+    svg,
 };
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
@@ -42,6 +43,7 @@ use crate::remote_access::{
 use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::settings_search::{self, DrawnTab, TabHits, Visibility};
 use crate::sidebar::{
     CountMode, FINISHED_GRACE_CHOICES, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos,
     SidebarView, ToastSound, ToastStyle,
@@ -116,6 +118,122 @@ const AGENTS_GROUP: &str = "Agents";
 const LAUNCH_ARGS_PLACEHOLDER: &str = "Extra arguments";
 const LAUNCH_USE_HINT: &str = "Used for new sessions, Restart and Resume; not for headless runs.";
 const LAUNCH_QUOTING_HINT: &str = "Extra arguments follow POSIX shell rules: quote a Windows path or double its backslashes. In cmd, a doskey macro is not expanded; set Program to a .cmd file instead.";
+
+/// The search box's selector, which [`RootView::settings_focus`] also
+/// names it by, its placeholder, and the line the list shows when nothing
+/// matches.
+const SEARCH_SELECTOR: &str = "settings-search";
+const SEARCH_PLACEHOLDER: &str = "Search settings";
+const NO_MATCH: &str = "No settings match";
+/// How far the search highlight's outline sits outside its row, and the
+/// room kept above a row the search scrolls to.
+const HIT_OUTSET: f32 = 3.0;
+const HIT_MARGIN: f32 = 8.0;
+/// The Dashboard's Provider row, which no control of its own names: each
+/// provider's control extends it with the provider's id.
+const DASHBOARD_PROVIDER_ROW: &str = "settings-dashboard-provider";
+
+/// The Settings search box: built each time Settings opens, dropped when it
+/// closes, so its text is never kept.
+pub(crate) struct SettingsSearch {
+    input: Entity<TextInput>,
+    focus: FocusHandle,
+    /// The highlighted row scrolls into view the next time it is drawn.
+    reveal: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// The selector of the setting the search highlights, with the `RootView`
+/// whose Settings holds it. Each root sets it at the top of its render,
+/// before any layer draws, and the row helpers, which cannot read the root
+/// they draw for, read it there; a row drawn for any other root, as in
+/// another window, finds no hit.
+#[derive(Debug, Default)]
+struct SearchHit(Option<(EntityId, &'static str)>);
+
+impl gpui::Global for SearchHit {}
+
+/// The hit in `slot` that the rows of root `root` draw: none unless `root`
+/// owns it.
+fn owned_hit(slot: Option<(EntityId, &'static str)>, root: EntityId) -> Option<&'static str> {
+    slot.filter(|(owner, _)| *owner == root).map(|(_, hit)| hit)
+}
+
+/// The slot after root `root` drew with `hit`: its own hit, else the slot
+/// cleared of any hit it owned; another root's hit stays for that root.
+fn next_hit_slot(
+    slot: Option<(EntityId, &'static str)>,
+    root: EntityId,
+    hit: Option<&'static str>,
+) -> Option<(EntityId, &'static str)> {
+    match hit {
+        Some(hit) => Some((root, hit)),
+        None => slot.filter(|(owner, _)| *owner != root),
+    }
+}
+
+/// The search highlight's outline for the row of `selector`, whose corners
+/// have `radius`, while that row is the hit of the root it is drawn for: it
+/// also measures the row, which scrolls into view when the search asks.
+pub(crate) fn search_hit_marker(
+    selector: &str,
+    radius: f32,
+    cx: &mut Context<RootView>,
+) -> Option<Div> {
+    let slot = cx.try_global::<SearchHit>()?.0;
+    let hit = owned_hit(slot, cx.entity_id())?;
+    if hit != selector {
+        return None;
+    }
+    let root = cx.weak_entity();
+    let accent = theme(cx).accent;
+    Some(
+        div()
+            .absolute()
+            .inset(px(-HIT_OUTSET))
+            .border_1()
+            .border_color(gpui::rgb(accent))
+            .rounded(px(radius + HIT_OUTSET))
+            .driver_id(|| "settings-search-hit".to_owned())
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        // Fails only when the view is gone, and Settings
+                        // with it.
+                        root.update(cx, |this, cx| this.reveal_search_hit(bounds, window, cx))
+                            .ok();
+                    },
+                    |_, (), _, _| {},
+                )
+                .size_full(),
+            ),
+    )
+}
+
+/// The search highlight's outline for a row of `controls`, named by its
+/// first, while that row is the hit.
+fn row_hit_marker(controls: &[SettingsControl], cx: &mut Context<RootView>) -> Option<Div> {
+    let first = controls.first()?;
+    search_hit_marker(first.selector(), 0.0, cx)
+}
+
+/// The content's new scroll offset (negative once scrolled down) that shows
+/// `row` from its top, `HIT_MARGIN` below the viewport's, unless it already
+/// shows whole; both ranges lie where they are at `offset`, and the offset
+/// stays within `0..=-max`.
+fn hit_offset(
+    viewport: std::ops::Range<Pixels>,
+    row: std::ops::Range<Pixels>,
+    offset: Pixels,
+    max: Pixels,
+) -> Pixels {
+    if row.start >= viewport.start && row.end <= viewport.end {
+        return offset;
+    }
+    (offset + viewport.start + px(HIT_MARGIN) - row.start)
+        .min(px(0.0))
+        .max(-max)
+}
 
 /// A tab of the Settings modal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1177,6 +1295,9 @@ impl RootView {
         }
         tracing::info!(?host, "settings: showing the host's agent pages");
         self.show_settings_host(host, window, cx);
+        // The new host draws other rows: the search follows them, so the
+        // shown tab is a listed one and the highlight moves with it.
+        self.settle_search(window, cx);
     }
 
     /// The selector moves to `host`: the shown tab stays while `host`
@@ -1261,6 +1382,375 @@ impl RootView {
             .into_iter()
             .map(|row| row.label(agents))
             .collect()
+    }
+
+    /// The Settings search box's text; empty while Settings is closed.
+    #[must_use]
+    pub fn settings_search_text(&self, cx: &App) -> String {
+        self.settings_search
+            .as_ref()
+            .map(|search| search.input.read(cx).text().to_owned())
+            .unwrap_or_default()
+    }
+
+    /// Every row the Settings tab list draws: while the search box holds a
+    /// word, each listed tab's label followed by two spaces and its count,
+    /// or the one line saying nothing matches.
+    #[must_use]
+    pub fn settings_search_rows(&self, cx: &App) -> Vec<String> {
+        let agents = self.agents();
+        let Some(hits) = self.search_hits(cx) else {
+            return self
+                .settings_tab_rows()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+        };
+        if hits.is_empty() {
+            return vec![NO_MATCH.to_owned()];
+        }
+        self.search_rows(&hits)
+            .into_iter()
+            .map(|(row, count)| match count {
+                Some(count) => format!("{}  {count}", row.label(agents)),
+                None => row.label(agents).to_owned(),
+            })
+            .collect()
+    }
+
+    /// The selector of the setting the search highlights: the shown tab's
+    /// first match, while the query holds a word and Settings is open.
+    #[must_use]
+    pub fn settings_search_hit(&self, cx: &App) -> Option<&'static str> {
+        self.search_hit(cx)
+    }
+
+    /// Whether the search catalogue names `selector`, a control of the
+    /// shown host's Settings, or a reviewed exemption covers it.
+    #[must_use]
+    pub fn settings_search_names(&self, selector: &str) -> bool {
+        settings_search::names(selector, self.agents())
+    }
+
+    /// The query, while the search box holds a word.
+    fn search_query(&self, cx: &App) -> Option<String> {
+        Some(self.settings_search_text(cx)).filter(|query| !query.trim().is_empty())
+    }
+
+    /// The rows the search covers now, and the tabs that hold a match for
+    /// the query, while it holds a word.
+    fn search_found(&self, cx: &App) -> Option<(Vec<settings_search::Entry>, Vec<TabHits>)> {
+        let query = self.search_query(cx)?;
+        let entries = settings_search::drawn(
+            settings_search::entries(self.agents()),
+            &self.drawn_tabs(cx),
+        );
+        let visible = Visibility {
+            remote_tab: self.settings_tabs().contains(&SettingsTab::RemoteAccess),
+            this_pc: self.settings_host == HostKey::Local,
+        };
+        let hits = settings_search::results(&query, &entries, visible);
+        Some((entries, hits))
+    }
+
+    /// The tabs that hold a match, while the query holds a word.
+    fn search_hits(&self, cx: &App) -> Option<Vec<TabHits>> {
+        self.search_found(cx).map(|(_, hits)| hits)
+    }
+
+    /// The tabs the list shows: the listed ones while searching, else all.
+    fn listed_tabs(&self, cx: &App) -> Vec<SettingsTab> {
+        match self.search_hits(cx) {
+            Some(hits) => self
+                .settings_tabs()
+                .into_iter()
+                .filter(|tab| hits.iter().any(|hit| hit.tab == *tab))
+                .collect(),
+            None => self.settings_tabs(),
+        }
+    }
+
+    /// The tab list's rows for `hits`, in the list's order, each listed tab
+    /// with its count; the Agents group row stays while one of its pages
+    /// is listed.
+    fn search_rows(&self, hits: &[TabHits]) -> Vec<(SettingsRow, Option<usize>)> {
+        let agent_listed = hits
+            .iter()
+            .any(|hit| matches!(hit.tab, SettingsTab::Agent(_)));
+        self.settings_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                SettingsRow::Group(_) => agent_listed.then_some((row, None)),
+                SettingsRow::Tab(tab) => hits
+                    .iter()
+                    .find(|hit| hit.tab == tab)
+                    .map(|hit| (row, Some(hit.count))),
+            })
+            .collect()
+    }
+
+    /// The selector of the shown tab's first match, while searching; a
+    /// Provider hit names the first provider control drawn.
+    fn search_hit(&self, cx: &App) -> Option<&'static str> {
+        if !self.settings_open() {
+            return None;
+        }
+        let (entries, hits) = self.search_found(cx)?;
+        let hit = hits.iter().find(|hit| hit.tab == self.settings_tab)?;
+        let selector = entries.get(hit.first)?.selector.as_ref();
+        if selector == DASHBOARD_PROVIDER_ROW {
+            let provider = format!("{DASHBOARD_PROVIDER_ROW}-");
+            return self
+                .drawn_stops_of(SettingsTab::Dashboard, cx)
+                .into_iter()
+                .map(SettingsControl::selector)
+                .find(|stop| stop.starts_with(&provider));
+        }
+        Some(intern(selector.to_owned()))
+    }
+
+    /// What each listed tab draws now: its stop order, and the rows no
+    /// control of their own names.
+    fn drawn_tabs(&self, cx: &App) -> Vec<DrawnTab> {
+        self.settings_tabs()
+            .into_iter()
+            .map(|tab| {
+                let stops: Vec<&'static str> = self
+                    .drawn_stops_of(tab, cx)
+                    .into_iter()
+                    .map(SettingsControl::selector)
+                    .collect();
+                let rows = self.control_free_rows(tab, &stops);
+                DrawnTab { tab, stops, rows }
+            })
+            .collect()
+    }
+
+    /// `tab`'s stops its page draws in the current state, whether the ring
+    /// holds them now or not, under the same conditions as the page's draw
+    /// code: the Dashboard's key rows by the provider and the key source,
+    /// the Worktrees buttons by the host, and an agent page's fields by
+    /// their `when` rules over the saved values.
+    fn drawn_stops_of(&self, tab: SettingsTab, cx: &App) -> Vec<SettingsControl> {
+        match tab {
+            SettingsTab::Dashboard => self.dashboard_drawn(),
+            SettingsTab::Worktrees => {
+                let mut controls = vec![SettingsControl::WorktreesPath];
+                if self.worktrees_browses() {
+                    controls.push(SettingsControl::WorktreesBrowse);
+                }
+                // Drawn always, dimmed while there is no override to reset.
+                controls.push(SettingsControl::WorktreesReset);
+                if self.worktrees_manages() {
+                    controls.push(SettingsControl::WorktreesManage);
+                }
+                controls
+            }
+            SettingsTab::Agent(_) => {
+                let Some(agent) = tab.agent() else {
+                    return Vec::new();
+                };
+                let Some(descriptor) = descriptor_for(self.agents(), &agent) else {
+                    return Vec::new();
+                };
+                let options =
+                    AgentOptions::new(descriptor.clone(), self.agent_settings().get(&agent));
+                // Only the selectors are compared, so the indices among the
+                // drawn fields serve.
+                options
+                    .settings_fields(self.shown_local().trusted)
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, view)| field_controls(&descriptor.tag, index, view))
+                    .chain([SettingsControl::AgentProgram, SettingsControl::AgentArgs])
+                    .collect()
+            }
+            _ => self.tab_stop_order_of(tab, cx),
+        }
+    }
+
+    /// The ids of `tab`'s drawn rows that no control of their own names:
+    /// the Dashboard's Provider row while a provider is drawn (`stops`),
+    /// and an agent page's fields of a kind this client draws no control
+    /// for.
+    fn control_free_rows(&self, tab: SettingsTab, stops: &[&str]) -> Vec<String> {
+        match tab {
+            SettingsTab::Dashboard => {
+                let provider = format!("{DASHBOARD_PROVIDER_ROW}-");
+                stops
+                    .iter()
+                    .any(|stop| stop.starts_with(&provider))
+                    .then(|| DASHBOARD_PROVIDER_ROW.to_owned())
+                    .into_iter()
+                    .collect()
+            }
+            SettingsTab::Agent(_) => {
+                let Some(agent) = tab.agent() else {
+                    return Vec::new();
+                };
+                let Some(descriptor) = descriptor_for(self.agents(), &agent) else {
+                    return Vec::new();
+                };
+                let options =
+                    AgentOptions::new(descriptor.clone(), self.agent_settings().get(&agent));
+                options
+                    .settings_fields(self.shown_local().trusted)
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, view)| {
+                        field_controls(&descriptor.tag, *index, view).is_empty()
+                    })
+                    .map(|(_, view)| {
+                        format!("settings-{}-{}", descriptor.tag, field_part(&view.id))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether the search box has the keyboard.
+    fn settings_search_focused(&self, window: &Window) -> bool {
+        self.settings_open()
+            && self
+                .settings_search
+                .as_ref()
+                .is_some_and(|search| search.focus.is_focused(window))
+    }
+
+    /// Ctrl+F, Tab or Shift+Tab: the keyboard goes to the search box,
+    /// its text selected with `select`.
+    fn focus_settings_search(&mut self, select: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = &self.settings_search else {
+            return;
+        };
+        self.settings_control = None;
+        search.focus.focus(window);
+        if select {
+            window.dispatch_action(Box::new(crate::text_input::SelectAll), cx);
+        }
+        cx.notify();
+    }
+
+    /// The search box, built afresh: empty, its keys and edits subscribed.
+    fn new_settings_search(window: &mut Window, cx: &mut Context<Self>) -> SettingsSearch {
+        let input = cx.new(|cx| TextInput::new(String::new(), SEARCH_PLACEHOLDER.to_owned(), cx));
+        let focus = input.read(cx).focus_handle(cx);
+        let keys = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Submit => this.focus_search_hit(window, cx),
+                // Esc clears a query first; from an empty box it closes
+                // Settings, as from any other field.
+                TextInputEvent::Cancel => {
+                    if input.read(cx).text().is_empty() {
+                        this.close_appearance_editor(window, cx);
+                    } else {
+                        input.update(cx, |input, cx| input.set_text("", cx));
+                        this.follow_search(window, cx);
+                    }
+                }
+            },
+        );
+        let edits = cx.subscribe_in(&input, window, |this, _, _: &TextChanged, window, cx| {
+            this.follow_search(window, cx);
+        });
+        SettingsSearch {
+            input,
+            focus,
+            reveal: false,
+            _subscriptions: vec![keys, edits],
+        }
+    }
+
+    /// After the query changed: the shown tab stays while it is listed,
+    /// else the first listed tab shows, and either way its first match
+    /// scrolls into view. The keyboard stays in the box.
+    fn follow_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settle_search(window, cx) {
+            self.focus_settings_search(false, window, cx);
+        }
+    }
+
+    /// The shown tab stays while the search lists it, else the first
+    /// listed tab shows, and either way its first match scrolls into view;
+    /// returns whether another tab was selected.
+    fn settle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(search) = &mut self.settings_search {
+            search.reveal = true;
+        }
+        let first = self.search_hits(cx).and_then(|hits| {
+            let shown = hits.iter().any(|hit| hit.tab == self.settings_tab);
+            hits.first().filter(|_| !shown).map(|hit| hit.tab)
+        });
+        if let Some(tab) = first {
+            self.select_settings_tab(tab, window, cx);
+        }
+        cx.notify();
+        first.is_some()
+    }
+
+    /// Enter in the search box: the keyboard goes to the highlighted
+    /// control, as Tab would land on it, without pressing it.
+    fn focus_search_hit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self.search_hit(cx) else {
+            return;
+        };
+        let control = self
+            .settings_controls(cx)
+            .into_iter()
+            .find(|control| control.selector() == hit);
+        if let Some(control) = control {
+            self.move_settings_focus(control, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The search hit's outline was laid out at `row`: when the search
+    /// asked, the content scrolls to show it.
+    fn reveal_search_hit(
+        &mut self,
+        row: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = &mut self.settings_search else {
+            return;
+        };
+        if !std::mem::take(&mut search.reveal) {
+            return;
+        }
+        let handle = self.settings_scroll.handle();
+        let viewport = handle.bounds();
+        let offset = handle.offset();
+        let y = hit_offset(
+            viewport.top()..viewport.bottom(),
+            row.top()..row.bottom(),
+            offset.y,
+            handle.max_offset().height,
+        );
+        if y != offset.y {
+            handle.set_offset(point(offset.x, y));
+            cx.defer_in(window, |_, window, _| window.refresh());
+        }
+    }
+
+    /// The search box over the tab list, as wide as the column.
+    fn settings_search_field(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+        let search = self.settings_search.as_ref()?;
+        let focused = search.focus.is_focused(window);
+        let frame = field_frame(focused, &theme(cx))
+            .driver_id(|| SEARCH_SELECTOR.to_owned())
+            .w_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.focus_settings_search(false, window, cx);
+                }),
+            )
+            .child(search.input.clone());
+        Some(div().flex().flex_none().pb(px(8.0)).child(frame))
     }
 
     /// The tabs the list shows on this target, in order.
@@ -1453,6 +1943,9 @@ impl RootView {
     /// Settings tab list, else the focused control's or stop's selector.
     #[must_use]
     pub fn settings_focus(&self, window: &Window, cx: &App) -> Option<&'static str> {
+        if self.settings_search_focused(window) {
+            return Some(SEARCH_SELECTOR);
+        }
         if self.settings_tabs_focus.is_focused(window) {
             return Some("list");
         }
@@ -1481,7 +1974,14 @@ impl RootView {
     /// The shown tab's own controls Tab reaches, in order; a disabled one
     /// is left out.
     fn tab_controls(&self, cx: &App) -> Vec<SettingsControl> {
-        match self.settings_tab {
+        self.tab_controls_of(self.settings_tab, cx)
+    }
+
+    /// `tab`'s own controls Tab reaches, in order; a disabled one is left
+    /// out. An agent page's are the shown page's, so only the shown tab
+    /// asks for one.
+    fn tab_controls_of(&self, tab: SettingsTab, cx: &App) -> Vec<SettingsControl> {
+        match tab {
             SettingsTab::General => general_controls(
                 self.settings_mirrors().keep_awake.is_some(),
                 self.settings_host == HostKey::Local,
@@ -1527,14 +2027,21 @@ impl RootView {
 
     /// The shown tab's own stops in the order Tab walks them.
     fn tab_stop_order(&self, cx: &App) -> Vec<SettingsControl> {
-        match self.settings_tab {
+        self.tab_stop_order_of(self.settings_tab, cx)
+    }
+
+    /// `tab`'s own stops in the order Tab walks them, each one there whether
+    /// the ring holds it now or not: what the page draws, which the search
+    /// covers.
+    fn tab_stop_order_of(&self, tab: SettingsTab, cx: &App) -> Vec<SettingsControl> {
+        match tab {
             SettingsTab::General => general_controls(true, true),
             SettingsTab::Dashboard => self.dashboard_controls(true),
             SettingsTab::AppTitle | SettingsTab::Notifications | SettingsTab::SpawnDefaults => {
-                self.tab_controls(cx)
+                self.tab_controls_of(tab, cx)
             }
             SettingsTab::Agent(_) => {
-                let Some(agent) = self.settings_tab.agent() else {
+                let Some(agent) = tab.agent() else {
                     return Vec::new();
                 };
                 let Some(descriptor) = descriptor_for(self.agents(), &agent) else {
@@ -2633,29 +3140,36 @@ impl RootView {
                 .is_some_and(|tab| tab.focus.is_focused(window))
     }
 
-    /// Moves the keyboard one step along the ring the tab list and the
-    /// shown tab's controls make, backwards with `back`. From anywhere off
-    /// the ring it goes to the tab list.
+    /// Moves the keyboard one step along the ring the search box, the tab
+    /// list and the shown tab's controls make, backwards with `back`. From
+    /// anywhere off the ring it goes to the tab list.
     fn step_settings_focus(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Position 0 is the search box, 1 the tab list; the controls follow.
+        const SEARCH: usize = 0;
+        const LIST: usize = 1;
         let controls = self.settings_controls(cx);
-        let at = if self.settings_tabs_focus.is_focused(window) {
-            Some(0)
+        let at = if self.settings_search_focused(window) {
+            Some(SEARCH)
+        } else if self.settings_tabs_focus.is_focused(window) {
+            Some(LIST)
         } else {
             self.focused_control_in(&controls, window, cx)
                 .and_then(|control| controls.iter().position(|c| *c == control))
-                .map(|index| index + 1)
+                .map(|index| index + 2)
         };
-        let len = controls.len() + 1;
+        let len = controls.len() + 2;
         let next = match at {
-            None => 0,
+            None => LIST,
             Some(at) if back => (at + len - 1) % len,
             Some(at) => (at + 1) % len,
         };
-        if next == 0 {
-            self.settings_control = None;
-            self.settings_tabs_focus.focus(window);
-        } else {
-            self.move_settings_focus(controls[next - 1], window, cx);
+        match next {
+            SEARCH => self.focus_settings_search(false, window, cx),
+            LIST => {
+                self.settings_control = None;
+                self.settings_tabs_focus.focus(window);
+            }
+            _ => self.move_settings_focus(controls[next - 2], window, cx),
         }
         cx.notify();
     }
@@ -3411,6 +3925,7 @@ impl RootView {
             self.settings_tabs_focus.focus(window);
             self.arm_pairing_tick(window, cx);
             self.hold_chat_width_field(window, cx);
+            self.settings_search = Some(Self::new_settings_search(window, cx));
         }
     }
 
@@ -3423,6 +3938,10 @@ impl RootView {
         self.settings_tab = tab;
         self.settings_control = None;
         self.notifications.sound_list = None;
+        // While searching, the tab's first match scrolls into view.
+        if let Some(search) = &mut self.settings_search {
+            search.reveal = true;
+        }
         self.arm_pairing_tick(window, cx);
         if tab == SettingsTab::Notifications {
             self.read_notify_state(window, cx);
@@ -3970,6 +4489,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> bool {
         let mods = &keystroke.modifiers;
+        let ctrl_only =
+            mods.control && !mods.alt && !mods.shift && !mods.platform && !mods.function;
+        if self.settings_open() && ctrl_only && keystroke.key == "f" {
+            // An open sound list closes first, as Tab closes it.
+            self.notifications.sound_list = None;
+            self.focus_settings_search(true, window, cx);
+            return true;
+        }
         if !self.settings_open() || mods.control || mods.alt || mods.platform || mods.function {
             return false;
         }
@@ -3988,10 +4515,12 @@ impl RootView {
             }
             _ if typing => false,
             ("up" | "down", false) if on_list => {
-                let tab = self
-                    .settings_tab
-                    .step(&self.settings_tabs(), keystroke.key == "down");
-                self.select_settings_tab(tab, window, cx);
+                // While searching, Up and Down walk the listed tabs only.
+                let tabs = self.listed_tabs(cx);
+                if !tabs.is_empty() {
+                    let tab = self.settings_tab.step(&tabs, keystroke.key == "down");
+                    self.select_settings_tab(tab, window, cx);
+                }
                 true
             }
             ("space" | "enter", false) => match self.focused_settings_control(window, cx) {
@@ -4014,7 +4543,8 @@ impl RootView {
     /// Whether a text field in the Settings modal or the appearance editor
     /// has the keyboard, so keys other than Tab are its.
     pub(crate) fn settings_typing(&self, window: &Window, cx: &App) -> bool {
-        self.worktrees_path_focused(window)
+        self.settings_search_focused(window)
+            || self.worktrees_path_focused(window)
             || self.remote_port_focused(window)
             || self.chat_width_focused(window)
             || self.launch_program_focused(window)
@@ -4219,6 +4749,18 @@ impl RootView {
         }
     }
 
+    /// At the top of the render, before any layer draws: this root's
+    /// search hit goes where its rows read it, or, with none (a blank query
+    /// or Settings closed), any hit it left there is cleared, so no
+    /// appearance editor outlines a row.
+    pub(crate) fn publish_search_hit(&self, cx: &mut Context<Self>) {
+        let slot = cx.try_global::<SearchHit>().and_then(|shown| shown.0);
+        let next = next_hit_slot(slot, cx.entity_id(), self.search_hit(cx));
+        if cx.try_global::<SearchHit>().is_none() || next != slot {
+            cx.set_global(SearchHit(next));
+        }
+    }
+
     /// The Settings modal over a backdrop that takes every click beneath
     /// it; a click on the backdrop itself does nothing.
     pub(crate) fn settings_layer(
@@ -4318,10 +4860,27 @@ impl RootView {
     fn settings_tab_list(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
         let list_focused = self.settings_tabs_focus.is_focused(window);
-        let tabs: Vec<AnyElement> = self
-            .settings_rows()
+        // While the query holds a word, only the tabs holding a match show,
+        // each with its count, or one line saying none does.
+        let rows: Vec<(SettingsRow, Option<usize>)> = match self.search_hits(cx) {
+            Some(hits) => self.search_rows(&hits),
+            None => self
+                .settings_rows()
+                .into_iter()
+                .map(|row| (row, None))
+                .collect(),
+        };
+        let no_match = (rows.is_empty() && self.search_query(cx).is_some()).then(|| {
+            div()
+                .driver_id(|| "settings-search-no-match".to_owned())
+                .px(px(12.0))
+                .py(px(8.0))
+                .text_color(gpui::rgb(t.muted))
+                .child(NO_MATCH)
+        });
+        let tabs: Vec<AnyElement> = rows
             .into_iter()
-            .map(|row| match row {
+            .map(|(row, count)| match row {
                 SettingsRow::Group(label) => group_row(
                     crate::fonts::ui_text_size(cx),
                     crate::fonts::ui_weight_shift(cx),
@@ -4330,7 +4889,7 @@ impl RootView {
                 )
                 .into_any_element(),
                 SettingsRow::Tab(tab) => self
-                    .settings_tab_row(tab, list_focused, cx)
+                    .settings_tab_row(tab, list_focused, count, cx)
                     .into_any_element(),
             })
             .collect();
@@ -4347,8 +4906,10 @@ impl RootView {
             .bg(gpui::rgb(t.modal_inset))
             .border_r_1()
             .border_color(gpui::rgb(t.card_edge))
+            .children(self.settings_search_field(window, cx))
             .children(self.settings_host_row(cx))
             .children(tabs)
+            .children(no_match)
     }
 
     /// The host selector over the tab list, while the window holds two or
@@ -4416,11 +4977,13 @@ impl RootView {
     }
 
     /// One clickable tab row; the shown one is filled, bold, and ringed
-    /// while the list has the keyboard.
+    /// while the list has the keyboard. While searching, `count` follows
+    /// the label, muted: how many of the tab's rows match.
     fn settings_tab_row(
         &self,
         tab: SettingsTab,
         list_focused: bool,
+        count: Option<usize>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = theme(cx);
@@ -4461,6 +5024,13 @@ impl RootView {
                 this.select_settings_tab(tab, window, cx);
             }))
             .child(label)
+            .children(count.map(|count| {
+                div()
+                    .driver_id(move || format!("{selector}-count"))
+                    .text_color(gpui::rgb(t.muted))
+                    .whitespace_nowrap()
+                    .child(format!("  {count}"))
+            }))
             .children(if tab == SettingsTab::RemoteAccess {
                 self.remote_access_tab_badge(
                     crate::fonts::ui_text_size(cx),
@@ -4505,6 +5075,7 @@ impl RootView {
         let path = SettingsControl::WorktreesPath;
         let field = field_frame(focused == Some(path), &theme(cx))
             .driver_id(|| path.selector().to_owned())
+            .children(search_hit_marker(path.selector(), SEGMENT_RADIUS, cx))
             .flex_1()
             .min_w(px(0.0))
             .on_mouse_down(
@@ -4639,6 +5210,7 @@ impl RootView {
         let port = SettingsControl::RemotePort;
         let frame = field_frame(focused == Some(port), &theme(cx))
             .driver_id(|| port.selector().to_owned())
+            .children(search_hit_marker(port.selector(), SEGMENT_RADIUS, cx))
             .w(px(PORT_FIELD_WIDTH));
         let field = if enabled {
             frame
@@ -4903,6 +5475,7 @@ impl RootView {
                     .text_color(gpui::rgb(t.text))
             })
             .on_click(press(link, cx))
+            .children(search_hit_marker(selector, LINK_RADIUS, cx))
             .when(focused == Some(link), |open| {
                 open.child(focus_ring(LINK_RADIUS, &theme(cx)))
             })
@@ -4918,28 +5491,7 @@ impl RootView {
             .child(open);
         let shown = self.shown_local();
         let settings = &shown.notifications;
-        let needs_you = toggle(
-            SettingsControl::NotifyNeedsYou,
-            ToggleState {
-                checked: settings.awaiting_input,
-                enabled: true,
-            },
-            "Needs you",
-            focused,
-            cx,
-        );
-        let sound = self.needs_you_sound_rows(focused, cx);
-        let finished_sound = self.finished_sound_rows(focused, cx);
-        let finished = toggle(
-            SettingsControl::NotifyFinished,
-            ToggleState {
-                checked: settings.finished,
-                enabled: true,
-            },
-            "Finished",
-            focused,
-            cx,
-        );
+        let kinds = self.notify_kind_rows(settings, focused, cx);
         let skip_when = settings.skip_when;
         let skips = NOTIFY_SKIP_CHOICES.map(|choice| {
             let text = match choice {
@@ -4976,15 +5528,50 @@ impl RootView {
                  with no background work left.",
             &t,
         ))
-        .child(needs_you)
-        .child(sound)
-        .child(finished)
-        .child(finished_sound)
+        .children(kinds)
         .children(grace_row)
         .child(skip_row);
         #[cfg(windows)]
         let section = section.child(Self::toast_style_row(settings.toast_style, focused, cx));
         vec![section.into_any_element()]
+    }
+
+    /// The Needs you switch and its sound rows, then the Finished switch
+    /// and its sound rows, as `settings` holds them.
+    fn notify_kind_rows(
+        &self,
+        settings: &crate::sidebar::NotificationSettings,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> [AnyElement; 4] {
+        let needs_you = toggle(
+            SettingsControl::NotifyNeedsYou,
+            ToggleState {
+                checked: settings.awaiting_input,
+                enabled: true,
+            },
+            "Needs you",
+            focused,
+            cx,
+        );
+        let sound = self.needs_you_sound_rows(focused, cx);
+        let finished_sound = self.finished_sound_rows(focused, cx);
+        let finished = toggle(
+            SettingsControl::NotifyFinished,
+            ToggleState {
+                checked: settings.finished,
+                enabled: true,
+            },
+            "Finished",
+            focused,
+            cx,
+        );
+        [
+            needs_you.into_any_element(),
+            sound.into_any_element(),
+            finished.into_any_element(),
+            finished_sound.into_any_element(),
+        ]
     }
 
     /// The row choosing how long a Finished toast is held, `chosen` marked.
@@ -5158,6 +5745,7 @@ impl RootView {
             .justify_between()
             .gap(px(8.0))
             .cursor_pointer()
+            .children(search_hit_marker(selector, SEGMENT_RADIUS, cx))
             .child(chosen)
             .child(chevron)
             .on_click(press(control, cx));
@@ -5193,6 +5781,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let t = theme(cx);
+        let shown = self.shown_local();
         let selected = self.keep_awake_mode();
         let modes = KEEP_AWAKE_CHOICES.map(|choice| {
             (
@@ -5233,7 +5822,7 @@ impl RootView {
         let copy = toggle(
             SettingsControl::CopyOnSelect,
             ToggleState {
-                checked: self.shown_local().general.copy_on_select,
+                checked: shown.general.copy_on_select,
                 enabled: true,
             },
             "Copy selection to clipboard automatically",
@@ -5260,19 +5849,23 @@ impl RootView {
             self.updates_section(focused, cx).into_any_element(),
         ];
         if self.settings_host == HostKey::Local {
-            rows.push(self.diagnostics_section(focused, cx).into_any_element());
+            rows.push(Self::diagnostics_section(&shown, focused, cx).into_any_element());
         }
         rows
     }
 
     /// The Diagnostics section: the Detailed logging switch, why it fills the
     /// logs faster, and the button that opens the logs folder. This PC only.
-    fn diagnostics_section(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
+    fn diagnostics_section(
+        shown: &ShownLocal,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let t = theme(cx);
         let detailed = toggle(
             SettingsControl::DetailedLogging,
             ToggleState {
-                checked: self.shown_local().general.detailed_logging,
+                checked: shown.general.detailed_logging,
                 enabled: true,
             },
             "Detailed logging",
@@ -5339,6 +5932,7 @@ impl RootView {
         let control = SettingsControl::ChatWidth;
         let frame = field_frame(focused == Some(control), &theme(cx))
             .driver_id(|| control.selector().to_owned())
+            .children(search_hit_marker(control.selector(), SEGMENT_RADIUS, cx))
             .w(px(PORT_FIELD_WIDTH))
             .on_mouse_down(
                 MouseButton::Left,
@@ -5768,6 +6362,33 @@ impl RootView {
         if every || self.summarizer_needs_key() {
             controls.extend(KEY_SOURCE_CHOICES.map(SettingsControl::DashboardKeySource));
             controls.extend(self.key_controls(every));
+        }
+        controls.extend([
+            SettingsControl::DashboardCap,
+            SettingsControl::DashboardTest,
+        ]);
+        controls
+    }
+
+    /// The Dashboard tab's stops [`Self::dashboard_tab_content`] draws now,
+    /// a locked or disabled one included: none before the daemon reports
+    /// its summarizer, the key rows only for a provider that takes a key,
+    /// and Key and Clear or Variable by the key source.
+    fn dashboard_drawn(&self) -> Vec<SettingsControl> {
+        if self.shown_summarizer().is_none() {
+            return Vec::new();
+        }
+        let mut controls = vec![SettingsControl::DashboardEnabled];
+        controls.extend(self.provider_controls());
+        if self.summarizer_needs_key() {
+            controls.extend(KEY_SOURCE_CHOICES.map(SettingsControl::DashboardKeySource));
+            match self.shown_key_source() {
+                KeySourceChoice::Stored => controls.extend([
+                    SettingsControl::DashboardKey,
+                    SettingsControl::DashboardKeyClear,
+                ]),
+                KeySourceChoice::Env => controls.push(SettingsControl::DashboardEnvVariable),
+            }
         }
         controls.extend([
             SettingsControl::DashboardCap,
@@ -6410,6 +7031,7 @@ impl RootView {
     ) -> Div {
         let frame = field_frame(focused == Some(control), &theme(cx))
             .driver_id(move || control.selector().to_owned())
+            .children(search_hit_marker(control.selector(), SEGMENT_RADIUS, cx))
             .w(px(width))
             .child(input.clone());
         if self.summarizer_locked() {
@@ -6485,7 +7107,8 @@ fn settings_button(
             &theme(cx),
         ),
         focused == Some(control),
-    );
+    )
+    .children(search_hit_marker(control.selector(), SEGMENT_RADIUS, cx));
     if enabled {
         button.on_click(press(control, cx))
     } else {
@@ -6510,6 +7133,7 @@ fn toggle(
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let hit = search_hit_marker(control.selector(), 0.0, cx);
     let row = checkbox_row(
         crate::fonts::ui_text_size(cx),
         crate::fonts::ui_weight_shift(cx),
@@ -6519,13 +7143,11 @@ fn toggle(
         label.into(),
         &theme(cx),
     );
+    let wrap = div().relative().flex().children(hit);
     if state.enabled {
-        div().flex().child(row.on_click(press(control, cx)))
+        wrap.child(row.on_click(press(control, cx)))
     } else {
-        div()
-            .flex()
-            .opacity(DISABLED_OPACITY)
-            .child(row.cursor_default())
+        wrap.opacity(DISABLED_OPACITY).child(row.cursor_default())
     }
 }
 
@@ -6581,12 +7203,13 @@ pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsC
             SettingsControl::CheckNow,
         ])
         .chain(
-            [
-                SettingsControl::DetailedLogging,
-                SettingsControl::OpenLogsFolder,
-            ]
-            .into_iter()
-            .filter(|_| logging),
+            logging
+                .then_some([
+                    SettingsControl::DetailedLogging,
+                    SettingsControl::OpenLogsFolder,
+                ])
+                .into_iter()
+                .flatten(),
         )
         .collect()
 }
@@ -7218,6 +7841,7 @@ fn agent_field_row(
     let enabled = page.live && !view.disabled;
     let row = match &view.editor {
         FieldEditor::Choice { choices, .. } => {
+            let hit = row_hit_marker(&controls, cx);
             let buttons = controls
                 .iter()
                 .zip(choices)
@@ -7245,6 +7869,8 @@ fn agent_field_row(
                 view.label.clone(),
                 &theme(cx),
             )
+            .relative()
+            .children(hit)
             .child(div().flex().child(segmented(buttons, &theme(cx))))
         }
         FieldEditor::Toggle => {
@@ -7277,21 +7903,7 @@ fn agent_field_row(
                 frame.opacity(DISABLED_OPACITY)
             })
         }
-        FieldEditor::Unknown => {
-            let selector = format!("settings-{tag}-{}", field_part(&view.id));
-            field(
-                crate::fonts::ui_text_size(cx),
-                crate::fonts::ui_weight_shift(cx),
-                view.label.clone(),
-                &theme(cx),
-            )
-            .child(
-                div()
-                    .driver_id(move || selector)
-                    .opacity(DISABLED_OPACITY)
-                    .child(muted(UPDATE_CLIENT, &theme(cx))),
-            )
-        }
+        FieldEditor::Unknown => unknown_field_row(tag, view, cx),
     };
     let locked = view.disabled && view.editor != FieldEditor::Unknown;
     let note = locked.then(|| {
@@ -7309,6 +7921,31 @@ fn agent_field_row(
     )
 }
 
+/// The row of agent page `tag`'s field `view`, of a kind this client draws
+/// no control for: the note saying so. The search lists the row, so it
+/// draws the outline as every other row does, outside the dimmed note.
+fn unknown_field_row(tag: &str, view: &FieldView, cx: &mut Context<RootView>) -> Div {
+    let selector = format!("settings-{tag}-{}", field_part(&view.id));
+    let hit = search_hit_marker(&selector, SEGMENT_RADIUS, cx);
+    field(
+        crate::fonts::ui_text_size(cx),
+        crate::fonts::ui_weight_shift(cx),
+        view.label.clone(),
+        &theme(cx),
+    )
+    .child(
+        div()
+            .relative()
+            .driver_id(move || selector)
+            .children(hit)
+            .child(
+                div()
+                    .opacity(DISABLED_OPACITY)
+                    .child(muted(UPDATE_CLIENT, &theme(cx))),
+            ),
+    )
+}
+
 /// A text field's frame round `input`; a click gives it the keyboard
 /// unless the field takes no input.
 fn input_frame(
@@ -7318,8 +7955,10 @@ fn input_frame(
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
 ) -> Div {
+    let hit = search_hit_marker(control.selector(), SEGMENT_RADIUS, cx);
     let frame = field_frame(focused == Some(control), &theme(cx))
         .driver_id(|| control.selector().to_owned())
+        .children(hit)
         .child(input.clone());
     if editable {
         frame.on_mouse_down(
@@ -7533,6 +8172,9 @@ fn choice_row(
 ) -> AnyElement {
     let t = theme(cx);
     let enabled = matches!(lock, RowLock::Live);
+    let hit = choices
+        .iter()
+        .find_map(|(control, _, _)| search_hit_marker(control.selector(), 0.0, cx));
     let buttons = choices
         .iter()
         .map(|(control, text, selected)| {
@@ -7565,6 +8207,8 @@ fn choice_row(
         label,
         &theme(cx),
     )
+    .relative()
+    .children(hit)
     .child(div().flex().child(segmented(buttons, &theme(cx))))
     .children(note)
     .into_any_element()
@@ -7583,12 +8227,47 @@ mod tests {
 
     use super::{
         AgentTab, AgentTabs, HostAgentTabs, HostPending, LocalPending, PendingEdit, PendingRow,
-        PendingSettings, SettingsTab, apply_enabled, control_matches, intern, row_tabs,
-        settings_host_after_close, tab_kept, tab_rows, text_pending,
+        PendingSettings, SettingsTab, apply_enabled, control_matches, intern, next_hit_slot,
+        owned_hit, row_tabs, settings_host_after_close, tab_kept, tab_rows, text_pending,
     };
     use crate::agent_options::{FieldEditor, FieldView};
     use crate::target::HostKey;
     use crate::text_input::TextInput;
+
+    // The UI harness opens one window per spec and cannot open a second, so
+    // the hit's scope to the root that owns it is held here.
+    #[test]
+    fn a_search_hit_is_drawn_only_for_the_root_that_owns_it() {
+        let mine = gpui::EntityId::from(1_u64);
+        let other = gpui::EntityId::from(2_u64);
+        assert_eq!(owned_hit(Some((mine, "row")), mine), Some("row"));
+        assert_eq!(
+            owned_hit(Some((other, "row")), mine),
+            None,
+            "another window's root, and its pane appearance editor, draw no outline"
+        );
+        assert_eq!(owned_hit(None, mine), None);
+    }
+
+    #[test]
+    fn a_root_with_no_hit_clears_only_its_own() {
+        let mine = gpui::EntityId::from(1_u64);
+        let other = gpui::EntityId::from(2_u64);
+        assert_eq!(
+            next_hit_slot(Some((mine, "row")), mine, None),
+            None,
+            "a closed Settings or a blank query clears this root's hit"
+        );
+        assert_eq!(
+            next_hit_slot(Some((other, "row")), mine, None),
+            Some((other, "row")),
+            "a root without a hit leaves another root's for that root"
+        );
+        assert_eq!(
+            next_hit_slot(Some((other, "row")), mine, Some("mine")),
+            Some((mine, "mine"))
+        );
+    }
 
     const FIXED: [&str; 8] = [
         "General",

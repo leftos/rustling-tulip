@@ -117,13 +117,6 @@ mod scrollbar;
 mod section;
 mod session_actions;
 mod session_menu;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Settings view does not call the catalogue yet"
-    )
-)]
 mod settings_search;
 mod settings_view;
 mod shell_dialog;
@@ -970,6 +963,9 @@ pub struct RootView {
     /// last render saw it; when it leaves the ring the keyboard moves on
     /// from its place.
     settings_ring_control: Option<settings_view::SettingsControl>,
+    /// The Settings search box, while Settings is open; built afresh at
+    /// each opening.
+    settings_search: Option<settings_view::SettingsSearch>,
     /// The Remote access page's port field and login launch, once shown.
     remote_access_tab: Option<settings_view::RemoteAccessTab>,
     /// The agent pages' launch-command and text fields, each kept per host
@@ -1545,6 +1541,7 @@ impl RootView {
             settings_scroll: scrollbar::Scrollbar::default(),
             settings_control: None,
             settings_ring_control: None,
+            settings_search: None,
             remote_access_tab: None,
             agent_tabs: settings_view::AgentTabs::default(),
             settings_pending: settings_view::PendingSettings::default(),
@@ -5436,6 +5433,9 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(feature = "driver")]
         driver::registry::begin_frame(window, cx);
+        // Every row below reads this root's search hit, and only this
+        // root's.
+        self.publish_search_hit(cx);
         // Tab switches and renames made here change the title without a
         // daemon message.
         self.refresh_window_title(window, cx);

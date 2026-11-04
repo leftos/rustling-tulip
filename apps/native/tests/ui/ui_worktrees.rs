@@ -268,7 +268,7 @@ fn apply_that_the_echo_disables_keeps_the_keyboard(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("list"),
+        Some("settings-search"),
         "Tab walks on from there"
     );
 }

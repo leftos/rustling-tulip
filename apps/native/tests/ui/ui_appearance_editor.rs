@@ -305,6 +305,7 @@ fn editor_tab_walks_the_same_stops_as_settings(cx: &mut TestAppContext) {
     // Settings' footer is its own: the editor ends on its Close instead.
     ring.retain(|stop| {
         *stop != "settings-cancel"
+            && *stop != "settings-search"
             && !stop.starts_with("appearance-ui-family")
             && !stop.starts_with("appearance-ui-text-size")
             && !stop.starts_with("appearance-ui-weight")

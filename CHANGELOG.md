@@ -13,6 +13,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The chat column stays a readable width on wide panes, and each turn's final answer is set apart in its own box.
 - The chat's new Compact mode, on by default, folds a run of reads, searches and commands into one line you can open, like the terminal does.
 - Settings > General has a Diagnostics section with a Detailed logging switch that records why sessions change status, and an Open logs folder button.
+- Settings has a search box that finds a setting on any page, with match counts per page and the match highlighted; Ctrl+F jumps there.
 
 ### Fixed
 

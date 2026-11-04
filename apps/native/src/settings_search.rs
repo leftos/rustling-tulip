@@ -133,6 +133,131 @@ pub(crate) fn results(query: &str, entries: &[Entry], visible: Visibility) -> Ve
     hits
 }
 
+/// What one tab draws now: the selectors of its stops in the order Tab
+/// walks them, and the driver ids of its rows that have no control of their
+/// own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DrawnTab {
+    /// The tab.
+    pub tab: SettingsTab,
+    /// The selectors of the controls its page draws now.
+    pub stops: Vec<&'static str>,
+    /// The ids of the rows it draws now that no control of their own names.
+    pub rows: Vec<String>,
+}
+
+/// The entries among `entries` whose row is drawn now: its tab is among
+/// `tabs` and names the entry's selector as a stop or a row.
+#[must_use]
+pub(crate) fn drawn(entries: Vec<Entry>, tabs: &[DrawnTab]) -> Vec<Entry> {
+    entries
+        .into_iter()
+        .filter(|entry| {
+            tabs.iter().any(|drawn| {
+                drawn.tab == entry.tab
+                    && (drawn.stops.contains(&entry.selector.as_ref())
+                        || drawn.rows.iter().any(|row| *row == entry.selector))
+            })
+        })
+        .collect()
+}
+
+/// Ring stops on the tabs whose stop orders need live state, so the unit
+/// guards cannot see them, that are no settings row of their own, with why:
+/// the UI spec that walks every tab's ring applies them beside [`EXEMPT`].
+pub(crate) const RING_EXEMPT: &[(&str, &str)] = &[
+    (
+        "settings-needs-you-sound-play",
+        "the Needs you sound row's Play button",
+    ),
+    (
+        "settings-finished-sound-play",
+        "the Finished sound row's Play button",
+    ),
+    (
+        "settings-finished-grace-2",
+        "another choice of the Hold a Finished toast for row",
+    ),
+    (
+        "settings-finished-grace-5",
+        "another choice of the Hold a Finished toast for row",
+    ),
+    (
+        "settings-finished-grace-10",
+        "another choice of the Hold a Finished toast for row",
+    ),
+    (
+        "settings-finished-grace-20",
+        "another choice of the Hold a Finished toast for row",
+    ),
+    (
+        "settings-notify-skip-focused",
+        "another choice of the Skip notifications when row",
+    ),
+    (
+        "settings-notify-skip-never",
+        "another choice of the Skip notifications when row",
+    ),
+    (
+        "settings-toast-style-app",
+        "another choice of the Show toasts as row",
+    ),
+    (
+        "settings-dashboard-key-source-env",
+        "another choice of the Key source row",
+    ),
+    ("settings-dashboard-key-clear", "the Key row's Clear button"),
+    (
+        "settings-worktrees-root-browse",
+        "the Path row's Browse button",
+    ),
+    (
+        "settings-count-busy",
+        "another choice of the Tab and badge count row",
+    ),
+    (
+        "settings-count-idle",
+        "another choice of the Tab and badge count row",
+    ),
+];
+
+/// Whether a search covers the control `selector`: a catalogue entry
+/// names it, an exemption says why none needs to, it is a provider of the
+/// Dashboard's Provider row, or another choice of an agent page's choice row
+/// whose first choice an entry names.
+#[must_use]
+pub(crate) fn names(selector: &str, agents: &[AgentDescriptor]) -> bool {
+    let catalogue = entries(agents);
+    let catalogued = |selector: &str| catalogue.iter().any(|entry| entry.selector == selector);
+    if catalogued(selector)
+        || EXEMPT
+            .iter()
+            .chain(RING_EXEMPT)
+            .any(|(exempt, _)| *exempt == selector)
+    {
+        return true;
+    }
+    if selector.starts_with("settings-dashboard-provider-") {
+        return catalogued("settings-dashboard-provider");
+    }
+    agents.iter().any(|descriptor| {
+        let options = AgentOptions::new(descriptor.clone(), None);
+        options
+            .settings_fields(false)
+            .iter()
+            .enumerate()
+            .any(|(index, view)| {
+                let controls = field_controls(&descriptor.tag, index, view);
+                controls
+                    .iter()
+                    .any(|control| control.selector() == selector)
+                    && controls
+                        .first()
+                        .is_some_and(|first| catalogued(first.selector()))
+            })
+    })
+}
+
 /// Whether `text` holds `word`, ignoring case: `word` is already lowercased
 /// once by the caller.
 fn holds(text: &str, word: &str) -> bool {
@@ -646,6 +771,97 @@ fn field_entry(
     }
 }
 
+/// Drawn controls that are no settings row of their own, with why: the
+/// other choice of a choice row, the far end of a stepper, and a row's
+/// reset link. No query needs to land on one, so no entry names it.
+pub(crate) const EXEMPT: &[(&str, &str)] = &[
+    (
+        "settings-keep-awake-when-busy",
+        "another choice of the Keep this PC awake row",
+    ),
+    (
+        "settings-keep-awake-always",
+        "another choice of the Keep this PC awake row",
+    ),
+    (
+        "settings-sidebar-view-tabs",
+        "another choice of the Default view row",
+    ),
+    (
+        "settings-leaf-density-compact",
+        "another choice of the Leaf density row",
+    ),
+    (
+        "settings-sessions-under-repos-busy",
+        "another choice of the Sessions under repos row",
+    ),
+    (
+        "settings-sessions-under-repos-none",
+        "another choice of the Sessions under repos row",
+    ),
+    (
+        "settings-repo-sort-active",
+        "another choice of the Sort repos row",
+    ),
+    (
+        "settings-repo-sort-needs-you",
+        "another choice of the Sort repos row",
+    ),
+    (
+        "settings-chat-mode-comfortable",
+        "another choice of the Chat view row",
+    ),
+    (
+        "appearance-frame-width-up",
+        "the other end of the Frame width stepper",
+    ),
+    (
+        "appearance-frame-width-reset",
+        "the Frame width row's reset link",
+    ),
+    (
+        "appearance-ui-family-list",
+        "the UI font row's list, under its filter",
+    ),
+    (
+        "appearance-ui-text-size-up",
+        "the other end of the UI text size stepper",
+    ),
+    (
+        "appearance-ui-weight-medium",
+        "another choice of the UI weight row",
+    ),
+    (
+        "appearance-ui-weight-semibold",
+        "another choice of the UI weight row",
+    ),
+    (
+        "appearance-family-list",
+        "the Font family row's list, under its filter",
+    ),
+    (
+        "appearance-size-up",
+        "the other end of the Font size stepper",
+    ),
+    ("appearance-size-reset", "the Font size row's reset link"),
+    (
+        "appearance-term-weight-medium",
+        "another choice of the Terminal weight row",
+    ),
+    (
+        "appearance-term-weight-semibold",
+        "another choice of the Terminal weight row",
+    ),
+    (
+        "appearance-term-weight-bold",
+        "another choice of the Terminal weight row",
+    ),
+    (
+        "appearance-term-weight-reset",
+        "the Terminal weight row's reset link",
+    ),
+];
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -818,6 +1034,47 @@ mod tests {
     }
 
     #[test]
+    fn only_drawn_entries_are_searched() {
+        let general = |logging: bool| DrawnTab {
+            tab: SettingsTab::General,
+            stops: general_controls(true, logging)
+                .iter()
+                .map(|control| control.selector())
+                .collect(),
+            rows: Vec::new(),
+        };
+        let drawn_now = drawn(catalogue(), &[general(false)]);
+        assert!(
+            results("logs", &drawn_now, all_visible()).is_empty(),
+            "rows the page does not draw are not found"
+        );
+        assert!(
+            results("font", &drawn_now, all_visible()).is_empty(),
+            "a tab not drawn is not searched"
+        );
+        let drawn_now = drawn(catalogue(), &[general(true)]);
+        assert_eq!(results("logs", &drawn_now, all_visible())[0].count, 2);
+
+        let dashboard = |rows: Vec<String>| DrawnTab {
+            tab: SettingsTab::Dashboard,
+            stops: vec!["settings-dashboard-enabled"],
+            rows,
+        };
+        let drawn_now = drawn(catalogue(), &[dashboard(Vec::new())]);
+        assert!(
+            results("provider", &drawn_now, all_visible()).is_empty(),
+            "the Provider row is out while no provider is drawn"
+        );
+        let drawn_now = drawn(
+            catalogue(),
+            &[dashboard(vec!["settings-dashboard-provider".to_owned()])],
+        );
+        let hits = results("provider", &drawn_now, all_visible());
+        assert_eq!(tabs(&hits), [SettingsTab::Dashboard]);
+        assert_eq!(drawn_now[hits[0].first].label, "Provider");
+    }
+
+    #[test]
     fn an_agent_tab_title_matches_its_launch_command_rows() {
         let descriptor = agent_api::test_agent::DESCRIPTOR.clone();
         let entries = entries(std::slice::from_ref(&descriptor));
@@ -892,97 +1149,6 @@ mod tests {
             }
         }
     }
-
-    /// Drawn controls that are no settings row of their own, with why: the
-    /// other choice of a choice row, the far end of a stepper, and a row's
-    /// reset link. No query needs to land on one, so no entry names it.
-    const EXEMPT: &[(&str, &str)] = &[
-        (
-            "settings-keep-awake-when-busy",
-            "another choice of the Keep this PC awake row",
-        ),
-        (
-            "settings-keep-awake-always",
-            "another choice of the Keep this PC awake row",
-        ),
-        (
-            "settings-sidebar-view-tabs",
-            "another choice of the Default view row",
-        ),
-        (
-            "settings-leaf-density-compact",
-            "another choice of the Leaf density row",
-        ),
-        (
-            "settings-sessions-under-repos-busy",
-            "another choice of the Sessions under repos row",
-        ),
-        (
-            "settings-sessions-under-repos-none",
-            "another choice of the Sessions under repos row",
-        ),
-        (
-            "settings-repo-sort-active",
-            "another choice of the Sort repos row",
-        ),
-        (
-            "settings-repo-sort-needs-you",
-            "another choice of the Sort repos row",
-        ),
-        (
-            "settings-chat-mode-comfortable",
-            "another choice of the Chat view row",
-        ),
-        (
-            "appearance-frame-width-up",
-            "the other end of the Frame width stepper",
-        ),
-        (
-            "appearance-frame-width-reset",
-            "the Frame width row's reset link",
-        ),
-        (
-            "appearance-ui-family-list",
-            "the UI font row's list, under its filter",
-        ),
-        (
-            "appearance-ui-text-size-up",
-            "the other end of the UI text size stepper",
-        ),
-        (
-            "appearance-ui-weight-medium",
-            "another choice of the UI weight row",
-        ),
-        (
-            "appearance-ui-weight-semibold",
-            "another choice of the UI weight row",
-        ),
-        (
-            "appearance-family-list",
-            "the Font family row's list, under its filter",
-        ),
-        (
-            "appearance-size-up",
-            "the other end of the Font size stepper",
-        ),
-        ("appearance-size-reset", "the Font size row's reset link"),
-        (
-            "appearance-term-weight-medium",
-            "another choice of the Terminal weight row",
-        ),
-        (
-            "appearance-term-weight-semibold",
-            "another choice of the Terminal weight row",
-        ),
-        (
-            "appearance-term-weight-bold",
-            "another choice of the Terminal weight row",
-        ),
-        (
-            "appearance-term-weight-reset",
-            "the Terminal weight row's reset link",
-        ),
-    ];
 
     /// The controls a unit test can see being drawn: the General tab's with
     /// both gates open, the Appearance tab's app-level stops in the order Tab

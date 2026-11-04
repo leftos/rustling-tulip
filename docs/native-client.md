@@ -371,11 +371,23 @@ The Settings modal's tab list reads General, Notifications, Dashboard, Spawn def
 
 Remote access (Tailscale) is absent from the list while the client's target is a remote host, and Settings falls back to General.
 
+A search box tops the tab list column (placeholder "Search settings", selector `settings-search`). While its query has a word, the list shows only the tabs with a match, each as `{label}  {count}` with the count muted; the `Agents` group row stays only while one of its pages is listed, and with no match the list is one muted line, "No settings match".
+
+A query matches a setting when every word is a case-insensitive substring of its label, its section heading, its tab title or one of its aliases; hints are not searched, and only rows drawn in the current state count. Agent pages are searched from their descriptors.
+
+The catalogue of searchable settings is hand-kept in `settings_search.rs`, with the aliases and the gates that say when a row is drawn. Drift guards (its unit tests and the UI spec `every_ring_stop_on_every_tab_has_a_catalogue_entry`) fail when a drawn control has no catalogue entry, so a new setting is added there.
+
+The shown tab's first match gets a 1 px accent outline and scrolls into view on every query change and on a pick. Typing keeps the shown tab if it still matches, else opens the first listed tab; while a query is set, Up and Down in the list walk only the listed tabs.
+
+Enter in the box moves the keyboard to the highlighted control without pressing it. Esc in a non-empty box clears it, and Esc in an empty box closes Settings. Ctrl+F, only while Settings is open, moves the keyboard to the box and selects its text. The query is cleared on every open and close.
+
 Every edit outside the Appearance tab is a pending edit until OK or Apply: text rows, toggles, choices and resets (the worktrees "Reset to default" empties the draft). Enter and leaving a field apply nothing, and there are no per-row Save or Apply buttons.
 
 Appearance keeps its live preview, outside the pending model. Action buttons with their own side effects stay immediate: Check now, Open logs folder, the notification settings link, sound Play, worktrees Browse (it fills the draft) and Manage, Dashboard key Clear and Test, and Remote access's start-at-login.
 
-The footer is OK, Apply and Cancel, right-aligned (`settings-ok`, `settings-apply`, `settings-cancel`). OK and Apply are dimmed and out of the Tab ring while nothing is pending or a pending row fails local validation (an invalid port or cap, an Environment-variable key source with no variable). The Tab ring ends OK, Apply, Cancel, then the tab list. Cancel, the title-bar X and Esc discard every pending edit and close.
+The footer is OK, Apply and Cancel, right-aligned (`settings-ok`, `settings-apply`, `settings-cancel`). OK and Apply are dimmed and out of the Tab ring while nothing is pending or a pending row fails local validation (an invalid port or cap, an Environment-variable key source with no variable).
+
+The Tab ring ends OK, Apply, Cancel, the search box, then the tab list; Shift+Tab from the tab list reaches the search box, and Settings still opens with the keyboard on the tab list. Cancel, the title-bar X and Esc discard every pending edit and close.
 
 Apply sends to every host that has pending edits, each host only its own. Drafts are per host where the page is per host, survive tab and host switches, and are dropped only when Settings closes. The state is runtime-only (`PendingSettings` in `settings_view.rs`): no saved-file shape and no protocol message changed.
 
@@ -956,7 +968,9 @@ The editor walks the same stops, Close included, and draws the focus ring on its
 
 The stop order, ring step (`step`), where focus goes when a press disables its stop (`after_lost`, shared by Settings and the editor), cursor and highlight logic is plain Rust in `appearance_stops.rs`, unit-tested; Settings keeps its one focus slot, `settings_control`.
 
-When a daemon echo or re-read removes the focused Settings control from the Tab ring (Worktrees Reset, Remote access Autostart, OK or Apply once nothing is pending, an agent field a rule disables), the keyboard moves to the next stop in that page's full order (`settings_stop_order`) instead of falling back to the tab list. The footer's OK, Apply and Cancel end the ring before the tab list. If the user has moved focus elsewhere, nothing moves. The rule runs at render time (`RootView::render` calls `keep_settings_keyboard`).
+When a daemon echo or re-read removes the focused Settings control from the Tab ring (Worktrees Reset, Remote access Autostart, OK or Apply once nothing is pending, an agent field a rule disables), the keyboard moves to the next stop in that page's full order (`settings_stop_order`) instead of falling back to the tab list.
+
+The footer's OK, Apply and Cancel end the ring before the search box and the tab list. If the user has moved focus elsewhere, nothing moves. The rule runs at render time (`RootView::render` calls `keep_settings_keyboard`).
 
 A text field without the keyboard draws no selection. A field built with its text selected shows the selection once it takes focus, and typing still replaces the text (`text_input.rs`, `painted_selection`).
 

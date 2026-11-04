@@ -468,7 +468,7 @@ fn tab_walks_the_remote_access_controls(cx: &mut TestAppContext) {
     open_page(&mut h);
     assert_eq!(settings_focus(&mut h), Some("list"));
     let mut walk = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..6 {
         h.keys("tab");
         walk.push(settings_focus(&mut h));
     }
@@ -479,18 +479,20 @@ fn tab_walks_the_remote_access_controls(cx: &mut TestAppContext) {
             Some(PORT),
             Some(AUTOSTART),
             Some("settings-cancel"),
+            Some("settings-search"),
             Some("list")
         ],
         "OK and Apply are out of the ring while the port is unchanged"
     );
     let mut back = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..6 {
         h.keys("shift-tab");
         back.push(settings_focus(&mut h));
     }
     assert_eq!(
         back,
         [
+            Some("settings-search"),
             Some("settings-cancel"),
             Some(AUTOSTART),
             Some(PORT),

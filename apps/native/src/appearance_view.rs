@@ -27,10 +27,10 @@ use crate::fonts;
 use crate::notices::ToastKind;
 use crate::section::field_column;
 use crate::session_menu::{backdrop, dialog_button, dialog_look, muted_row};
-use crate::settings_view::SettingsControl;
+use crate::settings_view::{SettingsControl, search_hit_marker};
 use crate::spawn_view::{
-    Look, choice_button, close_button, dialog_card, dialog_footer, dialog_title_bar, field_label,
-    segmented,
+    Look, SEGMENT_RADIUS, choice_button, close_button, dialog_card, dialog_footer,
+    dialog_title_bar, field_label, segmented,
 };
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::ui_theme::{UiTheme, theme};
@@ -463,6 +463,8 @@ impl RootView {
             self.dashboard_settings_tabs.clear();
             self.remote_access_tab = None;
             self.settings_control = None;
+            // The search box's query is never kept.
+            self.settings_search = None;
             self.focus_active_pane(window, cx);
             cx.notify();
         }
@@ -938,7 +940,8 @@ impl RootView {
                     &t,
                 ),
                 focus == Some(stop),
-            );
+            )
+            .children(search_hit_marker(stop.selector(), SEGMENT_RADIUS, cx));
             let button = if enabled {
                 button.on_click(click_stop(stop, Aim::Stop, cx))
             } else {
@@ -1002,6 +1005,7 @@ impl RootView {
                     on_click,
                     &t,
                 )
+                .children(search_hit_marker(stop.selector(), SEGMENT_RADIUS, cx))
                 .into_any_element(),
             );
         }
@@ -1105,6 +1109,7 @@ fn theme_section(
         dialog_look(offset, crate::fonts::ui_weight_shift(cx), false, true, &t),
         focus == Some(stop),
     )
+    .children(search_hit_marker(stop.selector(), SEGMENT_RADIUS, cx))
     .on_click(click_stop(stop, Aim::Stop, cx));
     div()
         .flex()
@@ -2087,7 +2092,8 @@ fn frame_width_section(
                 &t,
             ),
             focus == Some(stop),
-        );
+        )
+        .children(search_hit_marker(stop.selector(), SEGMENT_RADIUS, cx));
         let button = if enabled {
             button.on_click(click_stop(stop, Aim::Stop, cx))
         } else {
@@ -2151,6 +2157,11 @@ fn size_section(
         ),
         focused(AppearanceStop::SizeDown),
     )
+    .children(search_hit_marker(
+        AppearanceStop::SizeDown.selector(),
+        SEGMENT_RADIUS,
+        cx,
+    ))
     .on_click(click_stop(AppearanceStop::SizeDown, Aim::Stop, cx));
     let up = dialog_button(
         AppearanceStop::SizeUp.selector(),
@@ -2234,6 +2245,7 @@ fn term_weight_section(
                 on_click,
                 &t,
             )
+            .children(search_hit_marker(stop.selector(), SEGMENT_RADIUS, cx))
             .into_any_element(),
         );
     }
@@ -2272,8 +2284,10 @@ fn input_box(
 ) -> Div {
     let selector = stop.selector();
     let focused = focus == Some(stop);
+    let hit = search_hit_marker(selector, SEGMENT_RADIUS, cx);
     field_frame_with_ring(focused, format!("{selector}-ring"), &theme(cx))
         .driver_id(move || selector.to_owned())
+        .children(hit)
         .flex_1()
         .min_w(px(0.0))
         .on_mouse_down(

@@ -317,6 +317,35 @@ fn settings_escape_closes_from_its_fields(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_escape_clears_the_search_box_then_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, &fixture());
+
+    h.keys("ctrl-,");
+    h.click_on("settings-search");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-search"),
+        "the search box has the keyboard"
+    );
+    h.keys("l o g");
+    h.keys("escape");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Esc in a non-empty search box clears it, not Settings"
+    );
+    assert_eq!(h.root(RootView::settings_search_text), "");
+    assert_eq!(settings_focus(&mut h), Some("settings-search"));
+    h.keys("escape");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Esc in the empty search box closes Settings"
+    );
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard");
+}
+
+#[gpui::test]
 fn modal_escape_returns_focus_to_the_pane(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = attached(cx, &dir, &with_empty());

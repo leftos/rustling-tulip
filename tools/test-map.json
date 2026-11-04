@@ -762,7 +762,20 @@
         "apps/native/src/settings_view.rs",
         "apps/native/src/summarizer_settings.rs"
       ],
-      "filter": "(binary_id(rustling-tulip-native) & test(/^(settings_view|summarizer_settings)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_recover|ui_remote|ui_remote_access|ui_settings|ui_sidebar|ui_spawn_dialog|ui_worktrees)::/))"
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(settings_view|summarizer_settings|settings_search)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_appearance_editor|ui_keys|ui_notifications|ui_recover|ui_remote|ui_remote_access|ui_settings|ui_settings_search|ui_sidebar|ui_spawn_dialog|ui_worktrees)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/settings_search.rs",
+        "apps/native/tests/ui/ui_settings_search.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^settings_search::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_settings|ui_settings_search)::/))"
+    },
+    {
+      "paths": [
+        "apps/native/src/logging.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^logging::/)"
     },
     {
       "paths": [
