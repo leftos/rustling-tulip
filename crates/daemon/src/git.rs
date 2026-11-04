@@ -1137,12 +1137,27 @@ pub async fn existing_or_derived_worktree(
 }
 
 /// Whether `path` lies strictly below `root`, compared the way session
-/// records compare paths (case- and separator-insensitive on Windows).
+/// records compare paths (case- and separator-insensitive on Windows) and
+/// after resolving both, so a path git reports canonicalised (`/tmp` is
+/// `/private/tmp` on macOS) is still under a root named by its other
+/// spelling. A path that cannot be resolved compares as given.
 fn path_is_under(path: &Path, root: &Path) -> bool {
-    let path = crate::paths::normalize_path_key(&path.to_string_lossy());
-    let root = crate::paths::normalize_path_key(&root.to_string_lossy());
+    let path = crate::paths::normalize_path_key(&resolved_path(path).to_string_lossy());
+    let root = crate::paths::normalize_path_key(&resolved_path(root).to_string_lossy());
     path.strip_prefix(&root)
         .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// `path` canonicalised when it exists, else as given.
+#[cfg(not(windows))]
+fn resolved_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `path` as stored: Windows compares the spelling it was given.
+#[cfg(windows)]
+fn resolved_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -1482,7 +1497,17 @@ mod tests {
 
     /// Create a throwaway git repo on `main` with a single committed file.
     async fn init_repo(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("rt-git-{}-{tag}", std::process::id()));
+        // Under the temp root as the OS resolves it: git reports a worktree's
+        // path canonicalised (`/tmp` is `/private/tmp` on macOS), and these
+        // fixtures compare what git prints against the folder they made. Kept
+        // as given on Windows, whose canonical form carries the verbatim
+        // prefix `git` is never handed here.
+        #[cfg(not(windows))]
+        let temp =
+            std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        #[cfg(windows)]
+        let temp = std::env::temp_dir();
+        let root = temp.join(format!("rt-git-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create repo dir");
         run_git(&root, &["init"]).await.expect("git init");

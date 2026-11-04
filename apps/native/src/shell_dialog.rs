@@ -355,15 +355,43 @@ mod tests {
     use super::*;
     use crate::repo_add::HostPathProblem;
 
+    /// A folder that is a full path on this platform: `parts` under a drive
+    /// root on Windows, under the root elsewhere.
+    fn full(parts: &[&str]) -> String {
+        let mut path = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\")
+        } else {
+            std::path::PathBuf::from("/")
+        };
+        for part in parts {
+            path.push(part);
+        }
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn only_a_full_path_can_be_opened() {
         let form = ShellForm::new(1, None);
         for folder in ["", "   ", "work", "sub\\dir", ".\\x", "C:work"] {
             assert!(!form.can_submit(folder), "{folder:?} opens nothing");
         }
-        for folder in ["C:\\work", "C:/work", "\\\\server\\share", "  C:\\work  "] {
-            assert!(form.can_submit(folder), "{folder:?} is a full path");
-            assert!(form.hint(folder).is_none(), "{folder:?} shows no hint");
+        #[cfg(windows)]
+        let full_paths = [
+            r"C:\work".to_owned(),
+            "C:/work".to_owned(),
+            r"\\server\share".to_owned(),
+            format!("  {}  ", r"C:\work"),
+        ];
+        #[cfg(not(windows))]
+        let full_paths = [
+            full(&["work"]),
+            full(&["home", "me"]),
+            full(&[]),
+            format!("  {}  ", full(&["work"])),
+        ];
+        for folder in full_paths {
+            assert!(form.can_submit(&folder), "{folder:?} is a full path");
+            assert!(form.hint(&folder).is_none(), "{folder:?} shows no hint");
         }
         for folder in ["", "  "] {
             assert!(
@@ -380,21 +408,29 @@ mod tests {
 
     #[test]
     fn local_shell_folder_check_is_unchanged() {
-        let mut form = ShellForm::new(1, Some("C:\\work"));
+        let remembered = full(&["work"]);
+        let mut form = ShellForm::new(1, Some(&remembered));
+        assert_eq!(form.hint("work").as_deref(), Some(PATH_HINT));
+        assert_eq!(form.hint(&remembered), None);
+        assert_eq!(
+            form.submit(&format!(" {remembered} ")),
+            Some(ShellSubmission {
+                folder: remembered.clone(),
+                save_default: true,
+            })
+        );
+    }
+
+    /// Windows only: a POSIX path is no full path on this PC.
+    #[cfg(windows)]
+    #[test]
+    fn local_shell_folder_check_refuses_a_posix_path() {
+        let form = ShellForm::new(1, Some(r"C:\work"));
         assert!(
             !form.can_submit("/home/me"),
             "a POSIX path is no full path on this PC"
         );
         assert_eq!(form.hint("/home/me").as_deref(), Some(PATH_HINT));
-        assert_eq!(form.hint("work").as_deref(), Some(PATH_HINT));
-        assert_eq!(form.hint("C:\\work"), None);
-        assert_eq!(
-            form.submit(" C:\\work "),
-            Some(ShellSubmission {
-                folder: "C:\\work".to_owned(),
-                save_default: true,
-            })
-        );
     }
 
     #[test]
@@ -443,25 +479,24 @@ mod tests {
             form.submit("work").is_none(),
             "a relative folder goes nowhere"
         );
+        let deep = full(&["work", "deep"]);
         assert_eq!(
-            form.submit("  C:\\work\\deep  "),
+            form.submit(&format!("  {deep}  ")),
             Some(ShellSubmission {
-                folder: "C:\\work\\deep".to_owned(),
+                folder: deep.clone(),
                 save_default: true,
             })
         );
-        assert!(
-            form.submit("C:\\work\\deep").is_none(),
-            "a submit goes once"
-        );
+        assert!(form.submit(&deep).is_none(), "a submit goes once");
 
-        let mut unticked = ShellForm::new(2, Some("C:\\work"));
+        let remembered = full(&["work"]);
+        let mut unticked = ShellForm::new(2, Some(&remembered));
         unticked.toggle_save_default();
         assert!(!unticked.save_default());
         assert_eq!(
-            unticked.submit("C:\\work"),
+            unticked.submit(&remembered),
             Some(ShellSubmission {
-                folder: "C:\\work".to_owned(),
+                folder: remembered.clone(),
                 save_default: false,
             })
         );
@@ -502,9 +537,10 @@ mod tests {
 
     #[test]
     fn the_focus_ring_wraps_and_follows_the_folder() {
-        let mut form = ShellForm::new(1, Some("C:\\old"));
+        let work = full(&["work"]);
+        let mut form = ShellForm::new(1, Some(&full(&["old"])));
         assert_eq!(
-            form.controls("C:\\work", true),
+            form.controls(&work, true),
             [
                 ShellControl::Close,
                 ShellControl::Folder,
@@ -516,18 +552,14 @@ mod tests {
             ]
         );
         form.set_focus(ShellControl::ClearDefault);
-        form.move_focus(true, "C:\\work", true);
-        assert_eq!(form.focused("C:\\work", true), ShellControl::Cancel);
-        form.move_focus(true, "C:\\work", true);
-        assert_eq!(form.focused("C:\\work", true), ShellControl::Submit);
-        form.move_focus(true, "C:\\work", true);
-        assert_eq!(form.focused("C:\\work", true), ShellControl::Close, "wraps");
-        form.move_focus(false, "C:\\work", true);
-        assert_eq!(
-            form.focused("C:\\work", true),
-            ShellControl::Submit,
-            "and back"
-        );
+        form.move_focus(true, &work, true);
+        assert_eq!(form.focused(&work, true), ShellControl::Cancel);
+        form.move_focus(true, &work, true);
+        assert_eq!(form.focused(&work, true), ShellControl::Submit);
+        form.move_focus(true, &work, true);
+        assert_eq!(form.focused(&work, true), ShellControl::Close, "wraps");
+        form.move_focus(false, &work, true);
+        assert_eq!(form.focused(&work, true), ShellControl::Submit, "and back");
 
         assert_eq!(
             form.focused("relative", true),
@@ -543,7 +575,7 @@ mod tests {
         let plain = ShellForm::new(2, None);
         assert!(
             !plain
-                .controls("C:\\work", true)
+                .controls(&work, true)
                 .contains(&ShellControl::ClearDefault),
             "no remembered folder, no clear link"
         );
@@ -551,9 +583,10 @@ mod tests {
 
     #[test]
     fn browse_leaves_the_ring_where_no_picker_answers() {
+        let work = full(&["work"]);
         let mut form = ShellForm::new(1, None);
         assert_eq!(
-            form.controls("C:\\work", false),
+            form.controls(&work, false),
             [
                 ShellControl::Close,
                 ShellControl::Folder,
@@ -563,22 +596,22 @@ mod tests {
             ]
         );
         form.set_focus(ShellControl::Folder);
-        form.move_focus(true, "C:\\work", false);
+        form.move_focus(true, &work, false);
         assert_eq!(
-            form.focused("C:\\work", false),
+            form.focused(&work, false),
             ShellControl::SaveDefault,
             "Tab steps over Browse"
         );
-        form.move_focus(false, "C:\\work", false);
-        assert_eq!(form.focused("C:\\work", false), ShellControl::Folder);
+        form.move_focus(false, &work, false);
+        assert_eq!(form.focused(&work, false), ShellControl::Folder);
 
         form.set_focus(ShellControl::Browse);
         assert_eq!(
-            form.focused("C:\\work", false),
+            form.focused(&work, false),
             ShellControl::Close,
             "a focused Browse gives way once it leaves"
         );
-        assert_eq!(form.focused("C:\\work", true), ShellControl::Browse);
+        assert_eq!(form.focused(&work, true), ShellControl::Browse);
     }
 
     #[test]

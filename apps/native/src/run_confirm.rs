@@ -102,20 +102,20 @@ mod tests {
 
     use super::{RunButton, RunConfirm};
 
+    /// The script the confirm names, in this platform's spelling.
+    fn script() -> PathBuf {
+        PathBuf::from("repo").join("tools").join("run.bat")
+    }
+
     fn confirm() -> RunConfirm {
-        RunConfirm::new(PathBuf::from(r"C:\repo\tools\run.bat"))
+        RunConfirm::new(script())
     }
 
     #[test]
     fn it_names_the_file_and_shows_its_path() {
         let confirm = confirm();
         assert_eq!(confirm.title(), "Run run.bat?");
-        assert_eq!(
-            confirm.detail(),
-            PathBuf::from(r"C:\repo\tools\run.bat")
-                .display()
-                .to_string()
-        );
+        assert_eq!(confirm.detail(), script().display().to_string());
     }
 
     #[test]

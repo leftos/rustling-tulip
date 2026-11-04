@@ -17,7 +17,7 @@ use gpui::{
 };
 
 use crate::diff_tab::{PENDING_ACTIVATE_TTL, split_path};
-use crate::file_fetch::is_under;
+use crate::file_fetch::is_under_resolved;
 use crate::md_blocks;
 use crate::remote_mode::LOCAL_FILES_REASON;
 use crate::syntax::Highlighted;
@@ -399,7 +399,7 @@ pub(crate) fn derive_origin(
     download_root: Option<&Path>,
     opens_local_files: bool,
 ) -> ViewerOrigin {
-    if download_root.is_some_and(|root| is_under(root, path)) {
+    if download_root.is_some_and(|root| is_under_resolved(root, path)) {
         ViewerOrigin::Fetched
     } else if opens_local_files {
         ViewerOrigin::Link

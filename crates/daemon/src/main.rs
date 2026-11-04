@@ -1213,9 +1213,19 @@ mod tests {
 
     #[test]
     fn matches_template_names() {
-        assert!(is_tracer_image("rt-tracer.exe"));
         assert!(is_tracer_image("rt-tracer"));
-        assert!(is_tracer_image("RT-Tracer.EXE"));
+        // A Windows image name carries `.exe` and folds case; a Unix one is
+        // the bare stem, so a `.exe` name there is not the tracer.
+        #[cfg(windows)]
+        {
+            assert!(is_tracer_image("rt-tracer.exe"));
+            assert!(is_tracer_image("RT-Tracer.EXE"));
+        }
+        #[cfg(not(windows))]
+        assert!(
+            !is_tracer_image("rt-tracer.exe"),
+            "a Unix image name has no .exe suffix"
+        );
     }
 
     #[test]

@@ -800,9 +800,17 @@ mod tests {
 
     #[test]
     fn activator_shortcut_is_the_installer_one() {
-        assert_eq!(
-            shortcut_path(Path::new(r"C:\Start\Programs")),
-            Path::new(r"C:\Start\Programs\rustling-tulip.lnk")
+        // The Programs folder in this platform's spelling.
+        #[cfg(windows)]
+        let (programs, shortcut) = (
+            Path::new(r"C:\Start\Programs"),
+            Path::new(r"C:\Start\Programs\rustling-tulip.lnk"),
         );
+        #[cfg(not(windows))]
+        let (programs, shortcut) = (
+            Path::new("/home/me/Programs"),
+            Path::new("/home/me/Programs/rustling-tulip.lnk"),
+        );
+        assert_eq!(shortcut_path(programs), shortcut);
     }
 }

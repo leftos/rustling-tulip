@@ -2537,7 +2537,10 @@ fn shell_from_the_main_window(h: &mut Harness<'_>) -> Vec<ClientMessage> {
         h.root(|root, _| root.shell_dialog_open()),
         "the dialog opened"
     );
-    h.keys("C : / w o r k");
+    // A full path on this platform, one keystroke per token.
+    let folder = if cfg!(windows) { "C:/work" } else { "/work" };
+    let keys: Vec<String> = folder.chars().map(|c| c.to_string()).collect();
+    h.keys(&keys.join(" "));
     h.click_on("shell-submit");
     let mut sent = h.sent();
     let request_id = sent

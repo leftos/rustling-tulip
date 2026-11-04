@@ -16,7 +16,7 @@ use crate::RootView;
 use crate::fetch_link;
 use crate::file_fetch::{
     self, DoneAction, FetchEntry, FetchRequest, MediaEnd, ProbeGroup, WriteOutcome, WriteStep,
-    Writer, display_host_path, is_under,
+    Writer, display_host_path, is_under_resolved,
 };
 use crate::folder_unpack::{self, Announced};
 use crate::html_media;
@@ -1511,7 +1511,7 @@ impl RootView {
     pub(crate) fn is_fetched_copy(&self, path: &Path) -> bool {
         self.remote_files_root
             .as_ref()
-            .is_ok_and(|root| is_under(root, path))
+            .is_ok_and(|root| is_under_resolved(root, path))
     }
 }
 

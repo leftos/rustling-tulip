@@ -400,6 +400,9 @@ mod tests {
         );
     }
 
+    /// Windows only: `C:hooks.json` is a drive-relative path there, and a
+    /// plain file name on a Unix host, where no drive prefix exists.
+    #[cfg(windows)]
     #[test]
     fn a_plan_file_name_with_a_drive_prefix_is_refused() {
         let (hub, _scratch) = spawnless_test_hub("hook-plan-drive");

@@ -15,7 +15,20 @@ use rustling_tulip_native::{ToastKind, VIEWER_OPEN_FAILED_TITLE, ViewerLoad, Vie
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, session};
 
-const PATH: &str = r"C:\notes\a.md";
+/// A file the daemon stores as an open viewer tab, in this platform's
+/// spelling.
+const PATH: &str = if cfg!(windows) {
+    r"C:\notes\a.md"
+} else {
+    "/notes/a.md"
+};
+
+/// The path a spec types into the open dispatch, trimmed of the spaces and
+/// the line break around it.
+#[cfg(windows)]
+const TYPED: &str = "  C:/notes/a.md \n";
+#[cfg(not(windows))]
+const TYPED: &str = "  /notes/a.md \n";
 
 /// A viewer tab of `path`, which the daemon named `name`.
 fn viewer_tab_named(id: &str, path: &str, name: &str) -> TabEntry {
@@ -136,7 +149,7 @@ fn viewer_tab_opened_activates_and_focuses_the_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &with_tabs(&[]));
     h.sent();
-    let (id, path) = open_viewer(&mut h, "  C:/notes/a.md \n", Some(7));
+    let (id, path) = open_viewer(&mut h, TYPED, Some(7));
     assert_eq!(id, "viewer-open-1");
     assert_eq!(path, PATH, "trimmed, absolute, with this OS's separators");
 

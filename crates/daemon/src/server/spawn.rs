@@ -5079,6 +5079,17 @@ mod tests {
             crate::paths::normalize_path_key(path)
         }
 
+        /// `path` as a reused worktree comes back: the filesystem's resolution
+        /// of it on Unix, where git names a worktree's folder canonicalised,
+        /// and its own spelling on Windows.
+        fn resolved(path: &Path) -> String {
+            #[cfg(not(windows))]
+            let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            #[cfg(windows)]
+            let resolved = path.to_path_buf();
+            resolved.to_string_lossy().into_owned()
+        }
+
         fn single_preview(msg: DaemonMessage) -> Option<protocol::MemberSpawnPreview> {
             match msg {
                 DaemonMessage::SpawnPreview { preview, .. } => Some(preview),
@@ -5127,7 +5138,7 @@ mod tests {
             );
 
             let held = preview_single(&hub, "feat").await;
-            assert_eq!(key(&held.worktree_path), key(&old.to_string_lossy()));
+            assert_eq!(key(&held.worktree_path), key(&resolved(&old)));
             assert!(
                 held.worktree_exists,
                 "the held worktree is reported as existing"
@@ -5183,7 +5194,7 @@ mod tests {
             .await;
             let rows = workspace_previews(msg).expect("a workspace spawn preview");
             assert_eq!(rows.len(), 2);
-            assert_eq!(key(&rows[0].worktree_path), key(&old_web.to_string_lossy()));
+            assert_eq!(key(&rows[0].worktree_path), key(&resolved(&old_web)));
             assert!(rows[0].worktree_exists);
             let new_core = root.join("wt.feat").join("shop").join("libs").join("core");
             assert_eq!(

@@ -266,6 +266,31 @@ pub fn part_path(target: &Path, id: &str) -> PathBuf {
     target.with_file_name(format!(".{id}.part"))
 }
 
+/// [`is_under`] with both paths as the filesystem resolves them on this
+/// platform, so a file reached through a symlinked folder (`/tmp` is
+/// `/private/tmp` on macOS) counts as under a root named by its other
+/// spelling. A path that cannot be resolved compares as given.
+///
+/// Windows keeps [`is_under`] as it is: its canonical form carries the
+/// verbatim prefix no stored path has.
+#[must_use]
+pub fn is_under_resolved(root: &Path, path: &Path) -> bool {
+    is_under(&resolved_path(root), &resolved_path(path))
+}
+
+/// `path` canonicalised when it exists, else as given.
+#[cfg(not(windows))]
+fn resolved_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `path` as stored: Windows paths are already compared in their stored
+/// spelling, so nothing is resolved there.
+#[cfg(windows)]
+fn resolved_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 /// Whether `path` lies below `root`, compared component by component; a
 /// path with a `..` anywhere is never under it.
 #[must_use]

@@ -2442,10 +2442,15 @@ mod import_tests {
     fn workspace_log_matches_the_registered_workspace() {
         let dirs = scratch_dirs("import-ws");
         write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
-        let repos = [
-            repo("r-yaat", r"D:\yaat"),
-            repo("r-srv", r"d:/Yaat-Server/"),
-        ];
+        // The second registered path is spelled unlike the log's folder: the
+        // case and separator fold makes them one folder on Windows, and the
+        // settled spelling elsewhere, where path keys fold nothing.
+        let srv = if cfg!(windows) {
+            r"d:/Yaat-Server/"
+        } else {
+            r"D:\yaat-server"
+        };
+        let repos = [repo("r-yaat", r"D:\yaat"), repo("r-srv", srv)];
         let workspaces = [workspace("ws1", &["r-yaat", "r-srv"])];
 
         assert_eq!(import(&dirs, &repos, &workspaces), 1);
@@ -3999,11 +4004,15 @@ mod recovery_tests {
             entry.workspace_id = Some("ws1".to_owned());
             entry
         };
-        // Matched now, by folder: imported before the workspace existed.
-        let matched = folder_only(vec![
-            imported("", r"d:/YAAT/"),
-            imported("", r"D:\yaat-server"),
-        ]);
+        // Matched now, by folder: imported before the workspace existed. The
+        // first folder is spelled unlike the registered repo: one folder on
+        // Windows, where path keys fold case and separators.
+        let yaat = if cfg!(windows) {
+            r"d:/YAAT/"
+        } else {
+            r"D:\yaat"
+        };
+        let matched = folder_only(vec![imported("", yaat), imported("", r"D:\yaat-server")]);
         for entry in [named, matched] {
             let req = plan_in(
                 &entry,
@@ -4045,7 +4054,10 @@ mod recovery_tests {
     #[test]
     fn an_imported_single_repo_entry_recovers_into_its_pinned_repo() {
         let entry = folder_only(vec![imported("", r"D:\foo")]);
-        let repos = [repo("r-foo", "d:/FOO/")];
+        // Windows folds the case and the separator onto the entry's folder;
+        // elsewhere the registration is spelled as the folder is.
+        let registered = if cfg!(windows) { "d:/FOO/" } else { r"D:\foo" };
+        let repos = [repo("r-foo", registered)];
 
         let req = plan_in(&entry, &item(RecoverAs::Agent, Some(CONV)), &repos, &[])
             .expect("plan")
@@ -4134,17 +4146,20 @@ mod recovery_tests {
     #[test]
     fn register_repo_then_claude_registers_the_folder_and_resumes_there() {
         let entry = folder_only(vec![member("", r"D:\foo"), member("", r"D:\bar")]);
+        // The folder is named with another case and separator than the
+        // member's: the same folder on Windows, a folder of its own elsewhere.
+        let path = if cfg!(windows) { "d:/FOO/" } else { r"D:\foo" };
         let how = RecoverAs::RegisterRepoThenAgent {
-            path: "d:/FOO/".to_owned(),
+            path: path.to_owned(),
         };
 
         let plan = plan(&entry, &item(how, Some(CONV))).expect("plan");
 
-        assert_eq!(plan.register_repo.as_deref(), Some("d:/FOO/"));
+        assert_eq!(plan.register_repo.as_deref(), Some(path));
         assert_eq!(
             plan.request.target,
             SpawnTarget::Standalone {
-                cwd: Some("d:/FOO/".to_owned()),
+                cwd: Some(path.to_owned()),
                 add_dirs: vec![r"D:\bar".to_owned()],
             }
         );
@@ -4157,8 +4172,9 @@ mod recovery_tests {
         let mut config = workspace_config();
         config.extra_env = recorded_env_rows();
         entry.spawn_config = Some(config);
+        let path = if cfg!(windows) { "d:/FOO/" } else { r"D:\foo" };
         let how = RecoverAs::RegisterRepoThenAgent {
-            path: "d:/FOO/".to_owned(),
+            path: path.to_owned(),
         };
 
         let plan = plan(&entry, &item(how, Some(CONV))).expect("plan");
@@ -4484,9 +4500,18 @@ mod recovery_tests {
         for e in [&known, &gone, &shell, &headless] {
             write_if_absent(&dirs, e).expect("write entry");
         }
+        // Registered in another case than the entry's folder: one folder on
+        // Windows, where path keys fold case.
+        let registered = if cfg!(windows) {
+            git_dir.to_uppercase()
+        } else {
+            git_dir.clone()
+        };
         let repos: Vec<RepoEntry> = vec![
-            serde_json::from_value(json!({"id": "r-git", "name": "git", "path": git_dir.to_uppercase(), "default_branch": null}))
-                .expect("repo"),
+            serde_json::from_value(
+                json!({"id": "r-git", "name": "git", "path": registered, "default_branch": null}),
+            )
+            .expect("repo"),
         ];
 
         let items = history_items(&dirs, &repos, &home_rows(&home), agent_registry::plugin);

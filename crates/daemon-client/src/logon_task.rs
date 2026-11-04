@@ -609,12 +609,14 @@ mod tests {
     fn task_xml_escapes_paths() {
         let dir = Path::new(r"C:\Tom & Jerry's <tools>");
         let xml = task_xml(SID, &dir.join("rustling-tulipd.exe"), dir);
-        assert!(
-            xml.contains(
-                r"<Command>C:\Tom &amp; Jerry&apos;s &lt;tools&gt;\rustling-tulipd.exe</Command>"
-            ),
-            "{xml}"
-        );
+        // The joined exe carries this platform's separator.
+        #[cfg(windows)]
+        let command =
+            r"<Command>C:\Tom &amp; Jerry&apos;s &lt;tools&gt;\rustling-tulipd.exe</Command>";
+        #[cfg(not(windows))]
+        let command =
+            r"<Command>C:\Tom &amp; Jerry&apos;s &lt;tools&gt;/rustling-tulipd.exe</Command>";
+        assert!(xml.contains(command), "{xml}");
         assert!(
             xml.contains(
                 r"<WorkingDirectory>C:\Tom &amp; Jerry&apos;s &lt;tools&gt;</WorkingDirectory>"

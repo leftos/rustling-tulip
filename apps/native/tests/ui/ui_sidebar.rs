@@ -2202,6 +2202,10 @@ fn a_session_update_scans_its_folder_once(cx: &mut TestAppContext) {
     );
 }
 
+/// Windows only: folder keys fold case and separators there
+/// (`paths::normalize_path_key`), and a Unix path keeps the case it was
+/// given, so two spellings are two folders.
+#[cfg(windows)]
 #[gpui::test]
 fn folder_scans_fold_case_and_answer_both_casings(cx: &mut TestAppContext) {
     let dir = TestDir::new();

@@ -694,8 +694,16 @@ mod tests {
     #[test]
     fn locate_prefers_the_env_var_then_path_then_system32() {
         let exe = if cfg!(windows) { "ssh.exe" } else { "ssh" };
-        let bin = PathBuf::from("D:").join("bin");
-        let tools = PathBuf::from("D:").join("tools");
+        // A PATH value holds no `:` in an entry on Unix, so only the Windows
+        // drive roots may name a drive.
+        let (bin, tools) = if cfg!(windows) {
+            (
+                PathBuf::from("D:").join("bin"),
+                PathBuf::from("D:").join("tools"),
+            )
+        } else {
+            (PathBuf::from("/opt/bin"), PathBuf::from("/opt/tools"))
+        };
         let path = std::env::join_paths([&bin, &tools]).expect("a PATH value");
         let system = PathBuf::from("C:\\Windows")
             .join("System32")

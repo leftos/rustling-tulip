@@ -25,6 +25,9 @@ use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 const SPAWNING_TITLE: &str = "Spawning session…";
 const PATH_HINT: &str = "Enter a full path, like C:\\Users\\you";
 
+/// The folder every shell spec opens in: a full path on this platform.
+const WORK: &str = if cfg!(windows) { "C:/work" } else { "/work" };
+
 /// `s1` alone in pane `p1` of tab `t1`, and no repo at all.
 fn fixture() -> Fixture {
     Fixture::single(session("s1").build())
@@ -80,7 +83,7 @@ fn toasts(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
 }
 
 /// Types `text` into the field that has the keyboard: the harness takes one
-/// keystroke per token, so `C:/work` goes in as `C : / w o r k`.
+/// keystroke per token, so `/work` goes in as `/ w o r k`.
 fn type_text(h: &mut Harness<'_>, text: &str) {
     let keys: Vec<String> = text.chars().map(|c| c.to_string()).collect();
     h.keys(&keys.join(" "));
@@ -89,7 +92,7 @@ fn type_text(h: &mut Harness<'_>, text: &str) {
 /// Replies to spawn `request` with a standalone shell session `new`.
 fn reply(h: &mut Harness<'_>, request: &SpawnRequest) {
     h.send(DaemonMessage::SessionUpdated {
-        session: session("new").shell("C:/work").build(),
+        session: session("new").shell(WORK).build(),
         request_id: request.request_id.clone(),
     });
 }
@@ -173,8 +176,8 @@ fn shell_dialog_submit_sends_standalone_spawn_and_saves_default(cx: &mut TestApp
     assert!(!can_submit(&mut h), "a blank folder cannot go");
     assert_eq!(hint(&mut h), None, "and asks for nothing");
 
-    type_text(&mut h, "C:/work");
-    assert_eq!(folder(&mut h).as_deref(), Some("C:/work"));
+    type_text(&mut h, WORK);
+    assert_eq!(folder(&mut h).as_deref(), Some(WORK));
     assert!(can_submit(&mut h), "a full path is there to open");
 
     h.click_on("shell-submit");
@@ -184,7 +187,7 @@ fn shell_dialog_submit_sends_standalone_spawn_and_saves_default(cx: &mut TestApp
     assert_eq!(
         request.target,
         SpawnTarget::Standalone {
-            cwd: Some("C:/work".to_owned()),
+            cwd: Some(WORK.to_owned()),
             add_dirs: Vec::new(),
         }
     );
@@ -196,7 +199,7 @@ fn shell_dialog_submit_sends_standalone_spawn_and_saves_default(cx: &mut TestApp
     reply(&mut h, &request);
     assert_eq!(
         saved_ui(&dir)["quick_shell_dir"].as_str(),
-        Some("C:/work"),
+        Some(WORK),
         "the shell landed, so its folder is remembered"
     );
 }
@@ -206,7 +209,7 @@ fn successful_shell_spawn_saves_default(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
     h.open_shell_dialog_from_more();
-    type_text(&mut h, "C:/work");
+    type_text(&mut h, WORK);
     h.click_on("shell-submit");
     let request = the_spawn(&h.sent());
     assert!(
@@ -215,7 +218,7 @@ fn successful_shell_spawn_saves_default(cx: &mut TestAppContext) {
     );
 
     reply(&mut h, &request);
-    assert_eq!(saved_ui(&dir)["quick_shell_dir"].as_str(), Some("C:/work"));
+    assert_eq!(saved_ui(&dir)["quick_shell_dir"].as_str(), Some(WORK));
 }
 
 #[gpui::test]
@@ -223,7 +226,7 @@ fn failed_shell_spawn_does_not_save_default(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
     h.open_shell_dialog_from_more();
-    type_text(&mut h, "C:/work");
+    type_text(&mut h, WORK);
     h.click_on("shell-submit");
     let request = the_spawn(&h.sent());
     h.send(DaemonMessage::Error {
@@ -240,7 +243,7 @@ fn failed_shell_spawn_does_not_save_default(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
     h.open_shell_dialog_from_more();
-    type_text(&mut h, "C:/work");
+    type_text(&mut h, WORK);
     h.click_on("shell-submit");
     let request = the_spawn(&h.sent());
     h.send(DaemonMessage::ActionFailed {
@@ -276,7 +279,7 @@ fn relative_folder_cannot_submit_and_shows_hint(cx: &mut TestAppContext) {
     h.keys("escape");
     h.open_shell_dialog_from_more();
     assert_eq!(focus(&mut h), Some("shell-folder"), "the field anew");
-    type_text(&mut h, "C:/work");
+    type_text(&mut h, WORK);
     assert!(can_submit(&mut h), "a drive path can go");
     assert_eq!(hint(&mut h), None, "and asks for nothing");
     h.click_on("shell-submit");
@@ -284,7 +287,7 @@ fn relative_folder_cannot_submit_and_shows_hint(cx: &mut TestAppContext) {
     assert_eq!(
         the_spawn(&h.sent()).target,
         SpawnTarget::Standalone {
-            cwd: Some("C:/work".to_owned()),
+            cwd: Some(WORK.to_owned()),
             add_dirs: Vec::new(),
         }
     );
@@ -377,10 +380,10 @@ fn shell_dialog_unticked_does_not_save_default(cx: &mut TestAppContext) {
         Some("C:\\old"),
         "the field is seeded with the remembered folder"
     );
-    type_text(&mut h, "C:/work");
+    type_text(&mut h, WORK);
     assert_eq!(
         folder(&mut h).as_deref(),
-        Some("C:/work"),
+        Some(WORK),
         "typing replaces the seeded text"
     );
     h.click_on("shell-save-default");

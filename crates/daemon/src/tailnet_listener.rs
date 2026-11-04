@@ -2641,6 +2641,9 @@ mod tests {
         shutdown.send_replace(true);
     }
 
+    /// macOS configures only `127.0.0.1` on its loopback interface, so the
+    /// `127.0.0.2` the listener is told to rebind onto cannot be bound there.
+    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn rebinds_when_the_address_set_changes() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
@@ -3265,6 +3268,9 @@ mod tests {
         assert!(!*shutdown.borrow(), "stopped by the drop, not by shutdown");
     }
 
+    /// macOS configures only `127.0.0.1` on its loopback interface, so the
+    /// `127.0.0.2` the listener is told to rebind onto cannot be bound there.
+    #[cfg(not(target_os = "macos"))]
     #[tokio::test(start_paused = true)]
     async fn rebinds_while_a_cert_check_is_pending() {
         let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
@@ -3925,6 +3931,10 @@ mod tests {
         shutdown.send_replace(true);
     }
 
+    /// macOS configures only `127.0.0.1` on its loopback interface, so the
+    /// `127.0.0.10`–`127.0.0.17` client sockets this test binds are
+    /// addresses it does not have.
+    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn every_whois_error_drops_the_connection() {
         let errors = [

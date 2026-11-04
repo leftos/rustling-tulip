@@ -688,11 +688,20 @@ impl ShellFamily {
     }
 }
 
+/// `program`'s file stem, split on both separators so a path named with
+/// another platform's separators reads the same wherever the daemon runs.
+fn program_leaf_stem(program: &str) -> Option<&str> {
+    let leaf = program
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    Path::new(leaf).file_stem().and_then(|stem| stem.to_str())
+}
+
 /// `program`'s file stem, lower-cased; empty when it has none.
 fn program_stem(program: &str) -> String {
-    Path::new(program)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
+    program_leaf_stem(program)
         .map(str::to_ascii_lowercase)
         .unwrap_or_default()
 }
@@ -1211,10 +1220,7 @@ fn typed_prompt(prompt: &str) -> protocol::PromptInjector {
 }
 
 fn shell_label_from_path(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map_or_else(|| "shell".to_string(), str::to_lowercase)
+    program_leaf_stem(path).map_or_else(|| "shell".to_string(), str::to_lowercase)
 }
 
 /// True iff shell integration (OSC 133 + OSC 633 hooks) should be injected.
