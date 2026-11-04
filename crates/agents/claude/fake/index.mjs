@@ -34,7 +34,8 @@
  *     denies it and runs `Stop`.
  *   - Writes that transcript to
  *     `<CLAUDE_CONFIG_DIR>/projects/<encoded cwd>/<id>.jsonl`, the id from
- *     `--session-id` or `--resume`; nothing without either.
+ *     `--session-id` or `--resume`, else a uuid it mints at start, as Claude
+ *     Code does.
  *   - Echoes lines from stdin back so input from the harness is observable.
  *   - Reports the exact byte count + sha256 of an EOT-terminated payload as
  *     "RT_PASTE_RESULT bytes=<n> sha=<hex>" for paste byte-fidelity assertions
@@ -151,12 +152,17 @@ process.on("unhandledRejection", (err) => {
 
 const args = process.argv.slice(2);
 const flags = parseArgs(args);
+// Started with neither `--session-id` nor `--resume` (typed into a shell by
+// hand), it mints its conversation id, as Claude Code does.
+if (flags.conversationId === null) {
+  flags.conversationId = randomUUID();
+}
 // Every interactive Claude spawn passes `--settings`; a run whose file is
 // missing or malformed stays hookless with a line naming the path, because the
 // daemon itself spawns without hooks when it cannot write the file.
 const settingsDoc = loadSettings(flags.settings);
 // The transcript a message turn writes, where the daemon's chat mirror reads
-// it; null (nothing written) without a conversation id or a Claude home.
+// it; null (nothing written) without a Claude home.
 const transcriptFile = transcriptPath(flags.conversationId);
 
 process.stdout.write(`${READY_BANNER} (pid: ${process.pid})\r\n`);

@@ -112,8 +112,10 @@ pub fn apply_signal(
 ) {
     let mut applied = Applied::default();
     let mut start_turns = false;
+    let mut promoted = false;
     hub.sessions.update_then(session_id, |record| {
         applied = apply_to_record(record, event_time, report);
+        promoted = record.promoted_shell();
         // The report joins the pipeline in the same update that ends the
         // turn, so the registry sees a stop line on its way and keeps a
         // provisional line for it to replace.
@@ -148,6 +150,10 @@ pub fn apply_signal(
         crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
     }
     if applied.agent_exited {
+        // A promoted shell's waiter lives only while its agent runs.
+        if promoted {
+            hub.sessions.discovery().deregister(session_id);
+        }
         hub.sessions.announce_agent_exited(session_id);
     }
     if start_turns {

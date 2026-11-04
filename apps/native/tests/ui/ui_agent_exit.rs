@@ -4,7 +4,8 @@
 use crate::support;
 
 use gpui::TestAppContext;
-use protocol::{DaemonMessage, SessionNoticeKind};
+use protocol::{DaemonMessage, SessionMode, SessionNoticeKind};
+use rustling_tulip_native::chat::PaneView;
 use support::{Fixture, Harness, TestDir, session};
 
 /// Every toast's title and detail, oldest first.
@@ -72,6 +73,62 @@ fn agent_exited_for_an_unknown_session_raises_nothing(cx: &mut TestAppContext) {
     exited(&mut h, "gone");
 
     assert!(toasts(&mut h).is_empty(), "nothing to close, no toast");
+}
+
+/// Why `p1`'s header cannot switch to its chat now; `None` when it can.
+fn chat_tip(h: &mut Harness<'_>) -> Option<&'static str> {
+    h.root(|root, _| root.pane_view_disabled_tip("p1", PaneView::Chat))
+}
+
+/// A plain shell the daemon promoted when its screen showed the agent: an
+/// interactive session naming the agent, its leaf the agent's.
+fn promoted_shell(program: &str) -> protocol::SessionSnapshot {
+    let mut snap = session("s1").shell("D:/work").program_name(program).build();
+    snap.mode = SessionMode::Interactive;
+    snap
+}
+
+#[gpui::test]
+fn plain_shell_becomes_chat_capable_when_promoted(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(
+        cx,
+        &dir,
+        &Fixture::single(
+            session("s1")
+                .shell("D:/work")
+                .no_agent()
+                .program_name("pwsh")
+                .build(),
+        ),
+    );
+    h.sent();
+    assert_eq!(
+        chat_tip(&mut h),
+        Some("The agent isn't running"),
+        "a plain shell offers no chat"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: promoted_shell("claude"),
+        request_id: None,
+    });
+    assert_eq!(
+        chat_tip(&mut h),
+        None,
+        "the promoted shell's Chat is enabled"
+    );
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: promoted_shell("pwsh"),
+        request_id: None,
+    });
+    exited(&mut h, "s1");
+    assert_eq!(
+        chat_tip(&mut h),
+        Some("The agent isn't running"),
+        "the agent's exit disables Chat"
+    );
 }
 
 #[gpui::test]

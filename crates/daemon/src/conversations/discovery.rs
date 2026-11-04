@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -51,12 +52,19 @@ pub(crate) struct Waiter {
     launched_at: DateTime<Utc>,
     plugin: &'static dyn AgentPlugin,
     rows: ResolvedRows,
+    /// Which waiter this is among every waiter made: a poller serves only
+    /// the waiter of the generation it started for.
+    generation: u64,
 }
+
+/// The generation the next [`Waiter`] takes.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 impl Waiter {
     /// The waiter of `session_id`, launched when `baseline` was taken.
     pub(crate) fn new(session_id: String, baseline: Baseline) -> Self {
         Self {
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
             session_id,
             agent: baseline.plugin.descriptor().id.0.clone(),
             folder_key: normalize_path_key(&baseline.folder.to_string_lossy()),
@@ -378,16 +386,121 @@ pub(crate) fn register(registry: &SessionRegistry, waiter: Waiter) {
     registry.discovery().register(waiter);
 }
 
+/// How long before the screen first showed the agent in a promoted shell a
+/// conversation may have started and still count as the agent's: the agent
+/// writes its transcript a moment before the confirmation window closes.
+pub(crate) const PROMOTION_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(10);
+
+/// The baseline of a plain shell promoted when its screen showed an agent at
+/// `shown_at`: no launch was seen, so a conversation qualifies by time alone,
+/// last active at or after [`PROMOTION_SLACK`] before `shown_at`. Every
+/// transcript older than that counts as there before the agent; one of them
+/// written again after it (a resumed conversation) qualifies by its new time.
+/// `previous`, the conversation of the shell's run before this one, is
+/// excluded by id, since a quick restart leaves its last write in the window.
+pub(crate) fn promotion_baseline(
+    plugin: &'static dyn AgentPlugin,
+    rows: ResolvedRows,
+    folder: PathBuf,
+    shown_at: DateTime<Utc>,
+    previous: Option<String>,
+) -> Baseline {
+    Baseline {
+        ids: previous.into_iter().collect(),
+        plugin,
+        rows,
+        folder,
+        launched_at: shown_at - PROMOTION_SLACK,
+    }
+}
+
+/// Look for the conversation of the agent the screen showed at `shown_at`
+/// in plain shell `session_id`, promoted or started again: a waiter with a
+/// [`promotion_baseline`] in the shell's folder (its `current_cwd` when
+/// known, else the folder it started in) that excludes `previous`, the last
+/// run's conversation, replacing any earlier waiter, and a poller of its own
+/// (see [`watch`]). Nothing is
+/// looked for when the record holds a conversation id, names no folder, its
+/// agent is unregistered, or the registry has no config dirs.
+pub(crate) fn watch_promoted_shell(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    shown_at: DateTime<Utc>,
+    previous: Option<String>,
+) {
+    let Some(rec) = registry.get(session_id) else {
+        return;
+    };
+    let (agent, folder, extra_env) = {
+        let rec = lock(&rec);
+        if rec.conversation_id.is_some() {
+            return;
+        }
+        let folder = rec
+            .current_cwd
+            .clone()
+            .filter(|cwd| !cwd.trim().is_empty())
+            .or_else(|| history::primary_cwd(&rec));
+        let extra_env = rec
+            .spawn_config
+            .as_ref()
+            .map(|config| config.extra_env.clone())
+            .unwrap_or_default();
+        (rec.agent.clone(), folder, extra_env)
+    };
+    let Some(folder) = folder else {
+        warn!(%session_id, "discovery: the promoted shell names no folder; its conversation is not looked for");
+        return;
+    };
+    let Some(plugin) = agent_registry::plugin(&agent) else {
+        warn!(%session_id, "discovery: no agent plugin `{}` is registered; the promoted shell's conversation is not looked for", agent.0);
+        return;
+    };
+    let Some(dirs) = registry.dirs().cloned() else {
+        return;
+    };
+    let baseline = promotion_baseline(
+        plugin,
+        super::lookup_rows(&extra_env),
+        PathBuf::from(folder),
+        shown_at,
+        previous,
+    );
+    watch(registry, dirs, Waiter::new(session_id.to_owned(), baseline));
+}
+
+/// [`register`] `waiter` in place of any earlier waiter of its session, and
+/// start the poller of `waiter` alone: an earlier waiter's poller ends on its
+/// next tick, when it finds another generation registered.
+fn watch(
+    registry: &Arc<SessionRegistry>,
+    dirs: Dirs,
+    waiter: Waiter,
+) -> tokio::task::JoinHandle<()> {
+    let (session_id, generation) = (waiter.session_id.clone(), waiter.generation);
+    register(registry, waiter);
+    tokio::spawn(poll(
+        Arc::clone(registry),
+        dirs,
+        session_id,
+        Some(generation),
+    ))
+}
+
 /// Start the poller of the registered waiter `session_id`, which runs a
 /// [`pass`] on each tick of [`poll_interval`] until the waiter is
-/// deregistered (by a claim or the final look) or [`stop_reason`] gives a
-/// reason.
+/// deregistered (by a claim or the final look), replaced by a waiter of
+/// another generation, or [`stop_reason`] gives a reason.
 pub(crate) fn start_poller(
     registry: &Arc<SessionRegistry>,
     dirs: Dirs,
     session_id: String,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(poll(Arc::clone(registry), dirs, session_id))
+    let generation = registry
+        .discovery()
+        .waiter(&session_id)
+        .map(|waiter| waiter.generation);
+    tokio::spawn(poll(Arc::clone(registry), dirs, session_id, generation))
 }
 
 /// [`register`] `waiter`, then [`start_poller`].
@@ -402,7 +515,14 @@ pub(crate) fn start(
     start_poller(registry, dirs, session_id)
 }
 
-async fn poll(registry: Arc<SessionRegistry>, dirs: Dirs, session_id: String) {
+/// The poller of `session_id`'s waiter of `generation`: `None` when no
+/// waiter was registered as it started, which ends it at its first tick.
+async fn poll(
+    registry: Arc<SessionRegistry>,
+    dirs: Dirs,
+    session_id: String,
+    generation: Option<u64>,
+) {
     let started = Instant::now();
     loop {
         tokio::time::sleep(poll_interval(started.elapsed())).await;
@@ -410,6 +530,10 @@ async fn poll(registry: Arc<SessionRegistry>, dirs: Dirs, session_id: String) {
             debug!(%session_id, "discovery: poller ends; the waiter is gone");
             return;
         };
+        if Some(waiter.generation) != generation {
+            debug!(%session_id, "discovery: poller ends; another waiter took the session");
+            return;
+        }
         if let Some(reason) = stop_reason(&registry, &session_id) {
             registry.discovery().deregister(&session_id);
             debug!(%session_id, reason, "discovery: poller ends");
@@ -439,11 +563,12 @@ async fn poll(registry: Arc<SessionRegistry>, dirs: Dirs, session_id: String) {
 mod tests {
     use super::{
         Baseline, Excluded, Outcome, PassBy, Waiter, arbitrate, claim, pass, poll_interval,
-        recent_history_ids, start,
+        promotion_baseline, recent_history_ids, start, watch,
     };
     use crate::conversations::contested;
     use crate::history::{self, test_support};
     use crate::session::SessionRegistry;
+    use crate::session::ShownAgent;
     use crate::sync::lock;
     use agent_api::test_agent::TestAgent;
     use agent_api::{AgentPlugin, ConversationPlan, FoundConversation, ResolvedRows};
@@ -881,6 +1006,174 @@ mod tests {
         assert!(registry.discovery().waiter("s1").is_none());
         let entry = history::read_one(&dirs, "s1").expect("the history entry");
         assert_eq!(entry.conversation_id, None);
+    }
+
+    /// The waiter a promoted shell gets when its screen first showed the
+    /// agent at `shown_at`.
+    fn promotion_waiter(
+        agent: &'static TestAgent,
+        session_id: &str,
+        folder: &str,
+        shown_at: DateTime<Utc>,
+    ) -> Waiter {
+        restart_waiter(agent, session_id, folder, shown_at, None)
+    }
+
+    /// The waiter a promoted shell gets when its screen showed the agent
+    /// again at `shown_at`, after a run that held `previous`.
+    fn restart_waiter(
+        agent: &'static TestAgent,
+        session_id: &str,
+        folder: &str,
+        shown_at: DateTime<Utc>,
+        previous: Option<String>,
+    ) -> Waiter {
+        let plugin: &'static dyn AgentPlugin = agent;
+        Waiter::new(
+            session_id.to_owned(),
+            promotion_baseline(
+                plugin,
+                ResolvedRows::default(),
+                PathBuf::from(folder),
+                shown_at,
+                previous,
+            ),
+        )
+    }
+
+    #[test]
+    fn restarted_agent_does_not_claim_the_previous_runs_conversation() {
+        let (registry, dirs) = registry_with("discovery-restart-previous", &["s1"]);
+        // A promoted shell whose first run claimed `c-first`, then ended.
+        registry.update("s1", |rec| {
+            rec.mode = SessionMode::PlainShell;
+            rec.program_name = Some("pwsh".to_owned());
+            rec.agent_shown_in_plain_shell();
+            rec.conversation_id = Some("c-first".to_owned());
+            rec.end_agent_in_shell();
+        });
+        let mut shown = ShownAgent::Ignored;
+        registry.update("s1", |rec| shown = rec.agent_shown_in_plain_shell());
+        let previous = if let ShownAgent::Restarted { previous } = &shown {
+            previous.clone()
+        } else {
+            None
+        };
+        assert_eq!(previous.as_deref(), Some("c-first"), "{shown:?}");
+        let agent = leaked_agent();
+        let folder = r"D:\restart-previous";
+        let shown_at = Utc::now();
+        // The first run's last write lands inside the new run's slack.
+        agent.set_found(folder, vec![found("c-first", shown_at)]);
+        let s1 = restart_waiter(agent, "s1", folder, shown_at, previous);
+        registry.discovery().register(s1.clone());
+
+        pass(&registry, &dirs, &s1, Utc::now(), PassBy::Poller);
+
+        assert_eq!(conversation_of(&registry, "s1"), None);
+        assert!(registry.discovery().waiter("s1").is_some(), "still waiting");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_after_a_claim_runs_one_poller() {
+        let (registry, dirs) = registry_with("discovery-restart-one-poller", &["s1"]);
+        let agent = leaked_agent();
+        let folder = r"D:\restart-one-poller";
+        agent.set_found(folder, vec![found("c-first", Utc::now())]);
+        let first = watch(
+            &registry,
+            dirs.clone(),
+            promotion_waiter(agent, "s1", folder, Utc::now()),
+        );
+        for _ in 0..100 {
+            if conversation_of(&registry, "s1").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(conversation_of(&registry, "s1").as_deref(), Some("c-first"));
+
+        // A quick restart: the run's id is dropped and a new waiter takes the
+        // session before the first poller's next tick.
+        registry.update("s1", |rec| rec.conversation_id = None);
+        agent.set_found(folder, Vec::new());
+        let second = watch(
+            &registry,
+            dirs,
+            restart_waiter(agent, "s1", folder, Utc::now(), Some("c-first".to_owned())),
+        );
+
+        tokio::time::timeout(POLLER_END, first)
+            .await
+            .expect("the first poller ends once another waiter takes the session")
+            .expect("the first poller task");
+        assert!(!second.is_finished(), "the new waiter's poller runs on");
+        assert!(registry.discovery().waiter("s1").is_some());
+        second.abort();
+    }
+
+    #[test]
+    fn promotion_waiter_claims_a_new_transcript_in_its_folder() {
+        let (registry, dirs) = registry_with("discovery-promotion-new", &["s1"]);
+        let agent = leaked_agent();
+        let folder = r"D:\promotion-new";
+        let shown_at = Utc::now();
+        agent.set_found(
+            folder,
+            vec![found("c-new", shown_at - TimeDelta::seconds(5))],
+        );
+        let s1 = promotion_waiter(agent, "s1", folder, shown_at);
+        registry.discovery().register(s1.clone());
+
+        pass(&registry, &dirs, &s1, Utc::now(), PassBy::Poller);
+
+        assert_eq!(
+            conversation_of(&registry, "s1").as_deref(),
+            Some("c-new"),
+            "a transcript started inside the slack before the screen showed the agent is new"
+        );
+    }
+
+    #[test]
+    fn promotion_waiter_claims_a_resumed_transcript_written_after_promotion() {
+        let (registry, dirs) = registry_with("discovery-promotion-resumed", &["s1"]);
+        let agent = leaked_agent();
+        let folder = r"D:\promotion-resumed";
+        let shown_at = Utc::now() - TimeDelta::seconds(30);
+        let s1 = promotion_waiter(agent, "s1", folder, shown_at);
+        registry.discovery().register(s1.clone());
+        // An old conversation the agent resumed: its transcript is written
+        // again after the screen showed the agent.
+        agent.set_found(
+            folder,
+            vec![found("c-resumed", shown_at + TimeDelta::seconds(3))],
+        );
+
+        pass(&registry, &dirs, &s1, Utc::now(), PassBy::Poller);
+
+        assert_eq!(
+            conversation_of(&registry, "s1").as_deref(),
+            Some("c-resumed")
+        );
+    }
+
+    #[test]
+    fn promotion_waiter_ignores_a_transcript_older_than_its_baseline() {
+        let (registry, dirs) = registry_with("discovery-promotion-old", &["s1"]);
+        let agent = leaked_agent();
+        let folder = r"D:\promotion-old";
+        let shown_at = Utc::now();
+        agent.set_found(
+            folder,
+            vec![found("c-old", shown_at - TimeDelta::seconds(11))],
+        );
+        let s1 = promotion_waiter(agent, "s1", folder, shown_at);
+        registry.discovery().register(s1.clone());
+
+        pass(&registry, &dirs, &s1, Utc::now(), PassBy::Poller);
+
+        assert_eq!(conversation_of(&registry, "s1"), None);
+        assert!(registry.discovery().waiter("s1").is_some(), "still waiting");
     }
 
     #[test]

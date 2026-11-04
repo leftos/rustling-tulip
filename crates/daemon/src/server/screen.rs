@@ -33,12 +33,12 @@ fn dump(hub: &Hub, session_id: String, request_id: Option<String>) -> DaemonMess
             code: Some(protocol::error_codes::NOT_FOUND.to_owned()),
         };
     };
-    let (screen, agent, wire_agent) = {
+    let (screen, agent, named_agent) = {
         let record = lock(&record);
         (
             record.screen.clone(),
             record.agent.clone(),
-            record.wire_agent(),
+            record.snapshot_agent(),
         )
     };
     let Some(screen) = screen else {
@@ -58,7 +58,7 @@ fn dump(hub: &Hub, session_id: String, request_id: Option<String>) -> DaemonMess
         rows,
         grid: screen.rows(),
         title: screen.title(),
-        agent: wire_agent,
+        agent: named_agent,
         explanation: wire_explanation(&rules.explain(&screen)),
     }
 }
@@ -235,6 +235,25 @@ mod tests {
         assert_ne!(explanation.verdict, "no_match", "a rule wins");
         assert!(!explanation.rules.is_empty(), "every rule is traced");
         assert_eq!(explanation.rejected, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn screen_dump_of_a_promoted_shell_names_its_agent() {
+        let (hub, _scratch) = test_hub("screen-promoted");
+        let mut record = idle_record("s1");
+        record.mode = protocol::SessionMode::PlainShell;
+        record.program_name = Some("pwsh".to_owned());
+        record.agent_shown_in_plain_shell();
+        record.screen = Some(Arc::new(Mutex::new(Screen::new(80, 24))));
+        let projected = record.snapshot().agent;
+        hub.sessions.insert(record);
+
+        let reply = dispatch_one(&hub, ask("s1")).await;
+        let DaemonMessage::ScreenDump { agent, .. } = reply else {
+            panic!("not a dump: {reply:?}");
+        };
+        assert_eq!(agent, Some(agent_registry::default_agent()));
+        assert_eq!(agent, projected, "the dump names the snapshot's agent");
     }
 
     #[tokio::test]

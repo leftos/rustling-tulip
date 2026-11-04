@@ -27,7 +27,9 @@ use crate::osc_title::TitleActivity;
 use crate::pty::PtyHandle;
 use crate::screen::SharedScreen;
 use crate::screen::rules::{self, CompiledRules, Reading, ScreenState, Verdict};
-use crate::session::{SessionEvent, SessionRecord, SessionRegistry, push_recent_action};
+use crate::session::{
+    SessionEvent, SessionRecord, SessionRegistry, ShownAgent, push_recent_action,
+};
 use crate::typing_lane::{Holder, TypingTurn};
 use crate::view_drive::{DRIVE_LIMIT, KEY_WAIT, ReturnAction, ViewReturn};
 use agent_api::ViewReading;
@@ -1253,6 +1255,7 @@ fn hand_shell_back(
 ) -> Option<StatusRead> {
     let mut after = None;
     let mut agent_exited = false;
+    let mut promoted = false;
     registry.update_if_changed_then(session_id, |rec| {
         if moved_since(rec, from) {
             return None;
@@ -1262,6 +1265,7 @@ fn hand_shell_back(
             SessionStatus::Working | SessionStatus::AwaitingInput
         );
         agent_exited = rec.end_agent_in_shell();
+        promoted = rec.promoted_shell();
         let changed = rec.hook_driven || rec.background || in_turn || agent_exited;
         rec.hook_driven = false;
         rec.background = false;
@@ -1282,9 +1286,66 @@ fn hand_shell_back(
         changed.then(|| alert.map(|alert| alert.event(session_id)))
     });
     if agent_exited {
+        // A promoted shell's waiter lives only while its agent runs.
+        if promoted {
+            registry.discovery().deregister(session_id);
+        }
         registry.announce_agent_exited(session_id);
     }
     after
+}
+
+/// The fields a screen sighting of an agent may change on a shell's record.
+#[derive(PartialEq, Eq)]
+struct SightingFields {
+    agent_in_shell: bool,
+    shell_label: Option<String>,
+    hook_agent: Option<protocol::AgentId>,
+    program_name: Option<String>,
+    conversation_id: Option<String>,
+    agent_exit_announced: bool,
+}
+
+fn sighting_fields(rec: &SessionRecord) -> SightingFields {
+    SightingFields {
+        agent_in_shell: rec.agent_in_shell,
+        shell_label: rec.shell_label.clone(),
+        hook_agent: rec.hook_agent.clone(),
+        program_name: rec.program_name.clone(),
+        conversation_id: rec.conversation_id.clone(),
+        agent_exit_announced: rec.agent_exit_announced,
+    }
+}
+
+/// The screen showed an agent in session `session_id`'s shell for a whole
+/// window: a plain shell is promoted to one running that agent, or a promoted
+/// one starts its run again, in one registry update (see
+/// [`crate::session::SessionRecord::agent_shown_in_plain_shell`]), and its
+/// conversation is then looked for from its transcripts. An agent session's
+/// record is left to its hooks.
+fn agent_shown_in_shell(registry: &Arc<SessionRegistry>, session_id: &str) {
+    let shown_at = chrono::Utc::now();
+    let mut shown = ShownAgent::Ignored;
+    // A sighting that changes no field (a running agent seen again) is
+    // neither broadcast nor written to the sidecar.
+    registry.update_if_changed(session_id, |rec| {
+        let before = sighting_fields(rec);
+        shown = rec.agent_shown_in_plain_shell();
+        sighting_fields(rec) != before
+    });
+    if shown == ShownAgent::Ignored {
+        return;
+    }
+    info!(
+        session_id,
+        ?shown,
+        "plain shell: the screen shows an agent running in it"
+    );
+    let previous = match shown {
+        ShownAgent::Restarted { previous } => previous,
+        _ => None,
+    };
+    crate::conversations::discovery::watch_promoted_shell(registry, session_id, shown_at, previous);
 }
 
 /// Whether the agent typed into session `session_id`'s shell is up: its hooks
@@ -1575,6 +1636,7 @@ impl ShellWatcher {
                 self.launching_until = None;
                 self.agent_on_screen = true;
                 self.watch.confirm.check_at = Some(now);
+                agent_shown_in_shell(&self.watch.registry, &self.watch.session_id);
             }
             Checked::AgentEnded => {
                 self.launching_until = None;
@@ -3721,6 +3783,255 @@ mod hysteresis_tests {
         let read = record_status(&registry, SESSION).expect("the session is registered");
         assert!(hand_shell_back(&registry, SESSION, read).is_some());
         assert_eq!(agent_exits(&mut events), 0, "one run announces once");
+    }
+
+    /// A plain shell record running `pwsh`, the way its spawn left it.
+    fn pwsh_plain_shell() -> SessionRecord {
+        let mut record = test_record(SESSION);
+        record.mode = SessionMode::PlainShell;
+        record.program_name = Some("pwsh".to_owned());
+        record
+    }
+
+    /// The tag the default agent's leaf shows.
+    fn agent_tag() -> String {
+        agent_registry::plugin(&agent_registry::default_agent())
+            .expect("the default agent is registered")
+            .descriptor()
+            .tag
+            .clone()
+    }
+
+    /// The record's promotion fields: agent in shell, shell label, hook
+    /// agent and program name.
+    fn promotion(
+        h: &Harness,
+    ) -> (
+        bool,
+        Option<String>,
+        Option<protocol::AgentId>,
+        Option<String>,
+    ) {
+        let rec = h.registry.get(SESSION).expect("session registered");
+        let guard = rec.lock().expect("record lock");
+        (
+            guard.agent_in_shell,
+            guard.shell_label.clone(),
+            guard.hook_agent.clone(),
+            guard.program_name.clone(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_shown_promotes_a_plain_shell() {
+        let h = start_record("shell-promote", true, pwsh_plain_shell());
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            promotion(&h),
+            (
+                true,
+                Some("pwsh".to_owned()),
+                Some(agent_registry::default_agent()),
+                Some(agent_tag())
+            ),
+            "the screen's agent promotes the shell"
+        );
+        let snap = h
+            .registry
+            .get(SESSION)
+            .map(|rec| rec.lock().expect("record lock").snapshot())
+            .expect("session registered");
+        assert_eq!(snap.mode, SessionMode::Interactive);
+        assert_eq!(snap.agent, Some(agent_registry::default_agent()));
+        assert_eq!(agent_exits(&mut events), 0, "no exit at promotion");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_shown_again_after_exit_restarts_without_promoting_anew() {
+        let h = start_record("shell-promote-again", true, pwsh_plain_shell());
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        h.set_record(|rec| rec.conversation_id = Some("c-first".to_owned()));
+        settle().await;
+        h.chunk(shell_prompt_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(agent_exits(&mut events), 1, "the agent's end is announced");
+        assert_eq!(
+            promotion(&h),
+            (
+                true,
+                Some("pwsh".to_owned()),
+                Some(agent_registry::default_agent()),
+                Some("pwsh".to_owned())
+            ),
+            "the shell stays promoted with its leaf on the shell"
+        );
+
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            promotion(&h),
+            (
+                true,
+                Some("pwsh".to_owned()),
+                Some(agent_registry::default_agent()),
+                Some(agent_tag())
+            ),
+            "the later run names the agent again"
+        );
+        {
+            let rec = h.registry.get(SESSION).expect("session registered");
+            let guard = rec.lock().expect("record lock");
+            assert_eq!(
+                guard.conversation_id, None,
+                "the later run looks for its own conversation"
+            );
+        }
+        h.chunk(shell_prompt_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            agent_exits(&mut events),
+            1,
+            "the later run's end is announced"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_shown_on_an_agent_spawned_shell_does_not_promote() {
+        let mut record = test_record(SESSION);
+        record.agent_in_shell = true;
+        record.shell_label = Some("pwsh".to_owned());
+        record.program_name = Some("pwsh".to_owned());
+        let h = start_record_launching("shell-spawned-no-promote", record, ShellLaunch::AgentTyped);
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            promotion(&h),
+            (true, Some("pwsh".to_owned()), None, Some("pwsh".to_owned())),
+            "an agent session's record is left to its hooks"
+        );
+        let rec = h.registry.get(SESSION).expect("session registered");
+        assert_eq!(
+            rec.lock().expect("record lock").mode,
+            SessionMode::Interactive
+        );
+    }
+
+    /// Whether the discovery holds a waiter for the harness's session.
+    fn waiting(h: &Harness) -> bool {
+        h.registry.discovery().waiter(SESSION).is_some()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_exit_deregisters_the_promotion_waiter() {
+        let h = start_record("shell-promote-deregister", true, pwsh_plain_shell());
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert!(promotion(&h).0, "the shell is promoted");
+        // The waiter the promotion looks for its conversation with.
+        let plugin = agent_registry::plugin(&agent_registry::default_agent())
+            .expect("the default agent is registered");
+        h.registry
+            .discovery()
+            .register(crate::conversations::discovery::Waiter::new(
+                SESSION.to_owned(),
+                crate::conversations::discovery::promotion_baseline(
+                    plugin,
+                    agent_api::ResolvedRows::default(),
+                    std::path::PathBuf::from(r"D:\promotion-deregister"),
+                    Utc::now(),
+                    None,
+                ),
+            ));
+        assert!(waiting(&h));
+
+        h.chunk(shell_prompt_frame());
+        advance(Duration::from_secs(1)).await;
+        assert!(
+            !waiting(&h),
+            "the agent's end takes the promoted shell's waiter out"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovered_shell_with_a_hook_agent_is_not_promoted() {
+        let mut record = pwsh_plain_shell();
+        record.hook_agent = Some(agent_registry::default_agent());
+        let h = start_record("shell-recovered-no-promote", true, record);
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            promotion(&h),
+            (
+                false,
+                None,
+                Some(agent_registry::default_agent()),
+                Some("pwsh".to_owned())
+            ),
+            "a recovered shell's hooks own its agent"
+        );
+        let snap = h
+            .registry
+            .get(SESSION)
+            .map(|rec| rec.lock().expect("record lock").snapshot())
+            .expect("session registered");
+        assert_eq!(snap.mode, SessionMode::PlainShell);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn promoted_shell_without_a_program_name_still_sees_its_agent_end() {
+        let mut record = pwsh_plain_shell();
+        record.program_name = None;
+        let h = start_record("shell-promote-unnamed", true, record);
+        let mut events = h.registry.subscribe();
+        pass_hold().await;
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        h.set_record(|rec| rec.conversation_id = Some("c-first".to_owned()));
+        settle().await;
+        h.chunk(shell_prompt_frame());
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(agent_exits(&mut events), 1, "the agent's end is announced");
+        let (in_shell, shell_label, _, program_name) = promotion(&h);
+        assert!(in_shell);
+        assert!(shell_label.is_some(), "the shell has a label to go back to");
+        assert_eq!(program_name, shell_label, "the leaf names the shell again");
+
+        h.chunk(idle_frame(&[]));
+        advance(Duration::from_secs(1)).await;
+        let rec = h.registry.get(SESSION).expect("session registered");
+        assert_eq!(
+            rec.lock().expect("record lock").conversation_id,
+            None,
+            "the later run is a restart, which looks for its own conversation"
+        );
+    }
+
+    #[test]
+    fn redetected_sighting_with_no_change_does_not_broadcast() {
+        let mut record = pwsh_plain_shell();
+        record.agent_in_shell = true;
+        record.shell_label = Some("pwsh".to_owned());
+        record.hook_agent = Some(agent_registry::default_agent());
+        record.program_name = Some(agent_tag());
+        let registry = SessionRegistry::new(scratch_dirs("shell-redetected-quiet"));
+        registry.insert(record);
+        let mut events = registry.subscribe();
+
+        super::agent_shown_in_shell(&registry, SESSION);
+
+        assert!(
+            events.try_recv().is_err(),
+            "a sighting that changes nothing is not broadcast"
+        );
     }
 
     #[tokio::test(start_paused = true)]

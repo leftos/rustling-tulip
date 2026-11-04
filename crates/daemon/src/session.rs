@@ -384,10 +384,12 @@ pub struct SessionRecord {
     /// hook clears it. Runtime-only.
     pub agent_exit_announced: bool,
     /// The agent whose plugin maps a plain shell's hook events: the agent a
-    /// recovered shell typed its resume command into. `None` for every other
+    /// recovered shell typed its resume command into, or the agent the
+    /// screen saw in a promoted shell (see
+    /// [`Self::agent_shown_in_plain_shell`]). `None` for every other
     /// session, since an agent session maps with [`Self::agent`]; a plain
-    /// shell without one maps no hook event. Written to the sidecar once at
-    /// spawn and never changed after.
+    /// shell without one maps no hook event. Set at spawn or at promotion,
+    /// and mirrored into the sidecar.
     pub hook_agent: Option<AgentId>,
     /// The recovered selection's options a shell hosting a recovered agent
     /// maps its hook events with. Empty for every other session. Written to
@@ -417,6 +419,26 @@ pub struct SessionRecord {
     /// replaces the one it left behind.
     pub size_client: Option<String>,
 }
+
+/// What the screen's sighting of an agent in a shell did to its record (see
+/// [`SessionRecord::agent_shown_in_plain_shell`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShownAgent {
+    /// The record is not a plain shell with no hook agent; nothing changed.
+    Ignored,
+    /// A plain shell became one running an agent.
+    Promoted,
+    /// A promoted shell whose agent had ended runs one again. `previous` is
+    /// the conversation id the last run held, which the new run's waiter
+    /// must never claim.
+    Restarted { previous: Option<String> },
+    /// A promoted shell's running agent was seen again, as after a reattach.
+    Redetected,
+}
+
+/// The shell label a promoted shell takes when its record names no program:
+/// the label a plain shell's spawn gives a shell it cannot name.
+pub const UNNAMED_SHELL_LABEL: &str = "shell";
 
 /// The agent a record names for a session that runs none: a plain shell, the
 /// recovered shell among them.
@@ -484,6 +506,66 @@ impl SessionRecord {
         }
     }
 
+    /// Whether this plain shell was promoted: the screen saw an agent run in
+    /// it. Its snapshot then reports an interactive agent session.
+    pub fn promoted_shell(&self) -> bool {
+        self.mode == SessionMode::PlainShell && self.agent_in_shell
+    }
+
+    /// The agent this session's snapshot and screen dump name: a promoted
+    /// shell's agent, else [`Self::wire_agent`].
+    pub fn snapshot_agent(&self) -> Option<AgentId> {
+        if self.promoted_shell() {
+            Some(self.agent.clone())
+        } else {
+            self.wire_agent()
+        }
+    }
+
+    /// The screen showed an agent running in this session's shell. A plain
+    /// shell not yet promoted, with no hook agent from its spawn or recovery
+    /// and not driven by hooks, becomes one running [`Self::agent`] (the
+    /// agent whose screen rules its watcher reads with): every promotion
+    /// field is set together, and the run starts. Its shell label is its
+    /// program name, or [`UNNAMED_SHELL_LABEL`] when it has none. A promoted
+    /// shell starts a run again ([`Self::start_agent_in_shell`]); one whose
+    /// agent had ended (its leaf names the shell) drops the last run's
+    /// conversation id, answering it so the new run's waiter never claims it.
+    /// Any other record is left to its hooks.
+    pub fn agent_shown_in_plain_shell(&mut self) -> ShownAgent {
+        if self.mode != SessionMode::PlainShell {
+            return ShownAgent::Ignored;
+        }
+        // A promoted shell carries the hook agent its promotion set, so a
+        // later run is keyed on `agent_in_shell` before the hook-agent gate.
+        if self.agent_in_shell {
+            let ended = self.shell_label.is_some() && self.program_name == self.shell_label;
+            let previous = if ended {
+                self.conversation_id.take()
+            } else {
+                None
+            };
+            self.start_agent_in_shell();
+            return if ended {
+                ShownAgent::Restarted { previous }
+            } else {
+                ShownAgent::Redetected
+            };
+        }
+        if self.hook_agent.is_some() || self.hook_driven {
+            return ShownAgent::Ignored;
+        }
+        self.agent_in_shell = true;
+        self.shell_label = Some(
+            self.program_name
+                .clone()
+                .unwrap_or_else(|| UNNAMED_SHELL_LABEL.to_owned()),
+        );
+        self.hook_agent = Some(self.agent.clone());
+        self.start_agent_in_shell();
+        ShownAgent::Promoted
+    }
+
     pub fn snapshot(&self) -> SessionSnapshot {
         // Orphan = session still tracked but with no live stdio handle, and
         // not in a terminal state. After the child exits we keep the record
@@ -508,7 +590,15 @@ impl SessionRecord {
             .spawn_config
             .as_ref()
             .is_some_and(|cfg| cfg.dangerously_skip_permissions);
-        let agent = self.wire_agent();
+        // A promoted shell reports the agent it runs, as an interactive
+        // session; the record itself stays a plain shell.
+        let promoted = self.promoted_shell();
+        let agent = self.snapshot_agent();
+        let mode = if promoted {
+            SessionMode::Interactive
+        } else {
+            self.mode
+        };
         let agent_chips = if agent.is_some() {
             self.agent_chips()
         } else {
@@ -535,7 +625,7 @@ impl SessionRecord {
                         .collect(),
                     ..summary.clone()
                 }),
-            mode: self.mode,
+            mode,
             started_at: self.started_at,
             exit_code: self.exit_code,
             metrics: self.metrics.clone(),
@@ -852,6 +942,12 @@ impl SessionRegistry {
         &self.discovery
     }
 
+    /// The config dirs this registry persists into; `None` for a registry
+    /// that writes no files.
+    pub(crate) fn dirs(&self) -> Option<&Dirs> {
+        self.dirs.as_ref()
+    }
+
     /// The sidecar gate for `id`, created on first use.
     fn sidecar_gate(&self, id: &str) -> Arc<Mutex<SidecarGate>> {
         Arc::clone(lock(&self.sidecar_gates).entry(id.to_owned()).or_default())
@@ -1095,6 +1191,7 @@ impl SessionRegistry {
             program_name: guard.program_name.clone(),
             agent_in_shell: guard.agent_in_shell,
             shell_label: guard.shell_label.clone(),
+            hook_agent: guard.hook_agent.clone(),
         }
     }
 
@@ -3259,6 +3356,71 @@ mod tests {
         registry.insert_reattached(&excluded_meta(), pty).publish();
         assert_keeps_busy_excluded(&registry);
         let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A plain shell record whose program is the shell `pwsh`.
+    fn pwsh_shell(id: &str) -> SessionRecord {
+        let mut rec = crate::history::test_support::record(id, protocol::SessionMode::PlainShell);
+        rec.program_name = Some("pwsh".to_owned());
+        rec
+    }
+
+    fn agent_tag() -> String {
+        agent_registry::plugin(&default_agent())
+            .expect("the default agent is registered")
+            .descriptor()
+            .tag
+            .clone()
+    }
+
+    /// A plain shell the screen saw an agent in reports an interactive agent
+    /// session, its leaf naming the agent.
+    #[test]
+    fn promoted_shell_snapshot_reports_interactive_with_agent() {
+        let mut rec = pwsh_shell("s1");
+        assert_eq!(rec.agent_shown_in_plain_shell(), ShownAgent::Promoted);
+        assert!(rec.agent_in_shell);
+        assert_eq!(rec.shell_label.as_deref(), Some("pwsh"));
+        assert_eq!(rec.hook_agent, Some(default_agent()));
+        assert_eq!(
+            rec.mode,
+            SessionMode::PlainShell,
+            "the record stays a shell"
+        );
+        let snap = rec.snapshot();
+        assert_eq!(snap.mode, SessionMode::Interactive);
+        assert_eq!(snap.agent, Some(default_agent()));
+        assert_eq!(snap.program_name, Some(agent_tag()));
+    }
+
+    /// A plain shell no agent was seen in reports a plain shell with no agent.
+    #[test]
+    fn plain_shell_snapshot_without_promotion_is_unchanged() {
+        let rec = pwsh_shell("s1");
+        let snap = rec.snapshot();
+        assert_eq!(snap.mode, SessionMode::PlainShell);
+        assert_eq!(snap.agent, None);
+        assert_eq!(
+            snap.agent_chips.len(),
+            0,
+            "a plain shell shows no agent chips"
+        );
+        assert_eq!(snap.program_name.as_deref(), Some("pwsh"));
+    }
+
+    /// The history entry of a promoted shell records the plain shell its
+    /// record still is.
+    #[test]
+    fn history_entry_of_promoted_shell_stays_plain() {
+        let mut rec = pwsh_shell("s1");
+        rec.agent_shown_in_plain_shell();
+        let entry = crate::history::entry_from_record(
+            &rec,
+            protocol::SessionEnd::Exited { code: 0 },
+            Utc::now(),
+        );
+        assert_eq!(entry.mode, SessionMode::PlainShell);
+        assert_eq!(entry.agent, None);
     }
 
     /// A recovered shell reloaded from its sidecar, through every insert a

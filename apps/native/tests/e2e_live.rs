@@ -20,7 +20,7 @@ use base64::Engine as _;
 use gpui::{TestAppContext, px, size};
 use protocol::{
     ChatEntry, ClientMessage, DaemonMessage, InitLayoutKind, PendingInput, PendingQuestion,
-    SessionSnapshot, SessionStatus, SplitDirection, SplitPlace,
+    SessionMode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace,
 };
 use serde_json::{Value, json};
 use support::Harness;
@@ -691,6 +691,106 @@ fn split_beside(h: &mut Harness<'_>, client: &LiveClient, pane: &str, session_id
         .expect("the split made a second pane");
     wait_claude_prompt(h, &second);
     second
+}
+
+/// Spawns a plain shell, runs the agent in it by hand with the line
+/// `launch` gives for the shell's folder and the fake CLI's full path, and
+/// waits until the session's
+/// snapshot reports an interactive agent session and, after one message to
+/// the agent, its conversation id: no rustling-tulip hook runs in it, so the
+/// screen and the agent's transcript are all the daemon has.
+fn agent_typed_by_hand_gets_chat(
+    cx: &mut TestAppContext,
+    tag: &str,
+    launch: impl FnOnce(&Path, &str) -> String,
+) {
+    let daemon = LiveDaemon::start(tag);
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+    let node = Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    assert!(node, "node not on PATH; fake-claude needs it");
+
+    client.send(spawn_shell(daemon.dir()));
+    let pane = place_first_session(&mut h, &client);
+    let shell = wait_snapshot(&mut h, &client, "the plain shell", |_| true);
+    assert_eq!(shell.mode, SessionMode::PlainShell);
+    assert_eq!(shell.agent, None, "a plain shell names no agent");
+    h.wait_for_row(&pane, "the shell's prompt", |row| {
+        row.trim_end().ends_with('>')
+    });
+
+    let line = launch(daemon.dir(), &fake_agent_path(&daemon));
+    h.type_into(&pane, &format!("{line}\n"));
+    wait_claude_prompt(&mut h, &pane);
+    let promoted = wait_snapshot(
+        &mut h,
+        &client,
+        "the shell reported as an interactive agent session",
+        |s| s.id == shell.id && s.mode == SessionMode::Interactive && s.agent.is_some(),
+    );
+    assert_eq!(promoted.agent, Some(agent_registry::default_agent()));
+
+    h.type_into(&pane, "hello from rt-758\r");
+    let found = wait_snapshot(&mut h, &client, "the session's conversation id", |s| {
+        s.id == shell.id && s.conversation_id.is_some()
+    });
+    assert_eq!(found.mode, SessionMode::Interactive);
+}
+
+/// The full path of the default agent's fake CLI, as the harness gives it to
+/// `daemon` in the agent's program override. The `PATH` stub under the
+/// agent's name only prints a marker, so a spec starts the fake by its path.
+fn fake_agent_path(daemon: &LiveDaemon) -> String {
+    let plugin = agent_registry::plugin(&agent_registry::default_agent())
+        .expect("the default agent is registered");
+    let var = plugin.program_env_var();
+    daemon
+        .envs()
+        .iter()
+        .rev()
+        .find(|(key, _)| *key == var)
+        .map(|(_, value)| value.to_string_lossy().into_owned())
+        .expect("the harness overrides the agent's program")
+}
+
+/// `path` quoted for the test shell (`cmd.exe` on Windows, `sh` elsewhere).
+fn shell_quoted(path: &str) -> String {
+    if cfg!(windows) {
+        format!("\"{path}\"")
+    } else {
+        format!("'{path}'")
+    }
+}
+
+/// The agent's CLI typed into a plain shell by hand turns the shell into an
+/// agent session the client offers Chat for.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn typed_agent_in_plain_shell_gets_chat(cx: &mut TestAppContext) {
+    agent_typed_by_hand_gets_chat(cx, "typed-agent", |_, fake| shell_quoted(fake));
+}
+
+/// An agent started through a custom command of the user's own (here `cui`,
+/// a script in the shell's folder that runs the agent's CLI) is found the
+/// same way.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn agent_started_through_a_wrapper_gets_chat(cx: &mut TestAppContext) {
+    agent_typed_by_hand_gets_chat(cx, "wrapped-agent", |dir, fake| {
+        let fake = shell_quoted(fake);
+        if cfg!(windows) {
+            std::fs::write(dir.join("cui.cmd"), format!("@{fake} %*\r\n"))
+                .expect("write the wrapper");
+            "cui".to_owned()
+        } else {
+            std::fs::write(dir.join("cui.sh"), format!("exec {fake} \"$@\"\n"))
+                .expect("write the wrapper");
+            "sh ./cui.sh".to_owned()
+        }
+    });
 }
 
 /// What the chat spec types: it holds fake-claude's permission cue.

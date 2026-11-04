@@ -200,10 +200,11 @@ pub struct OrphanMeta {
     /// its agent has ended. `None` for every other session.
     #[serde(default)]
     pub shell_label: Option<String>,
-    /// The agent whose plugin maps a recovered shell's hook events (see
-    /// [`crate::session::SessionRecord::hook_agent`]), set at spawn. `None`
-    /// for every other session and for sidecars written before this field
-    /// existed: such a shell maps no hook event.
+    /// The agent whose plugin maps a plain shell's hook events (see
+    /// [`crate::session::SessionRecord::hook_agent`]): a recovered shell's,
+    /// set at spawn, or a promoted shell's, mirrored from the record when the
+    /// screen saw its agent. `None` for every other session and for sidecars
+    /// written before this field existed: such a shell maps no hook event.
     #[serde(default)]
     pub hook_agent: Option<AgentId>,
     /// The recovered selection's options that `hook_agent`'s plugin maps a
@@ -732,6 +733,9 @@ pub struct RecordMirror {
     pub program_name: Option<String>,
     pub agent_in_shell: bool,
     pub shell_label: Option<String>,
+    /// The agent a plain shell maps its hooks with: a recovered shell's,
+    /// set at spawn, or a promoted shell's, set when the screen saw it.
+    pub hook_agent: Option<AgentId>,
 }
 
 impl RecordMirror {
@@ -753,6 +757,7 @@ impl RecordMirror {
             && meta.program_name == self.program_name
             && meta.agent_in_shell == self.agent_in_shell
             && meta.shell_label == self.shell_label
+            && meta.hook_agent == self.hook_agent
     }
 
     fn apply(&self, meta: &mut OrphanMeta) {
@@ -776,6 +781,7 @@ impl RecordMirror {
         meta.program_name.clone_from(&self.program_name);
         meta.agent_in_shell = self.agent_in_shell;
         meta.shell_label.clone_from(&self.shell_label);
+        meta.hook_agent.clone_from(&self.hook_agent);
     }
 }
 
@@ -1257,6 +1263,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
+    /// A promoted shell's hook agent reaches the sidecar through the record
+    /// mirror.
+    #[test]
+    fn sidecar_round_trips_hook_agent() {
+        let dirs = scratch_dirs("sidecar-hook-agent-mirror");
+        let mut meta = s1_meta(None);
+        meta.mode = SessionMode::PlainShell;
+        write_meta(&dirs, &meta).expect("write meta");
+        let mut mirror = mirror_for(None);
+        mirror.agent_in_shell = true;
+        mirror.shell_label = Some("pwsh".to_owned());
+        mirror.hook_agent = Some(agent_registry::default_agent());
+        sync_record_fields(&dirs, "s1", &mirror).expect("sync the record");
+        let loaded = load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(loaded.hook_agent, Some(agent_registry::default_agent()));
+        assert!(loaded.agent_in_shell);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A plain shell's sidecar written before the hook agent was mirrored
+    /// loads, with no hook agent.
+    #[test]
+    fn sidecar_without_hook_agent_loads() {
+        let old = br#"{
+            "on_disk_version": 2,
+            "session_id": "old",
+            "pid": 9001,
+            "label": "legacy",
+            "kind": "standalone",
+            "mode": "plain_shell",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z",
+            "agent_in_shell": false
+        }"#;
+        let old_meta = load_meta_from_bytes(old).expect("parse old meta");
+        assert_eq!(old_meta.hook_agent, None);
+        assert_eq!(old_meta.mode, SessionMode::PlainShell);
+        assert!(!old_meta.agent_in_shell);
+    }
+
     /// A recovered shell's hook options and trust survive the sidecar; a
     /// sidecar without the fields loads as empty options, untrusted.
     #[test]
@@ -1312,6 +1358,7 @@ mod tests {
             program_name: Some("rt-tracer".to_owned()),
             agent_in_shell: false,
             shell_label: None,
+            hook_agent: None,
         }
     }
 

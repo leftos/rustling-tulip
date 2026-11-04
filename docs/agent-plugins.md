@@ -127,7 +127,7 @@ The context and result types, all in `agent-api`:
   The held events are raw JSON-object bodies, capped at 32 events and 256 KiB per session and 64 sessions and 8 MiB in all, oldest evicted first, dropped after 30 s; the record's plugin maps them, so the early `SessionStart` is mapped by the agent the record names and the permission-mismatch warn fires for early events too.
 - **Shell resume.** A recovered shell that types an agent's resume command carries that agent as a daemon-internal `hook_agent` on its `SpawnArgs` and record, so the hook route maps its events with that plugin. It is never on the wire `SpawnRequest` and never stored in `SpawnConfig`; the recovery path sets it (`RecoveryPlan.hook_agent`, passed to `spawn_session_with_extras` as `SpawnExtras`), and the `meta.json` sidecar keeps it.
 
-  A plain shell maps hooks only with a `hook_agent`. The shell itself stays a plain shell with no agent: its snapshot, sidecar and history entry carry `agent: None`, and only the in-memory record uses `default_agent()`.
+  A plain shell maps hooks only with a `hook_agent`. The shell itself stays a plain shell with no agent: its sidecar and history entry carry `agent: None`, and only the in-memory record uses `default_agent()`. Its snapshot carries `agent: None` too, until its screen watcher recognises an agent's TUI: the shell is then promoted, and the snapshot reports mode interactive, `agent` the plugin whose screen rules matched and `program_name` its tag (`session-runtime.md` "Session status"). A recovered shell with a `hook_agent` is never promoted by the screen.
 
 ### Codex and Cursor on this trait
 
