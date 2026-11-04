@@ -69,7 +69,7 @@ Every candidate measures in one window that opens, with the local CPU baseline, 
 | `sftp` | `sftp -b <batch>` with `get -r <dir> <dest>\<shape>` | `null` |
 | `ssh-tar` | `ssh … tar.exe -c -f - -C <dir> .` piped (by the harness, no shell) into `tar.exe -x -f - -C <dest>\<shape>` | `null` |
 
-The fetch candidates first run an untimed setup session (`ssh … rtd.cmd bridge`): it starts the isolated daemon if none runs, registers `<remote-dir>\<shape>` as a repo (`AddRepo`; a non-git folder is accepted) and reads its id (`ListRepos`). They then wait until the daemon is idle, meaning its CPU time is the same in two readings 1 s apart, for at most 30 s; past that `cpu_note` says `daemon not idle`.
+The fetch candidates first run an untimed setup session (`ssh … rtd.cmd bridge`): it starts the isolated daemon if none runs, registers `<remote-dir>\<shape>` as a repo named `folder-bench-<leaf of remote-dir>-<shape>` (`AddRepo`; a non-git folder is accepted; the leaf keeps fixtures at two scales apart) and reads its id (`ListRepos`). They then wait until the daemon is idle, meaning its CPU time is the same in two readings 1 s apart, for at most 30 s; past that `cpu_note` says `daemon not idle`.
 
 Only then does the timed session open the window. Its own SSH connect, the `bridge` start and `Hello` fall inside the window, and the daemon start and the registration do not.
 
@@ -81,7 +81,7 @@ The fetch candidates leave the isolated daemon running for the next run. Stop it
 
 ```powershell
 ssh builder@leftos-buildbox C:\Users\builder\.tmp\folder-bench\bin\rtd.cmd shutdown
-ssh builder@leftos-buildbox "powershell -NoProfile -Command Get-Process rustling-tulipd* -ErrorAction SilentlyContinue | Select-Object Id,Path"
+ssh builder@leftos-buildbox 'powershell -NoProfile -Command "Get-Process rustling-tulipd* -ErrorAction SilentlyContinue | Select-Object Id,Path | Format-List"'
 ```
 
 ## serve-tar

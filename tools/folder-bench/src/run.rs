@@ -625,7 +625,7 @@ impl Session {
     fn register(&mut self, plan: &Plan) -> anyhow::Result<String> {
         self.send(&ClientMessage::AddRepo {
             path: plan.remote.clone(),
-            name: Some(format!("folder-bench-{}", plan.shape)),
+            name: Some(repo_name(&plan.remote, plan.shape)),
         })?;
         self.send(&ClientMessage::ListRepos)?;
         let wanted = normalize(&plan.remote);
@@ -642,6 +642,22 @@ impl Session {
                 _ => {}
             }
         }
+    }
+}
+
+/// The name a shape's folder is registered under:
+/// `folder-bench-<fixtures folder leaf>-<shape>`, so the same shape made in
+/// two fixtures folders never derives the same name. `shape_dir` is
+/// `<remote-dir>\<shape>`; with no parent folder the leaf is left out.
+fn repo_name(shape_dir: &str, shape: &str) -> String {
+    let parent = shape_dir
+        .trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .nth(1)
+        .filter(|leaf| !leaf.is_empty() && !leaf.ends_with(':'));
+    match parent {
+        Some(leaf) => format!("folder-bench-{leaf}-{shape}"),
+        None => format!("folder-bench-{shape}"),
     }
 }
 
@@ -825,6 +841,21 @@ mod tests {
             normalize(r"\\?\C:\Users\Builder\.tmp\x\"),
             normalize("c:/users/builder/.tmp/x")
         );
+    }
+
+    #[test]
+    fn repo_name_includes_the_fixtures_folder() {
+        let full = repo_name(
+            r"C:\Users\builder\.tmp\folder-bench\fx-full\small-files",
+            "small-files",
+        );
+        let small = repo_name(
+            r"C:\Users\builder\.tmp\folder-bench\fx\small-files",
+            "small-files",
+        );
+        assert_eq!(full, "folder-bench-fx-full-small-files");
+        assert_eq!(small, "folder-bench-fx-small-files");
+        assert_ne!(full, small);
     }
 
     #[test]
