@@ -52,6 +52,18 @@ fn system_scope_value(name: &str) -> Option<String> {
     registry::value(registry::Scope::System, name)
 }
 
+/// This Windows installation's `MachineGuid` from
+/// `HKLM\SOFTWARE\Microsoft\Cryptography`, trimmed; `None` when it is absent,
+/// unreadable or empty. [`crate::daemon_id`] stamps the daemon id with a digest
+/// of it, so an id file copied from a machine with a different value is minted
+/// again.
+#[cfg(windows)]
+pub(crate) fn machine_guid() -> Option<String> {
+    registry::value(registry::Scope::Cryptography, "MachineGuid")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 /// Outside Windows there is no user scope beyond the process environment.
 #[cfg(not(windows))]
 fn user_scope_value(_name: &str) -> Option<String> {
@@ -201,20 +213,25 @@ mod registry {
     /// any text; a larger one does (its size counts the NUL terminator).
     const SMALL_VALUE_BYTES: u32 = 4;
 
-    /// A registry key holding persistent environment variables.
+    /// A registry key the daemon reads a value from: the two scopes that hold
+    /// persistent environment variables, and the cryptography key.
     #[derive(Debug, Clone, Copy)]
     pub enum Scope {
-        /// `HKCU\Environment`.
+        /// `HKCU\Environment`, the user's persistent environment variables.
         User,
-        /// `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`.
+        /// `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`,
+        /// the machine's persistent environment variables.
         System,
+        /// `HKLM\SOFTWARE\Microsoft\Cryptography`, read only for the machine's
+        /// `MachineGuid`.
+        Cryptography,
     }
 
     impl Scope {
         fn root(self) -> HKEY {
             match self {
                 Self::User => HKEY_CURRENT_USER,
-                Self::System => HKEY_LOCAL_MACHINE,
+                Self::System | Self::Cryptography => HKEY_LOCAL_MACHINE,
             }
         }
 
@@ -224,6 +241,7 @@ mod registry {
                 Self::System => {
                     w!("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")
                 }
+                Self::Cryptography => w!("SOFTWARE\\Microsoft\\Cryptography"),
             }
         }
 
@@ -231,6 +249,7 @@ mod registry {
             match self {
                 Self::User => "user",
                 Self::System => "system",
+                Self::Cryptography => "machine",
             }
         }
     }
