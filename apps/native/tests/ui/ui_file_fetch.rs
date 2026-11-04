@@ -95,9 +95,20 @@ fn on_host<'a>(
     dir: &TestDir,
     target: &Target,
 ) -> (Harness<'a>, PathBuf) {
+    on_host_with(cx, dir, target, &[])
+}
+
+/// [`on_host`], the host's daemon welcoming with the fake daemon's
+/// features and `extra`.
+fn on_host_with<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    target: &Target,
+    extra: &[&str],
+) -> (Harness<'a>, PathBuf) {
     let mut h = Harness::with(cx, dir, &Fixture::default());
     let mut host = h.host(target);
-    host.connect();
+    host.connect_with_features(extra);
     host.send(DaemonMessage::Repos {
         repos: vec![repo("r1", "C:/repos/repo")],
     });
@@ -238,6 +249,38 @@ fn a_file_fetched_from_an_ssh_host_lands_under_its_folder(cx: &mut TestAppContex
         b"fn main() {\n}\n"
     );
     assert_eq!(names_in(&root), ["ssh-me@devbox_2222"]);
+}
+
+#[gpui::test]
+fn an_ssh_hosts_fetch_toasts_name_the_host_as_typed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let ssh = Target::parse_ssh("builder@Leftos-Buildbox", None).expect("an SSH host");
+    let (mut h, root) = on_host_with(cx, &dir, &ssh, &[protocol::FEATURE_FOLDER_FETCH]);
+
+    let id = start_on(&mut h, &ssh, request("src/main.rs", Some(1), None));
+    assert!(
+        toasts(&mut h).contains(&(
+            "Fetching main.rs from builder@Leftos-Buildbox".to_owned(),
+            None
+        )),
+        "the Fetching toast names the host as typed: {:?}",
+        toasts(&mut h)
+    );
+    stream_on(&mut h, &ssh, &id, b"fn main() {\n", b"}\n");
+
+    assert!(
+        toasts(&mut h).contains(&(
+            "Fetched main.rs".to_owned(),
+            Some("from builder@Leftos-Buildbox".to_owned())
+        )),
+        "the Fetched toast names the host as typed: {:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(
+        names_in(&root),
+        ["ssh-builder@leftos-buildbox"],
+        "the file still lands under the host's folder"
+    );
 }
 
 #[gpui::test]

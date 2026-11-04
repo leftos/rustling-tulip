@@ -291,7 +291,8 @@ impl RootView {
         }
     }
 
-    /// The × on toast `id`; a preset job's progress toast stays closed.
+    /// The × on toast `id`; a preset job's or a folder fetch's progress
+    /// toast stays closed.
     fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
         let key = self
             .notices
@@ -301,6 +302,7 @@ impl RootView {
             .and_then(|toast| toast.key.clone());
         if let Some(key) = key {
             self.preset_launches.dismiss(&key);
+            self.fetches.dismiss_progress(&key);
         }
         if self.notices.dismiss(id) {
             self.forget_closed_jobs();
@@ -846,13 +848,17 @@ fn toast_card(toast: &Toast, progress: Option<f32>, cx: &mut Context<RootView>) 
         .detail
         .clone()
         .map(|detail| div().text_color(gpui::rgb(t.muted)).child(detail));
+    // The body shrinks below its text's width, so a long title wraps and
+    // the × stays on the card.
     let body = div()
         .flex()
         .flex_col()
         .flex_1()
+        .min_w_0()
         .gap(px(2.0))
         .child(
             div()
+                .min_w_0()
                 .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
                 .child(toast.title.clone()),
         )

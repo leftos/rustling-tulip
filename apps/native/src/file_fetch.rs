@@ -146,6 +146,15 @@ pub fn host_folder(target: &Target) -> Option<String> {
     Some(sanitize_segment(&folder))
 }
 
+/// A target's host as fetch toasts name it: the SSH host string as the user
+/// typed it, or the tailnet host's `MagicDNS` name without its port; never
+/// the folder form [`host_folder`] gives. "This PC" for the local daemon,
+/// which fetches nothing.
+#[must_use]
+pub fn host_label(target: &Target) -> String {
+    target.remote_name().unwrap_or("This PC").to_owned()
+}
+
 /// The last segment of the relative path `rel`.
 #[must_use]
 pub fn file_name(rel: &str) -> &str {
@@ -639,7 +648,8 @@ impl MediaBatch {
 pub struct FetchEntry {
     /// The host whose daemon sends the file.
     host_key: HostKey,
-    host: String,
+    /// The host as toasts name it ([`host_label`]), not its download folder.
+    label: String,
     request: FetchRequest,
     target: PathBuf,
     size: Option<u64>,
@@ -676,6 +686,9 @@ enum EntryKind {
         unpacked: Arc<AtomicU64>,
         /// The progress text the folder's toast last showed.
         shown: String,
+        /// The user closed the progress toast, which stays closed for the
+        /// rest of the fetch.
+        progress_dismissed: bool,
     },
 }
 
@@ -691,13 +704,13 @@ fn target_key(target: &Path) -> String {
 }
 
 impl FetchEntry {
-    /// A fetch of `request` from `host_key`'s daemon, whose download folder
-    /// is `host`, saved at `target`.
+    /// A fetch of `request` from `host_key`'s daemon, which toasts name
+    /// `label` ([`host_label`]), saved at `target`.
     #[must_use]
-    pub fn new(host_key: HostKey, host: String, request: FetchRequest, target: PathBuf) -> Self {
+    pub fn new(host_key: HostKey, label: String, request: FetchRequest, target: PathBuf) -> Self {
         Self {
             host_key,
-            host,
+            label,
             request,
             target,
             size: None,
@@ -777,9 +790,10 @@ impl FetchEntry {
         self.finishing = true;
     }
 
+    /// The host as toasts name it: [`host_label`], never its folder form.
     #[must_use]
-    pub fn host(&self) -> &str {
-        &self.host
+    pub fn host_label(&self) -> &str {
+        &self.label
     }
 
     /// The host whose daemon sends the file.
@@ -822,8 +836,32 @@ impl FetchEntry {
             announced: None,
             unpacked: Arc::new(AtomicU64::new(0)),
             shown: String::new(),
+            progress_dismissed: false,
         };
         self
+    }
+
+    /// The user closed a folder's progress toast: it shows no more progress
+    /// for this fetch. A file's fetch has no progress toast to close.
+    pub fn dismiss_progress(&mut self) {
+        if let EntryKind::Folder {
+            progress_dismissed, ..
+        } = &mut self.kind
+        {
+            *progress_dismissed = true;
+        }
+    }
+
+    /// Whether the user closed this folder's progress toast.
+    #[must_use]
+    pub fn progress_dismissed(&self) -> bool {
+        matches!(
+            self.kind,
+            EntryKind::Folder {
+                progress_dismissed: true,
+                ..
+            }
+        )
     }
 
     /// Whether this fetch brings over a folder.
@@ -992,6 +1030,9 @@ pub struct FetchRegistry {
     /// The action of each ended fetch's done toast, by the toast's key,
     /// while the toast shows.
     done: HashMap<String, DoneAction>,
+    /// A spec's hold on the folder unpackers started from now on; `None`
+    /// outside specs.
+    unpack_hold: Option<Arc<crate::file_fetch_view::UnpackGate>>,
 }
 
 impl FetchRegistry {
@@ -1007,7 +1048,26 @@ impl FetchRegistry {
             entries: HashMap::new(),
             stats: HashMap::new(),
             done: HashMap::new(),
+            unpack_hold: None,
         }
+    }
+
+    /// The toast keyed `key` was closed: when it is a folder fetch's
+    /// progress, that fetch shows no more of it.
+    pub fn dismiss_progress(&mut self, key: &str) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.dismiss_progress();
+        }
+    }
+
+    /// Holds every folder unpacker started from now on at `gate`.
+    pub(crate) fn hold_unpackers(&mut self, gate: Arc<crate::file_fetch_view::UnpackGate>) {
+        self.unpack_hold = Some(gate);
+    }
+
+    /// The gate a new folder unpacker waits at, while a spec holds them.
+    pub(crate) fn unpack_hold(&self) -> Option<Arc<crate::file_fetch_view::UnpackGate>> {
+        self.unpack_hold.clone()
     }
 
     /// Records `action` as what the done toast keyed `key` offers.
@@ -1077,6 +1137,16 @@ impl FetchRegistry {
     /// Drops every stat from `host`.
     pub fn drop_stats_of(&mut self, host: &HostKey) {
         self.stats.retain(|_, stat| stat.host != *host);
+    }
+
+    /// [`Self::new_group`], keyed `key`: a link's stat id, whose early
+    /// "Fetching" toast the group's fetch then updates in place.
+    pub fn new_group_keyed(&mut self, key: String, rest: Vec<FetchRequest>) -> ProbeGroup {
+        self.next_group += 1;
+        ProbeGroup {
+            key,
+            rest: rest.into(),
+        }
     }
 
     /// A new probe group whose readings after the first are `rest`.
@@ -1278,7 +1348,8 @@ mod tests {
     use super::{
         AlreadyFetching, DoneAction, FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd,
         WriteOutcome, WriteStep, display_host_path, download_path, folder_download_path,
-        host_folder, is_under, parent_folder_request, part_path, run_writer, sanitize_segment,
+        host_folder, host_label, is_under, parent_folder_request, part_path, run_writer,
+        sanitize_segment,
     };
     use crate::folder_unpack::Announced;
     use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
@@ -2434,6 +2505,35 @@ mod tests {
             host_folder(&ssh(name)),
             host_folder(&Target::tailnet(name, None)),
             "an SSH host never shares a tailnet host's folder"
+        );
+    }
+
+    #[test]
+    fn a_keyed_group_keeps_its_key_and_readings() {
+        let mut registry = FetchRegistry::new("L");
+        let group = registry.new_group_keyed("stat-L-1".to_owned(), vec![reading("b.txt")]);
+        assert_eq!(group.key(), "stat-L-1");
+        assert_eq!(
+            group
+                .remaining()
+                .iter()
+                .map(|r| r.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            ["b.txt"]
+        );
+    }
+
+    #[test]
+    fn an_ssh_host_label_is_its_name_as_typed() {
+        let ssh = Target::parse_ssh("builder@Leftos-Buildbox", None).expect("an SSH host");
+        assert_eq!(host_label(&ssh), "builder@Leftos-Buildbox");
+    }
+
+    #[test]
+    fn a_tailnet_host_label_is_its_name_without_the_port() {
+        assert_eq!(
+            host_label(&Target::tailnet("box.tail1234.ts.net.", Some(9000))),
+            "box.tail1234.ts.net"
         );
     }
 

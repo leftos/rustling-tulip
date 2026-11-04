@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use base64::Engine as _;
 use futures::channel::mpsc::unbounded;
@@ -55,6 +57,9 @@ pub(crate) const FETCH_REVEAL: ToastAction = ToastAction {
 /// worktree of its session.
 const NOT_INSIDE: &str = "Not inside a repo or worktree of this session.";
 
+/// How often a finishing folder fetch's toast shows the unpacked bytes.
+const FINISHING_TICK: Duration = Duration::from_millis(250);
+
 /// The title of the toast about a fetch that failed.
 fn failed_title(file_name: &str) -> String {
     format!("Couldn't fetch {file_name}")
@@ -77,10 +82,83 @@ fn failure_detail(entry: &FetchEntry, reason: &str) -> String {
     }
 }
 
+/// Where a held folder unpacker waits: before it starts unpacking, and
+/// after it ended, before it reports how.
+#[derive(Debug, Default)]
+pub(crate) struct UnpackGate {
+    released: Mutex<Released>,
+    changed: Condvar,
+}
+
+/// Which of a held unpacker's two waits are released.
+#[derive(Debug, Default, Clone, Copy)]
+struct Released {
+    start: bool,
+    outcome: bool,
+}
+
+impl UnpackGate {
+    /// Releases the waits `set` marks, waking every waiting unpacker.
+    fn release(&self, set: impl FnOnce(&mut Released)) {
+        let mut released = self.released.lock().unwrap_or_else(PoisonError::into_inner);
+        set(&mut released);
+        self.changed.notify_all();
+    }
+
+    /// Blocks the unpacker's thread until `passes` holds.
+    fn wait(&self, passes: impl Fn(Released) -> bool) {
+        let mut released = self.released.lock().unwrap_or_else(PoisonError::into_inner);
+        while !passes(*released) {
+            released = self
+                .changed
+                .wait(released)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// A spec's hold on the folder unpackers started while it lives: each waits
+/// before it starts until [`Self::release_start`], and before it reports
+/// until [`Self::release_outcome`]. Dropping it releases both, so no
+/// unpacker is left waiting.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct UnpackHold(Arc<UnpackGate>);
+
+impl UnpackHold {
+    /// Lets the held unpackers start.
+    pub fn release_start(&self) {
+        self.0.release(|released| released.start = true);
+    }
+
+    /// Lets the held unpackers report how they ended.
+    pub fn release_outcome(&self) {
+        self.0.release(|released| released.outcome = true);
+    }
+}
+
+impl Drop for UnpackHold {
+    fn drop(&mut self) {
+        self.0.release(|released| {
+            released.start = true;
+            released.outcome = true;
+        });
+    }
+}
+
 impl RootView {
     /// Saves fetched files under `root` instead of the data folder.
     pub fn set_remote_files_root(&mut self, root: PathBuf) {
         self.remote_files_root = Ok(absolute_root(root));
+    }
+
+    /// Holds every folder unpacker started from now on, for a spec to look
+    /// at a fetch between its last step and its outcome.
+    #[doc(hidden)]
+    pub fn hold_folder_unpackers(&mut self) -> UnpackHold {
+        let gate = Arc::new(UnpackGate::default());
+        self.fetches.hold_unpackers(Arc::clone(&gate));
+        UnpackHold(gate)
     }
 
     /// Asks the remote host for `request`'s file, saved under this host's
@@ -125,9 +203,10 @@ impl RootView {
         let name = file_fetch::fetch_name(&request).to_owned();
         let conn = self.conn_of(&request.host);
         if !conn.is_some_and(crate::connection::Connection::is_open) {
-            let host = conn
-                .and_then(|conn| file_fetch::host_folder(conn.target()))
-                .unwrap_or_else(|| "The host".to_owned());
+            let host = conn.map_or_else(
+                || "The host".to_owned(),
+                |conn| file_fetch::host_label(conn.target()),
+            );
             tracing::info!(host = ?request.host, "the folder's host is offline");
             self.push_toast(
                 ToastKind::Warning,
@@ -203,16 +282,44 @@ impl RootView {
             let Some((id, first)) = self.fetches.begin_stat(host.clone(), readings) else {
                 return;
             };
+            // The toast shows at once, keyed by the stat: the file fetch
+            // updates it in place, and a folder's toast or a warning
+            // replaces it.
+            let title = format!(
+                "Fetching {} from {}",
+                file_fetch::fetch_name(&first),
+                self.host_label_of(host)
+            );
+            self.push_toast_spec(
+                ToastSpec {
+                    kind: ToastKind::Info,
+                    title,
+                    detail: None,
+                    key: Some(id.clone()),
+                    sticky: false,
+                    actions: Vec::new(),
+                },
+                cx,
+            );
             self.send_stat(host, id, &first);
             return;
         }
         let Some(root) = readings.first().map(|r| r.repo_name.clone()) else {
             return;
         };
-        if !self.start_file_flow(readings, cx) {
+        if !self.start_file_flow(readings, None, cx) {
             tracing::info!(host = ?host, "the host cannot send the folder a link names");
             self.push_too_old(host, &root, cx);
         }
+    }
+
+    /// `host` as fetch toasts name it ([`file_fetch::host_label`]); "The
+    /// host" when it has no connection.
+    fn host_label_of(&self, host: &HostKey) -> String {
+        self.conn_of(host).map_or_else(
+            || "The host".to_owned(),
+            |conn| file_fetch::host_label(conn.target()),
+        )
     }
 
     /// Whether `host`'s daemon fetches folders.
@@ -223,22 +330,26 @@ impl RootView {
 
     /// Says that `host` is too old to send the folder `name`.
     fn push_too_old(&mut self, host: &HostKey, name: &str, cx: &mut Context<Self>) {
-        let folder = self
-            .conn_of(host)
-            .and_then(|conn| file_fetch::host_folder(conn.target()))
-            .unwrap_or_else(|| "The host".to_owned());
+        let label = self.host_label_of(host);
         self.push_toast(
             ToastKind::Warning,
             &failed_title(name),
-            Some(too_old_detail(&folder)),
+            Some(too_old_detail(&label)),
             cx,
         );
     }
 
     /// Fetches the first of a link's `readings` that names a file, trying
     /// the ones after it one at a time; a reading of the root itself is
-    /// never fetched as a file. `false` when no reading names a file.
-    fn start_file_flow(&mut self, readings: Vec<FetchRequest>, cx: &mut Context<Self>) -> bool {
+    /// never fetched as a file. `false` when no reading names a file. With
+    /// `key`, the link's stat whose toast already shows, the fetch updates
+    /// that toast in place, and a refused fetch takes it away.
+    fn start_file_flow(
+        &mut self,
+        readings: Vec<FetchRequest>,
+        key: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let mut files: Vec<FetchRequest> = readings
             .into_iter()
             .filter(|reading| !reading.rel_path.is_empty())
@@ -247,8 +358,15 @@ impl RootView {
             return false;
         }
         let first = files.remove(0);
-        let group = self.fetches.new_group(files);
-        self.start_fetch(first, Some(group), cx);
+        let group = match key {
+            Some(key) => self.fetches.new_group_keyed(key.to_owned(), files),
+            None => self.fetches.new_group(files),
+        };
+        if self.start_fetch(first, Some(group), cx).is_none()
+            && let Some(key) = key
+        {
+            self.dismiss_toast_key(key, cx);
+        }
         true
     }
 
@@ -279,6 +397,8 @@ impl RootView {
                 let Some(stat) = self.fetches.take_stat(id) else {
                     return true;
                 };
+                // The folder's own toast, or its refusal, takes over.
+                self.dismiss_toast_key(id, cx);
                 if let Err(refusal) = self.try_start_folder_fetch(stat.reading().clone(), cx) {
                     self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx);
                 }
@@ -295,7 +415,7 @@ impl RootView {
                     id,
                     "no reading of the link is on the host; fetching as files"
                 );
-                self.start_files_or_warn(stat.readings().to_vec(), cx);
+                self.start_files_or_warn(stat.readings().to_vec(), id, cx);
             }
             PathKind::File | PathKind::Other | PathKind::Unknown => {
                 let Some(stat) = self.fetches.take_stat(id) else {
@@ -303,28 +423,41 @@ impl RootView {
                 };
                 let mut readings = vec![stat.reading().clone()];
                 readings.extend(stat.rest().iter().cloned());
-                self.start_files_or_warn(readings, cx);
+                self.start_files_or_warn(readings, id, cx);
             }
         }
         true
     }
 
     /// [`Self::start_file_flow`] over `readings`; when none names a file, a
-    /// warning titled by the first reading says the link is outside the
-    /// session's repos and worktrees.
-    fn start_files_or_warn(&mut self, readings: Vec<FetchRequest>, cx: &mut Context<Self>) {
+    /// warning titled by the first reading says why: a link that reads only
+    /// as repo or worktree roots names a folder missing on the host, and
+    /// any other link is outside the session's repos and worktrees. The
+    /// toast of the link's stat `key` becomes the fetch's, or gives way to
+    /// the warning.
+    fn start_files_or_warn(
+        &mut self,
+        readings: Vec<FetchRequest>,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
         let name = readings
             .first()
             .map(file_fetch::fetch_name)
             .unwrap_or_default()
             .to_owned();
-        if !self.start_file_flow(readings, cx) {
-            self.push_toast(
-                ToastKind::Warning,
-                &failed_title(&name),
-                Some(NOT_INSIDE.to_owned()),
-                cx,
-            );
+        let root_host = readings
+            .iter()
+            .all(|reading| reading.rel_path.is_empty())
+            .then(|| readings.first().map(|reading| reading.host.clone()))
+            .flatten();
+        if !self.start_file_flow(readings, Some(key), cx) {
+            self.dismiss_toast_key(key, cx);
+            let detail = match root_host {
+                Some(host) => format!("{name} is not on {}.", self.host_label_of(&host)),
+                None => NOT_INSIDE.to_owned(),
+            };
+            self.push_toast(ToastKind::Warning, &failed_title(&name), Some(detail), cx);
         }
     }
 
@@ -379,31 +512,46 @@ impl RootView {
     }
 
     /// Shows the folder fetch `id`'s counts and unpacked bytes on its
-    /// toast; with `on_change`, only when the shown bytes changed.
+    /// toast; with `on_change`, only when the shown bytes changed. Once the
+    /// user closed that toast it stays closed.
     fn show_folder_progress(&mut self, id: &str, on_change: bool, cx: &mut Context<Self>) {
         let Some(entry) = self.fetches.get_mut(id) else {
             return;
         };
+        if entry.progress_dismissed() {
+            return;
+        }
         let Some(announced) = entry.announced() else {
             return;
         };
         let done = human_size(entry.bytes_received());
-        if !entry.note_progress(&done) && on_change {
+        let size = human_size(announced.bytes);
+        let finishing = entry.is_finishing();
+        let detail = if finishing {
+            format!("Finishing: {done} of {size}")
+        } else {
+            format!("{done} of {size}")
+        };
+        if !entry.note_progress(&detail) && on_change {
             return;
         }
-        let size = human_size(announced.bytes);
         let spec = ToastSpec {
             kind: ToastKind::Info,
             title: format!(
                 "Fetching folder {} from {} ({} files, {size})",
                 entry.file_name(),
-                entry.host(),
+                entry.host_label(),
                 announced.files
             ),
-            detail: Some(format!("{done} of {size}")),
+            detail: Some(detail),
             key: Some(id.to_owned()),
             sticky: true,
-            actions: vec![FETCH_CANCEL],
+            // A finishing fetch is not cancelled, so its toast offers no Cancel.
+            actions: if finishing {
+                Vec::new()
+            } else {
+                vec![FETCH_CANCEL]
+            },
         };
         self.push_toast_spec(spec, cx);
     }
@@ -489,8 +637,8 @@ impl RootView {
         Ok(id)
     }
 
-    /// The host `request` names, its download folder and
-    /// where `request`'s file lands in it.
+    /// The host `request` names, its label for toasts ([`file_fetch::host_label`])
+    /// and where `request`'s file lands under its download folder.
     ///
     /// # Errors
     /// The [`Refusal`] for the local daemon, a refused path or a missing
@@ -511,7 +659,7 @@ impl RootView {
         let name = file_fetch::fetch_name(request);
         let host_key = request.host.clone();
         let conn = self.conn_of(&host_key).unwrap_or_else(|| self.conn());
-        let Some(host) = file_fetch::host_folder(conn.target()) else {
+        let Some(folder) = file_fetch::host_folder(conn.target()) else {
             tracing::warn!(rel = %request.rel_path, "refusing a file fetch from the local daemon");
             return Err(Refusal {
                 kind: ToastKind::Warning,
@@ -520,11 +668,11 @@ impl RootView {
             });
         };
         let target = match &self.remote_files_root {
-            Ok(root) => place(root, &host, &request.repo_name, &request.rel_path),
+            Ok(root) => place(root, &folder, &request.repo_name, &request.rel_path),
             Err(err) => Err(format!("No folder for fetched files: {err}")),
         };
         match target {
-            Ok(target) => Ok((host_key, host, target)),
+            Ok(target) => Ok((host_key, file_fetch::host_label(conn.target()), target)),
             Err(reason) => {
                 tracing::warn!(rel = %request.rel_path, "refusing a file fetch: {reason}");
                 Err(Refusal {
@@ -954,6 +1102,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let hold = self.fetches.unpack_hold();
         let Some(entry) = self.fetches.get_mut(id) else {
             tracing::debug!(id, "a folder fetch the client no longer follows started");
             return;
@@ -978,10 +1127,16 @@ impl RootView {
         let spawned = std::thread::Builder::new()
             .name(format!("unpack {id}"))
             .spawn(move || {
+                if let Some(gate) = &hold {
+                    gate.wait(|released| released.start);
+                }
                 let ended =
                     folder_unpack::run_unpacker(&target, &thread_id, announced, steps, &mut |n| {
                         unpacked.store(n, Ordering::Relaxed);
                     });
+                if let Some(gate) = &hold {
+                    gate.wait(|released| released.outcome);
+                }
                 if report.send(ended).is_err() {
                     tracing::debug!(id = %thread_id, "nobody waits on the folder's unpacker");
                 }
@@ -1060,7 +1215,38 @@ impl RootView {
             tracing::debug!(id, "the fetch's writer already ended");
             return;
         }
+        let was_finishing = entry.is_finishing();
         entry.mark_finishing();
+        if entry.is_folder() {
+            self.show_folder_progress(id, false, cx);
+            if !was_finishing {
+                Self::tick_finishing_folder(id.to_owned(), cx);
+            }
+        }
+    }
+
+    /// Nothing else redraws the finishing folder fetch `id`'s toast after
+    /// the host's last chunk, so a timer started at `Done` shows what the
+    /// unpacker did since, until the fetch ends; before `Done` no timer
+    /// runs.
+    fn tick_finishing_folder(id: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(FINISHING_TICK).await;
+                let ticking = this.update(cx, |root, cx| {
+                    if !root.fetches.get(&id).is_some_and(FetchEntry::is_finishing) {
+                        return false;
+                    }
+                    root.show_folder_progress(&id, true, cx);
+                    true
+                });
+                // The fetch ended, or the view is gone with it.
+                if !ticking.unwrap_or(false) {
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The writer of the fetch `id` ended.
@@ -1130,7 +1316,7 @@ impl RootView {
         let spec = ToastSpec {
             kind: ToastKind::Info,
             title: format!("Fetched {}", file_fetch::fetch_name(entry.request())),
-            detail: Some(format!("from {}", entry.host())),
+            detail: Some(format!("from {}", entry.host_label())),
             key: Some(key.clone()),
             sticky: false,
             actions: vec![FETCH_WHOLE_FOLDER],
@@ -1155,7 +1341,7 @@ impl RootView {
         let spec = ToastSpec {
             kind: ToastKind::Info,
             title: format!("Fetched folder {}", entry.file_name()),
-            detail: Some(format!("{files} files from {}", entry.host())),
+            detail: Some(format!("{files} files from {}", entry.host_label())),
             key: Some(id.to_owned()),
             sticky: false,
             actions: vec![FETCH_REVEAL],
@@ -1223,7 +1409,7 @@ impl RootView {
     ) {
         self.fetches.drop_stats_of(host);
         for (id, entry) in self.fetches.take_unfinished(host) {
-            let reason = format!("The connection to {} closed.", entry.host());
+            let reason = format!("The connection to {} closed.", entry.host_label());
             tracing::warn!(%id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");
             abort_writer(&id, &entry);
             if entry.parent().is_some() {

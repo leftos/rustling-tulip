@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use gpui::{Modifiers, TestAppContext};
 use protocol::{ClientMessage, DaemonMessage, PathKind, SessionSnapshot};
-use rustling_tulip_native::{Connection, NetEvent, toast_action_selector};
+use rustling_tulip_native::{Connection, NetEvent, ToastKind, ToastSpec, toast_action_selector};
 use serde_json::json;
 use support::{
     Fixture, Harness, Opened, REMOTE, TestDir, pane, remote_pane, repo, saved_remote, seed_ui,
@@ -443,6 +443,106 @@ fn a_missing_stat_tries_the_next_reading(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_missing_root_link_says_the_folder_is_not_on_the_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+
+    click_link(&mut h, "see C:/wt/x", 6);
+    let id = one_stat(&mut h, "");
+    stat(&mut h, &id, PathKind::Missing);
+
+    let failures: Vec<(String, Option<String>)> = toasts(&mut h)
+        .into_iter()
+        .filter(|(title, _)| title.starts_with("Couldn't"))
+        .collect();
+    assert_eq!(
+        failures,
+        [(
+            "Couldn't fetch r1".to_owned(),
+            Some(format!("r1 is not on {HOST}."))
+        )],
+        "a missing root is named, not called outside the session"
+    );
+}
+
+#[gpui::test]
+fn a_link_click_shows_a_toast_before_any_stat_answers(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    one_stat(&mut h, "docs/notes.txt");
+
+    assert_eq!(
+        toasts(&mut h),
+        [(format!("Fetching notes.txt from {HOST}"), None)],
+        "the click shows a toast before the host answers"
+    );
+}
+
+#[gpui::test]
+fn a_file_link_updates_that_toast_in_place(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    let title = format!("Fetching notes.txt from {HOST}");
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    let stat_id = one_stat(&mut h, "docs/notes.txt");
+    let early = toast_titled(&mut h, &title).expect("the early toast shows");
+    stat(&mut h, &stat_id, PathKind::File);
+    one_file_fetch(&mut h, "docs/notes.txt");
+
+    assert_eq!(titled(&mut h, &title), 1, "{:?}", toasts(&mut h));
+    assert_eq!(
+        toast_titled(&mut h, &title),
+        Some(early),
+        "the file fetch updates the early toast in place"
+    );
+}
+
+#[gpui::test]
+fn a_folder_link_replaces_that_toast_with_the_folder_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+
+    let id = fetch_folder(&mut h, "see C:/wt/x/src", 6, "src");
+
+    assert_eq!(
+        toasts(&mut h),
+        [(format!("Fetching folder src from {HOST}"), None)],
+        "the folder's toast takes over from the early one"
+    );
+    assert!(
+        toast_keyed(&mut h, &id).is_some(),
+        "the toast is the fetch's"
+    );
+}
+
+#[gpui::test]
+fn a_missing_link_replaces_that_toast_with_the_warning(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+
+    click_link(&mut h, "see C:/wt/x", 6);
+    let id = one_stat(&mut h, "");
+    assert!(
+        shows(&mut h, &format!("Fetching r1 from {HOST}")),
+        "{:?}",
+        toasts(&mut h)
+    );
+    stat(&mut h, &id, PathKind::Missing);
+
+    assert_eq!(
+        toasts(&mut h),
+        [(
+            "Couldn't fetch r1".to_owned(),
+            Some(format!("r1 is not on {HOST}."))
+        )],
+        "only the warning shows"
+    );
+}
+
+#[gpui::test]
 fn a_link_to_the_worktree_root_fetches_the_whole_worktree(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, root) = linked(cx, &dir);
@@ -554,6 +654,142 @@ fn cancel_on_the_folder_toast_sends_cancel_and_deletes_the_stage(cx: &mut TestAp
         "a cancel is no failure: {:?}",
         toasts(&mut h)
     );
+}
+
+#[gpui::test]
+fn a_long_toast_title_wraps_and_keeps_the_close_button_on_the_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    let spec = ToastSpec {
+        kind: ToastKind::Info,
+        title: format!("Fetching folder src from builder@{HOST} (20000 files, 1.5 GB)"),
+        detail: Some("0 B of 1.5 GB".to_owned()),
+        key: Some("long-title".to_owned()),
+        sticky: true,
+        actions: Vec::new(),
+    };
+    let toast = h.root_update(|root, _, cx| root.push_toast_spec(spec, cx));
+
+    let card = h.bounds(&format!("toast-{toast}"));
+    let close = h.bounds(&format!("toast-close-{toast}"));
+    assert!(
+        close.origin.x >= card.origin.x
+            && close.origin.x + close.size.width <= card.origin.x + card.size.width,
+        "the × lies inside the card: card {card:?}, × {close:?}"
+    );
+}
+
+#[gpui::test]
+fn closing_the_folder_toast_keeps_its_progress_closed_until_the_fetch_ends(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+    let hold = h.root_update(|view, _, _| view.hold_folder_unpackers());
+
+    let id = fetch_folder(&mut h, "see C:/wt/x/src", 6, "src");
+    h.host(&saved_remote()).send(started(&id, &FILES));
+    let toast = toast_keyed(&mut h, &id).expect("the folder's toast shows");
+    h.click_on(&format!("toast-close-{toast}"));
+    h.cx.run_until_parked();
+    assert_eq!(toast_keyed(&mut h, &id), None, "the × closes the toast");
+
+    let packed = chunks(&id, &archive(&FILES));
+    let mut host = h.host(&saved_remote());
+    for chunk in packed.iter().cloned() {
+        host.send(chunk);
+    }
+    host.send(DaemonMessage::FileFetchDone { id: id.clone() });
+    hold.release_start();
+    let target = repo_folder(&root).join("src");
+    settle_until(&mut h, "the folder to be unpacked in place", |_| {
+        target.is_dir()
+    });
+    let last = packed.last().cloned().expect("a chunk");
+    h.host(&saved_remote()).send(last);
+    assert_eq!(
+        toast_keyed(&mut h, &id),
+        None,
+        "more unpacked bytes do not bring the progress back: {:?}",
+        toasts(&mut h)
+    );
+
+    hold.release_outcome();
+    settle_until(&mut h, "the folder's done toast", |h| {
+        shows(h, "Fetched folder src")
+    });
+}
+
+/// The detail and action ids of the toast keyed `key`, if one shows.
+fn keyed_detail_and_actions(
+    h: &mut Harness<'_>,
+    key: &str,
+) -> Option<(Option<String>, Vec<&'static str>)> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .find(|toast| toast.key.as_deref() == Some(key))
+            .map(|toast| {
+                (
+                    toast.detail.clone(),
+                    toast.actions.iter().map(|action| action.id).collect(),
+                )
+            })
+    })
+}
+
+/// Fetches the folder `src`, streaming [`FILES`] through `FileFetchDone`
+/// (a spec holds its unpacker first); returns the fetch's id.
+fn fetch_streamed(h: &mut Harness<'_>) -> String {
+    let id = fetch_folder(h, "see C:/wt/x/src", 6, "src");
+    stream_folder(h, &id, &FILES);
+    id
+}
+
+#[gpui::test]
+fn a_finishing_folder_toast_drops_cancel_and_says_finishing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    let hold = h.root_update(|view, _, _| view.hold_folder_unpackers());
+
+    let id = fetch_streamed(&mut h);
+
+    assert_eq!(
+        keyed_detail_and_actions(&mut h, &id),
+        Some((Some("Finishing: 0 B of 21 B".to_owned()), Vec::new())),
+        "once Done went to the unpacker the toast offers no Cancel"
+    );
+    drop(hold);
+    settle_until(&mut h, "the folder's done toast", |h| {
+        shows(h, "Fetched folder src")
+    });
+}
+
+#[gpui::test]
+fn a_finishing_folder_toast_keeps_counting_after_the_last_chunk(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+    let hold = h.root_update(|view, _, _| view.hold_folder_unpackers());
+    let id = fetch_streamed(&mut h);
+    let target = repo_folder(&root).join("src");
+
+    hold.release_start();
+    settle_until(&mut h, "the folder to be unpacked in place", |_| {
+        target.is_dir()
+    });
+    h.cx.executor().advance_clock(Duration::from_millis(300));
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        keyed_detail_and_actions(&mut h, &id).and_then(|(detail, _)| detail),
+        Some("Finishing: 21 B of 21 B".to_owned()),
+        "the toast shows what the unpacker did after the last chunk: {:?}",
+        toasts(&mut h)
+    );
+    hold.release_outcome();
+    settle_until(&mut h, "the folder's done toast", |h| {
+        shows(h, "Fetched folder src")
+    });
 }
 
 #[gpui::test]

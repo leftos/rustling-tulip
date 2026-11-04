@@ -69,7 +69,7 @@ impl RootView {
     pub fn fetch_dialog_progress(&self) -> Option<(String, f32)> {
         let entry = self.fetch_dialog_entry()?;
         Some((
-            progress_text(entry.bytes_received(), entry.size(), entry.host()),
+            progress_text(entry.bytes_received(), entry.size(), entry.host_label()),
             progress_fraction(entry.bytes_received(), entry.size()),
         ))
     }
