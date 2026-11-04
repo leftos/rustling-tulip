@@ -11,7 +11,7 @@ The fork starts from ops-tower `feat/own-account-store` at `59dc25f` (the crate'
 - **Global swap.** One active account for the machine. A switch rewrites Claude Code's live credential under Claude Code's own lock pair; every running `claude` (interactive and headless) picks the new account up on its next message, with no restart. Sessions never get their own `CLAUDE_CONFIG_DIR`, so transcripts, the recover dialog, subagent streams and status tailing keep reading one Claude home.
 - **Native Rust over cswap's store.** The daemon takes ops-tower's `claude-accounts` as a git dependency (RT-66) and reads and writes cswap's on-disk store and locks, so `cswap` and the daemon run side by side and existing accounts carry over. No Python at runtime.
 
-  Superseded: the crate's store is ops-tower's own, `%LOCALAPPDATA%\ops-tower\accounts` (`accounts.json`, sealed `credentials/<n>.cred`), never cswap's; the daemon and ops-tower share it through the crate's locks and cswap is not read (decision: ops-tower's own account store, RT-66). Accounts reach it through ops-tower's `import-cswap` or a login.
+  Superseded: rustling-tulip keeps its own account store in its data folder (`%LOCALAPPDATA%\leftos\rustling-tulip\data\accounts\`, following `docs/on-disk.md`'s data-dir rules), never cswap's or ops-tower's. The first open copies an existing ops-tower store in once and never writes back; ops-tower's `autoswitch` and `fleet` settings move to a settings file inside the store (owner ruling on RT-39: rustling-tulip is fully independent of ops-tower).
 - **Auto-switch in the daemon**, off by default, using the crate's rules. It runs whether or not a client is connected.
 - **Two engines never both switch.** The daemon honours cswap's locks and claim leases when polling. While its auto-switch is on it holds a lease file in the store; a live `cswap auto` is found by the crate's process scan (`runs_cswap_auto`, over the command line), since `autoswitch_state.json` is written only on a switch or a quarantine and says nothing about a running engine; then it pauses its own engine and reports "cswap auto is running".
 
@@ -33,7 +33,7 @@ The fork starts from ops-tower `feat/own-account-store` at `59dc25f` (the crate'
 
   It brings `proc-table` (git, `leftos/gate`) and `jiff`, and raises `zeroize` and `serde_json` (features `preserve_order`, `float_roundtrip`) for the whole workspace, so `Cargo.lock` is checked with `cargo tree -d`.
 - **Remove, alias and settings.** The ops-tower crate has no remove, alias or settings writer, so the fork gains `Store::remove_account`, `Store::set_alias` and a writer for the `autoswitch` settings (RT-908). Account settings never go in the daemon's `state.json`.
-- **Engine lease.** The daemon's engine stays off by default. A machine still running ops-tower shares the store through the lease, which picks one engine.
+- **Engine lease.** The daemon's engine stays off by default. The lease keeps two engines on rustling-tulip's store from both switching; ops-tower is not a peer, and running it beside rustling-tulip is unsupported.
 - **Transports** are synchronous: reqwest 0.12's `blocking` feature on one client built once, called inside `spawn_blocking`. The daemon's async client is unchanged.
 - **`ProcessTable`** is `proc-table`'s Windows table, and a macOS table from RT-916; on Linux it is the empty table.
 - **Paid fallback and prepaid balances** are not surfaced: `maySpendCredits` stays off and `read_balance` keeps its default. The engine still honours a paid fallback ops-tower's engine entered.

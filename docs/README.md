@@ -79,7 +79,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 
 ## Glossary
 
-- **Account store**: ops-tower's own folder of saved logins (`%LOCALAPPDATA%\ops-tower\accounts`: `accounts.json` and sealed `credentials/<n>.cred`), opened through the `claude-accounts` crate and shared by ops-tower and the daemon; never cswap's folder.
+- **Account store**: rustling-tulip's own folder of saved logins (`accounts\` under its data folder: `accounts.json` and sealed `credentials/<n>.cred`), opened through the `claude-accounts` crate; an existing ops-tower store is copied in once at first open, and neither ops-tower's nor cswap's folder is used after that.
 - **Active account**: the Claude login in `.credentials.json` that every Anthropic Claude session on the machine uses; a switch changes it for all of them at once.
 - **Activity track**: the Dashboard's thin two-hour bar per session or dispatch run (working, asking, idle, finished, gate holds as ticks, a hatched gap where the daemon kept no record), drawn from the status-change log; see `docs/plans/dashboard.md`.
 - **Agent chip**: a small label a session's agent shows on its sidebar leaf and pane header, such as `DeepSeek`; the daemon evaluates the descriptor's chip rules into `SessionSnapshot.agent_chips` (`{text, tip}`, `agent_api::session_chips`), so a client draws them without reading options.
@@ -153,7 +153,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **Edge overlay**: the tint a pane draws while a dragged pane would drop on it: a half for a split, a strip along the grid's edge for an outer-band split, or the inset centre with a `Swap panes` badge; see `docs/native-client.md` ("Drag model").
 - **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
 - **Elevated daemon**: a daemon whose token is at High integrity or above (run as administrator); it labels `daemon.json` High and admits only loopback peers at or above its level (capped at High), see `docs/daemon-cli.md` ("An elevated daemon"). Unrelated to the protocol's `elevated_authority`, which means a trusted launch.
-- **Engine lease**: the file in the account store that the `claude-accounts` crate's auto-switch engine claims and heartbeats, so only one engine, the daemon's or ops-tower's, switches at a time; the other reports itself paused with the holder as the reason.
+- **Engine lease**: the file in the account store that the `claude-accounts` crate's auto-switch engine claims and heartbeats, so only one engine switches at a time; the other reports itself paused with the holder as the reason.
 - **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment, then the user and system environment, at spawn; only the reference is stored and echoed; see Secret reference.
 - **Error code**: the snake_case `code` string on a `DaemonMessage::Error`, from the catalogue in `crates/protocol/src/error_codes.rs`; a client branches on it, never on the message text, and keeps an unknown code as an opaque string.
 - **Error feed**: the last 20 lines of a driven session's `native.log`, which the driver MCP server appends to every endpoint or session error it returns; see `docs/native-client.md` ("Driver MCP server").
