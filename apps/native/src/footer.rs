@@ -486,7 +486,7 @@ mod tests {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(HANDSHAKE.port);
-        conn.on_welcome(HANDSHAKE.protocol_version, Vec::new());
+        conn.on_welcome(HANDSHAKE.protocol_version, Vec::new(), None);
         conn
     }
 
@@ -498,7 +498,7 @@ mod tests {
         let mut conn = Connection::for_target(Target::tailnet("box.tail1234.ts.net", None));
         conn.on_connecting();
         conn.on_socket_open(8787);
-        conn.on_welcome(HANDSHAKE.protocol_version, Vec::new());
+        conn.on_welcome(HANDSHAKE.protocol_version, Vec::new(), None);
         conn
     }
 

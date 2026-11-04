@@ -6,6 +6,7 @@ pub(crate) mod test_support;
 mod remote;
 pub(crate) use self::remote::RemoteSlot;
 
+mod accounts;
 mod agent_hooks;
 mod chat;
 mod connection;
@@ -783,6 +784,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ChatAnswer { .. }) => {
             chat::handle(hub, m, ctx);
         }
+        m @ ClientMessage::ListAccounts { .. } => accounts::handle(m, ctx),
         m @ (ClientMessage::ListRepos
         | ClientMessage::AddRepo { .. }
         | ClientMessage::RemoveRepo { .. }

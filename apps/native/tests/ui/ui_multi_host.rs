@@ -1576,7 +1576,7 @@ fn welcome_as(h: &mut Harness<'_>, target: &Target, id: Option<&str>) {
     let mut conn = Connection::for_target(target.clone());
     conn.on_connecting();
     conn.on_socket_open(8787);
-    conn.on_welcome(PROTOCOL, support::daemon_features());
+    conn.on_welcome(PROTOCOL, support::daemon_features(), None);
     let mut host = h.host(target);
     host.event(NetEvent::State(conn));
     host.send(id.map_or_else(
@@ -1740,7 +1740,7 @@ fn this_pc_open() -> Connection {
     let mut conn = Connection::for_target(Target::Local);
     conn.on_connecting();
     conn.on_socket_open(4242);
-    conn.on_welcome(PROTOCOL, support::daemon_features());
+    conn.on_welcome(PROTOCOL, support::daemon_features(), None);
     conn
 }
 
@@ -1847,7 +1847,7 @@ fn dropped(target: Target) -> Connection {
     let mut conn = Connection::for_target(target);
     conn.on_connecting();
     conn.on_socket_open(8787);
-    conn.on_welcome(PROTOCOL, Vec::new());
+    conn.on_welcome(PROTOCOL, Vec::new(), None);
     let _ = conn.on_closed("socket closed".to_owned());
     conn
 }
@@ -1858,7 +1858,7 @@ fn welcomed(target: Target) -> Connection {
     let mut conn = Connection::for_target(target);
     conn.on_connecting();
     conn.on_socket_open(8787);
-    conn.on_welcome(PROTOCOL, Vec::new());
+    conn.on_welcome(PROTOCOL, Vec::new(), None);
     conn
 }
 

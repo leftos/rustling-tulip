@@ -4492,7 +4492,7 @@ fn welcome_as(h: &mut Harness<'_>, target: &Target, id: &str) {
     let mut conn = Connection::for_target(target.clone());
     conn.on_connecting();
     conn.on_socket_open(8787);
-    conn.on_welcome(PROTOCOL, support::daemon_features());
+    conn.on_welcome(PROTOCOL, support::daemon_features(), None);
     let mut host = h.host(target);
     host.event(NetEvent::State(conn));
     host.send(support::welcome_with_id(PROTOCOL, id));

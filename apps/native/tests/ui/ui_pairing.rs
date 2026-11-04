@@ -68,7 +68,7 @@ fn reconnect(h: &mut Harness<'_>, target: Target, features: Vec<String>) -> Vec<
     let mut conn = Connection::for_target(target);
     conn.on_connecting();
     conn.on_socket_open(port);
-    conn.on_welcome(support::PROTOCOL, features);
+    conn.on_welcome(support::PROTOCOL, features, None);
     h.set_connection(conn);
     h.send_welcome(support::PROTOCOL);
     h.sent()
@@ -80,7 +80,7 @@ fn beside(h: &mut Harness<'_>, target: &Target, features: Vec<String>) -> Vec<Cl
     let mut conn = Connection::for_target(target.clone());
     conn.on_connecting();
     conn.on_socket_open(8787);
-    conn.on_welcome(support::PROTOCOL, features);
+    conn.on_welcome(support::PROTOCOL, features, None);
     let mut host = h.host(target);
     host.event(NetEvent::State(conn));
     host.send(support::welcome(support::PROTOCOL));

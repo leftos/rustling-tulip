@@ -909,10 +909,12 @@ impl Net {
             DaemonMessage::Welcome {
                 protocol_version,
                 features,
+                origin,
                 ..
             } => {
-                info!(protocol_version, "connected to daemon");
-                self.conn.on_welcome(*protocol_version, features.clone());
+                info!(protocol_version, ?origin, "connected to daemon");
+                self.conn
+                    .on_welcome(*protocol_version, features.clone(), *origin);
                 self.emit_state();
             }
             DaemonMessage::AuthFailed { reason } => {
@@ -1917,6 +1919,7 @@ mod tests {
             supported_versions: vec![23],
             features: Vec::new(),
             daemon_id: Some(FAKE_DAEMON_ID.to_owned()),
+            origin: None,
         };
         let refusal = DaemonMessage::DevicePairFailed {
             reason: DEVICE_NOT_APPROVED.to_owned(),
@@ -2091,6 +2094,7 @@ mod tests {
             supported_versions: vec![23],
             features: Vec::new(),
             daemon_id: Some(FAKE_DAEMON_ID.to_owned()),
+            origin: None,
         };
         let served = matches!(answer, Answer::Served) || token == ISSUED_TOKEN;
         let next = if served {
@@ -3418,6 +3422,7 @@ mod tests {
             supported_versions: vec![23],
             features: Vec::new(),
             daemon_id: None,
+            origin: None,
         }
     }
 

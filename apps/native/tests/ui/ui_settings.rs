@@ -1761,7 +1761,7 @@ fn welcomed() -> Connection {
     conn.on_connecting();
     conn.on_socket_open(4242);
     let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
-    conn.on_welcome(version, support::daemon_features());
+    conn.on_welcome(version, support::daemon_features(), None);
     conn
 }
 
@@ -2180,7 +2180,7 @@ fn reconnect_with_user_hooks(h: &mut Harness<'_>, user_hooks: bool) {
     let mut conn = Connection::new();
     conn.on_connecting();
     conn.on_socket_open(4242);
-    conn.on_welcome(support::PROTOCOL, features);
+    conn.on_welcome(support::PROTOCOL, features, None);
     h.event(NetEvent::State(conn));
     h.send(DaemonMessage::Agents {
         agents: agent_registry::descriptors(),
@@ -2641,7 +2641,7 @@ fn disconnect_hides_the_launch_rows_without_the_restart_tip(cx: &mut TestAppCont
     dropped.on_connecting();
     dropped.on_socket_open(4242);
     let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
-    dropped.on_welcome(version, support::daemon_features());
+    dropped.on_welcome(version, support::daemon_features(), None);
     dropped.on_closed("the daemon went away".to_owned());
     h.event(NetEvent::State(dropped));
     assert!(h.root(|root, _| root.settings_open()));

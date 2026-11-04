@@ -52,7 +52,7 @@ The accounts feature lands on the feature branch `feat/claude-accounts`; RT-39 i
 | `login.rs` | the daemon-driven login and the add-current-login handler |
 | `mod.rs` | the `Accounts` handle the hub owns, and the snapshot it broadcasts |
 
-**Connection origin.** `client_session` already knows each connection's `AuthKind` (`Local` on the loopback listener, `Tailnet` on the tailnet listener), in `crates/daemon/src/server/connection.rs`. CA.1 maps it to an origin (`Local` / `Remote`); the account-admin handlers refuse a `Remote` origin with `ActionFailed`, and `Welcome` tells the client its origin so it can disable those controls with a reason.
+**Connection origin.** `client_session` already knows each connection's `AuthKind` (`Local` on the loopback listener, `Tailnet` on the tailnet listener), in `crates/daemon/src/server/connection.rs`. CA.1 maps it to an origin (`Local` / `Remote`); the SSH bridge counts as `Local`, so there are two origins. The account-admin handlers refuse a `Remote` connection through `host_only_refusal`, which answers `Error{code: local_only}` (RT-911 extends it), and `Welcome` tells the client its origin so it can disable those controls with a reason.
 
 **Protocol** (additive; `crates/protocol/src/lib.rs`, with the `add-protocol-message` skill):
 

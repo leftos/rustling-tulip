@@ -70,6 +70,7 @@ pub fn welcome(protocol_version: u32) -> DaemonMessage {
         supported_versions: vec![protocol_version],
         features: daemon_features(),
         daemon_id: None,
+        origin: None,
     }
 }
 
@@ -81,6 +82,7 @@ pub fn welcome_with_id(protocol_version: u32, daemon_id: &str) -> DaemonMessage 
         supported_versions: vec![protocol_version],
         features: daemon_features(),
         daemon_id: Some(daemon_id.to_owned()),
+        origin: None,
     }
 }
 
@@ -89,7 +91,7 @@ fn connected_to(target: Target, port: u16, features: Vec<String>) -> Connection 
     let mut conn = Connection::for_target(target);
     conn.on_connecting();
     conn.on_socket_open(port);
-    conn.on_welcome(PROTOCOL, features);
+    conn.on_welcome(PROTOCOL, features, None);
     conn
 }
 

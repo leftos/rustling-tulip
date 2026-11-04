@@ -813,6 +813,7 @@ mod tests {
                 supported_versions: vec![22],
                 features: Vec::new(),
                 daemon_id: None,
+                origin: None,
             }),
             "clearing a populated store is a change"
         );
@@ -823,6 +824,7 @@ mod tests {
                 supported_versions: vec![22],
                 features: Vec::new(),
                 daemon_id: None,
+                origin: None,
             }),
             "clearing an empty store is no change"
         );
@@ -890,6 +892,7 @@ mod tests {
             supported_versions: vec![22],
             features: Vec::new(),
             daemon_id: None,
+            origin: None,
         });
         assert_eq!(
             model.wanted_missing(&wanted),
@@ -968,6 +971,7 @@ mod tests {
                 supported_versions: vec![22],
                 features: Vec::new(),
                 daemon_id: None,
+                origin: None,
             }),
             "dropping a failure is a change"
         );

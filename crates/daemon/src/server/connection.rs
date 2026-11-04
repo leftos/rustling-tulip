@@ -9,7 +9,7 @@ use crate::file_fetch;
 use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt as _, StreamExt as _};
-use protocol::{DaemonMessage, InboundClientMessage, error_codes};
+use protocol::{ConnectionOrigin, DaemonMessage, InboundClientMessage, error_codes};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
@@ -49,6 +49,16 @@ impl Drop for ClientCountGuard {
 pub(super) enum AuthKind {
     Local,
     Tailnet(tailnet::PeerIdentity),
+}
+
+/// The origin `Welcome` reports for a connection of `auth`: the listener that
+/// accepted the socket decides it, never anything the client sends. The SSH
+/// bridge dials the loopback listener, so it is `Local`.
+pub(super) fn origin_of(auth: &AuthKind) -> ConnectionOrigin {
+    match auth {
+        AuthKind::Local => ConnectionOrigin::Local,
+        AuthKind::Tailnet(_) => ConnectionOrigin::Remote,
+    }
 }
 
 /// How long a connection whose listener server ended may take to finish the
@@ -1770,6 +1780,15 @@ mod tests {
             "the pump gave up on the peer for its missed pongs"
         );
         drop(out_tx);
+    }
+
+    #[test]
+    fn origin_of_maps_local_and_tailnet() {
+        assert_eq!(origin_of(&AuthKind::Local), ConnectionOrigin::Local);
+        assert_eq!(
+            origin_of(&AuthKind::Tailnet(test_peer())),
+            ConnectionOrigin::Remote
+        );
     }
 
     #[tokio::test(start_paused = true)]

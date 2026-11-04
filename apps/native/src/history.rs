@@ -890,6 +890,7 @@ mod tests {
             supported_versions: vec![23],
             features: Vec::new(),
             daemon_id: None,
+            origin: None,
         }
     }
 

@@ -140,7 +140,7 @@ fn an_ssh_host_whose_name_holds_double_colons_owns_its_rows(cx: &mut TestAppCont
     let mut dropped = Connection::for_target(ipv6.clone());
     dropped.on_connecting();
     dropped.on_socket_open(8787);
-    dropped.on_welcome(PROTOCOL, Vec::new());
+    dropped.on_welcome(PROTOCOL, Vec::new(), None);
     let _ = dropped.on_closed("socket closed".to_owned());
     h.host(&ipv6).event(NetEvent::State(dropped));
 
@@ -263,7 +263,7 @@ fn welcome_as_daemon(h: &mut Harness<'_>, target: &Target) {
     let mut conn = Connection::for_target(target.clone());
     conn.on_connecting();
     conn.on_socket_open(8787);
-    conn.on_welcome(PROTOCOL, support::daemon_features());
+    conn.on_welcome(PROTOCOL, support::daemon_features(), None);
     let mut host = h.host(target);
     host.event(NetEvent::State(conn));
     host.send(support::welcome_with_id(PROTOCOL, DAEMON));

@@ -27,6 +27,7 @@ fn welcome(features: &[&str]) -> DaemonMessage {
         supported_versions: vec![1],
         features: features.iter().map(|&feature| feature.to_owned()).collect(),
         daemon_id: None,
+        origin: None,
     }
 }
 

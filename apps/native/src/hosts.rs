@@ -1448,7 +1448,7 @@ mod tests {
         assert!(content_dimmed(&remote, Some(&box_conn)), "connecting");
         box_conn.on_connecting();
         box_conn.on_socket_open(8787);
-        box_conn.on_welcome(23, Vec::new());
+        box_conn.on_welcome(23, Vec::new(), None);
         assert!(!content_dimmed(&remote, Some(&box_conn)), "open");
         let _ = box_conn.on_closed("dropped".to_owned());
         assert!(content_dimmed(&remote, Some(&box_conn)), "dropped");

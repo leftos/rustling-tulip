@@ -330,7 +330,7 @@ fn the_chosen_host_disconnecting_returns_the_selector_to_this_pc(cx: &mut TestAp
     let mut open = Connection::for_target(remote());
     open.on_connecting();
     open.on_socket_open(8787);
-    open.on_welcome(PROTOCOL, daemon_features());
+    open.on_welcome(PROTOCOL, daemon_features(), None);
     h.host(&remote()).event(NetEvent::State(open));
     h.click_on(&remote_row());
     assert_eq!(shown_host(&mut h), remote_key());
@@ -588,7 +588,7 @@ fn the_chosen_host_disconnecting_drops_its_worktrees_draft(cx: &mut TestAppConte
     let mut open = Connection::for_target(remote());
     open.on_connecting();
     open.on_socket_open(8787);
-    open.on_welcome(PROTOCOL, daemon_features());
+    open.on_welcome(PROTOCOL, daemon_features(), None);
     h.host(&remote()).event(NetEvent::State(open));
     h.host(&remote()).send(root_changed(BOX_ROOT));
     h.click_on(&remote_row());

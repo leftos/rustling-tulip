@@ -811,7 +811,7 @@ fn later_host_state(view: View, target: &Target) -> Option<Connection> {
     conn.on_socket_open(8787);
     if view.on_hosts() {
         let version = NATIVE_PROTOCOL_VERSIONS.first().copied().unwrap_or(1);
-        conn.on_welcome(version, Vec::new());
+        conn.on_welcome(version, Vec::new(), None);
         let _ = conn.on_closed("socket closed".to_owned());
         return Some(conn);
     }
@@ -1898,7 +1898,7 @@ impl FakeDaemon {
             protocol::FEATURE_DEFAULT_SHELL.to_owned(),
             protocol::FEATURE_AGENT_USER_HOOKS.to_owned(),
         ];
-        conn.on_welcome(version, features.clone());
+        conn.on_welcome(version, features.clone(), None);
         self.event(NetEvent::State(conn))?;
         self.event(NetEvent::Handshake(HandshakeInfo {
             port: FAKE_PORT,
@@ -1911,6 +1911,7 @@ impl FakeDaemon {
             supported_versions: vec![version],
             features,
             daemon_id: None,
+            origin: None,
         })?;
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),
@@ -1952,13 +1953,14 @@ impl FakeDaemon {
         let mut conn = Connection::for_target(target.clone());
         conn.on_connecting();
         conn.on_socket_open(8787);
-        conn.on_welcome(version, Vec::new());
+        conn.on_welcome(version, Vec::new(), None);
         self.event(NetEvent::State(conn))?;
         self.send(DaemonMessage::Welcome {
             protocol_version: version,
             supported_versions: vec![version],
             features: Vec::new(),
             daemon_id: None,
+            origin: None,
         })?;
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),

@@ -2667,7 +2667,7 @@ fn file_tail_daemon(h: &mut Harness<'_>) {
         FEATURE_AGENT_COMMANDS.to_owned(),
         FEATURE_FILE_TAIL.to_owned(),
     ];
-    conn.on_welcome(support::PROTOCOL, features);
+    conn.on_welcome(support::PROTOCOL, features, None);
     h.event(NetEvent::State(conn));
 }
 

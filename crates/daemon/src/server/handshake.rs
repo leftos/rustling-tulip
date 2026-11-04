@@ -1,13 +1,14 @@
 //! The WebSocket handshake: reading and authorising `Hello`, negotiating the protocol version, `Welcome`, and the initial state push.
 use super::Hub;
-use super::connection::{AuthKind, Inbound};
+use super::connection::{AuthKind, Inbound, origin_of};
 use super::live_devices::LiveConnection;
 use crate::devices::DeviceId;
 use anyhow::{Context as _, anyhow};
 use axum::extract::ws::Message;
 use futures::StreamExt as _;
 use protocol::{
-    ClientMessage, ClonableLayout, DaemonMessage, InboundClientMessage, SUPPORTED_PROTOCOL_VERSIONS,
+    ClientMessage, ClonableLayout, ConnectionOrigin, DaemonMessage, InboundClientMessage,
+    SUPPORTED_PROTOCOL_VERSIONS,
 };
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -158,7 +159,7 @@ async fn read_hello<R: Inbound>(
         client_id = client_id.as_deref().unwrap_or("(legacy)"),
         "handshake negotiated protocol version"
     );
-    let _ = out_tx.send(welcome_message(negotiated, &hub.daemon_id));
+    let _ = out_tx.send(welcome_message(negotiated, &hub.daemon_id, origin_of(auth)));
     Ok(Handshake {
         negotiated_version: negotiated,
         client_id,
@@ -244,11 +245,13 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_DETAILED_LOGGING,
     protocol::FEATURE_DEFAULT_SHELL,
     protocol::FEATURE_AGENT_USER_HOOKS,
+    protocol::FEATURE_ACCOUNTS,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
-/// version this daemon speaks, [`DAEMON_FEATURES`] and this daemon's stable id.
-fn welcome_message(negotiated: u32, daemon_id: &str) -> DaemonMessage {
+/// version this daemon speaks, [`DAEMON_FEATURES`], this daemon's stable id
+/// and the connection's `origin`, which only the accepting listener decides.
+fn welcome_message(negotiated: u32, daemon_id: &str, origin: ConnectionOrigin) -> DaemonMessage {
     DaemonMessage::Welcome {
         protocol_version: negotiated,
         supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
@@ -257,6 +260,7 @@ fn welcome_message(negotiated: u32, daemon_id: &str) -> DaemonMessage {
             .map(|feature| (*feature).to_owned())
             .collect(),
         daemon_id: Some(daemon_id.to_owned()),
+        origin: Some(origin),
     }
 }
 
@@ -392,7 +396,7 @@ pub(super) fn send_resume_report(
 mod tests {
     use super::*;
     use crate::server::remote::{build_tailnet_router, name_slot, set_serving_name};
-    use crate::server::test_support::{test_hub, test_peer};
+    use crate::server::test_support::{HANG_GUARD, hello, mem_session, test_hub, test_peer};
     use crate::tailnet_listener::AuthorizedPeer;
     use protocol::PROTOCOL_VERSION;
     use std::net::Ipv4Addr;
@@ -507,7 +511,7 @@ mod tests {
     #[test]
     fn welcome_lists_detailed_logging_and_the_initial_state_carries_the_switch() {
         let (hub, _scratch) = test_hub("detailed-logging-initial");
-        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
         assert!(
             matches!(
                 &welcome,
@@ -543,7 +547,7 @@ mod tests {
     }
     #[test]
     fn welcome_carries_the_daemon_features_and_the_negotiated_version() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
         assert!(
             matches!(
                 &welcome,
@@ -620,7 +624,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_agent_commands() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
         assert!(
             matches!(
                 &welcome,
@@ -849,7 +853,7 @@ mod tests {
 
     #[test]
     fn welcome_advertises_device_pairing() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
         assert!(
             matches!(
                 &welcome,
@@ -862,7 +866,7 @@ mod tests {
 
     #[test]
     fn welcome_lists_device_block() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
         assert!(
             matches!(
                 &welcome,
@@ -877,7 +881,7 @@ mod tests {
 
     #[test]
     fn welcome_carries_the_daemon_id() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
         assert!(
             matches!(
                 &welcome,
@@ -889,12 +893,71 @@ mod tests {
 
     #[test]
     fn welcome_lists_daemon_id_feature() {
-        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
         assert!(
             matches!(
                 &welcome,
                 DaemonMessage::Welcome { features, .. }
                     if features.iter().any(|f| f == protocol::FEATURE_DAEMON_ID)
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_accounts_feature() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID, ConnectionOrigin::Local);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_ACCOUNTS)
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    /// The first message the daemon sends a connection of `auth` that
+    /// presented `token` in its `Hello`.
+    async fn first_reply(hub: &Hub, auth: AuthKind, token: &str) -> Option<DaemonMessage> {
+        let (mut client, _session) = mem_session(hub, auth);
+        client.send(&hello(token, None));
+        tokio::time::timeout(HANG_GUARD, client.next(true))
+            .await
+            .expect("the daemon answers the Hello")
+    }
+
+    #[tokio::test]
+    async fn welcome_reports_local_origin_on_loopback() {
+        let (hub, _scratch) = test_hub("welcome-origin-local");
+        let token = hub.auth_token.clone();
+        let welcome = first_reply(&hub, AuthKind::Local, &token).await;
+        assert!(
+            matches!(
+                welcome,
+                Some(DaemonMessage::Welcome {
+                    origin: Some(ConnectionOrigin::Local),
+                    ..
+                })
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn welcome_reports_remote_origin_on_tailnet() {
+        let (hub, _scratch) = test_hub("welcome-origin-tailnet");
+        // Even the daemon's own token earns a tailnet connection no local
+        // origin: the listener decides it, not what the client presents.
+        let token = hub.auth_token.clone();
+        let welcome = first_reply(&hub, AuthKind::Tailnet(test_peer()), &token).await;
+        assert!(
+            matches!(
+                welcome,
+                Some(DaemonMessage::Welcome {
+                    origin: Some(ConnectionOrigin::Remote),
+                    ..
+                })
             ),
             "{welcome:?}"
         );

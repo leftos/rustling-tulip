@@ -105,7 +105,7 @@ fn open_conn() -> Connection {
     let mut conn = Connection::new();
     conn.on_connecting();
     conn.on_socket_open(4242);
-    conn.on_welcome(1, support::daemon_features());
+    conn.on_welcome(1, support::daemon_features(), None);
     conn
 }
 

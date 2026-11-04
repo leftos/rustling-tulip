@@ -84,7 +84,7 @@ fn dropped(target: Target) -> Connection {
     let mut conn = Connection::for_target(target);
     conn.on_connecting();
     conn.on_socket_open(8787);
-    conn.on_welcome(PROTOCOL, Vec::new());
+    conn.on_welcome(PROTOCOL, Vec::new(), None);
     let _ = conn.on_closed("socket closed".to_owned());
     conn
 }

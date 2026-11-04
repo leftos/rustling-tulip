@@ -69,6 +69,11 @@ pub const FEATURE_DEFAULT_SHELL: &str = "default_shell";
 /// so a session the user starts by hand reports too. A client offers the
 /// Hooks switch only when the connected daemon lists it.
 pub const FEATURE_AGENT_USER_HOOKS: &str = "agent_user_hooks";
+/// `Welcome.features` entry: the daemon answers [`ClientMessage::ListAccounts`]
+/// with [`DaemonMessage::Accounts`] and may broadcast
+/// [`DaemonMessage::AccountsUpdated`]. A client asks for the accounts only
+/// when the connected daemon lists it.
+pub const FEATURE_ACCOUNTS: &str = "accounts";
 
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
@@ -3039,6 +3044,183 @@ pub enum ChatAnswerKind {
 }
 
 // ---------------------------------------------------------------------------
+// Connection origin and accounts
+// ---------------------------------------------------------------------------
+
+/// Where the daemon sees a connection come from, as `Welcome.origin` reports
+/// it: the loopback listener (this machine, the SSH bridge included) or the
+/// tailnet listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionOrigin {
+    /// Accepted on the loopback listener.
+    Local,
+    /// Accepted on the tailnet listener.
+    Remote,
+    /// Forward-compat fallback: an origin the current build doesn't know.
+    /// The daemon never sends this.
+    #[serde(other)]
+    Unknown,
+}
+
+/// How an account signs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountKind {
+    Oauth,
+    ApiKey,
+    /// Forward-compat fallback: a kind the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What the last usage poll of an account found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountUsageStatus {
+    Ok,
+    TokenExpired,
+    ApiKey,
+    ReloginRequired,
+    ForeignCredential,
+    NoCredentials,
+    StoreUnwritable,
+    Unavailable,
+    /// Forward-compat fallback: a status the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One usage window of an account: how much of it is used, in percent (100
+/// or more is exhausted), and when it resets, if known.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountUsageWindow {
+    pub pct: f64,
+    #[serde(default)]
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+/// A per-model limit of an account, in the shape of [`AccountUsageWindow`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountModelLimit {
+    pub model: String,
+    pub pct: f64,
+    #[serde(default)]
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+/// An account's extra (paid) usage: whether it is on, whether the user turned
+/// it off, whether its spend limit is reached, and the limit when one is set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountExtraUsage {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub user_disabled: bool,
+    #[serde(default)]
+    pub spend_limit_reached: bool,
+    #[serde(default)]
+    pub limit: Option<f64>,
+}
+
+/// One account as the host knows it, for display. It never carries a token,
+/// a key or any other credential.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountSnapshot {
+    /// The account's number in the host's account store.
+    pub number: u32,
+    pub email: String,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub organization_name: Option<String>,
+    pub kind: AccountKind,
+    /// Whether this is the account in use.
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub disabled: bool,
+    pub status: AccountUsageStatus,
+    #[serde(default)]
+    pub five_hour: Option<AccountUsageWindow>,
+    #[serde(default)]
+    pub seven_day: Option<AccountUsageWindow>,
+    #[serde(default)]
+    pub model_limits: Vec<AccountModelLimit>,
+    #[serde(default)]
+    pub extra_usage: Option<AccountExtraUsage>,
+    /// When the usage shown was fetched.
+    #[serde(default)]
+    pub fetched_at: Option<DateTime<Utc>>,
+    /// The last poll's failure, such as `http-429`.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// A usage window the fleet verdict speaks of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetWindow {
+    FiveHour,
+    SevenDay,
+    /// Forward-compat fallback: a window the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Whether the accounts together last the coming week at their present rate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetVerdict {
+    /// The window the first gap belongs to.
+    pub window: FleetWindow,
+    /// How many accounts are in the pool.
+    pub members: u32,
+    /// How many accounts are on the timeline.
+    pub accounts: u32,
+    /// The pooled remaining allowance, in 5-hour points.
+    pub remaining: f64,
+    /// The summed rate per hour, in the points of `rate_window`.
+    pub rate: f64,
+    pub rate_window: FleetWindow,
+    /// Whether the timeline has a gap.
+    #[serde(default)]
+    pub runs_dry: bool,
+    /// When the first gap starts.
+    #[serde(default)]
+    pub blocked_at: Option<DateTime<Utc>>,
+    /// When the first gap ends.
+    #[serde(default)]
+    pub resumes_at: Option<DateTime<Utc>>,
+    /// The earliest reset among the accounts.
+    #[serde(default)]
+    pub first_reset: Option<DateTime<Utc>>,
+}
+
+/// The host's auto-switch engine as it stands.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoSwitchState {
+    pub enabled: bool,
+    /// The usage, in percent, at which the engine switches away.
+    pub threshold_pct: f64,
+    /// How far, in percentage points, usage must fall back before an account
+    /// counts as recovered.
+    pub hysteresis_pct: f64,
+    /// The least time between two switches, in seconds.
+    pub cooldown_secs: u64,
+    /// Why the engine is paused (the lease holder, or the store's refusal);
+    /// `None` while it runs.
+    #[serde(default)]
+    pub paused_reason: Option<String>,
+    #[serde(default)]
+    pub warm_up_done: bool,
+    /// The engine's last decision, as it names it.
+    #[serde(default)]
+    pub last_decision: Option<String>,
+    #[serde(default)]
+    pub fleet_verdict: Option<FleetVerdict>,
+}
+
+// ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
 
@@ -4292,6 +4474,13 @@ pub enum ClientMessage {
     UnloadSummary {
         session_id: String,
     },
+    /// Ask for the host's accounts. Answered to the requester alone with
+    /// [`DaemonMessage::Accounts`], which echoes `request_id`. Read-only:
+    /// served on any connection origin.
+    ListAccounts {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 /// One history entry to recover, and how.
@@ -4610,6 +4799,33 @@ pub enum DaemonMessage {
         /// ([`FEATURE_DAEMON_ID`]). Absent from a daemon that has none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         daemon_id: Option<String>,
+        /// Where the daemon sees this connection come from, decided by the
+        /// listener that accepted it, never by anything the client sent. A
+        /// hint for the client's UI (it may disable host-only controls); the
+        /// daemon's own checks never read it back. Absent from an older
+        /// daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<ConnectionOrigin>,
+    },
+    /// Reply to [`ClientMessage::ListAccounts`], sent to the requester only:
+    /// every account the host knows and the auto-switch state. `auto` is
+    /// `None` while no auto-switch engine runs on the host. `request_id`
+    /// echoes the id the request set (`None` when it set none).
+    Accounts {
+        #[serde(default)]
+        accounts: Vec<AccountSnapshot>,
+        #[serde(default)]
+        auto: Option<AutoSwitchState>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Broadcast to every client when the accounts or the auto-switch state
+    /// change; the same two fields as [`DaemonMessage::Accounts`].
+    AccountsUpdated {
+        #[serde(default)]
+        accounts: Vec<AccountSnapshot>,
+        #[serde(default)]
+        auto: Option<AutoSwitchState>,
     },
     AuthFailed {
         reason: String,
@@ -6637,6 +6853,7 @@ mod tests {
             supported_versions: vec![23],
             features: Vec::new(),
             daemon_id: None,
+            origin: None,
         };
         let json = serde_json::to_string(&bare).expect("serializes");
         assert!(!json.contains("daemon_id"), "None is omitted: {json}");
@@ -6646,6 +6863,7 @@ mod tests {
             supported_versions: vec![23],
             features: vec![FEATURE_DAEMON_ID.to_owned()],
             daemon_id: Some("3f1c0c1e-8f5b-4d5e-9c1a-2b7d9e0a4c11".to_owned()),
+            origin: None,
         };
         let json = serde_json::to_string(&welcome).expect("serializes");
         let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
@@ -6657,6 +6875,261 @@ mod tests {
             ),
             "{json}"
         );
+    }
+
+    #[test]
+    fn welcome_origin_round_trips() {
+        for (origin, wire) in [
+            (ConnectionOrigin::Local, "local"),
+            (ConnectionOrigin::Remote, "remote"),
+        ] {
+            let welcome = DaemonMessage::Welcome {
+                protocol_version: 23,
+                supported_versions: vec![23],
+                features: Vec::new(),
+                daemon_id: None,
+                origin: Some(origin),
+            };
+            let json = serde_json::to_string(&welcome).expect("serializes");
+            assert!(
+                json.contains(&format!(r#""origin":"{wire}""#)),
+                "the origin is on the wire: {json}"
+            );
+            let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+            assert!(
+                matches!(&back, DaemonMessage::Welcome { origin: Some(o), .. } if *o == origin),
+                "{back:?}"
+            );
+        }
+
+        let bare = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23],
+            features: Vec::new(),
+            daemon_id: None,
+            origin: None,
+        };
+        let json = serde_json::to_string(&bare).expect("serializes");
+        assert!(!json.contains("origin"), "None is omitted: {json}");
+    }
+
+    #[test]
+    fn welcome_without_origin_reads_none() {
+        let old: DaemonMessage =
+            serde_json::from_str(r#"{"type":"welcome","protocol_version":23}"#)
+                .expect("an older daemon's welcome decodes");
+        assert!(
+            matches!(old, DaemonMessage::Welcome { origin: None, .. }),
+            "{old:?}"
+        );
+    }
+
+    #[test]
+    fn connection_origin_unknown_value_reads_unknown() {
+        let later: DaemonMessage = serde_json::from_str(
+            r#"{"type":"welcome","protocol_version":23,"origin":"from_the_moon"}"#,
+        )
+        .expect("a welcome with an origin this build does not know still decodes");
+        assert!(
+            matches!(
+                later,
+                DaemonMessage::Welcome {
+                    origin: Some(ConnectionOrigin::Unknown),
+                    ..
+                }
+            ),
+            "{later:?}"
+        );
+    }
+
+    #[test]
+    fn list_accounts_round_trips() {
+        let old: ClientMessage = serde_json::from_str(r#"{"type":"list_accounts"}"#)
+            .expect("a request without an id decodes");
+        assert!(
+            matches!(old, ClientMessage::ListAccounts { request_id: None }),
+            "{old:?}"
+        );
+
+        let bare = ClientMessage::ListAccounts { request_id: None };
+        let json = serde_json::to_string(&bare).expect("serializes");
+        assert_eq!(json, r#"{"type":"list_accounts"}"#, "None is omitted");
+
+        let asked = ClientMessage::ListAccounts {
+            request_id: Some("acc-1".to_owned()),
+        };
+        let json = serde_json::to_string(&asked).expect("serializes");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(&back, ClientMessage::ListAccounts { request_id: Some(id) } if id == "acc-1"),
+            "{back:?}"
+        );
+    }
+
+    /// An account snapshot with every field set, so a test sees each key.
+    fn full_account_snapshot() -> AccountSnapshot {
+        let at = DateTime::parse_from_rfc3339("2026-11-04T10:00:00Z")
+            .expect("a valid timestamp")
+            .with_timezone(&Utc);
+        AccountSnapshot {
+            number: 2,
+            email: "owner@example.com".to_owned(),
+            alias: Some("work".to_owned()),
+            organization_name: Some("Example Org".to_owned()),
+            kind: AccountKind::Oauth,
+            active: true,
+            disabled: false,
+            status: AccountUsageStatus::Ok,
+            five_hour: Some(AccountUsageWindow {
+                pct: 42.5,
+                resets_at: Some(at),
+            }),
+            seven_day: Some(AccountUsageWindow {
+                pct: 12.0,
+                resets_at: None,
+            }),
+            model_limits: vec![AccountModelLimit {
+                model: "big-model".to_owned(),
+                pct: 80.0,
+                resets_at: Some(at),
+            }],
+            extra_usage: Some(AccountExtraUsage {
+                enabled: true,
+                user_disabled: false,
+                spend_limit_reached: false,
+                limit: Some(50.0),
+            }),
+            fetched_at: Some(at),
+            error: Some("http-429".to_owned()),
+        }
+    }
+
+    fn full_auto_switch_state() -> AutoSwitchState {
+        AutoSwitchState {
+            enabled: true,
+            threshold_pct: 90.0,
+            hysteresis_pct: 5.0,
+            cooldown_secs: 600,
+            paused_reason: Some("another engine holds the lease".to_owned()),
+            warm_up_done: true,
+            last_decision: Some("stay".to_owned()),
+            fleet_verdict: Some(FleetVerdict {
+                window: FleetWindow::FiveHour,
+                members: 2,
+                accounts: 3,
+                remaining: 120.0,
+                rate: 30.5,
+                rate_window: FleetWindow::SevenDay,
+                runs_dry: true,
+                blocked_at: None,
+                resumes_at: None,
+                first_reset: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn accounts_reply_round_trips_without_auto() {
+        let old: DaemonMessage = serde_json::from_str(r#"{"type":"accounts","accounts":[]}"#)
+            .expect("a reply without auto or an id decodes");
+        assert!(
+            matches!(
+                &old,
+                DaemonMessage::Accounts { accounts, auto: None, request_id: None }
+                    if accounts.is_empty()
+            ),
+            "{old:?}"
+        );
+
+        let reply = DaemonMessage::Accounts {
+            accounts: vec![full_account_snapshot()],
+            auto: None,
+            request_id: Some("acc-1".to_owned()),
+        };
+        let json = serde_json::to_string(&reply).expect("serializes");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::Accounts { accounts, auto: None, request_id: Some(id) }
+                    if *accounts == [full_account_snapshot()] && id == "acc-1"
+            ),
+            "{back:?}"
+        );
+
+        let later: DaemonMessage = serde_json::from_str(
+            r#"{"type":"accounts","accounts":[{"number":1,"email":"a@b.c","kind":"later_kind","active":false,"disabled":false,"status":"later_status"}]}"#,
+        )
+        .expect("a snapshot with values this build does not know still decodes");
+        assert!(
+            matches!(
+                &later,
+                DaemonMessage::Accounts { accounts, .. }
+                    if accounts[0].kind == AccountKind::Unknown
+                        && accounts[0].status == AccountUsageStatus::Unknown
+            ),
+            "{later:?}"
+        );
+    }
+
+    #[test]
+    fn accounts_updated_round_trips() {
+        let update = DaemonMessage::AccountsUpdated {
+            accounts: vec![full_account_snapshot()],
+            auto: Some(full_auto_switch_state()),
+        };
+        let json = serde_json::to_string(&update).expect("serializes");
+        assert!(json.contains(r#""type":"accounts_updated""#), "{json}");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::AccountsUpdated { accounts, auto: Some(auto) }
+                    if *accounts == [full_account_snapshot()] && *auto == full_auto_switch_state()
+            ),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn account_snapshot_has_no_credential_fields() {
+        fn keys(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, inner) in map {
+                        out.push(key.clone());
+                        keys(inner, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        keys(item, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let reply = DaemonMessage::Accounts {
+            accounts: vec![full_account_snapshot()],
+            auto: Some(full_auto_switch_state()),
+            request_id: None,
+        };
+        let value = serde_json::to_value(&reply).expect("serializes");
+        let mut seen = Vec::new();
+        keys(&value, &mut seen);
+        assert!(
+            seen.contains(&"email".to_owned()),
+            "walked the snapshot: {seen:?}"
+        );
+        for key in &seen {
+            let lower = key.to_lowercase();
+            assert!(
+                !["token", "key", "credential"]
+                    .iter()
+                    .any(|banned| lower.contains(banned)),
+                "no field may carry a secret, but {key} looks like one"
+            );
+        }
     }
 
     #[test]
@@ -9036,6 +9509,7 @@ mod tests {
             supported_versions: vec![23, 22],
             features: vec![FEATURE_AGENT_COMMANDS.to_owned(), "later".to_owned()],
             daemon_id: None,
+            origin: None,
         };
         let json = serde_json::to_value(&welcome).expect("encode welcome");
         assert_eq!(
@@ -9057,6 +9531,7 @@ mod tests {
             supported_versions: vec![23],
             features: Vec::new(),
             daemon_id: None,
+            origin: None,
         };
         let json = serde_json::to_value(&bare).expect("encode bare welcome");
         assert!(

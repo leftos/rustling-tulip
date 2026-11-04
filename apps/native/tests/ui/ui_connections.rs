@@ -203,7 +203,7 @@ fn open_conn(target: Target) -> Connection {
     let mut conn = Connection::for_target(target);
     conn.on_connecting();
     conn.on_socket_open(8787);
-    conn.on_welcome(PROTOCOL, support::daemon_features());
+    conn.on_welcome(PROTOCOL, support::daemon_features(), None);
     conn
 }
 

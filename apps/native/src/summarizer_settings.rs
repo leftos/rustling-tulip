@@ -334,6 +334,7 @@ mod tests {
             supported_versions: vec![1],
             features: Vec::new(),
             daemon_id: None,
+            origin: None,
         };
         assert!(state.fold(&local, &welcome));
         assert!(

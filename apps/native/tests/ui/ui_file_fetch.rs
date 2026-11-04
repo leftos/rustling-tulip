@@ -33,7 +33,7 @@ fn open_on(target: Target, port: u16) -> Connection {
     let mut conn = Connection::for_target(target);
     conn.on_connecting();
     conn.on_socket_open(port);
-    conn.on_welcome(support::PROTOCOL, support::daemon_features());
+    conn.on_welcome(support::PROTOCOL, support::daemon_features(), None);
     conn
 }
 

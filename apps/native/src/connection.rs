@@ -8,6 +8,8 @@
 
 use std::time::{Duration, SystemTime};
 
+use protocol::ConnectionOrigin;
+
 use crate::target::Target;
 
 /// How often the standby watchdog ticks.
@@ -29,10 +31,12 @@ pub enum State {
     /// daemon has not yet answered `Hello`.
     Connecting,
     /// The daemon accepted `Hello`, negotiated this protocol version and
-    /// listed these features in its `Welcome`.
+    /// listed these features in its `Welcome`, which reported this
+    /// connection's `origin` (`None` from an older daemon).
     Open {
         negotiated: u32,
         features: Vec<String>,
+        origin: Option<ConnectionOrigin>,
     },
     /// The socket closed or could not be opened.
     Closed { reason: String },
@@ -177,6 +181,17 @@ impl Connection {
         }
     }
 
+    /// Where the connected daemon sees this client come from, as its
+    /// `Welcome` said; `None` whenever the connection is not open, and from
+    /// a daemon that sends no origin. A hint for the UI only.
+    #[must_use]
+    pub fn origin(&self) -> Option<ConnectionOrigin> {
+        match &self.state {
+            State::Open { origin, .. } => *origin,
+            _ => None,
+        }
+    }
+
     /// A WebSocket connect is starting.
     pub fn on_connecting(&mut self) {
         self.state = State::Connecting;
@@ -188,11 +203,18 @@ impl Connection {
         self.port = Some(port);
     }
 
-    /// The daemon answered `Hello` with `Welcome`, listing `features`.
-    pub fn on_welcome(&mut self, negotiated: u32, features: Vec<String>) {
+    /// The daemon answered `Hello` with `Welcome`, listing `features` and
+    /// reporting this connection's `origin` (`None` from an older daemon).
+    pub fn on_welcome(
+        &mut self,
+        negotiated: u32,
+        features: Vec<String>,
+        origin: Option<ConnectionOrigin>,
+    ) {
         self.state = State::Open {
             negotiated,
             features,
+            origin,
         };
         self.attempt = 0;
         self.has_ever_connected = true;
@@ -367,7 +389,7 @@ mod tests {
         Connection, DotKind, RESUME_GAP, RestartAction, State, TICK, Watchdog, backoff_delay,
     };
     use crate::target::Target;
-    use protocol::FEATURE_AGENT_COMMANDS;
+    use protocol::{ConnectionOrigin, FEATURE_AGENT_COMMANDS};
     use std::time::{Duration, SystemTime};
 
     const HALF_SECOND: Duration = Duration::from_millis(500);
@@ -376,7 +398,7 @@ mod tests {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(51418);
-        conn.on_welcome(negotiated, Vec::new());
+        conn.on_welcome(negotiated, Vec::new(), None);
         conn
     }
 
@@ -393,13 +415,47 @@ mod tests {
     }
 
     #[test]
+    fn on_welcome_stores_origin() {
+        let mut conn = Connection::new();
+        assert_eq!(conn.origin(), None, "no origin before a Welcome");
+        conn.on_connecting();
+        conn.on_socket_open(51418);
+        conn.on_welcome(23, Vec::new(), Some(ConnectionOrigin::Remote));
+        assert_eq!(conn.origin(), Some(ConnectionOrigin::Remote));
+    }
+
+    #[test]
+    fn on_welcome_without_origin_stores_none() {
+        let mut conn = Connection::new();
+        conn.on_socket_open(51418);
+        conn.on_welcome(23, Vec::new(), Some(ConnectionOrigin::Local));
+        conn.on_closed("dropped".to_owned());
+        conn.on_socket_open(51418);
+        // An older daemon's Welcome carries no origin.
+        conn.on_welcome(23, Vec::new(), None);
+        assert_eq!(conn.origin(), None, "the earlier origin is not kept");
+
+        let plain = open(23);
+        assert_eq!(plain.origin(), None);
+    }
+
+    #[test]
+    fn origin_is_none_after_close() {
+        let mut conn = Connection::new();
+        conn.on_socket_open(51418);
+        conn.on_welcome(23, Vec::new(), Some(ConnectionOrigin::Remote));
+        conn.on_closed("dropped".to_owned());
+        assert_eq!(conn.origin(), None, "a closed connection has no origin");
+    }
+
+    #[test]
     fn open_resets_backoff() {
         let mut conn = Connection::new();
         for _ in 0..3 {
             conn.on_closed("refused".to_owned());
         }
         conn.on_socket_open(51418);
-        conn.on_welcome(20, Vec::new());
+        conn.on_welcome(20, Vec::new(), None);
         assert_eq!(conn.on_closed("dropped".to_owned()), Some(HALF_SECOND));
     }
 
@@ -474,7 +530,8 @@ mod tests {
             conn.state(),
             &State::Open {
                 negotiated: 20,
-                features: Vec::new()
+                features: Vec::new(),
+                origin: None
             }
         );
 
@@ -496,7 +553,7 @@ mod tests {
         let mut conn = remote();
         conn.on_connecting();
         conn.on_socket_open(8787);
-        conn.on_welcome(23, Vec::new());
+        conn.on_welcome(23, Vec::new(), None);
         conn
     }
 
@@ -646,7 +703,7 @@ mod tests {
         assert_eq!(conn.footer(0).label, "connecting…");
         assert_eq!(conn.footer(0).dot, DotKind::Pending);
         conn.on_socket_open(51418);
-        conn.on_welcome(20, Vec::new());
+        conn.on_welcome(20, Vec::new(), None);
         assert_eq!(conn.footer(0).label, "0 sessions");
         assert_eq!(conn.footer(1).label, "1 session");
         assert_eq!(conn.footer(3).label, "3 sessions");
@@ -675,7 +732,7 @@ mod tests {
         conn.on_connecting();
         conn.on_socket_open(51418);
         assert_eq!(conn.footer(0).port, None);
-        conn.on_welcome(20, Vec::new());
+        conn.on_welcome(20, Vec::new(), None);
         assert_eq!(conn.footer(0).port, Some(51418));
         conn.on_closed("dropped".to_owned());
         assert_eq!(conn.footer(0).port, None);
@@ -724,6 +781,7 @@ mod tests {
         conn.on_welcome(
             20,
             vec![FEATURE_AGENT_COMMANDS.to_owned(), "later".to_owned()],
+            None,
         );
     }
 

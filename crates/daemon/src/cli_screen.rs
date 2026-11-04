@@ -372,6 +372,7 @@ mod tests {
                 supported_versions: vec![22],
                 features,
                 daemon_id: None,
+                origin: None,
             })
             .expect("the welcome serializes")
         };

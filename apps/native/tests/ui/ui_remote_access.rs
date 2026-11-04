@@ -600,7 +600,11 @@ fn with_device_block(h: &mut Harness<'_>) -> Vec<ClientMessage> {
     let mut conn = Connection::for_target(Target::Local);
     conn.on_connecting();
     conn.on_socket_open(4242);
-    conn.on_welcome(support::PROTOCOL, vec![FEATURE_DEVICE_BLOCK.to_owned()]);
+    conn.on_welcome(
+        support::PROTOCOL,
+        vec![FEATURE_DEVICE_BLOCK.to_owned()],
+        None,
+    );
     h.set_connection(conn);
     h.send_welcome(support::PROTOCOL);
     reload(h);
