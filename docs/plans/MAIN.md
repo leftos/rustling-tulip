@@ -29,9 +29,6 @@
 - [ ] RT-526 Show a scrollbar on every scrolling area of the native client
 - [ ] RT-753 Stitch a hard-wrapped terminal path whose continuation row is indented
 - [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
-- [ ] RT-670 Add a search box to Settings that finds a setting on any page · release vNext
-- [ ] RT-671 Add an opt-in Detailed logging switch to Settings for the client and daemon · release vNext
-  - [ ] RT-864 Add the Detailed logging switch and Open logs folder to Settings · release vNext
 - [ ] RT-676 Let a manual install over a running client finish when the close dialog takes over 30 s
 - [ ] RT-689 Reset the remembered Trusted choice when Settings' trusted default changes, and fix its hint
 - [ ] RT-690 Cut a dimmed headless Last row's summary with an ellipsis in the Spawn submenu
@@ -99,8 +96,9 @@
 - [ ] RT-536 Host SSH remote sessions on Linux and macOS machines · release vNext+1
 - [ ] RT-540 Make a one-shot ssh bridge call return after it starts the host's daemon
 - [ ] RT-747 Fetch a folder from a remote host, or a file's whole containing folder · release vNext
-- [ ] RT-748 Benchmark folder transfer from a remote host: packed and compressed stream vs loose files vs scp and sftp · release vNext
-  - [ ] RT-878 Time the folder-transfer candidates and write the research note
+  - [/] RT-885 Stream a folder from the daemon as tar.zst: FetchFolder, StatPath and the pack · release vNext
+  - [ ] RT-886 Fetch a remote folder from a Ctrl+clicked folder path, with progress and Cancel · release vNext
+  - [ ] RT-887 Offer Fetch whole folder on a fetched file and Reveal on a fetched folder · release vNext
 - [ ] RT-879 Open a remote session's browser requests on the client's machine · release vNext+1
 
 ## Wave 7 — Pop-out windows
@@ -118,7 +116,6 @@
 - [ ] RT-109 PW.10: Phone chat above the status line over the chat mirror
 - [ ] RT-142 Phone: tap a Linear identifier to see its card
 - [ ] RT-588 Key the chat pane's answer cache by its text, not its length
-- [ ] RT-653 Add Comfortable and Compact Chat modes and Chat view customization · release vNext
 - [ ] RT-691 Mark the question on screen, not the first unanswered one, as a chat card's current tab
 - [ ] RT-693 Fix the chat tool card splitter's edge cases and move the shell family into the plugin
 - [ ] RT-696 Draw a disabled pane-header view segment without the hover highlight
@@ -273,6 +270,7 @@
   - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap · release vNext+1
   - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README · release vNext+1
 - [ ] RT-860 Check the listener's owner before killing a retired daemon off Windows
+- [ ] RT-890 Close folder fetch's Unix open races before the macOS build
 
 ## Agent CLIs
 
@@ -444,6 +442,14 @@
 - [ ] RT-871 Let an elevated bridge's logon-task route find a dev daemon build
 - [ ] RT-872 Follow a pending Settings toggle in the agent page's when rules before Apply
 - [ ] RT-880 Split press_settings_control by page under the complexity limit
+- [ ] RT-883 Send This PC's daemon the saved Detailed logging switch when the two disagree
+- [ ] RT-884 Match the Detailed logging echo on its value so a reconnect or failed save cannot release OK
+- [ ] RT-889 Refuse the worktrees root itself as a worktree_path for FetchFile and snapshots
+- [ ] RT-891 Resolve a FetchFile path off the connection's dispatch so a hung share cannot stall it
+- [ ] RT-892 Refuse a duplicate fetch id without ending the client's live fetch of that id
+- [ ] RT-893 Stop FetchFile's refusal from revealing whether an outside path exists and where a link points
+- [ ] RT-894 Compute Settings search hits once per query change, not on every frame
+- [ ] RT-895 Bound StatPath work per connection and resolve a fetch's canonical root once
 
 ## Design files
 
