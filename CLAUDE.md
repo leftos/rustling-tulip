@@ -64,6 +64,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 test -Validate   # check tools/test-map.json ("test map ok: <n> rows; <m> native source and test files covered")
 .\rt.ps1 clippy           # the agent seam check (tools/check-agent-names.ps1) first, then the strict lint pass (-D warnings)
 .\rt.ps1 fmt              # cargo fmt --all
+.\rt.ps1 mac check|build|clippy|test [<extra>]   # one cargo command on the Mac mini builder (builder@mac-mini) as a pinned heavy gate run, log .tmp\rt-mac-<sub-verb>.log; extras use long forms (--package <crate>), since -p binds to -PrintOnly
 .\rt.ps1 clean            # cargo clean
 .\rt.ps1 native           # build daemon + tracer, then run the native client (extra args: a session id to focus)
 .\rt.ps1 native-e2e       # native client specs (e2e_live, e2e_recover, e2e_remote, e2e_ssh, e2e_multi_host) against a real daemon, built with the e2e-loopback-peers feature, isolated under .tmp/ (fake-claude, fake-tailscale and fake-ssh need node), as one gate call that .gate/desktop.toml's `session` patterns send to a builder's console session, whose Credential Manager the sealed-secret spec needs

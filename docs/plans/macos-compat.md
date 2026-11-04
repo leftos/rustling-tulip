@@ -139,9 +139,9 @@ Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `mai
 - [ ] Code-signing + notarization (Developer ID cert, `entitlements.plist`,
       `notarytool`). Build-machine/CI concern, not source. Needed for distribution
       but not for local dev runs.
-- `rt.ps1` is a Windows-only dev convenience wrapper. A macOS port would want a
-  `rt.sh` (or a `cargo xtask`) sibling; the underlying `cargo`/`pnpm` commands are
-  identical. Not a blocker for `cargo build` / `pnpm tauri dev`.
+- The macOS dev loop runs from the Windows PC: `.\rt.ps1 mac check|build|clippy|test [<extra>]` sends one cargo command to the Mac mini builder (`builder@mac-mini`) as a pinned heavy gate run, logged at `.tmp\rt-mac-<sub-verb>.log`. Extra cargo arguments use long forms (`--package <crate>`), since `-p` binds to `rt.ps1`'s `-PrintOnly`. There is no `rt.sh`.
+- [ ] The Mac mini builder lacks Xcode's Metal Toolchain (`xcodebuild -showComponent MetalToolchain` says uninstalled), so gpui's build script stops at "cannot execute tool 'metal'" before any of this repo's code compiles. Either install it there (`xcodebuild -downloadComponent MetalToolchain`) or build gpui with its `runtime_shaders` feature on macOS; RT-906 decides.
+- [ ] `crates/daemon-client` warns on macOS (an unused `anyhow` import in `protected_root.rs`, unused items in `device_tokens.rs` and `logon_task.rs`), which `mac clippy`'s `-D warnings` turns into errors; RT-906 or RT-46 gates them.
 
 - [ ] Accounts on macOS ([accounts.md](./accounts.md)) waits on ops-tower, and is not in this release: its `claude-accounts` crate is inert off 64-bit Windows, with no Unix locks and no Keychain writer (on macOS the live Claude credential is in the Keychain, not `.credentials.json`). Once ops-tower adds both, allow for Claude Code's roughly 30-second Keychain cache before a switch takes effect. Accounts stays hidden on macOS until then.
 

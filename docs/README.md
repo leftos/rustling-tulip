@@ -248,6 +248,7 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 - **PF, AT, SV, RD, AR, OT**: idea ids in `docs/plans/off-orca.md` (files across machines, attention streams, session views, remote desktop, artifacts by account, absorbing ops-tower).
 - **Pick mode**: the theme editor's toggle that makes a click on a part of its preview jump the token list to that part's token (`PICK_REGIONS` in `apps/native/src/themes_view.rs`).
 - **Pinned question**: the summary view's open prompt shown as a card on top, answered from the same card as in the chat.
+- **Pinned run**: a gate run sent to one named builder alone (`--builder <host>`), never another builder and never this PC; it must match one of the repo's routed patterns. `rt.ps1 mac` pins every run to the Mac mini builder.
 - **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
 - **Poller**: the task that runs a waiting session's discovery passes, every 2 s for 5 minutes, every 10 s up to an hour, then every minute while the session runs (`crates/daemon/src/conversations/discovery.rs`).
 - **Pop-out**: a second window of the native client showing a pane, a tab (a grid or a diff) or a session that has no pane; it is a window of the same process and view, and closing it docks it back; see `docs/native-client.md` ("Windows and pop-outs").
