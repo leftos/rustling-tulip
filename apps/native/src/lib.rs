@@ -117,6 +117,14 @@ mod scrollbar;
 mod section;
 mod session_actions;
 mod session_menu;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Settings view does not call the catalogue yet"
+    )
+)]
+mod settings_search;
 mod settings_view;
 mod shell_dialog;
 mod shell_lines;

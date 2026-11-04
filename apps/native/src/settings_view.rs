@@ -136,7 +136,7 @@ pub(crate) enum SettingsTab {
 
 impl SettingsTab {
     /// The tabs shown before the agents' pages, in the list's order.
-    const FIXED: [Self; 8] = [
+    pub(crate) const FIXED: [Self; 8] = [
         Self::General,
         Self::Notifications,
         Self::Dashboard,
@@ -149,7 +149,7 @@ impl SettingsTab {
 
     /// The tab's label: an agent page's is its descriptor's label in
     /// `agents`, else the agent's id.
-    fn label(self, agents: &[AgentDescriptor]) -> &'static str {
+    pub(crate) fn label(self, agents: &[AgentDescriptor]) -> &'static str {
         match self {
             Self::General => "General",
             Self::Notifications => "Notifications",
@@ -481,7 +481,7 @@ pub(crate) enum KeySourceChoice {
 const KEY_SOURCE_CHOICES: [KeySourceChoice; 2] = [KeySourceChoice::Stored, KeySourceChoice::Env];
 
 impl SettingsControl {
-    const fn selector(self) -> &'static str {
+    pub(crate) const fn selector(self) -> &'static str {
         match self {
             Self::KeepAwake(mode) => match mode {
                 KeepAwakeMode::Off => "settings-keep-awake-off",
@@ -6542,7 +6542,7 @@ struct AgentPage {
 /// `selector` as a `&'static str`, leaked once per distinct text. An agent
 /// page's selectors come from the daemon's descriptors, a few per field, and
 /// a [`SettingsControl`] stays `Copy` with its selector in it.
-fn intern(selector: String) -> &'static str {
+pub(crate) fn intern(selector: String) -> &'static str {
     static INTERNED: LazyLock<Mutex<HashSet<&'static str>>> =
         LazyLock::new(|| Mutex::new(HashSet::new()));
     // The set only ever grows by whole entries, so a poisoned lock still
@@ -6564,7 +6564,7 @@ fn field_part(id: &str) -> String {
 /// The General tab's controls in drawing order; the keep-awake choices
 /// only with `keep_awake`, once the daemon reported its state, and the
 /// Diagnostics rows only with `logging`, while This PC is chosen.
-fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsControl> {
+pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsControl> {
     let keep_awake = keep_awake.then_some(KEEP_AWAKE_CHOICES.map(SettingsControl::KeepAwake));
     keep_awake
         .into_iter()
@@ -6601,7 +6601,7 @@ fn parse_chat_width(text: &str) -> Option<u32> {
 /// The controls of `view`, field `index` of the page of the agent tagged
 /// `tag`, in drawing order: one per choice of a choice field, one for a
 /// toggle, none for a kind the page does not draw.
-fn field_controls(tag: &str, index: usize, view: &FieldView) -> Vec<SettingsControl> {
+pub(crate) fn field_controls(tag: &str, index: usize, view: &FieldView) -> Vec<SettingsControl> {
     let field = field_part(&view.id);
     match &view.editor {
         FieldEditor::Choice { choices, .. } => choices
