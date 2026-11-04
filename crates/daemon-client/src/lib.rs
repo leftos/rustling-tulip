@@ -563,7 +563,7 @@ pub async fn stop_in(config_dir: &Path) -> anyhow::Result<()> {
 }
 
 /// [`stop_in`] with `proof_budget` for the listener's proof and `owner` to
-/// read which pid owns the proven listener (Windows).
+/// read which pid owns the proven listener.
 ///
 /// # Errors
 ///
@@ -573,8 +573,6 @@ pub(crate) async fn stop_in_with(
     proof_budget: Duration,
     owner: &listener_owner::OwnerLookup,
 ) -> anyhow::Result<()> {
-    #[cfg(not(windows))]
-    let _ = owner;
     let path = handshake_file_in(config_dir);
     if !path.exists() {
         bail!("no daemon handshake on disk — daemon may not be running");
@@ -584,16 +582,18 @@ pub(crate) async fn stop_in_with(
     let pinned = pin_for_stop(config_dir, &parsed, &path).await?;
     let proof = proof::prove(parsed.port, &parsed.auth_token, proof_budget).await;
     refuse_unproven(proof, config_dir, &parsed, &path).await?;
+    // The lookup may block up to 3 s (the lsof deadline); stop and retire are
+    // rare and already waiting on the daemon.
+    if !supervisor::owns_listener(owner, &parsed) {
+        bail!(
+            "pid {} named by {} does not own the daemon's listener on 127.0.0.1:{}; nothing was stopped",
+            parsed.pid,
+            path.display(),
+            parsed.port
+        );
+    }
     #[cfg(windows)]
     {
-        if !supervisor::owns_listener(owner, &parsed) {
-            bail!(
-                "pid {} named by {} does not own the daemon's listener on 127.0.0.1:{}; nothing was stopped",
-                parsed.pid,
-                path.display(),
-                parsed.port
-            );
-        }
         pinned.terminate()?;
         if !pinned.wait(STOP_WAIT).await {
             bail!("pid {} did not exit after it was terminated", parsed.pid);
@@ -1213,7 +1213,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn stop_in_kills_the_proven_pid_and_removes_the_handshake() {
         let scratch = ScratchDir::new("stop-kill");
@@ -1234,6 +1233,16 @@ mod tests {
         let status = child.wait().expect("wait for the stand-in");
 
         stopped.expect("stop_in succeeds");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+
+            assert_eq!(
+                status.signal(),
+                Some(15),
+                "the stand-in was not sent SIGTERM: {status}"
+            );
+        }
         assert!(
             !status.success(),
             "the stand-in exited on its own: {status}"
@@ -1244,7 +1253,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
     fn stop_refuses_a_pid_that_does_not_own_the_proven_listener() {
         let scratch = ScratchDir::new("stop-not-owner");
@@ -1253,16 +1261,42 @@ mod tests {
         let pid = child.id();
         write_handshake(&scratch.0, pid, fake.port, "token");
 
-        // The proving listener lives in this test process, so the real lookup
-        // names this process, not the stand-in, as the listener's owner.
-        let stopped = block_on(super::stop_in_with(
-            &scratch.0,
-            HANG_GUARD,
-            &crate::listener_owner::listener_owner,
-        ));
+        // The proving listener lives in this test process, so this process,
+        // not the stand-in, is named as its owner.
+        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD, &|_| {
+            Ok(Some(std::process::id()))
+        }));
         let alive = alive_then_reaped(&mut child);
 
         let err = stopped.expect_err("a pid that does not own the listener is not stopped");
+        let path = crate::handshake_file_in(&scratch.0);
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "pid {pid} named by {} does not own the daemon's listener on 127.0.0.1:{}; \
+                 nothing was stopped",
+                path.display(),
+                fake.port
+            )
+        );
+        assert!(alive, "the stand-in was killed");
+        assert!(path.exists(), "daemon.json was removed");
+    }
+
+    #[test]
+    fn stop_refuses_when_the_owner_cannot_be_read() {
+        let scratch = ScratchDir::new("stop-owner-unreadable");
+        let fake = FakeListener::proving("token");
+        let mut child = stand_in();
+        let pid = child.id();
+        write_handshake(&scratch.0, pid, fake.port, "token");
+
+        let stopped = block_on(super::stop_in_with(&scratch.0, HANG_GUARD, &|_| {
+            Err(anyhow!("lsof failed"))
+        }));
+        let alive = alive_then_reaped(&mut child);
+
+        let err = stopped.expect_err("an unreadable owner is refused");
         let path = crate::handshake_file_in(&scratch.0);
         assert_eq!(
             format!("{err:#}"),
