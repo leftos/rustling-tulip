@@ -9,6 +9,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The Windows installer and the app's programs are signed with a verified publisher, so Windows names who made them.
 - A What's new button on the update notices shows the release notes for every version since the one you last had.
 - A file name after a full path on the same terminal line opens from that path's folder, so `d.html` after `x:/a/b/c.html` opens `x:/a/b/d.html`.
+- The chat column stays a readable width on wide panes, and each turn's final answer is set apart in its own box.
 - The chat's new Compact mode, on by default, folds a run of reads, searches and commands into one line you can open, like the terminal does.
 
 ### Fixed

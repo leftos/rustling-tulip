@@ -522,7 +522,8 @@ impl<'a> OpenRun<'a> {
 /// calls (a run of one included, thinking rows between its calls folded in)
 /// becomes one [`DisplayRow::Run`], and every other entry stands alone and
 /// ends the run before it. A run counts as running only while a call has no
-/// result and no turn end or user message follows it.
+/// result and no turn end or user message follows it (a message still
+/// queued does not count).
 #[must_use]
 pub fn display_rows<'a>(
     entries: impl IntoIterator<Item = &'a ChatEntry>,
@@ -551,18 +552,50 @@ pub fn display_rows<'a>(
     rows
 }
 
-/// Clears the running mark of every run a turn end or a user message comes
+/// Clears the running mark of every run an entry that [`ends_turn`] comes
 /// after: that turn is over, so a call it left without a result runs no
 /// more.
 fn settle_finished_runs(rows: &mut [DisplayRow<'_>]) {
     let mut ended = false;
     for row in rows.iter_mut().rev() {
         match row {
-            DisplayRow::Single(ChatEntry::TurnEnd { .. } | ChatEntry::User { .. }) => ended = true,
+            DisplayRow::Single(entry) if ends_turn(entry) => ended = true,
             DisplayRow::Run { summary, .. } if ended => summary.running = false,
             _ => {}
         }
     }
+}
+
+/// Whether `entry` ends the turn before it: a turn end, or a user message
+/// the transcript has. A message still pending (queued while the agent
+/// works) does not.
+fn ends_turn(entry: &ChatEntry) -> bool {
+    matches!(
+        entry,
+        ChatEntry::TurnEnd { .. } | ChatEntry::User { pending: false, .. }
+    )
+}
+
+/// The ids of the answers among `entries` (in display order) that are
+/// their turn's final reply: the last answer before a turn end, or before
+/// the next user message the transcript has. A turn still running has none
+/// yet, so its latest answer is not one, a message queued meanwhile
+/// included. Answers never join a Compact run, so each id stands
+/// for a row [`display_rows`] draws on its own in either mode.
+#[must_use]
+pub fn final_replies<'a>(entries: impl IntoIterator<Item = &'a ChatEntry>) -> BTreeSet<String> {
+    let mut finals = BTreeSet::new();
+    let mut last_answer: Option<&str> = None;
+    for entry in entries {
+        if let ChatEntry::Answer { id, .. } = entry {
+            last_answer = Some(id);
+        } else if ends_turn(entry)
+            && let Some(id) = last_answer.take()
+        {
+            finals.insert(id.to_owned());
+        }
+    }
+    finals
 }
 
 /// What a pane draws for its session.
@@ -2898,6 +2931,28 @@ mod run_tests {
     }
 
     #[test]
+    fn a_queued_message_keeps_a_run_running() {
+        let unanswered = with_result("g1", "Grep", ToolKind::Search, None);
+        let queued = ChatEntry::User {
+            id: "u1".to_owned(),
+            text: "next".to_owned(),
+            pending: true,
+        };
+        assert_eq!(
+            shapes(&[unanswered, queued], ChatMode::Compact),
+            [
+                RowShape::Run {
+                    ids: vec!["g1".to_owned()],
+                    line: "1 searched".to_owned(),
+                    running: true,
+                },
+                entry("u1")
+            ],
+            "a message queued while the turn runs does not end it"
+        );
+    }
+
+    #[test]
     fn an_unanswered_call_after_turn_end_is_not_running() {
         let unanswered = with_result("g1", "Grep", ToolKind::Search, None);
         let turn_end = ChatEntry::TurnEnd {
@@ -3015,5 +3070,135 @@ mod run_tests {
         }
         assert_eq!(ChatMode::default(), ChatMode::Compact);
         assert_eq!(ChatMode::of_name("dense"), None);
+    }
+}
+
+#[cfg(test)]
+mod final_reply_tests {
+    use protocol::{ChatEntry, ToolKind, ToolOutcome};
+
+    use super::{ChatMode, DisplayRow, display_rows, final_replies};
+
+    fn user(id: &str) -> ChatEntry {
+        ChatEntry::User {
+            id: id.to_owned(),
+            text: format!("message {id}"),
+            pending: false,
+        }
+    }
+
+    fn answer(id: &str, live: bool) -> ChatEntry {
+        ChatEntry::Answer {
+            id: id.to_owned(),
+            text: format!("answer {id}"),
+            live,
+        }
+    }
+
+    fn tool(id: &str) -> ChatEntry {
+        ChatEntry::Tool {
+            id: id.to_owned(),
+            name: "Read".to_owned(),
+            summary: format!("Read {id}"),
+            input: "{}".to_owned(),
+            result: Some(ToolOutcome {
+                text: "out".to_owned(),
+                is_error: false,
+            }),
+            parent_id: None,
+            tail_paths: Vec::new(),
+            kind: ToolKind::Read,
+        }
+    }
+
+    fn turn_end(id: &str) -> ChatEntry {
+        ChatEntry::TurnEnd {
+            id: id.to_owned(),
+            duration_ms: Some(1_000),
+        }
+    }
+
+    fn finals(entries: &[ChatEntry]) -> Vec<String> {
+        final_replies(entries).into_iter().collect()
+    }
+
+    #[test]
+    fn the_last_answer_before_the_turn_end_is_the_final_reply() {
+        let entries = [
+            user("u1"),
+            answer("a1", false),
+            tool("t1"),
+            answer("a2", false),
+            turn_end("e1"),
+        ];
+        assert_eq!(finals(&entries), ["a2"]);
+        for mode in [ChatMode::Compact, ChatMode::Comfortable] {
+            let singles: Vec<&str> = display_rows(&entries, mode)
+                .iter()
+                .filter_map(|row| match row {
+                    DisplayRow::Single(entry) => super::entry_id(entry),
+                    DisplayRow::Run { .. } => None,
+                })
+                .collect();
+            assert!(
+                singles.contains(&"a2"),
+                "{mode:?}: the final reply draws as its own row"
+            );
+        }
+    }
+
+    #[test]
+    fn each_finished_turn_has_its_own_final_reply() {
+        let entries = [
+            user("u1"),
+            answer("a1", false),
+            turn_end("e1"),
+            user("u2"),
+            answer("a2", false),
+            turn_end("e2"),
+        ];
+        assert_eq!(finals(&entries), ["a1", "a2"]);
+    }
+
+    #[test]
+    fn a_turn_without_a_turn_end_yet_has_no_final_reply() {
+        let entries = [
+            user("u1"),
+            answer("a1", false),
+            tool("t1"),
+            answer("a2", false),
+        ];
+        assert_eq!(finals(&entries), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_next_user_message_ends_the_turn_without_a_turn_end() {
+        let entries = [user("u1"), answer("a1", false), user("u2")];
+        assert_eq!(finals(&entries), ["a1"]);
+    }
+
+    #[test]
+    fn a_queued_message_does_not_box_the_running_answer() {
+        let queued = ChatEntry::User {
+            id: "u2".to_owned(),
+            text: "message u2".to_owned(),
+            pending: true,
+        };
+        let entries = [user("u1"), answer("a1", false), queued.clone()];
+        assert_eq!(finals(&entries), Vec::<String>::new());
+        let ended = [user("u1"), answer("a1", false), queued, turn_end("e1")];
+        assert_eq!(finals(&ended), ["a1"], "the turn's end still settles it");
+    }
+
+    #[test]
+    fn a_turn_without_an_answer_has_no_final_reply() {
+        let entries = [user("u1"), tool("t1"), turn_end("e1")];
+        assert_eq!(finals(&entries), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_live_answer_before_the_turn_end_is_the_final_reply() {
+        let entries = [user("u1"), answer("a1", true), turn_end("e1")];
+        assert_eq!(finals(&entries), ["a1"]);
     }
 }

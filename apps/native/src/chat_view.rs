@@ -545,6 +545,12 @@ pub(crate) struct RowLook<'a> {
     pub(crate) tail_scrolls: &'a HashMap<(String, String), ScrollHandle>,
     /// How the chat pane draws tool calls.
     pub(crate) mode: ChatMode,
+    /// The widest the chat column draws, centred in a wider pane; `None`
+    /// draws it at the pane's full width (a summary pane's look).
+    pub(crate) max_width: Option<f32>,
+    /// The answers that draw as their turn's final reply, in a box; none in
+    /// a summary pane's look.
+    pub(crate) finals: BTreeSet<String>,
 }
 
 /// The parts of a tool call a card draws.
@@ -1636,6 +1642,21 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// The ids of the answers in session `session_id`'s chat that draw as
+    /// their turn's final reply, in id order; none while it is not loaded.
+    #[must_use]
+    pub fn chat_final_replies(&self, session_id: &str) -> Vec<String> {
+        self.chat
+            .sessions
+            .get(session_id)
+            .map(|chat| {
+                chat::final_replies(chat.log.entries())
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether the Compact run that starts at call `first_id` of session
     /// `session_id`'s chat is open.
     #[must_use]
@@ -1768,7 +1789,14 @@ impl RootView {
     fn chat_body(&self, pane_id: &str, session_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let name = format!("pane-chat-{pane_id}");
         let chat = self.chat.sessions.get(session_id);
-        let look = self.row_look(pane_id, session_id, cx);
+        let cap = self.sidebar.chat_max_width();
+        let look = RowLook {
+            max_width: (cap > 0).then(|| u16::try_from(cap).map_or(f32::from(u16::MAX), f32::from)),
+            finals: chat
+                .map(|chat| chat::final_replies(chat.log.entries()))
+                .unwrap_or_default(),
+            ..self.row_look(pane_id, session_id, cx)
+        };
         let strip = chat.and_then(|chat| chat.work.strip(self.wall_now()));
         let rows = chat.filter(|chat| !chat.log.is_empty() || chat.log.hidden() > 0);
         let main = if let Some(chat) = rows {
@@ -1807,7 +1835,8 @@ impl RootView {
 
     /// What every row pane `pane_id` draws for session `session_id` is
     /// drawn with: the terminal's font for code, the UI text size and the
-    /// theme.
+    /// theme, with no width cap and no final replies (the chat pane adds
+    /// both).
     pub(crate) fn row_look<'a>(
         &'a self,
         pane_id: &'a str,
@@ -1830,6 +1859,8 @@ impl RootView {
             tails: &self.chat.tails,
             tail_scrolls: &self.chat.tail_scrolls,
             mode: self.sidebar.chat_mode(),
+            max_width: None,
+            finals: BTreeSet::new(),
         }
     }
 
@@ -2056,8 +2087,9 @@ pub(crate) fn card_key(keystroke: &Keystroke) -> Option<CardKey> {
     chars.next().is_none().then_some(CardKey::Digit(digit))
 }
 
-/// A loaded chat's rows in a column that follows the bottom until scrolled
-/// up, with its scrollbar.
+/// A loaded chat's rows in a column (tagged `chat-column-<pane>`) at most
+/// the look's width cap wide and centred in a wider pane, that follows the
+/// bottom until scrolled up, with its scrollbar at the pane's edge.
 fn chat_column(
     look: &RowLook<'_>,
     chat: &SessionChat,
@@ -2075,6 +2107,17 @@ fn chat_column(
         };
         rows.push(drawn);
     }
+    let name = format!("chat-column-{}", look.pane_id);
+    let rows = div()
+        .driver_id(|| name)
+        .w_full()
+        .when_some(look.max_width, |rows, cap| rows.max_w(px(cap)))
+        .px(px(BODY_PAD_X))
+        .py(px(BODY_PAD_Y))
+        .flex()
+        .flex_col()
+        .gap(px(ROW_GAP))
+        .children(rows);
     let column = div()
         .id(ElementId::Name(SharedString::from(format!(
             "chat-scroll-{}",
@@ -2082,14 +2125,12 @@ fn chat_column(
         ))))
         .size_full()
         .overflow_y_scroll()
-        .px(px(BODY_PAD_X))
-        .py(px(BODY_PAD_Y))
         .flex()
         .flex_col()
-        .gap(px(ROW_GAP))
+        .items_center()
         .text_size(ui_px_at(look.text_offset, UI_TEXT_SIZE))
         .text_color(gpui::rgb(look.theme.text))
-        .children(rows);
+        .child(rows);
     let column = match scroll {
         Some(scroll) => {
             follow_bottom(scroll.handle());
@@ -2263,7 +2304,12 @@ pub(crate) fn chat_row(
     let row = match entry {
         ChatEntry::User { text, pending, .. } => user_row(look, text, *pending),
         ChatEntry::Answer { text, live, .. } => {
-            answer_row(look, id, text, *live, chat.docs.get(id))
+            let answer = answer_row(look, id, text, *live, chat.docs.get(id));
+            if look.finals.contains(id) {
+                final_reply_box(look, id, answer)
+            } else {
+                answer
+            }
         }
         ChatEntry::Thinking { secs, .. } => muted(thinking_label(*secs)),
         ChatEntry::Tool {
@@ -2384,6 +2430,23 @@ fn answer_row(
                 .child(cursor)
                 .child(tag),
         )
+}
+
+/// A turn's final reply, `answer`, in a box tagged `chat-final-<pane>-<id>`:
+/// the theme's strong line for its border, no fill of its own (inline code
+/// keeps its `chip` background), rounded as the tool cards are.
+fn final_reply_box(look: &RowLook<'_>, id: &str, answer: Div) -> Div {
+    let name = format!("chat-final-{}-{id}", look.pane_id);
+    div()
+        .driver_id(|| name)
+        .flex()
+        .flex_col()
+        .px(px(BUBBLE_PAD_X))
+        .py(px(BUBBLE_PAD_Y))
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(gpui::rgb(look.theme.line_strong))
+        .child(answer)
 }
 
 /// A tool call's card: its name, one-line summary and status mark (tagged

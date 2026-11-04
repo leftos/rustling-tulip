@@ -92,6 +92,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   Its `chat_mode` field is the chat's density, `"compact"` or `"comfortable"`, app-level and not per session; a missing or unknown value loads as compact (an unknown one with a warning), and a click on the pane header's Compact button writes it at once.
 
+  Its `chat_max_width` field is the widest a chat pane's column draws, a whole number of logical px, `0` for no cap; a missing value or `null` loads as 960, and a value that is not a whole number logs `saved chat width {value} is not a whole number of px; chats cap at 960` and loads as 960 without failing the rest of the file.
+
   Its `unc_hosts` list (network hosts terminal links may open) is edited by hand; the client re-reads it on each click and never writes it. The native client's bundled OFL fonts live in `apps/native/assets/fonts/` (sources and versions in its README), and the large-file hook exempts them. The attribution for the built-in themes' source colour schemes is `apps/native/assets/themes/NOTICE.md`.
 
 When debugging spawn/connect/shutdown issues, both `daemon.log` and the client's log (`native.log`) together tell the full story — neither alone is enough.

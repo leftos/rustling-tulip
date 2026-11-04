@@ -518,6 +518,16 @@ pub struct UiState {
     /// before it) or with a value that names no mode loads as Compact.
     #[serde(default)]
     pub chat_mode: ChatMode,
+    /// The widest a chat pane's column draws, in whole logical px, centred
+    /// in a wider pane; `0` draws it at the pane's full width. A file
+    /// without it (v0.5.1-alpha and later releases before it) or with a
+    /// value that is not a whole number of px loads as
+    /// [`DEFAULT_CHAT_MAX_WIDTH`].
+    #[serde(
+        default = "default_chat_max_width",
+        deserialize_with = "chat_max_width_or_default"
+    )]
+    pub chat_max_width: u32,
     /// The Dashboard tab's choices.
     #[serde(deserialize_with = "dashboard_or_default")]
     pub dashboard: DashboardSettings,
@@ -550,6 +560,29 @@ impl<'de> Deserialize<'de> for ChatMode {
         }
         Ok(Self::default())
     }
+}
+
+/// The widest a chat pane's column draws until the user sets it, in
+/// logical px.
+pub const DEFAULT_CHAT_MAX_WIDTH: u32 = 960;
+
+fn default_chat_max_width() -> u32 {
+    DEFAULT_CHAT_MAX_WIDTH
+}
+
+/// Reads `chat_max_width`, never failing the file: a value that is not a
+/// whole number of px loads as [`DEFAULT_CHAT_MAX_WIDTH`], with a warning.
+fn chat_max_width_or_default<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if let Some(width) = value.as_u64().and_then(|width| u32::try_from(width).ok()) {
+        return Ok(width);
+    }
+    if !value.is_null() {
+        tracing::warn!(
+            "saved chat width {value} is not a whole number of px; chats cap at {DEFAULT_CHAT_MAX_WIDTH}"
+        );
+    }
+    Ok(DEFAULT_CHAT_MAX_WIDTH)
 }
 
 /// What a session's entry under `session_views` holds when its last view
@@ -1216,6 +1249,7 @@ impl Default for UiState {
             host_session_counts: BTreeMap::new(),
             session_views: SessionViews::default(),
             chat_mode: ChatMode::default(),
+            chat_max_width: DEFAULT_CHAT_MAX_WIDTH,
             dashboard: DashboardSettings::default(),
             last_installed_version: None,
         }
@@ -2291,6 +2325,13 @@ impl SidebarModel {
     #[must_use]
     pub fn chat_mode(&self) -> ChatMode {
         self.ui.chat_mode
+    }
+
+    /// The widest a chat pane's column draws, in logical px; `0` for no
+    /// cap.
+    #[must_use]
+    pub fn chat_max_width(&self) -> u32 {
+        self.ui.chat_max_width
     }
 
     /// Sets how chat panes draw tool calls; returns whether that changed it.
@@ -5391,6 +5432,7 @@ pub(crate) mod tests {
                 )]),
             },
             chat_mode: ChatMode::Comfortable,
+            chat_max_width: 720,
             last_installed_version: Some("0.8.1-alpha".to_owned()),
         };
         save_ui_state(&dir.0, &state).expect("first save");
@@ -5693,6 +5735,47 @@ pub(crate) mod tests {
         let dir = TestDir::new("chat-mode-v0-5-1-alpha");
         let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
         assert_eq!(ui.chat_mode, ChatMode::Compact);
+    }
+
+    #[test]
+    fn a_v0_5_1_alpha_file_without_a_chat_max_width_loads_960() {
+        let dir = TestDir::new("chat-max-width-v0-5-1-alpha");
+        let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
+        assert_eq!(ui.chat_max_width, 960);
+    }
+
+    #[test]
+    fn a_chat_max_width_round_trips_and_an_invalid_one_loads_960() {
+        let dir = TestDir::new("chat-max-width");
+        for width in [0, 1200] {
+            let state = UiState {
+                chat_max_width: width,
+                ..UiState::default()
+            };
+            save_ui_state(&dir.0, &state).expect("save");
+            let file: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                    .expect("JSON");
+            assert_eq!(file["chat_max_width"], width);
+            assert_eq!(load_ui_state(&dir.0).chat_max_width, width);
+        }
+        for width in [
+            json!("wide"),
+            json!(-5),
+            json!(800.5),
+            json!(null),
+            json!(u64::from(u32::MAX) + 1),
+            json!([960]),
+        ] {
+            let file = json!({ "sidebar_collapsed": true, "chat_max_width": width });
+            std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+            let loaded = load_ui_state(&dir.0);
+            assert!(
+                loaded.sidebar_collapsed,
+                "{width}: the rest of the file loads"
+            );
+            assert_eq!(loaded.chat_max_width, 960, "{width}");
+        }
     }
 
     #[test]

@@ -376,6 +376,134 @@ fn the_compact_toggle_switches_to_one_card_per_call_and_saves(cx: &mut TestAppCo
     );
 }
 
+/// The widest the chat column draws by default, in logical px.
+const CHAT_CAP: f32 = 960.0;
+
+/// `p1`'s chat showing one finished turn, in a window `width` px wide.
+fn chat_at_width<'a>(cx: &'a mut TestAppContext, dir: &TestDir, width: f32) -> Harness<'a> {
+    let (mut h, id) = opened(cx, dir);
+    h.send(reply(
+        Some(&id),
+        vec![
+            user("u1"),
+            answer("a1", "Done.", false),
+            ChatEntry::TurnEnd {
+                id: "e1".to_owned(),
+                duration_ms: Some(1_000),
+            },
+        ],
+    ));
+    let height = h.window_height();
+    h.cx.simulate_resize(gpui::size(px(width), px(height)));
+    h.cx.run_until_parked();
+    h
+}
+
+#[gpui::test]
+fn a_wide_pane_caps_and_centres_the_chat_column(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_at_width(cx, &dir, 2400.0);
+    let pane = h.bounds("pane-chat-p1");
+    assert!(
+        pane.size.width / px(1.0) > CHAT_CAP + 100.0,
+        "the pane is wider than the cap: {pane:?}"
+    );
+    let column = h.bounds("chat-column-p1");
+    assert!(
+        (column.size.width / px(1.0) - CHAT_CAP).abs() < 0.5,
+        "the column is capped: {column:?}"
+    );
+    let pane_centre = pane.origin.x / px(1.0) + pane.size.width / px(1.0) / 2.0;
+    let column_centre = column.origin.x / px(1.0) + column.size.width / px(1.0) / 2.0;
+    assert!(
+        (pane_centre - column_centre).abs() < 0.5,
+        "the column is centred: pane {pane:?}, column {column:?}"
+    );
+}
+
+#[gpui::test]
+fn a_narrow_pane_keeps_the_full_width(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = chat_at_width(cx, &dir, 900.0);
+    let pane = h.bounds("pane-chat-p1");
+    assert!(
+        pane.size.width / px(1.0) < CHAT_CAP,
+        "the pane is narrower than the cap: {pane:?}"
+    );
+    let column = h.bounds("chat-column-p1");
+    assert!(
+        column.size.width > px(0.0),
+        "the column is drawn: {column:?}"
+    );
+    assert!(
+        (column.size.width / px(1.0) - pane.size.width / px(1.0)).abs() < 0.5
+            && (column.origin.x / px(1.0) - pane.origin.x / px(1.0)).abs() < 0.5,
+        "the column fills the pane: pane {pane:?}, column {column:?}"
+    );
+}
+
+#[gpui::test]
+fn the_final_reply_draws_in_a_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(
+        Some(&id),
+        vec![
+            user("u1"),
+            answer("a1", "Looking.", false),
+            tool("t1", Some("fn main() {}")),
+            answer("a2", "Done: **two** files.", false),
+            ChatEntry::TurnEnd {
+                id: "e1".to_owned(),
+                duration_ms: Some(12_000),
+            },
+        ],
+    ));
+    assert_eq!(h.root(|root, _| root.chat_final_replies("s1")), ["a2"]);
+    assert!(
+        painted(&mut h, "chat-final-p1-a2"),
+        "the turn's last answer draws in its box"
+    );
+    assert!(
+        painted(&mut h, "chat-row-p1-a1"),
+        "the earlier answer still draws"
+    );
+}
+
+#[gpui::test]
+fn a_running_turns_latest_answer_has_no_box(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(
+        Some(&id),
+        vec![
+            user("u1"),
+            answer("a1", "Looking.", false),
+            tool("t1", None),
+            answer("a2", "Still going", true),
+        ],
+    ));
+    assert!(painted(&mut h, "chat-row-p1-a2"), "the live answer draws");
+    assert_eq!(
+        h.root(|root, _| root.chat_final_replies("s1")),
+        Vec::<String>::new(),
+        "a turn still running has no final reply"
+    );
+    h.send(append(
+        vec![ChatEntry::TurnEnd {
+            id: "e1".to_owned(),
+            duration_ms: Some(3_000),
+        }],
+        &[],
+    ));
+    assert_eq!(
+        h.root(|root, _| root.chat_final_replies("s1")),
+        ["a2"],
+        "the turn's end makes its latest answer the final reply"
+    );
+    assert!(painted(&mut h, "chat-final-p1-a2"));
+}
+
 #[gpui::test]
 fn a_call_with_tail_paths_keeps_its_card_in_compact(cx: &mut TestAppContext) {
     let dir = TestDir::new();
