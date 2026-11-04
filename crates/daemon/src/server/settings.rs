@@ -179,7 +179,12 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
         ClientMessage::ListShellChoices => {
             // Detection searches PATH and probes files, so it runs off the
             // async workers; the reply goes to this requester alone.
-            match tokio::task::spawn_blocking(|| detect_shells(&ShellProbe::HOST)).await {
+            let setting = hub.state.default_shell();
+            match tokio::task::spawn_blocking(move || {
+                detect_shells(setting.as_ref(), &ShellProbe::HOST)
+            })
+            .await
+            {
                 Ok(choices) => {
                     let _ = out_tx.send(DaemonMessage::ShellChoices { choices });
                 }

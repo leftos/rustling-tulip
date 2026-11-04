@@ -337,14 +337,43 @@ fn hosts_agents(path: Option<&str>) -> bool {
     path.is_some_and(|path| ShellFamily::of(path).is_some())
 }
 
-/// Every default-shell choice on this host, in Settings order: Automatic
-/// (with the shell it resolves to now), the named shells with what was found,
-/// and Custom. Blocking: it searches PATH and probes files.
-pub(crate) fn detect_shells(probe: &ShellProbe<'_>) -> Vec<ShellChoice> {
-    detect_shells_on(HostOs::CURRENT, probe)
+/// Whether the saved custom shell command types an agent into a shell: it
+/// splits into words, its program resolves, and the resolved program is a
+/// shell family. This is the same split, resolution and family test a spawn of
+/// the command makes, so Custom's flag agrees with what a spawn does.
+fn custom_hosts_agents(os: HostOs, setting: Option<&DefaultShell>, probe: &ShellProbe<'_>) -> bool {
+    let Some(command) = setting
+        .filter(|setting| setting.id == CUSTOM_SHELL_ID)
+        .and_then(|setting| setting.command.as_deref())
+    else {
+        return false;
+    };
+    let Some(words) = split_custom_command(os, command, probe).filter(|words| !words.is_empty())
+    else {
+        return false;
+    };
+    let Some(path) = resolve_custom_program(&words[0], probe) else {
+        return false;
+    };
+    ShellFamily::of(&path.to_string_lossy()).is_some()
 }
 
-fn detect_shells_on(os: HostOs, probe: &ShellProbe<'_>) -> Vec<ShellChoice> {
+/// Every default-shell choice on this host, in Settings order: Automatic
+/// (with the shell it resolves to now), the named shells with what was found,
+/// and Custom, which hosts agents when `setting`'s saved custom command
+/// resolves to a shell family. Blocking: it searches PATH and probes files.
+pub(crate) fn detect_shells(
+    setting: Option<&DefaultShell>,
+    probe: &ShellProbe<'_>,
+) -> Vec<ShellChoice> {
+    detect_shells_on(HostOs::CURRENT, setting, probe)
+}
+
+fn detect_shells_on(
+    os: HostOs,
+    setting: Option<&DefaultShell>,
+    probe: &ShellProbe<'_>,
+) -> Vec<ShellChoice> {
     let lossy = |path: PathBuf| path.to_string_lossy().into_owned();
     let auto_path = automatic_pick(os, probe).map(|pick| lossy(pick.path));
     let mut choices = vec![ShellChoice {
@@ -369,7 +398,7 @@ fn detect_shells_on(os: HostOs, probe: &ShellProbe<'_>) -> Vec<ShellChoice> {
         label: "Custom".to_owned(),
         available: true,
         path: None,
-        hosts_agents: false,
+        hosts_agents: custom_hosts_agents(os, setting, probe),
     });
     choices
 }
@@ -2245,7 +2274,11 @@ mod default_shell_tests {
         }
 
         fn choices(&self, os: HostOs) -> Vec<ShellChoice> {
-            self.probe(|probe| detect_shells_on(os, probe))
+            self.choices_with(os, None)
+        }
+
+        fn choices_with(&self, os: HostOs, setting: Option<&DefaultShell>) -> Vec<ShellChoice> {
+            self.probe(|probe| detect_shells_on(os, setting, probe))
         }
 
         fn resolve(&self, setting: Option<&DefaultShell>, cwd: Option<&Path>) -> ShellProgram {
@@ -2336,7 +2369,52 @@ mod default_shell_tests {
         assert_eq!(choice(&choices, "powershell").path, None);
         let custom = choice(&choices, "custom");
         assert_eq!(custom.path, None, "Custom has no path");
-        assert!(!custom.hosts_agents);
+        assert!(!custom.hosts_agents, "nothing saved as Custom");
+    }
+
+    /// A saved Custom command that resolves to a shell family hosts agents,
+    /// exactly as a spawn of it does.
+    #[test]
+    fn a_resolving_custom_command_reports_that_it_hosts_agents() {
+        let host = FakeHost::default().on_path("pwsh", "/usr/bin/pwsh");
+        let saved = setting("custom", Some("pwsh -NoLogo"));
+        let choices = host.choices_with(HostOs::Unix, Some(&saved));
+        let custom = choice(&choices, "custom");
+        assert_eq!(custom.path, None, "Custom has no path");
+        assert!(custom.available, "Custom is always available");
+        assert!(custom.hosts_agents, "pwsh hosts agents");
+    }
+
+    #[test]
+    fn no_saved_custom_command_reports_no_agents() {
+        let host = FakeHost::default();
+        assert!(!choice(&host.choices_with(HostOs::Unix, None), "custom").hosts_agents);
+        let other = setting("pwsh", Some("pwsh -NoLogo"));
+        assert!(
+            !choice(&host.choices_with(HostOs::Unix, Some(&other)), "custom").hosts_agents,
+            "only a saved Custom command counts"
+        );
+    }
+
+    /// Windows-only: `ShellFamily::of` parses the resolved path as a Windows
+    /// path to see that `System32\bash.exe` is WSL's.
+    #[cfg(windows)]
+    #[test]
+    fn a_custom_bare_bash_under_system32_reports_no_agents() {
+        let host = FakeHost::default().on_path("bash", r"C:\Windows\System32\bash.exe");
+        let saved = setting("custom", Some("bash"));
+        let choices = host.choices_with(HostOs::Windows, Some(&saved));
+        let custom = choice(&choices, "custom");
+        assert!(!custom.hosts_agents, "WSL's bash takes Linux paths");
+        assert!(custom.available, "Custom is always available");
+    }
+
+    #[test]
+    fn an_unresolvable_custom_command_reports_no_agents() {
+        let host = FakeHost::default();
+        let saved = setting("custom", Some("pwsh -NoLogo"));
+        let choices = host.choices_with(HostOs::Windows, Some(&saved));
+        assert!(!choice(&choices, "custom").hosts_agents);
     }
 
     #[cfg(windows)]
