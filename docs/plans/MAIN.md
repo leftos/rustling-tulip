@@ -11,13 +11,13 @@
 
 ## Wave 16 — Several hosts in one window
 
-- [ ] RT-620 Route the remaining session and repo lookups by their own host · release vNext
 - [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline · release vNext+1
 - [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host · release vNext+1
 - [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts · release vNext+1
 - [ ] RT-839 Give the keyboard back to the dialog under a closed cleanup failure, and scope the launch highlight to its host
 - [ ] RT-841 Refresh an open spawn dialog on a host's Agents and AgentSettings, and its host label
 - [ ] RT-865 Keep remote hosts usable while This PC's connecting overlay is up
+- [ ] RT-882 Route leaf selection state, the font-step base and launch-last waits by host
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -100,7 +100,8 @@
 - [ ] RT-540 Make a one-shot ssh bridge call return after it starts the host's daemon
 - [ ] RT-747 Fetch a folder from a remote host, or a file's whole containing folder · release vNext
 - [ ] RT-748 Benchmark folder transfer from a remote host: packed and compressed stream vs loose files vs scp and sftp · release vNext
-- [ ] RT-821 Keep a started daemon from holding an SSH channel open, and keep redirected CLI output · release vNext
+  - [ ] RT-878 Time the folder-transfer candidates and write the research note
+- [ ] RT-879 Open a remote session's browser requests on the client's machine · release vNext+1
 
 ## Wave 7 — Pop-out windows
 
@@ -122,6 +123,7 @@
 - [ ] RT-693 Fix the chat tool card splitter's edge cases and move the shell family into the plugin
 - [ ] RT-696 Draw a disabled pane-header view segment without the hover highlight
 - [ ] RT-698 Share one file watcher per folder across the daemon's file follows
+- [ ] RT-881 Compare ghostty-web with xterm.js for the phone's full terminal
 
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
@@ -396,7 +398,6 @@
   - [ ] RT-647 Fit the sidebar view switcher and pane titles at text size +4 · release vNext+1
   - [ ] RT-648 Stop the prompt-box draft note flashing after a successful chat send · release vNext+1
   - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext+1
-- [ ] RT-652 Give the Settings modal OK, Apply and Cancel instead of Enter-to-apply text rows · release vNext
 - [ ] RT-701 Replace the Fetching toast with the error when a page fetch fails
 - [ ] RT-702 Close a chat's Tail boxes when its load is refused or its host lacks file_tail
 - [ ] RT-712 Polish the Spawn submenu and New session dialog from the v0.7.0-alpha smoke
@@ -436,10 +437,13 @@
 - [ ] RT-855 Send a remote host's VS Code workspace suggestion to that host
 - [ ] RT-856 Match the workspace creator's replies by request id
 - [ ] RT-866 Log the remaining status writers under status_trace
-
-## No project
-
-- [ ] RT-793 Copy an elevated daemon's binaries only from a folder an ordinary process cannot write · release vNext
+- [ ] RT-867 Require an elevated daemon's templates to carry our own Authenticode signer
+- [ ] RT-868 Keep an elevated update from running the staged daemon from a user-writable folder
+- [ ] RT-869 Decide what an elevated daemon trusts from the account's agent and shell config · release vNext+1
+- [ ] RT-870 Pin an elevated client's daemon template when it starts, not at its first copy
+- [ ] RT-871 Let an elevated bridge's logon-task route find a dev daemon build
+- [ ] RT-872 Follow a pending Settings toggle in the agent page's when rules before Apply
+- [ ] RT-880 Split press_settings_control by page under the complexity limit
 
 ## Design files
 
@@ -452,14 +456,14 @@
 - [default-shell.md](default-shell.md) — RT-844, RT-851, RT-852, RT-853
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
-- [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-793
+- [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-867, RT-868, RT-869
 - [finished-toast.md](finished-toast.md) — RT-754, RT-755, RT-757, RT-769, RT-770
 - [gate-dashboard.md](gate-dashboard.md) — RT-64
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
 - [macos-compat.md](macos-compat.md) — RT-665
-- [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-364, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, Wave 4 — Mobile app (iPhone PWA over Tailscale)
+- [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-364, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
