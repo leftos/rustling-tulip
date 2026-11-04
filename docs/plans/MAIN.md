@@ -4,16 +4,16 @@
 
 ## Wave 17 — Themes
 
-- [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette · release vNext+1
-- [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons · release vNext+1
-- [ ] RT-619 Match italic terminal text to the Medium and SemiBold terminal weights · release vNext+1
+- [ ] RT-606 Answer terminal colour queries (OSC 4/10/11/12) from the pane's palette · release vNext
+- [ ] RT-587 Carry the Contrast look into the HTML viewer template, modal inputs, the installer icon and hovered icons · release vNext
+- [ ] RT-619 Match italic terminal text to the Medium and SemiBold terminal weights · release vNext
 - [ ] RT-674 Step the appearance editor from in-flight values and save an app change once
 
 ## Wave 16 — Several hosts in one window
 
-- [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline · release vNext+1
-- [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host · release vNext+1
-- [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts · release vNext+1
+- [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline · release vNext
+- [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host · release vNext
+- [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts · release vNext
 - [ ] RT-839 Give the keyboard back to the dialog under a closed cleanup failure, and scope the launch highlight to its host
 - [ ] RT-841 Refresh an open spawn dialog on a host's Agents and AgentSettings, and its host label
 - [ ] RT-865 Keep remote hosts usable while This PC's connecting overlay is up
@@ -35,10 +35,10 @@
 - [ ] RT-692 Scroll the spawn dialog's Target list to its highlight and keep clicks inside it from closing it
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
-- [ ] RT-844 Choose the default shell in Settings, with installed shells and a custom command · release vNext+1
-  - [ ] RT-851 Default shell: daemon setting, detection and protocol (DS.1) · release vNext+1
-  - [ ] RT-852 Default shell: native Settings row (DS.2) · release vNext+1
-  - [ ] RT-853 Default shell: host agent sessions in WSL, Nushell and fish (DS.3) · release vNext+1
+- [ ] RT-844 Choose the default shell in Settings, with installed shells and a custom command · release vNext
+  - [ ] RT-851 Default shell: daemon setting, detection and protocol (DS.1) · release vNext
+  - [ ] RT-852 Default shell: native Settings row (DS.2) · release vNext
+  - [ ] RT-853 Default shell: host agent sessions in WSL, Nushell and fish (DS.3) · release vNext
 
 ## Wave 2b — Hook status
 
@@ -76,7 +76,7 @@
 - [ ] RT-90 Sounds per attention stream and a taskbar badge
 - [ ] RT-757 Add a Background work counts as busy notification setting
 - [ ] RT-695 Dim the Needs you sound row while Needs you is off and refresh its file note
-- [ ] RT-704 Offer the app's own interactive toasts in place of the OS's, with Go to pane and prompt answers · release vNext+1
+- [ ] RT-704 Offer the app's own interactive toasts in place of the OS's, with Go to pane and prompt answers
   - [ ] RT-781 End a toast's clipped two-line body in an ellipsis
   - [ ] RT-782 Close app toasts on every way a session comes on screen, and drop holds for a closed host
 - [ ] RT-765 Preview a toast sound from the Settings list without choosing it
@@ -87,19 +87,24 @@
 - [ ] RT-58 Underline every terminal link and open it with a plain click
 - [ ] RT-97 Resolve clicked terminal paths on the daemon, using the lines above the click
 - [ ] RT-98 Index each session's transcript file paths and cwds for exact link resolution
-- [ ] RT-686 Update a connected remote host's daemon from the client, with automatic session recovery · release vNext+1
+- [ ] RT-686 Update a connected remote host's daemon from the client, with automatic session recovery
 - [ ] RT-99 Pick between candidates when a clicked path matches several files
 - [ ] RT-100 Open an unchanged fetched file from the local cache
 - [ ] RT-101 Paste an image or drop a file into a remote session
 - [ ] RT-102 Resume a remote connection without replaying scrollback
 - [ ] RT-590 Fail a spawn whose secret Credential Manager refuses, instead of hanging
-- [ ] RT-536 Host SSH remote sessions on Linux and macOS machines · release vNext+1
+- [ ] RT-536 Host SSH remote sessions on Linux and macOS machines
 - [ ] RT-540 Make a one-shot ssh bridge call return after it starts the host's daemon
-- [ ] RT-747 Fetch a folder from a remote host, or a file's whole containing folder · release vNext
-  - [/] RT-885 Stream a folder from the daemon as tar.zst: FetchFolder, StatPath and the pack · release vNext
-  - [ ] RT-886 Fetch a remote folder from a Ctrl+clicked folder path, with progress and Cancel · release vNext
-  - [ ] RT-887 Offer Fetch whole folder on a fetched file and Reveal on a fetched folder · release vNext
-- [ ] RT-879 Open a remote session's browser requests on the client's machine · release vNext+1
+- [ ] RT-879 Open a remote session's browser requests on the client's machine
+- [ ] RT-896 Name the skipped folders in a fetched folder's done toast
+- [ ] RT-897 Polish the folder fetch toast · release vNext
+  - [ ] RT-898 Keep a folder fetch's progress moving after its last chunk · release vNext
+  - [ ] RT-899 Keep a closed folder fetch toast closed · release vNext
+  - [ ] RT-900 Show that Cancel can't stop a finishing folder fetch · release vNext
+  - [ ] RT-901 Say the worktree is gone when a root link stats missing · release vNext
+  - [ ] RT-902 Show a toast while a link's readings are being statted · release vNext
+  - [ ] RT-904 Name an SSH host as the user named it in fetch toasts · release vNext
+- [ ] RT-903 Stop a root folder fetch from deleting other worktrees' fetched copies
 
 ## Wave 7 — Pop-out windows
 
@@ -125,24 +130,24 @@
 ## Wave 9 — Summaries, spoken alerts and the Dashboard
 
 - [ ] RT-721 Show whether LINEAR_API_KEY is found on the Dashboard settings tab
-- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries · release vNext+1
-  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21) · release vNext+1
-  - [ ] RT-501 Draw the repo lanes, the default view (DB.24) · release vNext+1
-  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25) · release vNext+1
-  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11) · release vNext+1
-  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8) · release vNext+1
+- [ ] RT-28 Dashboard: every session's agent and subagent tree, recent work, Linear context and summaries
+  - [ ] RT-499 Nest dispatch runs under their session and track them (DB.21)
+  - [ ] RT-501 Draw the repo lanes, the default view (DB.24)
+  - [ ] RT-502 Switch between By repo and By status, remembered per client (DB.25)
+  - [ ] RT-453 Document the summarizer and the Dashboard (SA.11)
+  - [ ] RT-488 Show gate holds and queue places under the session that runs them (DB.8)
   - [ ] RT-528 Count a session's recent work from where its branch stood at start, not by commit time
   - [ ] RT-529 Polish the Dashboard rows: the cut Agents summary and the first-frame column flicker
-  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks · release vNext+1
-  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row · release vNext+1
-  - [ ] RT-734 Show the Linear column in the Dashboard drawer · release vNext+1
-  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client · release vNext+1
-  - [ ] RT-736 Count issues Done and release progress in the Dashboard header · release vNext+1
-  - [ ] RT-737 Add the accounts card and Questions to the need-you band · release vNext+1
-  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes · release vNext+1
-  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md · release vNext+1
+  - [ ] RT-732 Send gate holds in the Dashboard's activity tracks
+  - [ ] RT-733 Draw a dispatch run's activity track under its Dashboard row
+  - [ ] RT-734 Show the Linear column in the Dashboard drawer
+  - [ ] RT-735 Show each session's Linear issue state and title from the Linear client
+  - [ ] RT-736 Count issues Done and release progress in the Dashboard header
+  - [ ] RT-737 Add the accounts card and Questions to the need-you band
+  - [ ] RT-738 Add Questions, Next up and the No live agent table to the repo lanes
+  - [ ] RT-739 Promote the Dashboard design and delete docs/plans/dashboard.md
   - [ ] RT-789 Draw nested agent rows under an open Dashboard drawer
-- [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5) · release vNext+1
+- [ ] RT-423 Needs You: Answer rows and line 2 from session summaries (NY.5)
 
 ## Wave 10 — Subagent streams
 
@@ -156,8 +161,8 @@
 
 ## Wave 12 — Claude accounts and artifacts by account
 
-- [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap · release vNext+1
-- [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching · release vNext+1
+- [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap · release vNext
+- [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching · release vNext
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-115 Host-approved extra roots for file fetch
@@ -233,7 +238,7 @@
 - [ ] RT-260 Autostart test: stop writing to the live HKCU Run key
 - [ ] RT-262 Run the ui_ellipsis specs: test-release builds without debug assertions
 - [!] RT-294 Route rt.ps1 native-e2e to the builder through the gate
-- [ ] RT-324 Drive the native client headless: hidden window, virtual input, captures · release vNext+1
+- [ ] RT-324 Drive the native client headless: hidden window, virtual input, captures
   - [ ] RT-316 Capture the native client in any state: native-shot views for the overlays and empty area, and a drive-and-capture command
   - [ ] RT-741 Swap in recording pickers, opener and autostart for a driven client
 - [ ] RT-346 Make rt.ps1 test -Validate fast: it ran 652 s through the gate
@@ -263,12 +268,12 @@
 ## macOS
 
 - [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
-- [ ] RT-665 Ship rustling-tulip on macOS: verified build, signed .app and .dmg, auto-update · release vNext+1
-  - [ ] RT-46 Verify macOS support M0–M3 on real Mac hardware · release vNext+1
-  - [ ] RT-47 M4: macOS packaging, signing and notarization · release vNext+1
-  - [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent · release vNext+1
-  - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap · release vNext+1
-  - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README · release vNext+1
+- [ ] RT-665 Ship rustling-tulip on macOS: verified build, signed .app and .dmg, auto-update
+  - [ ] RT-46 Verify macOS support M0–M3 on real Mac hardware
+  - [ ] RT-47 M4: macOS packaging, signing and notarization
+  - [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent
+  - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap
+  - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README
 - [ ] RT-860 Check the listener's owner before killing a retired daemon off Windows
 - [ ] RT-890 Close folder fetch's Unix open races before the macOS build
 
@@ -350,7 +355,7 @@
 - [ ] RT-434 Install the scrollback snapshot sender in attach_lifecycle itself
 - [ ] RT-435 Send the tracer's Exited only after the child's last output
 - [ ] RT-436 Send no Stopped attention for a session discarded before its exit
-- [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user · release vNext+1
+- [ ] RT-437 Detect an agent's request to reconnect an MCP server and run the reconnect for the user
 - [ ] RT-457 Close a running native client before the installer replaces it
 - [ ] RT-458 Pass a direct-spawned Claude session's initial prompt as its positional prompt, not -p
 - [ ] RT-459 Launch a .cmd agent shim whose path holds a space
@@ -386,16 +391,16 @@
 - [ ] RT-615 Keep a weight difference between chosen and unchosen at UI weight SemiBold
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
-- [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext+1
-  - [ ] RT-641 Wrap a tailscale CLI error inside the Connections dialog · release vNext+1
-  - [ ] RT-642 Draw This PC's empty state under its host header · release vNext+1
-  - [ ] RT-643 Stop the On switch clipping a saved host's session count · release vNext+1
-  - [ ] RT-644 Name the selected host in Settings' keep-awake label · release vNext+1
-  - [ ] RT-645 Keep the host header's Connecting… clear of + Repo · release vNext+1
-  - [ ] RT-646 Keep a reconnecting host's Claude pane titles · release vNext+1
-  - [ ] RT-647 Fit the sidebar view switcher and pane titles at text size +4 · release vNext+1
-  - [ ] RT-648 Stop the prompt-box draft note flashing after a successful chat send · release vNext+1
-  - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext+1
+- [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext
+  - [ ] RT-641 Wrap a tailscale CLI error inside the Connections dialog · release vNext
+  - [ ] RT-642 Draw This PC's empty state under its host header · release vNext
+  - [ ] RT-643 Stop the On switch clipping a saved host's session count · release vNext
+  - [ ] RT-644 Name the selected host in Settings' keep-awake label · release vNext
+  - [ ] RT-645 Keep the host header's Connecting… clear of + Repo · release vNext
+  - [ ] RT-646 Keep a reconnecting host's Claude pane titles · release vNext
+  - [ ] RT-647 Fit the sidebar view switcher and pane titles at text size +4 · release vNext
+  - [ ] RT-648 Stop the prompt-box draft note flashing after a successful chat send · release vNext
+  - [ ] RT-649 Keep the pane header tooltip off the Terminal, Chat and Summary labels · release vNext
 - [ ] RT-701 Replace the Fetching toast with the error when a page fetch fails
 - [ ] RT-702 Close a chat's Tail boxes when its load is refused or its host lacks file_tail
 - [ ] RT-712 Polish the Spawn submenu and New session dialog from the v0.7.0-alpha smoke
@@ -437,7 +442,7 @@
 - [ ] RT-866 Log the remaining status writers under status_trace
 - [ ] RT-867 Require an elevated daemon's templates to carry our own Authenticode signer
 - [ ] RT-868 Keep an elevated update from running the staged daemon from a user-writable folder
-- [ ] RT-869 Decide what an elevated daemon trusts from the account's agent and shell config · release vNext+1
+- [ ] RT-869 Decide what an elevated daemon trusts from the account's agent and shell config
 - [ ] RT-870 Pin an elevated client's daemon template when it starts, not at its first copy
 - [ ] RT-871 Let an elevated bridge's logon-task route find a dev daemon build
 - [ ] RT-872 Follow a pending Settings toggle in the agent page's when rules before Apply
