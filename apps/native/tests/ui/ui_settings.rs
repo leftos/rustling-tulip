@@ -18,7 +18,7 @@ use protocol::{
 };
 use rustling_tulip_native::{
     BadgeOverlay, Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, OpenOutcome,
-    PopoutKey, SidebarView, TabBadge, fonts,
+    PopoutKey, SidebarView, TabBadge, chat::ChatMode, fonts,
 };
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
@@ -1012,7 +1012,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     h.keys("space");
     h.keys("enter");
 
-    h.keys("tab");
+    h.keys("tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-general-check-updates")
@@ -1029,7 +1029,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     }
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
-    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab");
+    h.keys(&["shift-tab"; 9].join(" "));
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-terminal-copy-on-selection"),
@@ -1164,6 +1164,220 @@ fn general_tab_ring_includes_the_default_view_choices(cx: &mut TestAppContext) {
     h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["sidebar_view"], "tabs");
     assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
+}
+
+const CHAT_WIDTH: &str = "settings-chat-width-input";
+const CHAT_WIDTH_ERROR: &str = "Enter a whole number of pixels, 0 or more.";
+
+/// Clicks the General tab's `selector` once it is scrolled into view.
+fn click_general(h: &mut Harness<'_>, selector: &str) {
+    h.scroll_into_view("settings-content", selector);
+    h.click_on(selector);
+}
+
+/// Empties the Maximum chat width field and types `text` into it.
+fn type_chat_width(h: &mut Harness<'_>, text: &str) {
+    click_general(h, CHAT_WIDTH);
+    h.keys("ctrl-a backspace");
+    if !text.is_empty() {
+        type_text(h, text);
+    }
+}
+
+fn chat_width_draft(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_width_draft())
+}
+
+fn chat_width_error(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.chat_width_error())
+}
+
+/// The saved `chat_max_width`, if `native-ui.json` was written and holds
+/// one.
+fn saved_chat_width(dir: &TestDir) -> Option<serde_json::Value> {
+    std::fs::read_to_string(dir.path().join("native-ui.json"))
+        .ok()
+        .and_then(|text| {
+            let saved: serde_json::Value =
+                serde_json::from_str(&text).expect("native-ui.json is JSON");
+            saved.get("chat_max_width").cloned()
+        })
+}
+
+#[gpui::test]
+fn the_chat_view_choice_pends_until_apply_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    assert_eq!(apply_gate(&mut h), (false, false), "nothing is pending");
+    click_general(&mut h, "settings-chat-mode-comfortable");
+    assert_eq!(apply_gate(&mut h), (true, true), "the choice pends");
+    assert_eq!(
+        h.root(|root, _| root.chat_mode()),
+        ChatMode::Compact,
+        "chat panes wait for Apply"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["chat_mode"], "comfortable", "saved on Apply");
+    assert_eq!(h.root(|root, _| root.chat_mode()), ChatMode::Comfortable);
+    assert_eq!(apply_gate(&mut h), (false, false), "Apply took it");
+
+    h.click_on("settings-chat-mode-compact");
+    h.click_on("settings-chat-mode-comfortable");
+    assert_eq!(
+        apply_gate(&mut h),
+        (false, false),
+        "pressed back to the saved choice"
+    );
+    h.click_on("settings-chat-mode-compact");
+    h.click_on("settings-ok");
+    assert_eq!(saved_ui(&dir)["chat_mode"], "compact", "OK saves it too");
+    assert_eq!(h.root(|root, _| root.chat_mode()), ChatMode::Compact);
+}
+
+#[gpui::test]
+fn the_chat_width_pends_until_apply_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    assert_eq!(
+        chat_width_draft(&mut h),
+        Some("960".to_owned()),
+        "the field holds the saved width"
+    );
+    assert_eq!(apply_gate(&mut h), (false, false), "nothing is pending");
+    type_chat_width(&mut h, "720");
+    assert_eq!(apply_gate(&mut h), (true, true), "the width pends");
+    assert_eq!(chat_width_error(&mut h), None);
+    assert_ne!(
+        saved_chat_width(&dir),
+        Some(serde_json::json!(720)),
+        "nothing saved before Apply"
+    );
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["chat_max_width"], 720, "saved on Apply");
+    assert_eq!(apply_gate(&mut h), (false, false), "Apply took it");
+
+    type_chat_width(&mut h, "0");
+    assert_eq!(apply_gate(&mut h), (true, true), "0 is a width: no limit");
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["chat_max_width"], 0);
+}
+
+#[gpui::test]
+fn an_invalid_chat_width_shuts_the_apply_gate(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    for text in ["wide", "4294967296", "12.5", ""] {
+        type_chat_width(&mut h, text);
+        assert_eq!(
+            apply_gate(&mut h),
+            (true, false),
+            "{text:?} pends and fails validation"
+        );
+        assert_eq!(
+            chat_width_error(&mut h),
+            Some(CHAT_WIDTH_ERROR.to_owned()),
+            "{text:?}"
+        );
+        assert!(drawn(&mut h, "settings-chat-width-error"), "{text:?}");
+    }
+    h.click_on("settings-apply");
+    assert!(
+        saved_chat_width(&dir).is_none_or(|width| width == 960),
+        "a shut gate saves nothing"
+    );
+
+    type_chat_width(&mut h, "100000");
+    assert_eq!(
+        apply_gate(&mut h),
+        (true, true),
+        "a width above 65535 passes"
+    );
+    assert_eq!(chat_width_error(&mut h), None);
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["chat_max_width"], 100_000);
+}
+
+#[gpui::test]
+fn a_saved_width_above_65535_leaves_apply_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "chat_max_width": 100000 }"#,
+    )
+    .expect("the saved layout is written");
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    assert_eq!(
+        chat_width_draft(&mut h),
+        Some("100000".to_owned()),
+        "the field holds the saved width"
+    );
+    assert_eq!(chat_width_error(&mut h), None, "the saved width is a width");
+    assert_eq!(
+        apply_gate(&mut h),
+        (false, false),
+        "shut only because nothing is pending"
+    );
+    click_general(&mut h, "settings-terminal-copy-on-selection");
+    assert_eq!(apply_gate(&mut h), (true, true), "a toggle edit opens it");
+}
+
+#[gpui::test]
+fn the_general_ring_reaches_the_chat_rows(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    click_general(&mut h, "settings-terminal-copy-on-selection");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-terminal-copy-on-selection")
+    );
+    for stop in [
+        "settings-chat-mode-compact",
+        "settings-chat-mode-comfortable",
+        CHAT_WIDTH,
+        "settings-general-check-updates",
+    ] {
+        h.keys("tab");
+        assert_eq!(settings_focus(&mut h), Some(stop), "Tab walks on to {stop}");
+    }
+    for stop in [CHAT_WIDTH, "settings-chat-mode-comfortable"] {
+        h.keys("shift-tab");
+        assert_eq!(settings_focus(&mut h), Some(stop), "Shift+Tab walks back");
+    }
+}
+
+#[gpui::test]
+fn cancel_discards_a_chat_width_draft(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    for close in ["settings-cancel", "escape"] {
+        h.keys("ctrl-,");
+        type_chat_width(&mut h, "720");
+        assert_eq!(apply_gate(&mut h), (true, true));
+        if close == "escape" {
+            h.keys("escape");
+        } else {
+            h.click_on(close);
+        }
+        assert!(!h.root(|root, _| root.settings_open()), "{close} closes");
+        assert_ne!(
+            saved_chat_width(&dir),
+            Some(serde_json::json!(720)),
+            "{close} saves nothing"
+        );
+        h.keys("ctrl-,");
+        assert_eq!(
+            chat_width_draft(&mut h),
+            Some("960".to_owned()),
+            "{close} put the field back to the saved width"
+        );
+        assert_eq!(apply_gate(&mut h), (false, false), "{close} left nothing");
+        h.keys("escape");
+    }
 }
 
 #[gpui::test]

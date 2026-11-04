@@ -2343,6 +2343,16 @@ impl SidebarModel {
         true
     }
 
+    /// Sets the widest a chat pane's column draws, in logical px, `0` for
+    /// no cap; returns whether that changed it.
+    pub fn set_chat_max_width(&mut self, width: u32) -> bool {
+        if self.ui.chat_max_width == width {
+            return false;
+        }
+        self.ui.chat_max_width = width;
+        true
+    }
+
     /// Remembers `view` as session `session_id`'s last on host `host`;
     /// returns whether that changed what is saved.
     pub fn remember_session_view(&mut self, host: &str, session_id: &str, view: PaneView) -> bool {

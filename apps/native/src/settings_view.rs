@@ -27,6 +27,7 @@ use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::Level;
 use crate::assets::SIDEBAR_CHEVRON_DOWN_ICON;
 use crate::buttons::{field_frame, focus_ring};
+use crate::chat::ChatMode;
 use crate::combobox::list_placement;
 use crate::driver_id::DriverId as _;
 use crate::mouse::CopyOnSelect;
@@ -96,6 +97,10 @@ const AUTOSTART_HINT: &str = "So remote access works before you open this app.";
 const DEFAULT_PORT_TEXT: &str = "8787";
 /// The port field's width.
 const PORT_FIELD_WIDTH: f32 = 96.0;
+/// The Maximum chat width field's hint, placeholder and validation error.
+const CHAT_WIDTH_HINT: &str = "0 for no limit.";
+const CHAT_WIDTH_PLACEHOLDER: &str = "960";
+const CHAT_WIDTH_ERROR: &str = "Enter a whole number of pixels, 0 or more.";
 /// Why an agent page's launch-command rows are disabled on a daemon that
 /// does not store a launch command.
 const LAUNCH_COMMAND_UNSUPPORTED_TIP: &str =
@@ -273,6 +278,9 @@ const SESSIONS_UNDER_REPOS_CHOICES: [SessionsUnderRepos; 3] = [
 /// The General tab's Sort repos choices, in the order they show.
 const REPO_SORT_CHOICES: [RepoSort; 3] = [RepoSort::Manual, RepoSort::Active, RepoSort::NeedsYou];
 
+/// The General tab's Chat view choices, in the order they show.
+const CHAT_MODE_CHOICES: [ChatMode; 2] = [ChatMode::Compact, ChatMode::Comfortable];
+
 /// The App title tab's count choices, in the order they show.
 const COUNT_MODE_CHOICES: [CountMode; 3] = [CountMode::NeedsYou, CountMode::Busy, CountMode::Idle];
 
@@ -375,6 +383,8 @@ pub(crate) enum SettingsControl {
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
     CopyOnSelect,
+    ChatMode(ChatMode),
+    ChatWidth,
     CheckUpdates,
     CheckNow,
     CountMode(CountMode),
@@ -485,6 +495,9 @@ impl SettingsControl {
             Self::RepoSort(RepoSort::Active) => "settings-repo-sort-active",
             Self::RepoSort(RepoSort::NeedsYou) => "settings-repo-sort-needs-you",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
+            Self::ChatMode(ChatMode::Compact) => "settings-chat-mode-compact",
+            Self::ChatMode(ChatMode::Comfortable) => "settings-chat-mode-comfortable",
+            Self::ChatWidth => "settings-chat-width-input",
             Self::CheckUpdates => "settings-general-check-updates",
             Self::CheckNow => "settings-general-check-now",
             Self::CountMode(CountMode::NeedsYou) => "settings-count-needs-you",
@@ -1970,6 +1983,12 @@ impl RootView {
                     valid,
                 });
             }
+            if let Some(valid) = self.chat_width_pending() {
+                pending.push(PendingEdit {
+                    row: PendingRow::ChatWidth,
+                    valid,
+                });
+            }
             let local = self.settings_pending.local.len();
             pending.extend(std::iter::repeat_n(toggle, local));
         }
@@ -2028,6 +2047,7 @@ impl RootView {
         for value in std::mem::take(&mut self.settings_pending.local) {
             self.commit_local(value, window, cx);
         }
+        self.commit_chat_width();
         cx.notify();
         self.settings_pending.log.take()
     }
@@ -2378,6 +2398,7 @@ impl RootView {
             let has_keyboard = match control {
                 SettingsControl::WorktreesPath => self.worktrees_path_focused(window),
                 SettingsControl::RemotePort => self.remote_port_focused(window),
+                SettingsControl::ChatWidth => self.chat_width_focused(window),
                 SettingsControl::AgentProgram => self.launch_program_focused(window),
                 SettingsControl::AgentArgs => self.launch_args_focused(window),
                 SettingsControl::AgentText { field, .. } => {
@@ -2445,6 +2466,11 @@ impl RootView {
             SettingsControl::RemotePort => {
                 self.remote_access_tab.as_ref().map(|tab| tab.focus.clone())
             }
+            SettingsControl::ChatWidth => self
+                .settings_pending
+                .chat_width
+                .as_ref()
+                .map(|field| field.focus.clone()),
             SettingsControl::AgentProgram => {
                 self.shown_agent_tab().map(|tab| tab.program_focus.clone())
             }
@@ -2526,6 +2552,17 @@ impl RootView {
                 .remote_access_tab
                 .as_ref()
                 .is_some_and(|tab| tab.focus.is_focused(window))
+    }
+
+    /// Whether the General tab's Maximum chat width field has the keyboard.
+    fn chat_width_focused(&self, window: &Window) -> bool {
+        self.settings_open()
+            && self.settings_tab == SettingsTab::General
+            && self
+                .settings_pending
+                .chat_width
+                .as_ref()
+                .is_some_and(|field| field.focus.is_focused(window))
     }
 
     /// Whether the shown agent page's Program field has the keyboard.
@@ -2644,6 +2681,7 @@ impl RootView {
             // choice was held above.
             SettingsControl::WorktreesPath
             | SettingsControl::RemotePort
+            | SettingsControl::ChatWidth
             | SettingsControl::AgentProgram
             | SettingsControl::AgentArgs
             | SettingsControl::AgentText { .. }
@@ -2655,6 +2693,7 @@ impl RootView {
             | SettingsControl::SessionsUnderRepos(_)
             | SettingsControl::RepoSort(_)
             | SettingsControl::CopyOnSelect
+            | SettingsControl::ChatMode(_)
             | SettingsControl::CheckUpdates
             | SettingsControl::CountMode(_)
             | SettingsControl::TitleCount
@@ -2701,6 +2740,7 @@ impl RootView {
             SettingsControl::SessionsUnderRepos(mode) => LocalPending::SessionsUnderRepos(mode),
             SettingsControl::RepoSort(sort) => LocalPending::RepoSort(sort),
             SettingsControl::CopyOnSelect => LocalPending::CopyOnSelect(!general.copy_on_select),
+            SettingsControl::ChatMode(mode) => LocalPending::ChatMode(mode),
             SettingsControl::CheckUpdates => LocalPending::CheckUpdates(!general.check_updates),
             SettingsControl::CountMode(mode) => LocalPending::CountMode(mode),
             SettingsControl::TitleCount => LocalPending::TitleCount(!title.show_count),
@@ -3319,6 +3359,7 @@ impl RootView {
             self.notifications.sound_list = None;
             self.settings_tabs_focus.focus(window);
             self.arm_pairing_tick(window, cx);
+            self.hold_chat_width_field(window, cx);
         }
     }
 
@@ -3339,6 +3380,9 @@ impl RootView {
         }
         // A page holding drafts is built once per opening, and per host
         // where it is per host: selecting it again keeps what was typed.
+        if tab == SettingsTab::General {
+            self.hold_chat_width_field(window, cx);
+        }
         if tab == SettingsTab::Worktrees {
             self.hold_worktrees_tab(window, cx);
         }
@@ -3921,6 +3965,7 @@ impl RootView {
     pub(crate) fn settings_typing(&self, window: &Window, cx: &App) -> bool {
         self.worktrees_path_focused(window)
             || self.remote_port_focused(window)
+            || self.chat_width_focused(window)
             || self.launch_program_focused(window)
             || self.launch_args_focused(window)
             || self.agent_texts_focused(window)
@@ -4056,6 +4101,7 @@ impl RootView {
                 self.sidebar.set_check_updates(on);
                 true
             }
+            LocalPending::ChatMode(mode) => self.sidebar.set_chat_mode(mode),
             LocalPending::SpawnTrusted(on) => {
                 self.sidebar.set_spawn_trusted(on);
                 true
@@ -5120,6 +5166,7 @@ impl RootView {
         ))
         .children(status);
         let sidebar = self.sidebar_section(focused, cx);
+        let chat = self.chat_section(focused, cx);
         let copy = toggle(
             SettingsControl::CopyOnSelect,
             ToggleState {
@@ -5146,8 +5193,158 @@ impl RootView {
             power.into_any_element(),
             sidebar,
             terminal.into_any_element(),
+            chat,
             self.updates_section(focused, cx).into_any_element(),
         ]
+    }
+
+    /// The Chat section: how chat panes draw tool calls, the widest their
+    /// column draws, and why the width field's text is no width.
+    fn chat_section(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let mode = self.shown_local().chat_mode;
+        let modes = CHAT_MODE_CHOICES.map(|choice| {
+            let text = match choice {
+                ChatMode::Compact => "Compact",
+                ChatMode::Comfortable => "Comfortable",
+            };
+            (SettingsControl::ChatMode(choice), text, choice == mode)
+        });
+        // The error line, while the text is no width, sits in the hint's
+        // place.
+        let note = match self.chat_width_error() {
+            Some(error) => hint(crate::fonts::ui_text_size(cx), error, &t)
+                .driver_id(|| "settings-chat-width-error".to_owned()),
+            None => hint(crate::fonts::ui_text_size(cx), CHAT_WIDTH_HINT, &t),
+        };
+        section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Chat",
+        )
+        .child(choice_row("Chat view", &modes, RowLock::Live, focused, cx))
+        .children(self.chat_width_row(focused, cx))
+        .child(note)
+        .into_any_element()
+    }
+
+    /// The Maximum chat width field, once Settings built it.
+    fn chat_width_row(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let chat_width = self.settings_pending.chat_width.as_ref()?;
+        let control = SettingsControl::ChatWidth;
+        let frame = field_frame(focused == Some(control), &theme(cx))
+            .driver_id(|| control.selector().to_owned())
+            .w(px(PORT_FIELD_WIDTH))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.press_settings_control(control, window, cx);
+                }),
+            )
+            .child(chat_width.input.clone());
+        Some(
+            field(
+                crate::fonts::ui_text_size(cx),
+                crate::fonts::ui_weight_shift(cx),
+                "Maximum chat width",
+                &theme(cx),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(frame)
+                    .child("px"),
+            ),
+        )
+    }
+
+    /// The General tab's width field, built once per opening of Settings
+    /// with the saved width: held, it keeps its draft until Settings
+    /// closes.
+    fn hold_chat_width_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_pending.chat_width.is_some() {
+            return;
+        }
+        let draft = self.sidebar.chat_max_width().to_string();
+        let input =
+            cx.new(|cx| TextInput::new(draft.clone(), CHAT_WIDTH_PLACEHOLDER.to_owned(), cx));
+        let focus = input.read(cx).focus_handle(cx);
+        let keys = cx.subscribe_in(
+            &input,
+            window,
+            // Enter applies nothing: the width waits for Apply or OK. Esc
+            // is Cancel.
+            |this, _, event: &TextInputEvent, window, cx| {
+                if matches!(event, TextInputEvent::Cancel) {
+                    this.close_appearance_editor(window, cx);
+                }
+            },
+        );
+        let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(field) = &mut this.settings_pending.chat_width {
+                field.draft = text;
+            }
+            cx.notify();
+        });
+        self.settings_pending.chat_width = Some(ChatWidthField {
+            input,
+            focus,
+            draft,
+            _subscriptions: vec![keys, edits],
+        });
+    }
+
+    /// Whether the width field is pending, and whether it holds a width: a
+    /// draft other than the saved width; text that is no width is pending
+    /// and fails.
+    fn chat_width_pending(&self) -> Option<bool> {
+        let draft = &self.settings_pending.chat_width.as_ref()?.draft;
+        match parse_chat_width(draft) {
+            Some(width) => (width != self.sidebar.chat_max_width()).then_some(true),
+            None => Some(false),
+        }
+    }
+
+    /// Apply reaching the width field: its width recorded and saved when it
+    /// changed it.
+    fn commit_chat_width(&mut self) {
+        let Some(width) = self
+            .settings_pending
+            .chat_width
+            .as_ref()
+            .and_then(|field| parse_chat_width(&field.draft))
+        else {
+            return;
+        };
+        if self.sidebar.set_chat_max_width(width) {
+            tracing::info!(width, "settings: applying the maximum chat width");
+            self.save_ui();
+        }
+    }
+
+    /// The Maximum chat width field's text, once Settings built it.
+    #[must_use]
+    pub fn chat_width_draft(&self) -> Option<String> {
+        self.settings_pending
+            .chat_width
+            .as_ref()
+            .map(|field| field.draft.clone())
+    }
+
+    /// Why the Maximum chat width field's text is no width.
+    #[must_use]
+    pub fn chat_width_error(&self) -> Option<String> {
+        let draft = &self.settings_pending.chat_width.as_ref()?.draft;
+        parse_chat_width(draft)
+            .is_none()
+            .then(|| CHAT_WIDTH_ERROR.to_owned())
     }
 
     /// The Updates section: the automatic-check toggle, the client's version
@@ -6274,12 +6471,21 @@ fn general_controls(keep_awake: bool) -> Vec<SettingsControl> {
         .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
         .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
         .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
+        .chain([SettingsControl::CopyOnSelect])
+        .chain(CHAT_MODE_CHOICES.map(SettingsControl::ChatMode))
         .chain([
-            SettingsControl::CopyOnSelect,
+            SettingsControl::ChatWidth,
             SettingsControl::CheckUpdates,
             SettingsControl::CheckNow,
         ])
         .collect()
+}
+
+/// The width `text` sets as the Maximum chat width: any whole number of px
+/// that `native-ui.json` holds, 0 or more; one wider than any pane draws
+/// as no cap.
+fn parse_chat_width(text: &str) -> Option<u32> {
+    text.trim().parse::<u32>().ok()
 }
 
 /// The controls of `view`, field `index` of the page of the agent tagged
@@ -6344,6 +6550,8 @@ enum PendingRow {
     WorktreesRoot,
     /// This PC's remote access port.
     RemotePort,
+    /// The General tab's Maximum chat width.
+    ChatWidth,
     /// The Dashboard tab's variable, cap and key.
     DashboardVariable,
     DashboardCap,
@@ -6360,6 +6568,7 @@ pub(crate) enum LocalPending {
     RepoSort(RepoSort),
     CopyOnSelect(bool),
     CheckUpdates(bool),
+    ChatMode(ChatMode),
     CountMode(CountMode),
     TitleCount(bool),
     TitleSuffix(bool),
@@ -6553,6 +6762,26 @@ pub(crate) struct PendingSettings {
     log: Option<Vec<OwedEcho>>,
     /// The echoes OK waits for before Settings closes.
     ok_wait: Option<Vec<OwedEcho>>,
+    /// The General tab's Maximum chat width field, built when the tab is
+    /// first shown.
+    chat_width: Option<ChatWidthField>,
+}
+
+/// The General tab's Maximum chat width field and its draft.
+pub(crate) struct ChatWidthField {
+    input: Entity<TextInput>,
+    focus: FocusHandle,
+    /// The field's text, kept as it changes.
+    draft: String,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl std::fmt::Debug for ChatWidthField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatWidthField")
+            .field("draft", &self.draft)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PendingSettings {
@@ -6599,6 +6828,7 @@ pub(crate) struct ShownLocal {
     pub(crate) notifications: crate::sidebar::NotificationSettings,
     pub(crate) trusted: bool,
     pub(crate) sidebar_view: SidebarView,
+    pub(crate) chat_mode: ChatMode,
 }
 
 impl ShownLocal {
@@ -6611,6 +6841,7 @@ impl ShownLocal {
             LocalPending::RepoSort(sort) => self.general.repo_sort = sort,
             LocalPending::CopyOnSelect(on) => self.general.copy_on_select = on,
             LocalPending::CheckUpdates(on) => self.general.check_updates = on,
+            LocalPending::ChatMode(mode) => self.chat_mode = mode,
             LocalPending::CountMode(mode) => self.title.count = mode,
             LocalPending::TitleCount(on) => self.title.show_count = on,
             LocalPending::TitleSuffix(on) => self.title.suffix = on,
@@ -6637,6 +6868,7 @@ impl ShownLocal {
             LocalPending::RepoSort(_) => LocalPending::RepoSort(general.repo_sort),
             LocalPending::CopyOnSelect(_) => LocalPending::CopyOnSelect(general.copy_on_select),
             LocalPending::CheckUpdates(_) => LocalPending::CheckUpdates(general.check_updates),
+            LocalPending::ChatMode(_) => LocalPending::ChatMode(self.chat_mode),
             LocalPending::CountMode(_) => LocalPending::CountMode(title.count),
             LocalPending::TitleCount(_) => LocalPending::TitleCount(title.show_count),
             LocalPending::TitleSuffix(_) => LocalPending::TitleSuffix(title.suffix),
@@ -6668,6 +6900,7 @@ impl RootView {
             notifications: ui.notifications.clone(),
             trusted: ui.spawn.trusted,
             sidebar_view: ui.sidebar_view,
+            chat_mode: ui.chat_mode,
         };
         for value in pending {
             shown.take(value);
