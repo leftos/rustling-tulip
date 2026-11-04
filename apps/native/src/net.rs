@@ -267,6 +267,9 @@ pub enum NetEvent {
     /// A [`NetCommand::Shutdown`] arrived with no live socket, so nothing
     /// of it was sent.
     ShutdownFailed,
+    /// The user's Stop did not stop This PC's daemon; the text says why. The
+    /// connection state is unchanged.
+    StopFailed(String),
     /// The tailnet host issued this device a token and it is stored; the
     /// host is being redialled with it.
     Paired,
@@ -1122,8 +1125,11 @@ impl Net {
         resumed
     }
 
-    /// Force-stop the local daemon; true when it was stopped. A tailnet
-    /// host's daemon is never stopped from here.
+    /// Force-stop the local daemon; true in either case, so the caller holds
+    /// the reconnect whatever the outcome. A tailnet host's daemon is never
+    /// stopped from here, and a stop that fails is reported as
+    /// [`NetEvent::StopFailed`] after the connection is marked stopped: the
+    /// user asked for no daemon, so it is not dialled again.
     async fn stop(&mut self) -> bool {
         if !self.conn.target().is_local() {
             warn!(daemon = ?self.conn.target(), "stop: not offered on a tailnet host; ignored");
@@ -1134,6 +1140,7 @@ impl Net {
         self.emit_state();
         if let Err(err) = (self.deps.stop)().await {
             warn!("stopping the daemon: {err:#}");
+            self.emit(NetEvent::StopFailed(format!("{err:#}")));
         }
         true
     }
@@ -1251,9 +1258,9 @@ async fn sleep_until(deadline: Option<Instant>) {
 mod tests {
     use super::{
         EnsureFuture, Net, NetCommand, NetDeps, NetEvent, OpenLocalFuture, OpenSshFuture, Proof,
-        WELCOME_TIMEOUT, not_proven_reason, run_thread, tls_config_trusting,
+        StopFuture, WELCOME_TIMEOUT, not_proven_reason, run_thread, tls_config_trusting,
     };
-    use crate::connection::{Connection, State};
+    use crate::connection::{Connection, DotKind, State};
     use crate::ssh::LineSocket;
     use crate::target::{SshHost, Target};
     use daemon_client::device_tokens::{DeviceTokenStore, MemoryTokens};
@@ -1351,6 +1358,45 @@ mod tests {
                 build_version: String::new(),
             })
         })
+    }
+
+    /// A loopback listener that keeps its port for the whole test and closes
+    /// every connection it accepts at once, so each attempt fails and the
+    /// port is never handed to another test. The count is how many
+    /// connections it accepted.
+    fn refusing_server() -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("listener address").port();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&accepts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        (port, accepts)
+    }
+
+    /// Deps whose `ensure_running` names the local test server on `port`, and
+    /// whose Stop is `stop`; the rest are the plain test deps.
+    fn local_test_deps(port: u16, stop: Box<dyn Fn() -> StopFuture + Send>) -> NetDeps {
+        NetDeps {
+            ensure: Box::new(move || {
+                Box::pin(async move {
+                    Ok(DaemonHandshake {
+                        protocol_version: 23,
+                        port,
+                        auth_token: "test-token".to_owned(),
+                        pid: 0,
+                        supported_versions: vec![23],
+                        build_version: String::new(),
+                    })
+                })
+            }),
+            stop,
+            ..deps(ensure_silent_server)
+        }
     }
 
     /// A loopback WebSocket server that completes `accepts` upgrades and never
@@ -1485,6 +1531,89 @@ mod tests {
         net.join()
             .expect("net thread exits when the command channel closes");
         drop(sockets);
+    }
+
+    #[test]
+    fn a_failed_stop_reports_why_and_still_holds_the_reconnect() {
+        let (port, accepts) = refusing_server();
+        let deps = local_test_deps(
+            port,
+            Box::new(|| {
+                Box::pin(async {
+                    Err(anyhow::anyhow!(
+                        "no daemon handshake on disk; there is no daemon to stop"
+                    ))
+                })
+            }),
+        );
+        let (view_tx, mut view_rx, net) = run_net(deps, Target::Local);
+        assert!(
+            saw_state(&mut view_rx, |conn| matches!(
+                conn.state(),
+                State::Closed { .. }
+            )),
+            "the refused attempt never closed"
+        );
+        let before = accepts.load(Ordering::SeqCst);
+
+        view_tx
+            .unbounded_send(NetCommand::Stop)
+            .expect("net thread is running");
+        // The Stop's two answers, in whichever order the thread emits them:
+        // the reason it failed and the connection marked stopped.
+        let reported = Cell::new(false);
+        let stopped = Cell::new(false);
+        assert!(
+            saw(&mut view_rx, |event| {
+                match event {
+                    NetEvent::StopFailed(text) => {
+                        assert!(
+                            text.contains("no daemon handshake on disk"),
+                            "the failed Stop reported something else: {text}"
+                        );
+                        reported.set(true);
+                    }
+                    NetEvent::State(conn) if matches!(conn.footer(0).dot, DotKind::Stopped) => {
+                        stopped.set(true);
+                    }
+                    _ => {}
+                }
+                reported.get() && stopped.get()
+            }),
+            "the failed Stop did not both say why and mark the connection stopped"
+        );
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            before,
+            "a failed Stop let the client dial the daemon again"
+        );
+        stop_net(view_tx, net);
+    }
+
+    #[test]
+    fn a_successful_stop_marks_the_connection_stopped() {
+        let (port, _accepts) = refusing_server();
+        let deps = local_test_deps(port, Box::new(|| Box::pin(async { Ok(()) })));
+        let (view_tx, mut view_rx, net) = run_net(deps, Target::Local);
+        assert!(
+            saw_state(&mut view_rx, |conn| matches!(
+                conn.state(),
+                State::Closed { .. }
+            )),
+            "the refused attempt never closed"
+        );
+
+        view_tx
+            .unbounded_send(NetCommand::Stop)
+            .expect("net thread is running");
+        assert!(
+            saw_state(&mut view_rx, |conn| matches!(
+                conn.footer(0).dot,
+                DotKind::Stopped
+            )),
+            "a successful Stop did not mark the connection stopped"
+        );
+        stop_net(view_tx, net);
     }
 
     /// A request head read from `stream` up to its blank line or EOF.

@@ -4014,7 +4014,6 @@ impl RootView {
         }
         if self.stop.click() {
             self.command_to(&HostKey::Local, NetCommand::Stop);
-            self.clear_handshake(&HostKey::Local);
             self.close_flyout();
         }
     }
@@ -4051,6 +4050,7 @@ impl RootView {
             | NetEvent::DaemonId(_)
             | NetEvent::ShutdownSent
             | NetEvent::ShutdownFailed
+            | NetEvent::StopFailed(_)
             | NetEvent::Paired
             | NetEvent::PairingLost
             | NetEvent::TokenSaveFailed
@@ -4075,6 +4075,12 @@ impl RootView {
             }
             NetEvent::ShutdownSent => self.on_shutdown_sent(),
             NetEvent::ShutdownFailed => self.on_shutdown_failed(window, cx),
+            NetEvent::StopFailed(reason) => self.push_toast(
+                ToastKind::Error,
+                "Could not stop the daemon",
+                Some(reason),
+                cx,
+            ),
             NetEvent::Paired
             | NetEvent::PairingLost
             | NetEvent::TokenSaveFailed
@@ -4144,6 +4150,12 @@ impl RootView {
         // The handshake, the fetches streaming over the connection and the
         // remote access status are the old target's daemon's.
         if moved {
+            self.clear_handshake(host);
+        }
+        // A Stop that went through clears This PC's handshake with the daemon
+        // it stopped; one still being awaited, or one that failed on a live
+        // socket, keeps the port, pid and token path the flyout shows.
+        if *host == HostKey::Local && matches!(conn.footer(0).dot, DotKind::Stopped) {
             self.clear_handshake(host);
         }
         if moved && conn.is_open() {

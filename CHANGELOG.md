@@ -14,6 +14,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 - The new-session dialog keeps its fields, agents and worktree preview right when its target moves between hosts.
 - A PC whose app data was copied from another machine no longer shows up as "Same daemon as" that machine.
+- When Stop can't stop the background service, the app now says why instead of acting as if it stopped.
 - The new-session dialog greys out a host the moment it goes offline and says "{host} is offline" for it, without losing what you typed.
 - A remote host no longer flashes "No repos or workspaces yet" in the sidebar while it is still connecting.
 - A remote repo's menu now says Explorer and VS Code aren't available for a remote host, instead of saying it has no folder.

@@ -22,7 +22,7 @@ use protocol::{
     BranchCleanup, BranchFate, CleanupAction, ClientMessage, DaemonHandshake, DaemonMessage,
     MemberBranchFate, SessionSnapshot,
 };
-use rustling_tulip_native::{Connection, NetCommand, NetDeps, NetEvent};
+use rustling_tulip_native::{Connection, NetCommand, NetDeps, NetEvent, Toast, ToastKind};
 use serde_json::Value;
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 use tokio_tungstenite::tungstenite::{self, Message};
@@ -136,6 +136,59 @@ fn loaded<'a>(
     let mut h = Harness::with(cx, dir, &fixture);
     h.sent();
     h
+}
+
+/// The toasts showing.
+fn toasts(h: &mut Harness<'_>) -> Vec<Toast> {
+    h.root(|root, _| root.toasts().to_vec())
+}
+
+/// This PC's connection stopped with no daemon: what a Stop reports once its
+/// socket is gone.
+fn stopped_conn() -> Connection {
+    let mut conn = closed_conn();
+    conn.stop();
+    conn
+}
+
+#[gpui::test]
+fn a_failed_stop_keeps_the_handshake_until_a_stopped_state_clears_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir, vec![session("s1").in_repo("r1").build()]);
+    let open_pill = "daemon-pill=daemon · 1 session · :4242";
+
+    // The user's path to a Stop: the flyout's two-click button.
+    h.click_on(open_pill);
+    h.click_on("stop-daemon");
+    h.click_on("stop-daemon");
+    assert_eq!(commands(&mut h), ["stop"], "the confirmed Stop sent no ask");
+
+    let reason = "no daemon handshake on disk; there is no daemon to stop";
+    h.event(NetEvent::StopFailed(reason.to_owned()));
+    let shown = toasts(&mut h);
+    assert_eq!(shown.len(), 1, "one toast reports the failed Stop");
+    let toast = &shown[0];
+    assert_eq!(toast.kind, ToastKind::Error, "the failed Stop is no error");
+    assert_eq!(toast.title, "Could not stop the daemon");
+    assert_eq!(toast.detail.as_deref(), Some(reason));
+
+    // The daemon is still the one the flyout knows: its handshake stays.
+    h.click_on(open_pill);
+    assert!(
+        h.bounds("flyout-details=State|Port|PID|Protocol|Sessions")
+            .origin
+            .x
+            >= px(0.0),
+        "the failed Stop forgot the daemon's handshake"
+    );
+
+    // The Stop that lands reports the stopped connection, which the flyout
+    // keeps showing; its daemon's handshake goes with it.
+    h.event(NetEvent::State(stopped_conn()));
+    assert!(
+        h.bounds("flyout-details=State|Reason").origin.x >= px(0.0),
+        "a stopped connection kept its daemon's handshake"
+    );
 }
 
 /// One idle session in `r1`, with the exit dialog open.
