@@ -660,6 +660,95 @@ fn keep_awake_follows_the_chosen_host(cx: &mut TestAppContext) {
     );
 }
 
+/// One of a host's default-shell choices, every one installed and hosting
+/// agents.
+fn shell(id: &str, label: &str) -> protocol::ShellChoice {
+    protocol::ShellChoice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        available: true,
+        path: None,
+        hosts_agents: true,
+    }
+}
+
+/// How many times the client asked for the shell choices among `sent`.
+fn shell_lists(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::ListShellChoices))
+        .count()
+}
+
+fn shell_text(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.default_shell_text())
+}
+
+#[gpui::test]
+fn default_shell_row_follows_selected_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("a1").build()));
+    let mut features = daemon_features();
+    features.push(protocol::FEATURE_DEFAULT_SHELL.to_owned());
+    let mut conn = Connection::for_target(Target::Local);
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(PROTOCOL, features);
+    h.event(NetEvent::State(conn));
+    h.send(DaemonMessage::DefaultShell {
+        id: "pwsh".to_owned(),
+        command: None,
+    });
+    let mut host = h.host(&remote());
+    host.connect_with_features(&[protocol::FEATURE_DEFAULT_SHELL]);
+    host.send(DaemonMessage::DefaultShell {
+        id: "bash".to_owned(),
+        command: None,
+    });
+    host.sent();
+    h.sent();
+
+    h.keys("ctrl-,");
+    assert_eq!(shell_lists(&h.sent()), 1, "This PC is asked");
+    assert_eq!(shell_lists(&h.host(&remote()).sent()), 0, "box is not");
+    h.send(DaemonMessage::ShellChoices {
+        choices: vec![shell("auto", "Automatic"), shell("pwsh", "PowerShell 7")],
+    });
+    assert_eq!(shell_text(&mut h).as_deref(), Some("PowerShell 7"));
+
+    h.click_on(&remote_row());
+    assert_eq!(shown_host(&mut h), remote_key());
+    assert_eq!(shell_lists(&h.host(&remote()).sent()), 1, "box is asked");
+    assert_eq!(shell_lists(&h.sent()), 0, "This PC is not asked again");
+    assert_eq!(
+        shell_text(&mut h).as_deref(),
+        Some("Loading shells…"),
+        "box's choices have not arrived"
+    );
+    h.host(&remote()).send(DaemonMessage::ShellChoices {
+        choices: vec![shell("auto", "Automatic"), shell("bash", "Bash")],
+    });
+    assert_eq!(
+        shell_text(&mut h).as_deref(),
+        Some("Bash"),
+        "box's own choice"
+    );
+    let ids: Vec<String> = h.root(|root, _| {
+        root.default_shell_entries()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect()
+    });
+    assert_eq!(ids, ["auto", "bash"], "box's own choices");
+
+    h.click_on(LOCAL_ROW);
+    assert_eq!(shell_lists(&h.sent()), 1, "This PC is asked again");
+    assert_eq!(
+        shell_text(&mut h).as_deref(),
+        Some("PowerShell 7"),
+        "This PC's choice is untouched"
+    );
+}
+
 #[gpui::test]
 fn one_host_held_draws_no_selector(cx: &mut TestAppContext) {
     let dir = TestDir::new();

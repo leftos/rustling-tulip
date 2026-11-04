@@ -120,6 +120,7 @@ mod session_actions;
 mod session_menu;
 mod settings_search;
 mod settings_view;
+pub mod shell_choice;
 mod shell_dialog;
 mod shell_lines;
 mod shell_marks;
@@ -4337,6 +4338,7 @@ impl RootView {
         // counts as not focused.
         self.notify_on(host, &msg, finished, window.is_window_active(), cx);
         self.on_summarizer_message(host, &msg, cx);
+        self.on_shell_message(host, &msg, window, cx);
         if self.on_panel_message(host, &msg, window, cx) {
             return;
         }
@@ -4575,7 +4577,8 @@ impl RootView {
     /// and a refused worktrees root (by its `code`) ends that tab's save,
     /// whose message still toasts. A routed refusal (`Some`) answers its own
     /// request: a launch-command refusal of an apply, by its `code`, shows
-    /// under its row with no toast; a preset list's failure shows in the
+    /// under its row with no toast, as does a refused default shell; a
+    /// preset list's failure shows in the
     /// container menu's preset row with no toast; refused Settings values
     /// end their apply and toast; any other takes the generic path. A
     /// refused Settings save is ended on the host that replied, never on
@@ -4599,7 +4602,8 @@ impl RootView {
             None => self.on_creator_error(host, &message, cx),
             Some(id) => {
                 self.on_agent_setting_refused(host, id, &message, cx);
-                self.on_summarizer_refused(host, id, &message, cx)
+                self.on_default_shell_refused(host, id, &message, cx)
+                    || self.on_summarizer_refused(host, id, &message, cx)
                     || self.on_agent_command_error(host, id, code, &message, cx)
                     || self.on_preset_list_failed(id, &message, cx)
             }

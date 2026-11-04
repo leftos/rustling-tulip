@@ -360,6 +360,26 @@ fn general_entries() -> Vec<Entry> {
             Gate::Always,
         ),
         Entry {
+            aliases: &["shell"],
+            ..entry(
+                SettingsTab::General,
+                "settings-default-shell-field",
+                "Default shell",
+                "Terminal behavior",
+                Gate::Always,
+            )
+        },
+        Entry {
+            aliases: &["shell", "command"],
+            ..entry(
+                SettingsTab::General,
+                "settings-default-shell-command",
+                "Custom shell command",
+                "Terminal behavior",
+                Gate::Always,
+            )
+        },
+        Entry {
             aliases: &["tool calls", "compact", "comfortable"],
             ..entry(
                 SettingsTab::General,

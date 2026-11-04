@@ -4,6 +4,10 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+### Added
+
+- Settings › General picks each host's default shell for new sessions, from its installed shells or a custom command.
+
 ### Fixed
 
 - A toast with a long title now wraps inside its card, so its close button stays reachable.

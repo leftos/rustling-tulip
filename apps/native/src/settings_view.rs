@@ -18,9 +18,9 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
-    FEATURE_AGENT_COMMANDS, FEATURE_DETAILED_LOGGING, FieldKind, KeepAwakeMode, KeyState,
-    OptionValue, RemoteState, Secret, SummarizerKeySource, SummarizerSettings, SummarySource,
-    error_codes,
+    FEATURE_AGENT_COMMANDS, FEATURE_DEFAULT_SHELL, FEATURE_DETAILED_LOGGING, FieldKind,
+    KeepAwakeMode, KeyState, OptionValue, RemoteState, Secret, SummarizerKeySource,
+    SummarizerSettings, SummarySource, error_codes,
 };
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
@@ -44,6 +44,7 @@ use crate::scrollbar::{Scrollbar, Thumb};
 use crate::section::section;
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
 use crate::settings_search::{self, DrawnTab, TabHits, Visibility};
+use crate::shell_choice::{self, HostShell, RowState, ShellEntry, ShellSetting};
 use crate::sidebar::{
     CountMode, FINISHED_GRACE_CHOICES, LeafDensity, NotifySkip, RepoSort, SessionsUnderRepos,
     SidebarView, ToastSound, ToastStyle,
@@ -113,6 +114,9 @@ const CHAT_WIDTH_ERROR: &str = "Enter a whole number of pixels, 0 or more.";
 /// does not store a launch command.
 const LAUNCH_COMMAND_UNSUPPORTED_TIP: &str =
     "Restart the daemon to set the launch command: .\\rt.ps1 restart";
+/// What the disabled Default shell dropdown shows on a daemon that stores
+/// no default shell: what such a daemon runs.
+const UNSUPPORTED_SHELL_TEXT: &str = "Automatic";
 /// The tab list's group row over the agents' pages.
 const AGENTS_GROUP: &str = "Agents";
 const LAUNCH_ARGS_PLACEHOLDER: &str = "Extra arguments";
@@ -498,6 +502,45 @@ struct SoundRowLook {
     highlighted: bool,
 }
 
+/// The Default shell row's open list.
+pub(crate) struct ShellList {
+    /// The place among the host's choices Up, Down and the pointer have
+    /// reached.
+    highlight: usize,
+    scroll: ScrollHandle,
+    /// Where the field and the window were last laid out, which places the
+    /// list; `None` until the first frame.
+    measured: Option<SoundListRoom>,
+}
+
+impl std::fmt::Debug for ShellList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellList")
+            .field("highlight", &self.highlight)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The Default shell row's Custom command field, for the host it was built
+/// for, and its draft.
+pub(crate) struct ShellCommandField {
+    host: HostKey,
+    input: Entity<TextInput>,
+    focus: FocusHandle,
+    /// The field's text, kept as it changes.
+    draft: String,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl std::fmt::Debug for ShellCommandField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellCommandField")
+            .field("host", &self.host)
+            .field("draft", &self.draft)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A control of a Settings tab that Tab can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsControl {
@@ -507,6 +550,10 @@ pub(crate) enum SettingsControl {
     SessionsUnderRepos(SessionsUnderRepos),
     RepoSort(RepoSort),
     CopyOnSelect,
+    /// The Default shell row's dropdown, on the shown host.
+    DefaultShell,
+    /// The Default shell row's Custom command field, while Custom is chosen.
+    DefaultShellCommand,
     ChatMode(ChatMode),
     ChatWidth,
     CheckUpdates,
@@ -625,6 +672,8 @@ impl SettingsControl {
             Self::RepoSort(RepoSort::Active) => "settings-repo-sort-active",
             Self::RepoSort(RepoSort::NeedsYou) => "settings-repo-sort-needs-you",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
+            Self::DefaultShell => "settings-default-shell-field",
+            Self::DefaultShellCommand => "settings-default-shell-command",
             Self::ChatMode(ChatMode::Compact) => "settings-chat-mode-compact",
             Self::ChatMode(ChatMode::Comfortable) => "settings-chat-mode-comfortable",
             Self::ChatWidth => "settings-chat-width-input",
@@ -1310,7 +1359,11 @@ impl RootView {
         self.keep_offered_tab();
         self.settings_control = None;
         self.notifications.sound_list = None;
+        self.settings_pending.shell_list = None;
         if self.settings_open() {
+            if self.settings_tab == SettingsTab::General {
+                self.show_shell_row(window, cx);
+            }
             if let Some(agent) = self.settings_tab.agent() {
                 self.hold_agent_tab(agent, window, cx);
             }
@@ -1813,6 +1866,7 @@ impl RootView {
             self.settings_tab = kept;
             self.settings_control = None;
             self.notifications.sound_list = None;
+            self.settings_pending.shell_list = None;
         }
     }
 
@@ -1983,10 +2037,20 @@ impl RootView {
     /// asks for one.
     fn tab_controls_of(&self, tab: SettingsTab, cx: &App) -> Vec<SettingsControl> {
         match tab {
-            SettingsTab::General => general_controls(
-                self.settings_mirrors().keep_awake.is_some(),
-                self.settings_host == HostKey::Local,
-            ),
+            SettingsTab::General => {
+                let mut controls = general_controls(
+                    self.settings_mirrors().keep_awake.is_some(),
+                    self.settings_host == HostKey::Local,
+                );
+                let live = self.shell_row_state() == RowState::Live;
+                let command = self.shell_command_drawn();
+                controls.retain(|control| match control {
+                    SettingsControl::DefaultShell => live,
+                    SettingsControl::DefaultShellCommand => command,
+                    _ => true,
+                });
+                controls
+            }
             SettingsTab::AppTitle => COUNT_MODE_CHOICES
                 .map(SettingsControl::CountMode)
                 .into_iter()
@@ -2036,7 +2100,13 @@ impl RootView {
     /// covers.
     fn tab_stop_order_of(&self, tab: SettingsTab, cx: &App) -> Vec<SettingsControl> {
         match tab {
-            SettingsTab::General => general_controls(true, true),
+            SettingsTab::General => {
+                let mut controls = general_controls(true, true);
+                if !self.shell_command_drawn() {
+                    controls.retain(|control| *control != SettingsControl::DefaultShellCommand);
+                }
+                controls
+            }
             SettingsTab::Dashboard => self.dashboard_controls(true),
             SettingsTab::AppTitle | SettingsTab::Notifications | SettingsTab::SpawnDefaults => {
                 self.tab_controls_of(tab, cx)
@@ -2490,6 +2560,7 @@ impl RootView {
                     HostPending::KeepAwake(_)
                         | HostPending::AgentField { .. }
                         | HostPending::RemoteEnabled(_)
+                        | HostPending::DefaultShell(_)
                 )
             })
             .count();
@@ -2613,6 +2684,7 @@ impl RootView {
                     value,
                 } => self.set_agent_setting(host, &agent, &field, value, false),
                 HostPending::RemoteEnabled(on) => remote = Some(on),
+                HostPending::DefaultShell(setting) => self.apply_default_shell(host, setting),
                 other => dashboard.push(other),
             }
         }
@@ -2923,6 +2995,7 @@ impl RootView {
                 SettingsControl::WorktreesPath => self.worktrees_path_focused(window),
                 SettingsControl::RemotePort => self.remote_port_focused(window),
                 SettingsControl::ChatWidth => self.chat_width_focused(window),
+                SettingsControl::DefaultShellCommand => self.shell_command_focused(window),
                 SettingsControl::AgentProgram => self.launch_program_focused(window),
                 SettingsControl::AgentArgs => self.launch_args_focused(window),
                 SettingsControl::AgentText { field, .. } => {
@@ -2994,6 +3067,12 @@ impl RootView {
                 .settings_pending
                 .chat_width
                 .as_ref()
+                .map(|field| field.focus.clone()),
+            SettingsControl::DefaultShellCommand => self
+                .settings_pending
+                .shell_command
+                .as_ref()
+                .filter(|field| field.host == self.settings_host)
                 .map(|field| field.focus.clone()),
             SettingsControl::AgentProgram => {
                 self.shown_agent_tab().map(|tab| tab.program_focus.clone())
@@ -3201,6 +3280,7 @@ impl RootView {
                 self.toggle_sound_list(NotifyKind::Finished, cx);
             }
             SettingsControl::FinishedSoundPlay => self.play_finished_sound(cx),
+            SettingsControl::DefaultShell => self.toggle_shell_list(cx),
             SettingsControl::AgentChoice {
                 field,
                 choice,
@@ -3214,6 +3294,7 @@ impl RootView {
             SettingsControl::WorktreesPath
             | SettingsControl::RemotePort
             | SettingsControl::ChatWidth
+            | SettingsControl::DefaultShellCommand
             | SettingsControl::AgentProgram
             | SettingsControl::AgentArgs
             | SettingsControl::AgentText { .. }
@@ -3926,6 +4007,7 @@ impl RootView {
             self.settings_tabs_focus.focus(window);
             self.arm_pairing_tick(window, cx);
             self.hold_chat_width_field(window, cx);
+            self.show_shell_row(window, cx);
             self.settings_search = Some(Self::new_settings_search(window, cx));
         }
     }
@@ -3951,8 +4033,10 @@ impl RootView {
         }
         // A page holding drafts is built once per opening, and per host
         // where it is per host: selecting it again keeps what was typed.
+        self.settings_pending.shell_list = None;
         if tab == SettingsTab::General {
             self.hold_chat_width_field(window, cx);
+            self.show_shell_row(window, cx);
         }
         if tab == SettingsTab::Worktrees {
             self.hold_worktrees_tab(window, cx);
@@ -4493,8 +4577,9 @@ impl RootView {
         let ctrl_only =
             mods.control && !mods.alt && !mods.shift && !mods.platform && !mods.function;
         if self.settings_open() && ctrl_only && keystroke.key == "f" {
-            // An open sound list closes first, as Tab closes it.
+            // An open sound or shell list closes first, as Tab closes it.
             self.notifications.sound_list = None;
+            self.settings_pending.shell_list = None;
             self.focus_settings_search(true, window, cx);
             return true;
         }
@@ -4504,7 +4589,9 @@ impl RootView {
         if held && self.sound_ignores_held_key(&keystroke.key, window, cx) {
             return true;
         }
-        if self.on_sound_list_key(&keystroke.key, window, cx) {
+        if self.on_sound_list_key(&keystroke.key, window, cx)
+            || self.on_shell_list_key(&keystroke.key, window, cx)
+        {
             return true;
         }
         let on_list = self.settings_tabs_focus.is_focused(window);
@@ -4548,11 +4635,22 @@ impl RootView {
             || self.worktrees_path_focused(window)
             || self.remote_port_focused(window)
             || self.chat_width_focused(window)
+            || self.shell_command_focused(window)
             || self.launch_program_focused(window)
             || self.launch_args_focused(window)
             || self.agent_texts_focused(window)
             || self.dashboard_fields_focused(window)
             || self.appearance_field_focused(window, cx)
+    }
+
+    /// Whether the Default shell row's Custom command field has the
+    /// keyboard.
+    fn shell_command_focused(&self, window: &Window) -> bool {
+        self.settings_open()
+            && self.settings_tab == SettingsTab::General
+            && self
+                .shell_command_field()
+                .is_some_and(|field| field.focus.is_focused(window))
     }
 
     /// Whether one of the shown Dashboard tab's text fields has the
@@ -5776,6 +5874,661 @@ impl RootView {
         .child(dropdown)
     }
 
+    /// The shown host's Default shell state, while the window holds its
+    /// connection.
+    fn shown_shell(&self) -> Option<&HostShell> {
+        self.mirrors_of(&self.settings_host)
+            .map(|mirrors| &mirrors.shell)
+    }
+
+    /// `host`'s Default shell pick waiting for Apply, if one is held.
+    fn pending_shell(&self, host: &HostKey) -> Option<&ShellSetting> {
+        self.settings_pending
+            .host(host)
+            .iter()
+            .find_map(|value| match value {
+                HostPending::DefaultShell(setting) => Some(setting),
+                _ => None,
+            })
+    }
+
+    /// The default shell the shown host's row shows: its pending pick,
+    /// else Custom picked with a blank command, else the one being
+    /// applied, else the saved one.
+    fn shown_shell_setting(&self) -> Option<ShellSetting> {
+        let host = &self.settings_host;
+        let pending = self.pending_shell(host);
+        if pending.is_none() && self.settings_pending.shell_custom_picked.contains(host) {
+            return Some(ShellSetting::new(shell_choice::CUSTOM, None));
+        }
+        self.shown_shell()?.shown(pending).cloned()
+    }
+
+    /// Whether `host`'s connection is open on a daemon that stores a
+    /// default shell.
+    fn shell_supported(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.is_open() && conn.supports(FEATURE_DEFAULT_SHELL))
+    }
+
+    /// Whether the shown host's row takes input, and why not.
+    fn shell_row_state(&self) -> RowState {
+        let conn = self.conn_of(&self.settings_host);
+        shell_choice::row_state(
+            conn.is_some_and(crate::Connection::is_open),
+            conn.is_some_and(|conn| conn.supports(FEATURE_DEFAULT_SHELL)),
+            self.shown_shell()
+                .is_some_and(|shell| shell.choices.is_some()),
+        )
+    }
+
+    /// The shown host's row's chosen id, Automatic when nothing is saved.
+    fn shown_shell_id(&self) -> Option<String> {
+        self.shown_shell_setting().map(|setting| setting.id)
+    }
+
+    /// Whether the shown host's row shows Custom.
+    fn shell_custom_shown(&self) -> bool {
+        self.shown_shell_setting()
+            .is_some_and(|setting| setting.id == shell_choice::CUSTOM)
+    }
+
+    /// The Custom command field, when it was built for the shown host.
+    fn shell_command_field(&self) -> Option<&ShellCommandField> {
+        self.settings_pending
+            .shell_command
+            .as_ref()
+            .filter(|field| field.host == self.settings_host)
+    }
+
+    /// Whether the Custom command field is drawn: the row takes input and
+    /// shows Custom.
+    fn shell_command_drawn(&self) -> bool {
+        self.shell_row_state() == RowState::Live
+            && self.shell_custom_shown()
+            && self.shell_command_field().is_some()
+    }
+
+    /// The closed dropdown's text on the shown host.
+    fn shell_row_text(&self) -> String {
+        match self.shell_row_state() {
+            RowState::Live => shell_choice::chosen_label(
+                self.shown_shell()
+                    .and_then(|shell| shell.choices.as_deref()),
+                self.shown_shell_id().as_deref(),
+            ),
+            RowState::Loading => shell_choice::LOADING.to_owned(),
+            RowState::Unsupported => UNSUPPORTED_SHELL_TEXT.to_owned(),
+        }
+    }
+
+    /// The open list's entries on the shown host.
+    fn shell_entries(&self) -> Vec<ShellEntry> {
+        let Some(choices) = self
+            .shown_shell()
+            .and_then(|shell| shell.choices.as_deref())
+        else {
+            return Vec::new();
+        };
+        let host = crate::sidebar::host_label(&self.settings_host);
+        shell_choice::entries(choices, self.shown_shell_id().as_deref(), &host)
+    }
+
+    /// The note under the shown host's row.
+    fn shell_note(&self) -> Option<String> {
+        shell_choice::agents_note(
+            self.shown_shell()
+                .and_then(|shell| shell.choices.as_deref()),
+            self.shown_shell_id().as_deref(),
+        )
+    }
+
+    /// The Default shell dropdown's text while Settings is open.
+    #[must_use]
+    pub fn default_shell_text(&self) -> Option<String> {
+        self.settings_open().then(|| self.shell_row_text())
+    }
+
+    /// Whether the Default shell dropdown opens.
+    #[must_use]
+    pub fn default_shell_live(&self) -> bool {
+        self.settings_open() && self.shell_row_state() == RowState::Live
+    }
+
+    /// The Default shell list's entries on the shown host, in the daemon's
+    /// order; empty before its choices arrive.
+    #[must_use]
+    pub fn default_shell_entries(&self) -> Vec<ShellEntry> {
+        self.shell_entries()
+    }
+
+    /// The note under the Default shell row, while shown.
+    #[must_use]
+    pub fn default_shell_note(&self) -> Option<String> {
+        self.settings_open().then(|| self.shell_note()).flatten()
+    }
+
+    /// Why the Default shell row is disabled, while Settings is open on an
+    /// older daemon.
+    #[must_use]
+    pub fn default_shell_tip(&self) -> Option<&'static str> {
+        (self.settings_open() && self.shell_row_state() == RowState::Unsupported)
+            .then_some(shell_choice::UNSUPPORTED_TIP)
+    }
+
+    /// The Custom command field's text, while it is drawn.
+    #[must_use]
+    pub fn default_shell_command(&self) -> Option<String> {
+        if !self.shell_command_drawn() {
+            return None;
+        }
+        self.shell_command_field().map(|field| field.draft.clone())
+    }
+
+    /// The daemon's refusal of the shown host's last Default shell apply.
+    #[must_use]
+    pub fn default_shell_refusal(&self) -> Option<String> {
+        self.settings_pending
+            .shell_refusals
+            .get(&self.settings_host)
+            .cloned()
+    }
+
+    /// Whether the Default shell list is open.
+    #[must_use]
+    pub fn shell_list_open(&self) -> bool {
+        self.settings_pending.shell_list.is_some()
+    }
+
+    /// The General tab shows the shown host's row: its choices are asked
+    /// for, and Custom's command field is built when Custom shows.
+    fn show_shell_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.settings_host.clone();
+        self.ask_shell_choices(&host);
+        if self.shell_custom_shown() {
+            self.hold_shell_command_field(window, cx);
+        }
+    }
+
+    /// Asks `host` for its shell choices while Settings shows its General
+    /// tab and its daemon stores a default shell; nothing otherwise.
+    fn ask_shell_choices(&self, host: &HostKey) {
+        if self.shell_supported(host)
+            && self.settings_open()
+            && self.settings_tab == SettingsTab::General
+            && *host == self.settings_host
+        {
+            tracing::info!(?host, "settings: asking for the host's shell choices");
+            self.send_to(host, ClientMessage::ListShellChoices);
+        }
+    }
+
+    /// The Custom command field's text for `host`: its field's draft, else
+    /// the Custom command shown, else nothing.
+    fn shell_command_draft(&self, host: &HostKey) -> String {
+        if let Some(field) = self
+            .settings_pending
+            .shell_command
+            .as_ref()
+            .filter(|field| field.host == *host)
+        {
+            return field.draft.clone();
+        }
+        self.mirrors_of(host)
+            .and_then(|mirrors| mirrors.shell.shown(self.pending_shell(host)))
+            .filter(|setting| setting.id == shell_choice::CUSTOM)
+            .and_then(|setting| setting.command.clone())
+            .unwrap_or_default()
+    }
+
+    /// Builds the Custom command field for the shown host, unless it is
+    /// built; Enter applies nothing and Esc is Cancel.
+    fn hold_shell_command_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shell_command_field().is_some() {
+            return;
+        }
+        let host = self.settings_host.clone();
+        let draft = self.shell_command_draft(&host);
+        let input =
+            cx.new(|cx| TextInput::new(draft.clone(), shell_choice::CUSTOM_PLACEHOLDER, cx));
+        let focus = input.read(cx).focus_handle(cx);
+        let keys = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &TextInputEvent, window, cx| {
+                if matches!(event, TextInputEvent::Cancel) {
+                    this.close_appearance_editor(window, cx);
+                }
+            },
+        );
+        let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
+            let text = input.read(cx).text().to_owned();
+            this.edit_shell_command(text, cx);
+        });
+        self.settings_pending.shell_command = Some(ShellCommandField {
+            host,
+            input,
+            focus,
+            draft,
+            _subscriptions: vec![keys, edits],
+        });
+    }
+
+    /// The Custom command field's text changed: Custom with it is the
+    /// host's pending pick.
+    fn edit_shell_command(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(field) = self.settings_pending.shell_command.as_mut() else {
+            return;
+        };
+        // The field set to the saved command echoes nothing of the user's.
+        if field.draft == text {
+            return;
+        }
+        let pick = shell_choice::pick(shell_choice::CUSTOM, &text);
+        field.draft = text;
+        let host = field.host.clone();
+        self.pend_default_shell(&host, pick);
+        cx.notify();
+    }
+
+    /// Holds `pick` as `host`'s pending default shell as
+    /// [`shell_choice::pending_value`] says, against what the row shows
+    /// without it; Custom with a blank command holds nothing but stays
+    /// shown. A refusal shown under the row goes.
+    fn pend_default_shell(&mut self, host: &HostKey, pick: ShellSetting) {
+        let held = self
+            .mirrors_of(host)
+            .and_then(|mirrors| shell_choice::pending_value(&mirrors.shell, &pick));
+        let blank_custom = pick.normalized() == ShellSetting::new(shell_choice::CUSTOM, None);
+        if let Some(value) = held {
+            self.settings_pending
+                .set_host(host, HostPending::DefaultShell(value), None);
+        } else {
+            let value = HostPending::DefaultShell(pick);
+            self.settings_pending
+                .set_host(host, value.clone(), Some(&value));
+        }
+        if blank_custom {
+            self.settings_pending
+                .shell_custom_picked
+                .insert(host.clone());
+        } else {
+            self.settings_pending.shell_custom_picked.remove(host);
+        }
+        self.settings_pending.shell_refusals.remove(host);
+    }
+
+    /// `host`'s row follows its daemon after an echo or a refusal: with no
+    /// pending edit there, Custom picked blank is forgotten and the Custom
+    /// command field holds the saved command, empty when none.
+    fn sync_shell_field(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        if self.pending_shell(host).is_some() {
+            return;
+        }
+        self.settings_pending.shell_custom_picked.remove(host);
+        let text = self
+            .mirrors_of(host)
+            .map(|mirrors| mirrors.shell.saved_command())
+            .unwrap_or_default();
+        let Some(field) = self
+            .settings_pending
+            .shell_command
+            .as_mut()
+            .filter(|field| field.host == *host)
+        else {
+            return;
+        };
+        if field.draft == text {
+            return;
+        }
+        field.draft.clone_from(&text);
+        field.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// Opens the Default shell list on its chosen entry, or closes it when
+    /// open; it opens only once the choices arrived.
+    fn toggle_shell_list(&mut self, cx: &mut Context<Self>) {
+        if self.settings_pending.shell_list.take().is_none()
+            && self.shell_row_state() == RowState::Live
+        {
+            let highlight = self
+                .shell_entries()
+                .iter()
+                .position(|entry| entry.chosen)
+                .unwrap_or(0);
+            let scroll = ScrollHandle::new();
+            scroll.scroll_to_item(highlight);
+            self.settings_pending.shell_list = Some(ShellList {
+                highlight,
+                scroll,
+                measured: None,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Closes the Default shell list, if it is open.
+    fn close_shell_list(&mut self, cx: &mut Context<Self>) {
+        if self.settings_pending.shell_list.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Keeps where the open shell list's field and the window were laid
+    /// out, as [`Self::measure_sound_list`] does.
+    fn measure_shell_list(
+        &mut self,
+        room: SoundListRoom,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(list) = &mut self.settings_pending.shell_list else {
+            return;
+        };
+        if list.measured != Some(room) {
+            list.measured = Some(room);
+            list.scroll.scroll_to_item(list.highlight);
+            cx.defer_in(window, |_, window, _| window.refresh());
+        }
+    }
+
+    fn hover_shell_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(list) = &mut self.settings_pending.shell_list
+            && list.highlight != index
+        {
+            list.highlight = index;
+            cx.notify();
+        }
+    }
+
+    /// A key while the shell list is open; returns whether it was the
+    /// list's: Up and Down move the highlight, Enter or Space picks it when
+    /// it can be picked, Esc closes the list, and Tab closes it and walks
+    /// on.
+    fn on_shell_list_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.settings_tab != SettingsTab::General || self.settings_pending.shell_list.is_none() {
+            return false;
+        }
+        let entries = self.shell_entries();
+        let Some(list) = &mut self.settings_pending.shell_list else {
+            return false;
+        };
+        match key {
+            "up" | "down" => {
+                list.highlight = if key == "down" {
+                    (list.highlight + 1).min(entries.len().saturating_sub(1))
+                } else {
+                    list.highlight.saturating_sub(1)
+                };
+                list.scroll.scroll_to_item(list.highlight);
+                cx.notify();
+                true
+            }
+            "enter" | "space" => {
+                if let Some(entry) = entries.get(list.highlight).filter(|entry| entry.pickable) {
+                    self.choose_shell_entry(&entry.id, window, cx);
+                }
+                true
+            }
+            "escape" => {
+                self.close_shell_list(cx);
+                true
+            }
+            "tab" => {
+                self.close_shell_list(cx);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// A pick in the shell list: a choice the host has becomes the shown
+    /// host's pending default shell, Custom with its command field's text.
+    /// The keyboard stays on the dropdown.
+    fn choose_shell_entry(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_shell_list(cx);
+        self.move_settings_focus(SettingsControl::DefaultShell, window, cx);
+        let host = self.settings_host.clone();
+        let choices = self
+            .mirrors_of(&host)
+            .and_then(|mirrors| mirrors.shell.choices.as_deref());
+        if !shell_choice::can_pick(choices, id) {
+            return;
+        }
+        let custom = id == shell_choice::CUSTOM;
+        let command = if custom {
+            self.shell_command_draft(&host)
+        } else {
+            String::new()
+        };
+        tracing::info!(?host, id, "settings: picked a default shell");
+        self.pend_default_shell(&host, shell_choice::pick(id, &command));
+        if custom {
+            self.hold_shell_command_field(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Apply reaching `host`'s pending default shell: sent, the row showing
+    /// it until the daemon's echo or refusal. A host whose connection is
+    /// closed, or whose daemon stores no default shell, is sent nothing and
+    /// owes no echo: the pick is dropped.
+    fn apply_default_shell(&mut self, host: &HostKey, setting: ShellSetting) {
+        if !self.shell_supported(host) {
+            tracing::info!(?host, id = %setting.id, "settings: dropped a default shell the host cannot take");
+            return;
+        }
+        let request_id = crate::new_request_id();
+        tracing::info!(?host, id = %setting.id, %request_id, "settings: applying the default shell");
+        if let Some(mirrors) = self.mirrors_of_mut(host) {
+            mirrors.shell.on_apply(request_id.clone(), setting.clone());
+        }
+        self.send_setting(
+            host,
+            ClientMessage::SetDefaultShell {
+                id: setting.id,
+                command: setting.command,
+                request_id: Some(request_id),
+            },
+        );
+    }
+
+    /// Folds `host`'s daemon's `DefaultShell` or `ShellChoices`; any other
+    /// message is left alone.
+    pub(crate) fn on_shell_message(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match msg {
+            DaemonMessage::DefaultShell { id, command } => {
+                let saved = ShellSetting::new(id, command.as_deref());
+                self.on_default_shell(host, saved, window, cx);
+            }
+            DaemonMessage::ShellChoices { choices } => {
+                self.on_shell_choices(host, choices.clone(), cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// `host`'s daemon's default shell, at connect or after any client's
+    /// set: saved, and, while Settings shows `host`'s General tab, its
+    /// choices are asked for again, since Custom's `hosts_agents` follows
+    /// the saved command.
+    pub(crate) fn on_default_shell(
+        &mut self,
+        host: &HostKey,
+        saved: ShellSetting,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
+        tracing::info!(?host, id = %saved.id, "settings: the host's default shell");
+        let refetch = mirrors.shell.on_saved(saved);
+        self.settings_pending.shell_refusals.remove(host);
+        self.sync_shell_field(host, cx);
+        if refetch
+            && self.settings_open()
+            && self.settings_tab == SettingsTab::General
+            && *host == self.settings_host
+        {
+            self.show_shell_row(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// `host`'s daemon's shell choices, in its order.
+    pub(crate) fn on_shell_choices(
+        &mut self,
+        host: &HostKey,
+        choices: Vec<protocol::ShellChoice>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return;
+        };
+        tracing::info!(
+            ?host,
+            count = choices.len(),
+            "settings: the host's shell choices"
+        );
+        mirrors.shell.on_choices(choices);
+        cx.notify();
+    }
+
+    /// A refusal carrying `request_id`: when it answers `host`'s Default
+    /// shell apply, it shows under the row. Returns whether it did.
+    pub(crate) fn on_default_shell_refused(
+        &mut self,
+        host: &HostKey,
+        request_id: &str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(mirrors) = self.mirrors_of_mut(host) else {
+            return false;
+        };
+        if !mirrors.shell.on_refused(request_id) {
+            return false;
+        }
+        self.settings_pending
+            .shell_refusals
+            .insert(host.clone(), message.to_owned());
+        self.sync_shell_field(host, cx);
+        tracing::warn!(
+            ?host,
+            request_id,
+            message,
+            "settings: the daemon refused the default shell"
+        );
+        cx.notify();
+        true
+    }
+
+    /// The Default shell row on the shown host: its dropdown (live, loading
+    /// or unsupported), the Custom command field while Custom shows, the
+    /// note when the chosen shell does not host agents, and a refusal.
+    fn default_shell_row(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let control = SettingsControl::DefaultShell;
+        let selector = control.selector();
+        let state = self.shell_row_state();
+        let text = labelled_text(format!("{selector}-text"), self.shell_row_text())
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden();
+        let chevron = svg()
+            .path(SIDEBAR_CHEVRON_DOWN_ICON)
+            .flex_none()
+            .size(px(12.0))
+            .text_color(gpui::rgb(t.text_2));
+        let trigger = field_frame(focused == Some(control), &t)
+            .id(selector)
+            .driver_id(|| selector.to_owned())
+            .w_full()
+            .justify_between()
+            .gap(px(8.0))
+            .children(search_hit_marker(selector, SEGMENT_RADIUS, cx))
+            .child(text)
+            .child(chevron);
+        let trigger = match state {
+            RowState::Live => trigger.cursor_pointer().on_click(press(control, cx)),
+            RowState::Loading => trigger
+                .opacity(DISABLED_OPACITY)
+                .text_color(gpui::rgb(t.subtle)),
+            RowState::Unsupported => trigger
+                .opacity(DISABLED_OPACITY)
+                .text_color(gpui::rgb(t.subtle))
+                .tooltip(tooltip(shell_choice::UNSUPPORTED_TIP)),
+        };
+        let entries = self.shell_entries();
+        let list = self
+            .settings_pending
+            .shell_list
+            .as_ref()
+            .filter(|_| state == RowState::Live);
+        let dropdown = div()
+            .relative()
+            .w(px(SOUND_FIELD_WIDTH))
+            .child(trigger)
+            .when_some(list, |dropdown, list| {
+                dropdown
+                    .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.close_shell_list(cx);
+                    }))
+                    .child(shell_list_measurer(cx))
+                    .child(shell_list_rows_panel(list, &entries, cx))
+            });
+        let command = self
+            .shell_command_field()
+            .filter(|_| self.shell_command_drawn())
+            .map(|field| {
+                input_frame(
+                    SettingsControl::DefaultShellCommand,
+                    &field.input,
+                    true,
+                    focused,
+                    cx,
+                )
+                .w(px(SOUND_FIELD_WIDTH))
+            });
+        let note = self.shell_note().map(|note| {
+            hint(crate::fonts::ui_text_size(cx), note, &t)
+                .driver_id(|| "settings-default-shell-note".to_owned())
+        });
+        let refusal = self.default_shell_refusal().map(|message| {
+            hint(crate::fonts::ui_text_size(cx), message, &t)
+                .text_color(gpui::rgb(t.danger_text))
+                .driver_id(|| "settings-default-shell-refusal".to_owned())
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                field(
+                    crate::fonts::ui_text_size(cx),
+                    crate::fonts::ui_weight_shift(cx),
+                    "Default shell",
+                    &t,
+                )
+                .child(dropdown),
+            )
+            .children(command)
+            .children(note)
+            .children(refusal)
+    }
+
     fn general_tab(
         &self,
         focused: Option<SettingsControl>,
@@ -5841,7 +6594,8 @@ impl RootView {
             "Off: select to highlight, copy explicitly with Ctrl+C \
              (when there's a selection) or Ctrl+Shift+C.",
             &t,
-        ));
+        ))
+        .child(self.default_shell_row(focused, cx));
         let mut rows = vec![
             power.into_any_element(),
             sidebar,
@@ -7186,7 +7940,9 @@ fn field_part(id: &str) -> String {
 
 /// The General tab's controls in drawing order; the keep-awake choices
 /// only with `keep_awake`, once the daemon reported its state, and the
-/// Diagnostics rows only with `logging`, while This PC is chosen.
+/// Diagnostics rows only with `logging`, while This PC is chosen. The
+/// Default shell row's dropdown and Custom command field are both listed;
+/// the ring leaves them out while they take no input or are not drawn.
 pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsControl> {
     let keep_awake = keep_awake.then_some(KEEP_AWAKE_CHOICES.map(SettingsControl::KeepAwake));
     keep_awake
@@ -7196,7 +7952,11 @@ pub(crate) fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsC
         .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
         .chain(SESSIONS_UNDER_REPOS_CHOICES.map(SettingsControl::SessionsUnderRepos))
         .chain(REPO_SORT_CHOICES.map(SettingsControl::RepoSort))
-        .chain([SettingsControl::CopyOnSelect])
+        .chain([
+            SettingsControl::CopyOnSelect,
+            SettingsControl::DefaultShell,
+            SettingsControl::DefaultShellCommand,
+        ])
         .chain(CHAT_MODE_CHOICES.map(SettingsControl::ChatMode))
         .chain([
             SettingsControl::ChatWidth,
@@ -7329,6 +8089,8 @@ pub(crate) enum HostPending {
     },
     /// The remote access switch; This PC only.
     RemoteEnabled(bool),
+    /// The Default shell row's pick, as Apply sends it.
+    DefaultShell(ShellSetting),
     Summaries(bool),
     SummaryProvider(String),
     SummaryKeySource(KeySourceChoice),
@@ -7361,6 +8123,7 @@ enum EchoKind {
     Remote,
     Summarizer,
     DetailedLogging,
+    DefaultShell,
 }
 
 /// A send of Apply to `host`, owing its echo; a refusal of it carries
@@ -7385,6 +8148,9 @@ impl OwedEcho {
             ClientMessage::SetWorktreesRoot { .. } => (EchoKind::WorktreesRoot, None),
             ClientMessage::SetKeepAwakeMode { .. } => (EchoKind::KeepAwake, None),
             ClientMessage::SetDetailedLogging { .. } => (EchoKind::DetailedLogging, None),
+            ClientMessage::SetDefaultShell { request_id, .. } => {
+                (EchoKind::DefaultShell, request_id.clone())
+            }
             ClientMessage::ConfigureRemote { .. } => (EchoKind::Remote, None),
             ClientMessage::SetSummarizerSettings { request_id, .. }
             | ClientMessage::SetSummarizerKey { request_id, .. } => {
@@ -7419,6 +8185,7 @@ const fn echo_kind(msg: &DaemonMessage) -> Option<(EchoKind, EchoState)> {
         DaemonMessage::WorktreesRootChanged { .. } => EchoKind::WorktreesRoot,
         DaemonMessage::KeepAwakeStatus { .. } => EchoKind::KeepAwake,
         DaemonMessage::DetailedLogging { .. } => EchoKind::DetailedLogging,
+        DaemonMessage::DefaultShell { .. } => EchoKind::DefaultShell,
         DaemonMessage::RemoteStatus { state, .. } => {
             return Some((EchoKind::Remote, remote_echo(state)));
         }
@@ -7503,6 +8270,17 @@ pub(crate) struct PendingSettings {
     /// The General tab's Maximum chat width field, built when the tab is
     /// first shown.
     chat_width: Option<ChatWidthField>,
+    /// The Default shell row's list, while open.
+    shell_list: Option<ShellList>,
+    /// The Default shell row's Custom command field, built for the shown
+    /// host while Custom is chosen there.
+    shell_command: Option<ShellCommandField>,
+    /// The hosts whose Default shell row shows Custom with a blank command:
+    /// picked, but no pending edit.
+    shell_custom_picked: HashSet<HostKey>,
+    /// Each host's daemon's refusal of its last Default shell apply, shown
+    /// under the row until Settings closes.
+    shell_refusals: HashMap<HostKey, String>,
 }
 
 /// The General tab's Maximum chat width field and its draft.
@@ -8159,6 +8937,113 @@ fn sound_list_row(
             }),
         )
         .into_any_element()
+}
+
+/// Measures the open shell list's field and the window, filling the field's
+/// dropdown.
+fn shell_list_measurer(cx: &mut Context<RootView>) -> impl IntoElement {
+    let root = cx.weak_entity();
+    canvas(
+        move |field, window, cx| {
+            let room = SoundListRoom {
+                field,
+                window_height: window.viewport_size().height,
+            };
+            // Fails only when the view is gone, and Settings with it.
+            root.update(cx, |this, cx| this.measure_shell_list(room, window, cx))
+                .ok();
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .inset(px(0.0))
+}
+
+/// The open Default shell list over `entries`, placed as a sound list is.
+fn shell_list_rows_panel(
+    list: &ShellList,
+    entries: &[ShellEntry],
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let wanted = px(SOUND_LIST_MAX_HEIGHT);
+    let placement = list.measured.map_or((false, wanted), |room| {
+        list_placement(
+            px(0.0)..room.window_height,
+            room.field.top()..room.field.bottom(),
+            wanted,
+        )
+    });
+    let rows = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| shell_list_row(entry, index, index == list.highlight, cx))
+        .collect();
+    popup_panel(
+        "settings-shell-list".to_owned(),
+        placement,
+        Some(&list.scroll),
+        rows,
+        &theme(cx),
+    )
+}
+
+/// One row of the open Default shell list at place `index`: a choice the
+/// host has follows the pointer and is picked by a press; one it lacks is
+/// dimmed, takes no pick, and says why in its tooltip.
+fn shell_list_row(
+    entry: &ShellEntry,
+    index: usize,
+    highlighted: bool,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let (hover, subtle) = (t.popover_hover, t.subtle);
+    let name = format!("settings-shell-option-{}", entry.id);
+    let check = format!("{name}-chosen");
+    let text = labelled_text(format!("{name}-text"), entry.label.clone());
+    let row = div()
+        .id(SharedString::from(name.clone()))
+        .driver_id(|| name)
+        .flex()
+        .flex_none()
+        .justify_between()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(SEGMENT_RADIUS))
+        .when(highlighted, move |row| row.bg(gpui::rgb(hover)))
+        .child(text)
+        .when(entry.chosen, |row| {
+            row.child(div().driver_id(move || check).child("✓"))
+        })
+        .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+            this.hover_shell_entry(index, cx);
+        }));
+    if entry.pickable {
+        let id = entry.id.clone();
+        row.cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.choose_shell_entry(&id, window, cx);
+                }),
+            )
+            .into_any_element()
+    } else {
+        row.opacity(DISABLED_OPACITY)
+            .text_color(gpui::rgb(subtle))
+            .tooltip(tooltip(entry.tip.clone().unwrap_or_default()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
+    }
 }
 
 /// A labelled row of segmented choices, laid out as the spawn dialog's;

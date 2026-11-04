@@ -42,6 +42,9 @@ pub(crate) struct HostMirrors {
     pub(crate) agent_setting_applies: VecDeque<SettingApply>,
     /// The daemon's worktrees root, and whether it is an override.
     pub(crate) worktrees_root: Option<(String, bool)>,
+    /// The daemon's default shell, its shell choices, and the Settings
+    /// apply waiting on them.
+    pub(crate) shell: crate::shell_choice::HostShell,
 }
 
 /// One host's connection: where its commands go, its state machine as its
@@ -636,12 +639,13 @@ impl RootView {
         self.hosts.get_mut(host).map(|entry| &mut entry.mirrors)
     }
 
-    /// Forgets `host`'s daemon's keep-awake state and launch commands, as
-    /// a disconnect does.
+    /// Forgets `host`'s daemon's keep-awake state, launch commands and
+    /// default shell, as a disconnect does.
     pub(crate) fn forget_daemon_settings(&mut self, host: &HostKey) {
         if let Some(mirrors) = self.mirrors_of_mut(host) {
             mirrors.keep_awake = None;
             mirrors.agent_commands = None;
+            mirrors.shell = crate::shell_choice::HostShell::default();
         }
     }
 

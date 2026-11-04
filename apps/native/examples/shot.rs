@@ -1886,6 +1886,7 @@ impl FakeDaemon {
         let features = vec![
             protocol::FEATURE_AGENT_COMMANDS.to_owned(),
             protocol::FEATURE_FILE_TAIL.to_owned(),
+            protocol::FEATURE_DEFAULT_SHELL.to_owned(),
         ];
         conn.on_welcome(version, features.clone());
         self.event(NetEvent::State(conn))?;
@@ -1914,6 +1915,10 @@ impl FakeDaemon {
         })?;
         self.send(fixture.tabs.clone())?;
         self.send(fixture.keep_awake.clone())?;
+        self.send(DaemonMessage::DefaultShell {
+            id: "pwsh".to_owned(),
+            command: None,
+        })?;
         if self.view == View::SettingsDashboard {
             self.send(shot_summarizer_status())?;
         }
@@ -2054,6 +2059,7 @@ impl FakeDaemon {
                 ]);
             }
             ClientMessage::TestSummary { request_id } => shot_summary_test(request_id.clone()),
+            ClientMessage::ListShellChoices => shot_shell_choices(),
             ClientMessage::SuggestBranchName { target, request_id } => {
                 DaemonMessage::BranchNameSuggestion {
                     target: target.clone(),
@@ -2064,6 +2070,29 @@ impl FakeDaemon {
             _ => return Ok(Vec::new()),
         };
         Ok(vec![reply])
+    }
+}
+
+/// The fake daemon's default-shell choices, as a Windows host with
+/// PowerShell 7 and Git Bash but no WSL lists them.
+fn shot_shell_choices() -> DaemonMessage {
+    let choice = |id: &str, label: &str, available: bool| protocol::ShellChoice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        available,
+        path: None,
+        hosts_agents: true,
+    };
+    DaemonMessage::ShellChoices {
+        choices: vec![
+            choice("auto", "Automatic", true),
+            choice("pwsh", "PowerShell 7", true),
+            choice("powershell", "Windows PowerShell", true),
+            choice("cmd", "Command Prompt", true),
+            choice("git-bash", "Git Bash", true),
+            choice("wsl", "WSL", false),
+            choice("custom", "Custom", true),
+        ],
     }
 }
 

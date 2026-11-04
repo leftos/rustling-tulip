@@ -5118,3 +5118,433 @@ fn a_worktrees_draft_survives_a_tab_switch(cx: &mut TestAppContext) {
     );
     assert!(applies(&mut h), "and pending");
 }
+
+/// One of a host's default-shell choices.
+fn shell(id: &str, label: &str, available: bool, hosts_agents: bool) -> protocol::ShellChoice {
+    protocol::ShellChoice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        available,
+        path: None,
+        hosts_agents,
+    }
+}
+
+/// The daemon's shell choices: Automatic, PowerShell 7, WSL (agents start
+/// on their own), fish (not installed) and Custom, whose `hosts_agents` is
+/// `custom_hosts_agents`.
+fn shell_choices(custom_hosts_agents: bool) -> DaemonMessage {
+    DaemonMessage::ShellChoices {
+        choices: vec![
+            shell("auto", "Automatic", true, true),
+            shell("pwsh", "PowerShell 7", true, true),
+            shell("wsl", "WSL", true, false),
+            shell("fish", "fish", false, false),
+            shell("custom", "Custom", true, custom_hosts_agents),
+        ],
+    }
+}
+
+/// The daemon's saved default shell.
+fn default_shell(id: &str, command: Option<&str>) -> DaemonMessage {
+    DaemonMessage::DefaultShell {
+        id: id.to_owned(),
+        command: command.map(str::to_owned),
+    }
+}
+
+/// How many times the client asked for the shell choices among `sent`.
+fn shell_lists(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::ListShellChoices))
+        .count()
+}
+
+/// The `(id, command)` of every default shell set among `sent`.
+fn shell_sets(sent: &[ClientMessage]) -> Vec<(String, Option<String>)> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetDefaultShell { id, command, .. } => {
+                Some((id.clone(), command.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The harness on This PC's daemon welcomed with the `default_shell`
+/// feature beside the usual ones, PowerShell 7 saved, nothing sent yet.
+fn shell_host<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = opened(cx, dir);
+    h.event(NetEvent::State(shell_connection()));
+    h.send(default_shell("pwsh", None));
+    h.sent();
+    h
+}
+
+/// This PC's connection open and welcomed with the `default_shell`
+/// feature beside the usual ones.
+fn shell_connection() -> Connection {
+    let mut features = support::daemon_features();
+    features.push(protocol::FEATURE_DEFAULT_SHELL.to_owned());
+    let mut conn = Connection::for_target(rustling_tulip_native::target::Target::Local);
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(support::PROTOCOL, features);
+    conn
+}
+
+const SHELL_REFUSAL: &str = "The custom shell command has an unclosed quote.";
+
+/// Picks Custom, types `command` into its field and presses Apply; returns
+/// the request id the set carried.
+fn apply_custom(h: &mut Harness<'_>, command: &str) -> Option<String> {
+    pick_shell(h, "custom");
+    h.scroll_into_view("settings-content", "settings-default-shell-command");
+    h.click_on("settings-default-shell-command");
+    h.keys("end");
+    type_line(h, command);
+    h.click_on("settings-apply");
+    h.sent().iter().rev().find_map(|msg| match msg {
+        ClientMessage::SetDefaultShell { request_id, .. } => request_id.clone(),
+        _ => None,
+    })
+}
+
+/// Settings open on General with the Default shell row in view, the
+/// choices asked for once and answered with [`shell_choices`].
+fn shell_row_open(h: &mut Harness<'_>, custom_hosts_agents: bool) {
+    h.keys("ctrl-,");
+    assert_eq!(shell_lists(&h.sent()), 1, "opening Settings asks once");
+    h.send(shell_choices(custom_hosts_agents));
+    h.scroll_into_view("settings-content", "settings-default-shell-field");
+}
+
+/// Opens the Default shell list and picks `id`'s entry.
+fn pick_shell(h: &mut Harness<'_>, id: &str) {
+    h.click_on("settings-default-shell-field");
+    assert!(h.root(|root, _| root.shell_list_open()), "the list opens");
+    h.click_on(&format!("settings-shell-option-{id}"));
+}
+
+fn shell_text(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.default_shell_text())
+}
+
+fn shell_note(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.default_shell_note())
+}
+
+#[gpui::test]
+fn default_shell_row_lists_host_choices_with_unavailable_dimmed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_host(cx, &dir);
+    h.keys("ctrl-,");
+    assert_eq!(shell_lists(&h.sent()), 1, "opening Settings asks once");
+    assert_eq!(shell_text(&mut h).as_deref(), Some("Loading shells…"));
+    assert!(!h.root(|root, _| root.default_shell_live()));
+    h.scroll_into_view("settings-content", "settings-default-shell-field");
+    h.click_on("settings-default-shell-field");
+    assert!(
+        !h.root(|root, _| root.shell_list_open()),
+        "the list does not open before the choices arrive"
+    );
+    assert_eq!(
+        shell_note(&mut h),
+        None,
+        "no note before the choices arrive"
+    );
+
+    h.send(shell_choices(true));
+    assert_eq!(shell_text(&mut h).as_deref(), Some("PowerShell 7"));
+    h.click_on("settings-default-shell-field");
+    assert!(h.root(|root, _| root.shell_list_open()));
+    let entries = h.root(|root, _| root.default_shell_entries());
+    let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["auto", "pwsh", "wsl", "fish", "custom"],
+        "the daemon's order"
+    );
+    let labels: Vec<&str> = entries.iter().map(|entry| entry.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["Automatic", "PowerShell 7", "WSL", "fish", "Custom"]
+    );
+    let fish = entries
+        .iter()
+        .find(|entry| entry.id == "fish")
+        .expect("listed");
+    assert!(!fish.pickable, "a shell the host lacks cannot be picked");
+    assert_eq!(fish.tip.as_deref(), Some("Not installed on This PC"));
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| entry.id != "fish")
+            .all(|entry| entry.pickable && entry.tip.is_none())
+    );
+    assert!(drawn(&mut h, "settings-shell-option-fish"), "drawn, dimmed");
+    h.click_on("settings-shell-option-fish");
+    assert_eq!(
+        shell_text(&mut h).as_deref(),
+        Some("PowerShell 7"),
+        "a press on fish picks nothing"
+    );
+    assert!(!h.root(|root, _| root.settings_apply_enabled()));
+}
+
+#[gpui::test]
+fn default_shell_pick_applies_on_ok_and_closes_on_echo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_host(cx, &dir);
+    shell_row_open(&mut h, true);
+    pick_shell(&mut h, "auto");
+    assert_eq!(shell_text(&mut h).as_deref(), Some("Automatic"));
+    assert_eq!(shell_sets(&h.sent()), Vec::new(), "a pick sends nothing");
+
+    h.click_on("settings-ok");
+    let sent = h.sent();
+    assert_eq!(shell_sets(&sent), [("auto".to_owned(), None)]);
+    let request_id = sent.iter().find_map(|msg| match msg {
+        ClientMessage::SetDefaultShell { request_id, .. } => request_id.clone(),
+        _ => None,
+    });
+    assert!(request_id.is_some(), "the set carries a request id");
+    assert!(h.root(|root, _| root.settings_ok_waiting()));
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "OK waits for the echo"
+    );
+
+    h.send(default_shell("auto", None));
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "the echo closes Settings"
+    );
+}
+
+#[gpui::test]
+fn default_shell_custom_shows_command_field_and_sends_command(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_host(cx, &dir);
+    shell_row_open(&mut h, true);
+    assert!(
+        h.root(|root, _| root.default_shell_command()).is_none(),
+        "no command field while PowerShell 7 is chosen"
+    );
+    pick_shell(&mut h, "custom");
+    assert_eq!(
+        h.root(|root, _| root.default_shell_command()).as_deref(),
+        Some("")
+    );
+    assert!(drawn(&mut h, "settings-default-shell-command"));
+    h.scroll_into_view("settings-content", "settings-default-shell-command");
+    h.click_on("settings-default-shell-command");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-default-shell-command")
+    );
+    type_line(&mut h, "nu -l");
+    assert_eq!(
+        h.root(|root, _| root.default_shell_command()).as_deref(),
+        Some("nu -l")
+    );
+    h.keys("enter");
+    assert_eq!(shell_sets(&h.sent()), Vec::new(), "Enter applies nothing");
+
+    h.click_on("settings-apply");
+    assert_eq!(
+        shell_sets(&h.sent()),
+        [("custom".to_owned(), Some("nu -l".to_owned()))]
+    );
+}
+
+#[gpui::test]
+fn default_shell_refetches_choices_after_echo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_host(cx, &dir);
+    shell_row_open(&mut h, true);
+    pick_shell(&mut h, "custom");
+    h.scroll_into_view("settings-content", "settings-default-shell-command");
+    h.click_on("settings-default-shell-command");
+    type_line(&mut h, "nu");
+    h.click_on("settings-apply");
+    let sent = h.sent();
+    assert_eq!(
+        shell_sets(&sent),
+        [("custom".to_owned(), Some("nu".to_owned()))]
+    );
+    assert_eq!(shell_lists(&sent), 0, "nothing asked before the echo");
+
+    h.send(default_shell("custom", Some("nu")));
+    assert_eq!(
+        shell_lists(&h.sent()),
+        1,
+        "the echo asks for the choices again"
+    );
+    assert_eq!(shell_note(&mut h), None);
+    h.send(shell_choices(false));
+    assert_eq!(
+        shell_note(&mut h).as_deref(),
+        Some("Agents start on their own, not inside Custom."),
+        "the fresh choices say Custom does not host agents"
+    );
+
+    h.send(default_shell("pwsh", None));
+    assert_eq!(
+        shell_lists(&h.sent()),
+        1,
+        "another client's set asks again too"
+    );
+}
+
+#[gpui::test]
+fn default_shell_note_shows_for_shell_that_does_not_host_agents(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_host(cx, &dir);
+    shell_row_open(&mut h, true);
+    assert_eq!(shell_note(&mut h), None, "PowerShell 7 hosts agents");
+    assert!(!drawn(&mut h, "settings-default-shell-note"));
+
+    pick_shell(&mut h, "wsl");
+    assert_eq!(
+        shell_note(&mut h).as_deref(),
+        Some("Agents start on their own, not inside WSL.")
+    );
+    assert!(drawn(&mut h, "settings-default-shell-note"));
+
+    pick_shell(&mut h, "pwsh");
+    assert_eq!(shell_note(&mut h), None, "back on PowerShell 7");
+}
+
+#[gpui::test]
+fn default_shell_row_disabled_for_older_daemon(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    assert_eq!(
+        shell_lists(&h.sent()),
+        0,
+        "nothing is sent to an older daemon"
+    );
+    assert_eq!(
+        h.root(|root, _| root.default_shell_tip()),
+        Some("Update this host's daemon to choose a default shell")
+    );
+    assert!(!h.root(|root, _| root.default_shell_live()));
+    h.scroll_into_view("settings-content", "settings-default-shell-field");
+    assert!(
+        drawn(&mut h, "settings-default-shell-field"),
+        "drawn disabled"
+    );
+    h.click_on("settings-default-shell-field");
+    assert!(
+        !h.root(|root, _| root.shell_list_open()),
+        "it does not open"
+    );
+    assert_eq!(shell_note(&mut h), None);
+    assert_eq!(shell_lists(&h.sent()), 0);
+}
+
+#[gpui::test]
+fn default_shell_pending_not_sent_to_older_or_closed_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_host(cx, &dir);
+    shell_row_open(&mut h, true);
+    pick_shell(&mut h, "wsl");
+    h.welcome_without_features();
+    h.click_on("settings-ok");
+    assert_eq!(
+        shell_sets(&h.sent()),
+        Vec::new(),
+        "an older daemon is sent nothing"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "no echo is owed, so OK closes"
+    );
+
+    h.event(NetEvent::State(shell_connection()));
+    h.send(default_shell("pwsh", None));
+    shell_row_open(&mut h, true);
+    pick_shell(&mut h, "wsl");
+    let mut closed = Connection::for_target(rustling_tulip_native::target::Target::Local);
+    closed.on_connecting();
+    h.event(NetEvent::State(closed));
+    h.click_on("settings-ok");
+    assert_eq!(
+        shell_sets(&h.sent()),
+        Vec::new(),
+        "a closed connection is sent nothing"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "no echo is owed, so OK closes"
+    );
+}
+
+#[gpui::test]
+fn default_shell_field_follows_saved_command_after_echo_and_refusal(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_host(cx, &dir);
+    h.send(default_shell("custom", Some("nu")));
+    shell_row_open(&mut h, true);
+    assert_eq!(
+        h.root(|root, _| root.default_shell_command()).as_deref(),
+        Some("nu"),
+        "the field holds the saved command"
+    );
+    h.scroll_into_view("settings-content", "settings-default-shell-command");
+    h.click_on("settings-default-shell-command");
+    h.keys("end");
+    type_line(&mut h, " -l");
+    assert_eq!(
+        h.root(|root, _| root.default_shell_command()).as_deref(),
+        Some("nu -l")
+    );
+    h.click_on("settings-apply");
+    let id = h.sent().iter().find_map(|msg| match msg {
+        ClientMessage::SetDefaultShell { request_id, .. } => request_id.clone(),
+        _ => None,
+    });
+    refuse(&mut h, id.as_deref(), SHELL_REFUSAL);
+    assert_eq!(
+        h.root(|root, _| root.default_shell_refusal()).as_deref(),
+        Some(SHELL_REFUSAL)
+    );
+    assert_eq!(
+        h.root(|root, _| root.default_shell_command()).as_deref(),
+        Some("nu"),
+        "a refusal puts the saved command back"
+    );
+
+    h.send(default_shell("custom", Some("fish")));
+    assert_eq!(
+        h.root(|root, _| root.default_shell_command()).as_deref(),
+        Some("fish"),
+        "another client's set shows its command"
+    );
+}
+
+#[gpui::test]
+fn default_shell_refusal_clears_when_settings_close(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shell_host(cx, &dir);
+    shell_row_open(&mut h, true);
+    let id = apply_custom(&mut h, "nu");
+    assert!(id.is_some(), "Apply sent the set");
+    refuse(&mut h, id.as_deref(), SHELL_REFUSAL);
+    assert_eq!(
+        h.root(|root, _| root.default_shell_refusal()).as_deref(),
+        Some(SHELL_REFUSAL)
+    );
+
+    h.click_on("settings-cancel");
+    assert!(!h.root(|root, _| root.settings_open()));
+    h.keys("ctrl-,");
+    assert_eq!(
+        h.root(|root, _| root.default_shell_refusal()),
+        None,
+        "closing Settings drops the refusal"
+    );
+}

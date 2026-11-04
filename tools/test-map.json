@@ -810,6 +810,12 @@
     },
     {
       "paths": [
+        "apps/native/src/shell_choice.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^shell_choice::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_settings|ui_settings_hosts)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/shell_marks.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^shell_marks::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_shell_integration)::/))"
