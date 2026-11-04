@@ -36,6 +36,8 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "5.0"
 semver = "1.0.28"
+tar = { version = "0.4.46", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 protocol = { path = "crates/protocol" }
 tracer-protocol = { path = "crates/tracer-protocol" }

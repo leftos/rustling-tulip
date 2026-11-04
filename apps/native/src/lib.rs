@@ -59,6 +59,11 @@ mod fetch_link;
 pub mod file_fetch;
 mod file_fetch_view;
 mod folder_picker;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the fetch view does not call the unpacker yet")
+)]
+mod folder_unpack;
 pub mod fonts;
 mod footer;
 mod grid_view;
@@ -146,6 +151,8 @@ mod tab_menu;
 mod tabs;
 pub mod target;
 mod taskbar_badge;
+#[cfg(test)]
+pub(crate) mod temp_dir;
 mod term;
 mod term_input;
 mod term_view;

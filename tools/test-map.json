@@ -429,6 +429,18 @@
     },
     {
       "paths": [
+        "apps/native/src/folder_unpack.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^folder_unpack::/)"
+    },
+    {
+      "paths": [
+        "apps/native/src/temp_dir.rs"
+      ],
+      "filter": "binary_id(rustling-tulip-native) & test(/^(folder_unpack|file_fetch|open)::/)"
+    },
+    {
+      "paths": [
         "apps/native/src/update.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^update::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_update)::/))"

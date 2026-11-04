@@ -973,7 +973,6 @@ impl FetchRegistry {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use futures::channel::mpsc::unbounded;
 
@@ -984,28 +983,7 @@ mod tests {
     };
     use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
     use crate::target::{HostKey, Target};
-
-    /// A fresh folder under the system temp dir, removed on drop.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "rt-native-fetch-{label}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            fs::create_dir_all(&path).expect("create the temp folder");
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::temp_dir::TempDir;
 
     fn chunk(seq: u64, data: &[u8]) -> WriteStep {
         WriteStep::Chunk {

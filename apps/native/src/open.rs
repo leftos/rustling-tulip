@@ -871,7 +871,6 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, PoisonError};
 
     use protocol::{RepoEntry, SessionSnapshot, WorkspaceEntry};
@@ -883,22 +882,9 @@ mod tests {
         validate_http_url, workspace_vscode_target,
     };
     use crate::links::TerminalLinkCandidate;
-
-    /// A fresh folder under the system temp dir, removed on drop.
-    struct TempDir(PathBuf);
+    use crate::temp_dir::TempDir;
 
     impl TempDir {
-        fn new(label: &str) -> Self {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "rt-native-open-{label}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            fs::create_dir_all(&path).expect("create the temp folder");
-            Self(path)
-        }
-
         fn base(&self) -> Vec<String> {
             vec![self.0.to_string_lossy().into_owned()]
         }
@@ -910,12 +896,6 @@ mod tests {
             fs::create_dir_all(parent).expect("create the file's folder");
             fs::write(&path, "x\n").expect("write the file");
             simplify_path(&path.canonicalize().expect("canonicalize the file"))
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
