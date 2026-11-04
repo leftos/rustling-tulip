@@ -242,6 +242,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_FILE_TAIL,
     protocol::FEATURE_FOLDER_FETCH,
     protocol::FEATURE_DETAILED_LOGGING,
+    protocol::FEATURE_DEFAULT_SHELL,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -345,6 +346,9 @@ pub(super) fn push_initial_state(
             std::env::var(name).ok()
         }),
     });
+    // Sent to every client: Hello carries no client features, and an older
+    // client's Unknown wrapper absorbs it.
+    let _ = out_tx.send(super::settings::default_shell_message(&hub.state));
     hub.summarizer.send_status(out_tx);
     // Held across the send: every RemoteStatus broadcast is published under
     // the watch's write lock, so none can reach the state forwarder between
@@ -545,6 +549,69 @@ mod tests {
                 DaemonMessage::Welcome { protocol_version: 22, supported_versions, features, .. }
                     if supported_versions == SUPPORTED_PROTOCOL_VERSIONS
                         && features == DAEMON_FEATURES
+            ),
+            "{welcome:?}"
+        );
+    }
+
+    /// Every `DefaultShell` an initial-state push put on the wire.
+    fn default_shells(
+        out_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
+    ) -> Vec<(String, Option<String>)> {
+        let mut sent = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::DefaultShell { id, command } = message {
+                sent.push((id, command));
+            }
+        }
+        sent
+    }
+
+    #[test]
+    fn initial_state_sends_the_default_shell() {
+        let (hub, _scratch) = test_hub("default-shell-initial");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        push_initial_state(&hub, &out_tx, "c1", false);
+        assert_eq!(
+            default_shells(&mut out_rx),
+            [("auto".to_owned(), None)],
+            "a fresh daemon sends Automatic"
+        );
+
+        hub.state
+            .set_default_shell(Some(protocol::DefaultShell {
+                id: "custom".to_owned(),
+                command: Some("bash -l".to_owned()),
+            }))
+            .expect("store a shell");
+        push_initial_state(&hub, &out_tx, "c1", false);
+        assert_eq!(
+            default_shells(&mut out_rx),
+            [("custom".to_owned(), Some("bash -l".to_owned()))]
+        );
+
+        hub.state
+            .set_default_shell(Some(protocol::DefaultShell {
+                id: "tcsh".to_owned(),
+                command: None,
+            }))
+            .expect("store an unknown shell");
+        push_initial_state(&hub, &out_tx, "c1", false);
+        assert_eq!(
+            default_shells(&mut out_rx),
+            [("auto".to_owned(), None)],
+            "an id this build does not know reads as Automatic"
+        );
+    }
+
+    #[test]
+    fn welcome_lists_default_shell() {
+        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == "default_shell")
             ),
             "{welcome:?}"
         );

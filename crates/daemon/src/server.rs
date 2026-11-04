@@ -271,6 +271,13 @@ pub enum StateEvent {
     /// Broadcast after every [`ClientMessage::SetAgentCommand`] that is
     /// saved. Mirrors [`protocol::DaemonMessage::AgentCommands`].
     AgentCommands(Vec<protocol::AgentCommandEntry>),
+    /// Broadcast after every [`ClientMessage::SetDefaultShell`] that is
+    /// saved: the effective choice, `auto` when none is stored. Mirrors
+    /// [`protocol::DaemonMessage::DefaultShell`].
+    DefaultShell {
+        id: String,
+        command: Option<String>,
+    },
     /// Broadcast after every [`ClientMessage::SetAgentSettings`] that is
     /// saved: every agent's stored settings. Mirrors
     /// [`protocol::DaemonMessage::AgentSettings`].
@@ -794,6 +801,8 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::SetKeepAwakeMode { .. }
         | ClientMessage::SetDetailedLogging { .. }
         | ClientMessage::SetAgentCommand { .. }
+        | ClientMessage::SetDefaultShell { .. }
+        | ClientMessage::ListShellChoices
         | ClientMessage::SetAgentSettings { .. }
         | ClientMessage::InspectWorktreesRoot
         | ClientMessage::DeleteWorktreeAt { .. }) => settings::handle(hub, m, ctx).await?,

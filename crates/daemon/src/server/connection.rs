@@ -790,6 +790,9 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::AgentCommands(commands)) => {
                     let _ = out_tx.send(DaemonMessage::AgentCommands { commands });
                 }
+                Ok(StateEvent::DefaultShell { id, command }) => {
+                    let _ = out_tx.send(DaemonMessage::DefaultShell { id, command });
+                }
                 Ok(StateEvent::AgentSettings(settings)) => {
                     let _ = out_tx.send(DaemonMessage::AgentSettings { settings });
                 }

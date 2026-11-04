@@ -11,8 +11,8 @@ use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use protocol::{
-    AgentId, ContainerRef, KeepAwakeMode, OptionValues, RepoEntry, SummarizerSettings, TabEntry,
-    WorkspaceEntry,
+    AgentId, ContainerRef, DefaultShell, KeepAwakeMode, OptionValues, RepoEntry,
+    SummarizerSettings, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -100,6 +100,12 @@ pub struct PersistedState {
     /// meanwhile. It holds a key's source, never a key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summarizer: Option<SummarizerSettings>,
+    /// Host setting: the shell plain-shell sessions run and an interactive
+    /// agent is typed into. Absent means Automatic, as does an id this build
+    /// does not know. Read at spawn through [`AppState::default_shell`], so
+    /// Restart and Resume use the current choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_shell: Option<DefaultShell>,
 }
 
 /// One agent's stored launch command, both fields as the user typed them.
@@ -317,6 +323,19 @@ impl AppState {
     pub fn set_detailed_logging(&self, enabled: bool) -> anyhow::Result<()> {
         self.mutate(|s| {
             s.detailed_logging = enabled;
+        })
+    }
+
+    /// The stored default shell; `None` is Automatic. Every shell spawn reads
+    /// it here, at spawn time.
+    pub fn default_shell(&self) -> Option<DefaultShell> {
+        self.with_persisted(|s| s.default_shell.clone())
+    }
+
+    /// Persist the default shell; `None` (Automatic) removes the key.
+    pub fn set_default_shell(&self, shell: Option<DefaultShell>) -> anyhow::Result<()> {
+        self.mutate(|s| {
+            s.default_shell = shell;
         })
     }
 
@@ -1038,6 +1057,10 @@ mod tests {
             !persisted.detailed_logging,
             "the oldest release's file logs at the default level"
         );
+        assert!(
+            persisted.default_shell.is_none(),
+            "the oldest release's file runs the Automatic shell"
+        );
         assert_eq!(
             persisted
                 .agent_commands
@@ -1173,6 +1196,62 @@ mod tests {
             !released.detailed_logging,
             "the oldest release's state.json logs at the default level"
         );
+    }
+
+    #[test]
+    fn default_shell_reads_automatic_in_an_old_state_json() {
+        let old: PersistedState =
+            serde_json::from_str(r#"{"repos": [], "workspaces": []}"#).expect("parse old state");
+        assert!(
+            old.default_shell.is_none(),
+            "a state.json without the setting runs the Automatic shell"
+        );
+        let released: PersistedState =
+            serde_json::from_str(V0_5_1_STATE_JSON).expect("parse the v0.5.1 state.json");
+        assert!(
+            released.default_shell.is_none(),
+            "the oldest release's state.json runs the Automatic shell"
+        );
+    }
+
+    #[test]
+    fn default_shell_round_trips_and_none_removes_the_key() {
+        let dirs = scratch_dirs("default-shell");
+        assert!(!dirs.state_file.exists(), "scratch dir starts empty");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        assert_eq!(state.default_shell(), None, "a fresh install is Automatic");
+        let set = protocol::DefaultShell {
+            id: "custom".to_owned(),
+            command: Some("bash -l".to_owned()),
+        };
+        state
+            .set_default_shell(Some(set.clone()))
+            .expect("persist the shell");
+        assert_eq!(state.default_shell(), Some(set.clone()));
+
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert_eq!(
+            reloaded.default_shell(),
+            Some(set),
+            "the shell survives a reload"
+        );
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse state.json");
+        assert_eq!(
+            stored["default_shell"],
+            serde_json::json!({"id": "custom", "command": "bash -l"})
+        );
+
+        reloaded.set_default_shell(None).expect("clear the shell");
+        assert_eq!(reloaded.default_shell(), None);
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        let stored: serde_json::Value = serde_json::from_str(&text).expect("parse state.json");
+        assert!(
+            stored.get("default_shell").is_none(),
+            "Automatic removes the key: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

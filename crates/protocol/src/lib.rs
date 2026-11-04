@@ -55,6 +55,14 @@ pub const FEATURE_DETAILED_LOGGING: &str = "detailed_logging";
 /// when the connected daemon lists it.
 pub const FEATURE_FOLDER_FETCH: &str = "folder_fetch";
 
+/// `Welcome.features` entry: the daemon keeps a default shell for plain-shell
+/// sessions and for the shell that hosts an interactive agent
+/// ([`ClientMessage::SetDefaultShell`], [`DaemonMessage::DefaultShell`]) and
+/// lists the shells its host has ([`ClientMessage::ListShellChoices`],
+/// [`DaemonMessage::ShellChoices`]). A client offers the Default shell row
+/// only when the connected daemon lists it.
+pub const FEATURE_DEFAULT_SHELL: &str = "default_shell";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -201,6 +209,42 @@ pub struct AgentCommandEntry {
     /// then has no effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_env: Option<String>,
+}
+
+/// The host's default shell as `state.json` stores it: a choice id from
+/// [`DaemonMessage::ShellChoices`] (`pwsh`, `git-bash`, `custom`, ...) and,
+/// for `custom` only, the command line to run. No stored value, or an id the
+/// daemon does not know, means Automatic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultShell {
+    pub id: String,
+    /// The custom command line, split with shell words; `None` for any id
+    /// other than `custom`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// One entry of the host's default-shell choices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellChoice {
+    /// The id a [`ClientMessage::SetDefaultShell`] carries (`auto`, `pwsh`,
+    /// `git-bash`, `custom`, ...).
+    #[serde(default)]
+    pub id: String,
+    /// The name the daemon gives the choice, such as "PowerShell 7".
+    #[serde(default)]
+    pub label: String,
+    /// Whether the host has the shell; Automatic and Custom always do.
+    #[serde(default)]
+    pub available: bool,
+    /// The program the choice runs, when found; for Automatic, the shell it
+    /// resolves to now. `None` for Custom and for a shell not found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Whether an interactive agent is typed into this shell; when false, an
+    /// agent spawns on its own instead.
+    #[serde(default)]
+    pub hosts_agents: bool,
 }
 
 /// The bytes Shift+Enter sends to an agent's terminal.
@@ -3693,6 +3737,25 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Set the host's default shell: `id` is a [`ShellChoice::id`], and
+    /// `command` is the command line for `custom` (dropped for any other id).
+    /// `auto`, an id the daemon does not know, and `custom` with a blank
+    /// command all store Automatic. The daemon persists it in `state.json`,
+    /// then broadcasts [`DaemonMessage::DefaultShell`]. A control character or
+    /// an unclosed quote in `command` is refused with an `Error` and changes
+    /// nothing.
+    SetDefaultShell {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        /// Echoed only on the [`DaemonMessage::Error`] that refuses the
+        /// command; the broadcast that answers a stored one carries none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Ask for the host's default-shell choices; the daemon detects them and
+    /// answers this client alone with [`DaemonMessage::ShellChoices`].
+    ListShellChoices,
     /// Set the values `agent`'s Settings page holds, which clients use as the
     /// spawn dialog's defaults. The daemon validates them against the agent's
     /// option schema, persists them in `state.json`, then broadcasts
@@ -4597,6 +4660,20 @@ pub enum DaemonMessage {
     /// [`ClientMessage::SetAgentCommand`].
     AgentCommands {
         commands: Vec<AgentCommandEntry>,
+    },
+    /// The host's effective default shell: the stored choice, or `auto` when
+    /// nothing is stored or the stored id is unknown. Sent once at initial
+    /// state and broadcast after every [`ClientMessage::SetDefaultShell`].
+    DefaultShell {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+    },
+    /// The host's default-shell choices, in the order the Settings row lists
+    /// them, Automatic first and Custom last. Sent only to the client that
+    /// asked with [`ClientMessage::ListShellChoices`].
+    ShellChoices {
+        choices: Vec<ShellChoice>,
     },
     /// Every registered agent's descriptor, in the daemon's order. Sent once
     /// per connection, after `Welcome` and before `Sessions`.
@@ -9131,6 +9208,149 @@ mod tests {
         );
         assert_eq!(back[1].program_env, None);
         assert_eq!(FEATURE_AGENT_COMMANDS, "agent_commands");
+    }
+
+    #[test]
+    fn default_shell_messages_round_trip() {
+        let set = ClientMessage::SetDefaultShell {
+            id: "pwsh".to_owned(),
+            command: None,
+            request_id: None,
+        };
+        let json = serde_json::to_value(&set).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "set_default_shell", "id": "pwsh"}),
+            "command and request_id are omitted when None"
+        );
+        let back: ClientMessage = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetDefaultShell { id, command: None, request_id: None } if id == "pwsh"
+            ),
+            "a message without a command or request id decodes to None: {back:?}"
+        );
+
+        let set = ClientMessage::SetDefaultShell {
+            id: "custom".to_owned(),
+            command: Some("bash -l".to_owned()),
+            request_id: Some("r1".to_owned()),
+        };
+        let json = serde_json::to_value(&set).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "set_default_shell",
+                "id": "custom",
+                "command": "bash -l",
+                "request_id": "r1",
+            })
+        );
+        let back: ClientMessage = serde_json::from_value(json).expect("deserialize");
+        assert!(
+            matches!(
+                &back,
+                ClientMessage::SetDefaultShell { id, command: Some(command), request_id: Some(r) }
+                    if id == "custom" && command == "bash -l" && r == "r1"
+            ),
+            "the command and request id round-trip: {back:?}"
+        );
+
+        let list = serde_json::to_value(&ClientMessage::ListShellChoices).expect("serialize");
+        assert_eq!(list, serde_json::json!({"type": "list_shell_choices"}));
+        let back: ClientMessage = serde_json::from_value(list).expect("deserialize");
+        assert!(matches!(back, ClientMessage::ListShellChoices), "{back:?}");
+
+        for (echo, expected) in [
+            (
+                DaemonMessage::DefaultShell {
+                    id: "auto".to_owned(),
+                    command: None,
+                },
+                serde_json::json!({"type": "default_shell", "id": "auto"}),
+            ),
+            (
+                DaemonMessage::DefaultShell {
+                    id: "custom".to_owned(),
+                    command: Some("nu --login".to_owned()),
+                },
+                serde_json::json!({"type": "default_shell", "id": "custom", "command": "nu --login"}),
+            ),
+        ] {
+            let json = serde_json::to_value(&echo).expect("serialize");
+            assert_eq!(json, expected);
+            let back: DaemonMessage = serde_json::from_value(json).expect("deserialize");
+            let (
+                DaemonMessage::DefaultShell { id, command },
+                DaemonMessage::DefaultShell {
+                    id: want_id,
+                    command: want_command,
+                },
+            ) = (&back, &echo)
+            else {
+                panic!("expected DefaultShell, got {back:?}");
+            };
+            assert_eq!((id, command), (want_id, want_command));
+        }
+
+        assert_shell_choices_round_trip();
+        assert_eq!(FEATURE_DEFAULT_SHELL, "default_shell");
+    }
+
+    /// `ShellChoices` pins its JSON, omits a `None` path, decodes back, and
+    /// every `ShellChoice` field defaults.
+    fn assert_shell_choices_round_trip() {
+        let choices = DaemonMessage::ShellChoices {
+            choices: vec![
+                ShellChoice {
+                    id: "auto".to_owned(),
+                    label: "Automatic".to_owned(),
+                    available: true,
+                    path: Some("pwsh.exe".to_owned()),
+                    hosts_agents: true,
+                },
+                ShellChoice {
+                    id: "custom".to_owned(),
+                    label: "Custom".to_owned(),
+                    available: true,
+                    path: None,
+                    hosts_agents: false,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&choices).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "shell_choices",
+                "choices": [
+                    {"id": "auto", "label": "Automatic", "available": true, "path": "pwsh.exe", "hosts_agents": true},
+                    {"id": "custom", "label": "Custom", "available": true, "hosts_agents": false},
+                ],
+            })
+        );
+        let back: DaemonMessage = serde_json::from_value(json).expect("deserialize");
+        let DaemonMessage::ShellChoices { choices: back } = back else {
+            panic!("expected ShellChoices, got {back:?}");
+        };
+        let DaemonMessage::ShellChoices { choices: sent } = choices else {
+            panic!("expected ShellChoices");
+        };
+        assert_eq!(back, sent);
+
+        let sparse: ShellChoice = serde_json::from_str(r#"{"id":"nu"}"#).expect("deserialize");
+        assert_eq!(
+            sparse,
+            ShellChoice {
+                id: "nu".to_owned(),
+                label: String::new(),
+                available: false,
+                path: None,
+                hosts_agents: false,
+            },
+            "every field defaults"
+        );
     }
 
     #[test]

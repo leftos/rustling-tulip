@@ -7,6 +7,9 @@ mod worktree;
 pub(super) use self::hook_settings::hook_settings_path;
 pub(super) use self::hook_settings::{announce_replayed_prompt, remove_hook_settings};
 pub(crate) use self::shell::resolve_agent_program;
+pub(super) use self::shell::{
+    HostOs, ShellProbe, detect_shells, is_known_shell_id, split_custom_command,
+};
 pub(super) use self::worktree::target_uses_worktree;
 
 use self::hook_settings::{HookSettings, write_hook_files, write_hook_settings};
@@ -1413,7 +1416,7 @@ async fn spawn_interactive_session(
 /// The user's shell, to host an agent typed into it; `None`, logged, when
 /// none resolves, and the agent is then spawned directly.
 fn host_shell(hub: &Hub) -> Option<ShellProgram> {
-    match resolve_shell_program(&hub.dirs) {
+    match resolve_shell_program(&hub.dirs, hub.state.default_shell().as_ref(), None, false) {
         Ok(shell) => Some(shell),
         Err(err) => {
             warn!(
@@ -1457,7 +1460,15 @@ async fn spawn_plain_shell_session(
     stored_config: protocol::SpawnConfig,
     busy_excluded: bool,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
-    let shell = resolve_shell_program(&hub.dirs)?;
+    // A Recover that resumes the agent types its resume line into the shell,
+    // so it needs a shell that can run that line.
+    let types_resume = cfg.extras.hook_agent.is_some() && cfg.extras.resume_conversation.is_some();
+    let shell = resolve_shell_program(
+        &hub.dirs,
+        hub.state.default_shell().as_ref(),
+        Some(&primary_cwd),
+        types_resume,
+    )?;
     // A recovered shell gets its hook agent's injected hooks, so the CLI's
     // reports drive its status. The files are written after the last
     // fallible setup step and before the spawn, and the resume command the

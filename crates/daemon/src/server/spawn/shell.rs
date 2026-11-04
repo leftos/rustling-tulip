@@ -5,6 +5,8 @@ use crate::spawn_plan::SpawnFailure;
 use crate::state::AgentCommand;
 use agent_api::AgentPlugin;
 use anyhow::Context as _;
+use protocol::{DefaultShell, ShellChoice};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Resolve an agent-program name into something `CreateProcess` /
@@ -148,20 +150,275 @@ pub(super) struct ShellProgram {
     pub(super) extra_env: Vec<(String, String)>,
 }
 
-/// Pick a shell executable for [`SessionMode::PlainShell`] spawns. `program`
-/// is what we pass to `CommandBuilder` (resolved on PATH if it has no
-/// separator); `label` is the short token shown in the UI; `args` and
-/// `extra_env` together install the shell-integration init script for shells
-/// that support it (PowerShell / bash / zsh) — emits OSC 7 for cwd and
-/// OSC 133 + OSC 633 marks the frontend parses for the per-command chip UI.
-/// cmd.exe gets a minimal OSC 7 prompt hook only (no command tracking).
+/// The host lookups shell detection and resolution make. [`ShellProbe::HOST`]
+/// reads the real environment, PATH and disk; tests inject fakes.
+pub(crate) struct ShellProbe<'a> {
+    /// An environment variable's value.
+    pub(crate) env: &'a dyn Fn(&str) -> Option<OsString>,
+    /// A program name's path on PATH.
+    pub(crate) which: &'a dyn Fn(&str) -> Option<PathBuf>,
+    /// Whether a file exists.
+    pub(crate) exists: &'a dyn Fn(&Path) -> bool,
+}
+
+fn host_env(name: &str) -> Option<OsString> {
+    std::env::var_os(name)
+}
+
+fn host_which(name: &str) -> Option<PathBuf> {
+    which::which(name).ok()
+}
+
+fn host_exists(path: &Path) -> bool {
+    path.is_file()
+}
+
+impl ShellProbe<'static> {
+    /// The real environment, PATH and disk.
+    pub(crate) const HOST: Self = Self {
+        env: &host_env,
+        which: &host_which,
+        exists: &host_exists,
+    };
+}
+
+/// Which platform's shell list and lookups apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostOs {
+    Windows,
+    Unix,
+}
+
+impl HostOs {
+    /// The platform this daemon runs on.
+    pub(crate) const CURRENT: Self = if cfg!(windows) {
+        Self::Windows
+    } else {
+        Self::Unix
+    };
+
+    /// The named shells a user can choose here, as `(id, label)`, in the
+    /// Settings order between Automatic and Custom.
+    fn named_shells(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Windows => &[
+                ("pwsh", "PowerShell 7"),
+                ("powershell", "Windows PowerShell"),
+                ("cmd", "Command Prompt"),
+                ("git-bash", "Git Bash"),
+                ("wsl", "WSL"),
+                ("nu", "Nushell"),
+            ],
+            Self::Unix => &[
+                ("bash", "bash"),
+                ("zsh", "zsh"),
+                ("fish", "fish"),
+                ("nu", "Nushell"),
+                ("sh", "sh"),
+            ],
+        }
+    }
+}
+
+/// The choice id for Automatic.
+const AUTO_SHELL_ID: &str = "auto";
+/// The choice id for a custom command line.
+const CUSTOM_SHELL_ID: &str = "custom";
+
+/// Whether `id` is a choice this build offers on `os`: Automatic, Custom or
+/// one of its named shells. Any other id reads as Automatic.
+pub(crate) fn is_known_shell_id(os: HostOs, id: &str) -> bool {
+    id == AUTO_SHELL_ID
+        || id == CUSTOM_SHELL_ID
+        || os.named_shells().iter().any(|(known, _)| *known == id)
+}
+
+/// Where the named shell `id` lives on this host, `None` when it is not
+/// installed. Git Bash comes from the Git install (never `which bash`, which
+/// can return WSL's launcher), WSL from `%SystemRoot%\System32\wsl.exe`, and
+/// every other shell from PATH.
+fn locate_shell(os: HostOs, id: &str, probe: &ShellProbe<'_>) -> Option<PathBuf> {
+    match (os, id) {
+        (HostOs::Windows, "git-bash") => locate_git_bash(probe),
+        (HostOs::Windows, "wsl") => {
+            let wsl = PathBuf::from((probe.env)("SystemRoot")?)
+                .join("System32")
+                .join("wsl.exe");
+            (probe.exists)(&wsl).then_some(wsl)
+        }
+        (HostOs::Windows, name) => (probe.which)(&format!("{name}.exe")),
+        (HostOs::Unix, name) => (probe.which)(name),
+    }
+}
+
+/// Git Bash's `bash.exe`: beside the `git.exe` on PATH (`<root>\cmd\git.exe`
+/// gives `<root>\bin\bash.exe`), else under `%ProgramFiles%\Git`, else under
+/// `%LOCALAPPDATA%\Programs\Git`.
+fn locate_git_bash(probe: &ShellProbe<'_>) -> Option<PathBuf> {
+    let beside_git = (probe.which)("git.exe")
+        .and_then(|git| Some(git.parent()?.parent()?.join("bin").join("bash.exe")));
+    let program_files = (probe.env)("ProgramFiles")
+        .map(|root| PathBuf::from(root).join("Git").join("bin").join("bash.exe"));
+    let local = (probe.env)("LOCALAPPDATA").map(|root| {
+        PathBuf::from(root)
+            .join("Programs")
+            .join("Git")
+            .join("bin")
+            .join("bash.exe")
+    });
+    [beside_git, program_files, local]
+        .into_iter()
+        .flatten()
+        .find(|path| (probe.exists)(path))
+}
+
+/// The shell Automatic picks: the program to run, its label, and the path it
+/// resolved to.
+struct AutomaticPick {
+    program: String,
+    label: String,
+    path: PathBuf,
+}
+
+/// Automatic's pick on `os`: Windows tries `pwsh.exe`, `powershell.exe`,
+/// `cmd.exe` on PATH; Unix tries `$SHELL`, then `bash`, `zsh`, `sh` on PATH.
+fn automatic_pick(os: HostOs, probe: &ShellProbe<'_>) -> Option<AutomaticPick> {
+    let candidates: &[(&str, &str)] = match os {
+        HostOs::Windows => &[
+            ("pwsh.exe", "pwsh"),
+            ("powershell.exe", "powershell"),
+            ("cmd.exe", "cmd"),
+        ],
+        HostOs::Unix => {
+            if let Some(p) = (probe.env)("SHELL").and_then(|value| value.into_string().ok()) {
+                return Some(AutomaticPick {
+                    label: shell_label_from_path(&p),
+                    path: PathBuf::from(&p),
+                    program: p,
+                });
+            }
+            &[("bash", "bash"), ("zsh", "zsh"), ("sh", "sh")]
+        }
+    };
+    candidates.iter().find_map(|(candidate, label)| {
+        (probe.which)(candidate).map(|path| AutomaticPick {
+            program: (*candidate).to_owned(),
+            label: (*label).to_owned(),
+            path,
+        })
+    })
+}
+
+/// The Automatic shell, with its integration.
+fn automatic_shell(
+    dirs: &Dirs,
+    os: HostOs,
+    probe: &ShellProbe<'_>,
+) -> anyhow::Result<ShellProgram> {
+    let Some(pick) = automatic_pick(os, probe) else {
+        match os {
+            HostOs::Windows => {
+                anyhow::bail!("no shell on PATH (tried pwsh.exe, powershell.exe, cmd.exe)")
+            }
+            HostOs::Unix => anyhow::bail!("no shell on PATH (tried bash, zsh, sh)"),
+        }
+    };
+    let (args, extra_env) = plain_shell_args(dirs, &pick.label)?;
+    Ok(ShellProgram {
+        program: pick.program,
+        args,
+        label: pick.label,
+        extra_env,
+    })
+}
+
+/// Whether an agent is typed into the shell at `path`.
+fn hosts_agents(path: Option<&str>) -> bool {
+    path.is_some_and(|path| ShellFamily::of(path).is_some())
+}
+
+/// Every default-shell choice on this host, in Settings order: Automatic
+/// (with the shell it resolves to now), the named shells with what was found,
+/// and Custom. Blocking: it searches PATH and probes files.
+pub(crate) fn detect_shells(probe: &ShellProbe<'_>) -> Vec<ShellChoice> {
+    detect_shells_on(HostOs::CURRENT, probe)
+}
+
+fn detect_shells_on(os: HostOs, probe: &ShellProbe<'_>) -> Vec<ShellChoice> {
+    let lossy = |path: PathBuf| path.to_string_lossy().into_owned();
+    let auto_path = automatic_pick(os, probe).map(|pick| lossy(pick.path));
+    let mut choices = vec![ShellChoice {
+        id: AUTO_SHELL_ID.to_owned(),
+        label: "Automatic".to_owned(),
+        available: true,
+        hosts_agents: hosts_agents(auto_path.as_deref()),
+        path: auto_path,
+    }];
+    for (id, label) in os.named_shells() {
+        let path = locate_shell(os, id, probe).map(lossy);
+        choices.push(ShellChoice {
+            id: (*id).to_owned(),
+            label: (*label).to_owned(),
+            available: path.is_some(),
+            hosts_agents: hosts_agents(path.as_deref()),
+            path,
+        });
+    }
+    choices.push(ShellChoice {
+        id: CUSTOM_SHELL_ID.to_owned(),
+        label: "Custom".to_owned(),
+        available: true,
+        path: None,
+        hosts_agents: false,
+    });
+    choices
+}
+
+/// Pick a shell executable for [`SessionMode::PlainShell`] spawns and for the
+/// shell an interactive agent is typed into. `program` is what we pass to
+/// `CommandBuilder` (resolved on PATH if it has no separator); `label` is the
+/// short token shown in the UI; `args` and `extra_env` together install the
+/// shell-integration init script for shells that support it (PowerShell /
+/// bash / zsh) — emits OSC 7 for cwd and OSC 133 + OSC 633 marks the frontend
+/// parses for the per-command chip UI. cmd.exe gets a minimal OSC 7 prompt
+/// hook only (no command tracking).
 ///
 /// Resolution order:
-/// - `RUSTLING_TULIP_SHELL` env override (any platform);
-/// - Windows: `pwsh.exe` → `powershell.exe` → `cmd.exe`;
-/// - Unix: `$SHELL` → `bash` → `sh`.
-pub(super) fn resolve_shell_program(dirs: &Dirs) -> anyhow::Result<ShellProgram> {
-    if let Ok(p) = std::env::var("RUSTLING_TULIP_SHELL") {
+/// - `RUSTLING_TULIP_SHELL` env override (any platform); `setting` is not
+///   consulted;
+/// - the host's default shell, `setting`, when it is set and available (a
+///   chosen shell not found, or a custom command that does not split or whose
+///   program does not resolve, logs a warning and falls through); WSL starts
+///   in `cwd`. When `types_resume`, a chosen shell with no [`ShellFamily`]
+///   cannot run the resume line typed into it, so it falls through too;
+/// - Automatic: Windows `pwsh.exe` → `powershell.exe` → `cmd.exe`; Unix
+///   `$SHELL` → `bash` → `zsh` → `sh`.
+pub(super) fn resolve_shell_program(
+    dirs: &Dirs,
+    setting: Option<&DefaultShell>,
+    cwd: Option<&Path>,
+    types_resume: bool,
+) -> anyhow::Result<ShellProgram> {
+    resolve_shell_with(
+        dirs,
+        setting,
+        cwd,
+        types_resume,
+        HostOs::CURRENT,
+        &ShellProbe::HOST,
+    )
+}
+
+fn resolve_shell_with(
+    dirs: &Dirs,
+    setting: Option<&DefaultShell>,
+    cwd: Option<&Path>,
+    types_resume: bool,
+    os: HostOs,
+    probe: &ShellProbe<'_>,
+) -> anyhow::Result<ShellProgram> {
+    if let Some(p) = (probe.env)("RUSTLING_TULIP_SHELL").and_then(|value| value.into_string().ok())
+    {
         let label = shell_label_from_path(&p);
         let (args, extra_env) = plain_shell_args(dirs, &label)?;
         return Ok(ShellProgram {
@@ -171,52 +428,187 @@ pub(super) fn resolve_shell_program(dirs: &Dirs) -> anyhow::Result<ShellProgram>
             extra_env,
         });
     }
-    #[cfg(windows)]
+    if let Some(setting) = setting
+        && let Some(shell) = chosen_shell(dirs, setting, cwd, os, probe)?
     {
-        for (candidate, label) in [
-            ("pwsh.exe", "pwsh"),
-            ("powershell.exe", "powershell"),
-            ("cmd.exe", "cmd"),
-        ] {
-            if which::which(candidate).is_ok() {
-                let label = label.to_string();
-                let (args, extra_env) = plain_shell_args(dirs, &label)?;
-                return Ok(ShellProgram {
-                    program: candidate.to_string(),
-                    args,
-                    label,
-                    extra_env,
-                });
+        if !types_resume || ShellFamily::of(&shell.program).is_some() {
+            return Ok(shell);
+        }
+        tracing::info!(
+            id = %setting.id,
+            "shell: chosen shell cannot host the resume line; using automatic"
+        );
+    }
+    automatic_shell(dirs, os, probe)
+}
+
+/// Split a custom shell command into its program and arguments by `os`'s
+/// rules; `None` when it does not split (an unclosed quote). A command that,
+/// trimmed and with one pair of surrounding `"` removed, names an existing
+/// file is that program alone, so an unquoted path with spaces works. Windows
+/// splits by the `CommandLineToArgvW` rules ([`split_windows_command_line`]),
+/// so backslashes in paths are kept; Unix by POSIX shell words.
+pub(crate) fn split_custom_command(
+    os: HostOs,
+    command: &str,
+    probe: &ShellProbe<'_>,
+) -> Option<Vec<String>> {
+    let trimmed = command.trim();
+    let whole = trimmed
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    if !whole.is_empty() && (probe.exists)(Path::new(whole)) {
+        return Some(vec![whole.to_owned()]);
+    }
+    match os {
+        HostOs::Windows => split_windows_command_line(command),
+        HostOs::Unix => shell_words::split(command).ok(),
+    }
+}
+
+/// Split `line` by the Windows command-line rules: spaces and tabs separate
+/// words and `"` groups them; a backslash is literal unless it comes before a
+/// `"`, where 2n backslashes give n and toggle quoting and 2n+1 give n and a
+/// literal `"`; `'` is an ordinary character. `None` when a `"` is left open.
+fn split_windows_command_line(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    let mut backslashes = 0usize;
+    for c in line.chars() {
+        match c {
+            '\\' => {
+                backslashes += 1;
+                in_word = true;
+            }
+            '"' => {
+                word.extend(std::iter::repeat_n('\\', backslashes / 2));
+                if backslashes % 2 == 1 {
+                    word.push('"');
+                } else {
+                    quoted = !quoted;
+                }
+                backslashes = 0;
+                in_word = true;
+            }
+            ' ' | '\t' if !quoted => {
+                word.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                word.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                word.push(c);
+                in_word = true;
             }
         }
-        anyhow::bail!("no shell on PATH (tried pwsh.exe, powershell.exe, cmd.exe)")
     }
-    #[cfg(not(windows))]
-    {
-        if let Ok(p) = std::env::var("SHELL") {
-            let label = shell_label_from_path(&p);
-            let (args, extra_env) = plain_shell_args(dirs, &label)?;
-            return Ok(ShellProgram {
-                program: p,
-                args,
-                label,
-                extra_env,
-            });
-        }
-        for (candidate, label) in [("bash", "bash"), ("zsh", "zsh"), ("sh", "sh")] {
-            if which::which(candidate).is_ok() {
-                let label = label.to_string();
-                let (args, extra_env) = plain_shell_args(dirs, &label)?;
-                return Ok(ShellProgram {
-                    program: candidate.to_string(),
-                    args,
-                    label,
-                    extra_env,
-                });
-            }
-        }
-        anyhow::bail!("no shell on PATH (tried bash, zsh, sh)")
+    if quoted {
+        return None;
     }
+    word.extend(std::iter::repeat_n('\\', backslashes));
+    if in_word {
+        words.push(word);
+    }
+    Some(words)
+}
+
+/// Log that the chosen shell cannot run, so Automatic runs instead.
+fn warn_shell_unavailable(id: &str, path: Option<&str>) {
+    tracing::warn!(id = %id, path = ?path, "shell: chosen shell unavailable; using automatic");
+}
+
+/// The shell `setting` chooses; `None` for Automatic, an id this build does
+/// not know, a named shell not found, and a custom command that does not
+/// split into words. A custom command with arguments runs exactly as given;
+/// without, it gets its program stem's integration.
+fn chosen_shell(
+    dirs: &Dirs,
+    setting: &DefaultShell,
+    cwd: Option<&Path>,
+    os: HostOs,
+    probe: &ShellProbe<'_>,
+) -> anyhow::Result<Option<ShellProgram>> {
+    let id = setting.id.as_str();
+    if id == CUSTOM_SHELL_ID {
+        let command = setting.command.as_deref().unwrap_or_default();
+        let Some(mut words) =
+            split_custom_command(os, command, probe).filter(|words| !words.is_empty())
+        else {
+            warn_shell_unavailable(id, setting.command.as_deref());
+            return Ok(None);
+        };
+        let word = words.remove(0);
+        let Some(path) = resolve_custom_program(&word, probe) else {
+            warn_shell_unavailable(id, Some(&word));
+            return Ok(None);
+        };
+        let program = path.to_string_lossy().into_owned();
+        let label = shell_label_from_path(&program);
+        let (args, extra_env) = if !words.is_empty() {
+            (words, Vec::new())
+        } else if runs_through_wsl(&program) {
+            // WSL's bash or sh takes Linux paths; the integration scripts
+            // are staged at Windows paths.
+            (Vec::new(), Vec::new())
+        } else {
+            plain_shell_args(dirs, &label)?
+        };
+        return Ok(Some(ShellProgram {
+            program,
+            args,
+            label,
+            extra_env,
+        }));
+    }
+    if id == AUTO_SHELL_ID || !is_known_shell_id(os, id) {
+        return Ok(None);
+    }
+    let Some(path) = locate_shell(os, id, probe) else {
+        warn_shell_unavailable(id, None);
+        return Ok(None);
+    };
+    let program = path.to_string_lossy().into_owned();
+    if id == "wsl" {
+        let args = cwd.map_or_else(Vec::new, |cwd| {
+            vec!["--cd".to_owned(), cwd.to_string_lossy().into_owned()]
+        });
+        return Ok(Some(ShellProgram {
+            program,
+            args,
+            label: "wsl".to_owned(),
+            extra_env: Vec::new(),
+        }));
+    }
+    // Git Bash runs as bash, so it gets bash's integration.
+    let label = if id == "git-bash" { "bash" } else { id }.to_owned();
+    let (args, extra_env) = plain_shell_args(dirs, &label)?;
+    Ok(Some(ShellProgram {
+        program,
+        args,
+        label,
+        extra_env,
+    }))
+}
+
+/// Where a custom command's program `word` lives: a path with a separator
+/// must exist; a bare name is looked up on PATH. `None` when it is empty or
+/// not found.
+fn resolve_custom_program(word: &str, probe: &ShellProbe<'_>) -> Option<PathBuf> {
+    if word.is_empty() {
+        return None;
+    }
+    if word.contains(['/', '\\']) {
+        let path = PathBuf::from(word);
+        return (probe.exists)(&path).then_some(path);
+    }
+    (probe.which)(word)
 }
 
 /// The ceiling of the wait for the shell's prompt before the agent's command
@@ -1468,6 +1860,18 @@ mod launch_tests {
         );
     }
 
+    /// Git Bash classifies as POSIX by its stem, so an agent is typed into it
+    /// with a POSIX line, Windows paths kept verbatim inside the quotes.
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_launch_changes_to_the_start_folder_first() {
+        let argv = strings(&[r"C:\bin\claude.exe", "--model", "opus"]);
+        assert_eq!(
+            typed_line(shell(r"C:\Program Files\Git\bin\bash.exe", "bash"), &argv).as_deref(),
+            Some(r"cd -- 'C:\work\repo' && 'C:\bin\claude.exe' '--model' 'opus'")
+        );
+    }
+
     #[test]
     fn the_launch_clears_the_line_first() {
         let argv = strings(&["claude"]);
@@ -1786,6 +2190,562 @@ mod launch_command_tests {
                 "The Claude launch command's extra arguments cannot be split: missing closing quote. Fix them in Settings."
             )
         );
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod default_shell_tests {
+    use super::{
+        HostOs, ShellFamily, ShellProbe, ShellProgram, detect_shells_on, resolve_shell_with,
+        split_custom_command,
+    };
+    use crate::paths::Dirs;
+    use protocol::{DefaultShell, ShellChoice};
+    use std::collections::{HashMap, HashSet};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    /// A host with a fake environment, PATH and disk.
+    #[derive(Default)]
+    struct FakeHost {
+        env: HashMap<&'static str, &'static str>,
+        path: HashMap<&'static str, &'static str>,
+        files: HashSet<PathBuf>,
+    }
+
+    impl FakeHost {
+        fn env(mut self, name: &'static str, value: &'static str) -> Self {
+            self.env.insert(name, value);
+            self
+        }
+
+        fn on_path(mut self, name: &'static str, path: &'static str) -> Self {
+            self.path.insert(name, path);
+            self
+        }
+
+        fn file(mut self, path: PathBuf) -> Self {
+            self.files.insert(path);
+            self
+        }
+
+        fn probe<R>(&self, f: impl FnOnce(&ShellProbe<'_>) -> R) -> R {
+            let env = |name: &str| self.env.get(name).map(|value| OsString::from(*value));
+            let which = |name: &str| self.path.get(name).map(PathBuf::from);
+            let exists = |path: &Path| self.files.contains(path);
+            f(&ShellProbe {
+                env: &env,
+                which: &which,
+                exists: &exists,
+            })
+        }
+
+        fn choices(&self, os: HostOs) -> Vec<ShellChoice> {
+            self.probe(|probe| detect_shells_on(os, probe))
+        }
+
+        fn resolve(&self, setting: Option<&DefaultShell>, cwd: Option<&Path>) -> ShellProgram {
+            self.resolve_typing(setting, cwd, false)
+        }
+
+        /// Resolve for a spawn that types a resume line when `resume`.
+        fn resolve_typing(
+            &self,
+            setting: Option<&DefaultShell>,
+            cwd: Option<&Path>,
+            resume: bool,
+        ) -> ShellProgram {
+            let dirs = unused_dirs();
+            self.probe(|probe| {
+                resolve_shell_with(&dirs, setting, cwd, resume, HostOs::Windows, probe)
+            })
+            .expect("a shell resolves")
+        }
+    }
+
+    /// Dirs no test here writes to: the shells they resolve stage no files.
+    fn unused_dirs() -> Dirs {
+        let root = std::env::temp_dir().join("rt-default-shell-unused");
+        Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            remote_config_file: root.join("remote.json"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+            bin_templates: None,
+        }
+    }
+
+    fn choice<'a>(choices: &'a [ShellChoice], id: &str) -> &'a ShellChoice {
+        choices
+            .iter()
+            .find(|choice| choice.id == id)
+            .expect("the choice is listed")
+    }
+
+    fn setting(id: &str, command: Option<&str>) -> DefaultShell {
+        DefaultShell {
+            id: id.to_owned(),
+            command: command.map(str::to_owned),
+        }
+    }
+
+    fn wsl_path() -> PathBuf {
+        PathBuf::from(r"C:\Windows")
+            .join("System32")
+            .join("wsl.exe")
+    }
+
+    /// Windows-only: the `hosts_agents` asserts parse Windows paths.
+    #[cfg(windows)]
+    #[test]
+    fn windows_choices_come_in_order_with_what_path_has() {
+        let host = FakeHost::default()
+            .on_path("pwsh.exe", r"C:\Program Files\PowerShell\7\pwsh.exe")
+            .on_path("cmd.exe", r"C:\Windows\System32\cmd.exe");
+        let choices = host.choices(HostOs::Windows);
+        let listed: Vec<(&str, &str, bool)> = choices
+            .iter()
+            .map(|choice| (choice.id.as_str(), choice.label.as_str(), choice.available))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("auto", "Automatic", true),
+                ("pwsh", "PowerShell 7", true),
+                ("powershell", "Windows PowerShell", false),
+                ("cmd", "Command Prompt", true),
+                ("git-bash", "Git Bash", false),
+                ("wsl", "WSL", false),
+                ("nu", "Nushell", false),
+                ("custom", "Custom", true),
+            ]
+        );
+        let pwsh = choice(&choices, "pwsh");
+        assert_eq!(
+            pwsh.path.as_deref(),
+            Some(r"C:\Program Files\PowerShell\7\pwsh.exe")
+        );
+        assert!(pwsh.hosts_agents);
+        assert_eq!(choice(&choices, "powershell").path, None);
+        let custom = choice(&choices, "custom");
+        assert_eq!(custom.path, None, "Custom has no path");
+        assert!(!custom.hosts_agents);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_comes_from_the_git_install_never_from_a_bash_on_path() {
+        let beside_git = PathBuf::from(r"D:\Git\bin\bash.exe");
+        let program_files = PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+        let local = PathBuf::from(r"C:\Users\u\AppData\Local\Programs\Git\bin\bash.exe");
+        let git_bash = |host: &FakeHost| choice(&host.choices(HostOs::Windows), "git-bash").clone();
+
+        let host = FakeHost::default()
+            .on_path("git.exe", r"D:\Git\cmd\git.exe")
+            .env("ProgramFiles", r"C:\Program Files")
+            .file(beside_git.clone())
+            .file(program_files.clone());
+        let found = git_bash(&host);
+        assert!(found.available);
+        assert_eq!(
+            found.path.as_deref(),
+            Some(r"D:\Git\bin\bash.exe"),
+            "beside git.exe first"
+        );
+        assert!(found.hosts_agents, "Git Bash hosts agents as a POSIX shell");
+
+        let host = FakeHost::default()
+            .env("ProgramFiles", r"C:\Program Files")
+            .env("LOCALAPPDATA", r"C:\Users\u\AppData\Local")
+            .file(program_files)
+            .file(local.clone());
+        assert_eq!(
+            git_bash(&host).path.as_deref(),
+            Some(r"C:\Program Files\Git\bin\bash.exe"),
+            "then under Program Files"
+        );
+
+        let host = FakeHost::default()
+            .env("ProgramFiles", r"C:\Program Files")
+            .env("LOCALAPPDATA", r"C:\Users\u\AppData\Local")
+            .file(local);
+        assert_eq!(
+            git_bash(&host).path.as_deref(),
+            Some(r"C:\Users\u\AppData\Local\Programs\Git\bin\bash.exe"),
+            "then under the user's Programs"
+        );
+
+        let host = FakeHost::default()
+            .on_path("bash.exe", r"C:\Windows\System32\bash.exe")
+            .on_path("bash", r"C:\Windows\System32\bash.exe");
+        let missing = git_bash(&host);
+        assert!(!missing.available, "a bash on PATH is not Git Bash");
+        assert_eq!(missing.path, None);
+    }
+
+    #[test]
+    fn wsl_is_available_when_its_launcher_exists() {
+        let host = FakeHost::default().env("SystemRoot", r"C:\Windows");
+        assert!(!choice(&host.choices(HostOs::Windows), "wsl").available);
+
+        let host = host.file(wsl_path());
+        let choices = host.choices(HostOs::Windows);
+        let wsl = choice(&choices, "wsl");
+        assert!(wsl.available);
+        assert_eq!(wsl.path, Some(wsl_path().to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn unix_choices_come_in_order_with_what_path_has() {
+        let host = FakeHost::default()
+            .on_path("bash", "/usr/bin/bash")
+            .on_path("fish", "/usr/bin/fish")
+            .on_path("nu", "/usr/local/bin/nu")
+            .on_path("sh", "/bin/sh");
+        let choices = host.choices(HostOs::Unix);
+        let listed: Vec<(&str, &str, bool, Option<&str>)> = choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice.id.as_str(),
+                    choice.label.as_str(),
+                    choice.available,
+                    choice.path.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("auto", "Automatic", true, Some("/usr/bin/bash")),
+                ("bash", "bash", true, Some("/usr/bin/bash")),
+                ("zsh", "zsh", false, None),
+                ("fish", "fish", true, Some("/usr/bin/fish")),
+                ("nu", "Nushell", true, Some("/usr/local/bin/nu")),
+                ("sh", "sh", true, Some("/bin/sh")),
+                ("custom", "Custom", true, None),
+            ]
+        );
+        assert!(choice(&choices, "bash").hosts_agents);
+        assert!(choice(&choices, "sh").hosts_agents);
+    }
+
+    /// Windows-only: the `hosts_agents` asserts parse Windows paths.
+    #[cfg(windows)]
+    #[test]
+    fn automatic_names_the_shell_it_resolves_to() {
+        let host = FakeHost::default().on_path(
+            "powershell.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        );
+        let choices = host.choices(HostOs::Windows);
+        let auto = choice(&choices, "auto");
+        assert_eq!(
+            auto.path.as_deref(),
+            Some(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        );
+        assert!(auto.hosts_agents);
+
+        let host = FakeHost::default()
+            .env("SHELL", "/bin/zsh")
+            .on_path("bash", "/usr/bin/bash");
+        let choices = host.choices(HostOs::Unix);
+        assert_eq!(
+            choice(&choices, "auto").path.as_deref(),
+            Some("/bin/zsh"),
+            "$SHELL comes first"
+        );
+
+        let choices = FakeHost::default().choices(HostOs::Windows);
+        let auto = choice(&choices, "auto");
+        assert!(auto.available, "Automatic is always offered");
+        assert_eq!(auto.path, None, "nothing to resolve to");
+        assert!(!auto.hosts_agents);
+    }
+
+    #[test]
+    fn wsl_nushell_and_fish_do_not_host_agents_yet() {
+        let host = FakeHost::default()
+            .env("SystemRoot", r"C:\Windows")
+            .file(wsl_path())
+            .on_path("nu.exe", r"C:\Tools\nu.exe");
+        let choices = host.choices(HostOs::Windows);
+        for id in ["wsl", "nu"] {
+            let found = choice(&choices, id);
+            assert!(found.available, "{id} is installed");
+            assert!(!found.hosts_agents, "{id} spawns agents on their own");
+        }
+
+        let host = FakeHost::default()
+            .on_path("fish", "/usr/bin/fish")
+            .on_path("nu", "/usr/bin/nu");
+        let choices = host.choices(HostOs::Unix);
+        for id in ["fish", "nu"] {
+            let found = choice(&choices, id);
+            assert!(found.available, "{id} is installed");
+            assert!(!found.hosts_agents, "{id} spawns agents on their own");
+        }
+    }
+
+    /// A Windows host with PowerShell 7 and cmd on PATH.
+    fn windows_host() -> FakeHost {
+        FakeHost::default()
+            .on_path("pwsh.exe", r"C:\Program Files\PowerShell\7\pwsh.exe")
+            .on_path("cmd.exe", r"C:\Windows\System32\cmd.exe")
+    }
+
+    #[test]
+    fn the_env_override_wins_over_the_setting() {
+        let host = windows_host().env("RUSTLING_TULIP_SHELL", "cmd.exe");
+        let shell = host.resolve(Some(&setting("pwsh", None)), None);
+        assert_eq!(shell.program, "cmd.exe");
+        assert_eq!(shell.label, "cmd");
+    }
+
+    #[test]
+    fn the_setting_wins_over_automatic() {
+        let shell = windows_host().resolve(Some(&setting("cmd", None)), None);
+        assert_eq!(shell.program, r"C:\Windows\System32\cmd.exe");
+        assert_eq!(shell.label, "cmd");
+        assert_eq!(shell.args.first().map(String::as_str), Some("/K"));
+
+        let shell = windows_host().resolve(None, None);
+        assert_eq!(shell.program, "pwsh.exe", "with no setting, Automatic");
+        assert_eq!(shell.label, "pwsh");
+    }
+
+    #[test]
+    fn an_unavailable_or_unknown_choice_falls_back_to_automatic() {
+        for id in ["nu", "git-bash", "wsl", "tcsh", "auto"] {
+            let shell = windows_host().resolve(Some(&setting(id, None)), None);
+            assert_eq!(shell.program, "pwsh.exe", "{id} falls back to Automatic");
+            assert_eq!(shell.label, "pwsh");
+        }
+    }
+
+    #[test]
+    fn a_custom_command_with_arguments_runs_as_given() {
+        let shell = windows_host()
+            .file(PathBuf::from("C:/Program Files/Git/bin/bash.exe"))
+            .resolve(
+                Some(&setting(
+                    "custom",
+                    Some("\"C:/Program Files/Git/bin/bash.exe\" -l -i"),
+                )),
+                None,
+            );
+        assert_eq!(shell.program, "C:/Program Files/Git/bin/bash.exe");
+        assert_eq!(shell.args, ["-l", "-i"]);
+        assert_eq!(shell.label, "bash");
+        assert!(shell.extra_env.is_empty(), "no integration is added");
+    }
+
+    #[test]
+    fn a_custom_command_without_arguments_gets_its_stems_integration() {
+        let shell = windows_host()
+            .on_path("pwsh", r"C:\Program Files\PowerShell\7\pwsh.exe")
+            .resolve(Some(&setting("custom", Some("pwsh"))), None);
+        assert_eq!(
+            shell.program, r"C:\Program Files\PowerShell\7\pwsh.exe",
+            "a bare name runs what PATH resolves it to"
+        );
+        assert_eq!(shell.label, "pwsh");
+        assert_eq!(
+            shell
+                .args
+                .iter()
+                .take(2)
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["-NoExit", "-Command"],
+            "pwsh's prompt integration"
+        );
+    }
+
+    #[test]
+    fn a_custom_command_that_does_not_split_falls_back_to_automatic() {
+        for command in [Some("\"pwsh"), Some("   "), Some(""), None] {
+            let shell = windows_host().resolve(Some(&setting("custom", command)), None);
+            assert_eq!(shell.program, "pwsh.exe", "{command:?} falls back");
+        }
+    }
+
+    #[test]
+    fn wsl_starts_in_the_session_folder() {
+        let host = windows_host()
+            .env("SystemRoot", r"C:\Windows")
+            .file(wsl_path());
+        let shell = host.resolve(
+            Some(&setting("wsl", None)),
+            Some(Path::new(r"C:\work\repo")),
+        );
+        assert_eq!(shell.program, wsl_path().to_string_lossy());
+        assert_eq!(shell.args, ["--cd", r"C:\work\repo"]);
+        assert_eq!(shell.label, "wsl");
+        assert_eq!(
+            shell.extra_env,
+            Vec::<(String, String)>::new(),
+            "WSL gets no integration"
+        );
+
+        let shell = host.resolve(Some(&setting("wsl", None)), None);
+        assert!(shell.args.is_empty(), "no folder, no --cd");
+    }
+
+    fn split(host: &FakeHost, os: HostOs, command: &str) -> Option<Vec<String>> {
+        host.probe(|probe| split_custom_command(os, command, probe))
+    }
+
+    #[test]
+    fn a_windows_custom_command_keeps_its_backslashes() {
+        let host = FakeHost::default();
+        assert_eq!(
+            split(&host, HostOs::Windows, r"C:\Tools\pwsh.exe -NoLogo"),
+            Some(vec![r"C:\Tools\pwsh.exe".to_owned(), "-NoLogo".to_owned()])
+        );
+        assert_eq!(
+            split(&host, HostOs::Windows, "'pwsh"),
+            Some(vec!["'pwsh".to_owned()]),
+            "a single quote is an ordinary character"
+        );
+    }
+
+    #[test]
+    fn a_windows_custom_command_naming_a_whole_path_is_one_word() {
+        let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let host = FakeHost::default().file(PathBuf::from(pwsh));
+        for command in [pwsh.to_owned(), format!("  {pwsh} "), format!("\"{pwsh}\"")] {
+            assert_eq!(
+                split(&host, HostOs::Windows, &command),
+                Some(vec![pwsh.to_owned()]),
+                "{command:?} names the program"
+            );
+        }
+        assert_eq!(
+            split(&host, HostOs::Windows, &format!("\"{pwsh}\" -NoLogo")),
+            Some(vec![pwsh.to_owned(), "-NoLogo".to_owned()]),
+            "a quoted path with arguments splits"
+        );
+    }
+
+    #[test]
+    fn a_windows_custom_command_follows_the_command_line_rules_for_quotes() {
+        let host = FakeHost::default();
+        assert_eq!(
+            split(&host, HostOs::Windows, r#"a\\"b c""#),
+            Some(vec![r"a\b c".to_owned()]),
+            "2n backslashes before a quote give n and toggle quoting"
+        );
+        assert_eq!(
+            split(&host, HostOs::Windows, r#"a\"b"#),
+            Some(vec![r#"a"b"#.to_owned()]),
+            "2n+1 backslashes before a quote give n and a literal quote"
+        );
+        assert_eq!(
+            split(&host, HostOs::Windows, r#"x "a b"  c\d"#),
+            Some(vec!["x".to_owned(), "a b".to_owned(), r"c\d".to_owned()])
+        );
+        assert_eq!(
+            split(&host, HostOs::Windows, r#""pwsh -NoLogo"#),
+            None,
+            "an unclosed double quote does not split"
+        );
+    }
+
+    #[test]
+    fn a_unix_custom_command_still_splits_by_shell_words() {
+        let host = FakeHost::default();
+        assert_eq!(
+            split(&host, HostOs::Unix, r"'/opt/my shell/nu' --login a\ b"),
+            Some(vec![
+                "/opt/my shell/nu".to_owned(),
+                "--login".to_owned(),
+                "a b".to_owned()
+            ])
+        );
+        assert_eq!(split(&host, HostOs::Unix, "'nu"), None);
+    }
+
+    #[test]
+    fn a_windows_custom_path_with_arguments_resolves_as_given() {
+        let shell = windows_host()
+            .file(PathBuf::from(r"C:\Tools\pwsh.exe"))
+            .resolve(
+                Some(&setting("custom", Some(r"C:\Tools\pwsh.exe -NoLogo"))),
+                None,
+            );
+        assert_eq!(shell.program, r"C:\Tools\pwsh.exe");
+        assert_eq!(shell.args, ["-NoLogo"]);
+    }
+
+    #[test]
+    fn a_custom_bare_name_that_resolves_to_wsl_bash_gets_no_family_and_no_integration() {
+        let wsl_bash = r"C:\Windows\System32\bash.exe";
+        let shell = windows_host()
+            .on_path("bash", wsl_bash)
+            .resolve(Some(&setting("custom", Some("bash"))), None);
+        assert_eq!(shell.program, wsl_bash, "the program is the resolved path");
+        assert_eq!(
+            ShellFamily::of(&shell.program),
+            None,
+            "WSL's bash hosts no agent"
+        );
+        assert_eq!(shell.args, Vec::<String>::new(), "no --rcfile");
+        assert_eq!(shell.extra_env, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn a_custom_program_that_does_not_resolve_falls_back_to_automatic() {
+        for command in [
+            r"C:\Tools\nu.exe",
+            r"C:\Tools\nu.exe -l",
+            "nu",
+            "\"\"",
+            "\"\" -l",
+        ] {
+            let shell = windows_host().resolve(Some(&setting("custom", Some(command))), None);
+            assert_eq!(shell.program, "pwsh.exe", "{command:?} falls back");
+        }
+    }
+
+    #[test]
+    fn a_resume_line_never_goes_into_a_shell_that_cannot_host_it() {
+        let host = windows_host().on_path("nu.exe", r"C:\Tools\nu.exe");
+        let nu = setting("nu", None);
+        let resuming = host.resolve_typing(Some(&nu), None, true);
+        assert_eq!(
+            resuming.program, "pwsh.exe",
+            "Automatic types the resume line"
+        );
+        assert_eq!(resuming.label, "pwsh");
+        let plain = host.resolve_typing(Some(&nu), None, false);
+        assert_eq!(plain.program, r"C:\Tools\nu.exe", "a plain shell keeps nu");
+
+        // Classifying cmd by its Windows path needs Windows path parsing.
+        if cfg!(windows) {
+            let cmd = setting("cmd", None);
+            assert_eq!(
+                host.resolve_typing(Some(&cmd), None, true).program,
+                r"C:\Windows\System32\cmd.exe",
+                "a shell with a family keeps the resume line"
+            );
+        }
+    }
+
+    #[test]
+    fn nushell_runs_bare() {
+        let host = windows_host().on_path("nu.exe", r"C:\Tools\nu.exe");
+        let shell = host.resolve(Some(&setting("nu", None)), None);
+        assert_eq!(shell.program, r"C:\Tools\nu.exe");
+        assert_eq!(shell.label, "nu");
+        assert!(shell.args.is_empty() && shell.extra_env.is_empty());
     }
 }
 

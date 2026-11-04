@@ -1,6 +1,7 @@
 //! Repos, workspaces and host settings: the registry and settings messages, VS Code workspace scans, keep-awake, and the agents' launch commands.
 use super::connection::ConnCtx;
 use super::remote::LAN_RETIRED;
+use super::spawn::{HostOs, ShellProbe, detect_shells, is_known_shell_id, split_custom_command};
 use super::{Hub, StateEvent};
 use crate::registry::{
     add_repo, remove_repo, remove_workspace, set_repo_worktree_default,
@@ -11,8 +12,8 @@ use crate::state::{AgentCommand, AppState};
 use crate::{user_env, vscode};
 use anyhow::anyhow;
 use protocol::{
-    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, KeepAwakeMode, OptionValues,
-    VscodeWorkspaceSuggestion, error_codes,
+    AgentCommandEntry, AgentId, ClientMessage, DaemonMessage, DefaultShell, KeepAwakeMode,
+    OptionValues, VscodeWorkspaceSuggestion, error_codes,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -170,6 +171,21 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             set_agent_command(hub, &agent, AgentCommand { program, args }),
             request_id,
         )?,
+        ClientMessage::SetDefaultShell {
+            id,
+            command,
+            request_id,
+        } => answer_refusal(out_tx, set_default_shell(hub, &id, command), request_id)?,
+        ClientMessage::ListShellChoices => {
+            // Detection searches PATH and probes files, so it runs off the
+            // async workers; the reply goes to this requester alone.
+            match tokio::task::spawn_blocking(|| detect_shells(&ShellProbe::HOST)).await {
+                Ok(choices) => {
+                    let _ = out_tx.send(DaemonMessage::ShellChoices { choices });
+                }
+                Err(err) => warn!(?err, "settings: shell detection did not finish"),
+            }
+        }
         ClientMessage::SetAgentSettings {
             agent,
             options,
@@ -309,6 +325,74 @@ fn set_agent_command(hub: &Hub, agent: &AgentId, command: AgentCommand) -> anyho
     let commands = agent_command_entries(&hub.state, &|name| std::env::var(name).ok());
     let _ = hub.state_events.send(StateEvent::AgentCommands(commands));
     Ok(())
+}
+
+/// Persist the host's default shell and broadcast the effective choice.
+/// `auto`, an id this build does not know, and `custom` with a blank command
+/// store Automatic; `command` is kept for `custom` only. A custom command
+/// with a control character or an unclosed quote is refused.
+fn set_default_shell(hub: &Hub, id: &str, command: Option<String>) -> anyhow::Result<()> {
+    let stored = if id == "custom" {
+        let command = command.unwrap_or_default();
+        check_shell_command(&command)?;
+        (!command.trim().is_empty()).then(|| DefaultShell {
+            id: id.to_owned(),
+            command: Some(command),
+        })
+    } else if id != "auto" && is_known_shell_id(HostOs::CURRENT, id) {
+        Some(DefaultShell {
+            id: id.to_owned(),
+            command: None,
+        })
+    } else {
+        None
+    };
+    hub.state.set_default_shell(stored)?;
+    let (id, command) = effective_default_shell(&hub.state);
+    info!(id = %id, "default shell changed");
+    let _ = hub
+        .state_events
+        .send(StateEvent::DefaultShell { id, command });
+    Ok(())
+}
+
+/// Refuse a custom shell command that holds a control character or does not
+/// split into shell words (an unclosed quote).
+fn check_shell_command(command: &str) -> Result<(), LaunchRefusal> {
+    if command.chars().any(char::is_control) {
+        return Err(LaunchRefusal::Args(
+            "The custom shell command cannot contain a newline or other control character."
+                .to_owned(),
+        ));
+    }
+    // The same split the spawn uses, by this host's rules: on Windows only an
+    // unclosed `"` fails.
+    let words =
+        split_custom_command(HostOs::CURRENT, command, &ShellProbe::HOST).ok_or_else(|| {
+            LaunchRefusal::Args("The custom shell command has an unclosed quote.".to_owned())
+        })?;
+    if words.first().is_some_and(String::is_empty) {
+        return Err(LaunchRefusal::Program(
+            "The custom shell command has no program.".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The stored choice as `(id, command)`: `auto` when nothing is stored or the
+/// stored id is one this build does not know.
+fn effective_default_shell(state: &AppState) -> (String, Option<String>) {
+    match state.default_shell() {
+        Some(shell) if is_known_shell_id(HostOs::CURRENT, &shell.id) => (shell.id, shell.command),
+        _ => ("auto".to_owned(), None),
+    }
+}
+
+/// The [`DaemonMessage::DefaultShell`] echo of the stored choice, as
+/// [`effective_default_shell`] reads it.
+pub(super) fn default_shell_message(state: &AppState) -> DaemonMessage {
+    let (id, command) = effective_default_shell(state);
+    DaemonMessage::DefaultShell { id, command }
 }
 
 /// Validate `options` against `agent`'s option schema, persist them as the
@@ -1223,6 +1307,182 @@ mod tests {
                 .iter()
                 .all(|entry| entry.program.is_empty() && entry.args.is_empty()),
             "{broadcast:?}"
+        );
+    }
+
+    fn set_shell(id: &str, command: Option<&str>) -> ClientMessage {
+        ClientMessage::SetDefaultShell {
+            id: id.to_owned(),
+            command: command.map(str::to_owned),
+            request_id: None,
+        }
+    }
+
+    /// The next default-shell broadcast on the state stream, as `(id, command)`.
+    async fn next_default_shell(
+        rx: &mut broadcast::Receiver<StateEvent>,
+    ) -> (String, Option<String>) {
+        let next = async {
+            loop {
+                let evt = rx.recv().await.expect("the state broadcast stays open");
+                if let StateEvent::DefaultShell { id, command } = evt {
+                    return (id, command);
+                }
+            }
+        };
+        tokio::time::timeout(HANG_GUARD, next)
+            .await
+            .expect("hung: the change was never broadcast")
+    }
+
+    fn stored_shell(id: &str, command: Option<&str>) -> protocol::DefaultShell {
+        protocol::DefaultShell {
+            id: id.to_owned(),
+            command: command.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_default_shell_persists_broadcasts_and_auto_clears_it() {
+        let (hub, _scratch) = test_hub("default-shell-save");
+        let mut events = hub.state_events.subscribe();
+
+        let sent = dispatch_err(&hub, set_shell("custom", Some("bash -l"))).await;
+        assert_eq!(sent, None, "a valid custom command is accepted");
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert_eq!(
+            reloaded.default_shell(),
+            Some(stored_shell("custom", Some("bash -l"))),
+            "the choice reached state.json"
+        );
+        assert_eq!(
+            next_default_shell(&mut events).await,
+            ("custom".to_owned(), Some("bash -l".to_owned()))
+        );
+
+        let sent = dispatch_err(&hub, set_shell("nu", Some("ignored"))).await;
+        assert_eq!(sent, None, "a named shell is accepted");
+        assert_eq!(
+            hub.state.default_shell(),
+            Some(stored_shell("nu", None)),
+            "the command is dropped for a named shell"
+        );
+        assert_eq!(
+            next_default_shell(&mut events).await,
+            ("nu".to_owned(), None)
+        );
+
+        let sent = dispatch_err(&hub, set_shell("custom", Some("   "))).await;
+        assert_eq!(sent, None, "a blank custom command is accepted");
+        assert_eq!(hub.state.default_shell(), None, "and stored as Automatic");
+        assert_eq!(
+            next_default_shell(&mut events).await,
+            ("auto".to_owned(), None)
+        );
+
+        dispatch_err(&hub, set_shell("nu", None)).await;
+        assert_eq!(
+            next_default_shell(&mut events).await,
+            ("nu".to_owned(), None)
+        );
+        let sent = dispatch_err(&hub, set_shell("auto", None)).await;
+        assert_eq!(sent, None, "Automatic is accepted");
+        assert_eq!(hub.state.default_shell(), None, "auto clears the choice");
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert_eq!(
+            reloaded.default_shell(),
+            None,
+            "the clear reached state.json"
+        );
+        assert_eq!(
+            next_default_shell(&mut events).await,
+            ("auto".to_owned(), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_default_shell_command_echoes_the_request_id() {
+        let (hub, _scratch) = test_hub("default-shell-refused");
+        let args = protocol::error_codes::LAUNCH_ARGS_REFUSED;
+        let program = protocol::error_codes::LAUNCH_PROGRAM_REFUSED;
+        for (command, want, want_code) in [
+            (
+                "\"pwsh -NoLogo",
+                "The custom shell command has an unclosed quote.",
+                args,
+            ),
+            (
+                "bash\n-l",
+                "The custom shell command cannot contain a newline or other control character.",
+                args,
+            ),
+            ("\"\"", "The custom shell command has no program.", program),
+            (
+                "\"\" -l",
+                "The custom shell command has no program.",
+                program,
+            ),
+        ] {
+            let reply = dispatch_one(
+                &hub,
+                ClientMessage::SetDefaultShell {
+                    id: "custom".to_owned(),
+                    command: Some(command.to_owned()),
+                    request_id: Some("d1".to_owned()),
+                },
+            )
+            .await;
+            assert!(
+                matches!(
+                    &reply,
+                    DaemonMessage::Error { message, request_id: Some(id), code: Some(code) }
+                        if message == want && id == "d1" && code == want_code
+                ),
+                "the refusal answers the request it refuses: {reply:?}"
+            );
+            assert_eq!(hub.state.default_shell(), None, "nothing was stored");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_default_shell_id_stores_automatic_and_echoes_auto() {
+        let (hub, _scratch) = test_hub("default-shell-unknown");
+        let mut events = hub.state_events.subscribe();
+        dispatch_err(&hub, set_shell("nu", None)).await;
+        assert_eq!(
+            next_default_shell(&mut events).await,
+            ("nu".to_owned(), None)
+        );
+
+        let sent = dispatch_err(&hub, set_shell("tcsh", Some("tcsh"))).await;
+        assert_eq!(sent, None, "an unknown id is not refused");
+        assert_eq!(hub.state.default_shell(), None, "it stores Automatic");
+        assert_eq!(
+            next_default_shell(&mut events).await,
+            ("auto".to_owned(), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_shell_choices_answers_the_requester() {
+        let (hub, _scratch) = test_hub("shell-choices");
+        let mut events = hub.state_events.subscribe();
+        let reply = dispatch_one(&hub, ClientMessage::ListShellChoices).await;
+        assert!(
+            matches!(&reply, DaemonMessage::ShellChoices { .. }),
+            "the requester is answered with its choices: {reply:?}"
+        );
+        let choices = match reply {
+            DaemonMessage::ShellChoices { choices } => choices,
+            _ => Vec::new(),
+        };
+        let ids: Vec<&str> = choices.iter().map(|choice| choice.id.as_str()).collect();
+        assert_eq!(ids.first(), Some(&"auto"), "{ids:?}");
+        assert_eq!(ids.last(), Some(&"custom"), "{ids:?}");
+        assert!(ids.contains(&"nu"), "{ids:?}");
+        assert!(
+            events.try_recv().is_err(),
+            "the choices go to the requester alone"
         );
     }
 
