@@ -321,7 +321,7 @@ fn a_remote_sessions_menu_offers_what_a_remote_host_allows(cx: &mut TestAppConte
     };
 
     assert!(
-        reveal_tip(&mut h, "leaf-b1").is_some(),
+        reveal_tip(&mut h, &format!("leaf-{REMOTE}::b1")).is_some(),
         "the remote session's Reveal is refused: its folder is not on this PC"
     );
     assert_eq!(

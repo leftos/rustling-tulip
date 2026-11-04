@@ -275,7 +275,17 @@ fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
             .into_iter()
             .filter(|c| !c.collapsed)
     };
-    let listed = |id: &str| containers().any(|c| c.leaves.iter().any(|leaf| leaf.id == id));
+    // A leaf part names its leaf by `leaf_key`: `<host key>::<id>` on a
+    // remote host, the bare id on This PC.
+    let on_host = |key: &str| -> (HostKey, String) {
+        key.rsplit_once("::").map_or_else(
+            || (HostKey::Local, key.to_owned()),
+            |(host, id)| (HostKey::Remote(host.to_owned()), id.to_owned()),
+        )
+    };
+    let listed = |host: &HostKey, id: &str| {
+        containers().any(|c| &c.host == host && c.leaves.iter().any(|leaf| leaf.id == id))
+    };
     if selector == "unbound-banner" {
         Some(containers().any(|c| c.kind == ContainerKind::Unbound))
     } else if selector == "detached-banner" {
@@ -284,16 +294,24 @@ fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         Some(true)
     } else if selector == "sidebar-no-repos" || selector == "sidebar-add-repo" {
         Some(root.no_repos_yet())
-    } else if let Some(id) = selector.strip_prefix("leaf-pill-") {
-        Some(root.leaf_tab_pill(id).is_some() && listed(id))
-    } else if let Some(id) = selector
+    } else if let Some(key) = selector.strip_prefix("leaf-pill-") {
+        let (host, id) = on_host(key);
+        Some(root.leaf_tab_pill_on(&host, &id).is_some() && listed(&host, &id))
+    } else if let Some(key) = selector
         .strip_prefix("leaf-resume-")
         .or_else(|| selector.strip_prefix("leaf-dismiss-"))
     {
-        let offered = root.leaf_buttons(id).iter().any(|(s, _)| s == selector);
-        Some(offered && listed(id))
+        let (host, id) = on_host(key);
+        let offered = root
+            .leaf_buttons_on(&host, &id)
+            .iter()
+            .any(|(s, _)| s == selector);
+        Some(offered && listed(&host, &id))
     } else {
-        Some(listed(selector.strip_prefix("leaf-")?))
+        // A leaf's label draws while its leaf is listed.
+        let key = selector.strip_prefix("leaf-")?;
+        let (host, id) = on_host(key.strip_suffix("-label").unwrap_or(key));
+        Some(listed(&host, &id))
     }
 }
 

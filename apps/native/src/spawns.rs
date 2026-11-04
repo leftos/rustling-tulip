@@ -93,6 +93,13 @@ pub(crate) struct PendingSpawns {
 }
 
 impl PendingSpawns {
+    /// The host spawn `request_id` went to, while it waits for its reply.
+    pub(crate) fn host_of(&self, request_id: &str) -> Option<HostKey> {
+        self.pending
+            .get(request_id)
+            .map(|pending| pending.host.clone())
+    }
+
     /// Records `request` under `request_id`, going to `host`, and returns
     /// the message to send.
     pub(crate) fn start(

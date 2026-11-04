@@ -267,6 +267,7 @@ fn needs_you_row(
 ) -> Stateful<Div> {
     let t = theme(cx);
     let id = row.session_id.clone();
+    let host = row.host.clone();
     let menu_id = row.session_id.clone();
     let menu_host = row.host.clone();
     let name = format!("needs-you-row-{}", row.session_id);
@@ -341,7 +342,7 @@ fn needs_you_row(
             }),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.select_session(&id, window, cx);
+            this.select_session_on(&host, &id, window, cx);
         }))
 }
 

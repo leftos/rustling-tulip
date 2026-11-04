@@ -1197,13 +1197,14 @@ impl RootView {
         }
     }
 
-    /// Closes the menu and the menu's delete-worktree confirm of a session
-    /// the daemon no longer lists, and forgets its appearance sends still
-    /// in flight. The quit's walk skips such a session itself.
+    /// Closes the menu, the menu's delete-worktree confirm and the
+    /// pane-close dialog of a session its host no longer lists, and forgets
+    /// its appearance sends still in flight. The quit's walk skips such a
+    /// session itself.
     pub(crate) fn drop_stale_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let sidebar = &self.sidebar;
         self.pending_appearance
-            .retain_sessions(|session_id| sidebar.session(session_id).is_some());
+            .retain_sessions(|host, session_id| sidebar.session_on(host, session_id).is_some());
         if self.menu.as_ref().is_some_and(|menu| {
             self.sidebar
                 .session_on(&menu.host, &menu.session_id)
@@ -1219,6 +1220,13 @@ impl RootView {
                     .is_none()
         }) {
             self.close_delete_dialog(window, cx);
+        }
+        if self.pane_ui.close.as_ref().is_some_and(|dialog| {
+            self.sidebar
+                .session_on(dialog.host(), dialog.session_id())
+                .is_none()
+        }) {
+            self.close_pane_close_dialog(window, cx);
         }
         if self
             .repo_remove
@@ -2424,10 +2432,20 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(own) = self.effective_appearance(session_id) {
+        // The menu's own host: another host's session of the same id keeps
+        // its colours.
+        let host = self
+            .menu
+            .as_ref()
+            .filter(|menu| menu.session_id == session_id)
+            .map_or_else(
+                || self.host_of_session(session_id),
+                |menu| menu.host.clone(),
+            );
+        if let Some(own) = self.effective_appearance_on(&host, session_id) {
             match AppearanceChange::accent_and_frame(color.map(appearance::hex)).normalized() {
                 Ok(change) if change.changes_nothing_in(&own) => {}
-                Ok(change) => self.send_session_appearance(session_id, &own, &change),
+                Ok(change) => self.send_session_appearance_on(&host, session_id, &own, &change),
                 Err(err) => {
                     tracing::warn!("not sending session {session_id}'s accent: {err}");
                     self.push_toast(
@@ -3008,8 +3026,9 @@ impl RootView {
         session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let host = self.slot_host(pane_id);
         session_id
-            .and_then(|id| self.sidebar.session(id))
+            .and_then(|id| self.sidebar.session_on(&host, id))
             .filter(|session| can_attach(session))?;
         let key = PopoutKey::Pane {
             tab_id: tab_id.to_owned(),
@@ -3330,7 +3349,7 @@ impl RootView {
     /// The host of the session terminal slot `slot_id` draws: a session
     /// pop-out's own, else the host its pane names in whichever tab holds
     /// it; This PC for neither.
-    fn slot_host(&self, slot_id: &str) -> HostKey {
+    pub(crate) fn slot_host(&self, slot_id: &str) -> HostKey {
         crate::popouts::slot_session(slot_id)
             .map(|shown| shown.host)
             .or_else(|| {
@@ -3587,19 +3606,6 @@ impl RootView {
         self.delete_dialog
             .as_ref()
             .is_some_and(|dialog| matches!(dialog.owner, ConfirmOwner::ExitWalk { .. }))
-    }
-
-    /// Opens the confirm for `session_id` on the host that lists it; see
-    /// [`Self::open_delete_dialog_on`].
-    pub(crate) fn open_delete_dialog(
-        &mut self,
-        session_id: &str,
-        owner: ConfirmOwner,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let host = self.host_of_session(session_id);
-        self.open_delete_dialog_on(&host, session_id, owner, window, cx);
     }
 
     /// Opens the confirm for `host`'s session `session_id` on behalf of

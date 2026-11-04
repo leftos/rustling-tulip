@@ -319,7 +319,8 @@ impl RootView {
         match walk.current().map(str::to_owned) {
             Some(session_id) => {
                 let owner = ConfirmOwner::ExitWalk { index, total };
-                self.open_delete_dialog(&session_id, owner, window, cx);
+                // The walk covers This PC's sessions only.
+                self.open_delete_dialog_on(&HostKey::Local, &session_id, owner, window, cx);
             }
             None => self.finish_exit_walk(window, cx),
         }

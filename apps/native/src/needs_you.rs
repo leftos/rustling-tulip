@@ -48,7 +48,7 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
     let mut ended = Vec::new();
     for container in model.containers() {
         for leaf in &container.leaves {
-            let Some(session) = model.session(&leaf.id) else {
+            let Some(session) = model.session_on(&container.host, &leaf.id) else {
                 continue;
             };
             let Some(reason) = reason_of(leaf) else {
@@ -65,7 +65,7 @@ pub(crate) fn rows(model: &SidebarModel) -> Vec<NeedsYouRow> {
                 label: leaf.label.clone(),
                 reason,
                 since: session.status_since,
-                detail: detail_of(reason, session, model.session_agents(&session.id)),
+                detail: detail_of(reason, session, model.agents(&container.host)),
             };
             match reason {
                 Reason::Asking => asking.push(row),

@@ -94,11 +94,14 @@ pub fn resume_report_toast(resumed: u32, left: u32) -> ToastSpec {
 }
 
 /// The toast for [`protocol::DaemonMessage::SessionNotice`]: what the
-/// daemon did, or would not do, to session `session_id`'s terminal. `label`
-/// is the session agent's descriptor label; with none the toast says "The
-/// agent". A notice this build does not know raises none.
+/// daemon did, or would not do, to `host`'s session `session_id`'s
+/// terminal, keyed `session-notice:{id}` for This PC and
+/// `session-notice:{host key}::{id}` for a remote host. `label` is the
+/// session agent's descriptor label; with none the toast says "The agent".
+/// A notice this build does not know raises none.
 #[must_use]
 pub fn session_notice_toast(
+    host: &crate::target::HostKey,
     session_id: &str,
     label: Option<&str>,
     notice: &protocol::SessionNoticeKind,
@@ -117,7 +120,10 @@ pub fn session_notice_toast(
         kind: ToastKind::Info,
         title,
         detail: None,
-        key: Some(format!("session-notice:{session_id}")),
+        key: Some(match host.wire() {
+            None => format!("session-notice:{session_id}"),
+            Some(wire) => format!("session-notice:{wire}::{session_id}"),
+        }),
         sticky: false,
         actions: Vec::new(),
     })
@@ -697,10 +703,16 @@ mod tests {
 
     #[test]
     fn session_notice_toast_titles() {
+        use crate::target::HostKey;
         use protocol::SessionNoticeKind;
-        let waiting =
-            session_notice_toast("s1", Some("Test agent"), &SessionNoticeKind::WaitingInMain)
-                .expect("a known notice raises a toast");
+        let local = HostKey::Local;
+        let waiting = session_notice_toast(
+            &local,
+            "s1",
+            Some("Test agent"),
+            &SessionNoticeKind::WaitingInMain,
+        )
+        .expect("a known notice raises a toast");
         assert_eq!(
             waiting.title,
             "Test agent is waiting in the main conversation."
@@ -708,14 +720,29 @@ mod tests {
         assert_eq!(waiting.kind, ToastKind::Info);
         assert_eq!(waiting.key.as_deref(), Some("session-notice:s1"));
         assert!(!waiting.sticky && waiting.actions.is_empty());
+        let remote = HostKey::Remote("box.tail1234.ts.net".to_owned());
         assert_eq!(
-            session_notice_toast("s1", None, &SessionNoticeKind::WaitingInMain)
+            session_notice_toast(
+                &remote,
+                "s1",
+                Some("Test agent"),
+                &SessionNoticeKind::WaitingInMain
+            )
+            .expect("a toast")
+            .key
+            .as_deref(),
+            Some("session-notice:box.tail1234.ts.net::s1"),
+            "a remote host's notice carries its host part"
+        );
+        assert_eq!(
+            session_notice_toast(&local, "s1", None, &SessionNoticeKind::WaitingInMain)
                 .expect("a toast")
                 .title,
             "The agent is waiting in the main conversation."
         );
         assert_eq!(
             session_notice_toast(
+                &local,
                 "s2",
                 Some("Test agent"),
                 &SessionNoticeKind::DraftReturnedToMain {
@@ -727,7 +754,12 @@ mod tests {
             "Your draft for Sleeper A is back in the main conversation."
         );
         assert_eq!(
-            session_notice_toast("s1", Some("Test agent"), &SessionNoticeKind::Unknown),
+            session_notice_toast(
+                &local,
+                "s1",
+                Some("Test agent"),
+                &SessionNoticeKind::Unknown
+            ),
             None
         );
     }

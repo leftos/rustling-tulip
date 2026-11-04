@@ -850,7 +850,7 @@ fn a_remote_leaf_dropped_on_a_pill_lands_in_that_tab_with_its_host(cx: &mut Test
     host.sent();
     h.sent();
 
-    let leaf = h.bounds("leaf-b1");
+    let leaf = h.bounds(&format!("leaf-{REMOTE}::b1"));
     assert!(leaf.size.height > Pixels::ZERO, "b1's leaf is on screen");
     let from = point(leaf.origin.x + leaf.size.width * 0.3, leaf.center().y);
     let to = on_pill(&mut h, "t2", 0.5);

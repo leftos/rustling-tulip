@@ -5,10 +5,10 @@ use crate::support;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
-    AgentDescriptor, AgentId, BranchFate, CheckoutStrategy, ClientMessage, DaemonMessage,
-    InitLayoutKind, MemberBranchFate, MergeEvidence, PresetEntry, PresetTarget, SessionMode,
-    SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
-    VscodeWorkspaceSuggestion, WorktreeCleanupFailure, WorktreeReusePolicy,
+    AgentDescriptor, AgentId, AttentionReason, BranchFate, CheckoutStrategy, ClientMessage,
+    DaemonMessage, InitLayoutKind, MemberBranchFate, MergeEvidence, PresetEntry, PresetTarget,
+    SessionMode, SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget, SplitDirection,
+    VscodeWorkspaceFolder, VscodeWorkspaceSuggestion, WorktreeCleanupFailure, WorktreeReusePolicy,
 };
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, HeaderChipKind, NetEvent, OpenIn, OpenOutcome, PopoutKey};
@@ -612,8 +612,8 @@ fn a_leaf_reorder_in_a_remote_repo_goes_to_that_host(cx: &mut TestAppContext) {
     host.sent();
     h.sent();
 
-    let from = on_row(&mut h, "leaf-d", 0.5);
-    let to = on_row(&mut h, "leaf-c", 0.2);
+    let from = on_row(&mut h, &remote_leaf("", "d"), 0.5);
+    let to = on_row(&mut h, &remote_leaf("", "c"), 0.2);
     h.drag_and_drop(from, to);
 
     let reorders = |sent: Vec<ClientMessage>| -> Vec<(String, Vec<String>)> {
@@ -986,7 +986,7 @@ fn an_offline_hosts_leaf_neither_drags_nor_binds(cx: &mut TestAppContext) {
         "the offline host's rows dim"
     );
 
-    let from = on_row(&mut h, "leaf-b1", 0.5);
+    let from = on_row(&mut h, &remote_leaf("", "b1"), 0.5);
     h.start_drag(from);
     assert!(!h.dragging(), "the offline host's leaf does not drag");
     let to = at(&mut h, "p2", 0.5, 0.5);
@@ -1997,4 +1997,512 @@ fn changing_the_spawn_target_host_asks_its_env_names(cx: &mut TestAppContext) {
         "the new target's host is asked for its env names"
     );
     assert_eq!(env_name_asks(&h.sent()), 0, "This PC is not asked again");
+}
+
+/// Remote leaf selector `leaf-{part}{REMOTE}::{id}`: the host part a
+/// remote host's leaf selectors carry.
+fn remote_leaf(part: &str, id: &str) -> String {
+    format!("leaf-{part}{REMOTE}::{id}")
+}
+
+#[gpui::test]
+fn a_remote_leaf_has_host_qualified_selectors(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id(cx, &dir, session("s1").build());
+
+    assert!(h.in_model("leaf-s1"), "This PC's leaf keeps its selector");
+    let remote = remote_leaf("", "s1");
+    assert!(h.in_model(&remote), "the remote leaf is addressable");
+    assert!(
+        h.in_model(&format!("{remote}-label")),
+        "its label moves with it"
+    );
+    assert_ne!(
+        h.bounds("leaf-s1").origin.y,
+        h.bounds(&remote).origin.y,
+        "the two leaves are distinct rows"
+    );
+}
+
+/// The sessions among `sent` an abandoned session's Resume goes out for.
+fn abandoned_resumes(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ResumeAbandoned { session_id } => Some(session_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn resume_on_a_remote_leaf_resumes_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").abandoned().build(),
+        session("s1").abandoned().build(),
+    );
+
+    h.click_on(&remote_leaf("resume-", "s1"));
+
+    assert_eq!(
+        abandoned_resumes(&h.host(&remote()).sent()),
+        ["s1"],
+        "the remote leaf's Resume goes to its host"
+    );
+    assert!(
+        abandoned_resumes(&h.sent()).is_empty(),
+        "This PC is not asked"
+    );
+}
+
+#[gpui::test]
+fn a_remote_leafs_pill_shows_its_own_hosts_tab_state(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // Only This PC's s1 shows in a pane; the remote host's s1 is in none.
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.tabs = vec![tab("t1", &pane("p1", Some("s1")))];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+    host.sent();
+    h.sent();
+
+    // An unbound pill opens its session in a new tab; a bound one does not.
+    h.click_on(&remote_leaf("pill-", "s1"));
+
+    assert_eq!(
+        placements(&h.sent()),
+        [placed_on_remote("s1")],
+        "the remote leaf's pill is unbound, as its own s1 shows in no pane"
+    );
+}
+
+#[gpui::test]
+fn clicking_a_remote_leaf_selects_its_own_hosts_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.tabs = vec![
+        tab("t1", &pane("p1", Some("s1"))),
+        tab("t2", &remote_pane("p2", "s1")),
+    ];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+    assert_eq!(h.root(|root, _| root.active_pane_ids()), ["p1"]);
+
+    h.click_on(&remote_leaf("", "s1"));
+
+    assert_eq!(
+        h.root(|root, _| root.active_pane_ids()),
+        ["p2"],
+        "the remote leaf shows the pane of its own host's s1"
+    );
+}
+
+#[gpui::test]
+fn a_remote_session_notice_reads_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").no_agent().build(),
+        session("s1").agent("agent-x").build(),
+    );
+    let mut labelled = described("agent-x", "remote-x");
+    "Remote X".clone_into(&mut labelled.label);
+    h.host(&remote()).send(DaemonMessage::Agents {
+        agents: vec![labelled],
+    });
+
+    h.host(&remote()).send(DaemonMessage::SessionNotice {
+        session_id: "s1".to_owned(),
+        notice: protocol::SessionNoticeKind::WaitingInMain,
+    });
+    h.send(DaemonMessage::SessionNotice {
+        session_id: "s1".to_owned(),
+        notice: protocol::SessionNoticeKind::WaitingInMain,
+    });
+
+    let titles = toast_titles(&mut h);
+    assert!(
+        titles
+            .iter()
+            .any(|title| title == "Remote X is waiting in the main conversation."),
+        "the remote notice names the agent its own host lists: {titles:?}"
+    );
+    assert!(
+        titles
+            .iter()
+            .any(|title| title == "The agent is waiting in the main conversation."),
+        "This PC's notice keeps a toast of its own: {titles:?}"
+    );
+}
+
+/// The font sizes `sent` sets on session `id`.
+fn font_sizes(sent: &[ClientMessage], id: &str) -> Vec<Option<u16>> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetSessionAppearance {
+                session_id,
+                appearance,
+                ..
+            } if session_id == id => Some(appearance.terminal_font_size),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Focuses pane `pane_id` and presses Ctrl+=.
+fn step_font_in(h: &mut Harness<'_>, pane_id: &str) {
+    let on = h.cell_center(pane_id, 0, 0);
+    h.click(on, Modifiers::none());
+    h.keys("ctrl-=");
+}
+
+#[gpui::test]
+fn a_stale_remote_session_drops_only_its_own_ui(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id(cx, &dir, session("s1").build());
+    // A click focuses a pane only in an active window.
+    h.cx.update(|window, _| window.activate_window());
+
+    step_font_in(&mut h, "p2");
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()),
+        Some("p2".to_owned()),
+        "the click focuses the remote pane"
+    );
+    let remote_first = font_sizes(&h.host(&remote()).sent(), "s1");
+    assert_eq!(
+        remote_first.len(),
+        1,
+        "the remote pane's step goes to its host"
+    );
+    assert!(
+        font_sizes(&h.sent(), "s1").is_empty(),
+        "This PC is not asked"
+    );
+    step_font_in(&mut h, "p1");
+    let local_first = font_sizes(&h.sent(), "s1");
+    assert_eq!(local_first.len(), 1, "This PC's step stays in flight");
+
+    // The remote host drops its s1, then lists it again unchanged.
+    h.host(&remote()).send(DaemonMessage::Sessions {
+        sessions: Vec::new(),
+    });
+    h.host(&remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+
+    step_font_in(&mut h, "p2");
+    assert_eq!(
+        font_sizes(&h.host(&remote()).sent(), "s1"),
+        remote_first,
+        "the remote host's stale send was dropped with its session"
+    );
+    step_font_in(&mut h, "p1");
+    assert_eq!(
+        font_sizes(&h.sent(), "s1"),
+        [local_first[0].map(|size| size + 1)],
+        "This PC's send, still in flight, is kept"
+    );
+}
+
+#[gpui::test]
+fn needs_you_reads_the_remote_leafs_own_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id(
+        cx,
+        &dir,
+        session("s1")
+            .status("awaiting_input")
+            .pending_input(serde_json::json!({
+                "kind": "question",
+                "questions": [{
+                    "question": "ship it?",
+                    "header": "Deploy",
+                    "options": [],
+                    "multi_select": false,
+                }],
+            }))
+            .build(),
+    );
+
+    let details: Vec<String> = h
+        .root(|root, _| root.needs_you_rows())
+        .into_iter()
+        .map(|row| row.detail)
+        .collect();
+    assert_eq!(
+        details,
+        ["Deploy: ship it?"],
+        "the remote row reads what its own host's s1 asks"
+    );
+}
+
+/// The sessions among `sent` whose discard is previewed.
+fn discard_previews(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::PreviewDiscard { session_id } => Some(session_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn closing_a_remote_pane_deletes_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").worktree("r1").build(),
+        session("s1").worktree("r1").build(),
+    );
+    h.root_update(|root, window, cx| {
+        root.close_pane_clicked("t1", "p2", Some("s1"), window, cx);
+    });
+
+    h.click_on("pane-close-delete");
+
+    assert_eq!(
+        discard_previews(&h.host(&remote()).sent()),
+        ["s1"],
+        "the remote pane's delete asks its own host"
+    );
+    assert!(
+        discard_previews(&h.sent()).is_empty(),
+        "This PC is not asked"
+    );
+}
+
+#[gpui::test]
+fn popping_out_a_remote_pane_uses_its_own_hosts_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    // This PC's s1 cannot show in a pane; the remote host's can.
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").headless().build(),
+        session("s1").build(),
+    );
+
+    h.click_on("pane-popout-p2");
+    assert_eq!(
+        h.window_count(),
+        2,
+        "the remote pane pops out on its own host's s1"
+    );
+}
+
+#[gpui::test]
+fn removing_a_remote_repo_counts_its_own_hosts_workspace_sessions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").in_repo("r2").build());
+    // This PC's workspace holds an r2; the remote host's r2 is in none.
+    h.send(DaemonMessage::Workspaces {
+        workspaces: vec![support::workspace("w1", &["r2"])],
+    });
+    h.sent();
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    h.click_on("container-menu-remove");
+
+    assert_eq!(
+        h.root(|root, _| root.repo_remove_session_rows()),
+        ["b1 (claude)"],
+        "the remote r2's own session is counted"
+    );
+}
+
+/// This PC lists `a1` (pane `p0`, tab `t0`, in front) and `s1` (pane `p1`,
+/// tab `t1`); [`REMOTE`] lists `remote_s1` under the same id (pane `p2`,
+/// tab `t2`). Nothing sent is left unread.
+fn shared_id_tabs<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    remote_s1: SessionSnapshot,
+) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![session("a1").build(), session("s1").build()],
+        tabs: vec![
+            tab("t0", &pane("p0", Some("a1"))),
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &remote_pane("p2", "s1")),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    let mut host = h.host(&remote());
+    host.connect();
+    host.send(DaemonMessage::Sessions {
+        sessions: vec![remote_s1],
+    });
+    host.sent();
+    h.sent();
+    h
+}
+
+/// Session `id` waits on the user.
+fn awaiting(id: &str) -> DaemonMessage {
+    DaemonMessage::Attention {
+        session_id: id.to_owned(),
+        reason: AttentionReason::AwaitingInput,
+    }
+}
+
+#[gpui::test]
+fn clicking_a_remote_needs_you_row_shows_its_own_hosts_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_tabs(cx, &dir, session("s1").status("awaiting_input").build());
+    assert_eq!(h.root(|root, _| root.active_pane_ids()), ["p0"]);
+
+    h.click_on("activity-needs-you");
+    h.click_on("needs-you-row-s1");
+
+    assert_eq!(
+        h.root(|root, _| root.active_pane_ids()),
+        ["p2"],
+        "the remote row shows the pane of its own host's s1, not This PC's"
+    );
+}
+
+#[gpui::test]
+fn a_remote_reconnect_drops_its_unanswered_appearance_sends(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id(cx, &dir, session("s1").build());
+    // A click focuses a pane only in an active window.
+    h.cx.update(|window, _| window.activate_window());
+    step_font_in(&mut h, "p2");
+    let remote_first = font_sizes(&h.host(&remote()).sent(), "s1");
+    assert_eq!(
+        remote_first.len(),
+        1,
+        "the remote pane's step goes to its host"
+    );
+    step_font_in(&mut h, "p1");
+    let local_first = font_sizes(&h.sent(), "s1");
+    assert_eq!(local_first.len(), 1, "This PC's step stays in flight");
+
+    // The remote host reconnects and lists its s1 again unchanged.
+    h.host(&remote()).connect();
+    h.host(&remote()).send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+
+    step_font_in(&mut h, "p2");
+    assert_eq!(
+        font_sizes(&h.host(&remote()).sent(), "s1"),
+        remote_first,
+        "the reconnect dropped the remote host's unanswered send"
+    );
+    step_font_in(&mut h, "p1");
+    assert_eq!(
+        font_sizes(&h.sent(), "s1"),
+        [local_first[0].map(|size| size + 1)],
+        "This PC's send, still in flight, is kept"
+    );
+}
+
+#[gpui::test]
+fn pane_close_discards_on_the_host_it_opened_for(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id(cx, &dir, session("s1").build());
+    h.root_update(|root, window, cx| {
+        root.close_pane_clicked("t1", "p2", Some("s1"), window, cx);
+    });
+
+    // While the dialog is open, This PC's layout binds p2 to its own s1.
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s1")),
+            ),
+        )],
+    });
+    h.sent();
+    assert!(
+        h.root(|root, _| root.pane_close_open()),
+        "precondition: the dialog stays, its pane still showing an s1"
+    );
+
+    h.click_on("pane-close-discard");
+
+    assert_eq!(
+        discards(&h.host(&remote()).sent()),
+        ["s1"],
+        "the discard goes to the host the dialog opened for"
+    );
+    assert!(discards(&h.sent()).is_empty(), "This PC's s1 is left alone");
+}
+
+/// Whether `host`'s leaf `s1` shows in the sidebar needing attention.
+fn s1_attention(h: &mut Harness<'_>, host: HostKey) -> Option<bool> {
+    h.root(move |root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .filter(|container| container.host == host)
+            .flat_map(|container| container.leaves)
+            .find(|leaf| leaf.id == "s1")
+            .map(|leaf| leaf.attention)
+    })
+}
+
+#[gpui::test]
+fn opening_a_remote_leaf_keeps_this_pcs_same_id_attention(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id(cx, &dir, session("s1").build());
+    h.send(awaiting("s1"));
+    h.host(&remote()).send(awaiting("s1"));
+    assert_eq!(s1_attention(&mut h, HostKey::of(&remote())), Some(true));
+
+    h.click_on(&remote_leaf("", "s1"));
+
+    assert_eq!(
+        s1_attention(&mut h, HostKey::of(&remote())),
+        Some(false),
+        "the opened remote s1 no longer needs you"
+    );
+    assert_eq!(
+        s1_attention(&mut h, HostKey::Local),
+        Some(true),
+        "This PC's s1 still does"
+    );
+}
+
+#[gpui::test]
+fn a_remote_toasts_go_to_pane_shows_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(
+        &dir,
+        &serde_json::json!({ "notifications": { "toast_style": "app" } }),
+    );
+    let mut h = shared_id_tabs(cx, &dir, session("s1").build());
+    h.host(&remote()).send(awaiting("s1"));
+    assert_eq!(h.root(|root, _| root.active_pane_ids()), ["p0"]);
+
+    let mut toast = h.popout_window();
+    toast.run_until_parked();
+    let go = toast
+        .debug_bounds("toast-go-to-pane")
+        .expect("the remote s1's toast offers Go to pane");
+    toast.simulate_click(go.center(), Modifiers::none());
+    toast.run_until_parked();
+
+    assert_eq!(
+        h.root(|root, _| root.active_pane_ids()),
+        ["p2"],
+        "Go to pane shows the pane of the toast's own host's s1"
+    );
 }

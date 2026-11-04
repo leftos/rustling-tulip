@@ -258,9 +258,14 @@ pub(crate) fn is_live(s: &SessionSnapshot) -> bool {
 
 /// Whether `s` is one of `level`'s own sessions, by the rule the sidebar
 /// places a leaf by: its workspace id for a workspace, its first member repo
-/// for a repo. A repo a workspace holds has no container of its own, and a
-/// plain shell placed in the folder is not owned.
-pub(crate) fn owned_by(level: &Level, s: &SessionSnapshot, model: &SidebarModel) -> bool {
+/// for a repo. A repo one of `host`'s workspaces holds has no container of
+/// its own, and a plain shell placed in the folder is not owned.
+pub(crate) fn owned_by(
+    host: &HostKey,
+    level: &Level,
+    s: &SessionSnapshot,
+    model: &SidebarModel,
+) -> bool {
     if s.mode == SessionMode::PlainShell {
         return false;
     }
@@ -268,7 +273,7 @@ pub(crate) fn owned_by(level: &Level, s: &SessionSnapshot, model: &SidebarModel)
         Level::Workspace(id) => s.workspace_id.as_deref() == Some(id.as_str()),
         Level::Repo(id) => {
             let in_a_workspace = model
-                .workspaces()
+                .workspaces_of(host)
                 .iter()
                 .any(|workspace| workspace.member_repo_ids.iter().any(|member| member == id));
             s.workspace_id.is_none()
@@ -281,19 +286,20 @@ pub(crate) fn owned_by(level: &Level, s: &SessionSnapshot, model: &SidebarModel)
     }
 }
 
-/// The live sessions `level` owns, as the dialog lists them, by label as the
-/// container draws its leaves.
+/// The live sessions of `host`'s `sessions` that `level` owns, as the
+/// dialog lists them, by label as the container draws its leaves.
 pub(crate) fn live_owned_sessions(
+    host: &HostKey,
     level: &Level,
     sessions: &[SessionSnapshot],
     model: &SidebarModel,
 ) -> Vec<RepoRemoveSession> {
     let mut listed: Vec<RepoRemoveSession> = sessions
         .iter()
-        .filter(|session| is_live(session) && owned_by(level, session, model))
+        .filter(|session| is_live(session) && owned_by(host, level, session, model))
         .map(|session| RepoRemoveSession {
             id: session.id.clone(),
-            label: crate::sidebar::display_label(session, model.session_agents(&session.id)),
+            label: crate::sidebar::display_label(session, model.agents(host)),
             agent: session
                 .agent
                 .as_ref()
@@ -453,7 +459,7 @@ mod tests {
             in_workspace("ws", "w1"),
         ];
         let level = Level::Repo("r1".to_owned());
-        let listed: Vec<String> = live_owned_sessions(&level, &sessions, &model)
+        let listed: Vec<String> = live_owned_sessions(&HostKey::Local, &level, &sessions, &model)
             .into_iter()
             .map(|session| session.id)
             .collect();
@@ -473,7 +479,7 @@ mod tests {
             in_workspace("other", "w2"),
         ];
         let level = Level::Workspace("w1".to_owned());
-        let listed: Vec<String> = live_owned_sessions(&level, &sessions, &model)
+        let listed: Vec<String> = live_owned_sessions(&HostKey::Local, &level, &sessions, &model)
             .into_iter()
             .map(|session| session.id)
             .collect();
@@ -486,7 +492,7 @@ mod tests {
         let sessions = [in_repo("s1", "r1")];
         let level = Level::Repo("r1".to_owned());
         assert!(
-            live_owned_sessions(&level, &sessions, &model).is_empty(),
+            live_owned_sessions(&HostKey::Local, &level, &sessions, &model).is_empty(),
             "the sidebar places it in the workspace, not in a repo container"
         );
     }
@@ -498,7 +504,7 @@ mod tests {
         stopped.status = SessionStatus::Stopped;
         let level = Level::Repo("r1".to_owned());
         assert!(
-            live_owned_sessions(&level, &[stopped], &model).is_empty(),
+            live_owned_sessions(&HostKey::Local, &level, &[stopped], &model).is_empty(),
             "a stopped session is not live"
         );
     }
@@ -510,7 +516,7 @@ mod tests {
         s.label = "feature work".to_owned();
         s.agent = Some(protocol::AgentId("claude".to_owned()));
         let level = Level::Repo("r1".to_owned());
-        let listed = live_owned_sessions(&level, &[s], &model);
+        let listed = live_owned_sessions(&HostKey::Local, &level, &[s], &model);
         assert_eq!(
             listed,
             [RepoRemoveSession {
@@ -540,10 +546,11 @@ mod tests {
         let mut alpha = in_repo("alpha", "r1");
         alpha.label = "alpha".to_owned();
         let level = Level::Repo("r1".to_owned());
-        let listed: Vec<String> = live_owned_sessions(&level, &[beta, alpha], &model)
-            .into_iter()
-            .map(|session| session.id)
-            .collect();
+        let listed: Vec<String> =
+            live_owned_sessions(&HostKey::Local, &level, &[beta, alpha], &model)
+                .into_iter()
+                .map(|session| session.id)
+                .collect();
         assert_eq!(listed, ["alpha", "beta"]);
     }
 

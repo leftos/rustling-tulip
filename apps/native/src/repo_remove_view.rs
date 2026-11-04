@@ -49,7 +49,8 @@ impl RootView {
     ) {
         let key = container_key(level);
         let host = host.clone();
-        let sessions = live_owned_sessions(level, self.sidebar.sessions_of(&host), &self.sidebar);
+        let sessions =
+            live_owned_sessions(&host, level, self.sidebar.sessions_of(&host), &self.sidebar);
         if sessions.is_empty() {
             if self.repo_remove.armed() == Some(key.as_str()) {
                 self.repo_remove.disarm();

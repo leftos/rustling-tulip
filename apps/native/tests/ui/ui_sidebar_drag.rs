@@ -691,7 +691,12 @@ fn a_remote_leaf_dropped_on_a_pane_edge_splits_with_its_host(cx: &mut TestAppCon
     let mut h = remote_beside(cx, &dir, &pane("p1", Some("a1")));
 
     let to = at(&mut h, "p1", 0.1, 0.5);
-    drop_leaf(&mut h, "b1", to, ("p1", PaneDropEdge::Left));
+    drop_leaf(
+        &mut h,
+        &format!("{REMOTE}::b1"),
+        to,
+        ("p1", PaneDropEdge::Left),
+    );
 
     let sent = placements(&mut h);
     assert!(
@@ -730,7 +735,12 @@ fn a_remote_leaf_dropped_on_an_empty_pane_fills_it_with_its_host(cx: &mut TestAp
     let mut h = remote_beside(cx, &dir, &grid);
 
     let to = at(&mut h, "p2", 0.5, 0.5);
-    drop_leaf(&mut h, "b1", to, ("p2", PaneDropEdge::Replace));
+    drop_leaf(
+        &mut h,
+        &format!("{REMOTE}::b1"),
+        to,
+        ("p2", PaneDropEdge::Replace),
+    );
 
     let sent = placements(&mut h);
     assert!(

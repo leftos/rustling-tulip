@@ -14,6 +14,8 @@ The native client has three test tiers, and the driver MCP server has a live spe
 
 - **UI specs** — `cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui` (filter by module: `ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon.
 
+  The harness (`apps/native/tests/support/mod.rs`) resolves a remote leaf's `leaf-<host key>::<id>` selectors per host (the `leaf_tab_pill_on` and `leaf_buttons_on` hooks). Its `in_model` returns true for any selector without a model hook, such as the pane header buttons (`pane-popout-*`), so a positive check on one needs a click plus an outcome. A click updates `focused_pane` only after `window.activate_window()`, since the test window starts inactive.
+
   Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
 - **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer in test-release and runs `tests/e2e_live.rs`, `tests/e2e_recover.rs`, `tests/e2e_remote.rs`, `tests/e2e_ssh.rs` and `tests/e2e_multi_host.rs` under `nextest --run-ignored only` against a real daemon isolated under `.tmp/`; `e2e_remote` drives the daemon's tailnet listener as a tailnet client (pairing and approval, token reconnect, owner rule, refused commands, revoke, remote file fetch, remote access off). Needs `node` for the fake-claude, fake-tailscale and fake-ssh shims.
 

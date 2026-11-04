@@ -1589,11 +1589,13 @@ impl RootView {
             tracing::warn!("Go to pane: the main window has gone");
             return;
         };
-        let id = key.1.clone();
+        let (host, id) = key.clone();
         let target = root.clone();
         let shown = main.update(cx, move |_, window, cx| {
             window.activate_window();
-            target.update(cx, |root, cx| root.select_session(&id, window, cx))
+            target.update(cx, |root, cx| {
+                root.select_session_on(&host, &id, window, cx);
+            })
         });
         if !matches!(shown, Ok(Ok(()))) {
             tracing::warn!("Go to pane: the session was not shown");

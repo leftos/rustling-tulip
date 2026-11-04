@@ -129,7 +129,7 @@ fn reveal_disabled_on_remote(cx: &mut TestAppContext) {
         Vec::new(),
         vec![session("b1").worktree("r2").build()],
     );
-    h.right_click_on("leaf-b1");
+    h.right_click_on(&format!("leaf-{HOST}::b1"));
     assert_eq!(
         h.root(|root, _| root.menu_row_label("session-menu-reveal")),
         Some("Reveal worktree"),

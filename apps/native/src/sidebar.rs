@@ -1539,6 +1539,19 @@ impl SidebarModel {
         &mut self.remote[index].1
     }
 
+    /// `host`'s slice, to update; `None` for a remote host that never sent
+    /// one, which gains none.
+    fn listed_slice_mut(&mut self, host: &HostKey) -> Option<&mut HostSlice> {
+        match host {
+            HostKey::Local => Some(&mut self.local),
+            HostKey::Remote(_) => self
+                .remote
+                .iter_mut()
+                .find(|(key, _)| key == host)
+                .map(|(_, slice)| slice),
+        }
+    }
+
     /// The slice that lists session `id`, else This PC's.
     fn slice_of_session(&self, id: &str) -> &HostSlice {
         self.slices()
@@ -1607,6 +1620,14 @@ impl SidebarModel {
     pub fn mark_seen(&mut self, id: &str) {
         self.local.unseen.remove(id);
         for (_, slice) in &mut self.remote {
+            slice.unseen.remove(id);
+        }
+    }
+
+    /// The user looked at `host`'s session `id`: its finished turn is seen;
+    /// another host's session of the same id keeps its mark.
+    pub fn mark_seen_on(&mut self, host: &HostKey, id: &str) {
+        if let Some(slice) = self.listed_slice_mut(host) {
             slice.unseen.remove(id);
         }
     }
@@ -1934,9 +1955,18 @@ impl SidebarModel {
         collapsed.len() != before
     }
 
+    #[cfg(test)]
     pub fn clear_attention(&mut self, id: &str) {
         self.local.attention.remove(id);
         for (_, slice) in &mut self.remote {
+            slice.attention.remove(id);
+        }
+    }
+
+    /// `host`'s session `id` no longer needs attention; another host's
+    /// session of the same id keeps its mark.
+    pub fn clear_attention_on(&mut self, host: &HostKey, id: &str) {
+        if let Some(slice) = self.listed_slice_mut(host) {
             slice.attention.remove(id);
         }
     }

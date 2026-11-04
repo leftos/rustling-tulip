@@ -369,8 +369,22 @@ impl RootView {
             self.end_spawn(&request_id, cx);
         }
         if let Some(msg) = msg {
-            self.send_to(&self.host_of_request(&msg), msg);
+            self.send_to(&self.resent_spawn_host(&msg), msg);
         }
+    }
+
+    /// The host a resent spawn `msg` goes to: the host its first send went
+    /// to, so a remote repo sharing an id with This PC's keeps its host;
+    /// the owner of the target it names for a spawn no longer recorded.
+    fn resent_spawn_host(&self, msg: &protocol::ClientMessage) -> crate::target::HostKey {
+        let recorded = match msg {
+            protocol::ClientMessage::SpawnSession(request) => request
+                .request_id
+                .as_deref()
+                .and_then(|id| self.spawns.host_of(id)),
+            _ => None,
+        };
+        recorded.unwrap_or_else(|| self.host_of_request(msg))
     }
 
     /// Spawn `request_id` ends without a session: it is no longer pending,
@@ -582,7 +596,7 @@ impl RootView {
             }
             (Some(request_id), strategy @ Some(_)) => {
                 if let Some(msg) = self.spawns.resend(&request_id, strategy) {
-                    self.send_to(&self.host_of_request(&msg), msg);
+                    self.send_to(&self.resent_spawn_host(&msg), msg);
                     self.push_spawning_toast(&request_id, cx);
                 }
             }

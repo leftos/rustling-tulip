@@ -39,6 +39,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - An SSH host given by an IPv6 address keeps its pinned repo and collapsed panels in Source control.
 - An administrator daemon now keeps running the session helper it started with, so a file swapped into the install folder later never runs as administrator.
 - A remote repo's menu, Launch last, presets, Stop and the delete-worktree dialog now act on that host even when This PC has a repo or session of the same name.
+- A remote session's sidebar row, Needs you row, notices and close dialog now act on that host when This PC has a session with the same id.
 - An SSH connection that starts the background service now closes as soon as it ends, and `rustling-tulipd` output redirected to a file is no longer lost.
 
 ### Changed

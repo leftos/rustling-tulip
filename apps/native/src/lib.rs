@@ -1914,7 +1914,7 @@ impl RootView {
         if shown {
             self.popout_focused = Some(pane_id.to_owned());
             if let Some(session) = self.popout_focused_session() {
-                self.sidebar.mark_seen(&session.id);
+                self.sidebar.mark_seen_on(&session.host, &session.id);
             }
         } else if self.popout_focused.as_deref() == Some(pane_id) {
             self.popout_focused = None;
@@ -2467,21 +2467,24 @@ impl RootView {
     /// until the daemon's tab list is in, when leaves show no pill.
     #[must_use]
     pub fn leaf_tab_pill(&self, id: &str) -> Option<TabPill> {
+        self.leaf_tab_pill_on(&self.host_of_session(id), id)
+    }
+
+    /// As [`Self::leaf_tab_pill`], for the leaf of `host`'s session `id`.
+    #[must_use]
+    pub fn leaf_tab_pill_on(&self, host: &HostKey, id: &str) -> Option<TabPill> {
         if !self.tabs.is_loaded() {
             return None;
         }
-        let pill = self.leaf_pills().remove(id);
+        let shown = SessionRef::new(host.clone(), id);
+        let pill = self.leaf_pills().remove(&shown);
         Some(pill.unwrap_or(TabPill::Unbound))
     }
 
-    /// The tab pill of each sidebar leaf, by session id: the panes that
-    /// show the session on the host the sidebar lists it under.
-    pub(crate) fn leaf_pills(&self) -> HashMap<String, TabPill> {
+    /// The tab pill of each sidebar leaf, by host and session id: the panes
+    /// that show that host's session.
+    pub(crate) fn leaf_pills(&self) -> HashMap<SessionRef, TabPill> {
         tab_pills(self.tabs.tabs())
-            .into_iter()
-            .filter(|(shown, _)| self.host_of_session(&shown.id) == shown.host)
-            .map(|(shown, pill)| (shown.id, pill))
-            .collect()
     }
 
     /// Groups the sessions panel by `view`, saving the choice when it
@@ -3124,7 +3127,7 @@ impl RootView {
         };
         if !self
             .launch_last
-            .note_activation(&gesture_target, (self.now)())
+            .note_activation(host, &gesture_target, (self.now)())
         {
             return;
         }
@@ -3281,17 +3284,45 @@ impl RootView {
     /// A session click (a sidebar leaf, a Needs You row): clears the Select
     /// launched marks and shows the session; see [`Self::show_session`].
     fn select_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.host_of_session(id);
+        self.select_session_on(&host, id, window, cx);
+    }
+
+    /// A click on `host`'s session `id` (a sidebar leaf, a Needs You row):
+    /// see [`Self::select_session`]; another host's session of the same id
+    /// is left alone.
+    pub(crate) fn select_session_on(
+        &mut self,
+        host: &HostKey,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.launched_highlight.clear();
-        self.show_session(id, window, cx);
+        self.show_session_on(host, id, window, cx);
     }
 
     /// Shows the pane holding the session, or places the session when no
-    /// pane shows it. A session without a terminal only has its attention
-    /// and its unseen turn cleared.
+    /// pane shows it, on the host that lists it; see
+    /// [`Self::show_session_on`].
     fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar.clear_attention(id);
-        self.sidebar.mark_seen(id);
-        let shown = SessionRef::new(self.host_of_session(id), id);
+        let host = self.host_of_session(id);
+        self.show_session_on(&host, id, window, cx);
+    }
+
+    /// Shows the pane holding `host`'s session `id`, or places the session
+    /// when no pane shows it. A session without a terminal only has its
+    /// attention and its unseen turn cleared.
+    fn show_session_on(
+        &mut self,
+        host: &HostKey,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar.clear_attention_on(host, id);
+        self.sidebar.mark_seen_on(host, id);
+        let shown = SessionRef::new(host.clone(), id);
         if let Some(key) = self
             .popouts
             .showing_session(&shown, self.tabs.tabs())
@@ -3313,13 +3344,13 @@ impl RootView {
                 self.tabs.focus_pane(&tab_id, &pane_id);
                 self.after_tabs_change(window, cx);
             }
-        } else if let Some((host, session)) = self
+        } else if let Some(session) = self
             .sidebar
-            .find_session(id)
-            .filter(|(_, s)| can_attach(s))
-            .map(|(host, s)| (host, s.clone()))
+            .session_on(host, id)
+            .filter(|s| can_attach(s))
+            .cloned()
         {
-            self.place_session(&host, &session, window, cx);
+            self.place_session(host, &session, window, cx);
         }
         self.dismiss_skipped_toasts(window.is_window_active(), cx);
         cx.notify();
@@ -4216,7 +4247,7 @@ impl RootView {
         // A session focused in a pop-out is shown too: a turn ending there
         // is seen.
         if let Some(session) = self.popout_focused_session() {
-            self.sidebar.mark_seen(&session.id);
+            self.sidebar.mark_seen_on(&session.host, &session.id);
         }
         self.prune_container_row_focus();
         self.forget_remembered_session(msg);
@@ -4474,28 +4505,33 @@ impl RootView {
         msg: &DaemonMessage,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.on_resume_report(host, msg, cx) || self.on_session_notice(msg, cx)
+        self.on_resume_report(host, msg, cx) || self.on_session_notice(host, msg, cx)
     }
 
-    /// Shows a notice about a session's terminal as one toast, keyed by the
-    /// session; a notice for a session this client does not list, or of a
-    /// kind it does not know, raises nothing. Returns whether `msg` was that
-    /// notice.
-    fn on_session_notice(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+    /// Shows a notice about `host`'s session's terminal as one toast, keyed
+    /// by the host and the session; a notice for a session that host does
+    /// not list, or of a kind it does not know, raises nothing. Returns
+    /// whether `msg` was that notice.
+    fn on_session_notice(
+        &mut self,
+        host: &HostKey,
+        msg: &DaemonMessage,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let DaemonMessage::SessionNotice { session_id, notice } = msg else {
             return false;
         };
-        let Some(session) = self.sidebar.session(session_id) else {
+        let Some(session) = self.sidebar.session_on(host, session_id) else {
             return true;
         };
         let label = session
             .agent
             .as_ref()
-            .and_then(|id| {
-                crate::agent_options::descriptor_for(self.sidebar.session_agents(session_id), id)
-            })
+            .and_then(|id| crate::agent_options::descriptor_for(self.sidebar.agents(host), id))
             .map(|descriptor| descriptor.label.clone());
-        if let Some(spec) = notices::session_notice_toast(session_id, label.as_deref(), notice) {
+        if let Some(spec) =
+            notices::session_notice_toast(host, session_id, label.as_deref(), notice)
+        {
             self.push_toast_spec(spec, cx);
         }
         true
@@ -4665,9 +4701,10 @@ impl RootView {
 
     /// The part of a new connection's reset that sends nothing. This PC's:
     /// fresh panes, nothing in flight, and every dialog, menu and notice of
-    /// the old connection closed. A remote host's: its agents go, the preset
-    /// wizard it owns closes, and only what showed one of its sessions
-    /// closes; the window's other dialogs stay.
+    /// the old connection closed. A remote host's: its agents and its
+    /// appearance sends still in flight go, the preset wizard it owns
+    /// closes, and only what showed one of its sessions closes; the window's
+    /// other dialogs stay.
     fn reset_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         self.forget_agents(host);
         self.forget_daemon_settings(host);
@@ -4682,11 +4719,12 @@ impl RootView {
             if let Some(mirrors) = self.mirrors_of_mut(host) {
                 mirrors.worktrees_root = None;
             }
+            self.pending_appearance.clear_host(host);
             self.drop_stale_session_ui(window, cx);
             return;
         }
         self.reset_panes(cx);
-        self.pending_appearance.clear();
+        self.pending_appearance.clear_host(&HostKey::Local);
         self.container_sends.clear();
         self.status.clear();
         self.prefills.clear();
@@ -4719,11 +4757,11 @@ impl RootView {
         self.reset_worktrees(window, cx);
     }
 
-    /// Whether `session`'s snapshot moves its appearance, read against the
-    /// copy the sidebar still holds.
-    fn appearance_moved(&self, session: &SessionSnapshot) -> bool {
+    /// Whether `host`'s `session` snapshot moves its appearance, read
+    /// against the copy the sidebar still holds of that host's session.
+    fn appearance_moved(&self, host: &HostKey, session: &SessionSnapshot) -> bool {
         self.sidebar
-            .session(&session.id)
+            .session_on(host, &session.id)
             .map(|before| before.appearance.clone())
             != Some(session.appearance.clone())
     }
@@ -4751,7 +4789,11 @@ impl RootView {
                 let discard = self.exit_discard(host, session);
                 let finished = crate::notify::finished(self.sidebar.session(&session.id), session);
                 self.seen_by(host).insert(session.id.clone());
-                return (Some(self.appearance_moved(session)), discard, finished);
+                return (
+                    Some(self.appearance_moved(host, session)),
+                    discard,
+                    finished,
+                );
             }
             _ => {}
         }
@@ -4805,8 +4847,10 @@ impl RootView {
                 pane.update_session(session, self.sidebar.agents(reply.host));
             });
         }
-        let own_change = request_id
-            .is_some_and(|request_id| self.pending_appearance.answered(&session.id, request_id));
+        let own_change = request_id.is_some_and(|request_id| {
+            self.pending_appearance
+                .answered(reply.host, &session.id, request_id)
+        });
         self.attach_waiting_panes(cx);
         if moved {
             self.apply_session_pane_fonts(&session.id, own_change, cx);
@@ -5154,7 +5198,8 @@ impl RootView {
         let Some(session_id) = self.pane_session(&pane_id) else {
             return;
         };
-        let Some(own) = self.effective_appearance(&session_id) else {
+        let host = self.slot_host(&pane_id);
+        let Some(own) = self.effective_appearance_on(&host, &session_id) else {
             return;
         };
         let Some(resolved) = self.sidebar.appearance_with(&session_id, &own) else {
@@ -5164,23 +5209,46 @@ impl RootView {
             return;
         };
         let change = AppearanceChange::font_size(Some(font_size_to_u16(next)));
-        self.send_session_appearance(&session_id, &own, &change);
+        self.send_session_appearance_on(&host, &session_id, &own, &change);
         cx.notify();
     }
 
-    /// `session_id`'s stored appearance with each change sent and not yet
-    /// answered over it, in order; `None` for a session the list does not
-    /// hold.
+    /// `session_id`'s effective appearance on the host that lists it; see
+    /// [`Self::effective_appearance_on`].
     pub(crate) fn effective_appearance(&self, session_id: &str) -> Option<AppearanceOverrides> {
-        let stored = &self.sidebar.session(session_id)?.appearance;
-        Some(self.pending_appearance.overlay(session_id, stored))
+        self.effective_appearance_on(&self.host_of_session(session_id), session_id)
     }
 
-    /// Sends `session_id` `own` (its effective appearance) with `change`
-    /// over it, and holds `change` in flight until the daemon answers its
-    /// request.
+    /// `host`'s session `session_id`'s stored appearance with each change
+    /// sent to it and not yet answered over it, in order; `None` for a
+    /// session that host does not list.
+    pub(crate) fn effective_appearance_on(
+        &self,
+        host: &HostKey,
+        session_id: &str,
+    ) -> Option<AppearanceOverrides> {
+        let stored = &self.sidebar.session_on(host, session_id)?.appearance;
+        Some(self.pending_appearance.overlay(host, session_id, stored))
+    }
+
+    /// Sends `own` with `change` over it to `session_id` on the host that
+    /// lists it; see [`Self::send_session_appearance_on`].
     pub(crate) fn send_session_appearance(
         &mut self,
+        session_id: &str,
+        own: &AppearanceOverrides,
+        change: &AppearanceChange,
+    ) {
+        let host = self.host_of_session(session_id);
+        self.send_session_appearance_on(&host, session_id, own, change);
+    }
+
+    /// Sends `host`'s session `session_id` `own` (its effective appearance)
+    /// with `change` over it, and holds `change` in flight until that host
+    /// answers its request.
+    pub(crate) fn send_session_appearance_on(
+        &mut self,
+        host: &HostKey,
         session_id: &str,
         own: &AppearanceOverrides,
         change: &AppearanceChange,
@@ -5188,9 +5256,9 @@ impl RootView {
         let appearance = change.apply_to(own);
         let request_id = new_request_id();
         self.pending_appearance
-            .push(session_id, request_id.clone(), change.clone());
+            .push(host, session_id, request_id.clone(), change.clone());
         self.send_to(
-            &self.host_of_session(session_id),
+            host,
             ClientMessage::SetSessionAppearance {
                 session_id: session_id.to_owned(),
                 appearance,
@@ -5225,14 +5293,20 @@ impl RootView {
     /// already clear sends and saves nothing.
     fn clear_font_overrides(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
-        let target = self
-            .focused_pane()
-            .and_then(|pane_id| self.pane_session(&pane_id));
-        if let Some(session_id) = target
-            && let Some(own) = self.effective_appearance(&session_id)
+        let target = self.focused_pane().and_then(|pane_id| {
+            let session_id = self.pane_session(&pane_id)?;
+            Some((self.slot_host(&pane_id), session_id))
+        });
+        if let Some((host, session_id)) = target
+            && let Some(own) = self.effective_appearance_on(&host, &session_id)
             && own.terminal_font_size.is_some()
         {
-            self.send_session_appearance(&session_id, &own, &AppearanceChange::font_size(None));
+            self.send_session_appearance_on(
+                &host,
+                &session_id,
+                &own,
+                &AppearanceChange::font_size(None),
+            );
             changed = true;
         }
         let tab_id = self.tabs.active_id().map(str::to_owned);

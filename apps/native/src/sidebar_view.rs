@@ -1835,9 +1835,9 @@ struct LeafRows<'a> {
     /// The session the active pane shows.
     attached: Option<&'a str>,
     accents: HashMap<&'a str, u32>,
-    /// Each shown session's pill; `None` until the daemon's tab list is in,
-    /// when every session would look unbound.
-    pills: Option<HashMap<String, TabPill>>,
+    /// Each shown session's pill, by host and session id; `None` until the
+    /// daemon's tab list is in, when every session would look unbound.
+    pills: Option<HashMap<SessionRef, TabPill>>,
     /// The sessions that cannot be shown in a pane.
     headless: HashSet<&'a str>,
     density: LeafDensity,
@@ -1880,11 +1880,12 @@ impl LeafRows<'_> {
             .map(|(_, side)| *side)
     }
 
-    /// Session `id`'s tab pill; `None` until the tab list is in.
-    fn pill(&self, id: &str) -> Option<TabPill> {
+    /// `host`'s session `id`'s tab pill; `None` until the tab list is in.
+    fn pill(&self, host: &HostKey, id: &str) -> Option<TabPill> {
+        let shown = SessionRef::new(host.clone(), id);
         self.pills
             .as_ref()
-            .map(|pills| pills.get(id).cloned().unwrap_or(TabPill::Unbound))
+            .map(|pills| pills.get(&shown).cloned().unwrap_or(TabPill::Unbound))
     }
 
     /// Whether session `id` can be shown in a pane.
@@ -2006,7 +2007,7 @@ fn leaf_pill(
 ) -> AnyElement {
     let (pill, attachable) = (&shown.pill, shown.attachable);
     let t = theme(cx);
-    let selector = format!("leaf-pill-{session_id}");
+    let selector = format!("leaf-pill-{}", leaf_key(shown.host, session_id));
     let text = chip_text(&selector, pill_text(pill));
     let base = chip(
         crate::fonts::ui_text_size(cx),
@@ -2047,10 +2048,24 @@ fn leaf_pill(
     }
 }
 
+/// The id part of every selector `host`'s leaf of session `id` carries:
+/// `{id}` on This PC, `{host key}::{id}` on a remote host (the container
+/// key convention), so two hosts' leaves of one id stay apart and all of a
+/// leaf's selectors move together.
+#[must_use]
+pub fn leaf_key(host: &HostKey, id: &str) -> String {
+    match host.wire() {
+        None => id.to_owned(),
+        Some(key) => format!("{key}::{id}"),
+    }
+}
+
 /// The leaf's chips: its tab pill, when the tab list is in, then the
-/// session's provider, then its orphan, abandoned or parked tag.
+/// session's provider, then its orphan, abandoned or parked tag. `key` is
+/// the leaf's [`leaf_key`].
 fn leaf_chips(
     leaf: &Leaf,
+    key: &str,
     pill: Option<PillChip<'_>>,
     size: ChipSize,
     cx: &mut Context<RootView>,
@@ -2062,9 +2077,9 @@ fn leaf_chips(
         .collect();
     for (index, agent_chip) in leaf.chips.iter().enumerate() {
         let name = if index == 0 {
-            format!("leaf-provider-{}", leaf.id)
+            format!("leaf-provider-{key}")
         } else {
-            format!("leaf-provider-{}-{index}", leaf.id)
+            format!("leaf-provider-{key}-{index}")
         };
         let selector = name.clone();
         chips.push(
@@ -2085,7 +2100,7 @@ fn leaf_chips(
         );
     }
     if let Some((text, tip)) = leaf.state.tag() {
-        let name = format!("leaf-state-{}", leaf.id);
+        let name = format!("leaf-state-{key}");
         chips.push(
             chip(
                 crate::fonts::ui_text_size(cx),
@@ -2517,15 +2532,16 @@ fn leaf_row(
     let selected = ctx.attached == Some(id);
     let accent = ctx.accents.get(id).copied().unwrap_or(t.accent);
     let ground = leaf_ground(selected, ctx.highlighted.contains(id), &t);
-    let row = leaf_frame(leaf, ground, accent, ctx.density, cx);
+    let key = leaf_key(host, id);
+    let row = leaf_frame(leaf, host, &key, ground, accent, ctx.density, cx);
     match ctx.density {
         LeafDensity::Compact => {
-            let pill = ctx.pill(id).map(|pill| PillChip {
+            let pill = ctx.pill(host, id).map(|pill| PillChip {
                 pill,
                 attachable: ctx.attachable(id),
                 host,
             });
-            let chips = leaf_chips(leaf, pill, ChipSize::Row, cx);
+            let chips = leaf_chips(leaf, &key, pill, ChipSize::Row, cx);
             row.flex_row()
                 .items_center()
                 .gap(px(8.0))
@@ -2534,9 +2550,10 @@ fn leaf_row(
                     crate::fonts::ui_text_size(cx),
                     crate::fonts::ui_weight_shift(cx),
                     leaf,
+                    &key,
                     &theme(cx),
                 ))
-                .children(inline_buttons(leaf, cx))
+                .children(inline_buttons(leaf, host, &key, cx))
                 .children(chips)
         }
         LeafDensity::Comfortable => {
@@ -2548,10 +2565,11 @@ fn leaf_row(
                     crate::fonts::ui_text_size(cx),
                     crate::fonts::ui_weight_shift(cx),
                     leaf,
+                    &key,
                     &theme(cx),
                 ))
-                .children(inline_buttons(leaf, cx));
-            let lower = comfortable_lower(leaf, host, ctx, window, cx);
+                .children(inline_buttons(leaf, host, &key, cx));
+            let lower = comfortable_lower(leaf, host, &key, ctx, window, cx);
             row.flex_col().py(px(6.0)).child(label_line).children(lower)
         }
     }
@@ -2579,9 +2597,12 @@ fn leaf_ground(selected: bool, highlighted: bool, t: &UiTheme) -> Option<u32> {
 }
 
 /// The leaf's box: its fill `ground`, or the hover fill without one, its
-/// hover text, the accent stripe, and the clicks.
+/// hover text, the accent stripe, and the clicks, which select `host`'s
+/// session. `key` is the leaf's [`leaf_key`].
 fn leaf_frame(
     leaf: &Leaf,
+    host: &HostKey,
+    key: &str,
     ground: Option<u32>,
     accent: u32,
     density: LeafDensity,
@@ -2589,7 +2610,8 @@ fn leaf_frame(
 ) -> Stateful<Div> {
     let t = theme(cx);
     let id = leaf.id.clone();
-    let name = format!("leaf-{}", leaf.id);
+    let host = host.clone();
+    let name = format!("leaf-{key}");
     div()
         .id(SharedString::from(name.clone()))
         .driver_id(|| name)
@@ -2618,7 +2640,7 @@ fn leaf_frame(
                 .bg(gpui::rgb(accent)),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.select_session(&id, window, cx);
+            this.select_session_on(&host, &id, window, cx);
         }))
 }
 
@@ -2630,18 +2652,19 @@ fn seen_idle(leaf: &Leaf) -> bool {
 
 /// The label line's start: the status glyph, the label (dimmed once an
 /// idle session's turn has been seen), the `!` badge or, on a session that
-/// does not count as busy, its marker, and the runtime tag.
-fn label_head(offset: i8, shift: i8, leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement> {
+/// does not count as busy, its marker, and the runtime tag. `key` is the
+/// leaf's [`leaf_key`].
+fn label_head(offset: i8, shift: i8, leaf: &Leaf, key: &str, t: &UiTheme) -> Vec<AnyElement> {
     let seen_idle = seen_idle(leaf);
     let mut parts = vec![
         glyph_view(
             glyph(leaf.status, leaf.background, leaf.mode, leaf.unseen, t),
             GlyphSize::Leaf,
-            &format!("leaf-glyph-{}", leaf.id),
+            &format!("leaf-glyph-{key}"),
             t,
         ),
         truncating(
-            &format!("leaf-{}-label", leaf.id),
+            &format!("leaf-{key}-label"),
             StyledText::new(leaf.label.clone()),
         )
         .flex_1()
@@ -2652,14 +2675,14 @@ fn label_head(offset: i8, shift: i8, leaf: &Leaf, t: &UiTheme) -> Vec<AnyElement
     ];
     if leaf.shows_attention() {
         parts.push(
-            container_badge(offset, shift, format!("leaf-badge-{}", leaf.id), t).into_any_element(),
+            container_badge(offset, shift, format!("leaf-badge-{key}"), t).into_any_element(),
         );
     }
     if leaf.busy_excluded {
-        parts.push(busy_excluded_marker(&leaf.id, t));
+        parts.push(busy_excluded_marker(key, t));
     }
     if let (Some(icon), Some((_, tip))) = (&leaf.icon, leaf.runtime_tag()) {
-        let id = format!("leaf-runtime-{}", leaf.id);
+        let id = format!("leaf-runtime-{key}");
         parts.push(
             div()
                 .id(SharedString::from(id.clone()))
@@ -2686,9 +2709,9 @@ const BUSY_EXCLUDED_STROKES: [&[(f32, f32)]; 3] = [
 ];
 
 /// The muted crossed-out pulse an excluded leaf wears in the `!` badge's
-/// slot.
-fn busy_excluded_marker(id: &str, t: &UiTheme) -> AnyElement {
-    let selector = format!("leaf-busy-excluded-{id}");
+/// slot; `key` is the leaf's [`leaf_key`].
+fn busy_excluded_marker(key: &str, t: &UiTheme) -> AnyElement {
+    let selector = format!("leaf-busy-excluded-{key}");
     let t = *t;
     div()
         .id(SharedString::from(selector.clone()))
@@ -2742,12 +2765,13 @@ fn paint_busy_excluded(bounds: Bounds<Pixels>, window: &mut Window, t: &UiTheme)
 fn comfortable_lower(
     leaf: &Leaf,
     host: &HostKey,
+    key: &str,
     ctx: &LeafRows<'_>,
     window: &Window,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
     let t = theme(cx);
-    let pill = ctx.pill(&leaf.id);
+    let pill = ctx.pill(host, &leaf.id);
     let attachable = ctx.attachable(&leaf.id);
     let texts = chip_texts(leaf, pill.as_ref());
     let fits = chips_fit(
@@ -2761,6 +2785,7 @@ fn comfortable_lower(
         (
             leaf_chips(
                 leaf,
+                key,
                 pill.map(|pill| PillChip {
                     pill,
                     attachable,
@@ -2777,6 +2802,7 @@ fn comfortable_lower(
             Vec::new(),
             leaf_chips(
                 leaf,
+                key,
                 pill.map(|pill| PillChip {
                     pill,
                     attachable,
@@ -2789,7 +2815,7 @@ fn comfortable_lower(
     };
     let mut lower = Vec::new();
     if leaf.subline.is_some() || !inline.is_empty() {
-        let selector = format!("leaf-subline-{}", leaf.id);
+        let selector = format!("leaf-subline-{key}");
         let text_id = format!("{selector}-label");
         lower.push(
             div()
@@ -2813,7 +2839,7 @@ fn comfortable_lower(
         );
     }
     if !below.is_empty() {
-        let selector = format!("leaf-chips-{}", leaf.id);
+        let selector = format!("leaf-chips-{key}");
         lower.push(
             div()
                 .driver_id(|| selector)
@@ -2847,15 +2873,22 @@ fn action_chip(offset: i8, element: Stateful<Div>, t: &UiTheme) -> Stateful<Div>
         .hover(move |style| style.bg(gpui::rgb(t.hover)))
 }
 
-/// The leaf's Resume and Dismiss. They act on the press and keep it from
-/// the row, so the row's click never shows the session.
-fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
+/// The leaf's Resume and Dismiss, acting on `host`'s session; `key` is the
+/// leaf's [`leaf_key`]. They act on the press and keep it from the row, so
+/// the row's click never shows the session.
+fn inline_buttons(
+    leaf: &Leaf,
+    host: &HostKey,
+    key: &str,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
     let t = theme(cx);
     inline_actions(&leaf.state)
         .into_iter()
         .map(|inline| {
-            let selector = format!("leaf-{}-{}", inline.key, leaf.id);
+            let selector = format!("leaf-{}-{key}", inline.key);
             let id = leaf.id.clone();
+            let host = host.clone();
             action_chip(
                 crate::fonts::ui_text_size(cx),
                 div()
@@ -2869,7 +2902,7 @@ fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
-                    this.choose_action(&this.host_of_session(&id), &id, inline.action, window, cx);
+                    this.choose_action(&host, &id, inline.action, window, cx);
                 }),
             )
             .into_any_element()
@@ -2879,11 +2912,19 @@ fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
 
 impl RootView {
     fn listed_leaf(&self, id: &str) -> Option<Leaf> {
-        self.sidebar
-            .containers()
-            .into_iter()
-            .flat_map(|container| container.leaves)
-            .find(|leaf| leaf.id == id)
+        self.listed_leaf_and_host(id).map(|(_, leaf)| leaf)
+    }
+
+    /// The first listed leaf of session `id`, with the host of its row.
+    fn listed_leaf_and_host(&self, id: &str) -> Option<(HostKey, Leaf)> {
+        self.sidebar.containers().into_iter().find_map(|container| {
+            let host = container.host;
+            container
+                .leaves
+                .into_iter()
+                .find(|leaf| leaf.id == id)
+                .map(|leaf| (host, leaf))
+        })
     }
 
     /// Leaf `id`'s tags as text and hover text: its runtime, then its
@@ -2906,10 +2947,24 @@ impl RootView {
     /// Leaf `id`'s inline buttons: selector and hover text.
     #[must_use]
     pub fn leaf_buttons(&self, id: &str) -> Vec<(String, String)> {
-        self.listed_leaf(id).map_or_else(Vec::new, |leaf| {
+        self.listed_leaf_and_host(id)
+            .map_or_else(Vec::new, |(host, _)| self.leaf_buttons_on(&host, id))
+    }
+
+    /// As [`Self::leaf_buttons`], for the leaf of `host`'s session `id`.
+    #[must_use]
+    pub fn leaf_buttons_on(&self, host: &HostKey, id: &str) -> Vec<(String, String)> {
+        let leaf = self
+            .sidebar
+            .containers()
+            .into_iter()
+            .filter(|container| &container.host == host)
+            .find_map(|container| container.leaves.into_iter().find(|leaf| leaf.id == id));
+        leaf.map_or_else(Vec::new, |leaf| {
+            let key = leaf_key(host, id);
             inline_actions(&leaf.state)
                 .into_iter()
-                .map(|inline| (format!("leaf-{}-{id}", inline.key), inline.tip.to_owned()))
+                .map(|inline| (format!("leaf-{}-{key}", inline.key), inline.tip.to_owned()))
                 .collect()
         })
     }

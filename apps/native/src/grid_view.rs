@@ -473,9 +473,9 @@ impl RootView {
             return;
         }
         if let Some(slot) = self.panes.get(pane_id) {
-            let (tab_id, session) = (slot.tab_id.clone(), slot.session.clone());
+            let (tab_id, session) = (slot.tab_id.clone(), slot.session_ref());
             if let Some(session) = session {
-                self.sidebar.mark_seen(&session);
+                self.sidebar.mark_seen_on(&session.host, &session.id);
             }
             self.tabs.set_focused(&tab_id, pane_id);
             // In a popped tab's own window, the pane shows its session while

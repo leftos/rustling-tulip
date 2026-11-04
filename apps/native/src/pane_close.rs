@@ -3,6 +3,8 @@
 
 use protocol::{BranchCleanup, CleanupAction, ClientMessage, SessionSnapshot, SessionStatus};
 
+use crate::target::HostKey;
+
 pub(crate) const TITLE: &str = "Close pane?";
 pub(crate) const NOTE: &str = "Closing the pane only removes it from this tab. Keeping the session leaves it running in the sidebar so you can re-bind it later. Closing the session stops the underlying process and removes it from the sidebar.";
 
@@ -38,10 +40,12 @@ impl Control {
     }
 }
 
-/// The open pane-close dialog: the pane, the session it shows and the
-/// focused button.
+/// The open pane-close dialog: the pane, the session it shows, that
+/// session's host as it stood when the dialog opened, and the focused
+/// button.
 #[derive(Debug, Clone)]
 pub(crate) struct PaneClose {
+    host: HostKey,
     tab_id: String,
     pane_id: String,
     session_id: String,
@@ -53,15 +57,17 @@ pub(crate) struct PaneClose {
 }
 
 impl PaneClose {
-    /// The dialog for `pane_id` of `tab_id`, which shows `session` under
-    /// `label`; the pane-only button has the focus.
+    /// The dialog for `pane_id` of `tab_id`, which shows `host`'s `session`
+    /// under `label`; the pane-only button has the focus.
     pub(crate) fn new(
+        host: &HostKey,
         tab_id: &str,
         pane_id: &str,
         session: &SessionSnapshot,
         label: String,
     ) -> Self {
         Self {
+            host: host.clone(),
             tab_id: tab_id.to_owned(),
             pane_id: pane_id.to_owned(),
             session_id: session.id.clone(),
@@ -71,6 +77,12 @@ impl PaneClose {
             repo_ids: session.members.iter().map(|m| m.repo_id.clone()).collect(),
             focus: Control::PaneOnly,
         }
+    }
+
+    /// The host of the session, fixed when the dialog opened: every answer
+    /// acts on it.
+    pub(crate) fn host(&self) -> &HostKey {
+        &self.host
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -208,7 +220,7 @@ mod tests {
                 worktree_path: String::new(),
             })
             .collect();
-        PaneClose::new("t1", "p1", &s, "work".to_owned())
+        PaneClose::new(&HostKey::Local, "t1", "p1", &s, "work".to_owned())
     }
 
     fn labels(dialog: &PaneClose) -> Vec<String> {

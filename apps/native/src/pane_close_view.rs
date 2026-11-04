@@ -55,7 +55,8 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let session = session_id.and_then(|id| self.sidebar.session(id));
+        let host = self.slot_host(pane_id);
+        let session = session_id.and_then(|id| self.sidebar.session_on(&host, id));
         let Some(session) = session else {
             if let Some(id) = session_id {
                 tracing::warn!(session = %id, "closing a pane whose session is unknown");
@@ -75,7 +76,7 @@ impl RootView {
             return;
         };
         let label = self.session_label(&session.id);
-        self.pane_ui.close = Some(PaneClose::new(tab_id, pane_id, session, label));
+        self.pane_ui.close = Some(PaneClose::new(&host, tab_id, pane_id, session, label));
         self.overlays
             .opened(Overlay::PaneClose, window.window_handle().window_id());
         self.pane_ui.dialog_focus.focus(window);
@@ -141,8 +142,8 @@ impl RootView {
                 self.tabs
                     .mark_closing_if_last_pane(dialog.tab_id(), Some(&request_id));
                 // The pane's close is the layout's, on Local; the session's
-                // discard goes to the session's host.
-                let session_host = self.host_of_session(dialog.session_id());
+                // discard goes to the host the dialog opened for.
+                let session_host = dialog.host().clone();
                 for msg in dialog.discard_keep_messages(&request_id) {
                     let host = if matches!(msg, ClientMessage::ClosePane { .. }) {
                         HostKey::Local
@@ -158,10 +159,27 @@ impl RootView {
                 if !self.is_main_window(window) {
                     self.hand_back_focus(owner, window, cx);
                 }
-                self.open_delete_dialog(dialog.session_id(), ConfirmOwner::Menu, window, cx);
+                self.open_delete_dialog_on(
+                    dialog.host(),
+                    dialog.session_id(),
+                    ConfirmOwner::Menu,
+                    window,
+                    cx,
+                );
                 return;
             }
         }
+        self.hand_back_focus(owner, window, cx);
+        cx.notify();
+    }
+
+    /// Closes the dialog without an answer, as Cancel does: its host no
+    /// longer lists its session.
+    pub(crate) fn close_pane_close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane_ui.close.take().is_none() {
+            return;
+        }
+        let owner = self.overlays.owner(Overlay::PaneClose);
         self.hand_back_focus(owner, window, cx);
         cx.notify();
     }

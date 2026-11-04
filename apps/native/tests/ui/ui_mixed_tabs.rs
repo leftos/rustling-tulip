@@ -261,7 +261,7 @@ fn a_remote_duplicate_into_a_new_tab_carries_its_host(cx: &mut TestAppContext) {
     // The panes' scrollback loads on the remote host are not this spec's.
     h.host(&remote()).sent();
 
-    h.right_click_on("leaf-b1");
+    h.right_click_on(&format!("leaf-{REMOTE}::b1"));
     h.click_on("session-menu-duplicate");
     h.click_on("duplicate-new-tab");
     let remote_sent = h.host(&remote()).sent();
@@ -309,7 +309,7 @@ fn restarting_a_remote_session_in_its_pane_discards_on_the_remote(cx: &mut TestA
         vec![session("b1").in_repo("r2").exited(0).build()],
     );
 
-    h.right_click_on("leaf-b1");
+    h.right_click_on(&format!("leaf-{REMOTE}::b1"));
     h.click_on("menu-restart");
     let remote_sent = h.host(&remote()).sent();
     let id = match remote_sent.as_slice() {
@@ -355,7 +355,7 @@ fn clicking_a_remote_leaf_in_no_tab_places_it_with_its_host(cx: &mut TestAppCont
     );
     let mut h = hosts_over(cx, &dir, &grid, vec![session("b1").in_repo("r2").build()]);
 
-    h.click_on("leaf-b1");
+    h.click_on(&format!("leaf-{REMOTE}::b1"));
 
     let sent = h.sent();
     assert!(
@@ -376,7 +376,7 @@ fn add_to_new_tab_for_a_remote_session_carries_its_host(cx: &mut TestAppContext)
         vec![session("b1").in_repo("r2").build()],
     );
 
-    h.right_click_on("leaf-b1");
+    h.right_click_on(&format!("leaf-{REMOTE}::b1"));
     h.click_on("session-menu-add-new");
 
     let sent = h.sent();
@@ -527,7 +527,7 @@ fn switching_a_remote_host_off_ends_its_pending_spawn(cx: &mut TestAppContext) {
     list_remote(&mut h);
     h.sent();
     let id = spawn_remote(&mut h, OpenIn::NewTab);
-    h.right_click_on("leaf-b1");
+    h.right_click_on(&format!("leaf-{REMOTE}::b1"));
     h.click_on("menu-restart");
     let remote_sent = h.host(&saved_remote()).sent();
     assert_eq!(spawn_ids(&remote_sent), [Some(id)]);
@@ -543,7 +543,7 @@ fn switching_a_remote_host_off_ends_its_pending_spawn(cx: &mut TestAppContext) {
     );
     flip_remote_switch(&mut h);
     list_remote(&mut h);
-    h.right_click_on("leaf-b1");
+    h.right_click_on(&format!("leaf-{REMOTE}::b1"));
     h.click_on("menu-restart");
     assert_eq!(
         duplicated(&h.host(&saved_remote()).sent()),

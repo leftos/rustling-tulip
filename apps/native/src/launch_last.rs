@@ -10,6 +10,7 @@ use protocol::{RepoEntry, SpawnConfig, SpawnRequest, SpawnTarget, SuggestTarget,
 
 use crate::spawn_form::OpenChoice;
 use crate::spawns::OpenIn;
+use crate::target::HostKey;
 
 /// Two launch gestures for one target closer together than this are one
 /// gesture: the second click of a double-click, or a press the pointer
@@ -136,7 +137,7 @@ pub(crate) struct Pending {
 pub(crate) struct State {
     pending: HashMap<SuggestTarget, Pending>,
     next_generation: u64,
-    last_activation: Option<(SuggestTarget, Instant)>,
+    last_activation: Option<(HostKey, SuggestTarget, Instant)>,
 }
 
 impl State {
@@ -198,17 +199,24 @@ impl State {
         self.pending.remove(&target)
     }
 
-    /// Notes a launch gesture for `target` at `now`; false when it repeats
-    /// the previous gesture for the same target inside [`REPEAT_INTERVAL`],
-    /// so one double-click or duplicated press launches once.
-    pub(crate) fn note_activation(&mut self, target: &SuggestTarget, now: Instant) -> bool {
-        if let Some((last, at)) = &self.last_activation
+    /// Notes a launch gesture for `host`'s `target` at `now`; false when it
+    /// repeats the previous gesture for the same host and target inside
+    /// [`REPEAT_INTERVAL`], so one double-click or duplicated press launches
+    /// once. Another host's container of the same id is another gesture.
+    pub(crate) fn note_activation(
+        &mut self,
+        host: &HostKey,
+        target: &SuggestTarget,
+        now: Instant,
+    ) -> bool {
+        if let Some((last_host, last, at)) = &self.last_activation
+            && last_host == host
             && last == target
             && now.saturating_duration_since(*at) < REPEAT_INTERVAL
         {
             return false;
         }
-        self.last_activation = Some((target.clone(), now));
+        self.last_activation = Some((host.clone(), target.clone(), now));
         true
     }
 
@@ -456,13 +464,13 @@ mod tests {
         let mut state = State::default();
         let target = suggest_repo("r1");
         let start = Instant::now();
-        assert!(state.note_activation(&target, start));
+        assert!(state.note_activation(&HostKey::Local, &target, start));
         assert!(
-            !state.note_activation(&target, start + Duration::from_millis(499)),
+            !state.note_activation(&HostKey::Local, &target, start + Duration::from_millis(499)),
             "the second click of a gesture launches nothing"
         );
         assert!(
-            state.note_activation(&target, start + REPEAT_INTERVAL),
+            state.note_activation(&HostKey::Local, &target, start + REPEAT_INTERVAL),
             "past the interval a new gesture launches"
         );
     }
@@ -471,15 +479,47 @@ mod tests {
     fn another_target_or_a_new_connection_starts_over() {
         let mut state = State::default();
         let start = Instant::now();
-        assert!(state.note_activation(&suggest_repo("r1"), start));
+        assert!(state.note_activation(&HostKey::Local, &suggest_repo("r1"), start));
         assert!(
-            state.note_activation(&suggest_repo("r2"), start + Duration::from_millis(10)),
+            state.note_activation(
+                &HostKey::Local,
+                &suggest_repo("r2"),
+                start + Duration::from_millis(10)
+            ),
             "another target is another gesture"
         );
         state.clear();
         assert!(
-            state.note_activation(&suggest_repo("r1"), start + Duration::from_millis(20)),
+            state.note_activation(
+                &HostKey::Local,
+                &suggest_repo("r1"),
+                start + Duration::from_millis(20)
+            ),
             "a new connection forgets the last gesture"
+        );
+    }
+
+    #[test]
+    fn activations_on_two_hosts_same_id_are_two_gestures() {
+        let mut state = State::default();
+        let start = Instant::now();
+        let remote = HostKey::Remote("box".to_owned());
+        assert!(state.note_activation(&HostKey::Local, &suggest_repo("r1"), start));
+        assert!(
+            state.note_activation(
+                &remote,
+                &suggest_repo("r1"),
+                start + Duration::from_millis(10)
+            ),
+            "the remote host's r1 is another gesture"
+        );
+        assert!(
+            !state.note_activation(
+                &remote,
+                &suggest_repo("r1"),
+                start + Duration::from_millis(20)
+            ),
+            "a repeat on the same host is the same gesture"
         );
     }
 

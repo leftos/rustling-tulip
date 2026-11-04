@@ -626,7 +626,9 @@ fn place_remote_session(h: &mut Harness<'_>) -> String {
         session.is_some()
     });
     let session = session.expect("the wait just found it");
-    let leaf = format!("leaf-{session}");
+    let host = remote_key();
+    let wire = host.wire().expect("the tailnet host is remote");
+    let leaf = format!("leaf-{wire}::{session}");
     h.wait_until(&format!("the {leaf} row"), |h| {
         h.bounds(&leaf).size.height > gpui::px(0.0)
     });

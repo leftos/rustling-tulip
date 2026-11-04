@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::fonts::{self, FontSettings};
 use crate::palette;
+use crate::tabs::SessionRef;
+use crate::target::HostKey;
 use crate::theme;
 use crate::ui_theme::UiTheme;
 
@@ -417,40 +419,54 @@ impl AppearanceChange {
     }
 }
 
-/// The appearance changes sent for each session and not yet answered, in
-/// the order they went out, each under the `request_id` it was sent with.
-/// The daemon handles one connection's messages in order, so an answer to
-/// one send answers every send before it.
+/// The appearance changes sent for each host's session and not yet
+/// answered, in the order they went out, each under the `request_id` it was
+/// sent with. The daemon handles one connection's messages in order, so an
+/// answer to one send answers every send before it. Two hosts' sessions of
+/// one id keep their sends apart.
 #[derive(Debug, Default)]
 pub struct InFlightAppearance {
-    by_session: HashMap<String, Vec<(String, AppearanceChange)>>,
+    by_session: HashMap<SessionRef, Vec<(String, AppearanceChange)>>,
 }
 
 impl InFlightAppearance {
-    /// `stored` with each of `session_id`'s in-flight changes over it, in
-    /// the order they were sent.
+    /// `stored` with each of `host`'s session `session_id`'s in-flight
+    /// changes over it, in the order they were sent.
     #[must_use]
-    pub fn overlay(&self, session_id: &str, stored: &AppearanceOverrides) -> AppearanceOverrides {
+    pub fn overlay(
+        &self,
+        host: &HostKey,
+        session_id: &str,
+        stored: &AppearanceOverrides,
+    ) -> AppearanceOverrides {
         self.by_session
-            .get(session_id)
+            .get(&SessionRef::new(host.clone(), session_id))
             .into_iter()
             .flatten()
             .fold(stored.clone(), |base, (_, change)| change.apply_to(&base))
     }
 
-    /// Holds `change`, sent for `session_id` under `request_id`.
-    pub fn push(&mut self, session_id: &str, request_id: String, change: AppearanceChange) {
+    /// Holds `change`, sent for `host`'s session `session_id` under
+    /// `request_id`.
+    pub fn push(
+        &mut self,
+        host: &HostKey,
+        session_id: &str,
+        request_id: String,
+        change: AppearanceChange,
+    ) {
         self.by_session
-            .entry(session_id.to_owned())
+            .entry(SessionRef::new(host.clone(), session_id))
             .or_default()
             .push((request_id, change));
     }
 
-    /// The daemon stored `session_id`'s send `request_id`: drops it and
-    /// every send before it. Returns whether `request_id` was one of this
-    /// client's sends in flight.
-    pub fn answered(&mut self, session_id: &str, request_id: &str) -> bool {
-        let Some(sends) = self.by_session.get_mut(session_id) else {
+    /// `host` stored its session `session_id`'s send `request_id`: drops it
+    /// and every send before it. Returns whether `request_id` was one of
+    /// this client's sends in flight to that session.
+    pub fn answered(&mut self, host: &HostKey, session_id: &str, request_id: &str) -> bool {
+        let key = SessionRef::new(host.clone(), session_id);
+        let Some(sends) = self.by_session.get_mut(&key) else {
             return false;
         };
         let at = sends.iter().position(|(id, _)| id == request_id);
@@ -458,7 +474,7 @@ impl InFlightAppearance {
             sends.drain(..=at);
         }
         if sends.is_empty() {
-            self.by_session.remove(session_id);
+            self.by_session.remove(&key);
         }
         at.is_some()
     }
@@ -477,15 +493,17 @@ impl InFlightAppearance {
         found.is_some()
     }
 
-    /// Forgets the sends of every session `listed` says the daemon no
+    /// Forgets the sends of every host's session `listed` says that host no
     /// longer holds.
-    pub fn retain_sessions(&mut self, listed: impl Fn(&str) -> bool) {
-        self.by_session.retain(|session_id, _| listed(session_id));
+    pub fn retain_sessions(&mut self, listed: impl Fn(&HostKey, &str) -> bool) {
+        self.by_session
+            .retain(|session, _| listed(&session.host, &session.id));
     }
 
-    /// Forgets every send, as a new connection does.
-    pub fn clear(&mut self) {
-        self.by_session.clear();
+    /// Forgets every send to `host`'s sessions, as its new connection does;
+    /// another host's sends stay.
+    pub fn clear_host(&mut self, host: &HostKey) {
+        self.by_session.retain(|session, _| session.host != *host);
     }
 }
 
@@ -1626,5 +1644,53 @@ mod tests {
                 ..AppColors::default()
             }
         );
+    }
+
+    #[test]
+    fn two_hosts_in_flight_sends_for_one_session_id_stay_apart() {
+        let remote = HostKey::Remote("box".to_owned());
+        let mut sends = InFlightAppearance::default();
+        sends.push(
+            &HostKey::Local,
+            "s1",
+            "local".to_owned(),
+            AppearanceChange::font_size(Some(14)),
+        );
+        sends.push(
+            &remote,
+            "s1",
+            "remote".to_owned(),
+            AppearanceChange::font_size(Some(20)),
+        );
+        let stored = AppearanceOverrides::default();
+        let size = |sends: &InFlightAppearance, host: &HostKey| {
+            sends.overlay(host, "s1", &stored).terminal_font_size
+        };
+        assert_eq!(size(&sends, &HostKey::Local), Some(14));
+        assert_eq!(size(&sends, &remote), Some(20));
+
+        assert!(
+            !sends.answered(&HostKey::Local, "s1", "remote"),
+            "another host's request answers nothing here"
+        );
+        assert!(sends.answered(&remote, "s1", "remote"));
+        assert_eq!(size(&sends, &remote), None, "the remote send is answered");
+        assert_eq!(
+            size(&sends, &HostKey::Local),
+            Some(14),
+            "This PC's send stays in flight"
+        );
+
+        sends.push(
+            &remote,
+            "s1",
+            "again".to_owned(),
+            AppearanceChange::font_size(Some(22)),
+        );
+        sends.retain_sessions(|host, _| *host == HostKey::Local);
+        assert_eq!(size(&sends, &remote), None, "the remote session left");
+        assert_eq!(size(&sends, &HostKey::Local), Some(14));
+        sends.clear_host(&HostKey::Local);
+        assert_eq!(size(&sends, &HostKey::Local), None, "a new connection");
     }
 }
