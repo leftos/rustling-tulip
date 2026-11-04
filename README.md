@@ -41,6 +41,7 @@ It is alpha software, Windows only for now.
 - A Bash or PowerShell card shows its command one statement per line, and a command that writes a log offers Tail: a scrolling box under the card that follows the file as it grows.
 - The Summary view (Ctrl+Shift+U) shows a session as one line per stretch of work, each opening into its messages.
 - Long replies written as expandable text open a short phrase into its longer form with a click, one level at a time.
+- Compact mode, on by default, folds a run of reads, searches and commands into one line you can open. The chat column keeps a readable width on wide panes, and each turn's final answer sits in its own box.
 
 ![A Claude session's pane in the chat view, with its conversation, a permission card and the message box](docs/images/chat.png)
 
@@ -58,6 +59,7 @@ It is alpha software, Windows only for now.
 - The host picker lists your tailnet machines and the hosts you saved, and the app connects to every saved host you have switched on when it starts.
 - A new device has to be approved on the host PC with a one-time pairing code. The Devices list shows who is connected and when each device was last seen, and Block cuts a device off until you forget it.
 - Ctrl+click a file path in a remote session's terminal, or use Fetch file…, to copy the file to this PC and open it. An HTML page brings its images and stylesheets with it.
+- Ctrl+click a folder path to fetch the whole folder, with progress and Cancel, leaving out `.git`, `node_modules` and caches. A fetched file's notice offers Fetch whole folder, and a fetched folder's offers Reveal.
 - When a host's session count changed since your last visit, the app offers to keep your layout, open all its sessions or start empty.
 
 ### Remote access over SSH
@@ -79,7 +81,7 @@ It is alpha software, Windows only for now.
 
 ### Text and Markdown viewer
 
-- Ctrl+Shift+click a file path in the terminal and it opens in a read-only viewer tab with line numbers and syntax colours, scrolled to the line the path names.
+- Ctrl+Shift+click a file path in the terminal and it opens in a read-only viewer tab with line numbers and syntax colours, scrolled to the line the path names. A bare file name after a full path on the same line opens from that path's folder.
 - Markdown files open rendered (headings, lists, task boxes, tables, code blocks), with a Rendered / Source toggle. Links open, and `#heading` links scroll to the heading.
 - Ctrl+F finds text, a click or drag selects whole lines to copy, and a tab re-reads its file when you come back to it and the file has changed.
 
@@ -104,6 +106,9 @@ It is alpha software, Windows only for now.
 - Start the daemon at login, the folder worktrees go in, and Manage worktrees to clean up old ones.
 - Appearance: themes for the whole window and its terminals (built-in ones, Nord by default, or your own), session accent colours, terminal and interface fonts (Inter, Geist, Schibsted Grotesk or any installed font), the interface's text size and weight, the terminal's weight and frame width per app, repo, workspace or session, font sizes per session or per tab, and the window title.
 - The Themes window previews every theme with its contrast check, edits any colour of your own copy, and exports or imports theme files.
+- A search box finds any setting on any page (Ctrl+F), and changes wait for OK or Apply; Cancel or Esc discards them.
+- The Chat section sets Compact or Comfortable and the chat's maximum width, and Diagnostics has a Detailed logging switch and Open logs folder.
+- Update notices have a What's new button with the release notes for every version since the one you had.
 
 ![The Settings window on its General page](docs/images/settings.png)
 
@@ -113,9 +118,18 @@ It is alpha software, Windows only for now.
 
 1. Install [Claude Code](https://github.com/anthropics/claude-code) and check that `claude` runs from a terminal: rustling-tulip finds it on your `PATH`.
 2. Download `rustling-tulip-<version>-setup.exe` from the [latest release](https://github.com/leftos/rustling-tulip/releases/latest) and run it. It installs for your user only, with no administrator prompt, and can start the daemon when you log in.
-3. The installer is not code-signed yet, so Windows SmartScreen warns on first run: choose More info, then Run anyway.
+3. The installer and the app are signed with a verified publisher, so Windows names who made them. While the signature is new, SmartScreen may still warn on first run: choose More info, then Run anyway.
 
 Remote access over Tailscale needs [Tailscale](https://tailscale.com/) on both PCs, signed in to the same tailnet, with HTTPS certificates turned on for it. Remote access over SSH needs only an SSH login to the other PC.
+
+## What's new in v0.9.0-alpha
+
+- Ctrl+click a folder path in a remote host's terminal to fetch the whole folder, or fetch a fetched file's whole folder from its notice.
+- Settings has a search box that finds any setting, and OK, Apply and Cancel so changes wait until you confirm them.
+- The chat stays a readable width, sets each final answer apart, and folds runs of tool calls into one line in Compact mode.
+- The installer and the app are signed with a verified publisher, and update notices show what's new since your version.
+
+The full list is in the [release notes](https://github.com/leftos/rustling-tulip/releases/tag/v0.9.0-alpha).
 
 ## What's new in v0.8.1-alpha
 
