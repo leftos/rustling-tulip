@@ -13,14 +13,11 @@
 
 - [ ] RT-620 Route the remaining session and repo lookups by their own host · release vNext
 - [ ] RT-622 Clear tab-pill and pane drop marks when a dragged leaf's host goes offline · release vNext+1
-- [ ] RT-624 Keep a remote quick shell's remembered folder across This PC's reconnect · release vNext
-- [ ] RT-625 Close the multi-host spawn and creator gaps left by MH.7 brief D · release vNext
 - [ ] RT-626 Keep a session's remembered chat view when its pane moves to the owning host · release vNext+1
-- [ ] RT-627 Tell apart two machines that share a daemon id, and check cross-client host sweeps · release vNext
 - [ ] RT-628 Set the Settings host selector apart from the tab list and dim offline hosts · release vNext+1
-- [ ] RT-629 Open Manage worktrees on the host chosen in Settings · release vNext
 - [ ] RT-839 Give the keyboard back to the dialog under a closed cleanup failure, and scope the launch highlight to its host
 - [ ] RT-841 Refresh an open spawn dialog on a host's Agents and AgentSettings, and its host label
+- [ ] RT-865 Keep remote hosts usable while This PC's connecting overlay is up
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -34,6 +31,7 @@
 - [ ] RT-544 Take the bind and cert files off the tailnet listener's paused-clock schedule tests
 - [ ] RT-670 Add a search box to Settings that finds a setting on any page · release vNext
 - [ ] RT-671 Add an opt-in Detailed logging switch to Settings for the client and daemon · release vNext
+  - [ ] RT-864 Add the Detailed logging switch and Open logs folder to Settings · release vNext
 - [ ] RT-676 Let a manual install over a running client finish when the close dialog takes over 30 s
 - [ ] RT-689 Reset the remembered Trusted choice when Settings' trusted default changes, and fix its hint
 - [ ] RT-690 Cut a dimmed headless Last row's summary with an ellipsis in the Spawn submenu
@@ -44,7 +42,6 @@
   - [ ] RT-851 Default shell: daemon setting, detection and protocol (DS.1) · release vNext+1
   - [ ] RT-852 Default shell: native Settings row (DS.2) · release vNext+1
   - [ ] RT-853 Default shell: host agent sessions in WSL, Nushell and fish (DS.3) · release vNext+1
-- [ ] RT-857 Send ^H for Ctrl+Backspace so it deletes the previous word · release vNext
 
 ## Wave 2b — Hook status
 
@@ -217,6 +214,7 @@
 - [ ] RT-833 Re-read docs/DRIVING_CONVENTIONS.md against its named files' changes since 2026-11-02
 - [ ] RT-834 Re-read docs/agent-plugins.md against its named files' changes since 2026-11-02
 - [ ] RT-835 Re-read docs/spikes/hook-status.md against the Claude plugin's changes since 2026-10-30
+- [ ] RT-858 Fix the missing spoken-alerts design file four issues link
 
 ## Build tooling
 
@@ -261,6 +259,7 @@
   - [ ] RT-811 Attach an error-only feed to every rt-driver-mcp reply
   - [ ] RT-812 Check that a window minimised in front of the driven client never hands it the foreground
 - [ ] RT-840 Sign the installer's uninstaller too
+- [ ] RT-861 Forget a driver id's bounds in UI specs once it stops being drawn
 
 ## macOS
 
@@ -271,6 +270,7 @@
   - [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent · release vNext+1
   - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap · release vNext+1
   - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README · release vNext+1
+- [ ] RT-860 Check the listener's owner before killing a retired daemon off Windows
 
 ## Agent CLIs
 
@@ -386,7 +386,6 @@
 - [ ] RT-615 Keep a weight difference between chosen and unchosen at UI weight SemiBold
 - [ ] RT-618 Ask before Export replaces a file whose .json extension was added after the save dialog
 - [ ] RT-621 Pin a repo's presets.json shape from v0.5.1-alpha with a load test
-- [ ] RT-630 Open a remote host's preset wizard while This PC is offline · release vNext
 - [ ] RT-640 Polish found by the v0.6.0-alpha smoke test · release vNext+1
   - [ ] RT-641 Wrap a tailscale CLI error inside the Connections dialog · release vNext+1
   - [ ] RT-642 Draw This PC's empty state under its host header · release vNext+1
@@ -421,8 +420,6 @@
 - [ ] RT-779 Fix the activity track's long caption and Finished stretch across a restart
 - [ ] RT-780 Hold the daemon's pipe reader until the injector subscribes
 - [ ] RT-783 Hand keys back to the window after a tab rename ends on the Dashboard
-- [ ] RT-819 Show why the native client's Stop did not stop the daemon · release vNext
-- [ ] RT-824 Keep native file and folder pickers off the desktop in a driven or cloaked client · release vNext
 - [ ] RT-825 Show a session's label in rustling-tulipd sessions, as the client does
 - [ ] RT-827 Fit the Dashboard header's day figures at the default window width
 - [ ] RT-830 Make the daemon's default log filter match its own tracing target
@@ -438,10 +435,10 @@
 - [ ] RT-854 Refuse an isolated daemon launch whose checkout has no fake agent CLI
 - [ ] RT-855 Send a remote host's VS Code workspace suggestion to that host
 - [ ] RT-856 Match the workspace creator's replies by request id
+- [ ] RT-866 Log the remaining status writers under status_trace
 
 ## No project
 
-- [ ] RT-818 Kill a retired daemon only when the pinned pid owns its proven listener · release vNext
 - [ ] RT-793 Copy an elevated daemon's binaries only from a folder an ordinary process cannot write · release vNext
 
 ## Design files
@@ -451,7 +448,7 @@
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-853
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
-- [dashboard.md](dashboard.md) — RT-28, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-760, RT-779, RT-789
+- [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-760, RT-779, RT-789, RT-858
 - [default-shell.md](default-shell.md) — RT-844, RT-851, RT-852, RT-853
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
