@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use claude_accounts::{
-    AccountLock, AccountsRoot, AutoswitchState, ConsumeLock, Identity, Lease, LeaseHolder,
+    AccountLock, AccountsRoot, AutoswitchState, ConsumeLock, Identity, Lease, LeaseHolder, Store,
     USAGE_SCHEMA_VERSION, UsageEntry, UsageTable,
 };
 use proc_table::EmptyTable;
@@ -110,6 +110,27 @@ fn a_lease_claim_first_on_a_fresh_machine_makes_the_root_owner_only() {
 
     assert_owner_only(&parent);
     assert_owner_only(root.root());
+}
+
+/// A missing root under a parent that already exists and is owner-only is made owner-only by the first lock, and the
+/// store opens it: the parent's strict rule is met, and nothing about the parent changes.
+#[test]
+fn missing_root_is_created_under_an_owner_only_parent() {
+    let scratch = Scratch::empty("missing_root_is_created_under_an_owner_only_parent");
+    let root = scratch.root();
+    assert!(!root.root().exists(), "the root starts missing");
+    assert_owner_only(&scratch.dir);
+
+    drop(AccountLock::acquire(&root).expect("the first lock makes the root"));
+
+    assert!(root.root().is_dir(), "the root is made");
+    assert_owner_only(root.root());
+    assert_owner_only(&scratch.dir);
+    let store = Store::open(root).expect("the store opens over the new root");
+    assert!(
+        store.read_sequence().expect("the new root reads").is_none(),
+        "a new root holds no accounts"
+    );
 }
 
 /// A root another principal can write is refused by every lock in it, and nothing under it changes.

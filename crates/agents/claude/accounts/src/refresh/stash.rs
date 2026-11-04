@@ -556,6 +556,70 @@ fn read_entry(
         .map_err(|_| ReadFailure)
 }
 
+/// Drops every stash entry of account `number`, which is being removed, and its manifest row: once the account is gone
+/// no pass may adopt one and spend it for the number. Each entry's bytes go first, as a retire removes them
+/// ([`remove_entry_file`]), and then its row, under the manifest lock once [`mutate`]'s checks passed, waiting up to
+/// `wait` for it. A row whose id is not of the entry form names no file and is dropped alone. A manifest with no row
+/// of the account is left untouched, lock and all.
+///
+/// # Errors
+///
+/// When a folder on the way is a link, the manifest cannot be read, is corrupt or was written by a newer version, the
+/// store refuses writes, the manifest lock is not taken, an entry's bytes cannot be deleted (its row is kept), or the
+/// manifest cannot be rewritten. The caller removes nothing else then.
+pub(crate) fn drop_account_entries(
+    root: &AccountsRoot,
+    number: u32,
+    wait: Duration,
+    now: jiff::Timestamp,
+) -> io::Result<()> {
+    let dir = root.credentials_dir();
+    root.check_folders(&dir.join(MANIFEST))?;
+    let key = ConfigSlot::Account(number).field();
+    let of_account = |entries: &Map<String, Value>| -> Vec<String> {
+        entries
+            .iter()
+            .filter(|(_, row)| field(row, "configSlot") == Some(key.as_str()))
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+    let (entries, verdict) = read_manifest(&dir);
+    match verdict {
+        Verdict::Known => {}
+        Verdict::Unreadable | Verdict::Corrupt | Verdict::Newer => {
+            return Err(io::Error::other(
+                "the stash's manifest cannot be read or was written by a newer version",
+            ));
+        }
+    }
+    if of_account(&entries).is_empty() {
+        return Ok(());
+    }
+    let mut kept = false;
+    let rewritten = mutate(root, now, StashWrite::BeforeSpend, wait, |entries| {
+        for id in of_account(entries) {
+            if valid_id(&id) && !remove_entry_file(&entry_path(&dir, &id)) {
+                kept = true;
+                continue;
+            }
+            entries.remove(&id);
+        }
+    });
+    match rewritten {
+        Ok(()) if !kept => Ok(()),
+        Ok(()) => Err(io::Error::other(
+            "a stash entry of the account could not be deleted; it and its row are kept",
+        )),
+        Err(MutateFailed::Lock(error)) => Err(io::Error::other(error)),
+        Err(MutateFailed::Refused(_)) => Err(io::Error::other(
+            "the store or the stash's manifest refuses writes",
+        )),
+        Err(MutateFailed::Failed) => Err(io::Error::other(
+            "the stash's manifest could not be read or rewritten",
+        )),
+    }
+}
+
 /// The bytes of an entry exist and could not be read or opened as the slot's sealed entry, or opened to a credential
 /// other than the one its row's `fingerprint` names. Nothing is known about the credential the row expects, so nothing
 /// may be retired or overwritten on its account.

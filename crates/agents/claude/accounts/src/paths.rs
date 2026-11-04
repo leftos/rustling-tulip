@@ -83,6 +83,18 @@ impl AccountsRoot {
         self.root.join(".lock")
     }
 
+    /// `settings.json`: the auto-switch engine's and the fleet verdict's settings ([`crate::Settings`]).
+    #[must_use]
+    pub fn settings(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+
+    /// `.settings.lock`: the lock held around every write of `settings.json`.
+    #[must_use]
+    pub fn settings_lock(&self) -> PathBuf {
+        self.root.join(".settings.lock")
+    }
+
     /// `autoswitch_state.json`: the auto-switch engines' shared state: the last switch and the
     /// quarantined accounts.
     #[must_use]

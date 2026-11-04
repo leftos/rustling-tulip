@@ -24,8 +24,8 @@ use zeroize::Zeroizing;
 
 use crate::claude_files::identity_in;
 use crate::guard::{self, GuardError, GuardErrorKind};
-use crate::locks::AccountLockGuard;
-use crate::paths::{AccountsRoot, Email};
+use crate::locks::{AccountLock, AccountLockGuard, ConsumeLock, LockError};
+use crate::paths::{AccountsRoot, ClaudePaths, Email};
 use crate::refresh::{Scrubbed, scrub};
 use crate::seal::{self, AssociatedData, SealErrorKind, SealPurpose, SealedBytes};
 use crate::secret::CredentialBlob;
@@ -46,6 +46,9 @@ const TRANSIENT_MAX_DELAY: Duration = Duration::from_millis(250);
 const GROWTH_RETRIES: u32 = 3;
 /// The largest file a read takes: a longer one is refused before its buffer is allocated.
 const MAX_READ: u64 = 64 << 20;
+
+/// The most characters an account's alias may have, counted after trimming.
+pub const MAX_ALIAS_CHARS: usize = 64;
 
 /// Numbers this process's temp files, so two threads writing one target never share a temp file.
 static TEMP_SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -123,6 +126,11 @@ pub enum StoreErrorKind {
     LeftoverUnopenable,
     /// A new rotation order does not name each account in `accounts.json`'s `order` exactly once.
     OrderMismatch,
+    /// The account asked to be removed is the active one: switch to another account first.
+    ActiveAccount,
+    /// An alias is longer than [`MAX_ALIAS_CHARS`] characters once trimmed, or holds a control, bidi-control or other
+    /// invisible character (a line or paragraph separator, a zero-width space, a byte-order mark).
+    InvalidAlias,
 }
 
 impl fmt::Display for StoreErrorKind {
@@ -184,6 +192,12 @@ impl fmt::Display for StoreErrorKind {
                 "a credential file no account records is at this account number and does not open as the new account's; it was kept"
             }
             Self::OrderMismatch => "the order must name each account once",
+            Self::ActiveAccount => {
+                "the active account cannot be removed; switch to another account first"
+            }
+            Self::InvalidAlias => {
+                "an alias is at most 64 characters once trimmed and may not hold a control, bidi-control or invisible character"
+            }
         };
         formatter.write_str(text)
     }
@@ -429,6 +443,48 @@ impl Sequence {
         self.numbers = order.to_vec();
         self.document
             .insert("order".to_owned(), Value::from(self.numbers.clone()));
+    }
+
+    /// Drops account `number`: its record under `accounts` and its number from `order`, keeping every other key in
+    /// place. `nextNumber` is left as it is, so the number is never given to another account.
+    fn remove_record(&mut self, number: u32) {
+        if let Some(records) = self
+            .document
+            .get_mut("accounts")
+            .and_then(Value::as_object_mut)
+        {
+            records.shift_remove(&number.to_string());
+        }
+        self.accounts.remove(&number);
+        if self.numbers.contains(&number) {
+            self.numbers.retain(|kept| *kept != number);
+            self.document
+                .insert("order".to_owned(), Value::from(self.numbers.clone()));
+        }
+    }
+
+    /// Stores `alias` as account `number`'s `alias`, in its place when the key is there, or removes the key when
+    /// `alias` is `None`, keeping every other key in place.
+    fn set_alias_value(&mut self, number: u32, alias: Option<&str>) {
+        let record = self
+            .document
+            .get_mut("accounts")
+            .and_then(Value::as_object_mut)
+            .and_then(|records| records.get_mut(&number.to_string()))
+            .and_then(Value::as_object_mut);
+        if let Some(record) = record {
+            match alias {
+                Some(alias) => {
+                    record.insert("alias".to_owned(), Value::from(alias));
+                }
+                None => {
+                    record.shift_remove("alias");
+                }
+            }
+        }
+        if let Some(account) = self.accounts.get_mut(&number) {
+            account.alias = alias.map(str::to_owned);
+        }
     }
 
     /// Makes account `number` the active one (`active`), keeping every other key in place.
@@ -1269,6 +1325,157 @@ impl Store {
             return Ok(false);
         }
         sequence.set_active_number(number);
+        self.write_sequence_file(&sequence)?;
+        Ok(true)
+    }
+
+    /// Removes account `number` from the store. It takes the account's consume lock, then the account lock, in the
+    /// order a switch takes them, and under both drops the account's refresh stash entries and their manifest rows
+    /// under the stash's manifest lock, so no pass can adopt and spend one for the number; then drops the record and
+    /// its `order` entry, keeping `nextNumber` so the number is never given again, writes `accounts.json`, and deletes
+    /// `credentials/<n>.cred`, `credentials/<n>.cred.prev` and `configs/<n>.json`, a file already absent counting as
+    /// deleted. A crash between the write and the deletions leaves files no record names, which nothing reads. The
+    /// consume lock file, `credentials/.consume-<n>.lock`, stays: a waiter's open handle must keep naming the one lock,
+    /// and the number is never given again. Returns `true` when it removed the account.
+    ///
+    /// The account `accounts.json` names as active is refused, and so is the one Claude Code is logged in as now
+    /// (`claude`'s `~/.claude.json` `oauthAccount`, by email and organization). The checks run once before the locks
+    /// too, so a refused removal creates no lock file.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreErrorKind::StoreReadOnly`], [`StoreErrorKind::UnknownSchema`], [`StoreErrorKind::AccountsMissing`],
+    /// [`StoreErrorKind::UnknownAccount`], [`StoreErrorKind::ActiveAccount`] for the active account or the live login,
+    /// each with nothing changed; [`StoreErrorKind::AccountsWrite`] when a lock cannot be taken or the file cannot be
+    /// written; [`StoreErrorKind::CredentialsWrite`] when the account's stash entries cannot all be dropped (the
+    /// record stays then), or when a credential file that is there cannot be deleted; [`StoreErrorKind::ConfigWrite`]
+    /// when the config file cannot be deleted (the record is already gone then); or the errors of
+    /// [`Store::read_sequence`].
+    pub fn remove_account(&self, claude: &ClaudePaths, number: u32) -> Result<bool, StoreError> {
+        if let Some(kind) = self.write_refusal() {
+            return Err(StoreError::new(kind, Some(number)));
+        }
+        self.removable(claude, number)?;
+        let lock_failed = |error: LockError| {
+            StoreError::io(
+                StoreErrorKind::AccountsWrite,
+                Some(number),
+                io::Error::other(error),
+            )
+        };
+        let consume =
+            ConsumeLock::acquire_within(&self.root, number, self.lock_wait).map_err(lock_failed)?;
+        let lock = AccountLock::acquire_within(&self.root, self.lock_wait).map_err(lock_failed)?;
+        self.check_write(&lock, Some(number))?;
+        let mut sequence = self.removable(claude, number)?;
+        crate::refresh::stash::drop_account_entries(
+            &self.root,
+            number,
+            self.lock_wait,
+            jiff::Timestamp::now(),
+        )
+        .map_err(|error| StoreError::io(StoreErrorKind::CredentialsWrite, Some(number), error))?;
+        sequence.remove_record(number);
+        self.write_sequence_file(&sequence)?;
+        self.remove_file_if_present(
+            &self.root.credential_path(number),
+            StoreErrorKind::CredentialsWrite,
+            number,
+        )?;
+        self.remove_file_if_present(
+            &self.root.credential_previous_path(number),
+            StoreErrorKind::CredentialsWrite,
+            number,
+        )?;
+        self.remove_file_if_present(
+            &self.root.config_path(number),
+            StoreErrorKind::ConfigWrite,
+            number,
+        )?;
+        drop(lock);
+        drop(consume);
+        Ok(true)
+    }
+
+    /// `accounts.json` when account `number` may be removed: it exists, holds the account, and the account is neither
+    /// the active one nor the one Claude Code is logged in as now, resolved as a refresh resolves it.
+    fn removable(&self, claude: &ClaudePaths, number: u32) -> Result<Sequence, StoreError> {
+        let Some(sequence) = self.read_sequence()? else {
+            return Err(StoreError::new(
+                StoreErrorKind::AccountsMissing,
+                Some(number),
+            ));
+        };
+        let Some(account) = sequence.accounts.get(&number) else {
+            return Err(StoreError::new(
+                StoreErrorKind::UnknownAccount,
+                Some(number),
+            ));
+        };
+        let live = crate::poll::live_identity(claude);
+        if sequence.active == Some(number) || live.is_some_and(|live| live == Identity::of(account))
+        {
+            return Err(StoreError::new(StoreErrorKind::ActiveAccount, Some(number)));
+        }
+        Ok(sequence)
+    }
+
+    /// Deletes the store file at `path`, once the folders on the way are checked for links; a file already absent counts
+    /// as deleted, and transient sharing errors are retried. Any other failure is `kind`.
+    fn remove_file_if_present(
+        &self,
+        path: &Path,
+        kind: StoreErrorKind,
+        number: u32,
+    ) -> Result<(), StoreError> {
+        let failed = |error| StoreError::io(kind, Some(number), error);
+        self.root.check_folders(path).map_err(failed)?;
+        match retry_transient(|| fs::remove_file(path)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(failed(error)),
+        }
+    }
+
+    /// Sets account `number`'s alias to `alias`, trimmed, or removes it when `alias` is `None` or blank once trimmed,
+    /// every other key kept. Returns `false`, leaving the file untouched, when the alias is already that.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreErrorKind::WrongLock`], [`StoreErrorKind::StoreReadOnly`], [`StoreErrorKind::UnknownSchema`],
+    /// [`StoreErrorKind::InvalidAlias`] for an alias over [`MAX_ALIAS_CHARS`] characters once trimmed or holding a
+    /// control, bidi-control or other invisible character (as a model name may not), [`StoreErrorKind::AccountsMissing`], [`StoreErrorKind::UnknownAccount`], or the errors of
+    /// [`Store::read_sequence`] and [`Store::write_sequence`].
+    pub fn set_alias(
+        &self,
+        lock: &AccountLockGuard,
+        number: u32,
+        alias: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        self.check_write(lock, Some(number))?;
+        let alias = alias.map(str::trim).filter(|alias| !alias.is_empty());
+        if let Some(alias) = alias
+            && (alias.chars().count() > MAX_ALIAS_CHARS
+                || alias.chars().any(crate::settings::is_control_or_bidi))
+        {
+            return Err(StoreError::new(StoreErrorKind::InvalidAlias, Some(number)));
+        }
+        let Some(mut sequence) = self.read_sequence()? else {
+            return Err(StoreError::new(
+                StoreErrorKind::AccountsMissing,
+                Some(number),
+            ));
+        };
+        let Some(account) = sequence.accounts.get(&number) else {
+            return Err(StoreError::new(
+                StoreErrorKind::UnknownAccount,
+                Some(number),
+            ));
+        };
+        if account.alias.as_deref() == alias {
+            return Ok(false);
+        }
+        sequence.set_alias_value(number, alias);
         self.write_sequence_file(&sequence)?;
         Ok(true)
     }

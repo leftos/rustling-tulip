@@ -30,6 +30,9 @@
 //! [`switch`] makes another managed account Claude Code's live login under the store's and Claude Code's locks, after
 //! [`probe_outgoing`] has asked the profile oracle, before any lock, whose the outgoing credential is.
 //!
+//! [`Settings`] reads and writes the store's settings file, `settings.json`: the auto-switch engine's settings and the
+//! fleet verdict's, strictly checked.
+//!
 //! [`capture_live_login`] adds Claude Code's live login to the store, or writes it into its account when the live copy
 //! is later, once the profile oracle has confirmed whose it is; [`Store::add_accounts`] is the store's one way to add
 //! accounts.
@@ -46,6 +49,7 @@ mod poll;
 mod refresh;
 pub mod seal;
 mod secret;
+mod settings;
 mod store;
 mod switch;
 mod transport;
@@ -86,9 +90,13 @@ pub use refresh::{
 pub use secret::{
     AccessToken, CredentialBlob, OAUTH_EXPIRY_BUFFER, OauthCredentials, RefreshToken, Secret,
 };
+pub use settings::{
+    AutoSwitchSection, FleetSettings, RateWindow, Settings, SettingsError, StrategyName,
+};
 pub use store::{
-    AccountConfig, AccountKind, AccountNumber, AccountRecord, AutoSwitchSettings, NewAccount,
-    Retention, SealCanary, Sequence, Store, StoreError, StoreErrorKind, Strategy, default_canary,
+    AccountConfig, AccountKind, AccountNumber, AccountRecord, AutoSwitchSettings, MAX_ALIAS_CHARS,
+    NewAccount, Retention, SealCanary, Sequence, Store, StoreError, StoreErrorKind, Strategy,
+    default_canary,
 };
 pub use switch::{
     LoginState, OutgoingProbe, SwitchAccount, SwitchError, SwitchErrorKind, SwitchOutcome,

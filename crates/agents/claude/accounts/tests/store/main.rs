@@ -10,6 +10,8 @@ mod accounts_json;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod add;
 #[cfg(all(windows, target_pointer_width = "64"))]
+mod alias;
+#[cfg(all(windows, target_pointer_width = "64"))]
 mod claude_files;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod credentials;
@@ -22,12 +24,16 @@ mod links;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod locks;
 #[cfg(all(windows, target_pointer_width = "64"))]
+mod remove;
+#[cfg(all(windows, target_pointer_width = "64"))]
 mod replace;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod root_locks;
 mod seal;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod secrets;
+#[cfg(all(windows, target_pointer_width = "64"))]
+mod settings;
 mod support;
 #[cfg(not(all(windows, target_pointer_width = "64")))]
 mod unsupported;
