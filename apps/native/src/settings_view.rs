@@ -1982,6 +1982,16 @@ impl RootView {
         keep_awake_status(self.settings_mirrors().keep_awake)
     }
 
+    /// The Power section's keep-awake row label, naming the host Settings
+    /// shows: "Keep this PC awake", else "Keep {host} awake".
+    #[must_use]
+    pub fn keep_awake_label(&self) -> String {
+        match self.settings_host() {
+            HostKey::Local => "Keep this PC awake".to_owned(),
+            host @ HostKey::Remote(_) => format!("Keep {} awake", crate::sidebar::host_label(host)),
+        }
+    }
+
     /// The App title tab's preview: the title for a tab named "Tab name".
     #[must_use]
     pub fn title_preview(&self) -> String {
@@ -6564,7 +6574,7 @@ impl RootView {
             "Power",
         )
         .child(choice_row(
-            "Keep this PC awake",
+            self.keep_awake_label(),
             &modes,
             locked,
             focused,
@@ -9050,7 +9060,7 @@ fn shell_list_row(
 /// unless `lock` is [`RowLock::Live`] the choices are dimmed, inert and out
 /// of the ring.
 fn choice_row(
-    label: &'static str,
+    label: impl Into<SharedString>,
     choices: &[(SettingsControl, &'static str, bool)],
     lock: RowLock,
     focused: Option<SettingsControl>,

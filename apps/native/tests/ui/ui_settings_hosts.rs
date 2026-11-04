@@ -660,6 +660,23 @@ fn keep_awake_follows_the_chosen_host(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn keep_awake_label_names_the_selected_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.send(keep_awake(KeepAwakeMode::Always));
+    h.host(&remote()).send(keep_awake(KeepAwakeMode::Off));
+    h.keys("ctrl-,");
+    let label = |h: &mut Harness<'_>| h.root(|root, _| root.keep_awake_label());
+    assert_eq!(label(&mut h), "Keep this PC awake");
+
+    h.click_on(&remote_row());
+    assert_eq!(label(&mut h), "Keep box awake", "the row names box");
+
+    h.click_on(LOCAL_ROW);
+    assert_eq!(label(&mut h), "Keep this PC awake", "back on This PC");
+}
+
 /// One of a host's default-shell choices, every one installed and hosting
 /// agents.
 fn shell(id: &str, label: &str) -> protocol::ShellChoice {
