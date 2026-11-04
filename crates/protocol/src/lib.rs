@@ -49,6 +49,12 @@ pub const FEATURE_FILE_TAIL: &str = "file_tail";
 /// lists it.
 pub const FEATURE_DETAILED_LOGGING: &str = "detailed_logging";
 
+/// `Welcome.features` entry: the daemon sends a folder of a repo or worktree
+/// as one archive ([`ClientMessage::FetchFolder`]) and says what a path
+/// names ([`ClientMessage::StatPath`]). A client offers a folder fetch only
+/// when the connected daemon lists it.
+pub const FEATURE_FOLDER_FETCH: &str = "folder_fetch";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -2499,6 +2505,25 @@ pub struct EnvName {
     pub scopes: Vec<EnvScope>,
 }
 
+/// What a [`ClientMessage::StatPath`] path names, as [`DaemonMessage::PathStat`]
+/// reports it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PathKind {
+    /// A regular file.
+    File,
+    /// A folder.
+    Dir,
+    /// Nothing there, or a path the daemon refused (one resolving outside
+    /// the root included), which it never tells apart from a missing one.
+    Missing,
+    /// Something inside the root that is neither a file nor a folder.
+    Other,
+    /// A kind this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Where an environment variable is set.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -3485,8 +3510,47 @@ pub enum ClientMessage {
         worktree_path: Option<String>,
         path: String,
     },
-    /// Stop the [`ClientMessage::FetchFile`] transfer with this id. No
-    /// further messages for it are sent. An unknown id is ignored.
+    /// Download a folder of the repo root (or one of its session worktrees)
+    /// as one zstd-compressed tar archive. `path` is relative to that root,
+    /// and `""` or `"."` names the root itself; the daemon refuses `..`,
+    /// absolute or prefixed paths, anything resolving outside the root, a
+    /// `worktree_path` that is the worktrees root itself, and a target that
+    /// is not a folder. It walks the folder following no link: links,
+    /// entries that are neither files nor folders, names that are not
+    /// Unicode, `.git` and the ignored folders (`node_modules`, `target`,
+    /// `.venv`, caches, at any depth) are left out. A folder over 20 000
+    /// files or 512 MiB is refused. Every refusal is one
+    /// [`DaemonMessage::FileFetchError`] sent before anything else. Otherwise
+    /// the daemon answers with [`DaemonMessage::FolderFetchStarted`], then
+    /// [`DaemonMessage::FileChunk`]s carrying the archive, then
+    /// [`DaemonMessage::FileFetchDone`], or a [`DaemonMessage::FileFetchError`]
+    /// at any point. `id` shares the connection's id space with
+    /// [`ClientMessage::FetchFile`]: an id still active is refused.
+    FetchFolder {
+        /// Client-assigned transfer id, echoed on every response.
+        id: String,
+        repo_id: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
+        path: String,
+    },
+    /// Say what `path` names, resolved as [`ClientMessage::FetchFolder`]
+    /// resolves it (`""` and `"."` are the root): the daemon answers with
+    /// [`DaemonMessage::PathStat`]. A refused path, one resolving outside the
+    /// root included, answers [`PathKind::Missing`] exactly as a missing one
+    /// does.
+    StatPath {
+        /// Client-assigned request id, echoed on the answer.
+        id: String,
+        repo_id: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
+        path: String,
+    },
+    /// Stop the [`ClientMessage::FetchFile`] or [`ClientMessage::FetchFolder`]
+    /// transfer with this id. Once the daemon sees the cancel it queues
+    /// nothing more for it, but messages already queued may still arrive:
+    /// up to four, plus one being sent. An unknown id is ignored.
     CancelFetch {
         id: String,
     },
@@ -4890,23 +4954,45 @@ pub enum DaemonMessage {
         resolved_path: String,
         size: u64,
     },
-    /// One piece of a [`ClientMessage::FetchFile`] transfer, base64-encoded.
-    /// `seq` counts from 0; concatenating the chunks in order gives the file.
+    /// One piece of a [`ClientMessage::FetchFile`] or
+    /// [`ClientMessage::FetchFolder`] transfer, base64-encoded. `seq` counts
+    /// from 0; concatenating the chunks in order gives the file, or the
+    /// folder's archive.
     FileChunk {
         id: String,
         seq: u64,
         data_b64: String,
     },
-    /// The [`ClientMessage::FetchFile`] transfer finished; every chunk has
-    /// been sent.
+    /// The [`ClientMessage::FetchFile`] or [`ClientMessage::FetchFolder`]
+    /// transfer finished; every chunk has been sent.
     FileFetchDone {
         id: String,
     },
-    /// The [`ClientMessage::FetchFile`] transfer failed (refused path,
-    /// directory, unreadable file). No further messages for `id` follow.
+    /// The [`ClientMessage::FetchFile`] or [`ClientMessage::FetchFolder`]
+    /// transfer failed (refused path, directory for a file, file for a
+    /// folder, a folder over its limits, unreadable file). No further
+    /// messages for `id` follow.
     FileFetchError {
         id: String,
         error: String,
+    },
+    /// First response to an accepted [`ClientMessage::FetchFolder`].
+    /// `resolved_path` is the canonical host path of the folder, as display
+    /// text; `files` and `bytes` count the files the archive holds and their
+    /// total size uncompressed, as the walk found them. A file that shrinks
+    /// or goes after the walk sends less, never more.
+    FolderFetchStarted {
+        id: String,
+        resolved_path: String,
+        files: u64,
+        bytes: u64,
+    },
+    /// The answer to [`ClientMessage::StatPath`]: what the path names, and
+    /// its size in bytes for a file (0 for anything else).
+    PathStat {
+        id: String,
+        kind: PathKind,
+        size: u64,
     },
     /// Bytes of a file followed by [`ClientMessage::TailFile`], base64,
     /// at most 64 KiB a message. `path` is the path as the request named it;
@@ -10960,6 +11046,126 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn fetch_folder_round_trips() {
+        let msg = ClientMessage::FetchFolder {
+            id: "f1".to_string(),
+            repo_id: "r1".to_string(),
+            worktree_path: Some("C:/wt/a".to_string()),
+            path: "src/ui".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"fetch_folder""#), "{json}");
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::FetchFolder {
+                id,
+                repo_id,
+                worktree_path,
+                path,
+            } => {
+                assert_eq!((id.as_str(), repo_id.as_str()), ("f1", "r1"));
+                assert_eq!(worktree_path.as_deref(), Some("C:/wt/a"));
+                assert_eq!(path, "src/ui");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let bare: ClientMessage =
+            serde_json::from_str(r#"{"type":"fetch_folder","id":"f2","repo_id":"r1","path":""}"#)
+                .expect("a worktree path is optional");
+        assert!(matches!(
+            bare,
+            ClientMessage::FetchFolder { worktree_path: None, ref path, .. } if path.is_empty()
+        ));
+
+        let started = DaemonMessage::FolderFetchStarted {
+            id: "f1".to_string(),
+            resolved_path: r"\\?\C:\repo\src\ui".to_string(),
+            files: 12,
+            bytes: 4096,
+        };
+        let json = serde_json::to_string(&started).expect("serialize");
+        assert!(json.contains(r#""type":"folder_fetch_started""#), "{json}");
+        match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+            DaemonMessage::FolderFetchStarted {
+                id,
+                resolved_path,
+                files,
+                bytes,
+            } => {
+                assert_eq!(id, "f1");
+                assert_eq!(resolved_path, r"\\?\C:\repo\src\ui");
+                assert_eq!((files, bytes), (12, 4096));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stat_path_and_path_stat_round_trip() {
+        let msg = ClientMessage::StatPath {
+            id: "s1".to_string(),
+            repo_id: "r1".to_string(),
+            worktree_path: None,
+            path: "src".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"stat_path""#), "{json}");
+        match serde_json::from_str::<ClientMessage>(&json).expect("deserialize") {
+            ClientMessage::StatPath {
+                id,
+                repo_id,
+                worktree_path,
+                path,
+            } => {
+                assert_eq!((id.as_str(), repo_id.as_str()), ("s1", "r1"));
+                assert_eq!(worktree_path, None);
+                assert_eq!(path, "src");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        for (kind, wire) in [
+            (PathKind::File, "file"),
+            (PathKind::Dir, "dir"),
+            (PathKind::Missing, "missing"),
+            (PathKind::Other, "other"),
+        ] {
+            let stat = DaemonMessage::PathStat {
+                id: "s1".to_string(),
+                kind,
+                size: 7,
+            };
+            let json = serde_json::to_string(&stat).expect("serialize");
+            assert!(json.contains(r#""type":"path_stat""#), "{json}");
+            assert!(json.contains(&format!(r#""kind":"{wire}""#)), "{json}");
+            match serde_json::from_str::<DaemonMessage>(&json).expect("deserialize") {
+                DaemonMessage::PathStat {
+                    id,
+                    kind: back,
+                    size,
+                } => {
+                    assert_eq!((id.as_str(), back, size), ("s1", kind, 7));
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_path_kind_reads_as_unknown() {
+        let stat: DaemonMessage =
+            serde_json::from_str(r#"{"type":"path_stat","id":"s1","kind":"socket","size":0}"#)
+                .expect("an unknown kind decodes in place");
+        assert!(matches!(
+            stat,
+            DaemonMessage::PathStat {
+                kind: PathKind::Unknown,
+                size: 0,
+                ..
+            }
+        ));
     }
 
     #[test]

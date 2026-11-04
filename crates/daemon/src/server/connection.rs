@@ -12,7 +12,6 @@ use futures::{SinkExt as _, StreamExt as _};
 use protocol::{DaemonMessage, InboundClientMessage, error_codes};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -931,7 +930,8 @@ pub(super) type TailRegistry = Arc<AsyncMutex<HashMap<(String, String), super::t
 #[derive(Clone, Copy)]
 pub(super) struct ConnCtx<'a> {
     pub(super) out_tx: &'a mpsc::UnboundedSender<DaemonMessage>,
-    /// Bounded, lower-priority queue for `FetchFile` transfer messages.
+    /// Bounded, lower-priority queue for the transfer messages of `FetchFile`
+    /// and `FetchFolder` (and `TailFile` follows).
     pub(super) file_tx: &'a mpsc::Sender<DaemonMessage>,
     pub(super) pty_lane: &'a Arc<PtyLane>,
     pub(super) fetches: &'a FetchRegistry,
@@ -1026,10 +1026,28 @@ async fn close_gracefully<S: Outbound, R: Inbound>(mut sender: S, receiver: &mut
     }
 }
 
-/// Start streaming a confined file for `FetchFile`, or answer with
-/// `FileFetchError` when the path was refused or `id` is already active.
-pub(super) async fn start_fetch(ctx: &ConnCtx<'_>, id: String, target: anyhow::Result<PathBuf>) {
-    let path = match target {
+/// Start the transfer `id` (`FetchFile` or `FetchFolder`, which share the
+/// connection's ids and [`cancel_fetch`]) on `worker`, or answer with
+/// `FileFetchError` when `target` was refused or `id` is already active.
+/// `worker` gets the id, the target, the connection's file queue and the
+/// transfer's cancel token, and hands back the task it started. That task
+/// ends with the transfer's final message (`FileFetchDone` or
+/// `FileFetchError`) unsent, or `None` when it has nothing more to send.
+/// The task's end frees the id, and only then is the final message sent, so
+/// a client that reuses the id on hearing it is never refused. A task that
+/// panicked still ends its transfer with one `FileFetchError`.
+pub(super) async fn start_fetch<T>(
+    ctx: &ConnCtx<'_>,
+    id: String,
+    target: anyhow::Result<T>,
+    worker: impl FnOnce(
+        String,
+        T,
+        mpsc::Sender<DaemonMessage>,
+        CancellationToken,
+    ) -> tokio::task::JoinHandle<Option<DaemonMessage>>,
+) {
+    let target = match target {
         Ok(path) => path,
         Err(err) => {
             let error = format!("{err:#}");
@@ -1047,25 +1065,107 @@ pub(super) async fn start_fetch(ctx: &ConnCtx<'_>, id: String, target: anyhow::R
     };
     if duplicate {
         let _ = ctx.out_tx.send(DaemonMessage::FileFetchError {
-            id,
+            id: id.clone(),
             error: "duplicate fetch id".to_string(),
         });
+        #[cfg(test)]
+        hooks::reached_registry(&id);
         return;
     }
+    #[cfg(test)]
+    hooks::reached_registry(&id);
     let fetches = Arc::clone(ctx.fetches);
     let file_tx = ctx.file_tx.clone();
+    let run = worker(id.clone(), target, file_tx.clone(), token.clone());
     tokio::spawn(async move {
-        file_fetch::stream_file(id.clone(), path, file_tx, token.clone()).await;
-        let mut fetches = fetches.lock().await;
-        // A cancelled entry was already removed by whoever cancelled it, and
-        // the id may since belong to a newer fetch.
-        if !token.is_cancelled() {
-            fetches.remove(&id);
+        let last = match run.await {
+            Ok(last) => last,
+            Err(err) => {
+                warn!(%id, error = %err, "a fetch's worker failed");
+                let error = format!("the fetch stopped unexpectedly: {err}");
+                Some(DaemonMessage::FileFetchError {
+                    id: id.clone(),
+                    error,
+                })
+            }
+        };
+        {
+            let mut fetches = fetches.lock().await;
+            // A cancelled entry was already removed by whoever cancelled it,
+            // and the id may since belong to a newer fetch.
+            if !token.is_cancelled() {
+                fetches.remove(&id);
+            }
+        }
+        // The id is free before the client hears the transfer ended.
+        if let Some(last) = last {
+            file_fetch::send_unless_cancelled(&file_tx, &token, last).await;
         }
     });
 }
 
-/// Cancel and forget the `FetchFile` transfer `id`, if it is still active.
+/// Watching fetches reach the registry from a test, so it can wait on the
+/// dispatch of what it sent rather than on time.
+#[cfg(test)]
+pub(super) mod hooks {
+    use super::super::test_support::HANG_GUARD;
+    use crate::sync::lock;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::sync::watch;
+
+    static WATCHES: Mutex<Vec<(u64, String, watch::Sender<usize>)>> = Mutex::new(Vec::new());
+
+    /// Counts the fetches of one id that reached the registry, registered
+    /// or refused as a duplicate, until dropped.
+    pub(in super::super) struct RegistryWatch {
+        key: u64,
+        seen: watch::Receiver<usize>,
+    }
+
+    impl RegistryWatch {
+        /// Count the fetches of `id`.
+        pub(in super::super) fn new(id: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let key = NEXT.fetch_add(1, Ordering::Relaxed);
+            let (tx, seen) = watch::channel(0);
+            lock(&WATCHES).push((key, id.to_owned(), tx));
+            Self { key, seen }
+        }
+
+        /// Resolves once `count` fetches of the id reached the registry;
+        /// fails as hung when they never do.
+        pub(in super::super) async fn reached(&mut self, count: usize) {
+            let waited =
+                tokio::time::timeout(HANG_GUARD, self.seen.wait_for(|seen| *seen >= count))
+                    .await
+                    .map(|seen| seen.is_ok());
+            assert_eq!(
+                waited,
+                Ok(true),
+                "hung: {count} fetches never reached the registry"
+            );
+        }
+    }
+
+    impl Drop for RegistryWatch {
+        fn drop(&mut self) {
+            lock(&WATCHES).retain(|(key, _, _)| *key != self.key);
+        }
+    }
+
+    /// A fetch of `id` reached the registry.
+    pub(super) fn reached_registry(id: &str) {
+        for (_, watched, tx) in lock(&WATCHES).iter() {
+            if watched == id {
+                tx.send_modify(|seen| *seen += 1);
+            }
+        }
+    }
+}
+
+/// Cancel and forget the `FetchFile` or `FetchFolder` transfer `id`, if it
+/// is still active.
 pub(super) async fn cancel_fetch(fetches: &FetchRegistry, id: &str) {
     let mut fetches = fetches.lock().await;
     if let Some(token) = fetches.remove(id) {

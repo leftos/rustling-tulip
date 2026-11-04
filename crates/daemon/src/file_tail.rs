@@ -10,6 +10,7 @@
 //! thread, bounded by [`STEP_BOUND`] and stopped early by the follow's
 //! cancel token, and checks where the opened handle really is.
 
+use crate::file_fetch::send_unless_cancelled;
 use crate::session::SessionRecord;
 use base64::Engine as _;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -209,7 +210,8 @@ impl Folders {
         Self { canonical }
     }
 
-    fn holds(&self, resolved: &Path) -> bool {
+    /// Whether `resolved`, a canonical path, sits inside one of the folders.
+    pub(crate) fn holds(&self, resolved: &Path) -> bool {
         self.canonical
             .iter()
             .any(|folder| resolved.starts_with(folder))
@@ -309,7 +311,7 @@ const STOPPED: &str = "the follow was stopped";
 
 /// Why a read found nothing to send.
 #[derive(Debug)]
-enum StepError {
+pub(crate) enum StepError {
     /// The file does not exist (yet).
     Missing,
     /// The path was refused or the file could not be read.
@@ -318,7 +320,7 @@ enum StepError {
 
 /// Open `resolved` and check where the opened handle really is, which also
 /// catches a link swapped in after [`locate`].
-fn open_inside(folders: &Folders, resolved: &Path) -> Result<File, StepError> {
+pub(crate) fn open_inside(folders: &Folders, resolved: &Path) -> Result<File, StepError> {
     let file = File::open(resolved).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             StepError::Missing
@@ -346,7 +348,7 @@ fn open_inside(folders: &Folders, resolved: &Path) -> Result<File, StepError> {
 /// The path the open handle `file` refers to, in the form
 /// `std::fs::canonicalize` gives.
 #[cfg(windows)]
-fn final_path(file: &File, _opened_as: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn final_path(file: &File, _opened_as: &Path) -> std::io::Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt as _;
     use std::os::windows::io::AsRawHandle as _;
     use windows::Win32::Foundation::HANDLE;
@@ -376,7 +378,7 @@ fn final_path(file: &File, _opened_as: &Path) -> std::io::Result<PathBuf> {
 /// The path the open handle `file` refers to: its `/proc/self/fd` link
 /// where there is one, else `opened_as` canonicalized again.
 #[cfg(not(windows))]
-fn final_path(file: &File, opened_as: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn final_path(file: &File, opened_as: &Path) -> std::io::Result<PathBuf> {
     use std::os::fd::AsRawFd as _;
     std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
         .or_else(|_| std::fs::canonicalize(opened_as))
@@ -711,19 +713,6 @@ impl Cursor {
     }
 }
 
-/// Send `message` unless `cancel` fires first: whether it was sent.
-async fn send_unless_cancelled(
-    tx: &mpsc::Sender<DaemonMessage>,
-    cancel: &CancellationToken,
-    message: DaemonMessage,
-) -> bool {
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => false,
-        sent = tx.send(message) => sent.is_ok(),
-    }
-}
-
 /// Holding a follow's open from a test, to stand for an open that hangs.
 #[cfg(test)]
 pub(crate) mod hooks {
@@ -781,9 +770,15 @@ pub(crate) mod hooks {
         }
         #[cfg(windows)]
         {
-            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
-                return true;
-            }
+            std::os::windows::fs::symlink_dir(target, link).is_ok() || make_junction(link, target)
+        }
+    }
+
+    /// Make `link` a junction to the folder `target` on Windows; elsewhere,
+    /// which has no junctions, nothing. Whether one was made.
+    pub(crate) fn make_junction(link: &Path, target: &Path) -> bool {
+        #[cfg(windows)]
+        {
             std::process::Command::new("cmd")
                 .arg("/C")
                 .arg("mklink")
@@ -793,10 +788,15 @@ pub(crate) mod hooks {
                 .output()
                 .is_ok_and(|out| out.status.success())
         }
+        #[cfg(not(windows))]
+        {
+            let _ = (link, target);
+            false
+        }
     }
 
     /// Block while a hold names `path`'s file.
-    pub(super) fn before_open(path: &Path) {
+    pub(crate) fn before_open(path: &Path) {
         let held = lock(&HOLDS)
             .iter()
             .find(|hold| path.file_name() == Some(hold.name.as_os_str()))

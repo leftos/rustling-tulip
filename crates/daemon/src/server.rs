@@ -9,6 +9,7 @@ pub(crate) use self::remote::RemoteSlot;
 mod chat;
 mod connection;
 mod dashboard;
+mod folder;
 mod handshake;
 pub(crate) use self::handshake::TAILNET_HANDSHAKE_TIMEOUT;
 
@@ -874,7 +875,13 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         } => {
             let target = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())
                 .and_then(|root| file_fetch::confine_path(&root, &path));
-            start_fetch(ctx, id, target).await;
+            start_fetch(ctx, id, target, |id, path, tx, token| {
+                tokio::spawn(file_fetch::stream_file(id, path, tx, token))
+            })
+            .await;
+        }
+        m @ (ClientMessage::FetchFolder { .. } | ClientMessage::StatPath { .. }) => {
+            folder::handle(hub, m, ctx).await;
         }
         ClientMessage::CancelFetch { id } => cancel_fetch(ctx.fetches, &id).await,
         m @ (ClientMessage::TailFile { .. } | ClientMessage::UntailFile { .. }) => {

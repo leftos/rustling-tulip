@@ -108,6 +108,13 @@
     },
     {
       "paths": [
+        "crates/daemon/src/folder_pack.rs",
+        "crates/daemon/src/server/folder.rs"
+      ],
+      "filter": "package(daemon) & test(/^(folder_pack|server::folder)::/)"
+    },
+    {
+      "paths": [
         "crates/daemon/**"
       ],
       "filter": "rdeps(daemon)"
