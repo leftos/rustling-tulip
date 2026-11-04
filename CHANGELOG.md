@@ -4,6 +4,15 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 
 ## Unreleased
 
+## v0.9.0-alpha
+
+### Highlights
+
+- Ctrl+click a folder path in a remote host's terminal to fetch the whole folder, or fetch a fetched file's whole folder from its notice.
+- Settings has a search box that finds any setting, and OK, Apply and Cancel so changes wait until you confirm them.
+- The chat stays a readable width, sets each final answer apart, and folds runs of tool calls into one line in Compact mode.
+- The installer and the app are signed with a verified publisher, and update notices show what's new since your version.
+
 ### Added
 
 - The Windows installer and the app's programs are signed with a verified publisher, so Windows names who made them.
