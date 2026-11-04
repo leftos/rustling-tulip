@@ -135,6 +135,14 @@ pub fn apply_signal(
             ?to,
             "status set by a hook event"
         );
+        debug!(
+            target: "status_trace",
+            session = %session_id,
+            from = ?from,
+            to = ?to,
+            hook = %event,
+            "status changed by a hook event"
+        );
     }
     if applied.entered_awaiting {
         crate::pty_state::announce_awaiting_input(session_id, &hub.attention_tx);
@@ -770,6 +778,70 @@ mod tests {
             .expect("Claude is registered")
             .map_hook_event(body, None, false)
             .expect("the payload maps to a report")
+    }
+
+    /// A `MakeWriter` that keeps what a subscriber formats, for the
+    /// `status_trace` tests.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the log buffer is not poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            let bytes = self.0.lock().expect("the log buffer is not poisoned");
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    /// The subscriber a `status_trace` test captures with, filtered as the
+    /// Detailed logging switch raises it.
+    fn status_trace_subscriber(capture: LogCapture) -> impl tracing::Subscriber + Send + Sync {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("status_trace=debug"))
+            .with_ansi(false)
+            .with_writer(capture)
+            .finish()
+    }
+
+    #[test]
+    fn a_hook_status_change_logs_its_cause() {
+        let (hub, _scratch) = test_agent_hub("status-trace-hook");
+        let mut record = crate::history::test_support::record("s1", SessionMode::Interactive);
+        record.last_hook_time = Some(1);
+        hub.sessions.insert(record);
+        let capture = LogCapture::default();
+        let _guard = tracing::subscriber::set_default(status_trace_subscriber(capture.clone()));
+        let body = json!({"hook_event_name": "UserPromptSubmit", "prompt": "hello"});
+        apply_signal(&hub, "s1", Some(10), &report(&body), "UserPromptSubmit");
+        let text = capture.text();
+        assert!(
+            text.contains("status changed by a hook event"),
+            "the hook's cause line is missing: {text}"
+        );
+        assert!(text.contains("hook=UserPromptSubmit"), "{text}");
+        assert!(text.contains("to=Working"), "{text}");
+        assert!(text.contains("session=s1"), "{text}");
     }
 
     /// The main agent's open permission prompt, last stamped at 1.

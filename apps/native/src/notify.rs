@@ -691,6 +691,54 @@ pub(crate) fn skips(
     }
 }
 
+/// How the `status_trace` line words why `skip_when` skipped a toast.
+const fn skip_reason(skip_when: NotifySkip) -> &'static str {
+    match skip_when {
+        NotifySkip::OnScreen => "the session is on screen in the focused window",
+        NotifySkip::Focused => "the window is focused",
+        NotifySkip::Never => "the skip setting is never",
+    }
+}
+
+/// Whether the toast about `session_id` goes out: `wanted` is its toggle in
+/// Settings, and `skipped` what the skip setting made of the window and the
+/// screen. Logs the decision under `status_trace`.
+fn toast_decided(
+    session_id: &str,
+    kind: NotifyKind,
+    wanted: bool,
+    skip_when: NotifySkip,
+    skipped: bool,
+) -> bool {
+    if !wanted {
+        tracing::debug!(
+            target: "status_trace",
+            session = %session_id,
+            ?kind,
+            reason = "its toggle is off",
+            "notification skipped"
+        );
+        return false;
+    }
+    if skipped {
+        tracing::debug!(
+            target: "status_trace",
+            session = %session_id,
+            ?kind,
+            reason = skip_reason(skip_when),
+            "notification skipped"
+        );
+        return false;
+    }
+    tracing::debug!(
+        target: "status_trace",
+        session = %session_id,
+        ?kind,
+        "notification raised"
+    );
+    true
+}
+
 /// Whether `session`, as it now reads, has ended the wait `toast` stands
 /// for: it left `AwaitingInput`, or waits again from another status stamp.
 fn wait_is_over(toast: &AppToast, session: &SessionSnapshot) -> bool {
@@ -836,10 +884,15 @@ impl RootView {
     /// Raises `toast` unless its toggle is off or the skip setting says the
     /// owner is looking at the session already.
     fn raise_toast(&self, toast: &Toast<'_>, window_focused: bool, cx: &mut Context<Self>) {
-        if !toast.wanted {
-            return;
-        }
-        if self.skips_session(toast.session_id, window_focused) {
+        let skip_when = self.sidebar.ui_state().notifications.skip_when;
+        let skipped = toast.wanted && self.skips_session(toast.session_id, window_focused);
+        if !toast_decided(
+            toast.session_id,
+            toast.kind,
+            toast.wanted,
+            skip_when,
+            skipped,
+        ) {
             return;
         }
         if self.sidebar.ui_state().notifications.toast_style == ToastStyle::App {
@@ -922,6 +975,13 @@ impl RootView {
         ));
         self.notifications.next_hold += 1;
         let generation = self.notifications.next_hold;
+        tracing::debug!(
+            target: "status_trace",
+            session = %key.1,
+            awaits_alert,
+            grace_ms = grace.as_millis(),
+            "notification held through its grace"
+        );
         self.notifications.held.insert(
             key.clone(),
             Held {
@@ -1026,6 +1086,13 @@ impl RootView {
     ) {
         let graced = self.notifications.held.get(key).is_some_and(|h| h.graced);
         if !graced {
+            tracing::debug!(
+                target: "status_trace",
+                session = %key.1,
+                kind = ?alert.kind,
+                reason = "its grace has not ended",
+                "notification skipped"
+            );
             return;
         }
         let Some(held) = self.notifications.held.remove(key) else {
@@ -1616,6 +1683,81 @@ mod tests {
     #[test]
     fn never_skips_nothing() {
         assert_eq!(verdicts(NotifySkip::Never), [false; 4]);
+    }
+
+    /// A `MakeWriter` that keeps what a subscriber formats, for the
+    /// `status_trace` tests.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the log buffer is not poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            let bytes = self.0.lock().expect("the log buffer is not poisoned");
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    /// What `toast_decided` logs for its arguments, through the subscriber the
+    /// Detailed logging switch raises.
+    fn decision_log(wanted: bool, skip_when: NotifySkip, skipped: bool) -> (bool, String) {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("status_trace=debug"))
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        let raised = tracing::subscriber::with_default(subscriber, || {
+            toast_decided("s1", NotifyKind::Finished, wanted, skip_when, skipped)
+        });
+        (raised, capture.text())
+    }
+
+    #[test]
+    fn a_skipped_notification_logs_its_reason() {
+        let (raised, toggle) = decision_log(false, NotifySkip::Focused, false);
+        assert!(!raised, "a toast with its toggle off is not raised");
+        assert!(toggle.contains("notification skipped"), "{toggle}");
+        assert!(toggle.contains("its toggle is off"), "{toggle}");
+        assert!(toggle.contains("session=s1"), "{toggle}");
+
+        let (raised, looking) = decision_log(true, NotifySkip::OnScreen, true);
+        assert!(!raised, "a toast the skip rule covers is not raised");
+        assert!(looking.contains("notification skipped"), "{looking}");
+        assert!(
+            looking.contains("the session is on screen in the focused window"),
+            "{looking}"
+        );
+    }
+
+    #[test]
+    fn a_raised_notification_logs_it() {
+        let (raised, text) = decision_log(true, NotifySkip::OnScreen, false);
+        assert!(raised, "a wanted, uncovered toast is raised");
+        assert!(text.contains("notification raised"), "{text}");
+        assert!(text.contains("session=s1"), "{text}");
+        assert!(!text.contains("notification skipped"), "{text}");
     }
 
     #[test]

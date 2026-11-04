@@ -266,6 +266,9 @@ struct ScreenWatch {
     size: Option<(u16, u16)>,
     /// The verdict of the last executed check.
     last_verdict: Option<Verdict>,
+    /// The rule the last executed check matched, kept for the `status_trace`
+    /// line a status change writes.
+    last_rule: Option<Arc<str>>,
     /// Whether a dialog on screen may raise `AwaitingInput`: false from the
     /// moment the session enters or leaves a prompt that the screen still
     /// shows, until a check reads anything other than a dialog. A dialog left
@@ -500,6 +503,7 @@ impl ScreenWatch {
             last_output: None,
             size: None,
             last_verdict: None,
+            last_rule: None,
             dialog_edge_armed: true,
             screen_set_background: false,
             turn_end: TurnEndWatch::default(),
@@ -620,6 +624,7 @@ impl ScreenWatch {
             "pty_state screen check"
         );
         self.last_verdict = Some(reading.verdict);
+        self.last_rule.clone_from(&reading.rule);
         if reading.verdict != Verdict::State(ScreenState::AwaitingInput) {
             self.dialog_edge_armed = true;
         }
@@ -1037,6 +1042,15 @@ impl ScreenWatch {
             &self.attention_tx,
         );
         if wrote {
+            debug!(
+                target: "status_trace",
+                session = %self.session_id,
+                from = ?from.status,
+                to = ?next,
+                rule = ?self.last_rule,
+                how,
+                "status changed by a screen read"
+            );
             self.wake.seen = Some(StatusRead {
                 status: next,
                 held: None,
@@ -1937,6 +1951,97 @@ mod hysteresis_tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::{broadcast, mpsc};
+
+    /// A `MakeWriter` that keeps what a subscriber formats, for the
+    /// `status_trace` tests.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the log buffer is not poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            let bytes = self.0.lock().expect("the log buffer is not poisoned");
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    /// The subscriber a `status_trace` test captures with, filtered as the
+    /// Detailed logging switch raises it.
+    fn status_trace_subscriber(capture: LogCapture) -> impl tracing::Subscriber + Send + Sync {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("status_trace=debug"))
+            .with_ansi(false)
+            .with_writer(capture)
+            .finish()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_screen_status_change_logs_the_rule_that_fired() {
+        let capture = LogCapture::default();
+        let _guard = tracing::subscriber::set_default(status_trace_subscriber(capture.clone()));
+        let h = start("status-trace", false);
+        pass_hold().await;
+        h.chunk(permission_frame());
+        advance(ms(50)).await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the dialog raises the prompt"
+        );
+        let text = capture.text();
+        assert!(
+            text.contains("status changed by a screen read"),
+            "the screen's cause line is missing: {text}"
+        );
+        assert!(text.contains("to=AwaitingInput"), "{text}");
+        assert!(
+            text.contains("rule=Some("),
+            "the rule that fired is not named: {text}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unchanged_screen_read_logs_nothing() {
+        let capture = LogCapture::default();
+        let _guard = tracing::subscriber::set_default(status_trace_subscriber(capture.clone()));
+        let h = start("status-trace-steady", false);
+        pass_hold().await;
+        for _ in 0..5 {
+            h.chunk(idle_frame(&[]));
+            advance(ms(200)).await;
+        }
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "the screen shows idle throughout"
+        );
+        let text = capture.text();
+        assert!(
+            !text.contains("status changed by a screen read"),
+            "an unchanged read logged a change: {text}"
+        );
+    }
 
     /// Cadence of the slowest TUI element the watcher must ride through
     /// without demoting: an elapsed-time counter repainting once a second.

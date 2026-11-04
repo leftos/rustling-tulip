@@ -70,6 +70,10 @@ The screen clears only a flag it set itself, so a hook-set flag survives a foote
 
 A `Notification` `idle_prompt` does not leave `AwaitingInput` while a hook-reported prompt is pending.
 
+### Status decision log
+
+Each status change logs its cause at debug under the `status_trace` target, which the default log filters leave out: a hook-driven change names the hook event (`hook_status.rs`), a screen-driven change names the rule that fired, logged only when a screen read changes the status (`pty_state.rs`), the session record logs what it stamped (`session.rs`), and the hook route logs each hook it receives, holds for its spawn or drops (`server/hooks.rs`). The native client logs each notification it raises or skips, with the skip's reason (`notify.rs`). `RUST_LOG=status_trace=debug` shows them; the Detailed logging switch turns them on from Settings.
+
 ## Chat mirror
 
 The chat mirror serves a Claude session's chat from its transcript and its screen, and types into its PTY (`chat_mirror.rs`, `transcript_tail.rs`, `server/chat.rs`, the plugin's `chat_entries.rs` and `dialogs.rs`; design in `docs/architecture.md` "Chat mirror").

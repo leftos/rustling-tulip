@@ -49,9 +49,11 @@ pub(super) async fn hook_handler(
         return super::refused_peer_response(&refusal);
     }
     let Some(token) = presented_bearer(&headers) else {
+        log_unapplied(&session_id, "missing bearer token");
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
     if !crate::secret::constant_time_eq(token.as_bytes(), hub.auth_token.as_bytes()) {
+        log_unapplied(&session_id, "bad bearer token");
         return (StatusCode::UNAUTHORIZED, "bad bearer token").into_response();
     }
     let body = axum::body::to_bytes(body, HOOK_BODY_LIMIT)
@@ -59,13 +61,33 @@ pub(super) async fn hook_handler(
         .unwrap_or_else(|_| Bytes::new());
     let value = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(value) if value.is_object() => value,
-        _ => return StatusCode::NO_CONTENT.into_response(),
+        _ => {
+            log_unapplied(&session_id, "the body is not a JSON object");
+            return StatusCode::NO_CONTENT.into_response();
+        }
     };
+    let event = value
+        .get("hook_event_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    tracing::debug!(
+        target: "status_trace",
+        session = %session_id,
+        event,
+        "hook received"
+    );
     let event_time = hook_time(&headers);
     let Some(record) = hub.sessions.get(&session_id) else {
         // A spawn may have started the child — whose hooks fire from its
         // argv — before its record is inserted. Hold the event for the
         // insertion instead of dropping it on the floor.
+        tracing::debug!(
+            target: "status_trace",
+            session = %session_id,
+            event,
+            reason = "no session of that id is registered yet",
+            "hook held for its spawn"
+        );
         hub.pending_hooks
             .defer(&hub, &session_id, event_time, value, body.len());
         return StatusCode::NO_CONTENT.into_response();
@@ -101,6 +123,16 @@ pub(super) async fn proof_handler(State(hub): State<Hub>, headers: HeaderMap) ->
         .into_response()
 }
 
+/// Logs under `status_trace` why a hook body was not applied.
+fn log_unapplied(session_id: &str, reason: &'static str) {
+    tracing::debug!(
+        target: "status_trace",
+        session = %session_id,
+        reason,
+        "hook dropped"
+    );
+}
+
 /// The `X-RT-Hook-Time` header, nanoseconds since the Unix epoch.
 fn hook_time(headers: &HeaderMap) -> Option<u128> {
     headers
@@ -133,8 +165,79 @@ mod tests {
         hook_request, idle_record, snapshot_of, test_hub, test_hub_with_attention,
     };
     use protocol::{AttentionReason, SessionMode, SessionStatus};
+    use std::sync::{Arc, Mutex};
     use tokio::sync::broadcast;
     use tower::ServiceExt as _;
+
+    /// A `MakeWriter` that keeps what a subscriber formats, for the
+    /// `status_trace` tests.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the log buffer is not poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            let bytes = self.0.lock().expect("the log buffer is not poisoned");
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    /// The subscriber a `status_trace` test captures with, filtered as the
+    /// Detailed logging switch raises it.
+    fn status_trace_subscriber(capture: LogCapture) -> impl tracing::Subscriber + Send + Sync {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("status_trace=debug"))
+            .with_ansi(false)
+            .with_writer(capture)
+            .finish()
+    }
+
+    #[tokio::test]
+    async fn a_dropped_hook_logs_why() {
+        let (hub, _scratch) = test_hub("hook-drop-trace");
+        hub.sessions.insert(idle_record("s1"));
+        let capture = LogCapture::default();
+        let _guard = tracing::subscriber::set_default(status_trace_subscriber(capture.clone()));
+        let response = build_loopback_router(hub.clone())
+            .oneshot(hook_request(
+                "s1",
+                Some("wrong-token"),
+                Some("100"),
+                r#"{"hook_event_name":"Stop"}"#,
+            ))
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let text = capture.text();
+        assert!(
+            text.contains("hook dropped"),
+            "the drop's cause line is missing: {text}"
+        );
+        assert!(text.contains("bad bearer token"), "{text}");
+        assert!(text.contains("session=s1"), "{text}");
+    }
+
     #[tokio::test]
     async fn hook_route_requires_a_bearer_token() {
         let (hub, _scratch) = test_hub("hook-auth");

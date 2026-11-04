@@ -21,7 +21,7 @@ use protocol::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// In-memory cap on a session's `recent_actions`, matching the tail the
@@ -1235,7 +1235,7 @@ impl SessionRegistry {
                 let at = Utc::now();
                 guard.status_since = Some(at);
                 guard.status_seq = guard.status_seq.saturating_add(1);
-                status_change = Some((at, guard.status));
+                status_change = Some((at, was_status, guard.status));
                 let alert = settle_turn_end(&mut guard, id);
                 follow_up = follow_up.or(alert);
                 if self.turn_ended_without_stop_line(id, was_status, guard.status) {
@@ -1248,12 +1248,21 @@ impl SessionRegistry {
         // Record the change in the status-change log, outside the record lock
         // and never failing the update: the Dashboard's activity track reads
         // it long after the session, and the daemon, is gone.
-        if let (Some(dirs), Some((at, status))) = (self.dirs.as_ref(), status_change) {
+        if let (Some(dirs), Some((at, _, status))) = (self.dirs.as_ref(), status_change) {
             activity_log::append(
                 &dirs.activity_dir(),
                 &activity_log::session_key(id),
                 at,
                 status,
+            );
+        }
+        if let Some((_, from, to)) = status_change {
+            debug!(
+                target: "status_trace",
+                session = %id,
+                from = ?from,
+                to = ?to,
+                "session record stamped a status change"
             );
         }
         // Mirror the record into its sidecar so an abandoned session can show
