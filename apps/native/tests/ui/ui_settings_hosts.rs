@@ -491,6 +491,37 @@ fn the_worktrees_page_on_a_remote_host_takes_a_typed_path(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn the_worktrees_page_on_a_remote_host_has_no_manage_button(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    two_roots(&mut h);
+    h.keys("ctrl-,");
+    h.click_on(&remote_row());
+    assert_eq!(shown_host(&mut h), remote_key(), "box's page shows");
+    h.click_on("settings-tab-worktrees");
+    assert!(
+        !drawn(&mut h, "settings-worktrees-open-manager"),
+        "box's page draws no Manage worktrees"
+    );
+    let ring = tab_ring(&mut h);
+    assert!(
+        !ring.contains(&"settings-worktrees-open-manager"),
+        "box's page offers no Manage worktrees: {ring:?}"
+    );
+    assert_tab_reaches_only_drawn_controls(&mut h);
+
+    h.click_on(LOCAL_ROW);
+    assert!(
+        drawn(&mut h, "settings-worktrees-open-manager"),
+        "This PC's Manage worktrees is back"
+    );
+    assert!(
+        tab_ring(&mut h).contains(&"settings-worktrees-open-manager"),
+        "the ring walks to Manage worktrees again"
+    );
+}
+
+#[gpui::test]
 fn the_chosen_host_disconnecting_drops_its_worktrees_draft(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = worktrees_page(cx, &dir);

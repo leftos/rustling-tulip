@@ -259,7 +259,7 @@ This doc records the decisions a change to the client needs to know; what each f
 
 Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in [on-disk.md](on-disk.md)). Tab layouts, session appearance overrides and host settings such as the keep-awake mode and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.
 
-Settings → Worktrees edits the daemon's worktrees-root override, and shows `Saved` only once the daemon has echoed the last save. Manage worktrees (opened from that tab) lists the root's groups titled by their `.rt-group` name, deletes one group or every stale one, and "Launch session here" opens the spawn dialog with the target locked and that worktree pinned (the spawn form's `Lock`, which a duplicate prefill reuses).
+Settings → Worktrees edits the daemon's worktrees-root override, and shows `Saved` only once the daemon has echoed the last save. Manage worktrees (opened from that tab, and offered only while This PC is the chosen host, since it manages This PC's worktrees) lists the root's groups titled by their `.rt-group` name, deletes one group or every stale one, and "Launch session here" opens the spawn dialog with the target locked and that worktree pinned (the spawn form's `Lock`, which a duplicate prefill reuses).
 
 On a remote host the path field stays enabled with the hint "Created on {host} if it does not exist." and Browse stays disabled. Folder and file pickers go through `RootDeps.pick_folder` / `RootDeps.pick_file`, so specs inject fakes: GPUI's test platform cannot prompt.
 

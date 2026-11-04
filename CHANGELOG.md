@@ -16,6 +16,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - The new-session dialog greys out a host the moment it goes offline and says "{host} is offline" for it, without losing what you typed.
 - A remote host no longer flashes "No repos or workspaces yet" in the sidebar while it is still connecting.
 - A remote repo's menu now says Explorer and VS Code aren't available for a remote host, instead of saying it has no folder.
+- Settings no longer offers Manage worktrees while a remote host is chosen, where it opened This PC's worktrees instead.
 - A mistyped `rustling-tulipd` command now prints a usage error instead of starting the daemon, and `rustling-tulipd -V` prints its version.
 - Stopping the daemon as administrator after an administrator daemon crashed now clears its leftover handshake instead of refusing to stop.
 - Retiring or stopping the background service never force-closes a program that doesn't own the service's connection.

@@ -1417,7 +1417,9 @@ impl RootView {
                 if self.worktrees_override().is_some() {
                     controls.push(SettingsControl::WorktreesReset);
                 }
-                controls.push(SettingsControl::WorktreesManage);
+                if self.worktrees_manages() {
+                    controls.push(SettingsControl::WorktreesManage);
+                }
                 controls
             }
             SettingsTab::RemoteAccess => self.remote_access_controls(),
@@ -2435,6 +2437,13 @@ impl RootView {
     /// Whether the Worktrees tab draws Browse: only on a host whose folders
     /// this PC's picker reaches.
     fn worktrees_browses(&self) -> bool {
+        self.capabilities_of(&self.settings_host)
+            .opens_local_files()
+    }
+
+    /// Whether the Worktrees tab draws Manage worktrees: the manager lists,
+    /// prunes and deletes This PC's worktrees only.
+    fn worktrees_manages(&self) -> bool {
         self.capabilities_of(&self.settings_host)
             .opens_local_files()
     }
@@ -3983,13 +3992,15 @@ impl RootView {
                 focused,
                 cx,
             ))
-            .child(settings_button(
-                SettingsControl::WorktreesManage,
-                "Manage worktrees…",
-                true,
-                focused,
-                cx,
-            ));
+            .children(self.worktrees_manages().then(|| {
+                settings_button(
+                    SettingsControl::WorktreesManage,
+                    "Manage worktrees…",
+                    true,
+                    focused,
+                    cx,
+                )
+            }));
         let host_hint = self.worktrees_host_note().map(|note| {
             crate::tagged_text("settings-worktrees-host-hint", note)
                 .text_size(crate::fonts::ui_px(cx, HINT_SIZE))
