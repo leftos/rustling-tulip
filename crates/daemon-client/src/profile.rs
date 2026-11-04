@@ -192,6 +192,9 @@ pub struct ProfileRoots {
     pub tailnet: PathBuf,
     /// The summarizer's working folder.
     pub summarizer: PathBuf,
+    /// The account store's root: the saved agent logins the daemon switches
+    /// between. An elevated daemon never opens it.
+    pub accounts: PathBuf,
 }
 
 /// The folder overrides the environment sets; each beats the profile for the
@@ -206,6 +209,8 @@ pub struct Overrides {
     pub worktrees: Option<PathBuf>,
     /// `RUSTLING_TULIP_TAILNET_DIR`.
     pub tailnet: Option<PathBuf>,
+    /// `RUSTLING_TULIP_ACCOUNTS_DIR`, made absolute against the current dir.
+    pub accounts: Option<PathBuf>,
 }
 
 impl Overrides {
@@ -214,7 +219,8 @@ impl Overrides {
     ///
     /// # Errors
     ///
-    /// `RUSTLING_TULIP_CONFIG_DIR` could not be made absolute.
+    /// `RUSTLING_TULIP_CONFIG_DIR` or `RUSTLING_TULIP_ACCOUNTS_DIR` could not
+    /// be made absolute.
     pub fn from_env() -> anyhow::Result<Self> {
         Self::from_lookup(|name| std::env::var_os(name))
     }
@@ -234,11 +240,24 @@ impl Overrides {
                 })
             })
             .transpose()?;
+        // The account store holds saved logins: a relative value would name a
+        // folder under whatever cwd the daemon started in.
+        let accounts = set("RUSTLING_TULIP_ACCOUNTS_DIR")
+            .map(|value| {
+                std::path::absolute(&value).with_context(|| {
+                    format!(
+                        "resolving RUSTLING_TULIP_ACCOUNTS_DIR={} to an absolute path",
+                        value.to_string_lossy()
+                    )
+                })
+            })
+            .transpose()?;
         Ok(Self {
             config,
             binaries: set("RUSTLING_TULIP_BINARIES_DIR").map(PathBuf::from),
             worktrees: set("RUSTLING_TULIP_WORKTREES_DIR").map(PathBuf::from),
             tailnet: set("RUSTLING_TULIP_TAILNET_DIR").map(PathBuf::from),
+            accounts,
         })
     }
 }
@@ -277,6 +296,15 @@ pub fn roots_for(
     } else {
         base.join("daemon-id")
     };
+    // The account store follows the same rule, so an isolated daemon never
+    // reaches the real store even without its own override.
+    let accounts = overrides.accounts.clone().unwrap_or_else(|| {
+        if overrides.config.is_some() {
+            config.join("accounts")
+        } else {
+            base.join("accounts")
+        }
+    });
     ProfileRoots {
         binaries: overrides
             .binaries
@@ -291,6 +319,7 @@ pub fn roots_for(
             .clone()
             .unwrap_or_else(|| base.join("tailnet")),
         summarizer: base.join("summarizer"),
+        accounts,
         daemon_id,
         config,
         root,
@@ -490,7 +519,7 @@ mod tests {
     }
 
     /// Every path field of `roots`, named.
-    fn fields(roots: &ProfileRoots) -> [(&'static str, &PathBuf); 6] {
+    fn fields(roots: &ProfileRoots) -> [(&'static str, &PathBuf); 7] {
         [
             ("config", &roots.config),
             ("binaries", &roots.binaries),
@@ -498,6 +527,7 @@ mod tests {
             ("daemon_id", &roots.daemon_id),
             ("tailnet", &roots.tailnet),
             ("summarizer", &roots.summarizer),
+            ("accounts", &roots.accounts),
         ]
     }
 
@@ -524,6 +554,7 @@ mod tests {
                 daemon_id: data_local.join("daemon-id"),
                 tailnet: data_local.join("tailnet"),
                 summarizer: data_local.join("summarizer"),
+                accounts: data_local.join("accounts"),
             },
             "an ordinary daemon's saved data stays where it is"
         );
@@ -552,6 +583,7 @@ mod tests {
             binaries: Some(scratch.join("binaries")),
             worktrees: Some(scratch.join("worktrees")),
             tailnet: Some(scratch.join("tailnet")),
+            accounts: None,
         };
         for profile in [Profile::Ordinary, Profile::Elevated] {
             let roots = roots_of(profile, &overrides);
@@ -615,6 +647,7 @@ mod tests {
                 daemon_id: config.join("daemon-id"),
                 tailnet: config.join("tailnet"),
                 summarizer: config.join("summarizer"),
+                accounts: config.join("accounts"),
             },
             "an isolated elevated run keeps everything under its config override"
         );
@@ -734,6 +767,97 @@ mod tests {
         })
         .expect("resolve");
         assert_eq!(absolute.config, Some(absolute_dir));
+    }
+
+    #[test]
+    fn accounts_root_defaults_under_data_local() {
+        assert_eq!(
+            roots_of(Profile::Ordinary, &Overrides::default()).accounts,
+            data_local().join("accounts")
+        );
+    }
+
+    #[test]
+    fn accounts_root_follows_the_override() {
+        let scratch = std::env::temp_dir().join("rt-accounts-override");
+        let only_accounts = Overrides {
+            accounts: Some(scratch.join("accounts")),
+            ..Overrides::default()
+        };
+        let with_config = Overrides {
+            config: Some(scratch.join("config")),
+            accounts: Some(scratch.join("accounts")),
+            ..Overrides::default()
+        };
+        for profile in [Profile::Ordinary, Profile::Elevated] {
+            for overrides in [&only_accounts, &with_config] {
+                assert_eq!(
+                    roots_of(profile, overrides).accounts,
+                    scratch.join("accounts"),
+                    "{profile:?} {overrides:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accounts_root_sits_in_an_overridden_config_dir() {
+        let config = std::env::temp_dir()
+            .join("rt-accounts-config")
+            .join("config");
+        let overrides = Overrides {
+            config: Some(config.clone()),
+            ..Overrides::default()
+        };
+        for profile in [Profile::Ordinary, Profile::Elevated] {
+            let accounts = roots_of(profile, &overrides).accounts;
+            assert_eq!(accounts, config.join("accounts"), "{profile:?}");
+            assert!(
+                !accounts.starts_with(data_local()),
+                "{profile:?}: an isolated daemon's store reaches the real data dir"
+            );
+        }
+    }
+
+    #[test]
+    fn elevated_accounts_root_sits_under_the_protected_root() {
+        assert_eq!(
+            roots_of(Profile::Elevated, &Overrides::default()).accounts,
+            data_local().join("elevated").join("accounts")
+        );
+    }
+
+    #[test]
+    fn accounts_override_empty_counts_as_unset() {
+        let empty = Overrides::from_lookup(|name| {
+            (name == "RUSTLING_TULIP_ACCOUNTS_DIR").then(OsString::new)
+        })
+        .expect("resolve");
+        assert_eq!(empty.accounts, None, "an empty value counts as unset");
+
+        let dir = std::env::temp_dir().join("rt-accounts-set");
+        let set = Overrides::from_lookup(|name| {
+            (name == "RUSTLING_TULIP_ACCOUNTS_DIR").then(|| dir.clone().into_os_string())
+        })
+        .expect("resolve");
+        assert_eq!(set.accounts, Some(dir));
+    }
+
+    #[test]
+    fn accounts_override_relative_is_made_absolute() {
+        let relative = Overrides::from_lookup(|name| {
+            (name == "RUSTLING_TULIP_ACCOUNTS_DIR").then(|| OsString::from("rel/accounts"))
+        })
+        .expect("resolve");
+        let accounts = relative.accounts.expect("the accounts override is set");
+        assert!(accounts.is_absolute(), "{}", accounts.display());
+        assert_eq!(
+            accounts,
+            std::env::current_dir()
+                .expect("current dir")
+                .join("rel")
+                .join("accounts")
+        );
     }
 
     #[test]

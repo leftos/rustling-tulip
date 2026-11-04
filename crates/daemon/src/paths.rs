@@ -176,6 +176,16 @@ mod dir_tests {
     }
 
     #[test]
+    fn elevated_profile_has_no_accounts_dir() {
+        let accounts = PathBuf::from(r"C:\scratch\accounts");
+        assert_eq!(accounts_dir_of(Profile::Elevated, accounts.clone()), None);
+        assert_eq!(
+            accounts_dir_of(Profile::Ordinary, accounts.clone()),
+            Some(accounts)
+        );
+    }
+
+    #[test]
     fn profile_rule_agrees_with_integrity_elevation() {
         use crate::integrity::IntegrityLevel;
 
@@ -380,6 +390,27 @@ pub fn resolve_tailnet_dir() -> anyhow::Result<PathBuf> {
 /// a summary.
 pub(crate) fn resolve_summarizer_dir() -> anyhow::Result<PathBuf> {
     ensure_summarizer_dir(profile::roots()?.1.summarizer)
+}
+
+/// The account store's root by the profile ([`profile::ProfileRoots::accounts`]),
+/// honoring `RUSTLING_TULIP_ACCOUNTS_DIR` when set: an ordinary daemon's is
+/// `<data_local>/accounts`, or `<config>/accounts` while
+/// `RUSTLING_TULIP_CONFIG_DIR` overrides the config dir. `None` for an
+/// elevated daemon: the store belongs to the ordinary user's login, and an
+/// elevated daemon never opens it. Nothing is created here; the store creates
+/// its root owner-only when it first opens it.
+#[expect(dead_code, reason = "nothing opens the account store yet")]
+pub(crate) fn resolve_accounts_dir() -> anyhow::Result<Option<PathBuf>> {
+    let (profile, roots) = profile::roots()?;
+    Ok(accounts_dir_of(profile, roots.accounts))
+}
+
+/// `accounts` for an ordinary profile, `None` for an elevated one.
+fn accounts_dir_of(profile: Profile, accounts: PathBuf) -> Option<PathBuf> {
+    match profile {
+        Profile::Ordinary => Some(accounts),
+        Profile::Elevated => None,
+    }
 }
 
 /// `dir`, created if missing.

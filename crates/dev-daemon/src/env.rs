@@ -70,6 +70,12 @@ pub(crate) fn isolated_envs(
             "RUSTLING_TULIP_TAILNET_DIR",
             root.join("tailnet").into_os_string(),
         ),
+        // The account store: never the user's saved logins. The store
+        // creates the folder itself, owner-only, when it first opens it.
+        (
+            "RUSTLING_TULIP_ACCOUNTS_DIR",
+            root.join("accounts").into_os_string(),
+        ),
         // A shell the daemon starts finds the agents' stubs before any real
         // CLI.
         ("PATH", path_with_stub(root)?),
