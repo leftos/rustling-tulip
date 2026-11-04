@@ -12,21 +12,22 @@ use crate::repo_remove::{
     live_owned_sessions, remove_message, row_label, stop_message,
 };
 use crate::session_menu::{backdrop, dialog_button, dialog_look};
+use crate::target::HostKey;
 use crate::ui_theme::theme;
 
 impl RootView {
-    /// The name `level`'s container shows.
-    fn container_name(&self, level: &Level) -> String {
+    /// The name `host`'s container `level` shows.
+    fn container_name(&self, host: &HostKey, level: &Level) -> String {
         match level {
             Level::Repo(id) => self
                 .sidebar
-                .repos()
+                .repos_of(host)
                 .iter()
                 .find(|repo| &repo.id == id)
                 .map(|repo| repo.name.clone()),
             Level::Workspace(id) => self
                 .sidebar
-                .workspaces()
+                .workspaces_of(host)
                 .iter()
                 .find(|workspace| &workspace.id == id)
                 .map(|workspace| workspace.name.clone()),
@@ -36,16 +37,18 @@ impl RootView {
     }
 
     /// The Remove row of `level`'s container menu was clicked: with live
-    /// sessions it opens the dialog; without, the first click arms the row
-    /// and the second sends the removal.
+    /// sessions it opens the dialog, whose answer goes to `host`; without,
+    /// the first click arms the row and the second sends the removal to
+    /// `host`, the host of the row the menu was opened on.
     pub(crate) fn click_remove_container(
         &mut self,
+        host: &HostKey,
         level: &Level,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let key = container_key(level);
-        let host = self.host_of_container(&key);
+        let host = host.clone();
         let sessions = live_owned_sessions(level, self.sidebar.sessions_of(&host), &self.sidebar);
         if sessions.is_empty() {
             if self.repo_remove.armed() == Some(key.as_str()) {
@@ -61,9 +64,10 @@ impl RootView {
             }
             return;
         }
-        let name = self.container_name(level);
+        let name = self.container_name(&host, level);
         self.close_container_menu(window, cx);
-        self.repo_remove.open_dialog(level.clone(), name, sessions);
+        self.repo_remove
+            .open_dialog(host, level.clone(), name, sessions);
         self.repo_remove_focus.focus(window);
         cx.notify();
     }
@@ -94,8 +98,8 @@ impl RootView {
     }
 
     /// The user's answer. Cancel closes without sending; both removals send
-    /// what they say and leave the dialog open, until the daemon's repo or
-    /// workspace list no longer holds the level.
+    /// what they say to the dialog's host and leave the dialog open, until
+    /// the daemon's repo or workspace list no longer holds the level.
     fn answer_repo_remove(
         &mut self,
         button: RepoRemoveButton,
@@ -111,14 +115,11 @@ impl RootView {
         };
         if button == RepoRemoveButton::StopAndRemove {
             for session in dialog.sessions() {
-                self.send_to(
-                    &self.host_of_session(&session.id),
-                    stop_message(&session.id),
-                );
+                self.send_to(dialog.host(), stop_message(&session.id));
             }
         }
         if let Some(msg) = remove_message(dialog.level()) {
-            self.send_to(&self.host_of_container(&container_key(dialog.level())), msg);
+            self.send_to(dialog.host(), msg);
         }
         cx.notify();
     }

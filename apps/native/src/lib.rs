@@ -3096,13 +3096,14 @@ impl RootView {
         }
     }
 
-    /// The ▶ or a double-click on a repo or workspace row: replay its last
-    /// launch, or open the spawn dialog when there is nothing to replay. A
-    /// second gesture for the same target inside the double-click interval
-    /// is the same gesture, so it launches nothing; a spec also calls this
-    /// where a modal covers the row.
+    /// The ▶ or a double-click on `host`'s repo or workspace row: replay its
+    /// last launch on that host, or open the spawn dialog when there is
+    /// nothing to replay. A second gesture for the same target inside the
+    /// double-click interval is the same gesture, so it launches nothing; a
+    /// spec also calls this where a modal covers the row.
     pub fn launch_last_row(
         &mut self,
+        host: &HostKey,
         container: launch_last::Container<'_>,
         placement: launch_last::Placement,
         window: &mut Window,
@@ -3122,11 +3123,8 @@ impl RootView {
         {
             return;
         }
-        let host = match container {
-            launch_last::Container::Repo(id) => self.host_of_repo(id),
-            launch_last::Container::Workspace(id) => self.host_of_workspace(id),
-        };
-        let Some(config) = self.sidebar.last_spawn_config(container) else {
+        let host = host.clone();
+        let Some(config) = self.sidebar.last_spawn_config(&host, container) else {
             let target = match container {
                 launch_last::Container::Repo(id) => Target::repo(&host, id),
                 launch_last::Container::Workspace(id) => Target::workspace(&host, id),
@@ -4413,7 +4411,7 @@ impl RootView {
             DaemonMessage::DiscardPreview {
                 session_id,
                 members,
-            } => self.on_discard_preview(&session_id, &members, cx),
+            } => self.on_discard_preview(host, &session_id, &members, cx),
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
             DaemonMessage::Repos { repos } => self.on_repos(host, &repos, cx),
             msg @ DaemonMessage::Workspaces { .. } => self.on_workspaces(host, &msg, window, cx),

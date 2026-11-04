@@ -19,6 +19,7 @@ use protocol::{
     SplitDirection, SuggestTarget, TabEntry, WorktreeReusePolicy,
 };
 use rustling_tulip_native::launch_last;
+use rustling_tulip_native::target::HostKey;
 use rustling_tulip_native::{RootView, ToastKind};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
@@ -714,6 +715,7 @@ fn a_trusted_launch_with_a_dialog_open_shows_no_warning(cx: &mut TestAppContext)
 
     h.root_update(|root, window, cx| {
         root.launch_last_row(
+            &HostKey::Local,
             launch_last::Container::Repo("r1"),
             launch_last::Placement::CurrentTab,
             window,
@@ -759,6 +761,7 @@ fn a_trusted_launch_refused_by_an_open_dialog_says_why(cx: &mut TestAppContext) 
 
     h.root_update(|root, window, cx| {
         root.launch_last_row(
+            &HostKey::Local,
             launch_last::Container::Repo("r1"),
             launch_last::Placement::CurrentTab,
             window,

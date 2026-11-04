@@ -83,11 +83,12 @@ pub(crate) enum Step {
 }
 
 /// The pane header's Stop waiting for its confirming second click, keyed by
-/// where the Stop is drawn and the session it stops, so it never carries
-/// over to another session or between the main grid and a pop-out.
+/// where the Stop is drawn and the host and session it stops, so it never
+/// carries over to another session, another host's session of the same id,
+/// or between the main grid and a pop-out.
 #[derive(Debug, Default)]
 pub(crate) struct HeaderStopConfirm {
-    armed: Option<(StopPlace, String)>,
+    armed: Option<(StopPlace, HostKey, String)>,
 }
 
 /// Where a pane's two-step Stop is drawn.
@@ -856,31 +857,31 @@ impl SessionAction {
 }
 
 impl HeaderStopConfirm {
-    /// A Stop click at `place` for `session_id`: true when exactly that
-    /// place and session were armed (and disarms it), else arms them and
-    /// returns false.
-    pub(crate) fn click(&mut self, place: StopPlace, session_id: &str) -> bool {
-        if self.is_armed(place, session_id) {
+    /// A Stop click at `place` for `host`'s `session_id`: true when exactly
+    /// that place, host and session were armed (and disarms it), else arms
+    /// them and returns false.
+    pub(crate) fn click(&mut self, place: StopPlace, host: &HostKey, session_id: &str) -> bool {
+        if self.is_armed(place, host, session_id) {
             self.armed = None;
             true
         } else {
-            self.armed = Some((place, session_id.to_owned()));
+            self.armed = Some((place, host.clone(), session_id.to_owned()));
             false
         }
     }
 
-    pub(crate) fn is_armed(&self, place: StopPlace, session_id: &str) -> bool {
-        self.armed
-            .as_ref()
-            .is_some_and(|(armed, id)| *armed == place && id == session_id)
+    pub(crate) fn is_armed(&self, place: StopPlace, host: &HostKey, session_id: &str) -> bool {
+        self.armed.as_ref().is_some_and(|(armed, armed_host, id)| {
+            *armed == place && armed_host == host && id == session_id
+        })
     }
 
-    /// The session whose Stop at `place` waits for its confirm.
-    pub(crate) fn armed(&self, place: StopPlace) -> Option<&str> {
+    /// The host and session whose Stop at `place` waits for its confirm.
+    pub(crate) fn armed(&self, place: StopPlace) -> Option<(&HostKey, &str)> {
         self.armed
             .as_ref()
-            .filter(|(armed, _)| *armed == place)
-            .map(|(_, id)| id.as_str())
+            .filter(|(armed, _, _)| *armed == place)
+            .map(|(_, host, id)| (host, id.as_str()))
     }
 
     /// Returns whether anything was armed.
@@ -903,7 +904,7 @@ impl Duplicates {
         target: DuplicateTarget,
     ) -> Option<ClientMessage> {
         let restart = target.is_restart();
-        if restart && self.is_pending(session_id) {
+        if restart && self.is_pending(host, session_id) {
             return None;
         }
         self.pending.insert(
@@ -922,11 +923,12 @@ impl Duplicates {
         })
     }
 
-    /// Whether a restart or resume of `session_id` waits for its reply.
-    pub(crate) fn is_pending(&self, session_id: &str) -> bool {
+    /// Whether a restart or resume of `host`'s session `session_id` waits
+    /// for its reply; another host's session of the same id does not count.
+    pub(crate) fn is_pending(&self, host: &HostKey, session_id: &str) -> bool {
         self.pending
             .values()
-            .any(|dup| dup.target.is_restart() && dup.original == session_id)
+            .any(|dup| dup.target.is_restart() && dup.host == *host && dup.original == session_id)
     }
 
     /// Whether `request_id` is one of this client's duplicates.
@@ -1553,22 +1555,26 @@ mod tests {
     #[test]
     fn actions_header_stop_confirm_is_keyed_by_session() {
         let grid = StopPlace::Grid;
+        let local = &HostKey::Local;
         let mut confirm = HeaderStopConfirm::default();
-        assert!(!confirm.click(grid, "s1"), "the first click only arms");
-        assert!(confirm.is_armed(grid, "s1"));
-        assert_eq!(confirm.armed(grid), Some("s1"));
         assert!(
-            !confirm.click(grid, "s2"),
+            !confirm.click(grid, local, "s1"),
+            "the first click only arms"
+        );
+        assert!(confirm.is_armed(grid, local, "s1"));
+        assert_eq!(confirm.armed(grid), Some((local, "s1")));
+        assert!(
+            !confirm.click(grid, local, "s2"),
             "another session arms its own, never stops on s1's arm"
         );
-        assert!(!confirm.is_armed(grid, "s1"));
-        assert!(confirm.click(grid, "s2"));
+        assert!(!confirm.is_armed(grid, local, "s1"));
+        assert!(confirm.click(grid, local, "s2"));
         assert_eq!(confirm.armed(grid), None, "acting disarms");
         assert!(!confirm.disarm());
-        confirm.click(grid, "s1");
+        confirm.click(grid, local, "s1");
         assert!(confirm.disarm());
         assert!(
-            !confirm.click(grid, "s1"),
+            !confirm.click(grid, local, "s1"),
             "a disarm needs two clicks again"
         );
     }
@@ -1576,22 +1582,23 @@ mod tests {
     #[test]
     fn actions_header_stop_confirm_is_keyed_by_place() {
         let (grid, popout) = (StopPlace::Grid, StopPlace::Popout);
+        let local = &HostKey::Local;
         let mut confirm = HeaderStopConfirm::default();
         assert!(
-            !confirm.click(popout, "s1"),
+            !confirm.click(popout, local, "s1"),
             "the pop-out's first click arms"
         );
         assert!(
-            !confirm.is_armed(grid, "s1"),
+            !confirm.is_armed(grid, local, "s1"),
             "the main grid's Stop is not armed"
         );
         assert_eq!(confirm.armed(grid), None);
         assert!(
-            !confirm.click(grid, "s1"),
+            !confirm.click(grid, local, "s1"),
             "the main grid's click arms its own, never stops on the pop-out's arm"
         );
-        assert!(!confirm.is_armed(popout, "s1"), "one arm at a time");
-        assert!(confirm.click(grid, "s1"));
+        assert!(!confirm.is_armed(popout, local, "s1"), "one arm at a time");
+        assert!(confirm.click(grid, local, "s1"));
     }
 
     fn named(id: &str) -> SessionSnapshot {
@@ -2083,7 +2090,10 @@ mod tests {
             request,
             Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id), .. }) if session_id == "s1" && id == "req-1"
         ));
-        assert!(!dups.is_pending("s1"), "a copy is no restart on the way");
+        assert!(
+            !dups.is_pending(&HostKey::Local, "s1"),
+            "a copy is no restart on the way"
+        );
         assert!(dups.has_request("req-1"));
         let placed = dups
             .place("req-1", HostedSession::local(&named("s2")), &tabs, &[])
@@ -2196,7 +2206,7 @@ mod tests {
             .is_some(),
             "a copy on the way does not hold up a restart"
         );
-        assert!(dups.is_pending("s1"));
+        assert!(dups.is_pending(&HostKey::Local, "s1"));
         assert!(
             dups.request(
                 &HostKey::Local,
@@ -2229,7 +2239,7 @@ mod tests {
             "{:?}",
             restarted.messages
         );
-        assert!(!dups.is_pending("s1"));
+        assert!(!dups.is_pending(&HostKey::Local, "s1"));
         let copied = dups
             .place("copy", HostedSession::local(&named("s2")), &tabs, &[])
             .expect("placed");
@@ -2362,7 +2372,7 @@ mod tests {
             dups.request(&HostKey::Local, "s1", "req-1".to_owned(), restart())
                 .is_some()
         );
-        assert!(dups.is_pending("s1"));
+        assert!(dups.is_pending(&HostKey::Local, "s1"));
         assert!(dups.has_request("req-1"));
         assert!(
             dups.request(&HostKey::Local, "s1", "req-2".to_owned(), restart())
@@ -2375,13 +2385,13 @@ mod tests {
         );
         assert!(!dups.fail("unknown"));
         assert!(dups.fail("req-1"));
-        assert!(!dups.is_pending("s1"));
+        assert!(!dups.is_pending(&HostKey::Local, "s1"));
         assert!(
             dups.request(&HostKey::Local, "s1", "req-4".to_owned(), restart())
                 .is_some()
         );
         assert!(dups.drop_host(&HostKey::Local));
-        assert!(!dups.is_pending("s1") && !dups.is_pending("s2"));
+        assert!(!dups.is_pending(&HostKey::Local, "s1") && !dups.is_pending(&HostKey::Local, "s2"));
     }
 
     fn prefill_of(session_id: &str) -> PendingPrefill {

@@ -2311,6 +2311,7 @@ fn container_row(
     let hover_key = key.clone();
     let click_key = key.clone();
     let click_id = container.id.clone();
+    let click_host = container.host.clone();
     let name = format!("container-{}", container.key);
     let container_menu = MenuContainer::of(container);
     let launchable = matches!(
@@ -2386,7 +2387,13 @@ fn container_row(
                 } else {
                     launch_last::Container::Repo(&click_id)
                 };
-                this.launch_last_row(container, launch_last::Placement::CurrentTab, window, cx);
+                this.launch_last_row(
+                    &click_host,
+                    container,
+                    launch_last::Placement::CurrentTab,
+                    window,
+                    cx,
+                );
                 return;
             }
             this.focus_container_row(&click_key, window, cx);
@@ -2424,6 +2431,7 @@ fn container_launch(
     let selector = format!("container-{}-launch", container.key);
     let name = selector.clone();
     let id = container.id.clone();
+    let host = container.host.clone();
     let workspace = container.kind == ContainerKind::Workspace;
     div()
         .id(SharedString::from(selector))
@@ -2448,7 +2456,13 @@ fn container_launch(
                 } else {
                     launch_last::Container::Repo(&id)
                 };
-                this.launch_last_row(container, launch_last::Placement::CurrentTab, window, cx);
+                this.launch_last_row(
+                    &host,
+                    container,
+                    launch_last::Placement::CurrentTab,
+                    window,
+                    cx,
+                );
             }),
         )
 }

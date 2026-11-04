@@ -1632,10 +1632,15 @@ impl SidebarModel {
         self.slice(host).map_or(&[], |slice| &slice.workspaces)
     }
 
-    /// The spawn config `container` last launched with, when it has one.
+    /// The spawn config `host`'s `container` last launched with, when it
+    /// has one; another host's container of the same id does not count.
     #[must_use]
-    pub fn last_spawn_config(&self, container: launch_last::Container<'_>) -> Option<SpawnConfig> {
-        self.slices().find_map(|(_, slice)| {
+    pub fn last_spawn_config(
+        &self,
+        host: &HostKey,
+        container: launch_last::Container<'_>,
+    ) -> Option<SpawnConfig> {
+        self.slice(host).and_then(|slice| {
             launch_last::stored_config(container, &slice.repos, &slice.workspaces)
         })
     }
@@ -7869,12 +7874,18 @@ pub(crate) mod tests {
         );
 
         assert_eq!(
-            model.last_spawn_config(launch_last::Container::Repo("r1")),
+            model.last_spawn_config(
+                &crate::target::HostKey::Local,
+                launch_last::Container::Repo("r1")
+            ),
             Some(repo_config),
             "the repo's stored config"
         );
         assert_eq!(
-            model.last_spawn_config(launch_last::Container::Repo("r9")),
+            model.last_spawn_config(
+                &crate::target::HostKey::Local,
+                launch_last::Container::Repo("r9")
+            ),
             None,
             "an unknown repo has none"
         );
@@ -7904,12 +7915,18 @@ pub(crate) mod tests {
         );
 
         assert_eq!(
-            model.last_spawn_config(launch_last::Container::Workspace("w1")),
+            model.last_spawn_config(
+                &crate::target::HostKey::Local,
+                launch_last::Container::Workspace("w1")
+            ),
             Some(workspace_config),
             "the workspace's stored config"
         );
         assert_eq!(
-            model.last_spawn_config(launch_last::Container::Workspace("w9")),
+            model.last_spawn_config(
+                &crate::target::HostKey::Local,
+                launch_last::Container::Workspace("w9")
+            ),
             None,
             "an unknown workspace has none"
         );

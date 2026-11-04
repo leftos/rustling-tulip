@@ -243,7 +243,8 @@ pub(crate) struct CleanupQueue {
 
 impl CleanupQueue {
     /// Queues a session's failure, under the label the session was first
-    /// shown with. A session already queued has its entry replaced in place.
+    /// shown with. A session already queued for the same host has its entry
+    /// replaced in place; another host's session of the same id keeps its own.
     pub(crate) fn push(
         &mut self,
         host: HostKey,
@@ -259,7 +260,7 @@ impl CleanupQueue {
         if let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|entry| entry.session_id == session_id)
+            .find(|entry| entry.host == host && entry.session_id == session_id)
         {
             *entry = CleanupFailed::new(host, session_id, label, failures);
         } else {
@@ -507,6 +508,40 @@ mod tests {
             "the host's reset forgets the label of its closed entry: {}",
             head.body()
         );
+    }
+
+    #[test]
+    fn push_keeps_two_hosts_entries_for_one_session_id() {
+        let mut queue = CleanupQueue::default();
+        let remote = HostKey::Remote("box.tail1234.ts.net".to_owned());
+        queue.push(
+            HostKey::Local,
+            "s1".to_owned(),
+            "local".to_owned(),
+            vec![failure("a", vec![])],
+        );
+        queue.push(
+            remote.clone(),
+            "s1".to_owned(),
+            "remote".to_owned(),
+            vec![failure("b", vec![])],
+        );
+        let head = queue.head().expect("This PC's s1 is queued");
+        assert_eq!(
+            (head.host(), head.session_id()),
+            (&HostKey::Local, "s1"),
+            "the remote host's s1 does not replace This PC's"
+        );
+        queue.pop();
+        let next = queue.head().expect("the remote host's s1 is queued too");
+        assert_eq!((next.host(), next.session_id()), (&remote, "s1"));
+        assert!(
+            next.body().starts_with("Session remote stopped"),
+            "it keeps its own label: {}",
+            next.body()
+        );
+        queue.pop();
+        assert!(queue.is_empty());
     }
 
     #[test]

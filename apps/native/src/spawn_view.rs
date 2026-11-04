@@ -1078,16 +1078,12 @@ impl RootView {
         }
     }
 
-    /// Sends the dialog's requests to the host its target is on; the env
-    /// name list is This PC's.
+    /// Sends the dialog's requests, the env name list's included, to the
+    /// host its target is on.
     fn send_all(&self, messages: Vec<protocol::ClientMessage>) {
         let host = self.spawn_form_host();
         for msg in messages {
-            let to = match msg {
-                protocol::ClientMessage::ListEnvNames { .. } => HostKey::Local,
-                _ => host.clone(),
-            };
-            self.send_to(&to, msg);
+            self.send_to(&host, msg);
         }
     }
 

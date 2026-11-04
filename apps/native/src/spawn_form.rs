@@ -1474,7 +1474,21 @@ impl SpawnForm {
                 .into_iter()
                 .map(|repo_id| ClientMessage::FetchRepo { repo_id }),
         );
+        if moved {
+            messages.push(self.ask_env_names());
+        }
         messages
+    }
+
+    /// Drops the env names the dialog holds and asks for its target host's
+    /// under a fresh request, so a late reply from the host it left is not
+    /// taken.
+    fn ask_env_names(&mut self) -> ClientMessage {
+        self.env_names.clear();
+        self.env_names_request = crate::new_request_id();
+        ClientMessage::ListEnvNames {
+            request_id: Some(self.env_names_request.clone()),
+        }
     }
 
     /// The cached suggestion, else an empty field and a request for one.

@@ -108,16 +108,17 @@ fn pick_selector(pick: &Pick) -> String {
 }
 
 impl RootView {
-    /// Opens the wizard for `entry` launched on `target`, unless that host's
-    /// connection is down.
+    /// Opens the wizard for `entry` launched on `host_key`'s `target`, unless
+    /// that host's connection is down; the wizard's requests go to that
+    /// host, whichever other host lists the same id.
     pub(crate) fn open_preset_wizard(
         &mut self,
+        host_key: HostKey,
         entry: PresetEntry,
         target: PresetTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let host_key = self.host_of_preset_target(&target);
         if host_key == HostKey::Local && self.conn().overlay().is_some() {
             return;
         }
@@ -315,6 +316,7 @@ impl RootView {
         let Some(dialog) = &mut self.preset_wizard else {
             return;
         };
+        let host = dialog.host.clone();
         let wizard = &mut dialog.wizard;
         let request = if wizard.advance() && wizard.stage() == Stage::Preview {
             wizard.start_preview(crate::new_request_id())
@@ -323,7 +325,7 @@ impl RootView {
         };
         cx.notify();
         if let Some(msg) = request {
-            self.send_to(&self.host_of_request(&msg), msg);
+            self.send_to(&host, msg);
         }
     }
 
@@ -333,11 +335,12 @@ impl RootView {
         let Some(dialog) = &mut self.preset_wizard else {
             return;
         };
+        let host = dialog.host.clone();
         let step = dialog.wizard.press_launch(crate::new_request_id());
         dialog.lock_max_per_tab(cx);
         cx.notify();
         match step {
-            Some(LaunchStep::Scripts(msg)) => self.send_to(&self.host_of_request(&msg), msg),
+            Some(LaunchStep::Scripts(msg)) => self.send_to(&host, msg),
             Some(LaunchStep::Launch(msg)) => self.send_preset_launch(msg, window, cx),
             None => {}
         }
@@ -351,12 +354,12 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let host = self.host_of_request(&msg);
         let (Some(dialog), ClientMessage::LaunchPreset { job_id, .. }) =
             (&self.preset_wizard, &msg)
         else {
             return;
         };
+        let host = dialog.host.clone();
         let wizard = &dialog.wizard;
         let spec = self.preset_launches.start(
             job_id.clone(),

@@ -10,6 +10,7 @@ use protocol::{ClientMessage, SessionMode, SessionSnapshot, SessionStatus};
 
 use crate::appearance_view::Level;
 use crate::sidebar::SidebarModel;
+use crate::target::HostKey;
 
 /// The plain label of a repo's Remove row.
 const REPO_ROW: &str = "Remove repo";
@@ -81,6 +82,10 @@ impl RepoRemoveSession {
 /// The open dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepoRemoveDialog {
+    /// The host of the row whose menu opened the dialog: its sessions are
+    /// stopped and its container unregistered there, whichever other host
+    /// lists the same id.
+    host: HostKey,
     level: Level,
     name: String,
     sessions: Vec<RepoRemoveSession>,
@@ -89,6 +94,11 @@ pub(crate) struct RepoRemoveDialog {
 }
 
 impl RepoRemoveDialog {
+    /// The host the dialog's answer goes to.
+    pub(crate) fn host(&self) -> &HostKey {
+        &self.host
+    }
+
     pub(crate) fn level(&self) -> &Level {
         &self.level
     }
@@ -169,16 +179,18 @@ impl RepoRemove {
         self.dialog.as_mut()
     }
 
-    /// Opens the dialog for `level`, dropping any arm: a click that opens the
-    /// dialog did not land on the armed row.
+    /// Opens the dialog for `host`'s `level`, dropping any arm: a click that
+    /// opens the dialog did not land on the armed row.
     pub(crate) fn open_dialog(
         &mut self,
+        host: HostKey,
         level: Level,
         name: String,
         sessions: Vec<RepoRemoveSession>,
     ) {
         self.armed = None;
         self.dialog = Some(RepoRemoveDialog {
+            host,
             level,
             name,
             sessions,
@@ -387,7 +399,7 @@ mod tests {
     }
 
     fn open(remove: &mut RepoRemove, level: Level, sessions: Vec<RepoRemoveSession>) {
-        remove.open_dialog(level, "name".to_owned(), sessions);
+        remove.open_dialog(HostKey::Local, level, "name".to_owned(), sessions);
     }
 
     #[test]
@@ -559,6 +571,7 @@ mod tests {
     fn the_dialog_names_its_level_and_buttons() {
         let mut remove = RepoRemove::default();
         remove.open_dialog(
+            HostKey::Local,
             Level::Workspace("w1".to_owned()),
             "frontend".to_owned(),
             vec![row("s1")],

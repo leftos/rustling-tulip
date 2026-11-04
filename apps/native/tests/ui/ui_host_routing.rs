@@ -5,8 +5,9 @@ use crate::support;
 
 use gpui::{Modifiers, Pixels, Point, TestAppContext, point, px};
 use protocol::{
-    AgentDescriptor, AgentId, CheckoutStrategy, ClientMessage, DaemonMessage, InitLayoutKind,
-    SessionMode, SessionSnapshot, SpawnRequest, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
+    AgentDescriptor, AgentId, BranchFate, CheckoutStrategy, ClientMessage, DaemonMessage,
+    InitLayoutKind, MemberBranchFate, MergeEvidence, PresetEntry, PresetTarget, SessionMode,
+    SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget, SplitDirection, VscodeWorkspaceFolder,
     VscodeWorkspaceSuggestion, WorktreeCleanupFailure, WorktreeReusePolicy,
 };
 use rustling_tulip_native::target::{HostKey, Target};
@@ -422,7 +423,17 @@ fn shared_id<'a>(
     dir: &TestDir,
     remote_s1: protocol::SessionSnapshot,
 ) -> Harness<'a> {
-    let mut fixture = Fixture::single(session("s1").build());
+    shared_id_with(cx, dir, session("s1").build(), remote_s1)
+}
+
+/// As [`shared_id`], with This PC's `s1` given too.
+fn shared_id_with<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    local_s1: protocol::SessionSnapshot,
+    remote_s1: protocol::SessionSnapshot,
+) -> Harness<'a> {
+    let mut fixture = Fixture::single(local_s1);
     fixture.tabs = vec![tab(
         "t1",
         &split(
@@ -1403,4 +1414,587 @@ fn a_remote_repos_container_menu_gives_the_remote_refusal(cx: &mut TestAppContex
         Some(LOCAL_FILES.to_owned()),
         "and so does its VS Code row"
     );
+}
+
+/// How many of `sent` are `DuplicateSession`s.
+fn duplicate_count(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::DuplicateSession { .. }))
+        .count()
+}
+
+/// How many of `sent` are `SpawnSession`s.
+fn spawn_count(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::SpawnSession(_)))
+        .count()
+}
+
+/// The sessions `sent` stops.
+fn stops(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::StopSession { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The sessions whose branch fates `sent` asks for.
+fn previews(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::PreviewDiscard { session_id } => Some(session_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_remote_repo_menu_spawns_on_its_own_host_when_this_pc_shares_the_id(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").in_repo("r2").build());
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/local/r2")],
+    });
+    h.sent();
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    h.click_on("container-menu-spawn");
+    h.click_on("container-spawn-shell");
+
+    let remote_sent = h.host(&remote()).sent();
+    assert_eq!(
+        spawn_count(&remote_sent),
+        1,
+        "the remote repo's shell spawns on its host: {remote_sent:?}"
+    );
+    assert_eq!(spawn_count(&h.sent()), 0, "This PC's r2 is not asked");
+}
+
+#[gpui::test]
+fn copy_path_on_a_remote_repo_copies_that_hosts_path(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").in_repo("r2").build());
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    assert_eq!(
+        h.root(|root, _| root.container_menu_disabled_tip("container-menu-copy-path")),
+        None,
+        "Copy path is offered for the remote repo's path"
+    );
+    h.click_on("container-menu-copy-path");
+
+    assert_eq!(
+        h.clipboard().as_deref(),
+        Some("C:/r2"),
+        "the remote host's path is copied"
+    );
+}
+
+#[gpui::test]
+fn restarting_a_remote_session_proceeds_while_this_pc_restarts_the_same_id(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").exited(1).build(),
+        session("s1").exited(1).build(),
+    );
+
+    h.click_on("exited-restart-p1");
+    assert_eq!(duplicate_count(&h.sent()), 1, "This PC's s1 restarts first");
+    h.click_on("exited-restart-p2");
+
+    assert_eq!(
+        duplicate_count(&h.host(&remote()).sent()),
+        1,
+        "the remote host's s1 restarts though This PC's restart of the same id is in flight"
+    );
+    assert_eq!(duplicate_count(&h.sent()), 0, "This PC is not asked again");
+}
+
+#[gpui::test]
+fn header_stop_stops_the_panes_own_host_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").exited(1).build(),
+        session("s1").build(),
+    );
+
+    assert!(
+        h.in_model("pane-stop-p2"),
+        "the remote pane's live s1 offers Stop, not This PC's exit code"
+    );
+    h.click_on("pane-stop-p2");
+    h.click_on("pane-stop-confirm-p2");
+
+    assert_eq!(
+        stops(&h.host(&remote()).sent()),
+        ["s1"],
+        "the remote host's s1 is stopped"
+    );
+    assert!(stops(&h.sent()).is_empty(), "This PC is not asked");
+}
+
+#[gpui::test]
+fn delete_worktree_dialog_acts_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").build(),
+        session("s1").worktree("r1").build(),
+    );
+    let remote_key = HostKey::of(&remote());
+    h.root_update(move |root, window, cx| {
+        root.open_session_menu(
+            &remote_key,
+            "s1",
+            None,
+            point(px(40.0), px(12.0)),
+            window,
+            cx,
+        );
+    });
+
+    h.click_on("menu-stop");
+    h.click_on("menu-stop-delete");
+    assert_eq!(
+        previews(&h.host(&remote()).sent()),
+        ["s1"],
+        "the remote host is asked for its s1's branch fates"
+    );
+    assert!(previews(&h.sent()).is_empty(), "This PC is not asked");
+
+    h.host(&remote()).send(DaemonMessage::DiscardPreview {
+        session_id: "s1".to_owned(),
+        members: vec![MemberBranchFate {
+            repo_id: "r1".to_owned(),
+            repo_name: "r1".to_owned(),
+            branch: "wt/x".to_owned(),
+            fate: BranchFate::WillDelete {
+                into: "origin/main".to_owned(),
+                via: MergeEvidence::Ancestry,
+            },
+        }],
+    });
+    h.click_on("delete-worktree-and-branch");
+
+    assert_eq!(
+        discards(&h.host(&remote()).sent()),
+        ["s1"],
+        "the delete goes to the remote host's s1"
+    );
+    assert!(discards(&h.sent()).is_empty(), "This PC's s1 is left alone");
+}
+
+#[gpui::test]
+fn env_names_are_asked_of_the_spawn_targets_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").in_repo("r2").build());
+    h.host(&remote()).send(DaemonMessage::Agents {
+        agents: vec![described("agent-y", "remote-y")],
+    });
+    h.host(&remote()).sent();
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    h.click_on("container-menu-spawn");
+    h.click_on("container-spawn-agent-agent-y");
+
+    let env_names = |sent: Vec<ClientMessage>| -> usize {
+        sent.iter()
+            .filter(|msg| matches!(msg, ClientMessage::ListEnvNames { .. }))
+            .count()
+    };
+    assert_eq!(
+        env_names(h.host(&remote()).sent()),
+        1,
+        "the remote target's env names are asked of its host"
+    );
+    assert_eq!(env_names(h.sent()), 0, "This PC is not asked");
+}
+
+/// Whether `sent` holds a `RemoveRepo` of `repo_id`.
+fn removes_repo(sent: &[ClientMessage], repo_id: &str) -> bool {
+    sent.iter()
+        .any(|msg| matches!(msg, ClientMessage::RemoveRepo { repo_id: id } if id == repo_id))
+}
+
+#[gpui::test]
+fn removing_a_remote_repo_unregisters_it_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").build());
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/local/r2")],
+    });
+    h.sent();
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    h.click_on("container-menu-remove");
+    h.click_on("container-menu-remove");
+
+    assert!(
+        removes_repo(&h.host(&remote()).sent(), "r2"),
+        "the remote host unregisters its r2"
+    );
+    assert!(!removes_repo(&h.sent(), "r2"), "This PC's r2 stays");
+}
+
+#[gpui::test]
+fn a_remote_container_menu_closes_when_its_host_drops_the_repo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").build());
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/local/r2")],
+    });
+    h.sent();
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    assert!(h.root(|root, _| root.container_menu_open()));
+    h.host(&remote())
+        .send(DaemonMessage::Repos { repos: Vec::new() });
+
+    assert!(
+        !h.root(|root, _| root.container_menu_open()),
+        "the remote repo's menu closes once its host drops r2, though This PC lists an r2"
+    );
+}
+
+#[gpui::test]
+fn the_delete_dialog_names_its_own_hosts_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").worktree("r1").label("local-one").build(),
+        session("s1").worktree("r1").label("remote-one").build(),
+    );
+    let remote_key = HostKey::of(&remote());
+    h.root_update(move |root, window, cx| {
+        root.open_session_menu(
+            &remote_key,
+            "s1",
+            None,
+            point(px(40.0), px(12.0)),
+            window,
+            cx,
+        );
+    });
+    h.click_on("menu-stop");
+    h.click_on("menu-stop-delete");
+
+    let text = h.root(|root, _| root.delete_dialog_text());
+    assert_eq!(
+        text.first().map(String::as_str),
+        Some("Removing the worktree for remote-one."),
+        "the dialog names the remote host's session"
+    );
+}
+
+#[gpui::test]
+fn removing_a_remote_repo_with_sessions_confirms_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").in_repo("r2").build());
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/local/r2")],
+    });
+    h.sent();
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    h.click_on("container-menu-remove");
+    assert!(
+        h.root(|root, _| root.repo_remove_open()),
+        "the remote r2's live session asks for the confirm"
+    );
+    h.click_on("repo-remove-stop-and-remove");
+
+    let remote_sent = h.host(&remote()).sent();
+    assert_eq!(
+        stops(&remote_sent),
+        ["b1"],
+        "the remote host stops its session"
+    );
+    assert!(
+        removes_repo(&remote_sent, "r2"),
+        "and unregisters its r2: {remote_sent:?}"
+    );
+    let local_sent = h.sent();
+    assert!(
+        stops(&local_sent).is_empty() && !removes_repo(&local_sent, "r2"),
+        "This PC's r2 stays: {local_sent:?}"
+    );
+}
+
+/// A stored plain-shell launch of `r2` in place on `branch`.
+fn shell_launch(branch: &str) -> SpawnConfig {
+    SpawnConfig {
+        target: SpawnTarget::Single {
+            repo_id: "r2".to_owned(),
+            branch_name: branch.to_owned(),
+            base_branch: None,
+            use_worktree: false,
+            checkout_strategy: None,
+            worktree_reuse: WorktreeReusePolicy::default(),
+            existing_worktree: None,
+        },
+        mode: SessionMode::PlainShell,
+        dangerously_skip_permissions: false,
+        agent: None,
+        extra_env: Vec::new(),
+    }
+}
+
+/// [`two_hosts`], with This PC listing an `r2` of its own at
+/// `C:/local/r2`: This PC's `r2` last launched `local`, the remote host's
+/// `remote_last`. Nothing sent is left unread.
+fn shared_repo<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    local: Option<SpawnConfig>,
+    remote_last: Option<SpawnConfig>,
+) -> Harness<'a> {
+    let mut h = two_hosts(cx, dir, session("b1").in_repo("r2").build());
+    let mut local_r2 = repo("r2", "C:/local/r2");
+    local_r2.last_spawn_config = local;
+    h.send(DaemonMessage::Repos {
+        repos: vec![local_r2],
+    });
+    let mut remote_r2 = repo("r2", "C:/r2");
+    remote_r2.last_spawn_config = remote_last;
+    h.host(&remote()).send(DaemonMessage::Repos {
+        repos: vec![remote_r2],
+    });
+    h.host(&remote()).sent();
+    h.sent();
+    h
+}
+
+#[gpui::test]
+fn launch_last_on_a_remote_repo_spawns_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_repo(cx, &dir, None, Some(shell_launch("remote-x")));
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    h.click_on("container-launch-last");
+    h.click_on("container-launch-last-current");
+
+    let remote_sent = h.host(&remote()).sent();
+    assert_eq!(
+        spawn_count(&remote_sent),
+        1,
+        "the remote repo's last launch replays on its host: {remote_sent:?}"
+    );
+    assert_eq!(spawn_count(&h.sent()), 0, "This PC's r2 is not asked");
+}
+
+#[gpui::test]
+fn a_remote_repos_launch_summary_is_its_own_hosts_last_config(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_repo(
+        cx,
+        &dir,
+        Some(shell_launch("local-x")),
+        Some(shell_launch("remote-x")),
+    );
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    h.click_on("container-menu-spawn");
+
+    let labels = h.root(|root, _| root.container_menu_labels());
+    assert!(
+        labels.iter().any(|label| label.contains("remote-x")),
+        "Last sums up the remote host's stored launch: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label.contains("local-x")),
+        "not This PC's r2's: {labels:?}"
+    );
+}
+
+/// A preset of `r2` with a prompts folder under it and no variables.
+fn folder_preset() -> PresetEntry {
+    serde_json::from_value(serde_json::json!({
+        "id": "triage", "name": "Triage", "source_repo_id": "r2",
+        "prompt_sources": [{"kind": "folder", "relative_path": "docs/prompts"}],
+        "variables": [],
+        "prompt_template": "{prompt}", "branch_template": "tmp/{index}",
+        "tab_grouping": {"kind": "none"},
+        "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+    }))
+    .expect("preset fixture")
+}
+
+/// The preset messages among `sent`, by kind.
+fn preset_messages(sent: &[ClientMessage]) -> Vec<&'static str> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::ListPresets { .. } => Some("list"),
+            ClientMessage::PreviewPreset { .. } => Some("preview"),
+            ClientMessage::ResolvePresetScripts { .. } => Some("scripts"),
+            ClientMessage::LaunchPreset { .. } => Some("launch"),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_preset_from_a_remote_repo_menu_opens_on_its_own_host(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_repo(cx, &dir, None, None);
+    let target = PresetTarget::Repo {
+        repo_id: "r2".to_owned(),
+    };
+
+    h.right_click_on(&format!("container-{REMOTE}::repo:r2"));
+    let request_id = h
+        .host(&remote())
+        .sent()
+        .into_iter()
+        .find_map(|msg| match msg {
+            ClientMessage::ListPresets {
+                target: asked,
+                request_id,
+            } if asked == target => request_id,
+            _ => None,
+        });
+    assert!(
+        request_id.is_some(),
+        "the remote repo's presets are asked of its host"
+    );
+    h.host(&remote()).send(DaemonMessage::Presets {
+        target,
+        entries: vec![folder_preset()],
+        request_id,
+    });
+    h.click_on("container-menu-launch-preset-0");
+
+    assert_eq!(
+        h.root(|root, cx| root.preset_wizard_path_text("preset-source-folder", cx))
+            .as_deref(),
+        Some("C:/r2\\docs\\prompts"),
+        "the wizard opens on the remote host, its folder under that host's r2"
+    );
+    h.click_on("preset-next");
+    assert_eq!(
+        preset_messages(&h.host(&remote()).sent()),
+        ["preview"],
+        "the preview is asked of the remote host"
+    );
+    assert!(
+        preset_messages(&h.sent()).is_empty(),
+        "This PC is asked for no preset of the remote repo"
+    );
+}
+
+#[gpui::test]
+fn arming_stop_on_a_remote_pane_leaves_this_pcs_same_id_pane_unarmed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(cx, &dir, session("s1").build(), session("s1").build());
+
+    h.click_on("pane-stop-p2");
+
+    assert_eq!(
+        h.root(|root, _| root.armed_stop_pane().map(str::to_owned))
+            .as_deref(),
+        Some("p2"),
+        "the remote pane's Stop is the armed one"
+    );
+    assert!(
+        h.in_model("pane-stop-confirm-p2"),
+        "the remote pane asks for the confirm"
+    );
+    assert!(
+        !h.in_model("pane-stop-confirm-p1"),
+        "This PC's s1 pane is not armed"
+    );
+    assert!(h.in_model("pane-stop-p1"), "it keeps its plain Stop");
+}
+
+/// A branch fate of `r1`'s `wt/x` that deletes the branch.
+fn will_delete() -> MemberBranchFate {
+    MemberBranchFate {
+        repo_id: "r1".to_owned(),
+        repo_name: "r1".to_owned(),
+        branch: "wt/x".to_owned(),
+        fate: BranchFate::WillDelete {
+            into: "origin/main".to_owned(),
+            via: MergeEvidence::Ancestry,
+        },
+    }
+}
+
+#[gpui::test]
+fn a_late_preview_from_another_host_does_not_fill_the_delete_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = shared_id_with(
+        cx,
+        &dir,
+        session("s1").worktree("r1").build(),
+        session("s1").worktree("r1").build(),
+    );
+    let remote_key = HostKey::of(&remote());
+    h.root_update(move |root, window, cx| {
+        root.open_session_menu(
+            &remote_key,
+            "s1",
+            None,
+            point(px(40.0), px(12.0)),
+            window,
+            cx,
+        );
+    });
+    h.click_on("menu-stop");
+    h.click_on("menu-stop-delete");
+
+    h.send(DaemonMessage::DiscardPreview {
+        session_id: "s1".to_owned(),
+        members: vec![will_delete()],
+    });
+
+    let buttons: Vec<String> = h
+        .root(|root, _| root.delete_dialog_buttons())
+        .into_iter()
+        .map(|(selector, _)| selector)
+        .collect();
+    assert_eq!(
+        buttons,
+        ["delete-worktree-cancel"],
+        "This PC's preview of its own s1 leaves the remote s1's confirm waiting"
+    );
+}
+
+/// How many of `sent` ask for the env names.
+fn env_name_asks(sent: &[ClientMessage]) -> usize {
+    sent.iter()
+        .filter(|msg| matches!(msg, ClientMessage::ListEnvNames { .. }))
+        .count()
+}
+
+#[gpui::test]
+fn changing_the_spawn_target_host_asks_its_env_names(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir, session("b1").in_repo("r2").build());
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/local/r1")],
+    });
+    h.click_on("sidebar-add-session");
+    h.click_on("spawn-target");
+    h.click_on("spawn-target-repo-r1");
+    h.sent();
+    h.host(&remote()).sent();
+
+    h.click_on("spawn-target");
+    h.click_on(&format!("spawn-target-repo-r2@{REMOTE}"));
+
+    assert_eq!(
+        env_name_asks(&h.host(&remote()).sent()),
+        1,
+        "the new target's host is asked for its env names"
+    );
+    assert_eq!(env_name_asks(&h.sent()), 0, "This PC is not asked again");
 }

@@ -158,6 +158,10 @@ impl ConfirmOwner {
 
 /// The open delete-worktree confirm.
 pub(crate) struct DeleteDialog {
+    /// The host whose session the confirm is for: its preview is asked of
+    /// that host and its delete sent there, whichever other host lists the
+    /// same id.
+    host: HostKey,
     confirm: DeleteWorktreeConfirm,
     owner: ConfirmOwner,
     /// Wakes the dialog at the preview's deadline; replacing or dropping
@@ -760,11 +764,13 @@ enum ContainerLaunch {
     Edit,
 }
 
-/// The container a container menu acts on.
+/// The container a container menu acts on. A repo or workspace carries the
+/// host of the row that opened the menu, so every row acts on that host's
+/// container whichever other host lists the same id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MenuContainer {
-    Repo(String),
-    Workspace(String),
+    Repo(String, HostKey),
+    Workspace(String, HostKey),
     Tab(String),
 }
 
@@ -773,9 +779,10 @@ impl MenuContainer {
     /// have one.
     pub(crate) fn of(container: &Container) -> Option<Self> {
         let id = container.id.clone();
+        let host = container.host.clone();
         match container.kind {
-            ContainerKind::Repo => Some(Self::Repo(id)),
-            ContainerKind::Workspace => Some(Self::Workspace(id)),
+            ContainerKind::Repo => Some(Self::Repo(id, host)),
+            ContainerKind::Workspace => Some(Self::Workspace(id, host)),
             ContainerKind::Tab => Some(Self::Tab(id)),
             ContainerKind::Shell
             | ContainerKind::Dir
@@ -784,12 +791,21 @@ impl MenuContainer {
         }
     }
 
+    /// The host of the row that opened the menu on the repo or workspace
+    /// the container names; This PC for a tab, which is This PC's layout.
+    fn host(&self) -> HostKey {
+        match self {
+            Self::Repo(_, host) | Self::Workspace(_, host) => host.clone(),
+            Self::Tab(_) => HostKey::Local,
+        }
+    }
+
     /// The appearance and remove level the container names, for the two
     /// kinds that have one.
     fn level(&self) -> Option<Level> {
         match self {
-            Self::Repo(id) => Some(Level::Repo(id.clone())),
-            Self::Workspace(id) => Some(Level::Workspace(id.clone())),
+            Self::Repo(id, _) => Some(Level::Repo(id.clone())),
+            Self::Workspace(id, _) => Some(Level::Workspace(id.clone())),
             Self::Tab(_) => None,
         }
     }
@@ -798,8 +814,8 @@ impl MenuContainer {
     /// that have one.
     fn target(&self, host: &HostKey) -> Option<Target> {
         match self {
-            Self::Repo(id) => Some(Target::repo(host, id)),
-            Self::Workspace(id) => Some(Target::workspace(host, id)),
+            Self::Repo(id, _) => Some(Target::repo(host, id)),
+            Self::Workspace(id, _) => Some(Target::workspace(host, id)),
             Self::Tab(_) => None,
         }
     }
@@ -808,10 +824,10 @@ impl MenuContainer {
     /// presets.
     fn preset_target(&self) -> Option<PresetTarget> {
         match self {
-            Self::Repo(id) => Some(PresetTarget::Repo {
+            Self::Repo(id, _) => Some(PresetTarget::Repo {
                 repo_id: id.clone(),
             }),
-            Self::Workspace(id) => Some(PresetTarget::Workspace {
+            Self::Workspace(id, _) => Some(PresetTarget::Workspace {
                 workspace_id: id.clone(),
             }),
             Self::Tab(_) => None,
@@ -915,16 +931,24 @@ impl RootView {
             .map(|(_, pane_id)| pane_id.as_str())
     }
 
-    /// A pane showing the session whose header Stop waits for its confirm.
+    /// A pane whose header draws the confirm of the armed Stop: it shows
+    /// the armed session as its own host lists it, still running.
     #[must_use]
     pub fn armed_stop_pane(&self) -> Option<&str> {
-        let session_id = self.confirm.armed(StopPlace::Grid)?;
+        let (host, session_id) = self.confirm.armed(StopPlace::Grid)?;
         self.tabs
             .tabs()
             .iter()
             .filter_map(TabEntry::grid)
             .flat_map(collect_panes)
-            .find(|pane| pane.session == Some(session_id))
+            .find(|pane| {
+                pane.host == *host
+                    && pane.session == Some(session_id)
+                    && self
+                        .sidebar
+                        .session_on(&pane.host, session_id)
+                        .is_some_and(|session| !header_shows_exit_code(session))
+            })
             .map(|pane| pane.id)
     }
 
@@ -1099,10 +1123,12 @@ impl RootView {
             .collect()
     }
 
-    /// Whether a restart or resume of `session_id` waits for its reply.
+    /// Whether a restart or resume of `session_id`, on the host that lists
+    /// it, waits for its reply.
     #[must_use]
     pub fn restart_pending(&self, session_id: &str) -> bool {
-        self.duplicates.is_pending(session_id)
+        self.duplicates
+            .is_pending(&self.host_of_session(session_id), session_id)
     }
 
     /// The active tab's focused pane.
@@ -1187,7 +1213,10 @@ impl RootView {
         }
         if self.delete_dialog.as_ref().is_some_and(|dialog| {
             dialog.owner == ConfirmOwner::Menu
-                && self.sidebar.session(dialog.confirm.session_id()).is_none()
+                && self
+                    .sidebar
+                    .session_on(&dialog.host, dialog.confirm.session_id())
+                    .is_none()
         }) {
             self.close_delete_dialog(window, cx);
         }
@@ -1221,8 +1250,16 @@ impl RootView {
     /// Whether the container a menu names is still there.
     fn container_listed(&self, container: &MenuContainer) -> bool {
         match container {
-            MenuContainer::Repo(id) => self.sidebar.find_repo(id).is_some(),
-            MenuContainer::Workspace(id) => self.sidebar.find_workspace(id).is_some(),
+            MenuContainer::Repo(id, host) => self
+                .sidebar
+                .repos_of(host)
+                .iter()
+                .any(|repo| repo.id == *id),
+            MenuContainer::Workspace(id, host) => self
+                .sidebar
+                .workspaces_of(host)
+                .iter()
+                .any(|workspace| workspace.id == *id),
             MenuContainer::Tab(id) => self.tabs.tabs().iter().any(|tab| &tab.id == id),
         }
     }
@@ -1266,17 +1303,17 @@ impl RootView {
     /// replays.
     fn launch_container(container: &MenuContainer) -> Option<launch_last::Container<'_>> {
         match container {
-            MenuContainer::Repo(id) => Some(launch_last::Container::Repo(id)),
-            MenuContainer::Workspace(id) => Some(launch_last::Container::Workspace(id)),
+            MenuContainer::Repo(id, _) => Some(launch_last::Container::Repo(id)),
+            MenuContainer::Workspace(id, _) => Some(launch_last::Container::Workspace(id)),
             MenuContainer::Tab(_) => None,
         }
     }
 
     /// The stored launch config of the repo or workspace the container menu
-    /// acts on.
+    /// acts on, as the menu's host keeps it.
     fn container_launch_config(&self, container: &MenuContainer) -> Option<SpawnConfig> {
         Self::launch_container(container)
-            .and_then(|container| self.sidebar.last_spawn_config(container))
+            .and_then(|launched| self.sidebar.last_spawn_config(&container.host(), launched))
     }
 
     /// What the open menu's rows depend on now.
@@ -1293,7 +1330,7 @@ impl RootView {
             (MenuContainer::Tab(id), None) => ContainerShape::Tab {
                 spawnable: self.tab_spawnable(id),
             },
-            (MenuContainer::Repo(_) | MenuContainer::Workspace(_), None) => {
+            (MenuContainer::Repo(..) | MenuContainer::Workspace(..), None) => {
                 ContainerShape::Tab { spawnable: false }
             }
         };
@@ -1312,7 +1349,7 @@ impl RootView {
             vscode_gone: self.container_vscode_gone(container),
             has_copy_path: self.container_copy_path(container).is_some(),
             local_files_refusal: self
-                .capabilities_of(&self.host_of_menu_container(container))
+                .capabilities_of(&container.host())
                 .local_files_refusal(),
         }
     }
@@ -1322,7 +1359,7 @@ impl RootView {
     /// folder to start in.
     fn container_spawn_facts<'a>(&self, menu: &'a ContainerMenu) -> SpawnFacts<'a> {
         let container = &menu.container;
-        let descriptors = self.sidebar.agents(&self.host_of_menu_container(container));
+        let descriptors = self.sidebar.agents(&container.host());
         let last = self.container_launch_config(container).and_then(|config| {
             let summary = crate::sidebar::launch_summary(Some(&config), descriptors)?;
             let agent = match config.mode {
@@ -1351,11 +1388,11 @@ impl RootView {
     /// The folder, as its host names it, a Spawn session submenu's Shell
     /// starts in: a repo's own; none for a workspace.
     fn container_shell_folder(&self, container: &MenuContainer) -> Option<String> {
-        let MenuContainer::Repo(id) = container else {
+        let MenuContainer::Repo(id, host) = container else {
             return None;
         };
         self.sidebar
-            .repos_of(&self.host_of_repo(id))
+            .repos_of(host)
             .iter()
             .find(|repo| repo.id == *id)
             .map(|repo| repo.path.clone())
@@ -1635,7 +1672,7 @@ impl RootView {
             ContainerAction::CopyPath => self.container_copy(&container, window, cx),
             ContainerAction::Remove => {
                 if let Some(level) = container.level() {
-                    self.click_remove_container(&level, window, cx);
+                    self.click_remove_container(&container.host(), &level, window, cx);
                 }
             }
             ContainerAction::Launch(ContainerLaunch::Placement(placement)) => {
@@ -1658,8 +1695,8 @@ impl RootView {
     ) -> bool {
         let (lock, preselect) = match container {
             MenuContainer::Tab(id) => (Lock::for_tab(id.clone()), self.tab_preselect(id)),
-            MenuContainer::Repo(_) | MenuContainer::Workspace(_) => {
-                let Some(target) = container.target(&self.host_of_menu_container(container)) else {
+            MenuContainer::Repo(..) | MenuContainer::Workspace(..) => {
+                let Some(target) = container.target(&container.host()) else {
                     return false;
                 };
                 (Lock::for_target(target), None)
@@ -1680,7 +1717,7 @@ impl RootView {
         let Some(folder) = self.container_shell_folder(container) else {
             return;
         };
-        let host = self.host_of_menu_container(container);
+        let host = container.host();
         self.close_container_menu(window, cx);
         let tabs = TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id());
         let open_in = current_tab_open_in(&tabs);
@@ -1721,7 +1758,7 @@ impl RootView {
             .cloned();
         self.close_container_menu(window, cx);
         if let Some(entry) = entry {
-            self.open_preset_wizard(entry, target, window, cx);
+            self.open_preset_wizard(container.host(), entry, target, window, cx);
         }
     }
 
@@ -1740,22 +1777,12 @@ impl RootView {
         self.dispatch_open(&host, job, Then::Nothing, window, cx);
     }
 
-    /// The host that owns the repo or workspace `container` names; This PC
-    /// for a tab, which is This PC's layout.
-    fn host_of_menu_container(&self, container: &MenuContainer) -> HostKey {
-        match container {
-            MenuContainer::Repo(id) => self.host_of_repo(id),
-            MenuContainer::Workspace(id) => self.host_of_workspace(id),
-            MenuContainer::Tab(_) => HostKey::Local,
-        }
-    }
-
     /// The host of the container the open container menu acts on; This PC
     /// while none is open.
     fn container_menu_host(&self) -> HostKey {
-        self.container_menu.as_ref().map_or(HostKey::Local, |menu| {
-            self.host_of_menu_container(&menu.container)
-        })
+        self.container_menu
+            .as_ref()
+            .map_or(HostKey::Local, |menu| menu.container.host())
     }
 
     /// Closes the container menu and puts the container's path on the
@@ -1784,11 +1811,23 @@ impl RootView {
     ) {
         self.close_container_menu(window, cx);
         match container {
-            MenuContainer::Repo(id) => {
-                self.launch_last_row(launch_last::Container::Repo(id), placement, window, cx);
+            MenuContainer::Repo(id, host) => {
+                self.launch_last_row(
+                    host,
+                    launch_last::Container::Repo(id),
+                    placement,
+                    window,
+                    cx,
+                );
             }
-            MenuContainer::Workspace(id) => {
-                self.launch_last_row(launch_last::Container::Workspace(id), placement, window, cx);
+            MenuContainer::Workspace(id, host) => {
+                self.launch_last_row(
+                    host,
+                    launch_last::Container::Workspace(id),
+                    placement,
+                    window,
+                    cx,
+                );
             }
             MenuContainer::Tab(_) => {}
         }
@@ -1802,7 +1841,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = container.target(&self.host_of_menu_container(container)) else {
+        let Some(target) = container.target(&container.host()) else {
             return;
         };
         let Some(config) = self.container_launch_config(container) else {
@@ -1841,6 +1880,7 @@ impl RootView {
         self.close_sc_file_menu(window, cx);
         self.close_more_menu(window, cx);
         let target = container.preset_target();
+        let host = container.host();
         let preset_request = target.as_ref().map(|_| crate::new_request_id());
         let presets = if target.is_some() {
             MenuPresets::Loading
@@ -1861,7 +1901,7 @@ impl RootView {
         });
         if let Some(target) = target {
             self.send_to(
-                &self.host_of_preset_target(&target),
+                &host,
                 ClientMessage::ListPresets {
                     target,
                     request_id: preset_request,
@@ -1968,10 +2008,13 @@ impl RootView {
     fn container_vscode_gone(&self, container: &MenuContainer) -> Option<&'static str> {
         let missing = self.container_missing();
         match container {
-            MenuContainer::Repo(_) => self.container_folder_gone(container),
-            MenuContainer::Workspace(id) => {
-                match workspace_vscode_target(self.sidebar.workspaces(), self.sidebar.repos(), id)?
-                {
+            MenuContainer::Repo(..) => self.container_folder_gone(container),
+            MenuContainer::Workspace(id, host) => {
+                match workspace_vscode_target(
+                    self.sidebar.workspaces_of(host),
+                    self.sidebar.repos_of(host),
+                    id,
+                )? {
                     VsCodeTarget::WorkspaceFile(path) => missing
                         .contains(&path)
                         .then_some(CONTAINER_WORKSPACE_FILE_GONE_TIP),
@@ -2047,8 +2090,8 @@ impl RootView {
     /// a workspace.
     fn container_folder(&self, container: &MenuContainer) -> Option<PathBuf> {
         match container {
-            MenuContainer::Repo(id) => repo_folder(self.sidebar.repos(), id),
-            MenuContainer::Workspace(_) | MenuContainer::Tab(_) => None,
+            MenuContainer::Repo(id, host) => repo_folder(self.sidebar.repos_of(host), id),
+            MenuContainer::Workspace(..) | MenuContainer::Tab(_) => None,
         }
     }
 
@@ -2056,8 +2099,8 @@ impl RootView {
     /// none for a workspace.
     fn container_copy_path(&self, container: &MenuContainer) -> Option<String> {
         match container {
-            MenuContainer::Repo(id) => copy_path(self.sidebar.repos(), id),
-            MenuContainer::Workspace(_) | MenuContainer::Tab(_) => None,
+            MenuContainer::Repo(id, host) => copy_path(self.sidebar.repos_of(host), id),
+            MenuContainer::Workspace(..) | MenuContainer::Tab(_) => None,
         }
     }
 
@@ -2066,21 +2109,24 @@ impl RootView {
     /// less those the menu's check found gone.
     fn container_vscode_job(&self, container: &MenuContainer) -> Option<OpenJob> {
         match container {
-            MenuContainer::Repo(id) => repo_folder(self.sidebar.repos(), id)
+            MenuContainer::Repo(id, host) => repo_folder(self.sidebar.repos_of(host), id)
                 .map(|folder| OpenJob::VsCodeFolder(vec![folder])),
-            MenuContainer::Workspace(id) => {
+            MenuContainer::Workspace(id, host) => {
                 let missing = self.container_missing();
-                workspace_vscode_target(self.sidebar.workspaces(), self.sidebar.repos(), id).map(
-                    |target| match target {
-                        VsCodeTarget::WorkspaceFile(path) => OpenJob::VsCodeWorkspace(path),
-                        VsCodeTarget::Folders(paths) => OpenJob::VsCodeFolder(
-                            paths
-                                .into_iter()
-                                .filter(|path| !missing.contains(path))
-                                .collect(),
-                        ),
-                    },
+                workspace_vscode_target(
+                    self.sidebar.workspaces_of(host),
+                    self.sidebar.repos_of(host),
+                    id,
                 )
+                .map(|target| match target {
+                    VsCodeTarget::WorkspaceFile(path) => OpenJob::VsCodeWorkspace(path),
+                    VsCodeTarget::Folders(paths) => OpenJob::VsCodeFolder(
+                        paths
+                            .into_iter()
+                            .filter(|path| !missing.contains(path))
+                            .collect(),
+                    ),
+                })
             }
             MenuContainer::Tab(_) => None,
         }
@@ -2418,7 +2464,7 @@ impl RootView {
         match plan(action, &session, self.is_shown(host, session_id)) {
             Step::ConfirmWorktreeDelete => {
                 self.close_session_menu(window, cx);
-                self.open_delete_dialog(session_id, ConfirmOwner::Menu, window, cx);
+                self.open_delete_dialog_on(host, session_id, ConfirmOwner::Menu, window, cx);
             }
             Step::Send(messages) => {
                 for msg in messages {
@@ -2835,7 +2881,7 @@ impl RootView {
                 let (selector, label) = match entry {
                     MenuEntry::Action(action) => (
                         format!("menu-{}", action.key()),
-                        self.action_label(session, action, in_pane),
+                        self.action_label(&menu.host, session, action, in_pane),
                     ),
                     MenuEntry::StopChoice => ("menu-stop".to_owned(), "Stop session…"),
                     MenuEntry::Cancel => ("menu-cancel".to_owned(), "Cancel"),
@@ -2849,14 +2895,15 @@ impl RootView {
             .collect()
     }
 
-    /// An action's text: on the way, or as it stands.
+    /// An action's text for `host`'s `session`: on the way, or as it stands.
     fn action_label(
         &self,
+        host: &HostKey,
         session: &SessionSnapshot,
         action: SessionAction,
         in_pane: bool,
     ) -> &'static str {
-        if self.duplicates.is_pending(&session.id)
+        if self.duplicates.is_pending(host, &session.id)
             && let Some(pending) = action.pending_label()
         {
             return pending;
@@ -2902,7 +2949,7 @@ impl RootView {
             return disabled_row(selector, label, tip, &theme(cx));
         }
         let button = menu_item(selector, label, is_danger(action), &theme(cx));
-        if !self.action_ready(session_id, action) {
+        if !self.action_ready(&host, session_id, action) {
             return button.opacity(0.6).cursor_default();
         }
         on_action_press(button, host, session_id, action, cx)
@@ -2924,7 +2971,7 @@ impl RootView {
         } else {
             ButtonKind::Outlined
         };
-        let ready = self.action_ready(&session.id, action);
+        let ready = self.action_ready(&session.host, &session.id, action);
         let button = button(
             selector,
             button_look(
@@ -2945,10 +2992,10 @@ impl RootView {
         }
     }
 
-    /// Whether `action` on `session_id` can run now: a duplicate waits for
-    /// the one in flight.
-    fn action_ready(&self, session_id: &str, action: SessionAction) -> bool {
-        action.pending_label().is_none() || !self.duplicates.is_pending(session_id)
+    /// Whether `action` on `host`'s `session_id` can run now: a duplicate
+    /// waits for the one in flight of that host's session.
+    fn action_ready(&self, host: &HostKey, session_id: &str, action: SessionAction) -> bool {
+        action.pending_label().is_none() || !self.duplicates.is_pending(host, session_id)
     }
 
     /// The pane header's Pop out, which opens the pane in a window of its
@@ -3106,7 +3153,8 @@ impl RootView {
         place: StopPlace,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some(session) = session_id.and_then(|id| self.sidebar.session(id)) else {
+        let host = self.slot_host(pane_id);
+        let Some(session) = session_id.and_then(|id| self.sidebar.session_on(&host, id)) else {
             return Vec::new();
         };
         if header_shows_exit_code(session) {
@@ -3126,7 +3174,7 @@ impl RootView {
         let id = session.id.clone();
         let stop = SessionAction::StopKeepWorktree;
         let prefix = place.selector_prefix();
-        if !self.confirm.is_armed(place, &id) {
+        if !self.confirm.is_armed(place, &host, &id) {
             let button = header_text_button(
                 &format!("{prefix}-{pane_id}"),
                 "Stop",
@@ -3135,7 +3183,7 @@ impl RootView {
             );
             return vec![
                 on_press(button, cx, move |this, _, _| {
-                    this.confirm.click(place, &id);
+                    this.confirm.click(place, &host, &id);
                 })
                 .into_any_element(),
             ];
@@ -3154,8 +3202,8 @@ impl RootView {
         );
         vec![
             on_press(confirm, cx, move |this, window, cx| {
-                if this.confirm.click(place, &id) {
-                    this.choose_action(&this.host_of_session(&id), &id, stop, window, cx);
+                if this.confirm.click(place, &host, &id) {
+                    this.choose_action(&host, &id, stop, window, cx);
                 }
             })
             .into_any_element(),
@@ -3253,7 +3301,7 @@ impl RootView {
             .into_iter()
             .map(|action| {
                 let selector = format!("exited-{}-{pane_id}", action.key());
-                let label = self.action_label(session, action, in_pane);
+                let label = self.action_label(&shown.host, session, action, in_pane);
                 self.overlay_action_button(&shown, action, &selector, label, cx)
                     .into_any_element()
             })
@@ -3279,6 +3327,18 @@ impl RootView {
         )
     }
 
+    /// The host of the session terminal slot `slot_id` draws: a session
+    /// pop-out's own, else the host its pane names in whichever tab holds
+    /// it; This PC for neither.
+    fn slot_host(&self, slot_id: &str) -> HostKey {
+        crate::popouts::slot_session(slot_id)
+            .map(|shown| shown.host)
+            .or_else(|| {
+                crate::popouts::pane_in_tabs(slot_id, self.tabs.tabs()).map(|pane| pane.host)
+            })
+            .unwrap_or(HostKey::Local)
+    }
+
     /// The layer over an abandoned session's pane: what happened, the
     /// prompt it was running, and Resume and Dismiss.
     pub(crate) fn abandoned_overlay(
@@ -3287,15 +3347,16 @@ impl RootView {
         session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let host = self.slot_host(pane_id);
         let session = session_id
-            .and_then(|id| self.sidebar.session(id))
+            .and_then(|id| self.sidebar.session_on(&host, id))
             .filter(|session| action_state(session) == ActionState::Abandoned)?;
         let buttons: Vec<AnyElement> = ABANDONED_ACTIONS
             .iter()
             .map(|inline| {
                 let selector = format!("abandoned-{}-{pane_id}", inline.key);
-                let label = self.action_label(session, inline.action, true);
-                let shown = SessionRef::new(self.host_of_session(&session.id), &session.id);
+                let label = self.action_label(&host, session, inline.action, true);
+                let shown = SessionRef::new(host.clone(), &session.id);
                 self.overlay_action_button(&shown, inline.action, &selector, label, cx)
                     .tooltip(tooltip(inline.tip))
                     .into_any_element()
@@ -3373,7 +3434,10 @@ impl RootView {
         };
         let mut selectors = Vec::new();
         for pane in collect_panes(grid) {
-            let Some(session) = pane.session.and_then(|id| self.sidebar.session(id)) else {
+            let Some(session) = pane
+                .session
+                .and_then(|id| self.sidebar.session_on(&pane.host, id))
+            else {
                 continue;
             };
             if action_state(session) == ActionState::Abandoned {
@@ -3491,7 +3555,13 @@ impl RootView {
             return Vec::new();
         };
         let confirm = &dialog.confirm;
-        let label = self.session_label(confirm.session_id());
+        let label = self
+            .sidebar
+            .session_on(&dialog.host, confirm.session_id())
+            .map_or_else(
+                || confirm.session_id().to_owned(),
+                |session| crate::sidebar::display_label(session, self.sidebar.agents(&dialog.host)),
+            );
         let mut lines: Vec<String> = dialog.owner.progress().into_iter().collect();
         lines.push(format!("Removing the worktree for {label}."));
         lines.extend(confirm.status_note().map(str::to_owned));
@@ -3519,9 +3589,8 @@ impl RootView {
             .is_some_and(|dialog| matches!(dialog.owner, ConfirmOwner::ExitWalk { .. }))
     }
 
-    /// Opens the confirm for `session_id` on behalf of `owner`, replacing
-    /// any confirm open: asks the daemon for its branch fates, arms the
-    /// fallback at the preview's deadline and takes the keyboard.
+    /// Opens the confirm for `session_id` on the host that lists it; see
+    /// [`Self::open_delete_dialog_on`].
     pub(crate) fn open_delete_dialog(
         &mut self,
         session_id: &str,
@@ -3529,19 +3598,33 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let host = self.host_of_session(session_id);
+        self.open_delete_dialog_on(&host, session_id, owner, window, cx);
+    }
+
+    /// Opens the confirm for `host`'s session `session_id` on behalf of
+    /// `owner`, replacing any confirm open: asks that host for its branch
+    /// fates, arms the fallback at the preview's deadline and takes the
+    /// keyboard.
+    pub(crate) fn open_delete_dialog_on(
+        &mut self,
+        host: &HostKey,
+        session_id: &str,
+        owner: ConfirmOwner,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.is_main_window(window) {
-            let session_id = session_id.to_owned();
+            let (host, session_id) = (host.clone(), session_id.to_owned());
             self.open_in_main_window(cx, move |root, window, cx| {
-                root.open_delete_dialog(&session_id, owner, window, cx);
+                root.open_delete_dialog_on(&host, &session_id, owner, window, cx);
             });
             return;
         }
         let confirm = DeleteWorktreeConfirm::new(session_id, (self.now)());
-        self.send_to(
-            &self.host_of_session(confirm.session_id()),
-            confirm.request(),
-        );
+        self.send_to(host, confirm.request());
         self.delete_dialog = Some(DeleteDialog {
+            host: host.clone(),
             confirm,
             owner,
             timer: None,
@@ -3581,14 +3664,18 @@ impl RootView {
         self.schedule_delete_dialog_tick(cx);
     }
 
-    /// The daemon's branch fates for the open confirm's session.
+    /// `host`'s branch fates for the open confirm's session: taken only
+    /// from the confirm's own host, so another host's preview of a session
+    /// of the same id never fills it.
     pub(crate) fn on_discard_preview(
         &mut self,
+        host: &HostKey,
         session_id: &str,
         members: &[MemberBranchFate],
         cx: &mut Context<Self>,
     ) {
         if let Some(dialog) = &mut self.delete_dialog
+            && dialog.host == *host
             && dialog.confirm.on_preview(session_id, members)
         {
             cx.notify();
@@ -3631,10 +3718,13 @@ impl RootView {
             cx.notify();
             return;
         }
-        let session = self.sidebar.session(dialog.confirm.session_id()).cloned();
+        let session = self
+            .sidebar
+            .session_on(&dialog.host, dialog.confirm.session_id())
+            .cloned();
         if let (Some(branch), Some(session)) = (button.branch(), session) {
             for msg in confirm_messages(&session, branch) {
-                self.send_to(&self.host_of_session(&session.id), msg);
+                self.send_to(&dialog.host, msg);
             }
         }
         self.focus_active_pane(window, cx);
@@ -4413,6 +4503,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a broken repo fixture should fail the test loudly"
+    )]
     fn a_disabled_row_carries_its_tip_and_an_enabled_row_none() {
         let loading = MenuPresets::Loading;
         let workspace = ContainerFacts {
@@ -4435,7 +4529,17 @@ mod tests {
         );
         assert_eq!(state(&groups, CONTAINER_PRESET_ROW), Some(RowState::Inert));
 
+        // A remote host's repo, its path facts read from that host's own
+        // slice through the helpers `container_facts` reads them with.
+        let remote_repos: Vec<protocol::RepoEntry> = serde_json::from_value(
+            serde_json::json!({ "id": "r2", "name": "r2", "path": "C:/r2" }),
+        )
+        .map(|repo| vec![repo])
+        .expect("a remote repo fixture");
         let remote = ContainerFacts {
+            has_folder: repo_folder(&remote_repos, "r2").is_some(),
+            has_vscode_job: repo_folder(&remote_repos, "r2").is_some(),
+            has_copy_path: copy_path(&remote_repos, "r2").is_some(),
             local_files_refusal: Some(REFUSAL),
             ..repo_facts(&loading)
         };
