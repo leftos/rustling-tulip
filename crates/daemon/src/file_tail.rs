@@ -328,6 +328,87 @@ pub(crate) enum StepError {
 
 /// Open `resolved` and check where the opened handle really is, which also
 /// catches a link swapped in after [`locate`].
+///
+/// On Unix the open itself refuses a link as the path's last component
+/// (`O_NOFOLLOW`), cannot make a terminal device the daemon's controlling
+/// terminal (`O_NOCTTY`) and does not block on a FIFO swapped in after
+/// [`locate`] (`O_NONBLOCK`); the handle's own type is checked before
+/// anything is read, `O_NONBLOCK` is then cleared so a read that can report
+/// `EAGAIN` waits instead, and the handle's own path is read from the handle
+/// before anything is sent. Linux and macOS are the supported Unix targets;
+/// on any other Unix the handle's path cannot be read and every open is
+/// refused.
+#[cfg(unix)]
+pub(crate) fn open_inside(folders: &Folders, resolved: &Path) -> Result<File, StepError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(resolved)
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                StepError::Missing
+            } else {
+                StepError::Failed(format!("opening {}: {err}", resolved.display()))
+            }
+        })?;
+    let meta = file
+        .metadata()
+        .map_err(|err| StepError::Failed(format!("reading {}: {err}", resolved.display())))?;
+    if !meta.is_file() {
+        return Err(StepError::Failed(format!(
+            "{} is not a regular file",
+            resolved.display()
+        )));
+    }
+    clear_nonblock(&file).map_err(|err| {
+        StepError::Failed(format!(
+            "cannot make {} read blocking: {err}",
+            resolved.display()
+        ))
+    })?;
+    let opened = final_path(&file, resolved).map_err(|err| {
+        StepError::Failed(format!(
+            "cannot tell where {} opened: {err}",
+            resolved.display()
+        ))
+    })?;
+    if folders.holds(&opened) {
+        Ok(file)
+    } else {
+        Err(StepError::Failed(format!(
+            "{} opened outside the session's folders (at {})",
+            resolved.display(),
+            opened.display()
+        )))
+    }
+}
+
+/// Clear `O_NONBLOCK` from an opened regular file's descriptor, so a read
+/// that can still report `EAGAIN` (mandatory locking, a FUSE file system)
+/// waits instead of failing.
+#[cfg(unix)]
+fn clear_nonblock(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` stays open while `file` lives, and `F_GETFL` only reads
+    // the descriptor's flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` stays open while `file` lives, and `F_SETFL` takes only
+    // the flags to set, with no buffer.
+    let cleared = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    if cleared == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Open `resolved` and check where the opened handle really is, which also
+/// catches a link swapped in after [`locate`].
+#[cfg(not(unix))]
 pub(crate) fn open_inside(folders: &Folders, resolved: &Path) -> Result<File, StepError> {
     let file = File::open(resolved).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
@@ -383,13 +464,39 @@ pub(crate) fn final_path(file: &File, _opened_as: &Path) -> std::io::Result<Path
     }
 }
 
-/// The path the open handle `file` refers to: its `/proc/self/fd` link
-/// where there is one, else `opened_as` canonicalized again.
-#[cfg(not(windows))]
-pub(crate) fn final_path(file: &File, opened_as: &Path) -> std::io::Result<PathBuf> {
+/// The path the open handle `file` refers to, read from the handle itself:
+/// its `/proc/self/fd` link. Linux is the only Unix target here without
+/// `F_GETPATH`; another Unix has no such link, so its read fails and the
+/// open is refused. There is no fallback to the opened path, which a swap
+/// could make stale.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn final_path(file: &File, _opened_as: &Path) -> std::io::Result<PathBuf> {
     use std::os::fd::AsRawFd as _;
     std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
-        .or_else(|_| std::fs::canonicalize(opened_as))
+}
+
+/// The path the open handle `file` refers to, read from the handle itself
+/// with `F_GETPATH`. A failed call refuses the open, rather than walking the
+/// opened path again, which a swap could make stale.
+#[cfg(target_os = "macos")]
+pub(crate) fn final_path(file: &File, _opened_as: &Path) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: `buf` holds `libc::PATH_MAX` bytes, the most `F_GETPATH`
+    // writes, and `file` keeps its descriptor open while the call runs.
+    let written = unsafe {
+        libc::fcntl(
+            file.as_raw_fd(),
+            libc::F_GETPATH,
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+        )
+    };
+    if written == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let len = buf.iter().position(|byte| *byte == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
 }
 
 /// What tells one file from another at the same path: the volume and file
@@ -782,6 +889,18 @@ pub(crate) mod hooks {
         }
     }
 
+    /// Make `path` a FIFO on Unix. Whether one was made.
+    #[cfg(unix)]
+    pub(crate) fn make_fifo(path: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt as _;
+        let Ok(raw) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: `raw` is a NUL-terminated path under the test's own folder,
+        // and `mkfifo` only reads it.
+        unsafe { libc::mkfifo(raw.as_ptr(), 0o600) == 0 }
+    }
+
     /// Make `link` a junction to the folder `target` on Windows; elsewhere,
     /// which has no junctions, nothing. Whether one was made.
     pub(crate) fn make_junction(link: &Path, target: &Path) -> bool {
@@ -914,5 +1033,87 @@ mod tests {
                 "{err:?}"
             );
         }
+    }
+
+    /// The bound every wait on an open takes here; passing it fails as hung.
+    #[cfg(unix)]
+    const OPEN_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// [`open_inside`] on a thread of its own, failing the test as hung when
+    /// it has not returned within [`OPEN_GUARD`].
+    #[cfg(unix)]
+    fn open_guarded(folders: &Folders, path: &Path) -> Result<File, StepError> {
+        let folders = folders.clone();
+        let path = path.to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_inside(&folders, &path));
+        });
+        rx.recv_timeout(OPEN_GUARD)
+            .expect("hung: the open never returned")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_inside_refuses_a_fifo() {
+        let (_base, folder) = folder_with_sibling("fifo");
+        let fifo = folder.join("pipe");
+        assert!(hooks::make_fifo(&fifo), "a FIFO could not be made");
+        let folders = Folders::canonicalize(std::slice::from_ref(&folder));
+        let err = open_guarded(&folders, &fifo).expect_err("a FIFO is not opened");
+        assert!(
+            matches!(&err, StepError::Failed(why) if why.contains("not a regular file")),
+            "{err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_inside_refuses_a_symlink_to_an_inside_file() {
+        let (_base, folder) = folder_with_sibling("open-link");
+        let target = folder.join("logs").join("in.log");
+        std::fs::write(&target, "in").expect("write log");
+        let link = folder.join("link.log");
+        std::os::unix::fs::symlink(&target, &link).expect("make the link");
+        let folders = Folders::canonicalize(std::slice::from_ref(&folder));
+        assert!(
+            open_inside(&folders, &target).is_ok(),
+            "the real file opens"
+        );
+        let err = open_inside(&folders, &link).expect_err("a link is not opened");
+        assert!(
+            matches!(&err, StepError::Failed(why) if why.contains("opening")),
+            "{err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_inside_returns_a_blocking_handle() {
+        use std::os::fd::AsRawFd as _;
+        let (_base, folder) = folder_with_sibling("blocking");
+        let path = folder.join("logs").join("in.log");
+        std::fs::write(&path, "in").expect("write log");
+        let folders = Folders::canonicalize(std::slice::from_ref(&folder));
+        let file = open_inside(&folders, &path).expect("a regular file opens");
+        // SAFETY: `file` stays open, and `F_GETFL` only reads the
+        // descriptor's flags.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1, "F_GETFL");
+        assert_eq!(flags & libc::O_NONBLOCK, 0, "the handle reads blocking");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn final_path_follows_a_rename_by_handle() {
+        let (_base, folder) = folder_with_sibling("rename");
+        let before = folder.join("logs").join("in.log");
+        std::fs::write(&before, "in").expect("write log");
+        let file = File::open(&before).expect("open the log");
+        let after = folder.join("logs").join("renamed.log");
+        std::fs::rename(&before, &after).expect("rename the log");
+        let opened = final_path(&file, &before).expect("the handle's path");
+        let expected = std::fs::canonicalize(&after).expect("the renamed path");
+        assert_eq!(opened, expected, "the handle follows the rename");
     }
 }

@@ -124,6 +124,12 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"]
 # used by the idle-exit watcher tests to fast-forward through grace periods.
 tokio = { workspace = true, features = ["test-util"] }
 
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` and `O_NONBLOCK` for the folder fetch's and the file tail's
+# open of a listed file, and `F_GETPATH` for the real path of the opened
+# handle on macOS (`file_tail::open_inside` and `file_tail::final_path`).
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # Windows Credential Manager as the `keyring-core` store. Default features off
 # drops its regex-backed credential search, which the daemon never uses: the

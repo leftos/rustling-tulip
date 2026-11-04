@@ -13,12 +13,12 @@
 //! is stale for a file held open for writing.
 //!
 //! The walk is a snapshot: the pack opens each listed file again and checks
-//! where its handle really is ([`crate::file_tail::open_inside`]) before
-//! reading a byte. On Unix that check has a gap: a file swapped for a FIFO
-//! between the walk and the open can make the open block before the
-//! handle's type is checked, and on macOS, which has no `/proc/self/fd`, a
-//! handle's final path is its opened path canonicalized again, which a swap
-//! between the open and that check can fool.
+//! the handle itself ([`crate::file_tail::open_inside`]) before reading a
+//! byte. On Unix that open follows no link as its last component and never
+//! blocks on a FIFO, it refuses a handle that is not a regular file before
+//! reading, and it reads the handle's own path from the handle (its
+//! `/proc/self/fd` link, or `F_GETPATH` on macOS), so a swap after the walk
+//! is seen as it is and not followed.
 
 use crate::file_fetch::{self, CHUNK_SIZE, CanonicalRoot};
 use crate::file_tail::{self, Folders, StepError};
@@ -1495,6 +1495,22 @@ mod tests {
         let (sent, last) = pack_all(&root, scan, 4, &CancellationToken::new());
         assert!(is_done(last.as_ref()), "{last:?}");
         assert_eq!(unpack(&sent), [entry("keep.txt", b"k")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_swapped_in_after_the_scan_is_skipped_without_blocking() {
+        use crate::file_tail::hooks::make_fifo;
+        let (_base, root, _) = root_with_outside("pack-swap-fifo");
+        write(&root.join("keep.txt"), "k");
+        write(&root.join("f.txt"), "inside");
+        let scan = scan_all(&root);
+        std::fs::remove_file(root.join("f.txt")).expect("remove f.txt");
+        assert!(make_fifo(&root.join("f.txt")), "a FIFO could not be made");
+        let (sent, last) = pack_all(&root, scan, 4, &CancellationToken::new());
+        assert!(is_done(last.as_ref()), "{last:?}");
+        let entries = unpack(&sent);
+        assert_eq!(entries, [entry("keep.txt", b"k")]);
     }
 
     #[cfg(windows)]
