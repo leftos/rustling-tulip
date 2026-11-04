@@ -674,7 +674,7 @@ where
     // no daemon at all. The task route only locates the template; the binary
     // is cached (and an elevated root created) only for a start here.
     let (current, template) = if route == StartRoute::Direct {
-        let current = resolve_current_daemon_binary(binaries_dir)?;
+        let current = resolve_current_daemon_binary(binaries_dir, elevated)?;
         let template = current.template.clone();
         (Some(current), template)
     } else {
@@ -703,7 +703,7 @@ where
                     // The task route left the root as it found it.
                     crate::profile::ensure_protected(own_roots, overrides)?;
                 }
-                resolve_current_daemon_binary(binaries_dir)?
+                resolve_current_daemon_binary(binaries_dir, elevated)?
             };
             start_here(current, config_dirs).await
         },
@@ -793,9 +793,15 @@ async fn reuse_ordinary_daemon(
     Ok(None)
 }
 
-fn resolve_current_daemon_binary(binaries_dir: &Path) -> anyhow::Result<CurrentDaemonBinary> {
+/// The daemon template and its copy in `binaries_dir`. An `elevated` caller
+/// refuses a template whose bytes changed since its first copy.
+fn resolve_current_daemon_binary(
+    binaries_dir: &Path,
+    elevated: bool,
+) -> anyhow::Result<CurrentDaemonBinary> {
     let template = locate_daemon_binary()?;
-    let cached = cache_daemon_binary(&template, binaries_dir)?;
+    let pin = elevated.then_some(&ELEVATED_DAEMON_TEMPLATE);
+    let cached = cache_daemon_binary(&template, binaries_dir, pin)?;
     Ok(CurrentDaemonBinary { template, cached })
 }
 
@@ -1455,12 +1461,27 @@ async fn load_existing_if_alive(config_dir: &Path, proof_budget: Duration) -> Ha
 /// from).
 ///
 /// Looks next to the current executable first (production install), then in
-/// the workspace's `target/debug` and `target/release` (dev).
+/// the workspace's `target/debug` and `target/release` (dev). An elevated
+/// caller looks only next to its own executable.
 ///
 /// # Errors
 ///
-/// Fails, naming every path it tried, when none of them holds the binary.
+/// Fails, naming every path it tried, when none of them holds the binary, or
+/// when the caller's profile cannot be read.
 pub(crate) fn locate_daemon_binary() -> anyhow::Result<PathBuf> {
+    let caller = crate::profile::own_profile()?;
+    let current_exe = std::env::current_exe().ok();
+    locate_daemon_binary_in(caller, current_exe.as_deref(), dev_workspace_root)
+}
+
+/// [`locate_daemon_binary`] for a `caller` running `current_exe`, with the dev
+/// workspace root from `dev_root`. An elevated caller never searches the dev
+/// workspace: a workspace build is a folder an ordinary process can write.
+fn locate_daemon_binary_in(
+    caller: Profile,
+    current_exe: Option<&Path>,
+    dev_root: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<PathBuf> {
     let exe_name = if cfg!(windows) {
         "rustling-tulipd.exe"
     } else {
@@ -1468,17 +1489,28 @@ pub(crate) fn locate_daemon_binary() -> anyhow::Result<PathBuf> {
     };
 
     // 1. Sibling of the current executable (production install).
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(dir) = current_exe.parent()
+    let sibling = current_exe
+        .and_then(Path::parent)
+        .map(|dir| dir.join(exe_name));
+    if let Some(candidate) = &sibling
+        && candidate.is_file()
     {
-        let candidate = dir.join(exe_name);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
+        return Ok(candidate.clone());
+    }
+
+    if caller == Profile::Elevated {
+        let looked = sibling.as_deref().map_or_else(
+            || format!("<exe_dir>/{exe_name}"),
+            |path| path.display().to_string(),
+        );
+        return Err(anyhow!(
+            "rustling-tulipd binary not found at {looked}. An elevated caller runs only the \
+             daemon installed beside it, never a workspace build."
+        ));
     }
 
     // 2. Workspace target dir (dev).
-    let workspace_root = dev_workspace_root()?;
+    let workspace_root = dev_root()?;
     let dev_candidate = workspace_root.join("target").join("debug").join(exe_name);
     if dev_candidate.is_file() {
         return Ok(dev_candidate);
@@ -1551,12 +1583,23 @@ fn expected_daemon_path(binaries_dir: &Path) -> Option<PathBuf> {
 /// the shipped one is unlocked. The cache is the profile's binaries dir
 /// ([`crate::profile::ProfileRoots::binaries`]), shared with the daemon's
 /// `binary_cache` module and pruned by the daemon at startup.
-fn cache_daemon_binary(template: &Path, cache_dir: &Path) -> anyhow::Result<PathBuf> {
+///
+/// With a `pin` (an elevated client), the bytes read here, the ones hashed and
+/// written, are checked against the template's hash at the client's first
+/// copy, and a template changed since is refused.
+fn cache_daemon_binary(
+    template: &Path,
+    cache_dir: &Path,
+    pin: Option<&DaemonTemplatePin>,
+) -> anyhow::Result<PathBuf> {
     fs::create_dir_all(cache_dir)
         .with_context(|| format!("creating cache dir {}", cache_dir.display()))?;
 
     let bytes =
         fs::read(template).with_context(|| format!("reading template {}", template.display()))?;
+    if let Some(pin) = pin {
+        pin.check(template, &bytes)?;
+    }
     let filename = cached_file_name(template, &bytes);
     let cached = cache_dir.join(&filename);
 
@@ -1585,6 +1628,46 @@ fn cache_daemon_binary(template: &Path, cache_dir: &Path) -> anyhow::Result<Path
     info!(cached = %cached.display(), "daemon binary cache: populated");
     Ok(cached)
 }
+
+/// The SHA-256 of the daemon template an elevated client copied first. The
+/// template's folder is one an ordinary process can write, so the client
+/// trusts its bytes only as they were at that first copy.
+pub(crate) struct DaemonTemplatePin(std::sync::Mutex<Option<Vec<u8>>>);
+
+impl DaemonTemplatePin {
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    /// Pin the hash of `bytes`, read from `template`, at the first call; on
+    /// every later call, refuse bytes whose hash differs.
+    fn check(&self, template: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+        let digest = Sha256::digest(bytes).to_vec();
+        let mut pinned = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match pinned.as_deref() {
+            None => {
+                *pinned = Some(digest);
+                Ok(())
+            }
+            Some(first) if first == digest.as_slice() => Ok(()),
+            Some(_) => {
+                let folder = template.parent().unwrap_or(template);
+                Err(anyhow!(
+                    "the daemon template in {} changed since this elevated client first copied \
+                     it; refusing to start it. Start the app again as administrator to use the \
+                     new build.",
+                    folder.display()
+                ))
+            }
+        }
+    }
+}
+
+/// This process's pin, used when the caller is elevated.
+static ELEVATED_DAEMON_TEMPLATE: DaemonTemplatePin = DaemonTemplatePin::new();
 
 fn hash_prefix(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -1982,7 +2065,8 @@ mod tests {
         wait_for_handshake_in,
     };
     use super::{
-        CurrentDaemonBinary, START_FAILURE_FILE, StartSteps, daemon_start_args, ensure_running_in,
+        CurrentDaemonBinary, DaemonTemplatePin, START_FAILURE_FILE, StartSteps,
+        cache_daemon_binary, daemon_start_args, ensure_running_in, locate_daemon_binary_in,
         start_daemon_routed,
     };
     #[cfg(windows)]
@@ -2049,6 +2133,82 @@ mod tests {
     /// What the direct start hands back in the bridge's route tests.
     fn started_here() -> DaemonHandshake {
         handshake_naming(7777, 1, "started-here", SUPPORTED)
+    }
+
+    /// The daemon binary's file name on this platform.
+    const DAEMON_EXE: &str = if cfg!(windows) {
+        "rustling-tulipd.exe"
+    } else {
+        "rustling-tulipd"
+    };
+
+    #[test]
+    fn elevated_daemon_lookup_never_uses_the_dev_workspace() {
+        let scratch = ScratchDir::new("elevated-dev-lookup");
+        let app_dir = scratch.0.join("app");
+        std::fs::create_dir_all(&app_dir).expect("create the app dir");
+        let caller_exe = app_dir.join("rustling-tulip-native.exe");
+        let workspace = scratch.0.join("workspace");
+        let dev_daemon = workspace.join("target").join("debug").join(DAEMON_EXE);
+        std::fs::create_dir_all(dev_daemon.parent().expect("dev daemon has a parent"))
+            .expect("create the dev target dir");
+        std::fs::write(&dev_daemon, b"daemon").expect("write the dev daemon");
+
+        let ordinary = locate_daemon_binary_in(Profile::Ordinary, Some(&caller_exe), || {
+            Ok(workspace.clone())
+        })
+        .expect("an ordinary caller finds the workspace build");
+        assert_eq!(ordinary, dev_daemon);
+
+        let searched = Cell::new(false);
+        let err = locate_daemon_binary_in(Profile::Elevated, Some(&caller_exe), || {
+            searched.set(true);
+            Ok(workspace.clone())
+        })
+        .expect_err("an elevated caller must not run a workspace build");
+        assert!(!searched.get(), "the dev workspace was searched");
+        let message = format!("{err:#}");
+        assert!(
+            !message.contains(&workspace.display().to_string()),
+            "the refusal must not offer the workspace, got: {message}"
+        );
+        assert!(
+            message.contains(&app_dir.join(DAEMON_EXE).display().to_string()),
+            "the refusal must name where it looked, got: {message}"
+        );
+    }
+
+    #[test]
+    fn elevated_client_refuses_a_daemon_template_changed_since_its_first_copy() {
+        let scratch = ScratchDir::new("daemon-template-pin");
+        let install = scratch.0.join("install");
+        std::fs::create_dir_all(&install).expect("create the install dir");
+        let template = install.join(DAEMON_EXE);
+        std::fs::write(&template, b"daemon v1").expect("write the template");
+        let cache = scratch.0.join("binaries");
+        let pin = DaemonTemplatePin::new();
+
+        let first =
+            cache_daemon_binary(&template, &cache, Some(&pin)).expect("the first copy is made");
+        assert_eq!(
+            cache_daemon_binary(&template, &cache, Some(&pin)).expect("the same bytes copy"),
+            first
+        );
+
+        std::fs::write(&template, b"daemon v2, written after elevation")
+            .expect("overwrite the template");
+        let err = cache_daemon_binary(&template, &cache, Some(&pin))
+            .expect_err("a changed template must be refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&install.display().to_string()),
+            "the refusal must name the template's folder, got: {message}"
+        );
+
+        // An ordinary client copies the rebuilt template as before.
+        let rebuilt =
+            cache_daemon_binary(&template, &cache, None).expect("an ordinary client copies it");
+        assert_ne!(rebuilt, first);
     }
 
     #[test]

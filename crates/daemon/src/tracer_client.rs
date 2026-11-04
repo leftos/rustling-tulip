@@ -15,12 +15,14 @@ use crate::paths::Dirs;
 use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtyProducer, PtySpawnSpec};
 use anyhow::{Context as _, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use daemon_client::profile::Profile;
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 use portable_pty::ChildKiller;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::sync::mpsc;
@@ -205,8 +207,62 @@ fn check_connected_tracer(client: &Stream, pipe: &str, expected: u32) -> anyhow:
 /// passes the same path to [`spawn_with_tracer`], so the hook command and the
 /// running supervisor are one copy. Every other spawn resolves through
 /// [`spawn`], which calls this for itself.
+///
+/// An elevated daemon returns the copy it pinned at start
+/// ([`pin_tracer_at_start`]) and never reads the template again; an ordinary
+/// daemon copies the template as it is now, so a rebuilt tracer runs at the
+/// next spawn.
 pub(crate) fn cached_tracer_exe(dirs: &Dirs) -> anyhow::Result<PathBuf> {
+    if let Some(pinned) = pinned_tracer(dirs) {
+        return Ok(pinned);
+    }
     locate_tracer_exe(dirs)
+}
+
+/// The `rt-tracer` copy each elevated daemon pinned at start, keyed by the
+/// binary cache ([`Dirs::binaries_dir`]) it lives in. One daemon process has
+/// one cache; the key keeps a test's pin to its own scratch cache.
+static PINNED_TRACERS: Mutex<BTreeMap<PathBuf, PathBuf>> = Mutex::new(BTreeMap::new());
+
+fn pinned_tracers() -> MutexGuard<'static, BTreeMap<PathBuf, PathBuf>> {
+    PINNED_TRACERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The tracer copy an elevated daemon pinned for `dirs`' binary cache, which
+/// the startup cache GC keeps. `None` for an ordinary daemon.
+pub(crate) fn pinned_tracer(dirs: &Dirs) -> Option<PathBuf> {
+    pinned_tracers().get(&dirs.binaries_dir).cloned()
+}
+
+/// Pin the tracer an elevated daemon runs for the rest of its life: resolve
+/// the template once, before the daemon serves, copy it into the daemon's
+/// protected binary cache and return that copy, which every later spawn and
+/// hook settings file names. The template folder is one an ordinary process
+/// can write, so it is trusted only as it was when the user elevated. An
+/// ordinary daemon pins nothing (`Ok(None)`).
+///
+/// # Errors
+///
+/// An elevated daemon found no tracer template; the error names the folders
+/// it looked in, and the daemon refuses to start.
+pub(crate) fn pin_tracer_at_start(
+    dirs: &Dirs,
+    profile: Profile,
+) -> anyhow::Result<Option<PathBuf>> {
+    if profile != Profile::Elevated {
+        return Ok(None);
+    }
+    let mut pins = pinned_tracers();
+    if let Some(pinned) = pins.get(&dirs.binaries_dir) {
+        return Ok(Some(pinned.clone()));
+    }
+    let pinned = locate_tracer_exe(dirs)
+        .context("an elevated daemon will not start without its rt-tracer template")?;
+    info!(tracer = %pinned.display(), "tracer_client: pinned the elevated daemon's tracer");
+    pins.insert(dirs.binaries_dir.clone(), pinned.clone());
+    Ok(Some(pinned))
 }
 
 /// Resolve the cached `rt-tracer` path, copying the shipped template into
@@ -256,20 +312,15 @@ fn sanitize_pipe_prefix(raw: &str) -> Option<String> {
 
 /// Resolve the shipped `rt-tracer` template to copy into the binary cache from:
 /// `template_dir` ([`Dirs::bin_templates`], the value `daemon-client` passed
-/// down), else a sibling of the current exe, else the installed app dir.
+/// down), else a sibling of the current exe.
 fn locate_tracer_template(template_dir: Option<&Path>) -> anyhow::Result<PathBuf> {
     let current = std::env::current_exe().context("locating daemon exe")?;
-    locate_tracer_template_candidate(
-        template_dir,
-        &current,
-        installed_tracer_template_candidate(),
-    )
+    locate_tracer_template_candidate(template_dir, &current)
 }
 
 fn locate_tracer_template_candidate(
     template_dir: Option<&Path>,
     current_exe: &Path,
-    installed_candidate: Option<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
     // Preferred: the directory the client's supervisor (`daemon-client`) passed
     // down in `RUSTLING_TULIP_BIN_TEMPLATES`, which holds the original
@@ -305,40 +356,10 @@ fn locate_tracer_template_candidate(
         ));
     }
 
-    // Installed-app fallback: a compatible daemon can survive an app reinstall
-    // and be reused without inheriting the template-dir environment
-    // `daemon-client` set when it spawned the daemon. Current-user NSIS
-    // installs place the daemon and tracer beside the app under
-    // LOCALAPPDATA\rustling-tulip, so the daemon can still recover.
-    if let Some(candidate) = installed_candidate {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-        attempted.push(format!("installed app dir: {}", candidate.display()));
-    }
-
     Err(anyhow!(
         "rt-tracer binary not found (no {TRACER_TEMPLATE_DIR_ENV}, fallback lookups missed):\n  - {}",
         attempted.join("\n  - ")
     ))
-}
-
-#[cfg(windows)]
-fn installed_tracer_template_candidate() -> Option<PathBuf> {
-    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-    if local_app_data.is_empty() {
-        return None;
-    }
-    Some(
-        PathBuf::from(local_app_data)
-            .join("rustling-tulip")
-            .join(tracer_exe_name()),
-    )
-}
-
-#[cfg(not(windows))]
-fn installed_tracer_template_candidate() -> Option<PathBuf> {
-    None
 }
 
 #[cfg(windows)]
@@ -924,9 +945,11 @@ impl ChildKiller for TracerKiller {
 )]
 mod tests {
     use super::{
-        locate_tracer_template_candidate, read_welcome_line, resolve_socket_name,
-        sanitize_pipe_prefix,
+        cached_tracer_exe, locate_tracer_template_candidate, pin_tracer_at_start,
+        read_welcome_line, resolve_socket_name, sanitize_pipe_prefix,
     };
+    use daemon_client::profile::Profile;
+    use std::collections::HashSet;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -987,12 +1010,10 @@ mod tests {
     }
 
     #[test]
-    fn locates_installed_tracer_when_reusing_cached_daemon_without_template_env() {
-        let scratch = Scratch::new("installed-fallback");
+    fn tracer_lookup_without_template_dir_or_sibling_fails_naming_both() {
+        let scratch = Scratch::new("no-template");
         let cache_dir = scratch.path().join("binaries");
-        let install_dir = scratch.path().join("installed");
         fs::create_dir_all(&cache_dir).expect("create cache dir");
-        fs::create_dir_all(&install_dir).expect("create install dir");
 
         let cached_daemon = cache_dir.join(if cfg!(windows) {
             "rustling-tulipd-aaaaaaaaaaaaaaaa.exe"
@@ -1000,14 +1021,156 @@ mod tests {
             "rustling-tulipd-aaaaaaaaaaaaaaaa"
         });
         fs::write(&cached_daemon, b"daemon").expect("write cached daemon");
-        let installed_tracer = install_dir.join(super::tracer_exe_name());
-        fs::write(&installed_tracer, b"tracer").expect("write installed tracer");
 
-        let located =
-            locate_tracer_template_candidate(None, &cached_daemon, Some(installed_tracer.clone()))
-                .expect("installed tracer fallback should resolve");
+        let err = locate_tracer_template_candidate(None, &cached_daemon)
+            .expect_err("no template dir and no sibling tracer must not resolve");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(super::TRACER_TEMPLATE_DIR_ENV),
+            "the error must name the template dir variable, got: {message}"
+        );
+        let sibling = cache_dir.join(super::tracer_exe_name());
+        assert!(
+            message.contains(&sibling.display().to_string()),
+            "the error must name the sibling it tried, got: {message}"
+        );
+        assert!(
+            !message.contains("installed app dir"),
+            "no installed-app fallback is tried, got: {message}"
+        );
+    }
 
-        assert_eq!(located, installed_tracer);
+    /// Scratch dirs whose template folder holds an `rt-tracer` of `bytes`, and
+    /// that template's path. The caller removes `dirs.config`.
+    fn dirs_with_tracer_template(tag: &str, bytes: &[u8]) -> (crate::paths::Dirs, PathBuf) {
+        let mut dirs = crate::history::test_support::scratch_dirs(tag);
+        let templates = dirs.config.join("templates");
+        fs::create_dir_all(&templates).expect("create the template dir");
+        let template = templates.join(super::tracer_exe_name());
+        fs::write(&template, bytes).expect("write the tracer template");
+        dirs.bin_templates = Some(templates);
+        (dirs, template)
+    }
+
+    #[test]
+    fn elevated_tracer_is_resolved_once_and_survives_a_template_change() {
+        let (dirs, template) = dirs_with_tracer_template("pin-elevated", b"tracer v1");
+        let pinned = pin_tracer_at_start(&dirs, Profile::Elevated)
+            .expect("the template is there to pin")
+            .expect("an elevated daemon pins its tracer");
+        assert!(
+            pinned.starts_with(&dirs.binaries_dir),
+            "the pin is a copy in the daemon's own cache: {}",
+            pinned.display()
+        );
+
+        fs::write(&template, b"tracer v2, written after elevation").expect("overwrite template");
+        let resolved = cached_tracer_exe(&dirs).expect("the pinned tracer resolves");
+
+        assert_eq!(resolved, pinned);
+        assert_eq!(
+            fs::read(&resolved).expect("read the pinned copy"),
+            b"tracer v1"
+        );
+        let _ = fs::remove_dir_all(&dirs.config);
+    }
+
+    #[tokio::test]
+    async fn hook_settings_and_spawn_name_the_pinned_tracer() {
+        let (dirs, template) = dirs_with_tracer_template("pin-spawn", b"no runnable program");
+        let pinned = pin_tracer_at_start(&dirs, Profile::Elevated)
+            .expect("the template is there to pin")
+            .expect("an elevated daemon pins its tracer");
+        fs::write(&template, b"another build of the tracer").expect("overwrite template");
+
+        // The hook settings file names the path `cached_tracer_exe` returns.
+        assert_eq!(
+            cached_tracer_exe(&dirs).expect("the pinned tracer resolves"),
+            pinned
+        );
+
+        // The pinned bytes are no program, so the spawn fails at its launch,
+        // naming the tracer it ran.
+        let spec = crate::pty::PtySpawnSpec {
+            session_id: "pin-spawn-session".to_string(),
+            program: "cmd".to_string(),
+            args: Vec::new(),
+            cwd: dirs.config.clone(),
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            cols: 80,
+            rows: 24,
+            agent_note: None,
+        };
+        let err = super::spawn(&dirs, spec, 0)
+            .await
+            .err()
+            .expect("a tracer of non-program bytes must not start");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&pinned.display().to_string()),
+            "the spawn must run the pinned tracer, got: {message}"
+        );
+        let _ = fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn elevated_daemon_without_a_tracer_template_refuses_naming_the_folder() {
+        let mut dirs = crate::history::test_support::scratch_dirs("pin-missing");
+        let templates = dirs.config.join("templates");
+        fs::create_dir_all(&templates).expect("create the template dir");
+        dirs.bin_templates = Some(templates.clone());
+
+        let err = pin_tracer_at_start(&dirs, Profile::Elevated)
+            .expect_err("an elevated daemon without a tracer template must not start");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&templates.display().to_string()),
+            "the refusal must name the folder it looked in, got: {message}"
+        );
+        assert_eq!(super::pinned_tracer(&dirs), None);
+        let _ = fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn cache_gc_keeps_the_pinned_tracer() {
+        let (dirs, _template) = dirs_with_tracer_template("pin-gc", b"tracer v1");
+        let pinned = pin_tracer_at_start(&dirs, Profile::Elevated)
+            .expect("the template is there to pin")
+            .expect("an elevated daemon pins its tracer");
+        let stray = dirs.binaries_dir.join(if cfg!(windows) {
+            "rt-tracer-0000000000000000.exe"
+        } else {
+            "rt-tracer-0000000000000000"
+        });
+        fs::write(&stray, b"an old build").expect("write a stray cache entry");
+
+        let in_use: HashSet<PathBuf> = super::pinned_tracer(&dirs).into_iter().collect();
+        crate::binary_cache::gc(&dirs.binaries_dir, &in_use).expect("gc runs");
+
+        assert!(pinned.is_file(), "the pinned tracer is kept");
+        assert!(!stray.is_file(), "an unpinned entry is removed");
+        let _ = fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn ordinary_daemon_copies_a_rebuilt_tracer_at_the_next_spawn() {
+        let (dirs, template) = dirs_with_tracer_template("ordinary-rebuild", b"tracer v1");
+        assert_eq!(
+            pin_tracer_at_start(&dirs, Profile::Ordinary).expect("an ordinary daemon starts"),
+            None
+        );
+        let first = cached_tracer_exe(&dirs).expect("the template resolves");
+
+        fs::write(&template, b"tracer v2, rebuilt").expect("rebuild template");
+        let second = cached_tracer_exe(&dirs).expect("the rebuilt template resolves");
+
+        assert_ne!(first, second);
+        assert_eq!(
+            fs::read(&second).expect("read the new copy"),
+            b"tracer v2, rebuilt"
+        );
+        let _ = fs::remove_dir_all(&dirs.config);
     }
 
     #[tokio::test(start_paused = true)]

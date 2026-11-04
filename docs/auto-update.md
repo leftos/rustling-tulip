@@ -22,7 +22,7 @@ In scope:
 
 Out of scope:
 - A compromised GitHub account or release host, which could publish a matching hash for a malicious installer, hold back releases, or serve an old one as newest.
-- A process running as the same user, which can already write the install folder, the binary cache and HKCU Run.
+- A process running as the same user, which can already write the install folder, an ordinary profile's binary cache and HKCU Run. An elevated daemon's binary cache is under its protected root, which that process cannot write (`docs/on-disk.md`, "An elevated daemon's protected profile").
 
 Velopack was considered and not used. It would replace the NSIS installer and add the .NET `vpk` packaging tool to the release, where the existing per-user NSIS installer needs only the staging step below.
 

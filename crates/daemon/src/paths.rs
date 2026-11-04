@@ -33,8 +33,10 @@ pub struct Dirs {
     pub binaries_dir: PathBuf,
     /// Directory holding the shipped `rt-tracer` template, from
     /// `RUSTLING_TULIP_BIN_TEMPLATES` as `daemon-client` or the `--detach`
-    /// launcher sets it for the daemon it starts. `None` falls back to the sibling-of-exe and
-    /// installed-app lookups (see `tracer_client::locate_tracer_template`).
+    /// launcher sets it for the daemon it starts. `None` falls back to the
+    /// sibling-of-exe lookup (see `tracer_client::locate_tracer_template`). An
+    /// elevated daemon reads it once, when it pins its tracer at start
+    /// (`tracer_client::pin_tracer_at_start`), and never again.
     pub bin_templates: Option<PathBuf>,
 }
 
@@ -396,7 +398,8 @@ pub(crate) fn config_dir() -> anyhow::Result<PathBuf> {
 /// The template directory `RUSTLING_TULIP_BIN_TEMPLATES` names, as
 /// `daemon-client` or the `--detach` launcher sets it for the daemon it starts. `None`
 /// when the variable is unset or empty — the tracer lookup then falls back to
-/// the sibling-of-exe and installed-app locations.
+/// the sibling of the daemon's exe. An elevated daemon looks the tracer up
+/// only once, when it pins it at start.
 fn resolve_bin_templates_dir() -> Option<PathBuf> {
     std::env::var_os("RUSTLING_TULIP_BIN_TEMPLATES")
         .filter(|value| !value.as_os_str().is_empty())

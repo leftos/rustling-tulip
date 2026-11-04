@@ -34,6 +34,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Pop-out windows keep their places and follow their sessions correctly when several connections reach the same machine.
 - The new-workspace dialog no longer closes or shows an error because of another host's reply, and a remote session's name uses its own host's agent names.
 - An SSH host given by an IPv6 address keeps its pinned repo and collapsed panels in Source control.
+- An administrator daemon now keeps running the session helper it started with, so a file swapped into the install folder later never runs as administrator.
 
 ## v0.8.1-alpha
 

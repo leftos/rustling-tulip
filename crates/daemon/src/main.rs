@@ -285,6 +285,11 @@ async fn run_daemon(
         abandoned = dead.len(),
         "orphan recovery scan complete"
     );
+    // An elevated daemon trusts its tracer template only as it was when the
+    // user elevated: it copies it into its protected cache now, before it
+    // serves, and every later spawn runs that copy. Without a template it does
+    // not start. The cache GC below keeps the pinned copy.
+    tracer_client::pin_tracer_at_start(&dirs, daemon_client::profile::own_profile()?)?;
     let processes = running_processes();
     sweep_binary_cache(&dirs, &live, &dead, &processes);
     reap_orphan_tracers(&dirs, &live, &dead, &processes);
@@ -595,6 +600,10 @@ fn sweep_binary_cache(
             tracing::warn!(?err, "cache GC: could not pin daemon exe");
         }
     }
+
+    // Plus the tracer an elevated daemon pinned at start, which every spawn
+    // of this daemon runs.
+    in_use.extend(tracer_client::pinned_tracer(dirs));
 
     // Plus every tracer the live + abandoned sidecars know about. Abandoned
     // sessions can still be Resumed later via the tracer cache (the file is
