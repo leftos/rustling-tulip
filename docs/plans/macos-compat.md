@@ -143,7 +143,7 @@ Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `mai
 - [ ] The Mac mini builder lacks Xcode's Metal Toolchain (`xcodebuild -showComponent MetalToolchain` says uninstalled), so gpui's build script stops at "cannot execute tool 'metal'" before any of this repo's code compiles. Either install it there (`xcodebuild -downloadComponent MetalToolchain`) or build gpui with its `runtime_shaders` feature on macOS; RT-906 decides.
 - [ ] `crates/daemon-client` warns on macOS (an unused `anyhow` import in `protected_root.rs`, unused items in `device_tokens.rs` and `logon_task.rs`), which `mac clippy`'s `-D warnings` turns into errors; RT-906 or RT-46 gates them.
 
-- [ ] Accounts on macOS ([accounts.md](./accounts.md)) waits on ops-tower, and is not in this release: its `claude-accounts` crate is inert off 64-bit Windows, with no Unix locks and no Keychain writer (on macOS the live Claude credential is in the Keychain, not `.credentials.json`). Once ops-tower adds both, allow for Claude Code's roughly 30-second Keychain cache before a switch takes effect. Accounts stays hidden on macOS until then.
+- [ ] Accounts on macOS ([accounts.md](./accounts.md), RT-916): the forked `claude-accounts` crate gains Unix locks and reads and writes the live Claude credential through the Keychain (on macOS it is not in `.credentials.json`), allowing for Claude Code's roughly 30-second Keychain cache before a switch takes effect. Accounts shows on macOS once it lands.
 
 ## 5. Minor cleanups (work as-is, optionally tidy)
 

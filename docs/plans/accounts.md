@@ -2,9 +2,9 @@
 
 The daemon holds several Claude Code logins, polls each one's 5-hour and weekly usage, switches the machine's active login by hand or on its own when one runs low, and lets every client (the native client, a remote native client, the phone) watch and switch.
 
-It does this by taking ops-tower's `claude-accounts` crate as a git dependency and driving it: the crate owns the account store, the locks, the refresh and switch transactions, the poll cadence, the pace maths and the auto-switch engine; the daemon supplies the HTTP transports, a process table, the drivers and the protocol.
+It does this through the `claude-accounts` crate, forked from ops-tower into this repo at `crates/agents/claude/accounts/` and owned here: the crate owns the account store, the locks, the refresh and switch transactions, the poll cadence, the pace maths and the auto-switch engine; the daemon supplies the HTTP transports, a process table, the drivers and the protocol. ops-tower is maintenance-only and obsolete, so nothing here waits on it or asks it for changes.
 
-The pin is the first ops-tower `main` sha that holds both PR #383 (the crate's own account store) and `d80c605` (the 7-day-only fleet verdict); no such sha exists yet, and the first sub-issue that takes the crate (RT-908) is blocked until it does. The accounts feature lands on the feature branch `feat/claude-accounts`; RT-39 is its parent and RT-908 to RT-915 are its parts. Step ids are CA.0, CA.1, …
+The fork starts from ops-tower `feat/own-account-store` at `59dc25f` (the crate's own account store) with `d80c605`'s crate change (the 7-day-only fleet verdict) ported onto it (RT-908). The accounts feature lands on the feature branch `feat/claude-accounts`; RT-39 is its parent and RT-908 to RT-916 are its parts. Step ids are CA.0, CA.1, …
 
 ## Rulings
 
@@ -23,21 +23,21 @@ The pin is the first ops-tower `main` sha that holds both PR #383 (the crate's o
 - **Notifications:** a desktop toast for an auto-switch and for "all accounts exhausted, earliest reset at …"; the same events become phone pushes with MA7, under their own toggle.
 - **Platforms:** Windows (and Linux) first, with the credential writer behind a trait; the macOS Keychain writer is a line in [macos-compat.md](./macos-compat.md).
 
-  Superseded: Windows only for now. The crate is inert off 64-bit Windows (every lock returns `LockError::Unsupported`), so Accounts is hidden on macOS and Linux. Unix locks and a Keychain writer are later ops-tower work, booked separately and not in this release; there is no credential-writer trait in this repo (decision: Windows only, RT-66).
+  Superseded: Windows and macOS. The forked crate gains Unix locks and reads and writes the macOS live credential through the Keychain (RT-916); Accounts shows on macOS once that lands. Linux stays unsupported and Accounts is hidden there (owner ruling on RT-39: fork the crate and own it, macOS support included).
 - **Direct API calls:** the accounts module calls Anthropic's OAuth account endpoints (usage, profile, token refresh) directly. This is an exception to CLAUDE.md's no-direct-API rule; no model call is made. The CLAUDE.md wording changes with CA.3.
 - **Placement:** its own wave before the backlog in [MAIN.md](./MAIN.md); the phone's accounts screen is MA10 in [mobile-app.md](./mobile-app.md).
 
 ## Decisions on the crate
 
-- **Pin and API.** The own-store API: `AccountsRoot`, `Store`, `capture_live_login`, `switch`, `Engine`. The dependency is a workspace entry `claude-accounts = { git = "https://github.com/leftos/ops-tower", rev = "<sha>" }`; the crate is `publish = false`, edition 2024.
+- **The fork and its API.** The own-store API: `AccountsRoot`, `Store`, `capture_live_login`, `switch`, `Engine`. The crate is a workspace member at `crates/agents/claude/accounts/` (package `claude-accounts`, `publish = false`, edition 2024), reached only through the Claude plugin's seam, since app code never names an agent. Its README records the ops-tower shas it was forked from.
 
-  It brings `proc-table` (git, `leftos/gate`) and `jiff`, and raises `zeroize` and `serde_json` (features `preserve_order`, `float_roundtrip`) for the whole workspace, so `Cargo.lock` is checked with `cargo tree -d`. Builders need access to the ops-tower repo.
-- **Remove, alias and settings.** The crate has no remove, alias or settings writer. RT asks ops-tower for `Store::remove_account`, `Store::set_alias` and a writer for the `autoswitch` section of `%LOCALAPPDATA%\ops-tower\settings.json` (inbox request `20261104-185214`). If ops-tower declines, RT writes them with `Store::write_sequence` and file removal under the account lock ops-tower names. Account settings never go in the daemon's `state.json`.
-- **Engine lease.** The daemon's engine stays off by default, so ops-tower's engine keeps running until the owner turns the daemon's on.
+  It brings `proc-table` (git, `leftos/gate`) and `jiff`, and raises `zeroize` and `serde_json` (features `preserve_order`, `float_roundtrip`) for the whole workspace, so `Cargo.lock` is checked with `cargo tree -d`.
+- **Remove, alias and settings.** The ops-tower crate has no remove, alias or settings writer, so the fork gains `Store::remove_account`, `Store::set_alias` and a writer for the `autoswitch` settings (RT-908). Account settings never go in the daemon's `state.json`.
+- **Engine lease.** The daemon's engine stays off by default. A machine still running ops-tower shares the store through the lease, which picks one engine.
 - **Transports** are synchronous: reqwest 0.12's `blocking` feature on one client built once, called inside `spawn_blocking`. The daemon's async client is unchanged.
-- **`ProcessTable`** is `proc-table`'s Windows table; off Windows it is the empty table.
+- **`ProcessTable`** is `proc-table`'s Windows table, and a macOS table from RT-916; on Linux it is the empty table.
 - **Paid fallback and prepaid balances** are not surfaced: `maySpendCredits` stays off and `read_balance` keeps its default. The engine still honours a paid fallback ops-tower's engine entered.
-- **Daemon-driven login** points `ClaudePaths` at the scratch dir and calls `capture_live_login`; ops-tower confirms this is supported at CA.0, else RT asks for a route.
+- **Daemon-driven login** points `ClaudePaths` at the scratch dir and calls `capture_live_login`, extended in the fork if it cannot yet take a scratch config dir.
 
 ## What the daemon still owns
 
@@ -45,7 +45,7 @@ The pin is the first ops-tower `main` sha that holds both PR #383 (the crate's o
 
 **Pitfalls the crate enforces and RT must not bypass.** Refresh tokens are one-time, so a transport never retries a refresh POST, and the active account is refreshed only under Claude Code's lock pair; no network call under a lock; every HTTP status returns `Ok` from a transport, never `error_for_status`. `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` detection is RT's, not the crate's.
 
-The crate's behaviour is documented in ops-tower's `docs/accounts.md` (Switch, Engine, Pace, Where the account store lives).
+The crate's behaviour was documented in ops-tower's `docs/accounts.md` (Switch, Engine, Pace, Where the account store lives); RT-908 brings the parts the fork keeps into the crate's README.
 
 ## Design
 
@@ -85,7 +85,7 @@ Sub-issues: RT-908 takes the crate (CA.0, CA.2, CA.3); RT-909 the origin and the
 
   Rulings the later steps need go into this file's Design.
 - [ ] **CA.1 Connection origin** (RT-909). `crates/daemon/src/server/connection.rs` (`AuthKind`, `client_session`), `crates/protocol` (`Welcome.origin`, `#[serde(default)]`). Test: a tailnet connection is refused an admin message that a local one is allowed.
-- [ ] **CA.2 Take the crate** (RT-908, blocked on the pin). The git dependency and workspace entries, the lockfile resolved (`jiff`, `proc-table`, `zeroize`, `serde_json` features). A smoke test that `Store::open(AccountsRoot::from_local_app_data(..))` and `read_sequence` work on a temp root.
+- [ ] **CA.2 Fork the crate** (RT-908). The forked crate at `crates/agents/claude/accounts/` as a workspace member, the lockfile resolved (`jiff`, `proc-table`, `zeroize`, `serde_json` features). A smoke test that `Store::open(AccountsRoot::from_local_app_data(..))` and `read_sequence` work on a temp root.
 
   `Store::write_refusal()` is checked before every store write and refresh spend; `StoreErrorKind` is `#[non_exhaustive]`, so a wildcard arm, with messages for `AccountReidentified`, `StoreReadOnly`, `UnknownSchema` and `RootUnsafe`. The lock folder exists before `FileLock::acquire`. No fixtures of this repo's own: the crate's tests pin the format.
 - [ ] **CA.3 Transports** (RT-908). `accounts/transport.rs`; the daemon's `Cargo.toml` gains reqwest's `blocking` feature; CLAUDE.md's no-direct-API sentence gains this exception. `get_prepaid` stays `Unsupported`. Tests against a local axum mock: a 429 keeps `Retry-After` through `RawUsage`, and a 400 `invalid_grant` body reaches the crate's classifier. Parsing, refresh, the consume lock and quarantine are the crate's.
@@ -95,7 +95,7 @@ Sub-issues: RT-908 takes the crate (CA.0, CA.2, CA.3); RT-909 the origin and the
 - [ ] **CA.5 Protocol** (RT-909 read half: `Welcome.origin`, `ListAccounts`, `Accounts`, `AccountsUpdated`, `AccountEvent`; RT-911 write half: the admin messages). The messages above in `crates/protocol`, handlers in `server/`, `net.rs` decoding in the native client. `cargo nextest run -p protocol --cargo-profile test-release` stays green.
 - [ ] **CA.6 Manual switch** (RT-911). The handler calls `probe_outgoing`, then `switch(&ctx, number, &probe)` in `spawn_blocking`, and maps `SwitchOutcome` to `AccountEvent::switched` and `SwitchErrorKind` to `ActionFailed` codes, `Draining` on shutdown. The add-current-login handler calls `capture_live_login` (`CaptureKind::{Added, Refreshed, Kept}`), local origin only.
 
-  Remove and alias call the crate functions asked of ops-tower (fallback above); the origin gate refuses `Remote`. Tests are the handler mapping and the origin gate: the transaction, rollback and ownership classification are the crate's.
+  Remove and alias call the fork's `Store::remove_account` and `Store::set_alias`; the origin gate refuses `Remote`. Tests are the handler mapping and the origin gate: the transaction, rollback and ownership classification are the crate's.
 - [ ] **CA.7 Footer chip and popover** (RT-913). `footer.rs`, new `accounts.rs` and `accounts_view.rs`. UI spec `tests/ui/ui_accounts.rs`: the chip shows the active account and bars; Switch sends `SwitchAccount`; a `relogin_required` row shows its reason; a stale fetch shows its age; a "store read-only" or "held by another engine" row shows its reason. No paid-fallback state.
 - [ ] **CA.8 Settings → Accounts** (RT-914). `settings_view.rs`: list with alias, remove, "Add current login" (with the warning not to `/logout` first, since that can revoke the account being left), auto-switch on/off, threshold, hysteresis, cooldown, strategy; the tab is hidden off Windows; admin controls disabled with a reason on a `Remote` origin. Auto-switch settings go through the crate's settings writer. UI spec in `ui_accounts.rs`.
 - [ ] **CA.9 Auto-switch engine** (RT-912). `accounts/driver.rs`: a loop around `Engine::new(owner, pid, warm_since)` and `Engine::tick(&TickInputs{context, collector: &TransportCollector(&usage), processes, switcher: &LiveSwitch, claude_config_dir_set, settings, auto_switch_enabled})`, sleeping on `next_delay` and `sleep_event`. The engine claims and heartbeats the `Lease`; the driver releases it on shutdown and on `halt`.
