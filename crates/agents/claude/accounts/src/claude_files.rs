@@ -1,4 +1,4 @@
-//! Claude Code's own files, written the way cswap writes them: the live credential file `.credentials.json` and the
+//! Claude Code's own files: the live credential file `.credentials.json` and the
 //! global config `~/.claude.json`; and the live login read from both, with or without Claude Code's locks, for a
 //! capture into the account store, with the identity an `oauthAccount` names.
 //!
@@ -70,7 +70,7 @@ pub enum ClaudeFileError {
 }
 
 /// Writes `blob` as Claude Code's live credential file, `<config home>/.credentials.json`, making its folder first:
-/// through a temp file in the same folder renamed onto it, as cswap's `_write_active_credentials_file` writes it, while
+/// through a temp file in the same folder renamed onto it, while
 /// `guard`, Claude Code's credential locks for `paths` ([`crate::ClaudeCodeLocks::credentials`]), is held. On Unix the
 /// file is readable by its owner alone. Whatever the file holds is replaced: a switch writes through
 /// `rewrite_live_credentials` instead, with the bytes its snapshot read.
@@ -116,7 +116,7 @@ pub(crate) fn rewrite_live_credentials(
     write_live_credentials(paths, guard, blob)
 }
 
-/// Updates Claude Code's global config, `paths`' `~/.claude.json`, in place, as cswap's `_update_global_config` does,
+/// Updates Claude Code's global config, `paths`' `~/.claude.json`, in place,
 /// while `guard`, Claude Code's config lock for `paths` ([`crate::ClaudeCodeLocks::config`]), is held: reads the whole
 /// file (an absent one is an empty object), lets `mutator` change it, and writes it back as two-space-indented JSON
 /// with every other key kept in its order and every number as it was read. `mutator` returns whether it changed
@@ -376,8 +376,8 @@ pub(crate) fn read_live_login_locked(
     read_live_login(paths)
 }
 
-/// Drops `primaryApiKey` from Claude Code's global config, `paths`' `~/.claude.json`, as cswap's `_clear_managed_key`
-/// does when it makes an OAuth credential live: a managed API key left beside it would be billed instead. `guard` is
+/// Drops `primaryApiKey` from Claude Code's global config, `paths`' `~/.claude.json`,
+/// when it makes an OAuth credential live: a managed API key left beside it would be billed instead. `guard` is
 /// Claude Code's config lock for `paths`, held. Every other key is kept, and `customApiKeyResponses` is left alone.
 /// Returns whether a key was removed; a config without one (or no config at all) is not rewritten.
 ///

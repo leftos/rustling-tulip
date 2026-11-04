@@ -56,7 +56,7 @@ fn sealed_round_trip_reads_back_the_same_credentials() {
     assert_eq!(read.expose(), FIXTURE_CREDENTIALS);
     let bytes = scratch.read(ALICE_CRED);
     assert!(
-        bytes.starts_with(b"OTSEAL"),
+        bytes.starts_with(b"RTSEAL"),
         "the file is a sealed file, not base64: {bytes:?}"
     );
     assert_eq!(
@@ -120,7 +120,7 @@ fn a_foreign_file_is_refused_by_read_and_never_overwritten() {
 
     let read = store
         .read_credentials(1)
-        .expect_err("a cswap file is not a sealed one");
+        .expect_err("a base64 file is not a sealed one");
     let guard = scratch.lock();
     let write = store
         .write_credentials(&guard, 1, &blob(NEXT))

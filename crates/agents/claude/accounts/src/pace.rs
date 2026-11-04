@@ -1,10 +1,10 @@
 //! Pace: when a usage window runs out at its rate, and whether it lasts to its reset.
 //!
-//! [`pace`] is a port of cswap's `pace.py` (`compute_pace`, `projected_exhaustion_ts`, `will_last_to_reset`) that
+//! [`pace`] projects a window's use to its reset (the pace, the projected exhaustion, whether it lasts to the reset) and
 //! covers the 5-hour window as well as the 7-day ones. A window starts one window length before its reset, and its rate
 //! is its average use since that start. [`recent_pace`] runs the same window at its rise over the account's samples of
 //! a span the caller gives instead, falling back to [`pace`] with under 10 minutes of samples. A reset
-//! already past, or more than one window length away, is not computable here, where cswap folds it into one window.
+//! already past, or more than one window length away, is not computable here.
 //! Time is a parameter: a reading is judged at the moment it was fetched, so a stale reading keeps the pace it had.
 //!
 //! [`fleet`] runs the counted accounts' pooled allowance, in 5-hour points, along a timeline over the next 7 days: an
@@ -196,7 +196,7 @@ pub struct WindowReading {
 /// use of a 5-hour window not yet started.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AccountReading {
-    /// The account's number in cswap's roster.
+    /// The account's number in the store's roster.
     pub account: u32,
     /// When the reading was fetched.
     pub fetched_at: Timestamp,
@@ -361,7 +361,7 @@ pub struct Rotation<'a> {
     pub active: Option<u32>,
     /// The auto-switch settings.
     pub settings: &'a AutoSwitchSettings,
-    /// cswap's auto-switch state: the last switch, its departure snapshot and the quarantine.
+    /// The auto-switch state: the last switch, its departure snapshot and the quarantine.
     pub state: &'a AutoswitchState,
 }
 
@@ -383,7 +383,7 @@ pub struct Rotation<'a> {
 /// draw ratio. An account left out of the pool for a spent 7-day window still adds its rises, on its running 5-hour window
 /// or else its 7-day window over the draw ratio, so the burn stays when the account it was on runs out.
 ///
-/// The timeline follows cswap's auto-switch as the engine runs it, with `rotation`'s settings: it draws on one account
+/// The timeline follows the auto-switch as the engine runs it, with `rotation`'s settings: it draws on one account
 /// at a time, starting on the account Claude Code is logged in as when it is on the timeline, else the first pool member.
 /// Every `interval_seconds` the engine's own trigger classification reads the drawn account's binding window, the fuller
 /// of its 5-hour and 7-day windows: below the threshold it stays (or, under `consume-first`, looks for a sooner weekly

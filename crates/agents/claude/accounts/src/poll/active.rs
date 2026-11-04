@@ -1,9 +1,9 @@
-//! The account Claude Code is logged in as, fetched and refreshed as cswap's `_fetch_account_usage` does it for the
+//! The account Claude Code is logged in as, fetched and refreshed as the
 //! active account, under Claude Code's own locks.
 //!
 //! An unexpired live token is fetched as it is; when the server accepts it and its lineage differs from the backup's,
 //! the backup is resynced once the profile oracle attributes the lineage to the account (Resync R). An expired token,
-//! or one the server answered 401, is refreshed in Claude Code's own order: cswap's consume lock, its account lock,
+//! or one the server answered 401, is refreshed in Claude Code's own order: the store's consume lock, its account lock,
 //! then Claude Code's two credential locks; the live file and the backup are re-read under them, a rotation Claude Code
 //! already made is adopted without a POST, so is a successor an earlier pass left in the unclaimed stash, a backup that
 //! already holds a fresh credential is restored without one, and otherwise the chosen grant is spent once and the
@@ -103,7 +103,7 @@ enum Source {
     Backup,
 }
 
-/// What the refresh holds once its lock waits are over: cswap's account lock and Claude Code's two credential locks,
+/// What the refresh holds once its lock waits are over: the store's account lock and Claude Code's two credential locks,
 /// and the live file and the account's backup as they were read under them.
 struct Held<'h> {
     lock: &'h AccountLockGuard,
@@ -365,7 +365,7 @@ impl<'a, 'c> Active<'a, 'c> {
             .as_ref()
             .is_none_or(|stored| newer_generation(live, stored));
         if newer && (verdict == Some(true) || live_fp == held.backup.fingerprint) {
-            // As cswap's, a failed backup write is not fatal: the adopted credential is served, the failure is reported
+            // A failed backup write is not fatal: the adopted credential is served, the failure is reported
             // on the outcome, and a later pass's resync writes the backup.
             self.backup_written
                 .set(Some(self.slot.write(held.lock, live).is_ok()));
@@ -377,7 +377,7 @@ impl<'a, 'c> Active<'a, 'c> {
     }
 
     /// A successor an earlier pass parked in the unclaimed stash after spending the live generation (its backup write
-    /// failed), adopted here on the active path as cswap's refresh adopts it on its own: when the live file holds the
+    /// failed), adopted here on the active path as the inactive refresh adopts it: when the live file holds the
     /// backup's generation and a stash row names that generation as spent, the row's successor is written to the backup
     /// and returned, and nothing is posted. A stash that cannot be read, or a successor the backup refuses, defers: the
     /// live generation may already be spent.
@@ -507,7 +507,7 @@ impl<'a, 'c> Active<'a, 'c> {
 
     /// Makes `working` live and returns it. After a POST (`spent` is the generation posted) it is first written to the
     /// backup, and when that fails, parked in the unclaimed stash keyed to `spent`, where the next refresh adopts it
-    /// (cswap's, or this path's under the locks): a spent generation's successor is never left to the live file alone.
+    /// (the inactive path's, or this path's under the locks): a spent generation's successor is never left to the live file alone.
     /// A live write that fails is [`PollResult::LiveWriteFailed`].
     fn make_live(
         &self,
@@ -519,7 +519,7 @@ impl<'a, 'c> Active<'a, 'c> {
             let written = self.slot.write(held.lock, &working).is_ok();
             self.backup_written.set(Some(written));
             if !written {
-                // A stash that fails too leaves the successor to the live write alone, as cswap's persist does.
+                // A stash that fails too leaves the successor to the live write alone.
                 let _stashed = self
                     .slot
                     .stash(
@@ -625,7 +625,7 @@ impl<'a, 'c> Active<'a, 'c> {
             .and_then(|key| self.context.verdicts.get(&key))
     }
 
-    /// cswap's `_resync_rotated_backup`: after the server accepted the live credential, write it to the backup when
+    /// The rotated backup's resync: after the server accepted the live credential, write it to the backup when
     /// its lineage differs from the backup's and is the account's own. Best effort; never fails the fetch.
     fn resync(&self) {
         if let Some(fingerprint) = self.resync_verdict() {

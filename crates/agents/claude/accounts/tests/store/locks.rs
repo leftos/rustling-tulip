@@ -1,4 +1,4 @@
-//! cswap's one-byte file lock and Claude Code's directory locks: contention, stale takeover, the toucher and release.
+//! The one-byte file lock and Claude Code's directory locks: contention, stale takeover, the toucher and release.
 
 use std::fs::{self, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;

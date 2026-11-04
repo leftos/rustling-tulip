@@ -9,14 +9,14 @@
 //! [`AccessToken`] and [`RefreshToken`], which never print, clone or serialize. The crate reads no environment
 //! variable: the caller says where the account store and Claude Code's files are.
 //!
-//! [`UsageTable`] reads cswap's shared usage cache, `cache/usage.json`, and [`poll_once`] polls the usage endpoint
-//! within the request budget cswap shares through it, over a [`UsageTransport`] the caller implements: the crate has no
+//! [`UsageTable`] reads the store's usage cache, `cache/usage.json`, and [`poll_once`] polls the usage endpoint
+//! within the request budget recorded in it, over a [`UsageTransport`] the caller implements: the crate has no
 //! HTTP client.
 //!
-//! [`consume_backup_grant`] spends a backup account's one-time refresh grant through cswap's consume gate, over a
-//! [`RefreshTransport`] the caller implements, and parks a successor it cannot write in cswap's unclaimed stash.
+//! [`consume_backup_grant`] spends a backup account's one-time refresh grant through the consume gate, over a
+//! [`RefreshTransport`] the caller implements, and parks a successor it cannot write in the unclaimed stash.
 //!
-//! [`engine`] holds the auto-switch engine's shared files: cswap's [`AutoswitchState`] and the [`Lease`] that keeps one
+//! [`engine`] holds the auto-switch engine's shared files: the [`AutoswitchState`] and the [`Lease`] that keeps one
 //! engine live per account store, and the [`decision_value`] a switch decision trusts.
 //!
 //! [`pace`] says when a usage window runs out at the rate it has been used, and whether it lasts to its reset.
@@ -27,7 +27,7 @@
 //! [`guard`] makes folders only the current user can reach, and checks a folder or file's owner, its write access and
 //! that it is no link before a credential file is read.
 //!
-//! [`switch`] makes another managed account Claude Code's live login under cswap's and Claude Code's locks, after
+//! [`switch`] makes another managed account Claude Code's live login under the store's and Claude Code's locks, after
 //! [`probe_outgoing`] has asked the profile oracle, before any lock, whose the outgoing credential is.
 //!
 //! [`capture_live_login`] adds Claude Code's live login to the store, or writes it into its account when the live copy

@@ -1,13 +1,13 @@
 //! The auto-switch engine's shared files and the usage reading it decides on.
 //!
-//! [`AutoswitchState`] is cswap's `autoswitch_state.json` (the last switch and the quarantined accounts), which every
+//! [`AutoswitchState`] is `autoswitch_state.json` (the last switch and the quarantined accounts), which every
 //! engine on an account store reads and writes under `.autoswitch_state.lock`, keeping the keys it does not know. The
 //! [`Lease`] in `engine_lease.json` names the one engine that is live on the root, so a second one stands by.
 //! [`next_delay`] and [`sleep_event`] say how long a tick waits before the next one. [`decision_value`] is the usage
 //! reading a switch decision may trust; [`collect_warmup`] and [`collect_scheduled`] collect the readings a decision
 //! runs on, [`collect_refetch`] re-reads consume-first's members for its phase 2, and [`collect_recheck`] re-reads an
 //! exit target with its stored token only, spending no grant. [`Engine::tick`] runs one
-//! decision, cswap's `AutoSwitchEngine.tick`, and reports it as [`Event`]s and a [`TickOutcome`].
+//! decision and reports it as [`Event`]s and a [`TickOutcome`].
 
 mod cadence;
 mod collect;

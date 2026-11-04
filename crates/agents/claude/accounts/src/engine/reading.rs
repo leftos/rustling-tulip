@@ -1,27 +1,26 @@
-//! The usage reading a switch decision may trust: cswap's `UsageEntry.decision_value` less the sentinel, with the
-//! `trust_extended` that `UsageStore.entries` computes for it.
+//! The usage reading a switch decision may trust, the sentinel aside, and whether its staleness is deliberate.
 
 use jiff::Timestamp;
 use serde_json::Value;
 
 use crate::usage::{UsageEntry, UsageWindow, account_windows};
 
-/// cswap's `STALE_OK_S`: a reading this young is trusted for decisions.
+/// A reading this young is trusted for decisions.
 const STALE_OK_S: f64 = 300.0;
-/// cswap's `TRUST_MAX_AGE_S`: deliberate staleness keeps a reading trusted at most this long after its fetch.
+/// Deliberate staleness keeps a reading trusted at most this long after its fetch.
 const TRUST_MAX_AGE_S: f64 = 3600.0;
-/// cswap's `RATE_LIMIT_TRUST_MAX_AGE_S`: after a 429, the ceiling when no window reset comes sooner.
+/// After a 429, the ceiling when no window reset comes sooner.
 const RATE_LIMIT_TRUST_MAX_AGE_S: f64 = 7200.0;
 
-/// cswap's `decision_value` less the sentinel, which the caller checks first: `entry`'s last good reading while its
-/// age at `now` is at most cswap's `STALE_OK_S` (300 s), or while its staleness is deliberate (cswap's
-/// `trust_extended`): within the age ceiling (after a 429, until the earliest relevant window resets and at most
+/// The reading a decision trusts, the sentinel aside, which the caller checks first: `entry`'s last good reading while its
+/// age at `now` is at most `STALE_OK_S` (300 s), or while its staleness is deliberate
+/// (`trust_extended`): within the age ceiling (after a 429, until the earliest relevant window resets and at most
 /// 7200 s; otherwise 3600 s), and failing, before its planned poll, under a live fetch lease, or held for another
 /// machine's hand-over. `models` names the per-model scoped windows whose resets count after a 429 (`all` for every
 /// one): the settings' `models` as written, matched to a window's name case-insensitively. A `resets_at`
-/// without a UTC offset is ignored, where cswap would read it as local time. `None` when the reading is not to be
+/// without a UTC offset is ignored. `None` when the reading is not to be
 /// trusted: the switch decision treats the account's headroom as unknown. The caller checks the slot's sentinel (a
-/// poll outcome such as an expired token) first, as cswap's `decision_value` does before this.
+/// poll outcome such as an expired token) first.
 #[must_use]
 pub fn decision_value<'a>(
     entry: &'a UsageEntry,
@@ -33,7 +32,7 @@ pub fn decision_value<'a>(
     (age <= STALE_OK_S || trust_extended(entry, age, models, now)).then_some(reading)
 }
 
-/// cswap's `trust_extended` from `UsageStore.entries`: within the age ceiling (after a 429, until the earliest window
+/// Whether a reading's staleness is deliberate: within the age ceiling (after a 429, until the earliest window
 /// reset; otherwise [`TRUST_MAX_AGE_S`]), and stale on purpose: failing, before its planned poll, under a live fetch
 /// lease, or held for another machine's hand-over.
 fn trust_extended(entry: &UsageEntry, age: f64, models: &[String], now: Timestamp) -> bool {
@@ -47,7 +46,7 @@ fn trust_extended(entry: &UsageEntry, age: f64, models: &[String], now: Timestam
     within_ceiling && (entry.consecutive_failures > 0 || scheduled || entry.claimed(now) || held)
 }
 
-/// cswap's `_rate_limited_trust_ok`: a reading frozen by 429s stays trusted until the earliest relevant window resets,
+/// A reading frozen by 429s stays trusted until the earliest relevant window resets,
 /// and never past [`RATE_LIMIT_TRUST_MAX_AGE_S`] after its fetch.
 fn rate_limited_trust_ok(
     reading: Option<&Value>,
@@ -61,7 +60,7 @@ fn rate_limited_trust_ok(
     age < RATE_LIMIT_TRUST_MAX_AGE_S && before_reset
 }
 
-/// cswap's `_earliest_reset` over `oauth.relevant_windows`: the soonest `resets_at` among the windows
+/// The soonest `resets_at` among the windows
 /// [`relevant_windows`] gives for `models`, counting only a reset that parses as an RFC 3339 time.
 fn earliest_reset(reading: &Value, models: &[String]) -> Option<Timestamp> {
     relevant_windows(reading, models)
@@ -70,7 +69,7 @@ fn earliest_reset(reading: &Value, models: &[String]) -> Option<Timestamp> {
         .min()
 }
 
-/// cswap's `relevant_windows`: every window that gates an account, under the label cswap's `_window_pcts` shows it by.
+/// Every window that gates an account, under the label the poll event shows it by.
 /// The `five_hour` (`5h`) and `seven_day` (`7d`) windows with a numeric `pct`, then each `scoped` window with a numeric
 /// `pct` and a name `models` holds (matched case-insensitively; `all` holds every name), under that name, in the
 /// reading's order.
@@ -104,7 +103,7 @@ fn scoped_window(window: &Value) -> Option<(String, UsageWindow)> {
     Some((name.to_owned(), UsageWindow { pct, resets_at }))
 }
 
-/// cswap's `parse_model_names`: the `autoswitch.model` setting split on commas, each name trimmed, empty names dropped,
+/// The `autoswitch.model` setting split on commas, each name trimmed, empty names dropped,
 /// and each name kept once in its first spelling, compared case-insensitively. `all` stays a name; the matching gives
 /// it its meaning.
 #[must_use]

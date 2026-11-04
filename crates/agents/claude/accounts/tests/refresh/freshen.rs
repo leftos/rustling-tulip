@@ -1,5 +1,5 @@
-//! The engine's freshen and quarantine helpers, ported from cswap's `_freshen_target`, `_note_token_identity`,
-//! `_quarantine` and `_release_recovered_quarantines`, against a fake token endpoint and a scratch account store.
+//! The engine's freshen and quarantine helpers,
+//! against a fake token endpoint and a scratch account store.
 
 use std::fs;
 
@@ -383,7 +383,7 @@ fn a_padded_record_uuid_matching_the_token_is_no_conflict() {
     assert_eq!(
         freshened,
         Freshened::Ready,
-        "both uuids are compared trimmed, as cswap strips them"
+        "both uuids are compared trimmed"
     );
     assert_eq!(quarantined_reason(&rig, "1"), None);
 }

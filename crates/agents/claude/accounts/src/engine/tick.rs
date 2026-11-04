@@ -1,4 +1,4 @@
-//! One decision of the auto-switch engine, cswap's `AutoSwitchEngine.tick`. A tick re-reads the settings, stops when
+//! One decision of the auto-switch engine. A tick re-reads the settings, stops when
 //! the engine halted, pauses while another engine holds the lease or `CLAUDE_CONFIG_DIR` is
 //! set, idles while the live login is an API key, lifts recovered quarantines, collects usage (the start-up warm-up
 //! until every account settled, then the scheduled collection), classifies the active account's reading, ranks the
@@ -45,12 +45,12 @@ use crate::switch::{LoginState, SwitchErrorKind, SwitchPrecondition};
 use crate::transport::UsageTransport;
 use crate::usage::{Identity, PrepaidEntry, UsageEntry, secs_from_timestamp};
 
-/// cswap's `MAX_SLEEP_S`: the longest the engine sleeps while every account is exhausted, the exhausted accounts' poll
+/// The longest the engine sleeps while every account is exhausted, the exhausted accounts' poll
 /// cadence, so a reset that comes early is still seen.
 pub const MAX_SLEEP_S: f64 = EXHAUSTED_INTERVAL_S;
-/// cswap's `NO_RESET_FALLBACK_S`: the wait of a blocked tick whose recovery time is unknown, and of an idle hold.
+/// The wait of a blocked tick whose recovery time is unknown, and of an idle hold.
 pub const NO_RESET_FALLBACK_S: f64 = 300.0;
-/// cswap's `RESET_SLACK_S`: how long after a known reset the all-exhausted sleep ends.
+/// How long after a known reset the all-exhausted sleep ends.
 pub const RESET_SLACK_S: f64 = 60.0;
 
 /// Why a tick pauses while auto-switch is off ([`TickInputs::auto_switch_enabled`]).
@@ -272,7 +272,7 @@ pub struct TickInputs<'a> {
     pub auto_switch_enabled: bool,
 }
 
-/// What a tick came to: cswap's `TickOutcome`, plus the pause and the halt.
+/// What a tick came to: the decision's outcome, plus the pause and the halt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TickOutcome {
@@ -307,10 +307,9 @@ pub struct TickReport {
     /// When every account is exhausted and the soonest recovery is known: that time plus [`RESET_SLACK_S`].
     pub sleep_target: Option<Timestamp>,
     /// Whether the tick was blocked on something that will not change soon (no candidates, or every account
-    /// exhausted), so the next tick may wait longer than the interval, as cswap's `_blocked_wait_long`.
+    /// exhausted), so the next tick may wait longer than the interval.
     pub blocked_wait_long: bool,
-    /// Whether the active account idle-holds, which slows the cadence to [`NO_RESET_FALLBACK_S`], as cswap's
-    /// `_idle_hold_slow`.
+    /// Whether the active account idle-holds, which slows the cadence to [`NO_RESET_FALLBACK_S`].
     pub idle_hold_slow: bool,
     /// The paid account the tick held the login on because it may no longer spend credits and no account to move to
     /// was found; `None` otherwise.
@@ -348,7 +347,7 @@ pub struct Engine {
     conflicted: BTreeSet<u32>,
     /// When this engine last switched without recording it in the state file (seconds since the epoch).
     last_switch_at: Option<f64>,
-    /// The settings' `models` that cswap's check of them last ran to its end on; `None` until it has.
+    /// The settings' `models` that the model-name check last ran to its end on; `None` until it has.
     models_checked: Option<Vec<String>>,
     /// When the paid fallback's entry last tried to read each account's balance: at most once per
     /// [`PAID_STAY_READ_S`]. A restart forgets it.
@@ -359,7 +358,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// The engine `owner` (such as `ops-tower`) in process `pid`. With `warm_since`, no decision is made until every
+    /// The engine `owner` (such as `rustling-tulip`) in process `pid`. With `warm_since`, no decision is made until every
     /// account was polled once since then (the warm-up); `None` decides from the first tick.
     #[must_use]
     pub fn new(owner: impl Into<String>, pid: u32, warm_since: Option<Timestamp>) -> Self {
@@ -852,7 +851,7 @@ impl<'t, 'a> Tick<'t, 'a> {
     }
 
     /// The collection over the switchable accounts, its poll event, the warm-up's hold while it has not settled, and
-    /// cswap's model-name check. `paid_mode` is whether this engine spends on the active account's credits.
+    /// the model-name check. `paid_mode` is whether this engine spends on the active account's credits.
     fn gather(
         &mut self,
         engine: &mut Engine,
@@ -884,7 +883,7 @@ impl<'t, 'a> Tick<'t, 'a> {
         Ok(usage)
     }
 
-    /// cswap's typo guard (`_check_model_names`) for the settings' `models`: once every switchable, unquarantined OAuth
+    /// The typo guard for the settings' `models`: once every switchable, unquarantined OAuth
     /// account has a readable reading, a configured model name no reading's scoped windows carry is a `config-warning`,
     /// and the check does not run again until the `models` a tick reads differ from the ones it checked. Until then it
     /// runs on each tick.
@@ -1011,7 +1010,7 @@ impl<'t, 'a> Tick<'t, 'a> {
         ))
     }
 
-    /// cswap's `PollEvent`: each account's headroom, the windows of each readable one, and the fetch error of each
+    /// The poll event: each account's headroom, the windows of each readable one, and the fetch error of each
     /// unreadable one.
     fn emit_poll(&mut self, active: &AccountRecord, usage: &TickUsage) {
         let mut headroom = BTreeMap::new();
@@ -1093,7 +1092,7 @@ impl<'t, 'a> Tick<'t, 'a> {
         self.no_switch("below-threshold", detail);
     }
 
-    /// The census and the ranking (cswap's `_tick_inner` 1129-1377): the targets to try, best first, or the reason
+    /// The census and the ranking: the targets to try, best first, or the reason
     /// there are none. A consume-first ranking that found a target is decided again on a refetch ([`Self::phase_two`]).
     fn decide(
         &mut self,
@@ -1158,7 +1157,7 @@ impl<'t, 'a> Tick<'t, 'a> {
         Ok(decision)
     }
 
-    /// cswap's two-phase commit (autoswitch.py:1264-1293): consume-first decides below the threshold on readings that
+    /// The two-phase commit: consume-first decides below the threshold on readings that
     /// may be a candidate cadence old, so before it switches it refetches the active account and the candidates,
     /// replaces the decision's readings and time with the refetch's, and ranks again in full. The trigger is not
     /// classified again and the cooldown not checked again; no second poll event is emitted. A failed refetch ends the
@@ -1220,7 +1219,7 @@ impl<'t, 'a> Tick<'t, 'a> {
             .collect()
     }
 
-    /// cswap's census: the roster's switchable accounts ([`switchable`]) but the unwritten identity conflicts, the
+    /// The census: the roster's switchable accounts ([`switchable`]) but the unwritten identity conflicts, the
     /// active and quarantined ones left out by [`candidates`].
     fn census(&self, roster: &Roster, state: &AutoswitchState) -> Candidates {
         let store = self.store();
@@ -2321,7 +2320,7 @@ impl<'t, 'a> Tick<'t, 'a> {
         TickOutcome::Blocked
     }
 
-    /// cswap's freshness gate on a consume-first target (autoswitch.py:1387-1409): when phase 2 ran and its refetch did
+    /// The freshness gate on a consume-first target: when phase 2 ran and its refetch did
     /// not leave `number` fetched within [`SERVE_TTL_S`] (a failure backoff or a concurrent poller kept it off), the
     /// tick holds with `stale-usage` instead of switching on old data or moving to a worse-ranked target. The hold
     /// writes nothing. An escape never ran phase 2 and is never gated.
@@ -2342,7 +2341,7 @@ impl<'t, 'a> Tick<'t, 'a> {
         true
     }
 
-    /// Whether `account` is ready to switch to, cswap's freshen statuses: a dead grant and a config backup naming
+    /// Whether `account` is ready to switch to, by freshen status: a dead grant and a config backup naming
     /// another login ([`IDENTITY_MISMATCH`]) are quarantined here, an identity conflict was quarantined by
     /// [`freshen_target`] (or, when that write failed, is kept out of the census until a later tick writes it), and the
     /// drain stops the tick.
@@ -2666,7 +2665,7 @@ impl<'t, 'a> Tick<'t, 'a> {
     }
 }
 
-/// cswap's `_account_is_switchable` and its disabled check: an enabled account with a stored credential and a config
+/// Whether an account is switchable: an enabled account with a stored credential and a config
 /// backup.
 fn switchable(store: &Store, record: &AccountRecord) -> bool {
     !record.disabled
@@ -2725,7 +2724,7 @@ fn lease_lost(lease: &LeaseState) -> String {
     }
 }
 
-/// The configured model names cswap checks, each by its lowercase form beside its spelling: every name but `all`.
+/// The configured model names the typo guard checks, each by its lowercase form beside its spelling: every name but `all`.
 /// `models` are the settings' `models`, whose read already kept each name once.
 fn wanted_models(models: &[String]) -> Vec<(String, String)> {
     models
@@ -2863,7 +2862,7 @@ fn headroom_of(readings: &BTreeMap<u32, Value>, models: &[String], number: u32) 
     usage_of(readings, models, number)?.headroom()
 }
 
-/// cswap's `_window_pcts`: the windows the decision reads, each with its utilization: `5h`, `7d`, then each scoped
+/// The windows the decision reads, each with its utilization: `5h`, `7d`, then each scoped
 /// window `models` names, under its own name.
 fn window_pcts(reading: &Value, models: &[String]) -> Vec<(String, f64)> {
     relevant_windows(reading, models)
@@ -2872,7 +2871,7 @@ fn window_pcts(reading: &Value, models: &[String]) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// cswap's `_earliest_recovery`: the soonest moment any exhausted account (the active one included) is usable again,
+/// The soonest moment any exhausted account (the active one included) is usable again,
 /// each account's being the latest reset among its windows at 100 % or more, the scoped windows `models` names among
 /// them. An exhausted account whose recovery cannot be proven (no reset, or one not after `now`) makes the answer
 /// unknown.
@@ -2901,7 +2900,7 @@ fn earliest_recovery(
     earliest
 }
 
-/// A percentage for a detail line, cswap's `pct_label`: up to eight decimals, trailing zeros dropped, so float noise
+/// A percentage for a detail line: up to eight decimals, trailing zeros dropped, so float noise
 /// such as 95.00000000000001 reads as 95 and 99.9 never as 100.
 fn pct_label(value: f64) -> String {
     let text = format!("{value:.8}");

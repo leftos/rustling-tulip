@@ -1,4 +1,4 @@
-//! Switching the live login to a managed account: the target's credential and `oauthAccount` made live under cswap's
+//! Switching the live login to a managed account: the target's credential and `oauthAccount` made live under the store's
 //! and Claude Code's locks, the outgoing credential and config backed up or stashed as the profile oracle classifies
 //! them, and a failed write rolled back byte for byte.
 
@@ -438,7 +438,7 @@ fn switch_merges_live_shared_keys_and_drops_the_targets() {
     );
     assert_eq!(
         written["zTarget"], 1,
-        "a key cswap does not know stays the target's"
+        "a key this crate does not know stays the target's"
     );
     for key in [
         "pluginSecrets",
@@ -919,7 +919,7 @@ fn a_switch_to_an_api_key_account_is_refused_as_unknown_with_nothing_written() {
 }
 
 /// A live login that is an API-key account is no managed account's, so the switch activates the target directly, and
-/// the `primaryApiKey` cswap made live beside it, which the splice would drop with no copy kept, stops it.
+/// the `primaryApiKey` made live beside it, which the splice would drop with no copy kept, stops it.
 #[test]
 fn a_switch_from_a_live_api_key_account_holding_its_key_is_refused_with_nothing_written() {
     let own = fresh("fake-access-a", "fake-refresh-a");
@@ -1712,7 +1712,7 @@ fn an_oracle_failure_does_not_fail_the_switch() {
     assert_eq!(
         stored(&rig, 1),
         Some(rotated),
-        "an unresolved credential is backed up, as cswap's fail-open does"
+        "an unresolved credential is backed up: the backup fails open"
     );
     assert!(stash_rows(&rig).is_empty(), "nothing is stashed");
 }
@@ -2276,7 +2276,7 @@ fn lock_order_is_consume_account_credentials_config() {
             "no Claude Code lock is taken before the account lock"
         );
         drop(account);
-        // Past the account lock, the switch holds both of cswap's locks while it waits on `~/.claude.lock`.
+        // Past the account lock, the switch holds both of the store's file locks while it waits on `~/.claude.lock`.
         wait_for(&primary);
         assert!(held_elsewhere(&consume), "the consume lock is held");
         assert!(

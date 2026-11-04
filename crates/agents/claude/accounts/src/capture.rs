@@ -516,7 +516,7 @@ fn stored_verdict(stored: Option<&CredentialBlob>, live: &CredentialBlob) -> Cap
     }
 }
 
-/// A credential's `expiresAt`, 0 when it has none or it is not a number, as cswap's `or 0` reads it.
+/// A credential's `expiresAt`, 0 when it has none or it is not a number.
 fn expiry(blob: &CredentialBlob) -> f64 {
     oauth_expiry(blob).ok().flatten().unwrap_or(0.0)
 }

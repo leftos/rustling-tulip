@@ -1,6 +1,6 @@
-//! What a tick reports, cswap's `AutoSwitchEvent` family: each [`Event`] is one thing the engine saw or did, with the
-//! time it happened, and [`Event::to_json`] writes it in cswap's JSONL shape (`schemaVersion`, `event`, `ts` and the
-//! kind's own fields), so a reader of cswap's `auto --json` stream reads these too.
+//! What a tick reports: each [`Event`] is one thing the engine saw or did, with the
+//! time it happened, and [`Event::to_json`] writes it as one JSONL line (`schemaVersion`, `event`, `ts` and the
+//! kind's own fields).
 
 use std::collections::BTreeMap;
 
@@ -9,10 +9,10 @@ use serde_json::{Map, Value, json};
 
 use crate::engine::{ReleaseReason, Trigger};
 
-/// The `schemaVersion` every event's JSON carries, cswap's JSON output schema version.
+/// The `schemaVersion` every event's JSON carries.
 pub const EVENT_SCHEMA_VERSION: u64 = 1;
 
-/// An account as an event names it, cswap's `account_ref`: its number (none for a login no managed account has) and
+/// An account as an event names it: its number (none for a login no managed account has) and
 /// its email.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountRef {
@@ -46,7 +46,7 @@ pub struct Event {
     pub body: EventBody,
 }
 
-/// What an [`Event`] says, one variant per cswap event kind ([`Event::kind`]).
+/// What an [`Event`] says, one variant per event kind ([`Event::kind`]).
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum EventBody {
@@ -75,9 +75,9 @@ pub enum EventBody {
         /// What the switch warned of.
         warnings: Vec<String>,
     },
-    /// The tick did not switch (`no-switch`), with cswap's reason, such as `below-threshold` or `cooldown`.
+    /// The tick did not switch (`no-switch`), with its reason, such as `below-threshold` or `cooldown`.
     NoSwitch {
-        /// cswap's reason name.
+        /// The reason name.
         reason: &'static str,
         /// The detail, empty when there is none.
         detail: String,
@@ -162,8 +162,8 @@ pub enum EventBody {
 }
 
 impl Event {
-    /// cswap's event kind: `poll`, `switch`, `no-switch`, `account-quarantined`, `account-unquarantined`,
-    /// `all-exhausted`, `error`, `config-warning`, `warning` (an event cswap only logs), `sleep`, or this crate's own
+    /// The event kind: `poll`, `switch`, `no-switch`, `account-quarantined`, `account-unquarantined`,
+    /// `all-exhausted`, `error`, `config-warning`, `warning`, `sleep`,
     /// `note`, `paid-fallback-entered` and `paid-fallback-left`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
@@ -184,8 +184,8 @@ impl Event {
         }
     }
 
-    /// The event as cswap's `to_json` writes it: `schemaVersion`, `event` (the kind), `ts` (UTC to the second, `Z`)
-    /// and the kind's fields, account numbers as JSON keys or strings where cswap writes them so.
+    /// The event as JSON: `schemaVersion`, `event` (the kind), `ts` (UTC to the second, `Z`)
+    /// and the kind's fields, account numbers as JSON keys or strings where the format has them so.
     #[must_use]
     pub fn to_json(&self) -> Value {
         let mut map = Map::new();
@@ -283,7 +283,7 @@ fn round_tenths(seconds: f64) -> f64 {
     format!("{seconds:.1}").parse::<f64>().unwrap_or(seconds)
 }
 
-/// cswap's `PollEvent` fields: `fetchErrors` and `windowsPct` only when they hold something.
+/// The poll event's fields: `fetchErrors` and `windowsPct` only when they hold something.
 fn poll_fields(
     active: Option<&AccountRef>,
     headroom: &BTreeMap<u32, Option<f64>>,

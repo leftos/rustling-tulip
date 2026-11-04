@@ -1,9 +1,9 @@
-//! Where the engine may switch to and in which order: cswap's candidate census, `_rank_candidates`, and the no-return bar
-//! (`_no_return_account`, `_left_account_recovered` and the release retry of `_rank`), as pure functions. A proactive
+//! Where the engine may switch to and in which order: the candidate census, the ranking, and the no-return bar
+//! with its release, as pure functions. A proactive
 //! trigger never targets an account at or over the threshold: when every readable account is, the ranking is empty and
 //! the tick holds until the active account reaches its limit. The caller passes the trusted readings, the state file and
-//! the time; nothing here reads a file or the clock. Times inside the ranking are seconds since the epoch, as cswap
-//! computes them and the state file records them.
+//! the time; nothing here reads a file or the clock. Times inside the ranking are seconds since the epoch, as
+//! the state file records them.
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -19,20 +19,20 @@ use crate::engine::trigger::Trigger;
 use crate::store::{AccountKind, AccountRecord, AutoSwitchSettings, Strategy};
 use crate::usage::{UsageWindow, secs_from_timestamp};
 
-/// cswap's `RECOVERY_HYSTERESIS_S`: a binding reset this many seconds sooner counts as a meaningful improvement to the
+/// A binding reset this many seconds sooner counts as a meaningful improvement to the
 /// no-return bar and its release predicate.
 pub const RECOVERY_HYSTERESIS_S: f64 = 300.0;
-/// cswap's `RECOVERY_HORIZON_S`: a binding window resetting within this many seconds counts as near enough for the
+/// A binding window resetting within this many seconds counts as near enough for the
 /// failover release predicate.
 pub const RECOVERY_HORIZON_S: f64 = 4.0 * 3600.0;
-/// cswap's `HORIZON_HEADROOM_RATIO`: an account the no-return bar released must hold this many times the active
+/// An account the no-return bar released must hold this many times the active
 /// account's headroom, and the dominance leg of the release predicate compares headroom at this ratio.
 pub const HORIZON_HEADROOM_RATIO: f64 = 2.0;
-/// cswap's `SPENT_HEADROOM_PCT`: the headroom, in percent, an account must gain on its departure to count as recovered,
+/// The headroom, in percent, an account must gain on its departure to count as recovered,
 /// and the margin the dominance leg adds.
 pub const SPENT_HEADROOM_PCT: f64 = 3.0;
 
-/// One account's usage as the ranking reads it: the windows that gate the account, in cswap's order (the 5-hour, then
+/// One account's usage as the ranking reads it: the windows that gate the account, in order (the 5-hour, then
 /// the 7-day window, then each scoped window the configured models name), and the 7-day window's reset, which
 /// consume-first ranks by.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -44,7 +44,7 @@ pub struct AccountUsage {
 }
 
 impl AccountUsage {
-    /// The usage in a trusted reading, as [`crate::decision_value`] returns it: its windows as cswap's
+    /// The usage in a trusted reading, as [`crate::decision_value`] returns it: its windows as
     /// `relevant_windows` reads them for `models` (the settings' `models`), which is the `five_hour` and `seven_day`
     /// windows with a numeric `pct`, then each `scoped` window with a numeric `pct` whose name `models` holds, and the `seven_day` window's
     /// `resets_at`. A reset without a UTC offset is ignored.
@@ -64,7 +64,7 @@ impl AccountUsage {
         }
     }
 
-    /// cswap's `account_headroom`: 100 less the binding window's utilization, so at most 0 means at a limit; `None`
+    /// The account's headroom: 100 less the binding window's utilization, so at most 0 means at a limit; `None`
     /// with no windows.
     #[must_use]
     pub fn headroom(&self) -> Option<f64> {
@@ -130,7 +130,7 @@ pub struct CandidateAccount {
     pub number: u32,
     /// OAuth or a managed API key.
     pub kind: AccountKind,
-    /// Held out of automatic switching (`cswap disable`).
+    /// Held out of automatic switching.
     pub disabled: bool,
 }
 
@@ -189,9 +189,9 @@ pub struct Ranking {
     pub active_weekly_reset: Option<Timestamp>,
 }
 
-/// cswap's candidate census (autoswitch.py:1129-1145): the accounts in `accounts` (rotation order) other than the
+/// The candidate census: the accounts in `accounts` (rotation order) other than the
 /// `active` one that are neither disabled nor quarantined in `state`, OAuth accounts only: an API-key account is never
-/// switched to. cswap's census also drops accounts with no usable stored backup, which the caller leaves out of
+/// switched to. The census also has no account with no usable stored backup, which the caller leaves out of
 /// `accounts`. A barred account stays in the census: the bar is about the choice.
 #[must_use]
 pub fn candidates(
@@ -214,7 +214,7 @@ pub fn candidates(
     found
 }
 
-/// cswap's `_rank` (autoswitch.py:1178-1249): the candidates ranked with the no-return bar; when the bar empties the
+/// The candidates ranked with the no-return bar; when the bar empties the
 /// ranking and the account it bars has recovered since it was left, ranked again without the bar if that finds one.
 #[must_use]
 pub fn rank(inputs: &RankInputs<'_>) -> Ranking {
@@ -231,7 +231,7 @@ pub fn rank(inputs: &RankInputs<'_>) -> Ranking {
     ranking
 }
 
-/// cswap's `_rank_candidates` (autoswitch.py:1830-2026) with `no_return` barred: the OAuth candidates that qualify for
+/// The ranking with `no_return` barred: the OAuth candidates that qualify for
 /// the trigger, in order. An unreadable candidate, one at its limit, or one at or over the threshold on a proactive
 /// trigger never qualifies. `best` needs a target to beat the active account by `hysteresis_pct` and rank by most
 /// headroom; `consume-first` ranks by soonest weekly reset and for its own trigger needs that reset strictly sooner
@@ -250,7 +250,7 @@ pub fn all_above_threshold(inputs: &RankInputs<'_>) -> bool {
     every_account_above_threshold(&view, view.active_headroom())
 }
 
-/// cswap's `_no_return_account` (autoswitch.py:1459-1578): the account the last switch left, barred on the proactive
+/// The no-return bar: the account the last switch left, barred on the proactive
 /// triggers while the active account is the one that switch landed on (or the state does not say where it landed).
 /// When the account left has `recovered` (see [`left_account_recovered`]), it is released if it now holds
 /// [`HORIZON_HEADROOM_RATIO`] times the active account's headroom, or, with the active account unreadable, more than
@@ -260,7 +260,7 @@ pub fn no_return_account(inputs: &RankInputs<'_>, recovered: bool) -> Option<u32
     barred_account(&View::new(inputs), recovered)
 }
 
-/// cswap's `_left_account_recovered` (autoswitch.py:1580-1828): whether the account the last switch left is a better
+/// Whether the account the last switch left is a better
 /// proposition than when it was left. No departure snapshot releases. After a failover (by `leftTrigger`, or both
 /// snapshot values null on a record without it), the account must land healthy (more than 100 less the threshold) or
 /// its binding reset must be [`RECOVERY_HYSTERESIS_S`] sooner than the active account's, with that reset known or its
@@ -273,15 +273,15 @@ pub fn left_account_recovered(inputs: &RankInputs<'_>) -> bool {
     left_recovered(&View::new(inputs))
 }
 
-/// cswap's `_binding_recovery_ts` (autoswitch.py:564): when the account's binding window resets, `None` when it has no
-/// windows or the binding window's reset is unknown or not after `now` (where cswap answers infinity). The departure
+/// When the account's binding window resets, `None` when it has no
+/// windows or the binding window's reset is unknown or not after `now`, which the ranking treats as infinitely far. The departure
 /// snapshot records this as `leftRecoveryAt`.
 #[must_use]
 pub fn binding_recovery(usage: Option<&AccountUsage>, now: Timestamp) -> Option<Timestamp> {
     usage?.binding()?.resets_at.filter(|reset| *reset > now)
 }
 
-/// A ranking key, compared element by element as cswap compares its key tuples; shorter keys are padded with zeros.
+/// A ranking key, compared element by element as tuples compare; shorter keys are padded with zeros.
 type Key = [f64; 3];
 
 /// The tick's usage as the ranking reads it: the active account's, the candidates' and the barred account's.
@@ -314,13 +314,13 @@ impl<'a> View<'a> {
         self.headroom(self.inputs.active)
     }
 
-    /// cswap's `_binding_recovery_ts`: the binding window's reset in seconds, infinity when unknown or past.
+    /// The binding window's reset in seconds, infinity when unknown or past.
     fn recovery(&self, account: u32) -> f64 {
         binding_recovery(self.usage.get(&account), self.inputs.now)
             .map_or(f64::INFINITY, secs_from_timestamp)
     }
 
-    /// cswap's `_seven_day_reset_ts`: the weekly reset while it is still ahead.
+    /// The weekly reset while it is still ahead.
     fn weekly_reset(&self, account: u32) -> Option<Timestamp> {
         self.usage
             .get(&account)?
@@ -434,7 +434,7 @@ fn rank_view(view: &View<'_>, no_return: Option<u32>) -> Ranking {
         }
     }
     let mut chosen = qualifying;
-    // A stable sort: rotation order breaks ties, as cswap's does.
+    // A stable sort: rotation order breaks ties.
     chosen.sort_by(|left, right| compare_keys(&left.0, &right.0));
     Ranking {
         ordered: chosen.into_iter().map(|(_, account)| account).collect(),
@@ -459,7 +459,7 @@ fn candidate_headrooms<'v>(view: &'v View<'_>) -> impl Iterator<Item = f64> + 'v
         .filter_map(|&account| view.headroom(account))
 }
 
-/// cswap's `_every_account_above_threshold` (autoswitch.py:598): the active account readable and at or over the
+/// Whether every account is above the threshold: the active account readable and at or over the
 /// threshold, and every readable candidate too, with at least one readable. This is the condition under which a
 /// proactive tick holds: no candidate is a target, and the active account runs to its limit.
 fn every_account_above_threshold(view: &View<'_>, active_headroom: Option<f64>) -> bool {
@@ -471,7 +471,7 @@ fn every_account_above_threshold(view: &View<'_>, active_headroom: Option<f64>) 
     measured.peek().is_some() && measured.all(|headroom| 100.0 - headroom >= threshold)
 }
 
-/// cswap's `_no_return_account` on a view.
+/// The no-return bar on a view.
 fn barred_account(view: &View<'_>, recovered: bool) -> Option<u32> {
     let inputs = view.inputs;
     if inputs.trigger.is_escape() {
@@ -493,7 +493,7 @@ fn barred_account(view: &View<'_>, recovered: bool) -> Option<u32> {
     (!beats_active).then_some(barred)
 }
 
-/// cswap's `_left_account_recovered` on a view.
+/// Whether the left account recovered, on a view.
 fn left_recovered(view: &View<'_>) -> bool {
     let state = view.inputs.state;
     let Some(barred) = came_from(state) else {
@@ -564,7 +564,7 @@ fn ordinary_recovered(
     view.recovery(barred) < was - RECOVERY_HYSTERESIS_S
 }
 
-/// A departure snapshot value as cswap reads it from the state file.
+/// A departure snapshot value as read from the state file.
 #[derive(Clone, Copy, PartialEq)]
 enum Recorded {
     /// The key is not in the file.
@@ -597,14 +597,14 @@ impl Recorded {
     }
 }
 
-/// The account the last switch left (`lastSwitchFrom`): the number cswap writes, or a numeric string.
+/// The account the last switch left (`lastSwitchFrom`): a number, or a numeric string.
 fn came_from(state: &AutoswitchState) -> Option<u32> {
     state
         .last_switch_from
         .or_else(|| state.extra.get("lastSwitchFrom")?.as_str()?.parse().ok())
 }
 
-/// Whether `lastSwitchTo` names an account other than `active`, compared as text the way cswap compares it. A state
+/// Whether `lastSwitchTo` names an account other than `active`, compared as text. A state
 /// without it cannot show the engine moved away, so it keeps the bar.
 fn landed_elsewhere(state: &AutoswitchState, active: u32) -> bool {
     if let Some(landed) = &state.last_switch_to {

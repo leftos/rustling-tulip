@@ -1,5 +1,5 @@
 //! Sealed credential files: what seals opens again under the same purpose and associated data, and anything else
-//! (another purpose, another account slot or organization, a tampered or truncated file, a cswap base64 file) is
+//! (another purpose, another account slot or organization, a tampered or truncated file, a base64 file) is
 //! refused without a secret in the error. Every crafted file is written into a guard-made folder and read back
 //! through the guard, the only way bytes from a file become `SealedBytes`.
 
@@ -17,7 +17,7 @@ use claude_accounts::seal::{
 use crate::guard::private_base;
 use crate::support::Scratch;
 
-/// The header's length: `OTSEAL`, the version, the purpose and the generation.
+/// The header's length: `RTSEAL`, the version, the purpose and the generation.
 const HEADER_LEN: usize = 16;
 
 const PLAINTEXT: &str =
@@ -105,7 +105,7 @@ fn flipped_byte(files: &Files) -> SealedBytes {
 
 /// An intact header for a `Credentials` file, followed by bytes that are no sealed payload.
 fn garbage_after_header(files: &Files) -> SealedBytes {
-    let mut bytes = b"OTSEAL\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+    let mut bytes = b"RTSEAL\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
     bytes.extend_from_slice(&[0x5a; 64]);
     files.read_back("garbage", &bytes)
 }
@@ -331,11 +331,11 @@ fn a_truncated_file_is_refused() {
 }
 
 #[test]
-fn a_cswap_base64_file_is_foreign() {
-    let files = Files::new("cswap");
-    let cswap = STANDARD.encode(r#"{"claudeAiOauth":{}}"#);
+fn a_base64_file_is_foreign() {
+    let files = Files::new("base64");
+    let encoded = STANDARD.encode(r#"{"claudeAiOauth":{}}"#);
     for (name, bytes) in [
-        ("cswap", cswap.as_bytes()),
+        ("base64", encoded.as_bytes()),
         ("empty", b"".as_slice()),
         ("plain", PLAINTEXT.as_bytes()),
     ] {

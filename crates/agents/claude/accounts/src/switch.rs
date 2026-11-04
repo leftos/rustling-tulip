@@ -1,18 +1,18 @@
-//! Switching the live Claude Code login to another managed account, a port of cswap's `switch_to` and `_perform_switch`.
+//! Switching the live Claude Code login to another managed account.
 //!
 //! [`probe_outgoing`] asks the profile oracle, before any lock, whose account the live credential is when its bytes
-//! alone cannot tell; its answer is advisory. [`switch`] then takes the target's consume lock, cswap's account lock,
+//! alone cannot tell; its answer is advisory. [`switch`] then takes the target's consume lock, the store's account lock,
 //! Claude Code's two credential locks and its config lock, in that order and with each lock's usual wait, and the stop
 //! drain's guard once every lock is held. When the live login is a managed account, it snapshots the live credential
 //! file and `~/.claude.json` under them, backs the outgoing credential and config up into its account (or stashes the
 //! credential when it is another login's), writes the target's credential with the live file's machine-shared keys
 //! merged in, splices the target's `oauthAccount` into `~/.claude.json` (dropping `primaryApiKey`) and records the
 //! target as the active account. When the live login is no managed account's, or there is none, it activates the
-//! target directly, as cswap's direct activation does: the displaced live credential is stashed first and nothing is
+//! target directly (a direct activation): the displaced live credential is stashed first and nothing is
 //! backed up, and a missing `~/.claude.json` is written from the target's config backup. A write that fails puts every
 //! live file already written back as it was, byte for byte, while it still holds the switch's bytes (removing one the
 //! switch created; one rewritten since is left, and the rollback reported failed), keeping the live pair one
-//! account's. An API-key account cswap recorded is no account to switch to or from, and a live `primaryApiKey` the
+//! account's. An API-key account is no account to switch to or from, and a live `primaryApiKey` the
 //! switch would drop with no copy kept is refused. No network runs under a lock, and no outcome, error or log line
 //! carries a token, a credential or a path.
 
@@ -100,7 +100,7 @@ pub(crate) fn log_identity_refusal(number: u32, kind: SwitchErrorKind) {
     );
 }
 
-/// The credential file's machine-shared keys, cswap's `SHARED_CREDENTIAL_KEYS`: the live file's copies are the current
+/// The credential file's machine-shared keys: the live file's copies are the current
 /// generation, so a switch takes them from it, absence included, and drops the target's.
 const SHARED_KEYS: [&str; 5] = [
     "mcpOAuth",
@@ -109,14 +109,14 @@ const SHARED_KEYS: [&str; 5] = [
     "mcpXaaIdpConfig",
     "pluginSecrets",
 ];
-/// cswap's strategy name for a switch to a named account.
+/// The strategy name for a switch to a named account.
 const STRATEGY: &str = "direct";
 
 /// Why a switch did not happen, or did not finish.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SwitchErrorKind {
-    /// No switchable managed account has this number: none at all, an API-key account cswap recorded, or no
+    /// No switchable managed account has this number: none at all, an API-key account, or no
     /// `accounts.json`. Nothing was locked or written.
     UnknownAccount,
     /// `accounts.json` could not be read or parsed. Nothing was written.
@@ -417,7 +417,7 @@ impl SwitchAccount {
     }
 }
 
-/// What a switch came to, cswap's JSON switch result.
+/// What a switch came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SwitchOutcome {
@@ -428,7 +428,7 @@ pub struct SwitchOutcome {
     pub from: Option<SwitchAccount>,
     /// The account the live login is now.
     pub to: SwitchAccount,
-    /// cswap's strategy name: `direct`, a switch to a named account.
+    /// The strategy name: `direct`, a switch to a named account.
     pub strategy: &'static str,
     /// `switched`, or `already-active` when the target already was the live login.
     pub reason: &'static str,
@@ -439,8 +439,8 @@ pub struct SwitchOutcome {
     pub warnings: Vec<String>,
 }
 
-/// What the profile oracle said, before the switch took any lock, about whose account the live credential is: cswap's
-/// `_prefetch_live_identity`. The switch uses the answer only while the live file still holds the bytes it was asked
+/// What the profile oracle said, before the switch took any lock, about whose account the live credential is.
+/// The switch uses the answer only while the live file still holds the bytes it was asked
 /// about. Its `Debug` shows only whether there is an answer.
 pub struct OutgoingProbe {
     live: Option<CredentialBlob>,
@@ -449,7 +449,7 @@ pub struct OutgoingProbe {
 
 impl OutgoingProbe {
     /// A probe that asked nothing: an outgoing credential the switch cannot attribute by its bytes is unresolved, and
-    /// backed up into its account as cswap's fail-open backup does.
+    /// backed up into its account: the backup fails open.
     #[must_use]
     pub fn unresolved() -> Self {
         Self {
@@ -477,7 +477,7 @@ impl fmt::Debug for OutgoingProbe {
     }
 }
 
-/// Asks the profile oracle whose account the live credential is, as cswap's `_prefetch_live_identity` does, so that a
+/// Asks the profile oracle whose account the live credential is, so that a
 /// switch can tell an outgoing credential its account rotated from another login's. Call it before [`switch`], which
 /// takes the answer as advisory: the oracle is asked only when the live login is a managed account whose backup holds
 /// neither the live bytes nor their lineage, and an oracle that fails or cannot tell leaves the probe unresolved. This
@@ -540,22 +540,22 @@ fn ask_oracle(context: &RefreshContext<'_>, live: &CredentialBlob) -> Option<Res
     resolved
 }
 
-/// Switches Claude Code's live login to managed account `number`, as cswap's `switch_to` does: synchronous, with lock
-/// waits of up to 10 s each for cswap's locks and the caller's [`RefreshContext::claude_locks`] for Claude Code's, so an
+/// Switches Claude Code's live login to managed account `number`: synchronous, with lock
+/// waits of up to 10 s each for the store's locks and the caller's [`RefreshContext::claude_locks`] for Claude Code's, so an
 /// async caller runs it on a blocking thread. `probe` is [`probe_outgoing`]'s answer, taken before the call.
 ///
 /// A target that already is the live login is a no-op (`switched: false`, `already-active`) that takes no lock. A
-/// disabled target is switched to: it is only out of the automatic rotation. An API-key account cswap recorded is no
+/// disabled target is switched to: it is only out of the automatic rotation. An API-key account is no
 /// target ([`Sequence::switchable_account`]), and a live login that is one is no managed account's. Otherwise, when
-/// the live login is a managed account's, the outgoing credential is classified as cswap's
-/// `_classify_outgoing_credential` does: left alone when its backup holds the same bytes, backed up when it is the
+/// the live login is a managed account's, the outgoing credential is classified:
+/// left alone when its backup holds the same bytes, backed up when it is the
 /// backup's lineage, the oracle's answer names the account (whose missing uuid is then recorded), or ownership cannot
 /// be told; stashed and not backed up when the oracle, or an earlier verdict, named another account; left alone when
 /// its tokens were wiped. Unless it was stashed, the whole `~/.claude.json` is written as the outgoing account's config
 /// backup. A credential that would be stashed beside a `primaryApiKey` in `~/.claude.json` is refused instead: no file
 /// would keep the key the splice drops.
 ///
-/// A live login that is no managed account's, or none at all, is replaced directly, as cswap's direct activation does:
+/// A live login that is no managed account's, or none at all, is replaced directly (a direct activation):
 /// the live credential, unless it is absent, empty or the target's own bytes, is stashed as a `displaced-live-login`
 /// filed under `unmanaged` (or, when `~/.claude.json` names no login, under `accounts.json`'s active account), nothing
 /// is backed up, and a missing `~/.claude.json` is created holding the target's `oauthAccount` alone. A `~/.claude.json`
@@ -661,7 +661,7 @@ fn refuse_unmet(
     }
 }
 
-/// Every lock [`switch`] holds, taken in its order: the target's consume lock, cswap's account lock, Claude Code's two
+/// Every lock [`switch`] holds, taken in its order: the target's consume lock, the store's account lock, Claude Code's two
 /// credential locks, then its config lock. The fields are declared in the reverse order, so they are released last
 /// taken, first released.
 struct Locks {
@@ -705,8 +705,8 @@ fn read_roster(context: &RefreshContext<'_>, number: u32) -> Result<Sequence, Sw
     }
 }
 
-/// The switchable managed account `~/.claude.json`'s `oauthAccount` names, by email and organization, as cswap's
-/// `_find_account_slot` finds it; `None` for an API-key account's login, which the switch leaves as no managed
+/// The switchable managed account `~/.claude.json`'s `oauthAccount` names, by email and organization;
+/// `None` for an API-key account's login, which the switch leaves as no managed
 /// account's.
 fn current_account(paths: &ClaudePaths, sequence: &Sequence) -> Option<AccountRecord> {
     let identity = live_identity(paths)?;
@@ -753,7 +753,7 @@ fn already_active(target: &AccountRecord) -> SwitchOutcome {
     }
 }
 
-/// The locks a switch holds once its waits are over: cswap's account lock, Claude Code's credential locks and its
+/// The locks a switch holds once its waits are over: the store's account lock, Claude Code's credential locks and its
 /// config lock (the consume lock is held by [`switch`] alone).
 struct Held<'h> {
     lock: &'h AccountLockGuard,
@@ -877,7 +877,7 @@ impl fmt::Display for NotPutBack {
     }
 }
 
-/// What the outgoing account's backup may take of the live credential, cswap's ownership kinds.
+/// What the outgoing account's backup may take of the live credential, by ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outgoing {
     /// The backup holds these very bytes: nothing to back up.
@@ -886,7 +886,7 @@ enum Outgoing {
     OwnFamily,
     /// Another lineage the oracle named as the account's own.
     OwnRotated,
-    /// Ownership could not be told: backed up, as cswap's fail-open backup.
+    /// Ownership could not be determined, so the live credential is backed up (the backup fails open).
     Unresolved,
     /// An OAuth block with both tokens emptied (Claude Code's reaction to a refused refresh): nothing worth keeping.
     Wiped,
@@ -937,7 +937,7 @@ impl Switch<'_, '_> {
         }
     }
 
-    /// cswap's direct activation, for a live login that is no managed account's or none at all: the target's backup
+    /// The direct activation, for a live login that is no managed account's or none at all: the target's backup
     /// read, the live files read, the displaced live credential stashed unless there is none or it is the target's own
     /// bytes, then the target made live, rolling the live files back when a write fails. Nothing is backed up.
     fn leave_unmanaged(
@@ -1026,7 +1026,7 @@ impl Switch<'_, '_> {
         Ok(())
     }
 
-    /// cswap's switch from managed account `current`: snapshot, back up the outgoing account, read the target's
+    /// The switch from managed account `current`: snapshot, back up the outgoing account, read the target's
     /// backup, then make it live, rolling the live files back when a write fails.
     fn leave_managed(
         &self,
@@ -1126,7 +1126,7 @@ impl Switch<'_, '_> {
         Ok(Found { live, config })
     }
 
-    /// Stashes `live`, the credential a direct activation displaces, as cswap's `_stash_live_credential` does, unless
+    /// Stashes `live`, the credential a direct activation displaces, unless
     /// there is none, it is empty, or it is `target`'s own bytes, sealed with `organization`, the slot's as the roster
     /// already read names it. [`SwitchErrorKind::OutgoingBackupFailed`], with no live file written, when the stash fails.
     fn stash_live(
@@ -1156,8 +1156,8 @@ impl Switch<'_, '_> {
         Ok(())
     }
 
-    /// The live credential's and `~/.claude.json`'s bytes, read under the locks. cswap refuses an empty live credential
-    /// rather than write it over the outgoing account's backup.
+    /// The live credential's and `~/.claude.json`'s bytes, read under the locks. An empty live credential is refused
+    /// rather than written over the outgoing account's backup.
     fn snapshot(&self) -> Result<Snapshot, SwitchError> {
         let live = read_live(self.context.claude)
             .ok_or_else(|| self.fail(SwitchErrorKind::LiveUnreadable))?;
@@ -1168,7 +1168,7 @@ impl Switch<'_, '_> {
         Ok(Snapshot { live, config })
     }
 
-    /// cswap's first step, by [`Self::classify`]'s answer: the live credential stashed, or backed up into `current`'s
+    /// The first step, by [`Self::classify`]'s answer: the live credential stashed, or backed up into `current`'s
     /// backup when there is none or it is a newer generation than the backup classify read ([`newer_generation`]),
     /// else the stored copy kept (recording the oracle's uuid on an own rotation either way), or left alone, and then,
     /// unless it was stashed, the whole `~/.claude.json` written as `current`'s config backup. Any of these writes that
@@ -1265,7 +1265,7 @@ impl Switch<'_, '_> {
         }
     }
 
-    /// Records the oracle's uuid on `current` when it has none, as cswap does on an own rotation. Best effort: a
+    /// Records the oracle's uuid on `current` when it has none on an own rotation. Best effort: a
     /// failure is logged and the switch goes on.
     fn backfill_uuid(
         &self,
@@ -1286,7 +1286,7 @@ impl Switch<'_, '_> {
         }
     }
 
-    /// cswap's `_classify_outgoing_credential` over the crate's oracle verdict: the backup's own bytes or lineage first,
+    /// The outgoing credential's classification over the oracle verdict: the backup's own bytes or lineage first,
     /// then wiped tokens, then the probe's answer when it was about these bytes, then a remembered verdict. A backup
     /// that exists and cannot be read stops the switch
     /// ([`SwitchErrorKind::OutgoingBackupFailed`]) rather than reading as none and being replaced. The backup as read
@@ -1342,7 +1342,7 @@ impl Switch<'_, '_> {
     /// With no answer from the oracle: [`Outgoing::KnownForeign`] when this process already found the lineage to be
     /// another account's, else [`Outgoing::Unresolved`].
     fn remembered(&self, current: &AccountRecord, live: &CredentialBlob) -> Outgoing {
-        // cswap keys an empty credential's lineage by the empty fingerprint.
+        // An empty credential's lineage is keyed by the empty fingerprint.
         let fingerprint = credential_fingerprint(live).unwrap_or_default();
         let key = LineageKey::new(&current.email, current, &fingerprint);
         if self.context.verdicts.get(&key) == Some(false) {
@@ -1400,7 +1400,7 @@ impl Switch<'_, '_> {
         })
     }
 
-    /// The writes that make the target live, in cswap's order, noting each one done and each temp file a failed one
+    /// The writes that make the target live, in order, noting each one done and each temp file a failed one
     /// left: the credential file, then `~/.claude.json` as `edit` changes it (the `oauthAccount` splice), each only while
     /// it still holds what `before` says the switch found there, then `accounts.json`'s active account. A live file
     /// changed since the snapshot is [`ClaudeFileError::Changed`], a failed write like any other. `Err` at the first
@@ -1619,12 +1619,12 @@ fn holds_api_key(config: &[u8]) -> bool {
     tree.0.get("primaryApiKey").is_some_and(store::truthy)
 }
 
-/// Where cswap files the credential a direct activation displaces: under `accounts.json`'s active account when
+/// Where the credential a direct activation displaces is filed: under `accounts.json`'s active account when
 /// `~/.claude.json` names no login, else, or when there is no active account, under `unmanaged`; with the organization
 /// `sequence` records for that account, empty for `unmanaged` or an account it has none for.
 fn displaced_slot(identity: Option<&Identity>, sequence: &Sequence) -> (ConfigSlot, String) {
     match (identity, sequence.active()) {
-        // As cswap does, even when the active number is an API-key record: the row is inert, since only a switchable
+        // Even when the active number is an API-key record: the row is inert, since only a switchable
         // account's refresh adopts from the stash.
         (None, Some(active)) => (
             ConfigSlot::Account(active),
@@ -1660,7 +1660,7 @@ fn wiped_warning(number: u32) -> String {
     )
 }
 
-/// The credential to make live, cswap's `_prepare_credentials_for_activation`: `target` with the machine-shared keys
+/// The credential to make live: `target` with the machine-shared keys
 /// ([`SHARED_KEYS`]) taken from `live`, absence included. The target's other keys keep their order, and the live shared
 /// keys follow in the live file's order. `target` unchanged when `live` is not a JSON object, or `target` is not a JSON
 /// object with a `claudeAiOauth` key; `None` only when the merged object could not be written out.
@@ -1685,7 +1685,7 @@ fn merge_shared(target: &CredentialBlob, live: &CredentialBlob) -> Option<Creden
 }
 
 /// `target` and `live` parsed, when the merge applies: `live` is a JSON object and `target` a JSON object with a
-/// `claudeAiOauth` key, as cswap's `_credential_object` checks read them.
+/// `claudeAiOauth` key.
 fn mergeable(target: &CredentialBlob, live: &CredentialBlob) -> Option<(Scrubbed, Scrubbed)> {
     let shared = Scrubbed::parse(live.expose()).filter(|tree| tree.0.is_object())?;
     let merged =

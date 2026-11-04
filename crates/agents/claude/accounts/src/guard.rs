@@ -1200,7 +1200,7 @@ mod tests {
         #[test]
         fn a_held_folder_cannot_be_renamed() {
             let root =
-                std::env::temp_dir().join(format!("ops-tower-guard-held-{}", std::process::id()));
+                std::env::temp_dir().join(format!("rt-accounts-guard-held-{}", std::process::id()));
             if root.exists() {
                 std::fs::remove_dir_all(&root).expect("an old run's folder can be removed");
             }

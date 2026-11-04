@@ -28,7 +28,7 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// One account's whole credential file as cswap stores it, held opaquely: the JSON Claude Code keeps in
+/// One account's whole credential file as the store keeps it, held opaquely: the JSON Claude Code keeps in
 /// `.credentials.json`, or a raw API key for an `api_key` account.
 pub struct CredentialBlob(Secret);
 
@@ -67,7 +67,7 @@ impl CredentialBlob {
     }
 }
 
-/// How long before `expiresAt` an access token already counts as expired: cswap's and Claude Code's five minutes.
+/// How long before `expiresAt` an access token already counts as expired: Claude Code's five minutes.
 pub const OAUTH_EXPIRY_BUFFER: jiff::SignedDuration = jiff::SignedDuration::from_mins(5);
 
 /// A credential file's `claudeAiOauth` block: the tokens and when they lapse. Its `Debug` prints no token; it has no
@@ -104,8 +104,8 @@ impl OauthCredentials {
         self.refresh_token_expires_at
     }
 
-    /// Whether the access token has lapsed at `now` or will within [`OAUTH_EXPIRY_BUFFER`], as cswap's
-    /// `is_oauth_token_expired` decides. An unknown expiry is not expired.
+    /// Whether the access token has lapsed at `now` or will within [`OAUTH_EXPIRY_BUFFER`].
+    /// An unknown expiry is not expired.
     #[must_use]
     pub fn is_expired(&self, now: jiff::Timestamp) -> bool {
         self.expires_at.is_some_and(|expires_at| {
@@ -135,7 +135,7 @@ struct OauthFile {
     claude_ai_oauth: Option<OauthBlock>,
 }
 
-/// The `claudeAiOauth` keys cswap reads. The tokens go straight into zeroizing strings; the two expiries are numbers
+/// The `claudeAiOauth` keys this crate reads. The tokens go straight into zeroizing strings; the two expiries are numbers
 /// when Claude Code wrote them, and anything else is read as unknown rather than failing the whole block.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,8 +150,8 @@ struct OauthBlock {
     refresh_token_expires_at: Option<serde_json::Value>,
 }
 
-/// A JSON number of milliseconds since the epoch as a timestamp, truncated to whole milliseconds as cswap's `int()`
-/// does; `None` for anything else or a time out of range.
+/// A JSON number of milliseconds since the epoch as a timestamp, truncated to whole milliseconds;
+/// `None` for anything else or a time out of range.
 fn millis_timestamp(value: &serde_json::Value) -> Option<jiff::Timestamp> {
     let millis = match value.as_i64() {
         Some(millis) => millis,

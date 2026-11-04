@@ -1,4 +1,4 @@
-//! cswap's `autoswitch_state.json`: read as cswap writes it, written back with every key this crate does not model, and
+//! `autoswitch_state.json`: read as an engine writes it, written back with every key this crate does not model, and
 //! only ever under `.autoswitch_state.lock`.
 
 use std::fs::{self, File, OpenOptions};
@@ -17,8 +17,8 @@ use serde_json::json;
 
 use crate::support::{Scratch, read_json, write};
 
-/// A state file as cswap writes it after a proactive switch from account 1 to account 2, with account 3 quarantined.
-const CSWAP_STATE: &str = r#"{
+/// A state file as an engine writes it after a proactive switch from account 1 to account 2, with account 3 quarantined.
+const WRITTEN_STATE: &str = r#"{
   "schemaVersion": 1,
   "quarantine": {
     "3": {
@@ -37,10 +37,10 @@ const CSWAP_STATE: &str = r#"{
 }"#;
 
 #[test]
-fn state_reads_a_cswap_written_file() {
-    let scratch = Scratch::new("state_reads_a_cswap_written_file");
+fn state_reads_a_file_another_engine_wrote() {
+    let scratch = Scratch::new("state_reads_a_file_another_engine_wrote");
     let root = scratch.root();
-    write(&root.autoswitch_state(), CSWAP_STATE);
+    write(&root.autoswitch_state(), WRITTEN_STATE);
 
     let state = AutoswitchState::read(&root).expect("the state file reads");
 
@@ -59,7 +59,7 @@ fn state_reads_a_cswap_written_file() {
         .quarantine
         .get("3")
         .and_then(QuarantineRecord::entry)
-        .expect("account 3 is quarantined with an entry of cswap's shape");
+        .expect("account 3 is quarantined with an entry of the quarantine's shape");
     assert_eq!(entry.email, "carol@example.com");
     assert_eq!(entry.reason, "invalid_grant");
     assert_eq!(entry.at, "2026-09-21T13:00:00Z");
@@ -69,7 +69,7 @@ fn state_reads_a_cswap_written_file() {
     );
     assert!(
         state.extra.is_empty(),
-        "every key of cswap's file is modelled: {:?}",
+        "every key of the written file is modelled: {:?}",
         state.extra
     );
 }
@@ -79,7 +79,7 @@ fn state_keeps_unknown_keys_on_write() {
     let scratch = Scratch::new("state_keeps_unknown_keys_on_write");
     let root = scratch.root();
     let mut document: serde_json::Value =
-        serde_json::from_str(CSWAP_STATE).expect("the fixture is JSON");
+        serde_json::from_str(WRITTEN_STATE).expect("the fixture is JSON");
     document["futureKey"] = json!({"nested": [1, 2, 3]});
     document["quarantine"]["3"]["note"] = json!("kept");
     write(&root.autoswitch_state(), &document.to_string());
@@ -139,14 +139,14 @@ fn a_missing_or_corrupt_state_file_reads_as_default() {
     assert_eq!(
         written.schema_version,
         Some(1),
-        "an update stamps cswap's schema version"
+        "an update stamps the state schema version"
     );
     assert_eq!(
         read_json(&root.autoswitch_state()),
         json!({"schemaVersion": 1, "leftTrigger": "failover"})
     );
 
-    // A key of the wrong type reads as absent but is kept, as cswap reads its state key by key.
+    // A key of the wrong type reads as absent but is kept, as the state is read key by key.
     write(
         &root.autoswitch_state(),
         r#"{"lastSwitchAt": "soon", "lastSwitchFrom": "1", "leftTrigger": "proactive"}"#,
@@ -243,7 +243,7 @@ fn a_malformed_quarantine_entry_survives_an_update() {
     let scratch = Scratch::new("a_malformed_quarantine_entry_survives_an_update");
     let root = scratch.root();
     let mut document: serde_json::Value =
-        serde_json::from_str(CSWAP_STATE).expect("the fixture is JSON");
+        serde_json::from_str(WRITTEN_STATE).expect("the fixture is JSON");
     document["quarantine"]["4"] = json!({"reason": "invalid_grant", "at": 17});
     document["quarantine"]["5"] = json!("not an entry");
     write(&root.autoswitch_state(), &document.to_string());
@@ -328,7 +328,7 @@ fn an_unreadable_state_file_is_an_error_and_never_overwritten() {
 fn state_update_holds_the_state_lock() {
     let scratch = Scratch::new("state_update_holds_the_state_lock");
     let root = scratch.root();
-    write(&root.autoswitch_state(), CSWAP_STATE);
+    write(&root.autoswitch_state(), WRITTEN_STATE);
     let held = FileLock::acquire(&root.autoswitch_state_lock(), Duration::from_secs(1))
         .expect("the state lock is free");
 
@@ -342,7 +342,7 @@ fn state_update_holds_the_state_lock() {
     );
     assert_eq!(
         fs::read_to_string(root.autoswitch_state()).expect("the state file reads"),
-        CSWAP_STATE,
+        WRITTEN_STATE,
         "nothing was written"
     );
     drop(held);
@@ -389,7 +389,7 @@ fn temp_files(folder: &Path) -> Vec<String> {
 fn a_failed_state_write_leaves_no_temp_file() {
     let scratch = Scratch::new("a_failed_state_write_leaves_no_temp_file");
     let root = scratch.root();
-    write(&root.autoswitch_state(), CSWAP_STATE);
+    write(&root.autoswitch_state(), WRITTEN_STATE);
     let before = fs::read(root.autoswitch_state()).expect("the state file reads");
 
     let held = hold_open_against_replace(&root.autoswitch_state());
@@ -427,7 +427,7 @@ fn a_newer_state_file_is_never_rewritten() {
             "from": 1,
             "since": 1_789_999_000.25,
             "ownerExit": {"at": 1_789_999_500.0, "optedIn": [2]},
-            "leaseOwner": {"owner": "ops-tower", "pid": 101, "startedAt": 1_789_998_000.5},
+            "leaseOwner": {"owner": "rustling-tulip", "pid": 101, "startedAt": 1_789_998_000.5},
         },
     })
     .to_string();
@@ -482,7 +482,7 @@ fn a_state_write_into_a_newer_store_changes_nothing() {
     );
     assert!(!root.autoswitch_state().exists(), "no state file is made");
 
-    write(&root.autoswitch_state(), CSWAP_STATE);
+    write(&root.autoswitch_state(), WRITTEN_STATE);
     let existing =
         AutoswitchState::update(&root, |state| state.last_switch_at = Some(1_700_000_000.5));
     assert!(
@@ -494,7 +494,7 @@ fn a_state_write_into_a_newer_store_changes_nothing() {
     );
     assert_eq!(
         fs::read_to_string(root.autoswitch_state()).expect("the state file reads"),
-        CSWAP_STATE,
+        WRITTEN_STATE,
         "the existing state file keeps its bytes"
     );
 }
@@ -507,14 +507,14 @@ fn paid_fallback_round_trips_and_keeps_other_keys() {
     let scratch = Scratch::new("paid_fallback_round_trips_and_keeps_other_keys");
     let root = scratch.root();
     let mut document: serde_json::Value =
-        serde_json::from_str(CSWAP_STATE).expect("the fixture is JSON");
+        serde_json::from_str(WRITTEN_STATE).expect("the fixture is JSON");
     document["futureKey"] = json!("kept");
     document["paidFallback"] = json!({
         "number": 2,
         "from": 1,
         "since": 1_789_999_000.25,
         "ownerExit": {"at": 1_789_999_500.0, "optedIn": [2], "futureExitKey": 7},
-        "leaseOwner": {"owner": "ops-tower", "pid": 101, "startedAt": 1_789_998_000.5},
+        "leaseOwner": {"owner": "rustling-tulip", "pid": 101, "startedAt": 1_789_998_000.5},
         "futurePaidKey": "kept",
     });
     write(&root.autoswitch_state(), &document.to_string());
@@ -530,7 +530,7 @@ fn paid_fallback_round_trips_and_keeps_other_keys() {
     );
     assert_eq!(
         paid.lease_owner,
-        LeaseOwner::new("ops-tower", 101, 1_789_998_000.5)
+        LeaseOwner::new("rustling-tulip", 101, 1_789_998_000.5)
     );
     let bar = paid.owner_exit.clone().expect("the bar is read");
     assert_eq!(
@@ -565,7 +565,7 @@ fn paid_fallback_round_trips_and_keeps_other_keys() {
             "from": 1,
             "since": 1_789_999_000.25,
             "ownerExit": {"at": 1_790_000_000.0, "optedIn": [2, 3]},
-            "leaseOwner": {"owner": "ops-tower", "pid": 101, "startedAt": 1_789_998_000.5},
+            "leaseOwner": {"owner": "rustling-tulip", "pid": 101, "startedAt": 1_789_998_000.5},
             "futurePaidKey": "kept",
         })
     );
@@ -593,7 +593,7 @@ fn paid_fallback_round_trips_and_keeps_other_keys() {
 fn a_paid_fallback_from_a_recycled_pid_is_not_this_engines() {
     let scratch = Scratch::new("a_paid_fallback_from_a_recycled_pid_is_not_this_engines");
     let root = scratch.root();
-    let me = LeaseHolder::new("ops-tower", 101, 60.0);
+    let me = LeaseHolder::new("rustling-tulip", 101, 60.0);
     let lease = Lease::new(&root);
     assert_eq!(
         lease.started_at(&me).expect("the lease reads"),
@@ -612,7 +612,7 @@ fn a_paid_fallback_from_a_recycled_pid_is_not_this_engines() {
         2,
         1,
         1_790_000_010.0,
-        LeaseOwner::new("ops-tower", 101, started),
+        LeaseOwner::new("rustling-tulip", 101, started),
     );
     assert!(
         entered.lease_owner.is(&me, started),
@@ -621,7 +621,7 @@ fn a_paid_fallback_from_a_recycled_pid_is_not_this_engines() {
     assert!(
         !entered
             .lease_owner
-            .is(&LeaseHolder::new("ops-tower", 102, 60.0), started),
+            .is(&LeaseHolder::new("rustling-tulip", 102, 60.0), started),
         "another process is another engine"
     );
 
@@ -642,7 +642,7 @@ fn a_paid_fallback_from_a_recycled_pid_is_not_this_engines() {
     );
     assert_eq!(
         lease
-            .started_at(&LeaseHolder::new("ops-tower", 102, 60.0))
+            .started_at(&LeaseHolder::new("rustling-tulip", 102, 60.0))
             .expect("the lease reads"),
         None,
         "another engine's lease has no start for this one"
@@ -658,8 +658,8 @@ fn a_malformed_paid_fallback_reads_as_none() {
         json!("2"),
         json!(null),
         json!({"number": 2, "from": 1, "since": 1.0}),
-        json!({"number": 2, "from": 1, "since": 1.0, "leaseOwner": {"owner": "ops-tower", "pid": 101}}),
-        json!({"number": "2", "from": 1, "since": 1.0, "leaseOwner": {"owner": "ops-tower", "pid": 101, "startedAt": 1.0}}),
+        json!({"number": 2, "from": 1, "since": 1.0, "leaseOwner": {"owner": "rustling-tulip", "pid": 101}}),
+        json!({"number": "2", "from": 1, "since": 1.0, "leaseOwner": {"owner": "rustling-tulip", "pid": 101, "startedAt": 1.0}}),
         json!({"number": 2, "from": 1, "since": 1.0, "ownerExit": null, "leaseOwner": "x"}),
     ];
     for value in malformed {
@@ -688,7 +688,13 @@ fn a_malformed_paid_fallback_reads_as_none() {
 fn a_malformed_owner_exit_reads_as_a_bar() {
     let scratch = Scratch::new("a_malformed_owner_exit_reads_as_a_bar");
     let root = scratch.root();
-    let barred = json!({"number": 2, "from": 1, "since": 1.0, "ownerExit": 5, "leaseOwner": {"owner": "ops-tower", "pid": 101, "startedAt": 1.0}});
+    let barred = json!({
+        "number": 2,
+        "from": 1,
+        "since": 1.0,
+        "ownerExit": 5,
+        "leaseOwner": {"owner": "rustling-tulip", "pid": 101, "startedAt": 1.0},
+    });
     write(
         &root.autoswitch_state(),
         &json!({"lastSwitchTo": "2", "paidFallback": barred}).to_string(),
@@ -741,7 +747,7 @@ fn salvage_keeps_unknown_keys_at_both_levels() {
     let paid = json!({
         "number": 2, "from": 1, "since": 1.0, "note": "outer",
         "ownerExit": {"at": "x", "optedIn": [1], "why": "inner"},
-        "leaseOwner": {"owner": "ops-tower", "pid": 101, "startedAt": 1.0},
+        "leaseOwner": {"owner": "rustling-tulip", "pid": 101, "startedAt": 1.0},
     });
     write(
         &root.autoswitch_state(),

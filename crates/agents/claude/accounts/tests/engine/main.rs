@@ -1,4 +1,4 @@
-//! The claude-accounts crate's auto-switch engine files: cswap's state file and the engine lease, against a scratch
+//! The claude-accounts crate's auto-switch engine files: the state file and the engine lease, against a scratch
 //! account store.
 
 #![cfg_attr(

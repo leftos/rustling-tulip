@@ -54,7 +54,7 @@ fn only_row(scratch: &Scratch) -> (String, Value) {
     (id.clone(), row.clone())
 }
 
-/// Checks the stashed row carries cswap's fields for `reason`, and its bytes are the successor.
+/// Checks the stashed row carries the row fields for `reason`, and its bytes are the successor.
 fn assert_stashed(scratch: &Scratch, reason: StashReason) {
     let (id, row) = only_row(scratch);
     let keys: Vec<&String> = row
@@ -72,7 +72,7 @@ fn assert_stashed(scratch: &Scratch, reason: StashReason) {
             "fingerprint",
             "organization"
         ],
-        "cswap's row fields, in its order, then the organization the entry is sealed with"
+        "the row fields, in order, then the organization the entry is sealed with"
     );
     assert_eq!(row["createdAt"], "2026-09-21T14:13:20Z");
     assert_eq!(row["reason"], reason.kind());
@@ -90,7 +90,7 @@ fn assert_stashed(scratch: &Scratch, reason: StashReason) {
     assert_eq!(row["fingerprint"], json!(fingerprint(&successor)));
     assert!(
         id.starts_with("20260921T141320-"),
-        "the id starts with cswap's timestamp: {id}"
+        "the id starts with the UTC timestamp: {id}"
     );
 }
 
@@ -573,7 +573,7 @@ fn a_stashed_entry_is_sealed_for_its_slot_and_opens_only_with_it() {
         .stash_bytes(&id)
         .expect("the entry's file was written");
     assert!(
-        bytes.starts_with(b"OTSEAL"),
+        bytes.starts_with(b"RTSEAL"),
         "the entry is a sealed file, not base64: {bytes:?}"
     );
     assert!(
@@ -664,7 +664,7 @@ fn a_successor_stashed_while_the_roster_is_unreadable_is_adopted_once_it_reads_a
         .stash_bytes(&id)
         .expect("the entry's file was written");
     assert!(
-        bytes.starts_with(b"OTSEAL"),
+        bytes.starts_with(b"RTSEAL"),
         "the entry is a sealed file: {bytes:?}"
     );
     assert!(

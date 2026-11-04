@@ -1,6 +1,6 @@
-//! cswap's candidate census, ranking, cooldown and no-return bar, ported from its `test_autoswitch.py` one test per
-//! cswap test. A cswap test that drives whole ticks runs through [`Fleet::tick`], a tick built from the pure functions:
-//! classification, cooldown, census, ranking, and the departure snapshot cswap's `_perform` records on a switch.
+//! The candidate census, ranking, cooldown and no-return bar.
+//! A test that drives whole ticks runs through [`Fleet::tick`], a tick built from the pure functions:
+//! classification, cooldown, census, ranking, and the departure snapshot a switch records.
 
 use std::collections::BTreeMap;
 
@@ -31,17 +31,17 @@ fn source(readings: &Readings) -> TrustedReadings<'_, Value> {
     TrustedReadings::new(readings, &[])
 }
 
-/// cswap's `_usage`: the 5-hour window at `pct` and an empty 7-day window.
+/// The 5-hour window at `pct` and an empty 7-day window.
 fn five(pct: f64) -> Value {
     json!({"five_hour": {"pct": pct}, "seven_day": {"pct": 0.0}})
 }
 
-/// cswap's `_usage` with the 5-hour window resetting at `reset`.
+/// The 5-hour window at `pct` resetting at `reset`, and an empty 7-day window.
 fn five_at(pct: f64, reset: &str) -> Value {
     json!({"five_hour": {"pct": pct, "resets_at": reset}, "seven_day": {"pct": 0.0}})
 }
 
-/// cswap's `_usage7`: both windows, the 7-day one resetting at `reset` when given.
+/// Both windows, the 7-day one resetting at `reset` when given.
 fn weekly(pct5: f64, pct7: f64, reset: Option<&str>) -> Value {
     let mut seven_day = json!({"pct": pct7});
     if let Some(reset) = reset {
@@ -79,7 +79,7 @@ fn left(from: u32, headroom: Snap, recovery: Snap, trigger: Option<&str>) -> Aut
     state
 }
 
-/// cswap's engine harness, reduced to what the decision reads: the accounts, the settings, the state file, the active
+/// The engine harness, reduced to what the decision reads: the accounts, the settings, the state file, the active
 /// account, the engine's memory of it and a clock in seconds from the tests' fixed time.
 struct Fleet {
     accounts: Vec<CandidateAccount>,
@@ -91,7 +91,7 @@ struct Fleet {
 }
 
 impl Fleet {
-    /// OAuth accounts 1 to `count`, account 1 active, cswap's default settings.
+    /// OAuth accounts 1 to `count`, account 1 active, the default settings.
     fn new(count: u32) -> Self {
         Self {
             accounts: (1..=count)
@@ -119,7 +119,7 @@ impl Fleet {
         self.clock_s += seconds;
     }
 
-    /// A `resets_at` `offset` seconds from the clock now: cswap's `_at`, or its `_days_out` when kept across ticks.
+    /// A `resets_at` `offset` seconds from the clock now.
     fn reset_in(&self, offset: i64) -> String {
         at((self.clock_s + offset) * 1000).to_string()
     }
@@ -220,7 +220,7 @@ impl Fleet {
         outcomes
     }
 
-    /// cswap's failover setup: account 1 unreadable for `unhealthy_ticks` ticks a minute apart, account 2 at 4 % with
+    /// The failover setup: account 1 unreadable for `unhealthy_ticks` ticks a minute apart, account 2 at 4 % with
     /// its 5-hour window resetting at `reset` (or 400 h from each tick).
     fn fail_over_to_2(&mut self, reset: Option<&str>) {
         let outcomes = self.walk(3, 60, |fleet| {
@@ -253,7 +253,6 @@ fn active_reading(active: u32, readings: &Readings) -> ActiveReading {
         .map_or(ActiveReading::Unreadable, ActiveReading::Headroom)
 }
 
-// cswap: TestDecisionTable.test_over_threshold_switches_to_max_headroom
 #[test]
 fn over_threshold_switches_to_max_headroom() {
     let mut fleet = Fleet::new(3);
@@ -265,8 +264,8 @@ fn over_threshold_switches_to_max_headroom() {
     assert_eq!(fleet.state.last_switch_to.as_deref(), Some("3"));
 }
 
-// cswap: TestDecisionTable.test_hysteresis_margin_blocks_marginal_candidates (the ranking; the all-exhausted report and
-// the cadence are the tick's)
+// The ranking only; the all-exhausted report and
+// the cadence are the tick's.
 #[test]
 fn hysteresis_margin_blocks_marginal_candidates() {
     let mut fleet = Fleet::new(3);
@@ -280,7 +279,6 @@ fn hysteresis_margin_blocks_marginal_candidates() {
     assert_eq!(fleet.tick(&readings), None);
 }
 
-// cswap: TestDecisionTable.test_issue_115_strictly_better_candidate_switches
 #[test]
 fn issue_115_strictly_better_candidate_switches() {
     let mut fleet = Fleet::new(3);
@@ -302,7 +300,6 @@ fn issue_115_strictly_better_candidate_switches() {
     assert_eq!(fleet.state.left_trigger.as_deref(), Some("proactive"));
 }
 
-// cswap: TestDecisionTable.test_proactive_never_lands_at_or_over_threshold
 #[test]
 fn proactive_never_lands_at_or_over_threshold() {
     let mut fleet = Fleet::new(2);
@@ -311,7 +308,6 @@ fn proactive_never_lands_at_or_over_threshold() {
     assert_eq!(fleet.tick(&rows([(1, five(90.0)), (2, five(85.0))])), None);
 }
 
-// cswap: TestDecisionTable.test_stable_landing_does_not_switch_back
 #[test]
 fn stable_landing_does_not_switch_back() {
     let mut fleet = Fleet::new(2);
@@ -335,7 +331,7 @@ fn stable_landing_does_not_switch_back() {
     assert_eq!(fleet.tick(&readings), None);
 }
 
-// cswap: TestDecisionTable.test_mixed_unknown_and_exhausted_is_not_all_exhausted (the ranking; the report is the tick's)
+// The ranking only; the report is the tick's.
 #[test]
 fn mixed_unknown_and_exhausted_is_not_all_exhausted() {
     let fleet = Fleet::new(3);
@@ -348,7 +344,6 @@ fn mixed_unknown_and_exhausted_is_not_all_exhausted() {
     assert!(ranking.any_known, "the account at its limit is readable");
 }
 
-// cswap: TestDecisionTable.test_cooldown_suppresses_proactive
 #[test]
 fn cooldown_suppresses_proactive() {
     let mut fleet = Fleet::new(3);
@@ -367,7 +362,6 @@ fn cooldown_suppresses_proactive() {
     assert_eq!(fleet.tick(&readings), None);
 }
 
-// cswap: TestDecisionTable.test_at_limit_bypasses_cooldown
 #[test]
 fn at_limit_bypasses_cooldown() {
     let mut fleet = Fleet::new(3);
@@ -379,7 +373,6 @@ fn at_limit_bypasses_cooldown() {
     assert_eq!(fleet.state.left_trigger.as_deref(), Some("at-limit"));
 }
 
-// cswap: TestDecisionTable.test_cooldown_expires
 #[test]
 fn cooldown_expires() {
     let mut fleet = Fleet::new(3);
@@ -392,7 +385,6 @@ fn cooldown_expires() {
     );
 }
 
-// cswap: TestDecisionTable.test_all_candidates_unknown_is_no_comparison
 #[test]
 fn all_candidates_unknown_is_no_comparison() {
     let fleet = Fleet::new(3);
@@ -401,7 +393,6 @@ fn all_candidates_unknown_is_no_comparison() {
     assert!(!ranking.any_known);
 }
 
-// cswap: TestDecisionTable.test_tie_resolves_to_earliest_slot
 #[test]
 fn tie_resolves_to_earliest_slot() {
     let mut fleet = Fleet::new(3);
@@ -411,7 +402,6 @@ fn tie_resolves_to_earliest_slot() {
     );
 }
 
-// cswap: TestDecisionTable.test_candidate_not_better_than_active_is_skipped
 #[test]
 fn candidate_not_better_than_active_is_skipped() {
     let mut fleet = Fleet::new(3);
@@ -421,7 +411,6 @@ fn candidate_not_better_than_active_is_skipped() {
     );
 }
 
-// cswap: TestDecisionTable.test_at_limit_escapes_hysteresis_bar
 #[test]
 fn at_limit_escapes_hysteresis_bar() {
     let mut fleet = Fleet::new(3);
@@ -432,7 +421,6 @@ fn at_limit_escapes_hysteresis_bar() {
     assert_eq!(fleet.state.left_trigger.as_deref(), Some("at-limit"));
 }
 
-// cswap: TestDecisionTable.test_at_limit_never_targets_another_at_limit_account
 #[test]
 fn at_limit_never_targets_another_at_limit_account() {
     let mut fleet = Fleet::new(3);
@@ -446,7 +434,6 @@ fn at_limit_never_targets_another_at_limit_account() {
     );
 }
 
-// cswap: TestDecisionTable.test_failover_ignores_hysteresis_bar
 #[test]
 fn failover_ignores_hysteresis_bar() {
     let mut fleet = Fleet::new(3);
@@ -482,7 +469,7 @@ fn the_census_excludes_quarantined_accounts() {
     assert_eq!(
         fleet.census().oauth,
         [4],
-        "every key of `quarantine` counts, as cswap counts it"
+        "every key of `quarantine` counts"
     );
 }
 
@@ -503,7 +490,6 @@ fn resets(fleet: &Fleet) -> [String; 4] {
     ]
 }
 
-// cswap: TestConsumeFirstStrategy.test_below_threshold_switches_to_soonest_weekly_reset
 #[test]
 fn below_threshold_switches_to_soonest_weekly_reset() {
     let mut fleet = Fleet::consume_first(3);
@@ -517,7 +503,6 @@ fn below_threshold_switches_to_soonest_weekly_reset() {
     assert_eq!(fleet.state.left_trigger.as_deref(), Some("consume-first"));
 }
 
-// cswap: TestConsumeFirstStrategy.test_stays_when_active_already_resets_soonest
 #[test]
 fn stays_when_active_already_resets_soonest() {
     let mut fleet = Fleet::consume_first(3);
@@ -537,7 +522,6 @@ fn stays_when_active_already_resets_soonest() {
     assert_eq!(fleet.tick(&readings), None);
 }
 
-// cswap: TestConsumeFirstStrategy.test_over_threshold_prefers_soonest_reset_over_max_headroom
 #[test]
 fn over_threshold_prefers_soonest_reset_over_max_headroom() {
     let mut fleet = Fleet::consume_first(3);
@@ -550,7 +534,6 @@ fn over_threshold_prefers_soonest_reset_over_max_headroom() {
     assert_eq!(fleet.tick(&readings), Some(2));
 }
 
-// cswap: TestConsumeFirstStrategy.test_a_consume_first_target_must_still_be_healthy
 #[test]
 fn a_consume_first_target_must_still_be_healthy() {
     let mut fleet = Fleet::consume_first(2);
@@ -566,7 +549,6 @@ fn a_consume_first_target_must_still_be_healthy() {
     );
 }
 
-// cswap: TestConsumeFirstStrategy.test_respects_cooldown
 #[test]
 fn respects_cooldown() {
     let mut fleet = Fleet::consume_first(3);
@@ -596,7 +578,6 @@ fn respects_cooldown() {
     assert_eq!(fleet.active, 2);
 }
 
-// cswap: TestConsumeFirstStrategy.test_reset_unknown_when_active_reset_missing
 #[test]
 fn reset_unknown_when_active_reset_missing() {
     let mut fleet = Fleet::consume_first(3);
@@ -616,7 +597,6 @@ fn reset_unknown_when_active_reset_missing() {
     assert_eq!(fleet.tick(&readings), None);
 }
 
-// cswap: TestConsumeFirstStrategy.test_unreadable_candidates_stay_no_comparison
 #[test]
 fn unreadable_candidates_stay_no_comparison() {
     let fleet = Fleet::consume_first(3);
@@ -629,7 +609,6 @@ fn unreadable_candidates_stay_no_comparison() {
     assert!(!ranking.any_known);
 }
 
-// cswap: TestConsumeFirstStrategy.test_exhausted_candidates_hold_without_false_reset_claim
 #[test]
 fn exhausted_candidates_hold_without_false_reset_claim() {
     let fleet = Fleet::consume_first(3);
@@ -645,7 +624,6 @@ fn exhausted_candidates_hold_without_false_reset_claim() {
     assert!(ranking.active_weekly_reset.is_some());
 }
 
-// cswap: TestConsumeFirstStrategy.test_skips_sooner_account_that_is_exhausted
 #[test]
 fn skips_sooner_account_that_is_exhausted() {
     let mut fleet = Fleet::consume_first(3);
@@ -658,7 +636,6 @@ fn skips_sooner_account_that_is_exhausted() {
     assert_eq!(fleet.tick(&readings), Some(3));
 }
 
-// cswap: TestConsumeFirstStrategy.test_candidate_with_past_reset_is_not_selected
 #[test]
 fn candidate_with_past_reset_is_not_selected() {
     let mut fleet = Fleet::consume_first(3);
@@ -671,7 +648,6 @@ fn candidate_with_past_reset_is_not_selected() {
     assert_eq!(fleet.tick(&readings), Some(3));
 }
 
-// cswap: TestConsumeFirstStrategy.test_active_past_reset_holds_reset_unknown
 #[test]
 fn active_past_reset_holds_reset_unknown() {
     let mut fleet = Fleet::consume_first(3);
@@ -687,7 +663,7 @@ fn active_past_reset_holds_reset_unknown() {
     assert_eq!(fleet.tick(&readings), None);
 }
 
-/// cswap's `TestConsumeFirstDepartureRecordsItsOwnTrigger` fleet: the account left (1) on 11 points, the active one
+/// The departure-trigger fleet: the account left (1) on 11 points, the active one
 /// (2) on 5, no resets anywhere.
 fn eleven_against_five(state: AutoswitchState) -> Fleet {
     let mut fleet = Fleet::new(2);
@@ -696,7 +672,6 @@ fn eleven_against_five(state: AutoswitchState) -> Fleet {
     fleet
 }
 
-// cswap: TestConsumeFirstDepartureRecordsItsOwnTrigger.test_the_null_snapshot_answers_differently_by_recorded_trigger
 #[test]
 fn the_null_snapshot_answers_differently_by_recorded_trigger() {
     let readings = rows([(1, five(89.0)), (2, five(95.0))]);
@@ -712,22 +687,18 @@ fn the_null_snapshot_answers_differently_by_recorded_trigger() {
     );
 }
 
-// cswap: TestConsumeFirstDepartureRecordsItsOwnTrigger.test_pre_upgrade_null_snapshot_without_leftTrigger_still_infers_failover
 #[test]
 fn pre_upgrade_null_snapshot_without_left_trigger_still_infers_failover() {
     let fleet = eleven_against_five(left(1, Snap::Null, Snap::Null, None));
     assert!(fleet.recovered(&rows([(1, five(89.0)), (2, five(95.0))])));
 }
 
-// cswap: TestConsumeFirstDepartureRecordsItsOwnTrigger
-// .test_a_legacy_record_with_a_real_leftHeadroom_is_never_forced_through_the_failover_legs
 #[test]
 fn a_legacy_record_with_a_real_left_headroom_is_never_forced_through_the_failover_legs() {
     let fleet = eleven_against_five(left(1, Snap::At(10.0), Snap::Null, None));
     assert!(!fleet.recovered(&rows([(1, five(89.0)), (2, five(95.0))])));
 }
 
-// cswap: TestEveryAccountAboveThreshold.test_a_single_healthy_peer_still_wins_normally
 #[test]
 fn a_single_healthy_peer_still_wins_normally() {
     let mut fleet = Fleet::new(3);
@@ -739,7 +710,6 @@ fn a_single_healthy_peer_still_wins_normally() {
     assert_eq!(fleet.tick(&readings), Some(3));
 }
 
-// cswap: TestEveryAccountAboveThreshold.test_below_threshold_is_untouched
 #[test]
 fn below_threshold_is_untouched() {
     let mut fleet = Fleet::new(3);
@@ -749,7 +719,6 @@ fn below_threshold_is_untouched() {
     );
 }
 
-// cswap: TestEveryAccountAboveThreshold.test_all_at_limit_still_reports_exhausted
 #[test]
 fn all_at_limit_still_reports_exhausted() {
     let mut fleet = Fleet::new(3);
@@ -761,7 +730,6 @@ fn all_at_limit_still_reports_exhausted() {
     assert_eq!(fleet.tick(&readings), None);
 }
 
-// cswap: TestEveryAccountAboveThreshold.test_at_limit_trigger_still_ignores_the_landing_rule
 #[test]
 fn at_limit_trigger_still_ignores_the_landing_rule() {
     let mut fleet = Fleet::new(3);
@@ -774,7 +742,6 @@ fn at_limit_trigger_still_ignores_the_landing_rule() {
     assert_eq!(fleet.state.left_trigger.as_deref(), Some("at-limit"));
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_no_return_filter_does_not_block_the_at_limit_escape
 #[test]
 fn the_no_return_filter_does_not_block_the_at_limit_escape() {
     let mut fleet = Fleet::new(3);
@@ -785,7 +752,7 @@ fn the_no_return_filter_does_not_block_the_at_limit_escape() {
     );
 }
 
-/// cswap's opening move of the bar tests: account 1 at 92 % (500 h out) left for account 2 at 10 % (400 h out), with a
+/// The bar tests' opening move: account 1 at 92 % (500 h out) left for account 2 at 10 % (400 h out), with a
 /// third account at `third` (300 h out) when there is one; the clock then advances past the cooldown.
 fn leave_one_for_two(fleet: &mut Fleet, third: Option<f64>, resets: &[String; 3]) {
     let mut readings = rows([
@@ -811,7 +778,6 @@ fn days_out(fleet: &Fleet) -> [String; 3] {
     ]
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_a_proactive_move_does_not_lock_out_the_next_one
 #[test]
 fn a_proactive_move_does_not_lock_out_the_next_one() {
     let mut fleet = Fleet::new(3);
@@ -829,7 +795,6 @@ fn a_proactive_move_does_not_lock_out_the_next_one() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_an_ordinary_departure_does_not_stall_on_a_weekly_bound_peer
 #[test]
 fn an_ordinary_departure_does_not_stall_on_a_weekly_bound_peer() {
     let mut fleet = Fleet::consume_first(2);
@@ -859,7 +824,7 @@ fn an_ordinary_departure_does_not_stall_on_a_weekly_bound_peer() {
     );
 }
 
-/// Whether some account in the census holds headroom, the evidence cswap's all-exhausted report must not lose.
+/// Whether some account in the census holds headroom, the evidence the all-exhausted report must not lose.
 fn census_has_headroom(fleet: &Fleet, readings: &Readings) -> bool {
     fleet.census().oauth.iter().any(|account| {
         source(readings)
@@ -869,8 +834,7 @@ fn census_has_headroom(fleet: &Fleet, readings: &Readings) -> bool {
     })
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_a_filtered_candidate_does_not_forge_an_all_exhausted_claim (the census the
-// report reads; the report is the tick's)
+// The census the report reads; the report is the tick's.
 #[test]
 fn a_filtered_candidate_does_not_forge_an_all_exhausted_claim() {
     let mut fleet = Fleet::new(3);
@@ -887,7 +851,6 @@ fn a_filtered_candidate_does_not_forge_an_all_exhausted_claim() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_bar_does_not_hide_the_account_from_the_census
 #[test]
 fn the_bar_does_not_hide_the_account_from_the_census() {
     let mut fleet = Fleet::new(3);
@@ -912,7 +875,6 @@ fn the_bar_does_not_hide_the_account_from_the_census() {
     assert!(census_has_headroom(&fleet, &readings));
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_bar_lifts_when_it_would_leave_nothing
 #[test]
 fn the_bar_lifts_when_it_would_leave_nothing() {
     let mut fleet = Fleet::consume_first(2);
@@ -938,7 +900,6 @@ fn the_bar_lifts_when_it_would_leave_nothing() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_bar_never_applies_to_an_escape
 #[test]
 fn the_bar_never_applies_to_an_escape() {
     let mut fleet = Fleet::new(3);
@@ -962,7 +923,6 @@ fn the_bar_never_applies_to_an_escape() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_bar_actually_removes_the_account_from_the_ranking
 #[test]
 fn the_bar_actually_removes_the_account_from_the_ranking() {
     let mut fleet = Fleet::new(3);
@@ -979,7 +939,6 @@ fn the_bar_actually_removes_the_account_from_the_ranking() {
     assert_eq!(rank_candidates(&inputs, Some(1)).ordered, Vec::<u32>::new());
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_an_unreadable_barred_account_does_not_crash_the_tick
 #[test]
 fn an_unreadable_barred_account_does_not_crash_the_tick() {
     let mut fleet = Fleet::new(3);
@@ -993,7 +952,7 @@ fn an_unreadable_barred_account_does_not_crash_the_tick() {
     );
 }
 
-/// cswap's flap fleet: account 1 on 8 points (500 h out) left for account 2 on 30 (400 h out), then an hour on.
+/// The flap fleet: account 1 on 8 points (500 h out) left for account 2 on 30 (400 h out), then an hour on.
 fn left_at_eight_for_thirty(fleet: &mut Fleet) -> [String; 2] {
     let resets = [fleet.reset_in(500 * H), fleet.reset_in(400 * H)];
     assert_eq!(
@@ -1007,7 +966,6 @@ fn left_at_eight_for_thirty(fleet: &mut Fleet) -> [String; 2] {
     resets
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_release_fires_on_this_same_fleet_once_the_peer_actually_improves
 #[test]
 fn the_release_fires_on_this_same_fleet_once_the_peer_actually_improves() {
     let mut fleet = Fleet::new(2);
@@ -1024,7 +982,6 @@ fn the_release_fires_on_this_same_fleet_once_the_peer_actually_improves() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_a_departure_at_full_quota_is_immediately_eligible
 #[test]
 fn a_departure_at_full_quota_is_immediately_eligible() {
     let mut fleet = Fleet::consume_first(2);
@@ -1053,7 +1010,6 @@ fn a_departure_at_full_quota_is_immediately_eligible() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_clamp_stays_load_bearing_when_dominance_does_not_fire
 #[test]
 fn the_clamp_stays_load_bearing_when_dominance_does_not_fire() {
     let mut fleet = Fleet::new(2);
@@ -1065,7 +1021,6 @@ fn the_clamp_stays_load_bearing_when_dominance_does_not_fire() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_dominance_leg_does_not_silently_read_an_unreadable_active_as_no_dominance
 #[test]
 fn the_dominance_leg_does_not_silently_read_an_unreadable_active_as_no_dominance() {
     let mut fleet = Fleet::new(2);
@@ -1080,8 +1035,6 @@ fn the_dominance_leg_does_not_silently_read_an_unreadable_active_as_no_dominance
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap
-// .test_no_return_account_does_not_re_bar_an_already_recovered_peer_when_the_active_is_unreadable
 #[test]
 fn no_return_account_does_not_re_bar_an_already_recovered_peer_when_the_active_is_unreadable() {
     let mut fleet = Fleet::new(2);
@@ -1100,7 +1053,6 @@ fn no_return_account_does_not_re_bar_an_already_recovered_peer_when_the_active_i
     }
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_all_spent_recovery_leg_carries_its_own_hysteresis
 #[test]
 fn the_all_spent_recovery_leg_carries_its_own_hysteresis() {
     let mut fleet = Fleet::new(2);
@@ -1116,7 +1068,6 @@ fn the_all_spent_recovery_leg_carries_its_own_hysteresis() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_dominance_fallback_does_not_fire_below_its_own_floor
 #[test]
 fn the_dominance_fallback_does_not_fire_below_its_own_floor() {
     let mut fleet = Fleet::new(2);
@@ -1127,7 +1078,6 @@ fn the_dominance_fallback_does_not_fire_below_its_own_floor() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_no_return_accounts_unreadable_active_fallback_has_a_floor_too
 #[test]
 fn no_return_accounts_unreadable_active_fallback_has_a_floor_too() {
     let mut fleet = Fleet::new(2);
@@ -1138,7 +1088,6 @@ fn no_return_accounts_unreadable_active_fallback_has_a_floor_too() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_a_switch_that_recorded_no_snapshot_still_releases
 #[test]
 fn a_switch_that_recorded_no_snapshot_still_releases() {
     let mut fleet = Fleet::new(2);
@@ -1153,7 +1102,6 @@ fn a_switch_that_recorded_no_snapshot_still_releases() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_absence_of_a_snapshot_releases_even_a_poor_or_unreadable_peer
 #[test]
 fn absence_of_a_snapshot_releases_even_a_poor_or_unreadable_peer() {
     let mut fleet = Fleet::new(2);
@@ -1168,7 +1116,7 @@ fn absence_of_a_snapshot_releases_even_a_poor_or_unreadable_peer() {
     );
 }
 
-/// cswap's frozen-peer walk after a failover: account 1 frozen on 4 points while account 2 burns through `pcts`.
+/// The frozen-peer walk after a failover: account 1 frozen on 4 points while account 2 burns through `pcts`.
 fn after_failover(fleet: &mut Fleet, pcts: &[f64]) -> Vec<Option<u32>> {
     let (frozen, r400) = (fleet.reset_in(500 * H), fleet.reset_in(400 * H));
     fleet.fail_over_to_2(Some(&r400));
@@ -1184,7 +1132,6 @@ fn after_failover(fleet: &mut Fleet, pcts: &[f64]) -> Vec<Option<u32>> {
     outcomes
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_a_failover_departure_still_unreadable_does_not_crash_or_release
 #[test]
 fn a_failover_departure_still_unreadable_does_not_crash_or_release() {
     let mut fleet = Fleet::new(2);
@@ -1198,7 +1145,7 @@ fn a_failover_departure_still_unreadable_does_not_crash_or_release() {
     );
 }
 
-/// cswap's failover-then-release walks: after the failover, ten ticks with account 1 at `peer` (10 h out) and account
+/// The failover-then-release walks: after the failover, ten ticks with account 1 at `peer` (10 h out) and account
 /// 2 at `active` (400 h out).
 fn release_after_failover(peer: f64, active: f64) -> Vec<Option<u32>> {
     let mut fleet = Fleet::new(2);
@@ -1211,7 +1158,6 @@ fn release_after_failover(peer: f64, active: f64) -> Vec<Option<u32>> {
     })
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_a_failover_departure_releases_once_the_peer_is_readable_again
 #[test]
 fn a_failover_departure_releases_once_the_peer_is_readable_again() {
     let outcomes = release_after_failover(0.0, 95.0);
@@ -1221,7 +1167,6 @@ fn a_failover_departure_releases_once_the_peer_is_readable_again() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_a_failover_departure_releases_a_healthy_but_not_near_full_peer
 #[test]
 fn a_failover_departure_releases_a_healthy_but_not_near_full_peer() {
     let outcomes = release_after_failover(30.0, 98.0);
@@ -1231,7 +1176,6 @@ fn a_failover_departure_releases_a_healthy_but_not_near_full_peer() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_a_failover_hold_still_escapes_at_limit
 #[test]
 fn a_failover_hold_still_escapes_at_limit() {
     let mut fleet = Fleet::new(2);
@@ -1250,7 +1194,6 @@ fn a_failover_hold_still_escapes_at_limit() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_release_fires_when_the_barred_account_recovered
 #[test]
 fn the_release_fires_when_the_barred_account_recovered() {
     let mut fleet = Fleet::new(2);
@@ -1267,7 +1210,6 @@ fn the_release_fires_when_the_barred_account_recovered() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_ratio_release_changes_where_the_engine_lands
 #[test]
 fn the_ratio_release_changes_where_the_engine_lands() {
     let mut fleet = Fleet::new(3);
@@ -1285,8 +1227,7 @@ fn the_ratio_release_changes_where_the_engine_lands() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_bar_is_recomputed_on_the_phase_two_snapshot (the bar is read from the
-// snapshot the ranking is given; the phase-two refetch is the tick's)
+// The bar is read from the snapshot the ranking is given; the phase-two refetch is the tick's.
 #[test]
 fn the_bar_is_recomputed_on_the_phase_two_snapshot() {
     let mut fleet = Fleet::consume_first(3);
@@ -1324,7 +1265,6 @@ fn the_bar_is_recomputed_on_the_phase_two_snapshot() {
     );
 }
 
-// cswap: TestTheReleasePredicateOneStateShapePerTest.test_failover_peer_readable_dominant_and_changed_releases
 #[test]
 fn failover_peer_readable_dominant_and_changed_releases() {
     let mut fleet = Fleet::new(2);
@@ -1335,7 +1275,6 @@ fn failover_peer_readable_dominant_and_changed_releases() {
     );
 }
 
-// cswap: TestTheReleasePredicateOneStateShapePerTest.test_the_failover_floor_moves_with_the_users_threshold
 #[test]
 fn the_failover_floor_moves_with_the_users_threshold() {
     let mut fleet = Fleet::new(2);
@@ -1353,7 +1292,6 @@ fn the_failover_floor_moves_with_the_users_threshold() {
     );
 }
 
-// cswap: TestTheReleasePredicateOneStateShapePerTest.test_failover_peer_still_poor_holds
 #[test]
 fn failover_peer_still_poor_holds() {
     let mut fleet = Fleet::new(2);
@@ -1361,7 +1299,6 @@ fn failover_peer_still_poor_holds() {
     assert!(!fleet.recovered(&rows([(1, five(98.0)), (2, five(95.0))])));
 }
 
-// cswap: TestTheReleasePredicateOneStateShapePerTest.test_failover_peer_still_unreadable_holds
 #[test]
 fn failover_peer_still_unreadable_holds() {
     let mut fleet = Fleet::new(2);
@@ -1369,7 +1306,6 @@ fn failover_peer_still_unreadable_holds() {
     assert!(!fleet.recovered(&rows([(1, five(98.0))])));
 }
 
-// cswap: TestTheReleasePredicateOneStateShapePerTest.test_ordinary_departure_weekly_bound_peer_that_recovered_releases
 #[test]
 fn ordinary_departure_weekly_bound_peer_that_recovered_releases() {
     let mut fleet = Fleet::new(2);
@@ -1381,7 +1317,6 @@ fn ordinary_departure_weekly_bound_peer_that_recovered_releases() {
     );
 }
 
-// cswap: TestTheReleasePredicateOneStateShapePerTest.test_pre_upgrade_record_keys_absent_releases
 #[test]
 fn pre_upgrade_record_keys_absent_releases() {
     let mut fleet = Fleet::new(2);
@@ -1389,7 +1324,6 @@ fn pre_upgrade_record_keys_absent_releases() {
     assert!(fleet.recovered(&rows([(1, five(98.0)), (2, five(96.0))])));
 }
 
-// cswap: TestTheReleasePredicateOneStateShapePerTest.test_at_limit_escape_still_works
 #[test]
 fn at_limit_escape_still_works() {
     let mut fleet = Fleet::new(2);
@@ -1404,7 +1338,6 @@ fn at_limit_escape_still_works() {
     }
 }
 
-// cswap: TestEscapeBeforeTheLimitLands.test_at_99_the_proactive_path_already_escapes
 #[test]
 fn at_99_the_proactive_path_already_escapes() {
     let mut fleet = Fleet::new(3);
@@ -1417,7 +1350,6 @@ fn at_99_the_proactive_path_already_escapes() {
     assert_eq!(fleet.state.left_trigger.as_deref(), Some("proactive"));
 }
 
-// cswap: TestEscapeBeforeTheLimitLands.test_below_the_brink_the_ordinary_rules_still_decide
 #[test]
 fn below_the_brink_the_ordinary_rules_still_decide() {
     let mut fleet = Fleet::new(3);
@@ -1429,7 +1361,6 @@ fn below_the_brink_the_ordinary_rules_still_decide() {
     assert_eq!(fleet.tick(&readings), None);
 }
 
-// cswap: TestReviewFindings202.test_recovery_reads_the_binding_windows_reset
 #[test]
 fn recovery_reads_the_binding_windows_reset() {
     let fleet = Fleet::new(1);
@@ -1443,7 +1374,6 @@ fn recovery_reads_the_binding_windows_reset() {
     );
 }
 
-// cswap: TestReviewFindings202.test_at_limit_still_ranks_by_headroom_when_all_are_above
 #[test]
 fn at_limit_still_ranks_by_headroom_when_all_are_above() {
     let mut fleet = Fleet::new(3);

@@ -1,4 +1,4 @@
-//! Making the switch a tick decided on, cswap's `_perform`: under the state file's lock, the cooldown is checked again
+//! Making the switch a tick decided on: under the state file's lock, the cooldown is checked again
 //! (another engine may have switched since the tick read the state), the target's quarantine and the engine lease are
 //! checked again, the switch runs, and a switch that moved the live login is recorded with the departure snapshot of
 //! the account it left. Nothing else writes the state file. The switch itself goes through [`SwitchFn`], which the
@@ -133,7 +133,8 @@ impl SwitchFn for LiveSwitch {
 pub(crate) struct LeftSnapshot {
     /// The left account's headroom, `None` when unknown.
     pub(crate) headroom: Option<f64>,
-    /// When its binding window resets, `None` when unknown or past (cswap's infinity, written as null).
+    /// When its binding window resets, `None` when the reset is unknown or past, which the ranking treats as infinitely far
+    /// (written as null).
     pub(crate) recovery: Option<Timestamp>,
 }
 
@@ -201,7 +202,7 @@ pub(crate) enum Performed {
     Refused(EngineError),
 }
 
-/// cswap's `_perform`: under the state file's lock, the re-checks, the switch and the record of a switch that moved
+/// The switch: under the state file's lock, the re-checks, the switch and the record of a switch that moved
 /// the live login (`lastSwitchAt`, `lastSwitchTo`, `lastSwitchFrom`, the departure snapshot, `leftTrigger`, and
 /// `paidFallback`, set by a paid move and cleared by any other). Only
 /// that record writes the file: every other outcome leaves it as it was.
@@ -432,7 +433,7 @@ mod tests {
             verdicts: &verdicts,
             claude_locks: LockTiming::CLAUDE,
         };
-        let holder = LeaseHolder::new("ops-tower", 101, 60.0);
+        let holder = LeaseHolder::new("rustling-tulip", 101, 60.0);
         Lease::new(&root)
             .claim_or_heartbeat(&holder, now(), &EmptyTable)
             .expect("the lease is claimed");

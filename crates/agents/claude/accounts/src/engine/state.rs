@@ -1,4 +1,4 @@
-//! cswap's `autoswitch_state.json`, read and written under `.autoswitch_state.lock` as cswap's engine does.
+//! The auto-switch state file, `autoswitch_state.json`, read and written under `.autoswitch_state.lock`.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,12 +13,12 @@ use crate::locks::{ACCOUNT_LOCK_TIMEOUT, acquire_in_root};
 use crate::paths::AccountsRoot;
 use crate::store;
 
-/// The `schemaVersion` cswap stamps on the state file at every write.
+/// The `schemaVersion` stamped on the state file at every write.
 pub const STATE_SCHEMA_VERSION: u64 = 1;
 
-/// cswap's auto-switch state, shared by every engine on an account store: when and where the last switch went, what the
-/// account it left looked like then, and the quarantined accounts. Times are seconds since the epoch, as cswap writes
-/// them. The file is read key by key, as cswap reads it: a key whose value has another type than cswap writes reads
+/// The auto-switch state, shared by every engine on an account store: when and where the last switch went, what the
+/// account it left looked like then, and the quarantined accounts. Times are seconds since the epoch.
+/// The file is read key by key: a key whose value has another type than the one written reads
 /// as absent and stays in [`AutoswitchState::extra`] as written, beside every key this crate does not model, and all of
 /// them are written back unchanged; a typed field that is set replaces the key's value.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -28,20 +28,20 @@ pub struct AutoswitchState {
     pub schema_version: Option<u64>,
     /// When an engine last switched (`lastSwitchAt`): the cooldown runs from here.
     pub last_switch_at: Option<f64>,
-    /// The account number the last switch went to (`lastSwitchTo`), a string as cswap writes it.
+    /// The account number the last switch went to (`lastSwitchTo`), a string.
     pub last_switch_to: Option<String>,
-    /// The account number the last switch left (`lastSwitchFrom`), a number as cswap writes it.
+    /// The account number the last switch left (`lastSwitchFrom`), a number.
     pub last_switch_from: Option<u32>,
     /// The left account's headroom at the switch (`leftHeadroom`): `None` when the key is absent (a record from
-    /// before cswap wrote it: no evidence), `Some(None)` when it is null (unmeasured, as a failover leaves it).
+    /// before the key was written: no evidence), `Some(None)` when it is null (unmeasured, as a failover leaves it).
     pub left_headroom: Option<Option<f64>>,
     /// When the left account's window recovers (`leftRecoveryAt`): `None` when the key is absent, `Some(None)` when it
-    /// is null, which means never (cswap's infinity).
+    /// is null, which means never.
     pub left_recovery_at: Option<Option<f64>>,
     /// What triggered the last switch (`leftTrigger`), such as `proactive`, `consume-first` or `failover`.
     pub left_trigger: Option<String>,
     /// The quarantined accounts by account number (`quarantine`): every key of the file's `quarantine` object, an
-    /// entry this crate cannot read included, since cswap counts every key as quarantined.
+    /// entry this crate cannot read included, since every key counts as quarantined.
     pub quarantine: BTreeMap<String, QuarantineRecord>,
     /// The paid fallback this store's engine is in (`paidFallback`): the account whose prepaid credits it spends on.
     /// `None` when it is in none, and when the key is malformed, which is then dropped at the next write; a malformed
@@ -54,14 +54,14 @@ pub struct AutoswitchState {
 /// One account's entry in the state file's `quarantine` object.
 #[derive(Clone, Debug, PartialEq)]
 pub enum QuarantineRecord {
-    /// An entry of the shape cswap's `_quarantine` writes.
+    /// An entry of the shape a quarantine writes.
     Entry(QuarantineEntry),
     /// An entry that is not of that shape (not an object, or a key missing or of another type), kept as written.
     Malformed(Value),
 }
 
 impl QuarantineRecord {
-    /// The entry, when it has cswap's shape.
+    /// The entry, when it has the entry shape.
     #[must_use]
     pub fn entry(&self) -> Option<&QuarantineEntry> {
         match self {
@@ -85,7 +85,7 @@ impl QuarantineRecord {
     }
 }
 
-/// One quarantined account, as cswap's `_quarantine` records it. Every other key is kept in
+/// One quarantined account, as a quarantine records it. Every other key is kept in
 /// [`QuarantineEntry::extra`].
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,8 +105,8 @@ pub struct QuarantineEntry {
 }
 
 impl QuarantineEntry {
-    /// An entry for the account `email`, quarantined for `reason` at `at` (RFC 3339 UTC to the second, as cswap's
-    /// `_now_iso` writes it) with the refresh token whose fingerprint is `refresh_token_fingerprint`.
+    /// An entry for the account `email`, quarantined for `reason` at `at` (RFC 3339 UTC to the second)
+    /// with the refresh token whose fingerprint is `refresh_token_fingerprint`.
     #[must_use]
     pub fn new(
         email: impl Into<String>,
@@ -269,7 +269,7 @@ fn keep_extra(mut map: Map<String, Value>, extra: &Map<String, Value>) -> Value 
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct LeaseOwner {
-    /// The engine's owner name, such as `ops-tower`.
+    /// The engine's owner name, such as `rustling-tulip`.
     pub owner: String,
     /// The engine's process id.
     pub pid: u32,
@@ -300,7 +300,7 @@ impl LeaseOwner {
 
 impl AutoswitchState {
     /// Reads the state file of `root` under its lock, waiting up to [`ACCOUNT_LOCK_TIMEOUT`]. A missing file, or one
-    /// that is not a JSON object, reads as the default, as cswap's `{}` does.
+    /// that is not a JSON object, reads as the default.
     ///
     /// # Errors
     ///
@@ -312,8 +312,8 @@ impl AutoswitchState {
         read_unlocked(root)
     }
 
-    /// Reads, changes and writes the state file of `root` under its lock, waiting up to [`ACCOUNT_LOCK_TIMEOUT`], as
-    /// cswap's `_mutate_state` does: the state read as [`AutoswitchState::read`] reads it, stamped with
+    /// Reads, changes and writes the state file of `root` under its lock, waiting up to [`ACCOUNT_LOCK_TIMEOUT`]:
+    /// the state read as [`AutoswitchState::read`] reads it, stamped with
     /// [`STATE_SCHEMA_VERSION`], is handed to `change` and written atomically. Returns the state written.
     ///
     /// # Errors
@@ -356,7 +356,7 @@ impl AutoswitchState {
 
     /// Reads the state file of `root` under its lock, waiting up to `timeout`, and hands it to `change`, which returns
     /// its result and whether the state is to be written. Only then is the state stamped with [`STATE_SCHEMA_VERSION`]
-    /// and written atomically, as cswap writes the file only after a switch; otherwise the file keeps its bytes.
+    /// and written atomically; otherwise the file keeps its bytes.
     ///
     /// # Errors
     ///
@@ -405,7 +405,7 @@ impl AutoswitchState {
             || self.extra.contains_key("schemaVersion"))
     }
 
-    /// The state in the file's object, each known key taken out of `map` only when it has the type cswap writes.
+    /// The state in the file's object, each known key taken out of `map` only when it has the type written for it.
     fn from_map(mut map: Map<String, Value>) -> Self {
         Self {
             schema_version: take(&mut map, "schemaVersion"),
@@ -588,7 +588,7 @@ fn check_state_folders(root: &AccountsRoot) -> Result<(), EngineError> {
 
 /// The state file of `root`, read with its lock already held.
 ///
-/// It holds no secret (cswap's engine state, kept as a `Value` to write back), so the parsed tree is dropped without
+/// It holds no secret (the engine state, kept as a `Value` to write back), so the parsed tree is dropped without
 /// scrubbing.
 fn read_unlocked(root: &AccountsRoot) -> Result<AutoswitchState, EngineError> {
     let path = root.autoswitch_state();

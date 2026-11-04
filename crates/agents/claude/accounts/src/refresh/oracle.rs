@@ -1,6 +1,5 @@
 //! The ownership oracle: whose account a credential's access token belongs to, asked of the profile endpoint, and
-//! the verdicts kept per credential lineage, ports of cswap's `fetch_oauth_profile`, `_resolved_matches_slot_identity`,
-//! `_lineage_key` and `_probe_verdicts`.
+//! the verdicts kept per credential lineage.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -29,7 +28,7 @@ impl fmt::Debug for ResolvedProfile {
     }
 }
 
-/// The account a profile answer resolves to, as cswap's `fetch_oauth_profile` reads it: a 2xx answer whose `account`
+/// The account a profile answer resolves to: a 2xx answer whose `account`
 /// object carries a non-empty string `uuid` (trimmed); `account.email` and `organization.uuid` only when they are
 /// strings. Anything else is unresolved.
 pub(crate) fn resolve(answer: &RawProfile) -> Option<ResolvedProfile> {
@@ -54,7 +53,7 @@ pub(crate) fn resolve(answer: &RawProfile) -> Option<ResolvedProfile> {
     })
 }
 
-/// Whether a resolved profile is a slot's account, cswap's tri-state answer.
+/// Whether a resolved profile is a slot's account, a tri-state answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     /// The same account, by uuid.
@@ -67,7 +66,7 @@ pub(crate) enum Verdict {
     Unverifiable,
 }
 
-/// Whether `resolved` is `own`'s account, as cswap's `_resolved_matches_slot_identity` decides. With a uuid on both
+/// Whether `resolved` is `own`'s account. With a uuid on both
 /// sides, the uuids decide, the organizations only corroborating (a missing one on either side is tolerated). A slot
 /// without a uuid is affirmed only by an exact email and organization match with the resolved organization present;
 /// the same email under another organization, or a resolved email and organization matching nothing, is foreign; a
@@ -122,7 +121,7 @@ fn matches_by_email_and_organization(
     }
 }
 
-/// A credential lineage as one slot sees it, cswap's `_lineage_key`: the account number, the caller's email, the
+/// A credential lineage as one slot sees it: the account number, the caller's email, the
 /// slot's stored email, organization and uuid, and the credential's fingerprint. A slot re-created for another account
 /// builds another key, so it never inherits its predecessor's verdicts. Its `Debug` shows the account number alone.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -173,7 +172,7 @@ impl LineageKey {
     }
 }
 
-/// The ownership verdicts given so far, per credential lineage, cswap's `_probe_verdicts`: `true` when the lineage is
+/// The ownership verdicts given so far, per credential lineage: `true` when the lineage is
 /// the slot's own (the oracle affirmed it, or this process's own refresh produced it), `false` when the oracle named
 /// another account. Held in memory only, for the life of the poller; an unverifiable answer or an oracle failure is
 /// never remembered. Its `Debug` shows how many verdicts it holds, never whose.
@@ -275,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_identity_matches_the_slot_as_cswap_decides() {
+    fn resolved_identity_matches_the_slot_in_every_case() {
         let cases = [
             (
                 "uuid and org equal",

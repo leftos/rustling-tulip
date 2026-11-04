@@ -1,4 +1,4 @@
-//! The claude-accounts crate's token refresh: the token POST and cswap's fingerprints against a fake token endpoint,
+//! The claude-accounts crate's token refresh: the token POST and the credential fingerprints against a fake token endpoint,
 //! and the consume gate against a fake endpoint, a fake session table and a scratch account store.
 
 #![expect(

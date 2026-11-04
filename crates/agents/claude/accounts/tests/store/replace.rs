@@ -277,7 +277,7 @@ fn a_junctioned_cache_folder_is_neither_read_nor_written() {
 #[test]
 fn a_store_created_from_nothing_is_owner_only() {
     let scratch = Scratch::empty("a_store_created_from_nothing_is_owner_only");
-    let parent = scratch.dir.join("ops-tower");
+    let parent = scratch.dir.join("rustling-tulip");
     let root = AccountsRoot::new(parent.join("accounts"));
     let store = Store::open(root.clone()).expect("the store opens");
     let lock = AccountLock::acquire(&root).expect("the account lock is free");

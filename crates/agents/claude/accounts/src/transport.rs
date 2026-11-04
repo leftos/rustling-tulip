@@ -1,6 +1,6 @@
 //! The HTTP half of a usage read and of a token refresh, left to the caller: this crate has no HTTP client. The caller
-//! implements [`UsageTransport`] with its own client and sends the request cswap's `request_usage_data` sends, and
-//! [`RefreshTransport`] for the POST cswap's `try_refresh_oauth_credentials` sends.
+//! implements [`UsageTransport`] with its own client and sends the usage request, and
+//! [`RefreshTransport`] for the token refresh POST.
 
 use std::fmt;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use crate::secret::{AccessToken, RefreshToken, Secret};
 pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// The beta header the usage endpoint requires, as `(name, value)`.
 pub const USAGE_BETA_HEADER: (&str, &str) = ("anthropic-beta", "oauth-2025-04-20");
-/// How long cswap waits for the usage endpoint before giving up.
+/// How long the usage endpoint is waited for before giving up.
 pub const USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The prepaid-credits endpoint: `GET` with the account's access token as a bearer token and [`USAGE_BETA_HEADER`],
 /// answering the organization's prepaid extra-usage balance. `{org_uuid}` stands for the organization's UUID; build the
@@ -107,11 +107,11 @@ pub trait UsageTransport {
 
 /// The token endpoint: `POST` a refresh grant as JSON, get a new access token back.
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-/// The OAuth client id Claude Code and cswap send with every refresh grant.
+/// The OAuth client id Claude Code sends with every refresh grant.
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-/// How long cswap waits for the token endpoint before giving up.
+/// How long the token endpoint is waited for before giving up.
 pub const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long the logged-in account's refresh POST may take: it runs under cswap's account lock, which a switch waits
+/// How long the logged-in account's refresh POST may take: it runs under the store's account lock, which a switch waits
 /// 10 s for, so it is bounded well inside that.
 pub const LOCKED_REFRESH_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -156,7 +156,7 @@ impl RefreshRequest {
     }
 
     /// How long the POST may take before it is given up: [`REFRESH_TIMEOUT`] for an inactive account's grant,
-    /// [`LOCKED_REFRESH_TIMEOUT`] for the logged-in account's, which is spent under cswap's account lock.
+    /// [`LOCKED_REFRESH_TIMEOUT`] for the logged-in account's, which is spent under the store's account lock.
     #[must_use]
     pub fn timeout(&self) -> Duration {
         self.timeout
@@ -219,10 +219,10 @@ pub trait RefreshTransport {
 
 /// The profile endpoint: `GET` with an access token as a bearer token, answering whose token it is.
 pub const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
-/// How long cswap waits for the profile endpoint before giving up.
+/// How long the profile endpoint is waited for before giving up.
 pub const PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
-/// The `User-Agent` cswap sends to the profile endpoint.
-pub const PROFILE_USER_AGENT: &str = "claude-swap/1.0";
+/// The `User-Agent` sent to the profile endpoint.
+pub const PROFILE_USER_AGENT: &str = "rustling-tulip/1.0";
 
 /// One answer from the profile endpoint. Its body names an account (uuid, email, organization) and holds no token; its
 /// `Debug` shows the status alone.

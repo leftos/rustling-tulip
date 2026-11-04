@@ -59,7 +59,7 @@ fn run_before_lock() {
     });
 }
 
-/// Whose a stash row is, cswap's `configSlot`: a managed account's number, or `unmanaged` for a live login no managed
+/// Whose a stash row is (`configSlot`): a managed account's number, or `unmanaged` for a live login no managed
 /// account has. Only an account's rows are ever adopted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConfigSlot {
@@ -237,7 +237,7 @@ fn entry_files_exist(dir: &Path) -> bool {
 }
 
 /// Rewrites the manifest with `entries` at [`MANIFEST_SCHEMA_VERSION`], first setting a manifest that does not parse
-/// aside as `.unclaimed-manifest.json.corrupt-<epoch seconds>`, as cswap's `_write_stash_manifest` does. Only
+/// aside as `.unclaimed-manifest.json.corrupt-<epoch seconds>`. Only
 /// [`mutate`] calls it, once its refusal checks passed.
 fn write_manifest(
     dir: &Path,
@@ -248,7 +248,7 @@ fn write_manifest(
     if let Ok(Some(bytes)) = read_optional_unlinked(&path)
         && serde_json::from_slice::<Value>(&bytes).is_err()
     {
-        // cswap only logs a set-aside that fails; the rewrite below goes ahead either way.
+        // A set-aside that fails is only logged; the rewrite below goes ahead either way.
         let _set_aside = fs::rename(
             &path,
             dir.join(format!("{MANIFEST}.corrupt-{}", now.as_second())),
@@ -288,7 +288,7 @@ fn mutate(
     write_manifest(&dir, &entries, now).map_err(|_| MutateFailed::Failed)
 }
 
-/// cswap's entry id: `<UTC time %Y%m%dT%H%M%S>-<first 12 hex of the credential's SHA-256>-<6 hex nonce>`.
+/// An entry id: `<UTC time %Y%m%dT%H%M%S>-<first 12 hex of the credential's SHA-256>-<6 hex nonce>`.
 fn entry_id(blob: &CredentialBlob, now: jiff::Timestamp) -> String {
     let digest = fingerprint("", blob.expose().as_bytes());
     let serial = NONCE_SERIAL.fetch_add(1, Ordering::Relaxed);
@@ -638,7 +638,7 @@ pub(crate) fn retire_superseded(
     }
 }
 
-/// Completes an earlier pass's failed persist, cswap's `_adopt_stashed_successor`: when the account still stores the
+/// Completes an earlier pass's failed persist: when the account still stores the
 /// generation a row's `consumedFp` names, that row's credential is its live successor, written back and retired.
 /// Rows of the account that can never match are retired on sight: a CAS conflict's, and one whose bytes are gone.
 /// Each entry opens under the organization its row records, none for a row that records none; the roster is never
@@ -709,7 +709,7 @@ fn field<'r>(row: &'r Value, key: &str) -> Option<&'r str> {
     row.get(key).and_then(Value::as_str)
 }
 
-/// Whether `id` has the form of cswap's entry ids, `^\d{8}T\d{6}-[0-9a-f]{12}-[0-9a-f]{6}$` with ASCII digits. An id
+/// Whether `id` has the form of an entry id, `^\d{8}T\d{6}-[0-9a-f]{12}-[0-9a-f]{6}$` with ASCII digits. An id
 /// becomes a file name, so a row with any other id is never read, adopted, retired or deleted.
 fn valid_id(id: &str) -> bool {
     let decimal = |text: &str, len: usize| {
@@ -735,7 +735,7 @@ fn valid_id(id: &str) -> bool {
 
 /// Retires a row of the account keyed to another generation when it can never match: a CAS conflict's (its successor
 /// lost to the racing writer's lineage), or one whose bytes are gone. A CAS conflict's entry is deleted without being
-/// opened: that is cswap's rule, decided by the row's reason alone, whatever the bytes hold. Any other row whose bytes
+/// opened: the row's reason alone decides it, whatever the bytes hold. Any other row whose bytes
 /// exist and cannot be read is kept: it is not evidence that the credential is gone.
 fn retire_if_dead(
     root: &AccountsRoot,
@@ -1648,7 +1648,7 @@ mod tests {
         let sealed =
             guard::read_file(root.root(), &entry_path(&dir, FREE)).expect("the new entry reads");
         assert!(
-            sealed.as_bytes().starts_with(b"OTSEAL"),
+            sealed.as_bytes().starts_with(b"RTSEAL"),
             "the entry is a sealed file, not base64"
         );
         let opened = seal::open(

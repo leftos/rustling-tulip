@@ -1,7 +1,7 @@
-//! The locks cswap and Claude Code take around their files, taken the same way so the three tools exclude each other.
+//! The account store's locks and Claude Code's, each taken the way its owner takes it, so any process taking the same lock the same way is excluded.
 //!
-//! cswap's locks ([`FileLock`]: the account lock `.lock` and each account's consume lock) hold byte 0 of a lock file,
-//! the byte cswap's `msvcrt.locking` takes. Claude Code's locks ([`DirLock`]: its two credential locks and its config
+//! The store's locks ([`FileLock`]: the account lock `.lock` and each account's consume lock) hold byte 0 of a lock file,
+//! the byte `msvcrt.locking` takes. Claude Code's locks ([`DirLock`]: its two credential locks and its config
 //! lock) are directories in the `proper-lockfile` style: creating the directory is the mutex, a holder touches its mtime
 //! while it lives, and a directory older than the lock's staleness belongs to a dead holder and may be taken over.
 //! Off 64-bit Windows every lock returns [`LockError::Unsupported`].
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use crate::paths::{AccountsRoot, ClaudePaths};
 
-/// How long cswap waits for its account lock before giving up.
+/// How long the account lock is waited for before giving up.
 pub const ACCOUNT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long each of Claude Code's directory locks is waited for. The credentials pair waits up to twice this.
 pub const CLAUDE_LOCK_TIMEOUT: Duration = Duration::from_secs(9);
@@ -52,7 +52,7 @@ pub enum LockError {
     Unsupported,
 }
 
-/// cswap's file lock: byte 0 of a lock file, held exclusively.
+/// The store's file lock: byte 0 of a lock file, held exclusively.
 pub struct FileLock;
 
 /// A held [`FileLock`]; dropping it releases the byte and closes the file.

@@ -1,6 +1,6 @@
-//! The auto-switch engine's tick, [`Engine::tick`], ported from cswap's `test_autoswitch.py` one test per cswap test:
-//! a scratch account store whose account 1 is Claude Code's live login, with a fake usage collection (cswap's tests patch
-//! `usage_entries_by_account`; these set the fake collection's entries), a fake switch that moves the live login, a fake
+//! The auto-switch engine's tick, [`Engine::tick`]:
+//! a scratch account store whose account 1 is Claude Code's live login, with a fake usage collection (these tests set the
+//! fake collection's entries), a fake switch that moves the live login, a fake
 //! token endpoint and a process table.
 
 use std::cell::{Cell, RefCell};
@@ -50,7 +50,7 @@ fn uuid(number: u32) -> String {
     format!("00000000-0000-4000-8000-0000000000{number:02}")
 }
 
-/// cswap's `_usage`: the 5-hour window at `pct` and an empty 7-day window.
+/// The 5-hour window at `pct` and an empty 7-day window.
 fn usage(pct: f64) -> Value {
     json!({"five_hour": {"pct": pct}, "seven_day": {"pct": 0.0}})
 }
@@ -60,7 +60,7 @@ fn usage_at(pct: f64, reset: &str) -> Value {
     json!({"five_hour": {"pct": pct, "resets_at": reset}, "seven_day": {"pct": 0.0}})
 }
 
-/// cswap's `_usage7`: both windows, the 7-day one resetting at `reset`.
+/// Both windows, the 7-day one resetting at `reset`.
 fn usage7(pct5: f64, pct7: f64, reset: &str) -> Value {
     json!({"five_hour": {"pct": pct5}, "seven_day": {"pct": pct7, "resets_at": reset}})
 }
@@ -438,7 +438,7 @@ impl ProcessTable for Processes {
     }
 }
 
-/// cswap's engine harness: OAuth accounts 1 to N with far-off credentials, account 1 the live login, cswap's default
+/// The engine harness: OAuth accounts 1 to N with far-off credentials, account 1 the live login, the default
 /// settings, and an engine with the warm-up off. Shared with [`crate::cadence`], which reads its engine, ticks it, and
 /// reads the fake switch's calls.
 pub(crate) struct Bench {
@@ -499,7 +499,7 @@ impl Bench {
             securestorage_dir_set: false,
             settings: AutoSwitchSettings::default(),
             auto_switch_enabled: true,
-            engine: Engine::new("ops-tower", 101, None),
+            engine: Engine::new("rustling-tulip", 101, None),
         };
         for number in 1..=accounts {
             bench.put_credential(number, &credential(number, FAR));
@@ -1022,7 +1022,6 @@ fn all_above_threshold_holds_under_consume_first() {
     );
 }
 
-// cswap: TestDecisionTable.test_no_active_account
 #[test]
 fn no_active_account() {
     let mut bench = Bench::new("no_active_account", 2);
@@ -1033,7 +1032,6 @@ fn no_active_account() {
     assert_eq!(bench.switcher.calls().len(), 0);
 }
 
-// cswap: TestDecisionTable.test_unmanaged_live_login_is_never_touched
 #[test]
 fn unmanaged_live_login_is_never_touched() {
     let mut bench = Bench::new("unmanaged_live_login", 2);
@@ -1047,7 +1045,6 @@ fn unmanaged_live_login_is_never_touched() {
     assert_eq!(bench.switcher.calls().len(), 0);
 }
 
-// cswap: TestDecisionTable.test_stale_beyond_trust_blocks_all_exhausted
 #[test]
 fn stale_beyond_trust_blocks_all_exhausted() {
     let mut bench = three("stale_beyond_trust");
@@ -1068,7 +1065,6 @@ fn stale_beyond_trust_blocks_all_exhausted() {
     assert_eq!(reasons(&report), ["all-above-threshold"]);
 }
 
-// cswap: TestDecisionTable.test_trusted_stale_exhausted_set_still_fires_all_exhausted
 #[test]
 fn trusted_stale_exhausted_set_still_fires_all_exhausted() {
     let mut bench = three("trusted_stale_exhausted");
@@ -1088,7 +1084,6 @@ fn trusted_stale_exhausted_set_still_fires_all_exhausted() {
     );
 }
 
-// cswap: TestDecisionTable.test_all_exhausted_carries_earliest_reset
 #[test]
 fn all_exhausted_carries_earliest_reset() {
     let mut bench = three("all_exhausted_earliest");
@@ -1107,12 +1102,11 @@ fn all_exhausted_carries_earliest_reset() {
     assert_eq!(
         report.sleep_target,
         Some(bench.in_secs(5400 + 60)),
-        "the sleep target is the reset plus cswap's slack"
+        "the sleep target is the reset plus the slack"
     );
     assert!(report.blocked_wait_long);
 }
 
-// cswap: TestDecisionTable.test_all_exhausted_ignores_non_future_reset
 #[test]
 fn all_exhausted_ignores_non_future_reset() {
     for offset in [-60_i64, 0] {
@@ -1133,14 +1127,13 @@ fn all_exhausted_ignores_non_future_reset() {
     }
 }
 
-/// cswap's `TestIdleHold._HELD`: the active token expired while Claude Code is idle; both peers readable.
+/// The active token expired while Claude Code is idle; both peers readable.
 fn held(bench: &mut Bench) -> TickReport {
     bench.set_usage(&[(1, None), (2, Some(usage(10.0))), (3, Some(usage(20.0)))]);
     bench.set_result(1, PollResult::TokenExpired);
     bench.tick()
 }
 
-// cswap: TestIdleHold.test_token_expired_holds_instead_of_failover
 #[test]
 fn token_expired_holds_instead_of_failover() {
     let mut bench = three("token_expired_holds");
@@ -1157,7 +1150,6 @@ fn token_expired_holds_instead_of_failover() {
     assert_eq!(bench.engine.health().unhealthy_ticks, 0);
 }
 
-// cswap: TestIdleHold.test_idle_hold_slows_cadence
 #[test]
 fn idle_hold_slows_cadence() {
     let mut bench = three("idle_hold_slows_cadence");
@@ -1178,7 +1170,6 @@ fn idle_hold_slows_cadence() {
     );
 }
 
-// cswap: TestIdleHold.test_idle_hold_cap_escalates_to_failover
 #[test]
 fn idle_hold_cap_escalates_to_failover() {
     let mut bench = three("idle_hold_cap");
@@ -1191,7 +1182,7 @@ fn idle_hold_cap_escalates_to_failover() {
     assert_eq!(switches(&report), [(Trigger::Failover, Some(2))]);
 }
 
-// The idle-hold lapse warning cswap logs (autoswitch.py:1103) is an event here.
+// The idle-hold lapse warning is an event.
 #[test]
 fn an_idle_hold_past_its_cap_warns() {
     let mut bench = three("idle_hold_lapse_warning");
@@ -1211,7 +1202,6 @@ fn an_idle_hold_past_its_cap_warns() {
     assert_eq!(reasons(&report), ["active-usage-unknown"]);
 }
 
-// cswap: TestIdleHold.test_recovery_resets_the_hold_clock
 #[test]
 fn recovery_resets_the_hold_clock() {
     let mut bench = three("recovery_resets_hold_clock");
@@ -1230,7 +1220,6 @@ fn recovery_resets_the_hold_clock() {
     assert_eq!(bench.live(), Some(1));
 }
 
-// cswap: TestIdleHold.test_plain_fetch_failure_still_counts_unhealthy
 #[test]
 fn plain_fetch_failure_still_counts_unhealthy() {
     let mut bench = three("plain_fetch_failure");
@@ -1246,7 +1235,6 @@ fn plain_fetch_failure_still_counts_unhealthy() {
     );
 }
 
-// cswap: TestIdleHold.test_foreign_credential_sentinel_fails_over_instead_of_holding
 #[test]
 fn foreign_credential_sentinel_fails_over_instead_of_holding() {
     let mut bench = three("foreign_credential_fails_over");
@@ -1278,7 +1266,6 @@ fn mark_api_key(bench: &Bench, number: u32) {
     bench.set_account(number, "kind", json!("api_key"));
 }
 
-// cswap: TestApiKeyAccounts.test_active_api_key_idles_engine
 #[test]
 fn active_api_key_idles_engine() {
     let mut bench = Bench::new("active_api_key_idles", 2);
@@ -1290,7 +1277,6 @@ fn active_api_key_idles_engine() {
     assert_eq!(bench.switcher.calls().len(), 0);
 }
 
-// cswap: TestFreshening.test_near_expiry_target_is_refreshed_and_persisted
 #[test]
 fn near_expiry_target_is_refreshed_and_persisted() {
     let mut bench = Bench::new("near_expiry_refreshed", 2);
@@ -1306,7 +1292,6 @@ fn near_expiry_target_is_refreshed_and_persisted() {
     assert_eq!(bench.switcher.calls(), [2]);
 }
 
-// cswap: TestFreshening.test_fresh_target_is_not_refreshed
 #[test]
 fn fresh_target_is_not_refreshed() {
     let mut bench = Bench::new("fresh_target_not_refreshed", 2);
@@ -1316,7 +1301,6 @@ fn fresh_target_is_not_refreshed() {
     assert_eq!(bench.endpoint.posts(), 0);
 }
 
-// cswap: TestFreshening.test_invalid_grant_quarantines_and_tries_next
 #[test]
 fn invalid_grant_quarantines_and_tries_next() {
     let mut bench = three("invalid_grant_quarantines");
@@ -1335,7 +1319,6 @@ fn invalid_grant_quarantines_and_tries_next() {
     assert!(bench.state()["quarantine"].get("2").is_some());
 }
 
-// cswap: TestFreshening.test_transient_failure_skips_without_quarantine
 #[test]
 fn transient_failure_skips_without_quarantine() {
     let mut bench = Bench::new("transient_freshen", 2);
@@ -1387,13 +1370,12 @@ fn a_store_refusing_writes_is_reported_as_the_freshen_error() {
     );
 }
 
-// cswap: TestQuarantineLifecycle.test_quarantine_persists_across_engine_instances
 #[test]
 fn quarantine_persists_across_engine_instances() {
     let mut bench = three("quarantine_persists");
     quarantine(&bench.store, 2, &address(2), "invalid_grant", bench.now())
         .expect("the quarantine is written");
-    bench.engine = Engine::new("ops-tower", 101, None);
+    bench.engine = Engine::new("rustling-tulip", 101, None);
     let report = bench.tick_with(&[
         (1, Some(usage(95.0))),
         (2, Some(usage(0.0))),
@@ -1403,7 +1385,6 @@ fn quarantine_persists_across_engine_instances() {
     assert_eq!(bench.live(), Some(3));
 }
 
-// cswap: TestQuarantineLifecycle.test_replaced_credentials_lift_quarantine
 #[test]
 fn replaced_credentials_lift_quarantine() {
     let mut bench = three("replaced_credentials_lift");
@@ -1422,7 +1403,6 @@ fn replaced_credentials_lift_quarantine() {
     assert!(bench.state()["quarantine"].get("2").is_none());
 }
 
-// cswap: TestEventsShape.test_every_event_has_envelope
 #[test]
 fn every_event_has_envelope() {
     let mut bench = three("every_event_has_envelope");
@@ -1436,7 +1416,6 @@ fn every_event_has_envelope() {
     }
 }
 
-// cswap: TestEventsShape.test_switch_event_refs_match_account_ref_shape
 #[test]
 fn switch_event_refs_match_account_ref_shape() {
     let mut bench = three("switch_event_refs");
@@ -1452,7 +1431,7 @@ fn switch_event_refs_match_account_ref_shape() {
     assert_eq!(payload["trigger"], "proactive");
 }
 
-// cswap: TestEventsShape.test_poll_event_human_line, as the poll event's fields: cswap's line is drawn from them.
+// The poll event's fields, from which a human-readable line is drawn.
 #[test]
 fn poll_event_carries_each_accounts_usage() {
     let mut bench = three("poll_event_fields");
@@ -1480,7 +1459,7 @@ fn poll_event_carries_each_accounts_usage() {
     assert_eq!(windows.get(&3), None);
 }
 
-// cswap: TestEventsShape.test_poll_event_windows_match_the_decision_set; the poll event shows the windows the decision
+// The poll event shows the windows the decision
 // reads: the account-wide windows, then each configured model's scoped window under its own name.
 #[test]
 fn poll_event_windows_match_the_decision_set() {
@@ -1494,7 +1473,6 @@ fn poll_event_windows_match_the_decision_set() {
     );
 }
 
-// cswap: TestTokenIdentity.test_identity_conflict_quarantines_instead_of_activating
 #[test]
 fn identity_conflict_quarantines_instead_of_activating() {
     let mut bench = three("identity_conflict_quarantines");
@@ -1517,7 +1495,7 @@ fn identity_conflict_quarantines_instead_of_activating() {
     assert_eq!(bench.live(), Some(3));
 }
 
-// cswap: TestTokenIdentity.test_dead_slot_quarantined_even_with_safety_copy_present, without the safety copy: the
+// A dead slot is quarantined; the safety copy is left out here: the
 // stash is the refresh tests' concern.
 #[test]
 fn dead_slot_quarantined() {
@@ -1536,7 +1514,6 @@ fn dead_slot_quarantined() {
     assert_eq!(bench.live(), Some(3));
 }
 
-// cswap: TestConsumeFirst.test_left_snapshot_uses_the_ranking_now_not_a_fresh_clock_read (test_autoswitch.py:5904)
 #[test]
 fn left_snapshot_uses_the_ranking_now_not_a_fresh_clock_read() {
     let mut bench = Bench::new("left_snapshot_ranking_now", 2);
@@ -1555,7 +1532,7 @@ fn left_snapshot_uses_the_ranking_now_not_a_fresh_clock_read() {
     assert_eq!(bench.state()["leftHeadroom"], json!(5.0));
 }
 
-// cswap: TestConsumeFirst.test_locked_recheck_stops_concurrent_engine (test_autoswitch.py:2887): another engine
+// Another engine
 // switches after this tick's own cooldown check; the re-check under the state lock backs off.
 #[test]
 fn locked_recheck_stops_concurrent_engine() {
@@ -1576,7 +1553,6 @@ fn locked_recheck_stops_concurrent_engine() {
     );
 }
 
-// cswap: TestConsumeFirst.test_single_account_below_threshold_is_no_action (test_autoswitch.py:2978)
 #[test]
 fn single_account_below_threshold_is_no_action() {
     let mut bench = Bench::new("single_account_consume_first", 1);
@@ -1595,7 +1571,7 @@ fn consume_first(test: &str) -> Bench {
     bench
 }
 
-/// cswap's `_R_SOON`, `_R_LATER` and `_R_LATEST`: three 7-day resets, soonest first, fixed when called.
+/// Three 7-day resets, soonest first, fixed when called.
 fn weekly_resets(bench: &Bench) -> (String, String, String) {
     (
         bench.reset_in(24 * 3600),
@@ -1604,7 +1580,7 @@ fn weekly_resets(bench: &Bench) -> (String, String, String) {
     )
 }
 
-/// cswap's `_two_phase_tick`: the scheduled collection serves `stored`, the phase-2 refetch `fresh`.
+/// A two-phase tick: the scheduled collection serves `stored`, the phase-2 refetch `fresh`.
 fn two_phase_tick(
     bench: &mut Bench,
     stored: &[(u32, Option<Value>)],
@@ -1621,7 +1597,6 @@ fn polls(report: &TickReport) -> usize {
         .count()
 }
 
-// cswap: TestAdaptiveScheduler.test_consume_first_hold_never_escalates_below_threshold (test_autoswitch.py:1620)
 #[test]
 fn consume_first_hold_never_refetches() {
     let mut bench = consume_first("cf_hold_never_refetches");
@@ -1643,7 +1618,6 @@ fn consume_first_hold_never_refetches() {
     assert!(bench.switcher.calls().is_empty(), "a hold never switches");
 }
 
-// cswap: TestAdaptiveScheduler.test_consume_first_stale_target_holds_then_switches (test_autoswitch.py:1656)
 #[test]
 fn consume_first_stale_target_holds_then_switches() {
     let mut bench = consume_first("cf_stale_target");
@@ -1696,7 +1670,7 @@ fn consume_first_stale_target_holds_then_switches() {
     assert_eq!(switches(&report), [(Trigger::ConsumeFirst, Some(2))]);
 }
 
-// cswap's freshness gate (autoswitch.py:1395-1396): a stale consume-first pick holds the tick and never slides to the
+// The freshness gate: a stale consume-first pick holds the tick and never slides to the
 // next-ranked target, even one the refetch left fresh.
 #[test]
 fn consume_first_stale_target_never_slides_to_a_worse_target() {
@@ -1724,7 +1698,6 @@ fn consume_first_stale_target_never_slides_to_a_worse_target() {
     assert_eq!(bench.live(), Some(1));
 }
 
-// cswap: TestConsumeFirstStrategy.test_below_threshold_switches_to_soonest_weekly_reset (test_autoswitch.py:2796)
 #[test]
 fn consume_first_below_threshold_switches_to_soonest_reset() {
     let mut bench = consume_first("cf_switches_to_soonest");
@@ -1745,7 +1718,6 @@ fn consume_first_below_threshold_switches_to_soonest_reset() {
     assert_eq!(polls(&report), 1, "phase 2 emits no second poll event");
 }
 
-// cswap: TestConsumeFirstStrategy.test_two_phase_refetch_disqualifies_stale_pick (test_autoswitch.py:3101)
 #[test]
 fn two_phase_refetch_disqualifies_stale_pick() {
     let mut bench = consume_first("two_phase_disqualifies");
@@ -1767,7 +1739,6 @@ fn two_phase_refetch_disqualifies_stale_pick() {
     assert_eq!(bench.refetch_calls().len(), 1, "phase 2 fired once");
 }
 
-// cswap: TestConsumeFirstStrategy.test_two_phase_refetch_confirms_switch (test_autoswitch.py:3122)
 #[test]
 fn two_phase_refetch_confirms_switch() {
     let mut bench = consume_first("two_phase_confirms");
@@ -1783,7 +1754,6 @@ fn two_phase_refetch_confirms_switch() {
     assert_eq!(bench.refetch_calls(), [vec![1, 2, 3]]);
 }
 
-// cswap: TestConsumeFirstStrategy.test_two_phase_refetch_reranks_to_fresh_best (test_autoswitch.py:3136)
 #[test]
 fn two_phase_refetch_reranks_to_fresh_best() {
     let mut bench = consume_first("two_phase_reranks");
@@ -1808,7 +1778,6 @@ fn two_phase_refetch_reranks_to_fresh_best() {
     assert_eq!(bench.live(), Some(3));
 }
 
-// cswap: TestConsumeFirstStrategy.test_threshold_crossed_in_phase_two_holds_then_escapes_next_tick (test_autoswitch.py:3155)
 #[test]
 fn threshold_crossed_in_phase_two_holds_then_escapes_next_tick() {
     let mut bench = consume_first("two_phase_threshold_crossed");
@@ -1847,7 +1816,6 @@ fn threshold_crossed_in_phase_two_holds_then_escapes_next_tick() {
     );
 }
 
-// cswap: TestHorizonAxisDoesNotFlap.test_the_bar_is_recomputed_on_the_phase_two_snapshot (test_autoswitch.py:6140)
 #[test]
 fn the_bar_is_recomputed_on_the_phase_two_snapshot() {
     let mut bench = consume_first("bar_phase_two");
@@ -1977,7 +1945,6 @@ fn a_failed_refetch_is_a_transient_error() {
     assert_eq!(polls(&report), 1);
 }
 
-// cswap: TestWarmUp.test_warmup_none_keeps_existing_behaviour
 #[test]
 fn warmup_none_keeps_existing_behaviour() {
     let mut bench = three("warmup_none");
@@ -1993,11 +1960,10 @@ fn warmup_none_keeps_existing_behaviour() {
     assert_eq!(bench.live(), Some(2));
 }
 
-// cswap: TestWarmUp.test_warmup_blocks_switch_until_all_polled and test_warmup_detail_reports_progress
 #[test]
 fn warmup_blocks_switch_until_all_polled() {
     let mut bench = three("warmup_blocks");
-    bench.engine = Engine::new("ops-tower", 101, Some(bench.now()));
+    bench.engine = Engine::new("rustling-tulip", 101, Some(bench.now()));
     bench.collection.warm_settled.set(Some(2));
     let rows = [
         (1, Some(usage(95.0))),
@@ -2033,7 +1999,7 @@ fn warmup_blocks_switch_until_all_polled() {
 #[test]
 fn a_sentinel_member_is_not_forced_again() {
     let mut bench = three("warmup_drops_sentinels");
-    bench.engine = Engine::new("ops-tower", 101, Some(bench.now()));
+    bench.engine = Engine::new("rustling-tulip", 101, Some(bench.now()));
     bench.collection.warm_settled.set(Some(2));
     bench.set_usage(&[(1, Some(usage(95.0))), (2, Some(usage(10.0))), (3, None)]);
     bench.set_result(3, PollResult::AuthDead);
@@ -2059,7 +2025,7 @@ fn a_live_engine_holds_the_lease() {
         (3, Some(usage(20.0))),
     ]);
     let lease = read_json(&bench.root().engine_lease());
-    assert_eq!(lease["owner"], "ops-tower");
+    assert_eq!(lease["owner"], "rustling-tulip");
     assert_eq!(lease["pid"], 101);
 }
 
@@ -2162,7 +2128,7 @@ fn rollback_failed_halts_until_restart() {
         "a halted engine collects nothing"
     );
     assert_eq!(bench.switcher.calls(), [2]);
-    bench.engine = Engine::new("ops-tower", 101, None);
+    bench.engine = Engine::new("rustling-tulip", 101, None);
     bench.advance(301);
     assert_eq!(
         over_threshold(&mut bench).outcome,
@@ -2384,7 +2350,6 @@ fn a_draining_switch_stops_silently() {
     assert_eq!(bench.switcher.calls(), [2]);
 }
 
-// cswap: TestDryRunAndNoOp.test_already_active_result_is_noop
 #[test]
 fn already_active_result_is_noop() {
     let mut bench = three("already_active_noop");
@@ -2514,7 +2479,7 @@ fn a_newer_store_releases_the_lease_even_when_sealing_fails() {
     ]);
     assert_eq!(
         lease_owner(&bench),
-        Some(json!("ops-tower")),
+        Some(json!("rustling-tulip")),
         "the first tick claims the lease"
     );
     let path = bench.root().accounts_json();
@@ -2550,7 +2515,7 @@ fn an_engine_that_finds_a_newer_store_releases_its_lease() {
     ]);
     assert_eq!(
         lease_owner(&bench),
-        Some(json!("ops-tower")),
+        Some(json!("rustling-tulip")),
         "the first tick claims the lease"
     );
     let path = bench.root().accounts_json();
@@ -2642,7 +2607,7 @@ fn a_fresh_lease_whose_holder_is_not_running_is_taken_over() {
         "a lease whose holder is not running pauses nothing: {:?}",
         report.outcome
     );
-    assert_eq!(lease_owner(&bench), Some(json!("ops-tower")));
+    assert_eq!(lease_owner(&bench), Some(json!("rustling-tulip")));
 }
 
 // A lease written mid-tick by an engine that is not running is not this engine's either: the check under the state
@@ -2711,7 +2676,7 @@ fn a_failed_conflict_quarantine_still_blocks_the_target() {
     );
 }
 
-// cswap's `_account_is_switchable`: an account with a credential but no config backup is neither ranked nor collected.
+// An account with a credential but no config backup is neither ranked nor collected.
 #[test]
 fn an_account_without_a_config_backup_is_not_switchable() {
     let mut bench = three("no_config_backup");
@@ -2720,7 +2685,7 @@ fn an_account_without_a_config_backup_is_not_switchable() {
     assert_eq!(bench.switcher.calls(), [3], "account 2 is not ranked");
     let mut warming = three("no_config_backup_collected");
     fs::remove_file(warming.config_backup(2)).expect("the config backup can be removed");
-    warming.engine = Engine::new("ops-tower", 101, Some(warming.now()));
+    warming.engine = Engine::new("rustling-tulip", 101, Some(warming.now()));
     warming.collection.warm_settled.set(Some(1));
     over_threshold(&mut warming);
     assert_eq!(
@@ -2739,7 +2704,7 @@ fn config_warnings(report: &TickReport) -> Vec<String> {
         .collect()
 }
 
-// cswap: TestModelFilter's typo guard (autoswitch.py:2296): a model name no usage window carries warns once.
+// The model-name typo guard: a model name no usage window carries warns once.
 #[test]
 fn a_typoed_model_name_warns_once() {
     let mut bench = three("model_typo_warns_once");
@@ -2786,12 +2751,12 @@ fn a_typoed_model_name_warns_once() {
     );
 }
 
-/// cswap's `_model_usage`: the 5-hour window at `five_hour`, an empty 7-day window and a `Fable` window at `fable`.
+/// The 5-hour window at `five_hour`, an empty 7-day window and a `Fable` window at `fable`.
 fn model_usage(five_hour: f64, fable: f64) -> Value {
     json!({"five_hour": {"pct": five_hour}, "seven_day": {"pct": 0.0}, "scoped": [{"name": "Fable", "pct": fable}]})
 }
 
-/// cswap's `TestModelAwareSwitch._seed`: three accounts, account 1 live, with the settings' `models` set to `models`.
+/// Three accounts, account 1 live, with the settings' `models` set to `models`.
 fn modelled(test: &str, models: &[&str]) -> Bench {
     let mut bench = three(test);
     bench.settings.models = models.iter().map(|&model| model.to_owned()).collect();
@@ -2808,7 +2773,6 @@ fn switch_targets(report: &TickReport) -> Vec<&AccountRef> {
         .collect()
 }
 
-// cswap: TestModelAwareSwitch.test_model_maxed_switches_despite_session_headroom
 #[test]
 fn model_maxed_switches_despite_session_headroom() {
     let mut bench = modelled("model_maxed_switches_despite_session_headroom", &["Fable"]);
@@ -2829,7 +2793,6 @@ fn model_maxed_switches_despite_session_headroom() {
     );
 }
 
-// cswap: TestModelAwareSwitch.test_without_model_setting_the_same_usage_holds
 #[test]
 fn without_model_setting_the_same_usage_holds() {
     let mut bench = three("without_model_setting_the_same_usage_holds");
@@ -2843,7 +2806,6 @@ fn without_model_setting_the_same_usage_holds() {
     assert_eq!(reasons(&report), ["below-threshold"]);
 }
 
-// cswap: TestModelAwareSwitch.test_model_headroom_still_gated_by_session_window
 #[test]
 fn model_headroom_still_gated_by_session_window() {
     let mut bench = modelled("model_headroom_still_gated_by_session_window", &["Fable"]);
@@ -2860,7 +2822,6 @@ fn model_headroom_still_gated_by_session_window() {
     );
 }
 
-// cswap: TestModelAwareSwitch.test_comma_separated_models_switch_on_any
 #[test]
 fn comma_separated_models_switch_on_any() {
     let mut bench = modelled("comma_separated_models_switch_on_any", &["Fable", "Opus"]);
@@ -2884,7 +2845,6 @@ fn comma_separated_models_switch_on_any() {
     );
 }
 
-// cswap: TestModelAwareSwitch.test_all_sentinel_binds_every_scoped_window
 #[test]
 fn all_sentinel_binds_every_scoped_window() {
     let mut bench = modelled("all_sentinel_binds_every_scoped_window", &["all"]);
@@ -2898,7 +2858,6 @@ fn all_sentinel_binds_every_scoped_window() {
     assert_eq!(bench.live(), Some(2));
 }
 
-// cswap: TestModelAwareSwitch.test_dual_exhausted_candidate_recovers_at_its_later_reset
 #[test]
 fn dual_exhausted_candidate_recovers_at_its_later_reset() {
     let mut bench = modelled(
@@ -2928,7 +2887,6 @@ fn dual_exhausted_candidate_recovers_at_its_later_reset() {
     );
 }
 
-// cswap: TestModelAwareSwitch.test_unknown_recovery_falls_back_instead_of_oversleeping
 #[test]
 fn unknown_recovery_falls_back_instead_of_oversleeping() {
     let mut bench = modelled(
@@ -2951,7 +2909,6 @@ fn unknown_recovery_falls_back_instead_of_oversleeping() {
     );
 }
 
-// cswap: TestModelAwareSwitch.test_scoped_only_exhaustion_drives_the_wake_time
 #[test]
 fn scoped_only_exhaustion_drives_the_wake_time() {
     let mut bench = modelled("scoped_only_exhaustion_drives_the_wake_time", &["Fable"]);
@@ -2970,7 +2927,7 @@ fn scoped_only_exhaustion_drives_the_wake_time() {
     assert_eq!(exhausted(&report), [Some(bench.in_secs(19 * H))]);
 }
 
-// cswap :965-973: a live login with no `accounts.json` is an unmanaged account, not a missing one.
+// A live login with no `accounts.json` is an unmanaged account, not a missing one.
 #[test]
 fn a_live_login_without_a_roster_is_unmanaged() {
     let mut bench = Bench::new("live_login_no_roster", 2);
@@ -2980,7 +2937,7 @@ fn a_live_login_without_a_roster_is_unmanaged() {
     assert_eq!(reasons(&report), ["unmanaged-active-account"]);
 }
 
-// cswap :949-953: recovered quarantines are lifted before the live login is looked at.
+// Recovered quarantines are lifted before the live login is looked at.
 #[test]
 fn recovered_quarantines_lift_before_the_roster_check() {
     let mut bench = three("quarantine_lift_before_roster");
@@ -2997,7 +2954,7 @@ fn recovered_quarantines_lift_before_the_roster_check() {
     assert!(bodies(&report).any(|body| matches!(body, EventBody::Unquarantined { .. })));
 }
 
-// cswap :1008-1012: an account whose poll was a sentinel has no fetch error in the poll event.
+// An account whose poll was a sentinel has no fetch error in the poll event.
 #[test]
 fn a_sentinel_account_has_no_fetch_error() {
     let mut bench = three("sentinel_no_fetch_error");
@@ -3309,7 +3266,7 @@ fn no_paid_entry_on_failover() {
 #[test]
 fn no_paid_entry_during_warm_up() {
     let mut bench = three("paid_not_warming");
-    bench.engine = Engine::new("ops-tower", 101, Some(bench.now()));
+    bench.engine = Engine::new("rustling-tulip", 101, Some(bench.now()));
     bench.set_warm_settled(1);
     bench.paid_fleet(3);
     bench.fund(2, 100_000, 60);
@@ -3324,7 +3281,8 @@ fn no_paid_entry_during_warm_up() {
 fn no_paid_entry_behind_an_owner_exit_bar() {
     let mut bench = three("paid_owner_exit_bar");
     claim_lease(&mut bench, 3);
-    let ours = json!({"owner": "ops-tower", "pid": 101, "startedAt": lease_started_at(&bench)});
+    let ours =
+        json!({"owner": "rustling-tulip", "pid": 101, "startedAt": lease_started_at(&bench)});
     write_paid_fallback(&bench, 2, &ours, true);
     bench.paid_fleet(3);
     bench.fund(2, 100_000, 60);
@@ -3371,7 +3329,7 @@ fn an_eligible_active_account_is_kept_in_place() {
         (paid["number"].clone(), paid["from"].clone()),
         (json!(1), json!(1))
     );
-    assert_eq!(paid["leaseOwner"]["owner"], json!("ops-tower"));
+    assert_eq!(paid["leaseOwner"]["owner"], json!("rustling-tulip"));
     assert_eq!(paid["leaseOwner"]["pid"], json!(101));
     assert_eq!(
         paid["leaseOwner"]["startedAt"].as_f64(),
@@ -3423,7 +3381,7 @@ fn paid_fallback_is_written_with_the_entering_switch_and_cleared_by_a_normal_swi
         paid["since"], state["lastSwitchAt"],
         "set in the same write as the switch record"
     );
-    assert_eq!(paid["leaseOwner"]["owner"], json!("ops-tower"));
+    assert_eq!(paid["leaseOwner"]["owner"], json!("rustling-tulip"));
 
     bench.advance(H);
     let report = bench.tick_with(&[
@@ -3456,7 +3414,7 @@ fn a_paid_fallback_of_another_lease_owner_is_ignored() {
     );
     assert_eq!(entered(&report), [(1, 1, 500.0, "USD".to_owned())]);
     let paid = &bench.state()["paidFallback"];
-    assert_eq!(paid["leaseOwner"]["owner"], json!("ops-tower"));
+    assert_eq!(paid["leaseOwner"]["owner"], json!("rustling-tulip"));
     assert!(paid.get("ownerExit").is_none());
 }
 
@@ -3488,7 +3446,8 @@ fn an_owner_exit_bar_from_another_lease_owner_still_bars_entry() {
 fn a_non_paid_switch_keeps_the_owner_exit_bar() {
     let mut bench = three("paid_bar_survives_switch");
     claim_lease(&mut bench, 3);
-    let ours = json!({"owner": "ops-tower", "pid": 101, "startedAt": lease_started_at(&bench)});
+    let ours =
+        json!({"owner": "rustling-tulip", "pid": 101, "startedAt": lease_started_at(&bench)});
     write_paid_fallback(&bench, 2, &ours, true);
     let barred = bench.state()["paidFallback"].clone();
     bench.set_may_spend(2, true);
@@ -4185,7 +4144,8 @@ fn set_bar_opted_in(bench: &Bench, numbers: &[u32]) {
 fn barred_with_two_and_three(test: &str) -> Bench {
     let mut bench = three(test);
     claim_lease(&mut bench, 3);
-    let ours = json!({"owner": "ops-tower", "pid": 101, "startedAt": lease_started_at(&bench)});
+    let ours =
+        json!({"owner": "rustling-tulip", "pid": 101, "startedAt": lease_started_at(&bench)});
     write_paid_fallback(&bench, 2, &ours, true);
     set_bar_opted_in(&bench, &[2, 3]);
     bench.paid_fleet(3);
@@ -4375,7 +4335,7 @@ fn auto_switch_off_still_heartbeats_the_lease() {
     ];
     assert!(paused_off(&bench.tick_with(&rows)));
     let first = read_json(&bench.root().engine_lease());
-    assert_eq!(first["owner"], "ops-tower");
+    assert_eq!(first["owner"], "rustling-tulip");
     assert_eq!(first["pid"], 101);
 
     bench.advance(60);
@@ -4477,7 +4437,7 @@ fn auto_switch_off_reads_paused_with_no_live_login() {
 #[test]
 fn auto_switch_off_reads_paused_during_warm_up() {
     let mut bench = switched_off("off_warm_up");
-    bench.engine = Engine::new("ops-tower", 101, Some(bench.now()));
+    bench.engine = Engine::new("rustling-tulip", 101, Some(bench.now()));
     bench.collection.warm_settled.set(Some(2));
     let report = bench.tick_with(&[
         (1, Some(usage(95.0))),

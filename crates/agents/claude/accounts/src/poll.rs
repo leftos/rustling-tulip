@@ -1,12 +1,12 @@
-//! Polling the usage endpoint within the request budget cswap shares: reserve, fetch, record.
+//! Polling the usage endpoint within the request budget: reserve, fetch, record.
 //!
-//! The endpoint allows about 28-30 requests per account per trailing hour, and cswap and this crate spend one budget
+//! The endpoint allows about 28-30 requests per account per trailing hour, and every poll on the store spends one budget
 //! through `cache/usage.json`. A poll first reserves the accounts it may fetch under `cache/.usage.lock` (not fetched
 //! in the last 180 s, past their planned next poll, out of failure backoff, and not claimed by another process),
 //! stamping a 90 s lease on each; it then fetches with no lock held, and records the outcomes under the lock again,
 //! fenced by the lease ids, so a result fetched under a lease another process has since replaced is dropped. A success
-//! writes the reading and the next poll time; a failure writes the backoff. These are ports of cswap's
-//! `usage_store.py`, `poll_policy.py` and the fetch half of `oauth.py`, for the account-wide 5-hour and 7-day windows.
+//! writes the reading and the next poll time; a failure writes the backoff.
+//! These cover the account-wide 5-hour and 7-day windows.
 
 mod active;
 
@@ -42,7 +42,7 @@ use crate::usage::{
 pub const SERVE_TTL_S: f64 = 180.0;
 /// How long a fetch lease keeps other collectors off an account.
 pub const CLAIM_TTL_S: f64 = 90.0;
-/// How long `cache/.usage.lock` is waited for: cswap's file-lock timeout.
+/// How long `cache/.usage.lock` is waited for: the file-lock timeout.
 const USAGE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Failure backoff with no `Retry-After`: 30 s, doubling per failure, capped at 600 s.
@@ -98,7 +98,7 @@ pub enum PollError {
     #[error("the usage table's lock was not taken")]
     Lock(#[source] LockError),
     /// `cache/usage.json` is a JSON object whose `schemaVersion` is not the integer [`USAGE_SCHEMA_VERSION`]: a newer or
-    /// unknown version of ops-tower's account store wrote it, so it is read as empty and never written. A file that is
+    /// unknown version of this store wrote it, so it is read as empty and never written. A file that is
     /// not a JSON object at all is corrupt instead, and is read as empty and rewritten.
     #[error(
         "cache/usage.json was written by a newer or unknown version of the account store, so it is left untouched"
@@ -141,7 +141,7 @@ pub enum FetchError {
 }
 
 impl FetchError {
-    /// cswap's failure token: `http-<status>`, `timeout`, `network` or `bad-response`.
+    /// The failure token: `http-<status>`, `timeout`, `network` or `bad-response`.
     #[must_use]
     pub fn kind(&self) -> String {
         match self {
@@ -203,12 +203,12 @@ impl Claims {
     }
 }
 
-/// Which accounts a poll may fetch, and past which gates (cswap's `usage_entries_by_account` `fetch`, `scheduled`,
-/// `force`). Every account is reported whatever the scope; an account outside it is never claimed.
+/// Which accounts a poll may fetch, and past which gates.
+/// Every account is reported whatever the scope; an account outside it is never claimed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FetchScope<'a> {
-    /// Every account, respecting poll plans and repairing plans no planner could have written (cswap's `fetch=None`).
+    /// Every account, respecting poll plans and repairing plans no planner could have written.
     OnDemand,
     /// Only `accounts` may be fetched, under `mode`; every other account is reported but never reserved.
     Only {
@@ -235,7 +235,7 @@ impl FetchScope<'_> {
     }
 }
 
-/// The gates an explicit fetch set passes, cswap's `reserve` modes for the auto engine. Strikes, failure backoff, holds
+/// The gates an explicit fetch set passes for the auto engine. Strikes, failure backoff, holds
 /// (`heldUntil`) and another collector's live lease refuse in every mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -330,7 +330,7 @@ pub struct PollOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeferReason {
-    /// cswap's consume or account lock, or one of Claude Code's credential locks, stayed held past its wait.
+    /// The store's consume or account lock, or one of Claude Code's credential locks, stayed held past its wait.
     LocksBusy,
     /// `~/.claude.json` names another account under the locks: a switch or a login landed meanwhile.
     IdentityMismatch,
@@ -433,7 +433,7 @@ impl UsageTable {
     /// [`UsageTable::reserve`] within the pass's scope, with each account's stored credential fingerprints when the pass
     /// has them (the backup's, or for the account Claude Code is logged in as its live credential's and its backup's): a
     /// strike then quarantines a row only while its `struckFingerprint` names a stored generation (or is absent, or the
-    /// logged-in account's backup cannot be read), as cswap's `_entry_token_dead` reads it, and each quarantined account
+    /// logged-in account's backup cannot be read), and each quarantined account
     /// is noted in the claims, inside the scope or not. An account outside the scope is never claimed and its row never
     /// replaced. The lock is taken even for an [`FetchScope::Only`] with no accounts, since the strikes behind
     /// `claims.dead` are read under it.
@@ -463,7 +463,7 @@ impl UsageTable {
     /// lease id, or names another account, is dropped. A success writes the reading, `fetchedAt` and the next poll
     /// ([`plan_after_fetch`]), and clears the failure state; a failure keeps the reading and writes the failure count,
     /// `lastError`, `backoffUntil` ([`backoff_seconds`]) and, for a 429, `last429At`. Both release the lease. Every time
-    /// written is one reading of `clock`, taken once the lock is held, as cswap's `record` reads its clock: a reserve's
+    /// written is one reading of `clock`, taken once the lock is held: a reserve's
     /// time would date them up to the fetches' length early, and a 429's backoff would lift before the server's
     /// deadline. Returns the accounts whose outcome was written.
     ///
@@ -564,7 +564,7 @@ struct StoredFingerprints {
     backup: Option<BackupFingerprint>,
 }
 
-/// The logged-in account's backup as its strike reads it, cswap's `_entry_token_dead`.
+/// The logged-in account's backup as its strike reads it.
 #[derive(Clone)]
 enum BackupFingerprint {
     /// A backup holding a refresh token, by its fingerprint.
@@ -662,7 +662,7 @@ struct Planning<'a> {
 enum Recorded<'r> {
     /// A fetch's result.
     Fetch(&'r FetchResult),
-    /// A refresh refused without a verdict on the token, recorded as a failure with cswap's `kind` as `lastError`.
+    /// A refresh refused without a verdict on the token, recorded as a failure with the refusal's `kind` as `lastError`.
     Refused { kind: &'static str },
     /// A dead refresh lineage: a failure, plus a strike bound to the generation posted, as the usage table records it.
     Dead {
@@ -761,7 +761,7 @@ fn record_failure(
     row.insert("backoffUntil".to_owned(), Value::from(at + wait));
 }
 
-/// Seconds to stay in backoff after the `failures`-th failure in a row, cswap's `_failure_backoff_s`. With no
+/// Seconds to stay in backoff after the `failures`-th failure in a row. With no
 /// `retry_after`: 30 s doubling per failure, capped at 600 s. A 429's `Retry-After: 0` waits at least 300 s. A longer
 /// ask is honoured, a 429's above 600 s with 900 s added, and capped at 4500 s for a 429 and 3600 s otherwise; the
 /// plain curve still wins when it is longer.
@@ -770,7 +770,7 @@ pub fn backoff_seconds(failures: u32, retry_after: Option<f64>, rate_limited: bo
     let shift = failures.saturating_sub(1).min(BACKOFF_MAX_SHIFT);
     let computed =
         (BACKOFF_BASE_S * 2f64.powi(i32::try_from(shift).unwrap_or(32))).min(BACKOFF_CAP_S);
-    // A NaN header is no header; a negative one is zero, as cswap's parse clamps it.
+    // A NaN header is no header; a negative one is zero.
     let Some(asked) = retry_after
         .filter(|seconds| !seconds.is_nan())
         .map(|seconds| seconds.max(0.0))
@@ -795,8 +795,8 @@ pub fn backoff_seconds(failures: u32, retry_after: Option<f64>, rate_limited: bo
     wait.max(computed)
 }
 
-/// `(next poll, interval)` for an account just fetched successfully, cswap's `plan_after_fetch` over the 5-hour and
-/// 7-day windows and the scoped windows the request's `models` name (cswap's `relevant_windows`). A binding window
+/// `(next poll, interval)` for an account just fetched successfully, planned over the 5-hour and
+/// 7-day windows and the scoped windows the request's `models` name (`relevant_windows`). A binding window
 /// that moved at least a point halves the interval (floor 180 s), or drops it to 60 s for the active account within
 /// 15 points of the threshold; one that did not grows it ×1.5 toward 300 s (active) or 600 s. A recent 429 floors the
 /// interval at 360 s and grows it ×1.5 up to 1800 s. An exhausted account polls every 600 s at least. The next poll
@@ -836,7 +836,7 @@ fn plan_interval(request: &PlanRequest<'_>) -> f64 {
     } else {
         (CANDIDATE_DEFAULT_INTERVAL_S, CANDIDATE_MAX_INTERVAL_S)
     };
-    // cswap's `prev or default`: a zero interval is no interval.
+    // The previous interval or the default: a zero interval is no interval.
     let base = request
         .prev_interval_s
         .filter(|interval| *interval != 0.0)
@@ -912,7 +912,7 @@ fn recent_429(row: &Map<String, Value>, now: f64) -> bool {
     now < anchor + RECENT_429_WINDOW_S
 }
 
-/// Whether a row's dead-token strike quarantines the stored generation, cswap's `token_dead` and `_entry_token_dead`:
+/// Whether a row's dead-token strike quarantines the stored generation:
 /// at least one strike, and no `stored` fingerprints, no `struckFingerprint`, or a stored source that carries the struck
 /// generation: the credential the poll read, or the logged-in account's backup. A backup that could not be read keeps
 /// the strike; a missing one does not. A strike on a generation no stored source carries has lapsed.
@@ -935,7 +935,7 @@ fn strike_applies(row: &Map<String, Value>, stored: Option<&StoredFingerprints>)
     }
 }
 
-/// Whether a matching row the strikes leave alone may be fetched at `now`, cswap's `_row_eligible`: never in backoff,
+/// Whether a matching row the strikes leave alone may be fetched at `now`: never in backoff,
 /// held, or under another collector's live lease; then by `mode` ([`FetchMode`]), or on demand (`None`) stale and past
 /// its planned poll, with no plan, or with a plan no planner could have written.
 fn row_eligible(row: &Map<String, Value>, now: f64, mode: Option<FetchMode>) -> bool {
@@ -975,7 +975,7 @@ fn number(row: &Map<String, Value>, key: &str) -> Option<f64> {
     row.get(key).and_then(Value::as_f64)
 }
 
-/// Fetches one account's usage with `token`, cswap's `try_fetch_usage_for_account` without its refresh: a 2xx answer
+/// Fetches one account's usage with `token`, without a refresh: a 2xx answer
 /// becomes the reading the usage table stores, any other status a [`FetchError::Http`] with its `Retry-After`.
 ///
 /// # Errors
@@ -1335,12 +1335,12 @@ fn classify(answer: &RawUsage) -> FetchResult {
     })
 }
 
-/// cswap's `build_usage_result` less the `countdown` and `clock` display strings cswap recomputes from `resets_at`:
+/// The usage reading, with no display strings (a display recomputes them from `resets_at`):
 /// `{"five_hour": {"pct", "resets_at"}, "seven_day": …, "extra_usage": {…}, "spend": …, "scoped": [...]}`, each part
 /// the answer leaves out or empty omitted, and `None` when none of the windows (5-hour, 7-day, per-model) nor `spend` is
-/// there, as cswap's. `extra_usage` holds the block's switches ([`extra_usage_flags`]), which cswap's reading does not;
+/// there. `extra_usage` holds the block's switches ([`extra_usage_flags`]);
 /// they are added only to a reading, never making one of an otherwise empty answer. The whole reading is stored as
-/// `lastGood`, so a cswap engine with per-model windows set still finds them on rows this crate wrote.
+/// `lastGood`, so an engine with per-model windows set finds them on every row.
 fn build_usage_result(body: &Value) -> FetchResult {
     let Value::Object(data) = body else {
         return Err(FetchError::BadResponse);
@@ -1410,7 +1410,7 @@ fn extra_usage_flags(extra: &Map<String, Value>) -> Value {
     Value::Object(flags)
 }
 
-/// cswap's `spend`: the enabled `extra_usage` block with its credits in minor units turned into currency units by its
+/// The `spend`: the enabled `extra_usage` block with its credits in minor units turned into currency units by its
 /// `decimal_places` (2 when it names none), `{"used", "limit", "pct", "currency", "resets_at"}`. An uncapped block
 /// (no `monthly_limit`) keeps its spend with `limit` and `pct` null. Left out when the block is off, `used_credits` is
 /// missing, null or not a number, or `decimal_places` is not a whole number up to [`MAX_MINOR_EXPONENT`].
@@ -1444,7 +1444,7 @@ fn spend_entry(data: &Map<String, Value>) -> Option<Value> {
     Some(Value::Object(entry))
 }
 
-/// One of cswap's `scoped` per-model windows, `{"name", "pct", "resets_at"}`, from a `limits[]` entry whose
+/// One of the `scoped` per-model windows, `{"name", "pct", "resets_at"}`, from a `limits[]` entry whose
 /// `scope.model.display_name` is set and whose `percent` is a number; any other entry gives none.
 fn scoped_entry(limit: &Value) -> Option<Value> {
     let name = limit
@@ -1473,10 +1473,10 @@ fn python_float(value: &Value) -> Option<f64> {
 
 /// Polls every enabled OAuth account in `store` once: reads its credentials, refuses an expired access token without
 /// sending it, reserves the accounts due ([`UsageTable::reserve`]), fetches each with no lock held, and records the
-/// outcomes ([`UsageTable::record`]). The account Claude Code is logged in as, found as cswap finds it by the identity
+/// outcomes ([`UsageTable::record`]). The account Claude Code is logged in as, found by the identity
 /// (email and organization) `~/.claude.json`'s `oauthAccount` names rather than by `accounts.json`'s active number, is
 /// fetched with Claude Code's live credential (`claude`'s `.credentials.json`), since Claude Code renews that one and
-/// the backup copy is usually stale. Both files are read without a lock and never written, as cswap reads them. A live
+/// the backup copy is usually stale. Both files are read without a lock and never written. A live
 /// login no stored account matches, or a `~/.claude.json` that is missing or unreadable, lends its token to no account;
 /// a live credential file that is missing, unreadable or holds no OAuth token falls back to the backup. The logged-in
 /// account is also the only one planned at the active cadence: when no stored account is logged in, every account is
@@ -1531,8 +1531,8 @@ pub(crate) fn poll_read_only<T: UsageTransport + ?Sized>(
     poller.poll(transport)
 }
 
-/// [`poll_once`], refreshing inactive accounts through cswap's consume gate ([`consume_backup_grant`]) as cswap's
-/// `try_fetch_usage_for_account` does. The store, Claude Code's files and the clock are `refresh`'s.
+/// [`poll_once`], refreshing inactive accounts through the consume gate ([`consume_backup_grant`]).
+/// The store, Claude Code's files and the clock are `refresh`'s.
 ///
 /// An account that is neither the one Claude Code is logged in as nor `accounts.json`'s active one, whose backup
 /// access token has expired and which holds a refresh token, is refreshed before its fetch; a fetch of such an account
@@ -1549,8 +1549,8 @@ pub(crate) fn poll_read_only<T: UsageTransport + ?Sized>(
 /// [`PollError::StoreRefused`] before any grant is spent.
 ///
 /// The account Claude Code is logged in as, when its live credential holds an access token, is fetched with that
-/// token and refreshed under Claude Code's own locks when it has expired or answers 401, as cswap refreshes its active
-/// account: the successor goes to the backup (the unclaimed stash when that write fails) and to the live file's
+/// token and refreshed under Claude Code's own locks when it has expired or answers 401:
+/// the successor goes to the backup (the unclaimed stash when that write fails) and to the live file's
 /// `claudeAiOauth`, and `primaryApiKey` is cleared from `~/.claude.json` under its config lock
 /// ([`PollOutcome::primary_key_cleared`], and [`PollOutcome::backup_written`] for the backup). A successor an earlier
 /// pass left in the stash is adopted without a POST. A refresh put off before anything is spent shows as
@@ -1562,7 +1562,7 @@ pub(crate) fn poll_read_only<T: UsageTransport + ?Sized>(
 ///
 /// The account Claude Code is logged in as, when the reserve leaves it unclaimed (and no strike keeps it out) while its
 /// live access token has expired and no hold (`heldUntil`) explains the wait, shows as [`PollResult::TokenExpired`]
-/// rather than [`PollResult::NotDue`], as cswap's collector overlays it: the next pass that claims it refreshes it.
+/// rather than [`PollResult::NotDue`]: the next pass that claims it refreshes it.
 ///
 /// # Errors
 ///
@@ -1575,7 +1575,7 @@ pub fn poll_once_with_refresh<T: UsageTransport + ?Sized>(
     poll_with_refresh(transport, settings, refresh, FetchScope::OnDemand)
 }
 
-/// [`poll_once_with_refresh`] within `scope`, cswap's `usage_entries_by_account(fetch, scheduled, force)`: every account
+/// [`poll_once_with_refresh`] within `scope`: every account
 /// is gathered and reported (an API key, a missing or expired credential, a struck lineage), but only the accounts the
 /// scope allows are reserved, past the gates its [`FetchMode`] names; any other account shows as
 /// [`PollResult::NotDue`], or [`PollResult::AuthDead`] when a strike on a stored generation keeps it out.
@@ -1683,7 +1683,7 @@ impl Poller<'_> {
                 results.insert(*number, self.unclaimed(*number, candidate, now));
             }
         }
-        // The cadence follows the logged-in account only, as cswap's does: with none, no account is planned as active.
+        // The cadence follows the logged-in account only: with none, no account is planned as active.
         let context = PlanContext::new(
             live_owner,
             self.settings.threshold,
@@ -1723,8 +1723,8 @@ impl Poller<'_> {
 
     /// What an account the reserve left unclaimed, and no strike keeps out, shows: [`PollResult::NotDue`], or
     /// [`PollResult::TokenExpired`] for the account Claude Code is logged in as when its live access token has expired
-    /// at `now` and its row is not held (`heldUntil`) for another machine's reading. cswap's collector overlays the
-    /// expired state so the engine idle-holds instead of counting the gap toward a failover.
+    /// at `now` and its row is not held (`heldUntil`) for another machine's reading. The expired state is overlaid
+    /// so the engine idle-holds instead of counting the gap toward a failover.
     fn unclaimed(&self, number: u32, candidate: &Candidate, now: jiff::Timestamp) -> PollResult {
         let expired = candidate.live.is_some()
             && candidate
@@ -1960,7 +1960,7 @@ impl Attempt {
     }
 }
 
-/// An inactive account's fetch with refresh, cswap's `try_fetch_usage_for_account`: a token that is expired, or empty
+/// An inactive account's fetch with refresh: a token that is expired, or empty
 /// (`stored` is `None`), is refreshed first, and a 401 refreshes once and retries once. With no access token to send
 /// after the refresh (it failed for now, or its successor carries none), the attempt is recorded as `refresh-failed`.
 fn refreshing_fetch<T: UsageTransport + ?Sized>(
@@ -2105,8 +2105,8 @@ fn grant_result(error: GrantError) -> Option<PollResult> {
 }
 
 /// The account Claude Code is logged in as now: `oauthAccount`'s `emailAddress` and `organizationUuid` (missing or not a
-/// string counting as none, as cswap's `or ""`) in `~/.claude.json`, read without a lock and never written, as cswap's
-/// `_get_current_identity_triple` reads it. `None` when the file is missing, unreadable or not JSON, or names no email.
+/// string counting as none) in `~/.claude.json`, read without a lock and never written.
+/// `None` when the file is missing, unreadable or not JSON, or names no email.
 /// Only `oauthAccount` is parsed; every other key of the file is skipped unread.
 ///
 /// It holds no secret (only `oauthAccount`'s identity fields), so the parsed tree is dropped without scrubbing.
@@ -2125,7 +2125,7 @@ pub(crate) fn live_identity(claude: &ClaudePaths) -> Option<Identity> {
 
 pub(crate) use crate::claude_files::identity_in;
 
-/// Claude Code's live credential file, read without a lock as cswap's `_read_active_credentials` reads it. `None` when
+/// Claude Code's live credential file, read without a lock. `None` when
 /// the file is missing, cannot be read or is not UTF-8; one that holds no OAuth access token is also passed over by the
 /// caller, which then falls back to the backup copy.
 pub(crate) fn live_blob(claude: &ClaudePaths) -> Option<CredentialBlob> {
@@ -2207,8 +2207,8 @@ fn load_document(root: &AccountsRoot) -> Result<Map<String, Value>, PollError> {
     }
 }
 
-/// Takes the document's `accounts` object out for editing; one that is missing or not an object is empty, as cswap
-/// reads it. [`put_accounts`] puts it back in its place.
+/// Takes the document's `accounts` object out for editing; one that is missing or not an object is empty.
+/// [`put_accounts`] puts it back in its place.
 fn take_accounts(document: &mut Map<String, Value>) -> Map<String, Value> {
     match document.get_mut("accounts") {
         Some(Value::Object(accounts)) => std::mem::take(accounts),
@@ -2271,7 +2271,7 @@ pub(crate) fn clear_stash_failure(root: &AccountsRoot, number: u32) -> Result<bo
     Ok(true)
 }
 
-/// A lease's fencing id: 32 random hex digits, like cswap's `uuid4().hex`.
+/// A lease's fencing id: 32 random hex digits.
 fn new_claim_id() -> String {
     format!("{:016x}{:016x}", random_u64(), random_u64())
 }

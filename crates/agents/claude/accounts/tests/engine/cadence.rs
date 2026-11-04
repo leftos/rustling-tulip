@@ -1,5 +1,5 @@
-//! The engine's cadence between ticks, cswap's `_next_delay` and `_respect_poll_plan`, and the `sleep` event a long
-//! wait reports, ported from `test_autoswitch.py` one test per cswap test that does not need the run loop or the
+//! The engine's cadence between ticks, and the `sleep` event a long
+//! wait reports, in the tests that need neither the run loop nor the
 //! engine harness. Nothing here touches the filesystem, so the module is not platform-gated and runs on every runner;
 //! the tests that drive a real tick live in `cadence_tick`, which needs the platform-gated harness.
 
@@ -14,7 +14,7 @@ use claude_accounts::engine::{
 };
 use jiff::{SignedDuration, Timestamp};
 
-/// cswap's default `interval_seconds`, which the harness's engine also uses.
+/// The default `interval_seconds`, which the harness's engine also uses.
 pub(crate) const INTERVAL: f64 = 60.0;
 
 /// The tests' fixed clock: 2026-09-21 14:13:20 UTC, `offset_ms` from it.
@@ -50,7 +50,6 @@ fn assert_close(actual: f64, expected: f64) {
     );
 }
 
-// cswap: TestNextDelay.test_blocked_with_reset_rechecks_at_exhausted_cadence
 #[test]
 fn blocked_with_reset_rechecks_at_exhausted_cadence() {
     let now = at(0);
@@ -58,7 +57,6 @@ fn blocked_with_reset_rechecks_at_exhausted_cadence() {
     assert_close(next_delay(&blocked, INTERVAL, now, None, 0.0), MAX_SLEEP_S);
 }
 
-// cswap: TestNextDelay.test_blocked_exhausted_without_reset_uses_fallback
 #[test]
 fn blocked_exhausted_without_reset_uses_fallback() {
     let now = at(0);
@@ -69,7 +67,6 @@ fn blocked_exhausted_without_reset_uses_fallback() {
     );
 }
 
-// cswap: TestNextDelay.test_blocked_on_resolvable_condition_keeps_normal_cadence
 #[test]
 fn blocked_on_resolvable_condition_keeps_normal_cadence() {
     let now = at(0);
@@ -85,7 +82,6 @@ fn blocked_on_resolvable_condition_keeps_normal_cadence() {
     );
 }
 
-// cswap: TestNextDelay.test_normal_delay_is_jittered_interval
 #[test]
 fn normal_delay_is_jittered_interval() {
     let now = at(0);
@@ -110,7 +106,6 @@ fn normal_delay_is_jittered_interval() {
     }
 }
 
-// cswap: TestNextDelay.test_sleep_cap
 #[test]
 fn sleep_cap() {
     let now = at(0);
@@ -123,7 +118,7 @@ fn sleep_cap() {
     assert_close(next_delay(&blocked, INTERVAL, now, None, 0.0), MAX_SLEEP_S);
 }
 
-// cswap: TestIdleHold.test_idle_hold_slows_cadence (the delay half)
+// The delay half of the idle-hold cadence.
 #[test]
 fn idle_hold_slows_cadence() {
     let now = at(0);
@@ -205,7 +200,6 @@ fn a_flag_decides_the_wait_whatever_the_outcome() {
     }
 }
 
-// cswap: TestLoopObeysThePollPlan.test_sleep_is_cut_to_the_rows_next_poll
 #[test]
 fn poll_plan_sleep_is_cut_to_the_rows_next_poll() {
     let now = at(0);
@@ -216,7 +210,6 @@ fn poll_plan_sleep_is_cut_to_the_rows_next_poll() {
     );
 }
 
-// cswap: TestLoopObeysThePollPlan.test_never_sleeps_below_the_planners_own_floor
 #[test]
 fn poll_plan_never_sleeps_below_the_planners_own_floor() {
     let now = at(0);
@@ -228,7 +221,6 @@ fn poll_plan_never_sleeps_below_the_planners_own_floor() {
     );
 }
 
-// cswap: TestLoopObeysThePollPlan.test_a_relaxed_plan_never_lengthens_the_sleep
 #[test]
 fn poll_plan_a_relaxed_plan_never_lengthens_the_sleep() {
     let now = at(0);
@@ -240,7 +232,6 @@ fn poll_plan_a_relaxed_plan_never_lengthens_the_sleep() {
     );
 }
 
-// cswap: TestReviewFindings202.test_a_short_interval_is_never_lengthened
 #[test]
 fn poll_plan_a_short_interval_is_never_lengthened() {
     let now = at(0);
@@ -267,9 +258,9 @@ fn sleep_event_only_past_one_and_a_half_intervals() {
     );
 }
 
-// The `sleep` event's JSON matches cswap's `SleepEvent` (autoswitch.py:456-466).
+// The `sleep` event's JSON shape.
 #[test]
-fn sleep_event_json_matches_cswap() {
+fn sleep_event_json_has_its_shape() {
     let now = at(0);
     let event = sleep_event(3600.06, INTERVAL, now).expect("a long wait reports a sleep");
     assert_eq!(event.kind(), "sleep");
@@ -290,7 +281,7 @@ fn sleep_event_json_matches_cswap() {
     assert_eq!(event_json["until"].as_str(), Some(until_text.as_str()));
 }
 
-// cswap's `round(seconds, 1)` is correctly rounded on the exact binary double, ties to even — not half away from zero.
+// Rounding seconds to one decimal is correctly rounded on the exact binary double, ties to even — not half away from zero.
 #[test]
 fn sleep_seconds_round_like_python() {
     let now = at(0);

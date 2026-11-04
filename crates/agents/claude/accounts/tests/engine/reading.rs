@@ -1,4 +1,4 @@
-//! The usage reading a switch decision trusts, read from a usage table as cswap writes it.
+//! The usage reading a switch decision trusts, read from a usage table as the poll writes it.
 
 use std::collections::BTreeMap;
 
@@ -61,7 +61,6 @@ fn decision_value_matches_models_case_insensitively() {
     }
 }
 
-// cswap: settings.parse_model_names
 #[test]
 fn model_names_dedupe_case_insensitively_first_spelling_wins() {
     assert_eq!(
@@ -75,7 +74,7 @@ fn model_names_dedupe_case_insensitively_first_spelling_wins() {
     assert!(parse_model_names(None).is_empty(), "no setting");
 }
 
-// cswap: settings.parse_model_names keeps `all` as a name; the matching gives it its meaning.
+// `all` stays a name; the matching gives it its meaning.
 #[test]
 fn model_names_keep_all_sentinel() {
     assert_eq!(parse_model_names(Some("all")), ["all"]);

@@ -29,10 +29,10 @@ use crate::store;
 /// 100 ns intervals from 1601-01-01, the `FILETIME` epoch, to 1970-01-01.
 const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
 
-/// Takes an exclusive lock on byte 0 of `file` without waiting, the byte cswap's `msvcrt.locking` takes.
+/// Takes an exclusive lock on byte 0 of `file` without waiting, the byte `msvcrt.locking` takes.
 /// `Ok(false)` when another handle holds it.
 pub(crate) fn try_lock_first_byte(file: &File) -> io::Result<bool> {
-    // A zeroed OVERLAPPED is offset 0 with no event, the range cswap locks.
+    // A zeroed OVERLAPPED is offset 0 with no event, the range the file lock covers.
     let mut overlapped = OVERLAPPED::default();
     // SAFETY: the handle is open for the life of `file`, and `overlapped` outlives this synchronous call.
     let locked = unsafe {

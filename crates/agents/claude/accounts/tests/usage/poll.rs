@@ -123,7 +123,7 @@ fn rate_limited_one(label: &str) -> Result<RawUsage, TransportError> {
     success(label)
 }
 
-/// An answer and the `lastGood` cswap's `build_usage_result` makes of it, display strings left out.
+/// An answer and the `lastGood` the poll makes of it, display strings left out.
 fn scoped_spend_fixture() -> Value {
     serde_json::from_str(include_str!("fixtures/scoped-spend.json"))
         .expect("the scoped-spend fixture is JSON")
@@ -679,7 +679,7 @@ fn last_good_keeps_scoped_and_spend() {
     assert_eq!(
         scratch.usage_row(1)["lastGood"],
         scoped_spend_fixture()["lastGood"],
-        "lastGood holds the windows, spend and per-model windows as cswap writes them"
+        "lastGood holds the windows, spend and per-model windows as the poll writes them"
     );
 }
 
@@ -977,7 +977,7 @@ fn an_older_binary_leaves_the_usage_table_alone_in_a_newer_store() {
     );
 }
 
-/// cswap's `_model_usage`: a low 5-hour and 7-day window, and a per-model `Fable` window at `fable` percent.
+/// A low 5-hour and 7-day window, and a per-model `Fable` window at `fable` percent.
 fn model_usage(five_hour: f64, fable: f64) -> Value {
     json!({
         "five_hour": {"pct": five_hour},
@@ -1787,7 +1787,7 @@ fn a_reply_with_only_spend_is_a_reading() {
             "spend": {"used": 31.64, "limit": 100.0, "pct": 31.64, "currency": "USD"},
             "extra_usage": {"enabled": true},
         }),
-        "an enabled block with spend is a reading, as cswap's is: {row}"
+        "an enabled block with spend is a reading: {row}"
     );
     assert_eq!(
         transport.prepaid_calls(),

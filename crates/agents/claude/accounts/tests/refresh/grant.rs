@@ -1,4 +1,4 @@
-//! The token POST and cswap's fingerprints, against a fake token endpoint.
+//! The token POST and the credential fingerprints, against a fake token endpoint.
 
 use std::fmt::Write as _;
 
@@ -35,7 +35,7 @@ fn parsed(blob: &CredentialBlob) -> Value {
 }
 
 #[test]
-fn fingerprints_match_cswap() {
+fn fingerprints_have_their_documented_form() {
     let with_refresh = credential("abc", Some("abc"), ms_after(0));
     assert_eq!(
         credential_fingerprint(&blob(&with_refresh)).as_deref(),
@@ -354,7 +354,7 @@ fn token_account_debug_hides_the_email() {
     assert_eq!(
         account.account_uuid.as_deref(),
         Some("uuid-one"),
-        "the uuid is trimmed, as cswap reads it"
+        "the uuid is trimmed"
     );
     assert_eq!(account.email.as_deref(), Some("secret@example.test"));
     assert_eq!(account.organization_uuid.as_deref(), Some("org-one"));
@@ -471,7 +471,7 @@ mod gate {
         );
         let account = outcome
             .token_account
-            .expect("the spent grant's account rides along, as cswap carries it");
+            .expect("the spent grant's account rides along");
         assert_eq!(account.account_uuid.as_deref(), Some("uuid-one"));
     }
 }

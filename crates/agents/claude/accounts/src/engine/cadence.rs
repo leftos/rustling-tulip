@@ -1,4 +1,4 @@
-//! The engine's cadence between ticks, cswap's `_next_delay` and `_respect_poll_plan`: how long a tick's outcome earns
+//! The engine's cadence between ticks: how long a tick's outcome earns
 //! before the next one, obeying the usage store's own poll plan, and the `sleep` event a long wait reports.
 
 use jiff::{SignedDuration, Timestamp};
@@ -7,11 +7,11 @@ use crate::engine::{Event, EventBody, MAX_SLEEP_S, NO_RESET_FALLBACK_S, TickRepo
 use crate::poll::URGENT_INTERVAL_S;
 use crate::usage::secs_from_timestamp;
 
-/// The seconds to wait before the next tick, cswap's `_next_delay` and `_respect_poll_plan`.
+/// The seconds to wait before the next tick.
 ///
 /// `interval_s` is the configured interval, `now` the time the tick ran at, `active_next_poll_at` the usage store's
 /// planned next poll for the active account (`None` when there is no active account, no row, no plan, or the usage
-/// store could not be read — cswap swallows that: the unshortened delay is always safe), and `jitter_unit` the caller's
+/// store could not be read — an unreadable store is no error: the unshortened delay is always safe), and `jitter_unit` the caller's
 /// draw in `[0, 1)`, so the function is pure.
 ///
 /// Whatever the outcome (a tick paused because auto-switch is off included): a known reset the tick sleeps toward is
@@ -40,7 +40,7 @@ pub fn next_delay(
     )
 }
 
-/// cswap's `_respect_poll_plan`: a normal-cadence sleep shortened to the store's next poll for the active account,
+/// A normal-cadence sleep shortened to the store's next poll for the active account,
 /// never below [`URGENT_INTERVAL_S`] (the planner's floor, and the rate budget's) and never lengthened.
 fn respect_poll_plan(delay: f64, now: Timestamp, active_next_poll_at: Option<Timestamp>) -> f64 {
     let Some(next) = active_next_poll_at else {
@@ -50,7 +50,7 @@ fn respect_poll_plan(delay: f64, now: Timestamp, active_next_poll_at: Option<Tim
     delay.min(due_in.max(URGENT_INTERVAL_S))
 }
 
-/// The `sleep` event of a wait longer than 1.5 intervals, cswap's `run_loop` rule: `None` when the wait is short
+/// The `sleep` event of a wait longer than 1.5 intervals: `None` when the wait is short
 /// enough that the loop stays quiet, and `None` when the delay is not finite or lies outside the timestamp range, so a
 /// nonsensical delay reports no sleep rather than a bogus wake time.
 #[must_use]

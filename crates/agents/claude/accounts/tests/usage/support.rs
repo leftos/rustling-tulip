@@ -120,7 +120,7 @@ pub fn after_fetch(seconds: i64) -> jiff::Timestamp {
     jiff::Timestamp::from_second(fetched + seconds).expect("the fixture's times are in range")
 }
 
-/// A timestamp as cswap writes it: seconds since the epoch.
+/// A timestamp as the store writes it: seconds since the epoch.
 pub fn epoch_seconds(timestamp: jiff::Timestamp) -> f64 {
     timestamp.as_duration().as_secs_f64()
 }

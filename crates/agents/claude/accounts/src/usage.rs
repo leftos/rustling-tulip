@@ -45,7 +45,7 @@ const MODELLED_KEYS: [&str; 15] = [
     "prepaid",
 ];
 
-/// The account a usage row describes: its email and organization UUID (empty when it has none), cswap's `Identity`.
+/// The account a usage row describes: its email and organization UUID (empty when it has none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
     pub email: String,
@@ -68,7 +68,7 @@ impl Identity {
         Self::new(record.email.as_str(), &record.org_uuid)
     }
 
-    /// Whether `row` describes this account, as cswap's `_matches` decides: the same `email`, and the same
+    /// Whether `row` describes this account: the same `email`, and the same
     /// `organizationUuid`, a missing one counting as empty.
     pub(crate) fn matches(&self, row: &Map<String, Value>) -> bool {
         let org_matches = match row.get("organizationUuid") {
@@ -79,7 +79,7 @@ impl Identity {
         row.get("email").and_then(Value::as_str) == Some(self.email.as_str()) && org_matches
     }
 
-    /// The row cswap starts for an account with no row of its own.
+    /// The row started for an account with no row of its own.
     pub(crate) fn fresh_row(&self) -> Map<String, Value> {
         let mut row = Map::new();
         row.insert("email".to_owned(), Value::String(self.email.clone()));
@@ -108,7 +108,7 @@ pub struct UsageWindow {
 pub struct UsageEntry {
     /// The account the row describes; `None` on an empty entry.
     pub identity: Option<Identity>,
-    /// The last successful reading (`lastGood`), raw, as cswap's `build_usage_result` shapes it.
+    /// The last successful reading (`lastGood`), raw, as the poll shapes it.
     pub last_good: Option<Value>,
     /// The account-wide 5-hour window of `last_good`.
     pub five_hour: Option<UsageWindow>,
@@ -238,26 +238,26 @@ impl UsageEntry {
         }
     }
 
-    /// Whether the reading was fetched at most `ttl_s` seconds before `now`, cswap's `UsageEntry.fresh`.
+    /// Whether the reading was fetched at most `ttl_s` seconds before `now`.
     #[must_use]
     pub fn fresh(&self, now: jiff::Timestamp, ttl_s: f64) -> bool {
         self.fetched_at
             .is_some_and(|fetched| secs_from_timestamp(now) - secs_from_timestamp(fetched) <= ttl_s)
     }
 
-    /// Whether a failure's backoff still keeps collectors off at `now`, cswap's `UsageEntry.in_backoff`.
+    /// Whether a failure's backoff still keeps collectors off at `now`.
     #[must_use]
     pub fn in_backoff(&self, now: jiff::Timestamp) -> bool {
         self.backoff_until.is_some_and(|until| now < until)
     }
 
-    /// Whether a reading adopted from another machine still keeps collectors off at `now`, cswap's `UsageEntry.held`.
+    /// Whether a reading adopted from another machine still keeps collectors off at `now`.
     #[must_use]
     pub fn held(&self, now: jiff::Timestamp) -> bool {
         self.held_until.is_some_and(|until| now < until)
     }
 
-    /// Whether another collector's fetch lease is live at `now`, cswap's `UsageEntry.claimed`: `claimUntil` when the row
+    /// Whether another collector's fetch lease is live at `now`: `claimUntil` when the row
     /// has one, else an attempt in the last 10 s.
     #[must_use]
     pub fn claimed(&self, now: jiff::Timestamp) -> bool {
@@ -272,7 +272,7 @@ impl UsageEntry {
 /// How long a row with no lease (`claimUntil`) counts as claimed after its last attempt.
 const LEGACY_CLAIM_TTL_S: f64 = 10.0;
 
-/// Whether a fetch lease is live at `now`, cswap's `_live_claim`: before `claim_until` when the row has one, else
+/// Whether a fetch lease is live at `now`: before `claim_until` when the row has one, else
 /// within 10 s of `last_attempt_at`. Times are seconds since the epoch.
 pub(crate) fn live_claim(claim_until: Option<f64>, last_attempt_at: Option<f64>, now: f64) -> bool {
     match claim_until {
@@ -395,7 +395,7 @@ pub(crate) fn secs_from_timestamp(timestamp: jiff::Timestamp) -> f64 {
     timestamp.as_duration().as_secs_f64()
 }
 
-/// `consecutiveFailures` as cswap's `int(... or 0)` reads it: a number, truncated; anything else is 0.
+/// `consecutiveFailures` as a count: a number, truncated; anything else is 0.
 pub(crate) fn failure_count(value: Option<&Value>) -> u32 {
     let Some(count) = value.and_then(Value::as_f64) else {
         return 0;

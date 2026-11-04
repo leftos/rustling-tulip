@@ -93,8 +93,8 @@ pub enum StoreErrorKind {
     /// An account's credential file exists but could not be read, or is not one this crate may read: another user's,
     /// another link's, or writable by someone else.
     CredentialsUnreadable,
-    /// An account's credential file is not a file the account store sealed: an older layout's, cswap's, or another
-    /// program's.
+    /// An account's credential file is not a file the account store sealed: an older layout's, or a file this store did not
+    /// write.
     /// It is reported and never overwritten.
     Foreign,
     /// An account's credential file is sealed but does not open: sealed for another Windows user or PC, for another
@@ -601,7 +601,7 @@ fn string_or_empty(record: &Map<String, Value>, key: &str) -> Option<String> {
     }
 }
 
-/// A JSON value's truth as Python's `bool()` reads it, the way cswap reads its flags.
+/// A JSON value's truth as Python's `bool()` reads it, the way the store reads its flags.
 pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -634,7 +634,7 @@ pub enum Strategy {
     ConsumeFirst,
 }
 
-/// The auto-switch engine's settings, with cswap's defaults and ranges; the server reads them from its own settings file
+/// The auto-switch engine's settings, with their defaults and ranges; the server reads them from its own settings file
 /// and hands them to the engine and the poll.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -2006,7 +2006,7 @@ fn create_temp(target: &Path, options: &mut OpenOptions) -> io::Result<(PathBuf,
 }
 
 /// Options for writing a file that holds a secret: on Unix, a file they create is readable by its owner alone
-/// (`0o600`), as cswap creates its credential files.
+/// (`0o600`).
 fn secret_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.write(true);

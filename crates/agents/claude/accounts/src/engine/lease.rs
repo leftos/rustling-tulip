@@ -32,7 +32,7 @@ pub struct LeaseHolder {
 }
 
 impl LeaseHolder {
-    /// The engine `owner` (such as `ops-tower`) in process `pid`, heartbeating every `interval_seconds`.
+    /// The engine `owner` (such as `rustling-tulip`) in process `pid`, heartbeating every `interval_seconds`.
     #[must_use]
     pub fn new(owner: impl Into<String>, pid: u32, interval_seconds: f64) -> Self {
         Self {
@@ -86,7 +86,7 @@ pub enum LeaseState {
 /// engine and is never overwritten. A lease without one is this version's.
 pub const LEASE_SCHEMA_VERSION: u64 = 1;
 
-/// The lease file as written: times in seconds since the epoch, as cswap writes its times.
+/// The lease file as written: times in seconds since the epoch.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LeaseRecord {

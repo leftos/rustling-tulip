@@ -83,7 +83,7 @@ impl AccountsRoot {
         self.root.join(".lock")
     }
 
-    /// `autoswitch_state.json`: the auto-switch engines' shared state, cswap's included: the last switch and the
+    /// `autoswitch_state.json`: the auto-switch engines' shared state: the last switch and the
     /// quarantined accounts.
     #[must_use]
     pub fn autoswitch_state(&self) -> PathBuf {

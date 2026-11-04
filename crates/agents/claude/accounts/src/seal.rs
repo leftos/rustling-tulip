@@ -1,7 +1,7 @@
 //! Credentials sealed for a file: a [`CredentialBlob`] turned into bytes whose payload is sealed to this Windows user's
 //! DPAPI keys, and back.
 //!
-//! A sealed file is `OTSEAL`, a version byte, a purpose byte and a generation (u64, little-endian), then the sealed
+//! A sealed file is `RTSEAL`, a version byte, a purpose byte and a generation (u64, little-endian), then the sealed
 //! payload. The payload is the purpose byte again, the associated data, the text's length (u32, little-endian), the
 //! text's SHA-256 and the UTF-8 text. On Windows the payload is sealed with DPAPI at user scope, under an entropy of its
 //! own per purpose followed by the associated data, so a file sealed for one use never opens as another.
@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 use crate::secret::CredentialBlob;
 
 /// The first bytes of every sealed file.
-const MAGIC: &[u8; 6] = b"OTSEAL";
+const MAGIC: &[u8; 6] = b"RTSEAL";
 /// The file format's version byte.
 const VERSION: u8 = 1;
 /// The magic, the version byte, the purpose byte and the generation.
@@ -33,7 +33,7 @@ const GENERATION_LEN: usize = 8;
 /// The length and the SHA-256 that come before the text in a payload.
 const TEXT_PREFIX_LEN: usize = 4 + 32;
 /// The text [`canary`] seals: fixed and not secret.
-const CANARY_TEXT: &str = "ops-tower sealing canary";
+const CANARY_TEXT: &str = "rustling-tulip sealing canary";
 /// The slot [`canary`] seals under, which no account has.
 const CANARY_SLOT: &str = "canary";
 /// The longest sealed file [`open`] looks into, and the most the store reads of a credential or stash file: 64 KiB.
@@ -132,19 +132,19 @@ struct Scope {
 const CREDENTIALS_SCOPE: Scope = Scope {
     tag: 1,
     #[cfg(windows)]
-    entropy: b"ops-tower/claude-accounts/credentials/v1",
+    entropy: b"rustling-tulip/accounts/credentials/v1",
 };
 
 const STASH_ENTRY_SCOPE: Scope = Scope {
     tag: 2,
     #[cfg(windows)]
-    entropy: b"ops-tower/claude-accounts/stash-entry/v1",
+    entropy: b"rustling-tulip/accounts/stash-entry/v1",
 };
 
 const CANARY_SCOPE: Scope = Scope {
     tag: 3,
     #[cfg(windows)]
-    entropy: b"ops-tower/claude-accounts/canary/v1",
+    entropy: b"rustling-tulip/accounts/canary/v1",
 };
 
 /// A sealed file's bytes, made only by [`seal`] and by [`crate::guard::read_file`], so every file opened was read
@@ -793,7 +793,7 @@ mod tests {
 
         // DPAPI and the payload check would both call these bytes unopenable, DPAPI with an OS code, so `Foreign`
         // with no code means neither saw them.
-        let mut bytes = b"OTSEAL\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        let mut bytes = b"RTSEAL\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
         bytes.resize(65_537, 0x5a);
         let file = SealedBytes::from_file_bytes(zeroize::Zeroizing::new(bytes));
         let error = open(
@@ -810,7 +810,7 @@ mod tests {
     fn a_file_of_exactly_64_kib_reaches_the_opening() {
         use super::{SealPurpose, SealedBytes, open};
 
-        let mut bytes = b"OTSEAL\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        let mut bytes = b"RTSEAL\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
         bytes.resize(65_536, 0x5a);
         let file = SealedBytes::from_file_bytes(zeroize::Zeroizing::new(bytes));
         let error = open(

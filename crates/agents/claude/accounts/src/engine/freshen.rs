@@ -1,5 +1,5 @@
-//! Freshening a switch target and the quarantine around it, as cswap's engine does (`_freshen_target`,
-//! `_note_token_identity`, `_quarantine` and `_release_recovered_quarantines`): a target whose stored access token is
+//! Freshening a switch target and the quarantine around it:
+//! a target whose stored access token is
 //! about to lapse has its grant spent through the consume gate before it is activated, the account the token endpoint
 //! names is checked against the record, and an account whose credential is dead or belongs to someone else is held out
 //! of rotation until its credential is replaced.
@@ -17,18 +17,18 @@ use crate::store::{AccountRecord, Sequence, Store};
 use crate::switch::{SwitchErrorKind, log_identity_refusal, target_identity_check};
 use crate::usage::Identity;
 
-/// How long before its `expiresAt` a target's access token is refreshed before a switch, cswap's `FRESHEN_BUFFER_MS`:
+/// How long before its `expiresAt` a target's access token is refreshed before a switch:
 /// twice Claude Code's own five-minute refresh buffer, so Claude Code does not refresh it again right after the switch.
 pub const FRESHEN_BUFFER: jiff::SignedDuration = jiff::SignedDuration::from_mins(10);
 
-/// The quarantine reason of an account whose credential authenticates as another account, cswap's.
+/// The quarantine reason of an account whose credential authenticates as another account.
 pub const IDENTITY_CONFLICT: &str = "identity-conflict";
 
-/// The quarantine reason of an account whose config backup names another login than its record, ops-tower's own: the
+/// The quarantine reason of an account whose config backup names another login than its record: the
 /// account number is all that ties a record to its files, and they disagree.
 pub const IDENTITY_MISMATCH: &str = "identity-mismatch";
 
-/// What freshening a switch target came to ([`freshen_target`]), cswap's `_freshen_target` statuses
+/// What freshening a switch target came to ([`freshen_target`]), by status
 /// ([`Freshened::kind`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -46,7 +46,7 @@ pub enum Freshened {
 }
 
 impl Freshened {
-    /// cswap's status: `ok`, `identity-conflict`, `identity-mismatch` (ops-tower's own),
+    /// The status: `ok`, `identity-conflict`, `identity-mismatch`,
     /// `invalid_grant` (a dead lineage the caller quarantines), a systemic refusal's name (`store-unmirrored`, `store-unwritable`, `invalid_client`,
     /// `stash-unreadable`, `consume-busy`) or `transient`.
     #[must_use]
@@ -95,7 +95,7 @@ pub enum ReleaseReason {
 }
 
 impl ReleaseReason {
-    /// cswap's reason, `account-replaced` or `credentials-replaced`, or ops-tower's own `identity-restored`.
+    /// The reason: `account-replaced`, `credentials-replaced` or `identity-restored`.
     #[must_use]
     pub fn kind(self) -> &'static str {
         match self {
@@ -118,7 +118,7 @@ pub struct Released {
     pub reason: ReleaseReason,
 }
 
-/// Quarantines account `number` for `reason` at `now`, as cswap's `_quarantine` does: an entry in the state file bound
+/// Quarantines account `number` for `reason` at `now`: an entry in the state file bound
 /// to the fingerprint of the account's stored credential (none when it is absent or cannot be read), so replacing the
 /// credential releases it.
 ///
@@ -155,8 +155,8 @@ pub fn quarantine(
     Ok(())
 }
 
-/// Lifts every quarantine in `state` whose account was replaced since, as cswap's `_release_recovered_quarantines`
-/// does: the account number is gone or holds another email, or its stored credential's fingerprint is no longer the
+/// Lifts every quarantine in `state` whose account was replaced since:
+/// the account number is gone or holds another email, or its stored credential's fingerprint is no longer the
 /// entry's (the user logged in again and re-captured it). An [`IDENTITY_MISMATCH`] entry is lifted on neither credential
 /// rule but when the account's config backup names its record's login again ([`ReleaseReason::IdentityRestored`]),
 /// and stays while it does not. An entry that is not an object, and an account whose
@@ -248,8 +248,8 @@ struct Quarantined<'a> {
     reason: Option<&'a str>,
 }
 
-/// The email, fingerprint and reason an entry was quarantined with, read leniently from a malformed object as cswap's
-/// `entry.get` reads it; `None` for an entry that is not an object.
+/// The email, fingerprint and reason an entry was quarantined with, read leniently from a malformed object
+/// key by key; `None` for an entry that is not an object.
 fn quarantined_as(record: &QuarantineRecord) -> Option<Quarantined<'_>> {
     match record {
         QuarantineRecord::Entry(entry) => Some(Quarantined {
@@ -266,8 +266,8 @@ fn quarantined_as(record: &QuarantineRecord) -> Option<Quarantined<'_>> {
     }
 }
 
-/// Checks the account the token endpoint named for a credential just refreshed against the account's record, as
-/// cswap's `_note_token_identity` does: no uuid in the token says nothing; an organization that differs, when both
+/// Checks the account the token endpoint named for a credential just refreshed against the account's record:
+/// no uuid in the token says nothing; an organization that differs, when both
 /// sides record one, is a conflict; a record with no uuid gets the token's (under the account lock, and only while the
 /// record still holds its email and organization); otherwise a different uuid, both trimmed, is a conflict. A failed
 /// backfill is logged and never fails the freshen. The caller must not hold the account lock, which the backfill takes.
@@ -316,13 +316,13 @@ fn backfill(store: &Store, account: &AccountRecord, uuid: &str) -> IdentityCheck
     }
 }
 
-/// Makes sure a switch target's stored access token outlives [`FRESHEN_BUFFER`] before it is activated, as cswap's
-/// `_freshen_target` does. A token lapsing within the buffer whose account's config backup names another login than its record (the switch's own
+/// Makes sure a switch target's stored access token outlives [`FRESHEN_BUFFER`] before it is activated.
+/// A token lapsing within the buffer whose account's config backup names another login than its record (the switch's own
 /// target identity check) is [`Freshened::IdentityMismatch`], and one whose config backup is missing or unreadable is
 /// [`GrantError::Transient`], each logged once with nothing spent; any other has its grant spent through
 /// [`consume_backup_grant`]; the account the endpoint names is
-/// then checked ([`note_token_identity`]) against the account's record as `accounts.json` holds it after the grant (as
-/// cswap re-reads it; nothing is checked when it cannot be read), and a conflict quarantines the target as
+/// then checked ([`note_token_identity`]) against the account's record as `accounts.json` holds it after the grant (re-read
+/// for it; nothing is checked when it cannot be read), and a conflict quarantines the target as
 /// [`IDENTITY_CONFLICT`] instead of returning it as ready. Only the target's stored backup is ever touched, never
 /// Claude Code's live credential. The caller must not hold the account lock or the target's consume lock: the gate and
 /// the backfill take them.
@@ -393,7 +393,7 @@ fn check_after_grant(store: &Store, number: u32, token: Option<&TokenAccount>) -
 }
 
 /// Whether an access token lapsing at `expires_at` (milliseconds since the epoch) lapses within [`FRESHEN_BUFFER`] of
-/// `now`, cswap's `now_ms + FRESHEN_BUFFER_MS >= expires_at`.
+/// `now`: `now_ms + FRESHEN_BUFFER_MS >= expires_at`.
 fn near_expiry(expires_at: f64, now: jiff::Timestamp) -> bool {
     let Ok(soon) = now.checked_add(FRESHEN_BUFFER) else {
         return true;

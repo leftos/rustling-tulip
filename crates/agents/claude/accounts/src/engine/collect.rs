@@ -1,10 +1,10 @@
-//! Collecting the usage readings an auto-switch decision runs on, cswap's `_collect_warmup_usage` and
-//! `_collect_scheduled_usage`: the start-up warm-up forces one fetch of every account not polled since the engine
+//! Collecting the usage readings an auto-switch decision runs on:
+//! the start-up warm-up forces one fetch of every account not polled since the engine
 //! started, and the scheduled collection fetches the active account and one due candidate, then every candidate when a
 //! switch could be near. Each collection polls through [`poll_with_refresh`] and reads the usage table back after it,
 //! except the exit target's re-read ([`collect_recheck`]), which never refreshes.
 //!
-//! A poll's [`PollResult`] stands in for cswap's per-entry sentinel and dead-token verdict: an API key, no or unreadable
+//! A poll's [`PollResult`] stands in for a per-entry sentinel and dead-token verdict: an API key, no or unreadable
 //! credentials, an expired or session-held token, a struck lineage, a foreign live credential, a deferred refresh, a
 //! failed live write, or a disabled account has nothing a fetch could change this pass.
 
@@ -73,7 +73,7 @@ pub struct ScheduleInputs<'a> {
     pub paid_mode: bool,
 }
 
-/// Whether a fetch of the account concluded at or after `since`, cswap's `_polled_since`: a success then, or a recorded
+/// Whether a fetch of the account concluded at or after `since`: a success then, or a recorded
 /// failure then whose row no longer carries a live lease (a live one is a concurrent collector mid-fetch).
 #[must_use]
 pub fn polled_since(entry: Option<&UsageEntry>, since: Timestamp, now: Timestamp) -> bool {
@@ -90,8 +90,8 @@ pub fn polled_since(entry: Option<&UsageEntry>, since: Timestamp, now: Timestamp
         && !entry.claimed(now)
 }
 
-/// Whether the warm-up gate has nothing left to wait for on the account, cswap's `_warm_settled`: no entry at all,
-/// polled since `since` ([`polled_since`]), or unpollable for now: a poll `result` that stands for a cswap sentinel or a
+/// Whether the warm-up gate has nothing left to wait for on the account: no entry at all,
+/// polled since `since` ([`polled_since`]), or unpollable for now: a poll `result` that stands for a sentinel or a
 /// dead token, a failure backoff, or another machine's hold.
 #[must_use]
 pub fn warm_settled(
@@ -109,10 +109,10 @@ pub fn warm_settled(
         || entry.held(now)
 }
 
-/// The due candidate with the stalest reading, cswap's `due_candidate`: never fetched first, then the oldest fetch. Due
+/// The due candidate with the stalest reading: never fetched first, then the oldest fetch. Due
 /// means its poll `results` show no sentinel or dead token, it is out of failure backoff and not held, and it is past its
 /// planned poll, has none, or has one no planner could have written. Ties go to the lower account number, compared as a
-/// number: cswap compares the numbers as strings, so it would pick 10 before 9.
+/// number, so 9 comes before 10.
 #[must_use]
 pub fn due_candidate(
     candidates: &[u32],
@@ -141,7 +141,7 @@ pub fn due_candidate(
     due.into_iter().min().map(|(_, _, number)| number)
 }
 
-/// The start-up warm-up, cswap's `_collect_warmup_usage`: the members are `current` then `candidates` (the caller has
+/// The start-up warm-up: the members are `current` then `candidates` (the caller has
 /// left out quarantined and non-switchable accounts). Each member with no fetch concluded since `warm_since` is fetched
 /// once with [`FetchMode::Force`], past the serve TTL and its poll plan; strikes, backoff, holds and live leases still
 /// refuse. No idle-hold or escalation runs here.
@@ -195,7 +195,7 @@ pub fn collect_warmup<T: UsageTransport + ?Sized>(
     })
 }
 
-/// The scheduled two-phase collection, cswap's `_collect_scheduled_usage`. Phase A fetches the active account when its
+/// The scheduled two-phase collection. Phase A fetches the active account when its
 /// own row nominates it (never fetched, a candidate-cadence plan older than the active cap, a plan no planner could have
 /// written, past its plan, or no plan and at least 180 s old) and, unless the engine idle-holds, the one
 /// [`due_candidate`]; it runs with [`FetchMode::Escalation`] when the active account's candidate-cadence plan is being
@@ -204,8 +204,8 @@ pub fn collect_warmup<T: UsageTransport + ?Sized>(
 /// unknown while its token is not merely expired, or its utilization is within 15 points of the threshold. Phase B leaves
 /// out an account at its limit whose valid plan is wider than the exhausted cadence, so a post-429 plan survives.
 ///
-/// Phase B's check and the readings it trusts are judged at a fresh read of the clock taken after phase A: cswap judges
-/// its plans at the clock it read before phase A, so this one ages the readings phase A just fetched by no more than the
+/// Phase B's check and the readings it trusts are judged at a fresh read of the clock taken after phase A, so
+/// the readings phase A just fetched are aged by no more than the
 /// fetches took.
 ///
 /// # Errors
@@ -273,7 +273,7 @@ pub fn collect_scheduled<T: UsageTransport + ?Sized>(
     Ok(collected)
 }
 
-/// The consume-first phase-2 refetch, cswap's `usage_entries_by_account(fetch={current, *candidates})` in its
+/// The consume-first phase-2 refetch of the
 /// two-phase commit: `members` (the active account and the candidates) are fetched with [`FetchMode::Escalation`], so a
 /// reading past the serve TTL is fetched again while strikes, backoff, holds and live leases still refuse and serve the
 /// stored entry. Unlike the warm-up it never forces.
@@ -322,7 +322,7 @@ pub fn collect_recheck<T: UsageTransport + ?Sized>(
     collected(context, outcomes)
 }
 
-/// Whether a poll result stands for one of cswap's usage sentinels or its dead-token verdict: nothing a fetch could
+/// Whether a poll result stands for one of the usage sentinels or the dead-token verdict: nothing a fetch could
 /// change this pass.
 pub(crate) fn is_sentinel(result: &PollResult) -> bool {
     match result {
@@ -346,7 +346,7 @@ pub(crate) fn is_sentinel(result: &PollResult) -> bool {
     }
 }
 
-/// Whether a poll result is one cswap shows as its `token expired` sentinel: an expired token left unsent, a refresh
+/// Whether a poll result is one shown as the `token expired` sentinel: an expired token left unsent, a refresh
 /// put off before anything was spent, or a successor the live file could not take.
 pub(crate) fn shows_expired(result: &PollResult) -> bool {
     match result {
@@ -441,7 +441,7 @@ fn active_due(entry: &UsageEntry, now: Timestamp) -> bool {
 
 /// Whether the active account carries a plan written while it was a candidate (wider than the active cadence's cap)
 /// and its reading is at least that cap old, while its binding window is not exhausted: the plan is overridden. The
-/// binding window is the fullest of the 5-hour and 7-day windows and the scoped windows `models` names, as cswap's
+/// binding window is the fullest of the 5-hour and 7-day windows and the scoped windows `models` names, as
 /// `relevant_windows` gives them.
 fn stale_candidate_plan(entry: &UsageEntry, models: &[String], now: Timestamp) -> bool {
     let old = entry

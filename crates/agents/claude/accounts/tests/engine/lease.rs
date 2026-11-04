@@ -53,7 +53,7 @@ fn not_running() -> Table {
 }
 
 fn me() -> LeaseHolder {
-    LeaseHolder::new("ops-tower", 1234, INTERVAL_S)
+    LeaseHolder::new("rustling-tulip", 1234, INTERVAL_S)
 }
 
 /// Another engine's lease, its last heartbeat `ago_ms` before the tests' clock and its start an hour before that.
@@ -113,7 +113,10 @@ fn a_free_lease_is_claimed() {
     let now = NOW_S as f64;
     assert_eq!(
         read_json(&root.engine_lease()),
-        json!({"schemaVersion": LEASE_SCHEMA_VERSION, "owner": "ops-tower", "pid": 1234, "startedAt": now, "heartbeatAt": now, "intervalSeconds": INTERVAL_S})
+        json!({
+            "schemaVersion": LEASE_SCHEMA_VERSION, "owner": "rustling-tulip", "pid": 1234,
+            "startedAt": now, "heartbeatAt": now, "intervalSeconds": INTERVAL_S
+        })
     );
     assert_eq!(
         lease
@@ -190,7 +193,10 @@ fn a_lease_older_than_three_intervals_is_taken_over() {
                 .expect("the lease is taken over"),
             LeaseState::Ours
         );
-        assert_eq!(read_json(&root.engine_lease())["owner"], json!("ops-tower"));
+        assert_eq!(
+            read_json(&root.engine_lease())["owner"],
+            json!("rustling-tulip")
+        );
     }
 }
 
@@ -222,7 +228,10 @@ fn a_fresh_lease_whose_holder_is_not_running_is_claimed() {
     let now = NOW_S as f64;
     assert_eq!(
         read_json(&root.engine_lease()),
-        json!({"schemaVersion": LEASE_SCHEMA_VERSION, "owner": "ops-tower", "pid": 1234, "startedAt": now, "heartbeatAt": now, "intervalSeconds": INTERVAL_S}),
+        json!({
+            "schemaVersion": LEASE_SCHEMA_VERSION, "owner": "rustling-tulip", "pid": 1234,
+            "startedAt": now, "heartbeatAt": now, "intervalSeconds": INTERVAL_S
+        }),
         "the claim names us and starts anew"
     );
 }
@@ -263,7 +272,10 @@ fn a_fresh_lease_whose_pid_was_reused_is_claimed() {
             .expect("the lease is claimed"),
         LeaseState::Ours
     );
-    assert_eq!(read_json(&root.engine_lease())["owner"], json!("ops-tower"));
+    assert_eq!(
+        read_json(&root.engine_lease())["owner"],
+        json!("rustling-tulip")
+    );
 }
 
 #[test]
@@ -332,7 +344,7 @@ fn our_lease_heartbeat_moves_heartbeat_at() {
     lease
         .claim_or_heartbeat(&me(), at(0), &table)
         .expect("the lease is claimed");
-    let me_faster = LeaseHolder::new("ops-tower", 1234, 30.0);
+    let me_faster = LeaseHolder::new("rustling-tulip", 1234, 30.0);
 
     assert_eq!(
         lease
@@ -418,7 +430,10 @@ fn a_corrupt_lease_counts_as_stale() {
                 .expect("the lease is claimed"),
             LeaseState::Ours
         );
-        assert_eq!(read_json(&root.engine_lease())["owner"], json!("ops-tower"));
+        assert_eq!(
+            read_json(&root.engine_lease())["owner"],
+            json!("rustling-tulip")
+        );
     }
 }
 
@@ -486,7 +501,7 @@ fn a_lease_written_before_its_version_field_is_still_ours() {
     write(
         &root.engine_lease(),
         &json!({
-            "owner": "ops-tower",
+            "owner": "rustling-tulip",
             "pid": 1234,
             "startedAt": 1_789_996_400.0,
             "heartbeatAt": 1_789_999_990.0,

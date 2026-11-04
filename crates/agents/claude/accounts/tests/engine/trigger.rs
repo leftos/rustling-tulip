@@ -1,4 +1,4 @@
-//! cswap's trigger classification and idle hold, ported from its `test_autoswitch.py` one test per cswap test.
+//! The engine's trigger classification and idle hold.
 
 use claude_accounts::engine::{
     ActiveHealth, ActiveReading, Hold, IDLE_HOLD_MAX_S, Trigger, TriggerDecision, classify_trigger,
@@ -48,12 +48,11 @@ fn unknown(ticks: u32) -> TriggerDecision {
 fn idle_cap_s() -> i64 {
     assert!(
         (IDLE_HOLD_MAX_S - 1800.0).abs() < f64::EPSILON,
-        "cswap's idle-hold cap is 30 minutes"
+        "the idle-hold cap is 30 minutes"
     );
     1800
 }
 
-// cswap: TestDecisionTable.test_below_threshold_is_no_action
 #[test]
 fn below_threshold_is_no_action() {
     assert_eq!(
@@ -62,7 +61,6 @@ fn below_threshold_is_no_action() {
     );
 }
 
-// cswap: TestDecisionTable.test_unknown_active_usage_waits_then_fails_over
 #[test]
 fn unknown_active_usage_waits_then_fails_over() {
     let mut ticks = Ticks::new();
@@ -71,7 +69,6 @@ fn unknown_active_usage_waits_then_fails_over() {
     assert_eq!(ticks.tick(UNKNOWN), FAILOVER);
 }
 
-// cswap: TestDecisionTable.test_known_active_usage_resets_unhealthy_counter
 #[test]
 fn known_active_usage_resets_unhealthy_counter() {
     let mut ticks = Ticks::new();
@@ -88,7 +85,6 @@ fn known_active_usage_resets_unhealthy_counter() {
     );
 }
 
-// cswap: TestIdleHold.test_token_expired_holds_instead_of_failover
 #[test]
 fn token_expired_holds_instead_of_failover() {
     let mut ticks = Ticks::new();
@@ -99,7 +95,6 @@ fn token_expired_holds_instead_of_failover() {
     assert_eq!(ticks.health.unhealthy_ticks, 0);
 }
 
-// cswap: TestIdleHold.test_idle_hold_cap_escalates_to_failover
 #[test]
 fn idle_hold_cap_escalates_to_failover() {
     let mut ticks = Ticks::new();
@@ -110,7 +105,6 @@ fn idle_hold_cap_escalates_to_failover() {
     assert_eq!(ticks.tick(HELD), FAILOVER);
 }
 
-// cswap: TestIdleHold.test_recovery_resets_the_hold_clock
 #[test]
 fn recovery_resets_the_hold_clock() {
     let mut ticks = Ticks::new();
@@ -126,7 +120,6 @@ fn recovery_resets_the_hold_clock() {
     assert_eq!(ticks.health.unhealthy_ticks, 0);
 }
 
-// cswap: TestIdleHold.test_plain_fetch_failure_still_counts_unhealthy
 #[test]
 fn plain_fetch_failure_still_counts_unhealthy() {
     let mut ticks = Ticks::new();
@@ -136,7 +129,6 @@ fn plain_fetch_failure_still_counts_unhealthy() {
     assert_eq!(ticks.health.idle_hold_since, None);
 }
 
-// cswap: TestIdleHold.test_foreign_credential_sentinel_fails_over_instead_of_holding
 #[test]
 fn foreign_credential_sentinel_fails_over_instead_of_holding() {
     // A credential proven to be another account's is no trusted reading: the caller passes it as unreadable.
@@ -147,7 +139,6 @@ fn foreign_credential_sentinel_fails_over_instead_of_holding() {
     assert_eq!(ticks.health.idle_hold_since, None);
 }
 
-// cswap: TestConsumeFirstStrategy.test_best_strategy_unaffected_below_threshold
 #[test]
 fn best_strategy_unaffected_below_threshold() {
     let mut ticks = Ticks::new();

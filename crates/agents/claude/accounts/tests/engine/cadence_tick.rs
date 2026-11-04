@@ -1,4 +1,4 @@
-//! The cadence tests that drive a real tick through cswap's engine harness, which the platform-gated engine test
+//! The cadence tests that drive a real tick through the engine harness, which the platform-gated engine test
 //! support provides. The pure `next_delay` and `sleep_event` tests live in [`crate::cadence`], which is not gated.
 
 use claude_accounts::engine::{
@@ -12,16 +12,15 @@ use serde_json::{Value, json};
 use crate::cadence::INTERVAL;
 use crate::tick::{Bench, reasons};
 
-/// cswap's `_usage`: the 5-hour window at `pct` and an empty 7-day window.
+/// The 5-hour window at `pct` and an empty 7-day window.
 fn reading(pct: f64) -> Value {
     json!({"five_hour": {"pct": pct}, "seven_day": {"pct": 0.0}})
 }
 
-// cswap: TestWarmUp.test_warmup_uses_normal_interval
 #[test]
 fn warmup_uses_normal_interval() {
     let mut bench = Bench::new("cadence_warmup_interval", 3);
-    bench.engine = Engine::new("ops-tower", 101, Some(bench.now()));
+    bench.engine = Engine::new("rustling-tulip", 101, Some(bench.now()));
     bench.set_warm_settled(2);
     bench.set_usage(&[(1, None), (2, Some(reading(10.0)))]);
     bench.set_result(1, PollResult::TokenExpired);
@@ -55,7 +54,7 @@ fn halt_stops_switching_and_releases_the_lease() {
         (2, Some(reading(10.0))),
         (3, Some(reading(50.0))),
     ]);
-    let ours = LeaseHolder::new("ops-tower", 101, INTERVAL);
+    let ours = LeaseHolder::new("rustling-tulip", 101, INTERVAL);
     let claimed = Lease::new(&bench.root())
         .claim_or_heartbeat(&ours, bench.now(), &EmptyTable)
         .expect("the lease can be claimed");

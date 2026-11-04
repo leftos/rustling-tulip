@@ -43,7 +43,7 @@ fn collect(base: &Path, folder: &Path, listing: &mut BTreeMap<String, Option<Vec
 }
 
 fn me() -> LeaseHolder {
-    LeaseHolder::new("ops-tower", std::process::id(), 30.0)
+    LeaseHolder::new("rustling-tulip", std::process::id(), 30.0)
 }
 
 /// Account 1, ALICE, as the usage table names her.
@@ -101,7 +101,7 @@ fn assert_every_root_lock_refuses(root: &AccountsRoot) {
 fn a_lease_claim_first_on_a_fresh_machine_makes_the_root_owner_only() {
     let scratch =
         Scratch::empty("a_lease_claim_first_on_a_fresh_machine_makes_the_root_owner_only");
-    let parent = scratch.dir.join("ops-tower");
+    let parent = scratch.dir.join("rustling-tulip");
     let root = AccountsRoot::new(parent.join("accounts"));
 
     Lease::new(&root)

@@ -1,11 +1,11 @@
-//! Spending an account's refresh grant: the token POST ([`refresh_grant`]), the fingerprints cswap binds strikes and
-//! stash rows to, and the consume gate ([`consume_backup_grant`]) through which a backup account's grant is spent once.
+//! Spending an account's refresh grant: the token POST ([`refresh_grant`]), the fingerprints that bind strikes and
+//! stash rows, and the consume gate ([`consume_backup_grant`]) through which a backup account's grant is spent once.
 //!
-//! A refresh token is one-time-use. The gate ports cswap's `consume_backup_grant`: it holds the account's consume lock
+//! A refresh token is one-time-use. The gate holds the account's consume lock
 //! across re-read, POST and compare-and-swap, so two consumers never POST the same grant; it re-reads under the account
 //! lock and adopts a successor an earlier pass stashed; it POSTs
 //! outside the account lock; and it writes the successor back only when the store still holds the generation it spent,
-//! parking it in cswap's unclaimed stash otherwise. A spent generation is never discarded.
+//! parking it in the unclaimed stash otherwise. A spent generation is never discarded.
 
 pub(crate) mod oracle;
 pub(crate) mod stash;
@@ -31,7 +31,7 @@ use crate::transport::{
 };
 use crate::usage::Identity;
 
-/// Why a refresh grant bought no new token, in cswap's words ([`RefreshError::kind`]).
+/// Why a refresh grant bought no new token, by name ([`RefreshError::kind`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RefreshError {
@@ -52,7 +52,7 @@ pub enum RefreshError {
 }
 
 impl RefreshError {
-    /// cswap's name for the error: `no_refresh_token`, `invalid_grant`, `invalid_client` or `transient`.
+    /// The error's name: `no_refresh_token`, `invalid_grant`, `invalid_client` or `transient`.
     #[must_use]
     pub fn kind(self) -> &'static str {
         match self {
@@ -64,7 +64,7 @@ impl RefreshError {
     }
 }
 
-/// cswap's fingerprint of a stored credential: `sha256:` and the lowercase hex SHA-256 of the refresh token when the
+/// The fingerprint of a stored credential: `sha256:` and the lowercase hex SHA-256 of the refresh token when the
 /// text holds a non-empty one, else `sha256-full:` and the hash of the whole text. `None` only for empty text.
 #[must_use]
 pub fn credential_fingerprint(blob: &CredentialBlob) -> Option<String> {
@@ -82,7 +82,7 @@ pub fn credential_fingerprint(blob: &CredentialBlob) -> Option<String> {
     }
 }
 
-/// cswap's fingerprint of the access token alone, `sha256-at:` and its hex SHA-256: the part that rotates within a
+/// The fingerprint of the access token alone, `sha256-at:` and its hex SHA-256: the part that rotates within a
 /// lineage. `None` when the text holds no non-empty access token.
 #[must_use]
 pub fn access_token_fingerprint(blob: &CredentialBlob) -> Option<String> {
@@ -107,7 +107,7 @@ pub(crate) fn has_refresh_token(blob: &CredentialBlob) -> bool {
 /// - otherwise `candidate` is newer only when its `expiresAt` is strictly later than the stored one's. A tie keeps the
 ///   stored copy, and so do two copies that both lack an expiry.
 ///
-/// An `expiresAt` that is absent or not a number reads as 0, as cswap's `or 0` reads it, and so does a text that is not
+/// An `expiresAt` that is absent or not a number reads as 0, and so does a text that is not
 /// JSON or holds no `claudeAiOauth` object.
 #[must_use]
 pub fn newer_generation(candidate: &CredentialBlob, stored: &CredentialBlob) -> bool {
@@ -156,8 +156,8 @@ fn fingerprint(prefix: &str, bytes: &[u8]) -> String {
     text
 }
 
-/// Spends `blob`'s refresh token at the token endpoint and returns the refreshed credential, as cswap's
-/// `try_refresh_oauth_credentials` does: every key of the credential JSON is kept, `accessToken` and `expiresAt` (`now`
+/// Spends `blob`'s refresh token at the token endpoint and returns the refreshed credential:
+/// every key of the credential JSON is kept, `accessToken` and `expiresAt` (`now`
 /// plus `expires_in` seconds, in milliseconds) are replaced, `refreshToken` only when the answer carries a non-empty
 /// one, and `scope` becomes `scopes`, split on whitespace.
 ///
@@ -271,9 +271,8 @@ pub(crate) fn refresh_grant_within(
 /// A credential whose text is not JSON or holds no `claudeAiOauth` object, or an empty one.
 pub(crate) struct NoOauthBlock;
 
-/// The credential's `expiresAt` when it is a number, as cswap's `extract_oauth_data(...).get("expiresAt")` reads it:
-/// `Ok(None)` when it is absent or not a number. An empty `claudeAiOauth` object counts as none, as cswap's `not data`
-/// reads it.
+/// The credential's `expiresAt` when it is a number:
+/// `Ok(None)` when it is absent or not a number. An empty `claudeAiOauth` object counts as none.
 pub(crate) fn oauth_expiry(blob: &CredentialBlob) -> Result<Option<f64>, NoOauthBlock> {
     let parsed = Scrubbed::parse(blob.expose()).ok_or(NoOauthBlock)?;
     let oauth = parsed
@@ -310,7 +309,7 @@ struct TokenGrant {
     token_account: Option<TokenAccount>,
 }
 
-/// A truthy `scope` that is not a string: cswap's `.split()` fails on it.
+/// A truthy `scope` that is not a string: it cannot be split into scopes.
 struct MalformedScope;
 
 impl TokenGrant {
@@ -422,7 +421,7 @@ fn read_scopes(scope: Option<&Value>) -> Result<Option<Vec<String>>, MalformedSc
 }
 
 /// `now` plus `expires_in` seconds, in milliseconds since the epoch: a whole number for a whole `expires_in`, a float
-/// for a float one, as cswap's arithmetic gives.
+/// for a float one.
 fn expires_at(expires_in: &Number, now: jiff::Timestamp) -> Option<Number> {
     let now_ms = now.as_millisecond();
     if let Some(seconds) = expires_in.as_i64() {
@@ -483,7 +482,7 @@ impl Scrubbed {
             .filter(|text| !text.is_empty())
     }
 
-    /// The OAuth block's `expiresAt` as a number, 0 when absent or not a number, as cswap's `or 0` reads it.
+    /// The OAuth block's `expiresAt` as a number, 0 when absent or not a number.
     fn expires_at(&self) -> f64 {
         self.oauth()
             .and_then(|oauth| oauth.get("expiresAt"))
@@ -522,8 +521,8 @@ pub(crate) fn scrub(value: &mut Value) {
     }
 }
 
-/// Parks `live`, a live credential a switch is about to overwrite without backing it up, in the unclaimed stash, as
-/// cswap's direct activation does: reason `displaced-live-login`, filed under `slot` (sealed with `organization`, the
+/// Parks `live`, a live credential a switch is about to overwrite without backing it up, in the unclaimed stash, as a
+/// direct activation does: reason `displaced-live-login`, filed under `slot` (sealed with `organization`, the
 /// account's as the caller read it) and keyed to no generation, so no refresh ever adopts it; its bytes are kept and
 /// never overwritten. Nothing is spent yet, so a newer store refuses it ([`StashWrite::BeforeSpend`]).
 pub(crate) fn stash_displaced(
@@ -577,7 +576,7 @@ pub struct RefreshContext<'a> {
     pub claude_locks: LockTiming,
 }
 
-/// What an account's credential file looks like inside, as cswap's `extract_oauth_data` sees it: whether it holds a
+/// What an account's credential file looks like inside: whether it holds a
 /// `claudeAiOauth` object, which of the two tokens are non-empty, and its `expiresAt` (0 when absent or not a number).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct OauthShape {
@@ -604,7 +603,7 @@ impl OauthShape {
     }
 }
 
-/// Why the consume gate handed back no freshened credential, in cswap's words where cswap has one
+/// Why the consume gate handed back no freshened credential, by name
 /// ([`GrantError::kind`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -635,9 +634,9 @@ pub enum GrantError {
 }
 
 impl GrantError {
-    /// cswap's name for the outcome (`store-unmirrored`, `consume-busy`, `stash-unreadable`, `transient`,
-    /// `no_refresh_token`, `invalid_grant`, `invalid_client`), or this crate's for the three cswap lacks: `draining`,
-    /// `active` and `store-unwritable`.
+    /// The outcome's name: `store-unmirrored`, `consume-busy`, `stash-unreadable`, `transient`,
+    /// `no_refresh_token`, `invalid_grant`, `invalid_client`, `draining`,
+    /// `active` or `store-unwritable`.
     #[must_use]
     pub fn kind(self) -> &'static str {
         match self {
@@ -678,7 +677,7 @@ impl From<RefreshError> for GrantError {
     }
 }
 
-/// Why the gate parked a successor in the unclaimed stash instead of writing it, cswap's `consume-gate-*` reasons.
+/// Why the gate parked a successor in the unclaimed stash instead of writing it, by its `consume-gate-*` reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StashReason {
@@ -697,7 +696,7 @@ pub enum StashReason {
 }
 
 impl StashReason {
-    /// cswap's reason string, `consume-gate-…`.
+    /// The reason string, `consume-gate-…`.
     #[must_use]
     pub fn kind(self) -> &'static str {
         match self {
@@ -722,7 +721,7 @@ impl StashReason {
     }
 }
 
-/// What one pass through the consume gate came to, cswap's `RefreshOutcome`.
+/// What one pass through the consume gate came to.
 #[derive(Debug)]
 pub struct GrantOutcome {
     /// The account's now-current credential: the successor, a racing writer's newer lineage, an adopted stash, or a
@@ -735,7 +734,7 @@ pub struct GrantOutcome {
     pub consumed_fp: Option<String>,
     /// Why the successor was stashed, when it was.
     pub stash: Option<StashReason>,
-    /// The account the token endpoint named as the spent grant's owner, as cswap carries it: set only when this pass
+    /// The account the token endpoint named as the spent grant's owner: set only when this pass
     /// spent the grant (a demoted [`GrantError::Transient`] and a racing writer's adopted lineage included), `None` when
     /// it adopted a credential without a POST.
     pub token_account: Option<TokenAccount>,
@@ -753,7 +752,7 @@ impl GrantOutcome {
     }
 }
 
-/// Spends account `number`'s backup refresh grant once, through cswap's consume gate, and returns the account's
+/// Spends account `number`'s backup refresh grant once, through the consume gate, and returns the account's
 /// now-current credential. `snapshot` is the credential the caller read: the gate never spends it, only compares its
 /// access token with the store's re-read.
 ///
@@ -993,7 +992,7 @@ impl<'s, 'a> Slot<'s, 'a> {
     }
 
     /// Parks `live`, a live credential that is not the account's lineage, in the unclaimed stash before it is
-    /// overwritten, as cswap's `_stash_live_credential` does: reason `foreign`, keyed to no generation, so no refresh
+    /// overwritten: reason `foreign`, keyed to no generation, so no refresh
     /// ever adopts it; its bytes are kept and never overwritten. `organization` is as [`Self::stash`] takes it. Nothing
     /// is spent yet, so a newer store refuses it ([`StashWrite::BeforeSpend`]).
     pub(crate) fn stash_foreign(
