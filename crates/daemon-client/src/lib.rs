@@ -21,6 +21,8 @@ mod pinned_process;
 pub mod profile;
 mod proof;
 pub mod protected_root;
+#[cfg(windows)]
+pub mod spawn_detached;
 mod supervisor;
 #[cfg(test)]
 mod test_fakes;

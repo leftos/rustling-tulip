@@ -38,9 +38,9 @@ The driver MCP server's other specs (`tools/rt-driver-mcp/tests/server.rs`) run 
 
 ## Driving the daemon's CLI from a script
 
-`rustling-tulipd` is a GUI-subsystem program: PowerShell's `&` does not wait for it and loses its output, and a redirect from `cmd` under a non-interactive SSH session lost it too. A script that runs its verbs starts it with `System.Diagnostics.ProcessStartInfo` and redirected standard output and error, then reads both and the exit code.
+`rustling-tulipd` is a GUI-subsystem program: PowerShell's `&` does not wait for it and loses its output; a redirect from `cmd` keeps it (`crates/daemon/tests/cli_console.rs` runs the exe under `cmd /c` with a redirect). A script that runs its verbs starts it with `System.Diagnostics.ProcessStartInfo` and redirected standard output and error, then reads both and the exit code.
 
-A daemon a verb starts directly can hold a remote SSH command's channel open, so a script that starts one over SSH redirects the remote command's own output and wraps the local `ssh` in a timeout.
+A daemon a client, `bridge` or verb starts inherits none of the caller's handles and cannot hold a remote SSH command's channel open, but a script that starts one over SSH still wraps the local `ssh` in a timeout, so a regression fails the run instead of hanging it.
 
 Measuring an elevated daemon against an ordinary one on a builder needs the real ordinary profile: under a `RUSTLING_TULIP_CONFIG_DIR` override both profiles resolve to one folder. With no daemon running, rename the real ordinary config folder aside, set `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to scratch folders and `RUSTLING_TULIP_CLAUDE` to a path that does not exist, and rename the folder back afterwards. An SSH logon of an administrator is High; a Medium process comes from a scheduled task with `-LogonType Interactive -RunLevel Limited` while the console session is logged on, and a daemon such a task starts comes through the WMI launch, since the task's job refuses breakaway.
 

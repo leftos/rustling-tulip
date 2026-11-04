@@ -514,7 +514,7 @@ fn tracer_command(launch: &TracerLaunch<'_>) -> std::process::Command {
     cmd
 }
 
-/// Spawns the tracer through [`crate::spawn_detached`], so it inherits none of
+/// Spawns the tracer through [`daemon_client::spawn_detached`], so it inherits none of
 /// the daemon's handles: a tracer outliving the daemon must not keep the
 /// daemon's listener or client connections open. It runs in a hidden console
 /// of its own (`CREATE_NO_WINDOW`, no `STARTF_USESTDHANDLES`), so its std
@@ -524,11 +524,13 @@ fn tracer_command(launch: &TracerLaunch<'_>) -> std::process::Command {
 #[cfg(windows)]
 fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<TracerProcess> {
     let invocation = tracer_invocation(launch);
-    let child = crate::spawn_detached::spawn_detached(
+    let child = daemon_client::spawn_detached::spawn_detached(
         launch.tracer,
         &invocation.args,
         &invocation.env_set,
         &invocation.env_remove,
+        windows::Win32::System::Threading::CREATE_NO_WINDOW.0,
+        daemon_client::spawn_detached::StdHandles::Console,
     )
     .with_context(|| format!("spawning tracer process {}", launch.tracer.display()))?;
     Ok(TracerProcess { child })
@@ -546,7 +548,7 @@ fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<TracerProce
 /// failure can end that very process. Dropping it leaves the tracer running.
 struct TracerProcess {
     #[cfg(windows)]
-    child: crate::spawn_detached::OwnedChild,
+    child: daemon_client::spawn_detached::OwnedChild,
     #[cfg(not(windows))]
     child: std::process::Child,
 }
@@ -1520,7 +1522,7 @@ mod tests {
             log_path: Some(&log),
             owner: &owner,
         });
-        let block = crate::spawn_detached::environment_block(
+        let block = daemon_client::spawn_detached::environment_block(
             Vec::new(),
             &invocation.env_set,
             &invocation.env_remove,

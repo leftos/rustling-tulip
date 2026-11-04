@@ -130,14 +130,12 @@ windows-native-keyring-store = { version = "1.1", default-features = false }
 # API (`SetThreadExecutionState`) backing the keep-awake hold that stops the
 # host idle-sleeping while a session is live, plus the Registry API
 # (`RegGetValueW`) reading user-scope environment variables for spawn-env
-# references, plus `CreateProcessW` (Threading; Security for its
-# SECURITY_ATTRIBUTES parameters) spawning tracers that inherit none of the
-# daemon's handles, plus the Job Objects API killing a pre-create run's whole
-# process tree, plus the Console API (`AttachConsole`, `GetStdHandle`,
-# `SetStdHandle`) and `CreateFileW` giving the `pair` subcommand the parent's
-# console, plus `SetHandleInformation` keeping the `bridge` subcommand's
-# standard handles out of a daemon it starts (`CreatePipe`, Pipes, in its
-# test), plus the IP Helper TCP table (`GetExtendedTcpTable`) and the token
+# references, plus the Threading API (`CREATE_NO_WINDOW` for the tracer spawn
+# `daemon_client::spawn_detached` makes), plus the Job Objects API killing a
+# pre-create run's whole process tree, plus the Console API (`AttachConsole`,
+# `GetStdHandle`, `SetStdHandle`) and `CreateFileW` giving the `pair`
+# subcommand the parent's console, plus the IP Helper TCP table
+# (`GetExtendedTcpTable`) and the token
 # and SDDL calls (Security, Security_Authorization) behind an elevated
 # daemon's integrity check and its labelled handshake file. 0.61 matches the
 # version already pulled transitively by the existing dep graph.
@@ -149,7 +147,6 @@ windows = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_JobObjects",
-    "Win32_System_Pipes",
     "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_RestartManager",

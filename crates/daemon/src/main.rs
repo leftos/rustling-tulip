@@ -59,8 +59,6 @@ mod scrollback;
 mod secret;
 mod server;
 mod session;
-#[cfg(windows)]
-mod spawn_detached;
 mod spawn_plan;
 mod state;
 mod summarizer;

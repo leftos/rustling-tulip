@@ -45,6 +45,8 @@ winreg = "0.56"
 windows-native-keyring-store = { version = "1.1", default-features = false }
 # `OpenProcess` / `TerminateProcess` / `WaitForSingleObject`: a daemon's pid is
 # pinned by a process handle before its proof, and killed only through it.
+# `CreateProcessW` (Threading): `src/spawn_detached.rs` starts the daemon and
+# the daemon's tracers with no inherited handles.
 # COM, OLE, RPC, Variant and WMI: `src/wmi_launch.rs` starts the daemon through
 # `Win32_Process.Create` when the caller's job forbids breakaway.
 # `Win32_Security`: `src/profile.rs` reads this process's token integrity level.
@@ -72,10 +74,16 @@ windows = { version = "0.61", features = [
 
 [target.'cfg(windows)'.dev-dependencies]
 # Job objects for the supervisor tests that prove a spawned daemon breaks away
-# from its caller's job; `CreateJobObjectW` needs `Win32_Security`.
+# from its caller's job; `CreateJobObjectW` needs `Win32_Security`. `CreatePipe`
+# (Pipes) and `ReadFile` (Storage_FileSystem, which compiles it only with
+# System_IO, the feature of its OVERLAPPED parameter) for the test that proves
+# a spawned daemon inherits no caller handle.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_JobObjects",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }

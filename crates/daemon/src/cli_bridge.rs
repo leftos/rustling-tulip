@@ -48,7 +48,6 @@ pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
 /// Start the daemon if none runs and relay this process's stdin and stdout to
 /// it until either end closes.
 pub async fn run() -> anyhow::Result<()> {
-    stop_inheriting_stdio();
     run_with(
         async || {
             daemon_client::ensure_running_for_bridge(
@@ -65,49 +64,6 @@ pub async fn run() -> anyhow::Result<()> {
         },
     )
     .await
-}
-
-/// Keep this process's standard handles out of every child it starts.
-///
-/// sshd hands the bridge inheritable pipes, and a daemon `ensure_running`
-/// starts would otherwise inherit them and hold sshd's output pipe open for
-/// its whole life, so the ssh session would never end after the bridge exits.
-#[cfg(windows)]
-fn stop_inheriting_stdio() {
-    use windows::Win32::System::Console::{
-        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-    };
-    let handles: Vec<_> = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
-        .into_iter()
-        // SAFETY: reads one of this process's own standard handles.
-        .filter_map(|which| unsafe { GetStdHandle(which) }.ok())
-        .collect();
-    stop_inheriting(&handles);
-}
-
-/// Nothing to do: on other platforms the daemon is started without the
-/// caller's standard handles holding the session open.
-#[cfg(not(windows))]
-fn stop_inheriting_stdio() {}
-
-/// Clear the inherit flag on each of `handles`, skipping a null or invalid
-/// one. A failure is reported on stderr and leaves the rest as they are.
-#[cfg(windows)]
-fn stop_inheriting(handles: &[windows::Win32::Foundation::HANDLE]) {
-    use std::io::Write as _;
-    use windows::Win32::Foundation::{HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation};
-    for &handle in handles.iter().filter(|handle| !handle.is_invalid()) {
-        // SAFETY: changes only the inherit flag of a handle this process holds.
-        let cleared =
-            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
-        if let Err(err) = cleared {
-            let _ = writeln!(
-                std::io::stderr(),
-                "rustling-tulipd bridge: could not keep a standard handle from a started daemon: {err}"
-            );
-            return;
-        }
-    }
 }
 
 /// Standard input, read on a thread of its own.
@@ -620,54 +576,6 @@ mod tests {
             .expect("hung: the bridge did not end on the daemon's close")
             .expect("the bridge task ran to its end")
             .expect("stdin's end ends the bridge cleanly");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn stdio_handles_stop_being_inherited() {
-        use windows::Win32::Foundation::{
-            CloseHandle, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
-        };
-        use windows::Win32::Security::SECURITY_ATTRIBUTES;
-        use windows::Win32::System::Pipes::CreatePipe;
-
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
-                .expect("the attributes' size fits a u32"),
-            lpSecurityDescriptor: std::ptr::null_mut(),
-            bInheritHandle: true.into(),
-        };
-        let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
-        // SAFETY: creates an anonymous pipe into two handles this test owns.
-        unsafe {
-            CreatePipe(
-                &raw mut read,
-                &raw mut write,
-                Some(&raw const attributes),
-                0,
-            )
-        }
-        .expect("create an inheritable pipe");
-        let inherited = |handle: HANDLE| {
-            let mut flags = 0u32;
-            // SAFETY: reads the flags of a handle this test owns.
-            unsafe { GetHandleInformation(handle, &raw mut flags) }
-                .expect("read the handle's flags");
-            flags & HANDLE_FLAG_INHERIT.0 != 0
-        };
-        assert!(
-            inherited(read) && inherited(write),
-            "the pipe starts inheritable"
-        );
-
-        stop_inheriting(&[read, HANDLE::default(), write]);
-
-        assert!(!inherited(read), "the read end is still inherited");
-        assert!(!inherited(write), "the write end is still inherited");
-        for handle in [read, write] {
-            // SAFETY: closes a handle this test owns, once.
-            unsafe { CloseHandle(handle) }.expect("close the pipe end");
-        }
     }
 
     #[tokio::test]

@@ -13,9 +13,11 @@ use protocol::DaemonHandshake;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
+#[cfg(not(windows))]
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -1726,17 +1728,15 @@ async fn spawn_daemon_with(
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    /// What `CreateProcess` returns when the caller's job forbids breakaway.
-    const ERROR_ACCESS_DENIED: i32 = 5;
 
     let flags = CREATE_NO_WINDOW | DETACHED_PROCESS;
     match spawn_daemon_with_flags(bin, args, template_dir, flags | CREATE_BREAKAWAY_FROM_JOB) {
         Ok(child) => {
             info!("daemon launched with breakaway from the caller's job");
-            return pid_of(&child);
+            return Ok(child.pid());
         }
-        Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {}
-        Err(err) => return Err(err).context("failed to spawn daemon"),
+        Err(err) if is_access_denied(&err) => {}
+        Err(err) => return Err(err.context("failed to spawn daemon")),
     }
     match launch_bounded(bin, args, template_dir, launch_outside_job).await {
         Ok(pid) => {
@@ -1748,7 +1748,16 @@ async fn spawn_daemon_with(
     let child = spawn_daemon_with_flags(bin, args, template_dir, flags)
         .context("failed to spawn daemon")?;
     info!("daemon launched inside the caller's job (WMI launch failed)");
-    pid_of(&child)
+    Ok(child.pid())
+}
+
+/// True when `err` is `CreateProcessW` failing with `ERROR_ACCESS_DENIED`,
+/// which it returns when the caller's job forbids breakaway.
+#[cfg(windows)]
+fn is_access_denied(err: &anyhow::Error) -> bool {
+    use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+    err.downcast_ref::<windows::core::Error>()
+        .is_some_and(|os| os.code() == ERROR_ACCESS_DENIED.to_hresult())
 }
 
 /// Runs `launch` on a blocking thread, so a slow WMI call never stalls the
@@ -1780,31 +1789,38 @@ async fn launch_bounded(
     }
 }
 
-/// The pid of a just-spawned daemon. The child is not awaited: the daemon
-/// outlives us.
-#[cfg(windows)]
-fn pid_of(child: &tokio::process::Child) -> anyhow::Result<u32> {
-    child
-        .id()
-        .ok_or_else(|| anyhow!("the spawned daemon has no pid"))
-}
-
+/// Starts the daemon through [`crate::spawn_detached`], so it inherits none
+/// of the caller's handles: a `bridge` run under sshd holds inheritable
+/// copies of the SSH channel's pipes, and a daemon holding one would keep the
+/// ssh session open after the bridge exits. Its std handles are the NUL device
+/// ([`DAEMON_STD_HANDLES`]). The environment is the caller's
+/// plus `RUSTLING_TULIP_BIN_TEMPLATES`, the working directory the caller's.
+/// The returned child is not awaited: dropping it leaves the daemon running.
 #[cfg(windows)]
 fn spawn_daemon_with_flags(
     bin: &std::path::Path,
     args: &[std::ffi::OsString],
     template_dir: &std::path::Path,
     creation_flags: u32,
-) -> std::io::Result<tokio::process::Child> {
-    let mut cmd = Command::new(bin);
-    cmd.args(args);
-    cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(creation_flags);
-    cmd.spawn()
+) -> anyhow::Result<crate::spawn_detached::OwnedChild> {
+    crate::spawn_detached::spawn_detached(
+        bin,
+        args,
+        &[(
+            std::ffi::OsString::from("RUSTLING_TULIP_BIN_TEMPLATES"),
+            template_dir.as_os_str().to_owned(),
+        )],
+        &[],
+        creation_flags,
+        DAEMON_STD_HANDLES,
+    )
 }
+
+/// The daemon's std handles: the NUL device, as `Stdio::null()` gave it, and
+/// the only handle it inherits.
+#[cfg(windows)]
+const DAEMON_STD_HANDLES: crate::spawn_detached::StdHandles =
+    crate::spawn_detached::StdHandles::Nul;
 
 #[cfg(not(windows))]
 #[expect(
@@ -2070,7 +2086,7 @@ mod tests {
         start_daemon_routed,
     };
     #[cfg(windows)]
-    use super::{spawn_daemon, spawn_daemon_with};
+    use super::{spawn_daemon, spawn_daemon_with, spawn_daemon_with_flags};
     use crate::HandshakeFile;
     use crate::listener_owner;
     use crate::logon_task::StartRoute;
@@ -3053,11 +3069,39 @@ mod tests {
         info.TotalProcesses
     }
 
+    /// `%SystemRoot%\System32\cmd.exe`: the daemon spawn runs the path it is
+    /// given and searches no PATH.
+    #[cfg(windows)]
+    fn system_cmd() -> std::path::PathBuf {
+        std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot is set"))
+            .join("System32")
+            .join("cmd.exe")
+    }
+
+    /// The daemon spawn hands the daemon the NUL device as its std handles,
+    /// and that one handle is the whole list it lets the daemon inherit.
+    #[cfg(windows)]
+    #[test]
+    fn the_daemon_spawn_hands_over_only_the_nul_handle() {
+        let child_std = crate::spawn_detached::ChildStd::open(super::DAEMON_STD_HANDLES)
+            .expect("open the daemon's std handles");
+        let inherited = child_std.inherited();
+        assert_eq!(
+            inherited.len(),
+            1,
+            "the handle list holds the NUL handle and nothing else: {inherited:?}"
+        );
+        assert!(
+            inherited.iter().all(|handle| !handle.is_invalid()),
+            "the one inherited handle is an open NUL handle: {inherited:?}"
+        );
+    }
+
     /// `cmd.exe` stands in for the daemon: with a null stdin it reads EOF and exits.
     #[cfg(windows)]
     fn spawn_stand_in_daemon() -> anyhow::Result<()> {
         block_on(spawn_daemon(
-            Path::new("cmd.exe"),
+            &system_cmd(),
             Path::new("unused-templates"),
             Path::new("unused-start-failure"),
         ))
@@ -3097,7 +3141,7 @@ mod tests {
         let job = join_new_job(JOB_OBJECT_LIMIT(0));
 
         block_on(spawn_daemon_with(
-            Path::new("cmd.exe"),
+            &system_cmd(),
             &[],
             Path::new("unused-templates"),
             |_, _, _| Err(anyhow::anyhow!("injected WMI launch failure")),
@@ -3108,6 +3152,85 @@ mod tests {
             processes_ever_in(job),
             2,
             "the daemon should have started inside the caller's job"
+        );
+    }
+
+    /// One end of a pipe, moved to the thread that reads it.
+    #[cfg(windows)]
+    struct PipeEnd(HANDLE);
+
+    // SAFETY: a pipe handle is a kernel handle, valid from any thread of this
+    // process; the reading thread is its only user and closes it once.
+    #[cfg(windows)]
+    unsafe impl Send for PipeEnd {}
+
+    /// A started daemon holds no handle of its caller's: with an inheritable
+    /// pipe open (neither end a std handle), closing our write end breaks the
+    /// pipe at once, which it cannot while the daemon holds a copy of it.
+    #[cfg(windows)]
+    #[test]
+    fn spawned_daemon_inherits_no_caller_handle() {
+        use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
+        use windows::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows::Win32::Storage::FileSystem::ReadFile;
+        use windows::Win32::System::Pipes::CreatePipe;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const READ_HANG_GUARD: Duration = Duration::from_secs(10);
+
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+                .expect("the attributes' size fits a u32"),
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: true.into(),
+        };
+        let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
+        // SAFETY: creates an anonymous pipe into two handles this test owns.
+        unsafe {
+            CreatePipe(
+                &raw mut read,
+                &raw mut write,
+                Some(&raw const attributes),
+                0,
+            )
+        }
+        .expect("create an inheritable pipe");
+        let args: Vec<OsString> = ["-n", "600", "127.0.0.1"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let spawned = spawn_daemon_with_flags(
+            Path::new(r"C:\Windows\System32\PING.EXE"),
+            &args,
+            Path::new("unused-templates"),
+            CREATE_NO_WINDOW | DETACHED_PROCESS,
+        );
+        let _stand_in = KillOnDrop(spawned.expect("spawn the stand-in daemon").pid());
+        // SAFETY: closes our write end, once; the read end stays open below.
+        unsafe { CloseHandle(write) }.expect("close our write end");
+
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let read_end = PipeEnd(read);
+        std::thread::spawn(move || {
+            let read_end = read_end;
+            let mut buffer = [0u8; 16];
+            let mut got = 0u32;
+            // SAFETY: reads into a live buffer from a pipe handle this thread
+            // owns; `got` is a live u32.
+            let result =
+                unsafe { ReadFile(read_end.0, Some(&mut buffer), Some(&raw mut got), None) };
+            // SAFETY: closes the read end this thread owns, once.
+            let _ = unsafe { CloseHandle(read_end.0) };
+            let _ = done_tx.send(result.map(|()| got));
+        });
+        let result = done
+            .recv_timeout(READ_HANG_GUARD)
+            .expect("hung: the read end stayed open, so the stand-in daemon holds the write end");
+        let code = result.err().map(|err| err.code());
+        assert_eq!(
+            code,
+            Some(ERROR_BROKEN_PIPE.to_hresult()),
+            "the read ends in a broken pipe once our write end closes"
         );
     }
 

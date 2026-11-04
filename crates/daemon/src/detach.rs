@@ -13,7 +13,6 @@
 use anyhow::Context as _;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -154,46 +153,87 @@ fn relaunch(dirs: &crate::paths::Dirs) -> anyhow::Result<()> {
         .context("caching the daemon binary")?;
     let templates_env_already_set = std::env::var_os("RUSTLING_TULIP_BIN_TEMPLATES").is_some();
 
-    let mut cmd = child_command(&cached, &template_dir, templates_env_already_set);
-    let child = cmd.spawn().context("spawning the cached daemon")?;
+    let launch = child_launch(&cached, &template_dir, templates_env_already_set);
+    let pid = launch.spawn().context("spawning the cached daemon")?;
     info!(
         exe = %exe.display(),
         cached = %cached.display(),
         template_dir = %template_dir.display(),
-        pid = child.id(),
+        pid,
         "--detach: relaunched the daemon from the binary cache"
     );
-    // The child outlives us; dropping the handle leaves it running.
-    drop(child);
     Ok(())
 }
 
-/// The command that starts the cached daemon: no arguments, no inherited
-/// stdio, and — on Windows — no console window and no console-group tie to
-/// this short-lived launcher. `RUSTLING_TULIP_BIN_TEMPLATES` tells the child
-/// which install dir it came from so it can find its sibling `rt-tracer`; when
-/// the launcher already has that variable, the child inherits it instead.
-pub fn child_command(
+/// How the cached daemon is started: the program, its (empty) argument list
+/// and the variables set on top of this launcher's environment.
+#[derive(Debug)]
+pub struct ChildLaunch {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    pub env_set: Vec<(OsString, OsString)>,
+}
+
+impl ChildLaunch {
+    /// Starts the child and returns its pid. The child outlives this launcher.
+    ///
+    /// On Windows it goes through [`daemon_client::spawn_detached`], so it
+    /// inherits none of this launcher's handles, gets the NUL device as its std
+    /// handles, and has no console window and no console-group tie to the
+    /// launcher (`CREATE_NO_WINDOW | DETACHED_PROCESS`). Elsewhere it is a
+    /// plain spawn with null stdio.
+    pub fn spawn(&self) -> anyhow::Result<u32> {
+        #[cfg(windows)]
+        {
+            // Same flags `daemon_client`'s supervisor starts the daemon with.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            daemon_client::spawn_detached::spawn_detached(
+                &self.program,
+                &self.args,
+                &self.env_set,
+                &[],
+                CREATE_NO_WINDOW | DETACHED_PROCESS,
+                daemon_client::spawn_detached::StdHandles::Nul,
+            )
+            .map(|child| child.pid())
+        }
+        #[cfg(not(windows))]
+        {
+            let child = std::process::Command::new(&self.program)
+                .args(&self.args)
+                .envs(self.env_set.iter().cloned())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+            // The child outlives us; dropping the handle leaves it running.
+            Ok(child.id())
+        }
+    }
+}
+
+/// The launch that starts the cached daemon: no arguments and no inherited
+/// handles or stdio. `RUSTLING_TULIP_BIN_TEMPLATES` tells the child which
+/// install dir it came from so it can find its sibling `rt-tracer`; when the
+/// launcher already has that variable, the child inherits it instead.
+pub fn child_launch(
     cached: &Path,
     template_dir: &Path,
     templates_env_already_set: bool,
-) -> Command {
-    let mut cmd = Command::new(cached);
+) -> ChildLaunch {
+    let mut env_set = Vec::new();
     if !templates_env_already_set {
-        cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
+        env_set.push((
+            OsString::from("RUSTLING_TULIP_BIN_TEMPLATES"),
+            template_dir.as_os_str().to_owned(),
+        ));
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        // Same constants `daemon_client::supervisor::spawn_daemon` uses.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    ChildLaunch {
+        program: cached.to_path_buf(),
+        args: Vec::new(),
+        env_set,
     }
-    cmd
 }
 
 /// Log the launcher's short life to `<config>/logs/autostart.log`. Truncated
@@ -243,8 +283,7 @@ fn init_logging(dirs: &crate::paths::Dirs) {
 )]
 mod tests {
     use super::{
-        Launch, LaunchRequest, child_command, launch_form, record_start_failure,
-        write_start_failure,
+        Launch, LaunchRequest, child_launch, launch_form, record_start_failure, write_start_failure,
     };
     use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
@@ -277,10 +316,11 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
-    fn template_env(cmd: &std::process::Command) -> Option<OsString> {
-        cmd.get_envs()
-            .find(|(key, _)| *key == OsStr::new(TEMPLATE_ENV))
-            .and_then(|(_, value)| value.map(OsString::from))
+    fn template_env(cmd: &super::ChildLaunch) -> Option<OsString> {
+        cmd.env_set
+            .iter()
+            .find(|(key, _)| key == OsStr::new(TEMPLATE_ENV))
+            .map(|(_, value)| value.clone())
     }
 
     /// The refusal line for `arg`, spelled out so a change to the wording
@@ -393,13 +433,13 @@ mod tests {
     }
 
     #[test]
-    fn child_command_sets_the_template_dir_when_unset() {
+    fn child_launch_sets_the_template_dir_when_unset() {
         let cached = Path::new(r"C:\cache\rustling-tulipd-0123456789abcdef.exe");
         let template_dir = Path::new(r"C:\Program Files\rustling-tulip");
-        let cmd = child_command(cached, template_dir, false);
+        let cmd = child_launch(cached, template_dir, false);
 
-        assert_eq!(cmd.get_program(), cached.as_os_str());
-        assert_eq!(cmd.get_args().count(), 0);
+        assert_eq!(cmd.program.as_os_str(), cached.as_os_str());
+        assert_eq!(cmd.args.len(), 0);
         assert_eq!(
             template_env(&cmd).as_deref(),
             Some(template_dir.as_os_str())
@@ -407,10 +447,10 @@ mod tests {
     }
 
     #[test]
-    fn child_command_leaves_an_inherited_template_dir_alone() {
+    fn child_launch_leaves_an_inherited_template_dir_alone() {
         let cached = Path::new(r"C:\cache\rustling-tulipd-0123456789abcdef.exe");
         let template_dir = Path::new(r"C:\Program Files\rustling-tulip");
-        let cmd = child_command(cached, template_dir, true);
+        let cmd = child_launch(cached, template_dir, true);
 
         assert_eq!(template_env(&cmd), None);
     }

@@ -51,12 +51,16 @@ pub fn requested(args: impl IntoIterator<Item = OsString>) -> bool {
 /// does not wait for a GUI-subsystem exe either, so the two lines can land
 /// after the prompt has already come back.
 ///
-/// A failed attach means there was no parent console to join — the output was
-/// redirected to a pipe or a file — and the inherited handles are left exactly
-/// as they are, so `rustling-tulipd pair > code.txt` still captures both
-/// lines.
+/// The standard output and error handles are read before the attach, since
+/// `AttachConsole` replaces them with the console's even when the caller
+/// redirected them. After a successful attach each one that was valid (neither
+/// null nor `INVALID_HANDLE_VALUE`: a redirect to a pipe or a file) is put
+/// back with `SetStdHandle`, so `rustling-tulipd pair > code.txt` still
+/// captures both lines; only the ones that were null get the console, opened
+/// as `CONOUT$`. A failed attach (no parent console) changes no handle.
 #[cfg(windows)]
 pub fn attach_parent_console() {
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -66,41 +70,50 @@ pub fn attach_parent_console() {
         SetStdHandle,
     };
 
+    let before = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(|which| {
+        // SAFETY: reads one of this process's own standard handles. Only a
+        // real handle counts: `is_invalid` is true for both null and
+        // INVALID_HANDLE_VALUE.
+        let kept = unsafe { GetStdHandle(which) }
+            .ok()
+            .filter(|handle| !handle.is_invalid());
+        (which, kept)
+    });
     // SAFETY: attaches this process to whatever console the parent holds; a
     // failure changes nothing.
     if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_err() {
         return;
     }
-    // SAFETY: reads this process's own standard output handle. Only a real
-    // handle counts: a null one means the launch gave this GUI-subsystem exe
-    // none at all, which is what the console below replaces.
-    if unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.is_ok_and(|handle| !handle.is_invalid()) {
-        // A redirect survived the launch: its handle is the one to keep.
-        return;
+    let mut console: Option<HANDLE> = None;
+    for (which, kept) in before {
+        if kept.is_none() && console.is_none() {
+            // The console device's name, NUL-terminated UTF-16 that outlives
+            // the call.
+            let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+            // SAFETY: opens the console device the attach just gave this
+            // process. The handle lives as long as the process, which is the
+            // only writer.
+            console = unsafe {
+                CreateFileW(
+                    windows::core::PCWSTR(name.as_ptr()),
+                    (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+            }
+            .ok();
+        }
+        let Some(handle) = kept.or(console) else {
+            continue;
+        };
+        // SAFETY: installs a valid handle (the redirect read before the attach,
+        // or the console opened above) as this process's output or error
+        // stream; the setter only rejects an invalid handle.
+        let _ = unsafe { SetStdHandle(which, handle) };
     }
-    // The console device's name, NUL-terminated UTF-16 that outlives the call.
-    let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
-    // SAFETY: opens the console device the attach just gave this process. The
-    // handle lives as long as the process, which is the only writer.
-    let Ok(console) = (unsafe {
-        CreateFileW(
-            windows::core::PCWSTR(name.as_ptr()),
-            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-    }) else {
-        return;
-    };
-    // SAFETY: installs the console handle as this process's output and error
-    // stream; both setters only reject an invalid handle, which the open
-    // above never yields.
-    let _ = unsafe { SetStdHandle(STD_OUTPUT_HANDLE, console) };
-    // SAFETY: as above, for the error stream.
-    let _ = unsafe { SetStdHandle(STD_ERROR_HANDLE, console) };
 }
 
 /// Nothing to attach: on other platforms the binary keeps the caller's
