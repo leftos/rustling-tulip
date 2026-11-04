@@ -2974,6 +2974,7 @@ mod tests {
             summarizer,
             integrity: crate::integrity::IntegrityLevel::MEDIUM,
             peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
+            accounts: None,
         };
         (hub, preset_rx, scratch)
     }

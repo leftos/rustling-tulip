@@ -399,14 +399,13 @@ pub(crate) fn resolve_summarizer_dir() -> anyhow::Result<PathBuf> {
 /// elevated daemon: the store belongs to the ordinary user's login, and an
 /// elevated daemon never opens it. Nothing is created here; the store creates
 /// its root owner-only when it first opens it.
-#[expect(dead_code, reason = "nothing opens the account store yet")]
 pub(crate) fn resolve_accounts_dir() -> anyhow::Result<Option<PathBuf>> {
     let (profile, roots) = profile::roots()?;
     Ok(accounts_dir_of(profile, roots.accounts))
 }
 
 /// `accounts` for an ordinary profile, `None` for an elevated one.
-fn accounts_dir_of(profile: Profile, accounts: PathBuf) -> Option<PathBuf> {
+pub(crate) fn accounts_dir_of(profile: Profile, accounts: PathBuf) -> Option<PathBuf> {
     match profile {
         Profile::Ordinary => Some(accounts),
         Profile::Elevated => None,

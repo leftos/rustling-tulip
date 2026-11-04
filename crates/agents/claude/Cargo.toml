@@ -22,13 +22,28 @@ test-support = ["agent-api/test-support"]
 [dependencies]
 agent-api = { workspace = true }
 chrono = { workspace = true }
+# The account store the accounts service reads, and the transport traits it
+# implements.
+claude-accounts = { workspace = true }
 directories = { workspace = true }
+# The process table the account engine checks a lease holder against.
+proc-table = { git = "https://github.com/leftos/gate", rev = "15659c9e38a82270688c3371af2c5b6d7c19a0b6" }
 protocol = { workspace = true }
 regex = "1.11"
+# The account transports' HTTP client: blocking, rustls on the `ring` backend
+# with the OS's root certificates, as the daemon's summarizer client is.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "blocking",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
+# Zeroes the transports' response buffers, which may hold tokens.
+zeroize = "1.9.0"
 
 [dev-dependencies]
 agent-api = { workspace = true, features = ["test-support"] }
+# The clock the refresh transport test hands the store's refresh grant.
+jiff = "0.2.37"

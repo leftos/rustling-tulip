@@ -28,7 +28,7 @@ The accounts feature lands on the feature branch `feat/claude-accounts`; RT-39 i
   It brings `proc-table` (git, `leftos/gate`) and `jiff`, and raises `zeroize` and `serde_json` (features `preserve_order`, `float_roundtrip`) for the whole workspace, so `Cargo.lock` is checked with `cargo tree -d`.
 - **Remove, alias and settings.** The crate gains `Store::remove_account`, `Store::set_alias` and a writer for the `autoswitch` settings (RT-919). Account settings never go in the daemon's `state.json`.
 - **Engine lease.** The daemon's engine stays off by default. The lease keeps two engines on rustling-tulip's store from both switching.
-- **Transports** are synchronous: reqwest 0.12's `blocking` feature on one client built once, called inside `spawn_blocking`. The daemon's async client is unchanged.
+- **Transports** are synchronous: reqwest 0.12's `blocking` feature in the Claude plugin, each client built per call inside the blocking thread (the poller reuses clients when it lands). The daemon's async client is unchanged.
 - **`ProcessTable`** is `proc-table`'s Windows table, and a macOS table from RT-916; on Linux it is the empty table.
 - **Paid fallback and prepaid balances** are not surfaced: `maySpendCredits` stays off and `read_balance` keeps its default.
 - **Daemon-driven login** points `ClaudePaths` at the scratch dir and calls `capture_live_login`, extended in the crate if it cannot yet take a scratch config dir.
@@ -45,10 +45,10 @@ The accounts feature lands on the feature branch `feat/claude-accounts`; RT-39 i
 
 | File | Owns |
 |---|---|
-| `transport.rs` | the reqwest `blocking` implementations of the crate's `UsageTransport`, `RefreshTransport` and `ProfileTransport`: HTTPS only, no proxy, no redirects, bodies capped at 64 KiB, a sensitive `Authorization`, a zeroizing refresh body; base URLs injectable for tests; tokens never logged |
-| `process_table.rs` | the `ProcessTable` for `TickInputs.processes` and the lease: `proc-table`'s Windows table, the macOS table, the empty table on Linux |
+| transports (plugin-side, `crates/agents/claude/src/accounts.rs`) | the reqwest `blocking` implementations of the crate's `UsageTransport`, `RefreshTransport` and `ProfileTransport` (`UsageClient`, `RefreshClient`, `ProfileClient`): HTTPS only, no proxy, no redirects, bodies capped at 64 KiB, a sensitive `Authorization`, a zeroizing refresh body; each client built and dropped inside the blocking call; the base URL injectable for tests through `AccountsConfig::base_url`, the only case plain `http` is accepted; tokens never logged. The daemon never depends on the crate. |
+| process table (plugin-side, `crates/agents/claude/src/accounts.rs`) | the `ProcessTable` for `TickInputs.processes` and the lease (`process_table()`): `proc-table`'s Windows table, the macOS table, the empty table on Linux |
 | `driver.rs` | the poll and engine tasks in `spawn_blocking`, the lease, the `Drain`, a settings snapshot; parks the poller when no client is connected and no engine is live |
-| `snapshot.rs` | the crate's `UsageEntry`, `Sequence` and `AutoswitchState` to protocol rows |
+| `snapshot.rs` | the plugin's `agent_api` rows (`AccountsSnapshot` and its row types, built by `ClaudeAccounts`) to protocol rows; the daemon never names the crate's types |
 | `login.rs` | the daemon-driven login and the add-current-login handler |
 | `mod.rs` | the `Accounts` handle the hub owns, and the snapshot it broadcasts |
 
@@ -80,7 +80,7 @@ Sub-issues: RT-908 vendored the crate (done: CA.0, and the vendoring half of CA.
 - [ ] **CA.2 The crate** (RT-908, RT-919, RT-927). The crate at `crates/agents/claude/accounts/` as a workspace member, the lockfile resolved (`jiff`, `proc-table`, `zeroize`, `serde_json` features). The store's accounts dir under the data folder, the writers for remove, alias and settings, and the crate's own seal format identifiers. A smoke test that `Store::open(AccountsRoot::from_local_app_data(..))` and `read_sequence` work on a temp root.
 
   `Store::write_refusal()` is checked before every store write and refresh spend; `StoreErrorKind` is `#[non_exhaustive]`, so a wildcard arm, with messages for `AccountReidentified`, `StoreReadOnly`, `UnknownSchema` and `RootUnsafe`. The lock folder exists before `FileLock::acquire`. No fixtures of this repo's own: the crate's tests pin the format.
-- [ ] **CA.3 Transports** (RT-919). `accounts/transport.rs`; the daemon's `Cargo.toml` gains reqwest's `blocking` feature; CLAUDE.md's no-direct-API sentence gains this exception. `get_prepaid` stays `Unsupported`. Tests against a local axum mock: a 429 keeps `Retry-After` through `RawUsage`, and a 400 `invalid_grant` body reaches the crate's classifier. Parsing, refresh, the consume lock and quarantine are the crate's.
+- [x] **CA.3 Transports** (RT-919). The transports are in `crates/agents/claude/src/accounts.rs`, whose `Cargo.toml` gains reqwest's `blocking` feature, and the plugin reaches them through the optional `Agent::accounts` seam (not called yet); CLAUDE.md's no-direct-API sentence gains this exception (still to do). `get_prepaid` stays `Unsupported`. Tests (`crates/agents/claude/tests/accounts.rs`) against a std `TcpListener` server: a 429 keeps `Retry-After` through `RawUsage`, and a 400 `invalid_grant` body reaches the crate's classifier. Parsing, refresh, the consume lock and quarantine are the crate's.
 - [ ] **CA.4 Usage poller** (RT-910). `accounts/driver.rs`, `accounts/snapshot.rs`, `accounts/mod.rs`, hub wiring in `server/`. A `spawn_blocking` task calls `poll_with_refresh(&transport, &ctx, FetchScope::..)` on the crate's `next_delay` and `plan_after_fetch` schedule; the crate persists the cadence and the shared `cache/usage.json`, so every process on the store spends one budget.
 
   The `RefreshContext` is built once (store, `ClaudePaths` from `claude_home`, transports, `Drain`, `ProbeVerdicts`, `LockTiming`, clock). Parking at zero clients stays this repo's rule, except while an engine is live. `UsageTable` becomes `AccountSnapshot`, then `AccountsUpdated`. Shutdown calls `Drain::start` and `wait_idle` with a bound. Tests with a fake clock around the driver, not the cadence maths.

@@ -501,8 +501,9 @@ impl Sequence {
             .filter(|record| switchable_kind(record))
     }
 
-    /// Every account's record, API-key ones included, in account-number order.
-    pub(crate) fn every_record(&self) -> impl Iterator<Item = &AccountRecord> {
+    /// Every account's record, API-key ones included, in account-number order, whether or not its number is in the
+    /// rotation order.
+    pub fn every_record(&self) -> impl Iterator<Item = &AccountRecord> {
         self.accounts.values()
     }
 

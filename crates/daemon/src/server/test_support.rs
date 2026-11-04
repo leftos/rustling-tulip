@@ -185,6 +185,7 @@ pub(super) fn build_test_hub(
         turns,
         integrity: crate::integrity::IntegrityLevel::MEDIUM,
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
+        accounts: None,
     };
     (hub, scratch, attention_rx)
 }

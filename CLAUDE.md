@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **The client is the native GPUI app** (`apps/native`, design in `docs/native-client.md`, open work in Linear team RT, snapshot in `docs/plans/MAIN.md`). The earlier Tauri app is retired and not on `main`: the `tauri` branch, cut from the `tauri-last` tag, keeps it as history only. Nothing is fixed or built there, and daemon fixes are not cherry-picked to it.
 
-`rustling-tulip` is a native desktop client + a long-lived Rust daemon that orchestrates many parallel `claude` CLI sessions across single repos and multi-repo "workspaces". The daemon owns all PTYs and child processes; the client is just a client. **No code in this repo calls the Anthropic API directly** — the daemon always shells out to the `claude` CLI, which is the stable boundary.
+`rustling-tulip` is a native desktop client + a long-lived Rust daemon that orchestrates many parallel `claude` CLI sessions across single repos and multi-repo "workspaces". The daemon owns all PTYs and child processes; the client is just a client. **No code in this repo makes model calls to the Anthropic API** — the daemon always shells out to the `claude` CLI, which is the stable boundary. The one exception is the Claude plugin's account service (`crates/agents/claude/src/accounts.rs`), which calls Anthropic's OAuth account endpoints (usage, profile, token refresh) for the user's saved logins.
 
 ```
 crates/protocol/        shared wire types (serde JSON over WS) — the contract between daemon and clients

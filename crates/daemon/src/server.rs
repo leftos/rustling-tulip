@@ -197,6 +197,10 @@ pub struct Hub {
     /// How [`loopback_door`] reads a loopback peer's integrity level;
     /// consulted only when [`Hub::integrity`] is elevated.
     pub peer_integrity: Arc<dyn PeerIntegrity>,
+    /// The plugin's account service over this host's account store, called
+    /// off the async threads; `None` when no plugin keeps accounts or the
+    /// daemon runs elevated.
+    pub accounts: Option<accounts::SharedAccounts>,
 }
 
 impl Hub {
@@ -507,6 +511,7 @@ pub async fn run(
         turns,
         integrity,
         peer_integrity: Arc::new(crate::integrity::SystemPeerIntegrity),
+        accounts: accounts::start_service(),
     };
     start_hub_tasks(&hub, client_count_rx);
 
@@ -784,7 +789,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::ChatAnswer { .. }) => {
             chat::handle(hub, m, ctx);
         }
-        m @ ClientMessage::ListAccounts { .. } => accounts::handle(m, ctx),
+        m @ ClientMessage::ListAccounts { .. } => accounts::handle(hub, m, ctx).await,
         m @ (ClientMessage::ListRepos
         | ClientMessage::AddRepo { .. }
         | ClientMessage::RemoveRepo { .. }

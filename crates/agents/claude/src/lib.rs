@@ -7,6 +7,7 @@
 //! stream-json parser that turns a headless session's output into
 //! [`HeadlessEvent`]s.
 
+pub mod accounts;
 mod activity;
 mod chat_entries;
 mod dialogs;
@@ -554,6 +555,15 @@ impl Agent for ClaudePlugin {
     /// The incremental reader of the session's main transcript.
     fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>> {
         activity::reader(source)
+    }
+
+    /// The account store's service: snapshots now, polls and switches as
+    /// their items land.
+    fn accounts(
+        &self,
+        cfg: &agent_api::AccountsConfig,
+    ) -> Option<Box<dyn agent_api::AccountsService>> {
+        Some(Box::new(accounts::ClaudeAccounts::new(cfg.clone())))
     }
 
     /// Haiku through the CLI on the user's own login, with an allow-listed

@@ -82,9 +82,7 @@ pub trait Agent: Send + Sync + 'static {
 }
 ```
 
-Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, `map_hook_event`, `parse_headless_line`, `find_conversations`, `shell_resume`, `import_tracer_run`, `fake_cli`, and the four user-hooks methods, which default to unsupported) have default bodies.
-
-The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) and `inherited_session_vars`. A failed decode of `OptionValues` into `Self::Options` is a conformance bug: on a spawn path the adapter refuses the spawn naming the agent, elsewhere it logs an `error!` and uses `Default`; the conformance test keeps it from happening.
+Methods with an obvious "does nothing" answer (`passthrough_vars`, `hook_plan`, `map_hook_event`, `parse_headless_line`, `find_conversations`, `shell_resume`, `import_tracer_run`, `fake_cli`, and the four user-hooks methods, which default to unsupported) have default bodies. The optional `accounts(&AccountsConfig) -> Option<Box<dyn AccountsService>>` (default `None`; the `accounts` module of `agent-api` holds the config, the service's `snapshot` and its row types) gives the daemon an agent's saved-login service; the daemon's hub holds it, an elevated daemon never asks for it, and `conformance::check` also runs `check_accounts`. The trait also carries `chat_entries` and `chat_line_facts` (the chat mirror) and `inherited_session_vars`. A failed decode of `OptionValues` into `Self::Options` is a conformance bug: on a spawn path the adapter refuses the spawn naming the agent, elsewhere it logs an `error!` and uses `Default`; the conformance test keeps it from happening.
 
 | Capability | Method | What the app does with it |
 |---|---|---|

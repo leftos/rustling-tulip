@@ -14,6 +14,7 @@
 //! [`workspace_prelude`] is the workspace note a plugin hands its CLI for a
 //! multi-member session.
 
+pub mod accounts;
 pub mod activity;
 #[cfg(feature = "test-support")]
 pub mod conformance;
@@ -23,6 +24,10 @@ pub mod screen_rules;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_agent;
 
+pub use accounts::{
+    AccountKindRow, AccountRow, AccountsConfig, AccountsError, AccountsService, AccountsSnapshot,
+    AutoState, ExtraUsageRow, ModelLimitRow, UsageRow, UsageStatus, UsageWindowRow,
+};
 pub use activity::{
     ActivityReader, ActivitySnapshot, ActivitySource, BackgroundTask, ContextReading, EndedTask,
     MINUTE_COLUMNS, OpenCall, SubagentNode,
@@ -831,6 +836,13 @@ pub trait Agent: Send + Sync + 'static {
         None
     }
 
+    /// The service over the account store `cfg` names, which the daemon keeps
+    /// and calls off its async threads. `None` for an agent that keeps no
+    /// accounts.
+    fn accounts(&self, _cfg: &AccountsConfig) -> Option<Box<dyn AccountsService>> {
+        None
+    }
+
     /// The call that summarizes a session through this agent's CLI, its reply
     /// following `request`'s schema. `None` for an agent that offers none.
     fn summarizer(&self, _request: &SummarizerRequest<'_>) -> Option<SummarizerSpec> {
@@ -1076,6 +1088,9 @@ pub trait AgentPlugin: Send + Sync {
 
     /// See [`Agent::activity_reader`].
     fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>>;
+
+    /// See [`Agent::accounts`].
+    fn accounts(&self, cfg: &AccountsConfig) -> Option<Box<dyn AccountsService>>;
 
     /// See [`Agent::summarizer`].
     fn summarizer(&self, request: &SummarizerRequest<'_>) -> Option<SummarizerSpec>;
@@ -1329,6 +1344,10 @@ impl<A: Agent> AgentPlugin for A {
 
     fn activity_reader(&self, source: &ActivitySource) -> Option<Box<dyn ActivityReader>> {
         Agent::activity_reader(self, source)
+    }
+
+    fn accounts(&self, cfg: &AccountsConfig) -> Option<Box<dyn AccountsService>> {
+        Agent::accounts(self, cfg)
     }
 
     fn summarizer(&self, request: &SummarizerRequest<'_>) -> Option<SummarizerSpec> {
@@ -2165,6 +2184,15 @@ mod tests {
         };
 
         assert!(plugin.activity_reader(&source).is_none());
+    }
+
+    #[test]
+    fn accounts_defaults_to_none() {
+        let plugin: &dyn AgentPlugin = &Bare;
+        let cfg = AccountsConfig::new(PathBuf::from(r"D:\accounts"));
+
+        assert!(Agent::accounts(&Bare, &cfg).is_none());
+        assert!(plugin.accounts(&cfg).is_none());
     }
 
     #[test]

@@ -1,7 +1,10 @@
 //! The check every agent crate runs in one test, so an agent's option schema
 //! and its typed options cannot drift apart.
 
-use crate::{Agent, AgentPlugin, RecoveredRun, SummarizerRequest, decode_options, validate};
+use crate::{
+    AccountsConfig, AccountsService, Agent, AgentPlugin, RecoveredRun, SummarizerRequest,
+    decode_options, validate,
+};
 use protocol::{AgentDescriptor, FieldKind, OptionValue, OptionValues};
 
 /// Check that `agent`'s option schema and its [`Agent::Options`] agree.
@@ -41,7 +44,50 @@ pub fn check<A: Agent>(agent: &A) {
     check_chat(agent);
     check_recovery_and_import(agent);
     check_summarizer(agent);
+    check_accounts(agent);
     check_icon(descriptor);
+}
+
+/// An account service, when the agent offers one, is offered through the
+/// adapter too, and passes [`check_accounts_service`] over a store that does
+/// not exist.
+///
+/// # Panics
+///
+/// Panics naming the check that failed, so the calling test fails.
+pub fn check_accounts<A: Agent>(agent: &A) {
+    let root = std::env::temp_dir().join(format!(
+        "agent-api-conformance-accounts-{}-missing",
+        std::process::id()
+    ));
+    let cfg = AccountsConfig::new(root);
+    let typed = Agent::accounts(agent, &cfg);
+    let adapted = AgentPlugin::accounts(agent, &cfg);
+    assert_eq!(
+        typed.is_some(),
+        adapted.is_some(),
+        "the adapter's account service differs from the agent's"
+    );
+    if let Some(service) = typed {
+        check_accounts_service(service.as_ref());
+    }
+}
+
+/// A snapshot of a store that does not exist is empty when the service
+/// answers it; a refusal (the folder it would live in is not private) is an
+/// error, never a panic.
+///
+/// # Panics
+///
+/// Panics when the snapshot lists an account.
+pub fn check_accounts_service(service: &dyn AccountsService) {
+    if let Ok(snapshot) = service.snapshot() {
+        assert!(
+            snapshot.accounts.is_empty(),
+            "a store that does not exist lists accounts: {:?}",
+            snapshot.accounts
+        );
+    }
 }
 
 /// The largest runtime icon a descriptor may carry, in bytes.
@@ -475,6 +521,49 @@ mod tests {
             "href",
         );
         assert_refused(&[r#"<svg><rect fill="url(#&#47;a)"/></svg>"#], "url()");
+    }
+
+    /// An account service answering from a fixed list.
+    struct FakeAccounts(Vec<crate::AccountRow>);
+
+    impl AccountsService for FakeAccounts {
+        fn snapshot(&self) -> Result<crate::AccountsSnapshot, crate::AccountsError> {
+            Ok(crate::AccountsSnapshot {
+                accounts: self.0.clone(),
+                auto: None,
+            })
+        }
+    }
+
+    #[test]
+    fn check_accounts_passes_for_a_fake_service() {
+        check_accounts_service(&FakeAccounts(Vec::new()));
+        check_accounts(&crate::test_agent::TestAgent::new(
+            crate::ConversationPlan::None,
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "lists accounts")]
+    fn check_accounts_fails_a_service_that_invents_accounts() {
+        check_accounts_service(&FakeAccounts(vec![crate::AccountRow {
+            number: 1,
+            email: "a@example.com".to_owned(),
+            alias: None,
+            org_name: None,
+            kind: crate::AccountKindRow::Oauth,
+            active: true,
+            disabled: false,
+            usage: crate::UsageRow {
+                status: crate::UsageStatus::Unavailable,
+                five_hour: None,
+                seven_day: None,
+                model_limits: Vec::new(),
+                extra_usage: None,
+                fetched_at: None,
+                error: None,
+            },
+        }]));
     }
 
     #[test]

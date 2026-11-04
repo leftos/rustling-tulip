@@ -46,6 +46,7 @@ daemon-client = { path = "crates/daemon-client" }
 tailnet = { path = "crates/tailnet" }
 agent-api = { path = "crates/agents/api" }
 agent-claude = { path = "crates/agents/claude" }
+claude-accounts = { path = "crates/agents/claude/accounts" }
 agent-registry = { path = "crates/agents/registry" }
 dev-daemon = { path = "crates/dev-daemon" }
 
