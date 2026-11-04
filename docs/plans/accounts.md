@@ -1,63 +1,51 @@
 # Claude accounts: usage, switching and auto-switch
 
-Built-in [claude-swap](https://github.com/leftos/claude-swap) (`X:\dev\claude-swap`, CLI `cswap`): the daemon holds several Claude Code logins, polls each one's 5-hour and weekly usage, switches the machine's active login by hand or on its own when one runs low, and lets every client (the native client, a remote native client, the phone) watch and switch. Step ids are CA.0, CA.1, …
+The daemon holds several Claude Code logins, polls each one's 5-hour and weekly usage, switches the machine's active login by hand or on its own when one runs low, and lets every client (the native client, a remote native client, the phone) watch and switch.
+
+It does this by taking ops-tower's `claude-accounts` crate as a git dependency and driving it: the crate owns the account store, the locks, the refresh and switch transactions, the poll cadence, the pace maths and the auto-switch engine; the daemon supplies the HTTP transports, a process table, the drivers and the protocol.
+
+The pin is the first ops-tower `main` sha that holds both PR #383 (the crate's own account store) and `d80c605` (the 7-day-only fleet verdict); no such sha exists yet, and the first sub-issue that takes the crate (RT-908) is blocked until it does. The accounts feature lands on the feature branch `feat/claude-accounts`; RT-39 is its parent and RT-908 to RT-915 are its parts. Step ids are CA.0, CA.1, …
 
 ## Rulings
 
 - **Global swap.** One active account for the machine. A switch rewrites Claude Code's live credential under Claude Code's own lock pair; every running `claude` (interactive and headless) picks the new account up on its next message, with no restart. Sessions never get their own `CLAUDE_CONFIG_DIR`, so transcripts, the recover dialog, subagent streams and status tailing keep reading one Claude home.
 - **Native Rust over cswap's store.** The daemon takes ops-tower's `claude-accounts` as a git dependency (RT-66) and reads and writes cswap's on-disk store and locks, so `cswap` and the daemon run side by side and existing accounts carry over. No Python at runtime.
+
+  Superseded: the crate's store is ops-tower's own, `%LOCALAPPDATA%\ops-tower\accounts` (`accounts.json`, sealed `credentials/<n>.cred`), never cswap's; the daemon and ops-tower share it through the crate's locks and cswap is not read (decision: ops-tower's own account store, RT-66). Accounts reach it through ops-tower's `import-cswap` or a login.
 - **Auto-switch in the daemon**, off by default, using the crate's rules. It runs whether or not a client is connected.
 - **Two engines never both switch.** The daemon honours cswap's locks and claim leases when polling. While its auto-switch is on it holds a lease file in the store; a live `cswap auto` is found by the crate's process scan (`runs_cswap_auto`, over the command line), since `autoswitch_state.json` is written only on a switch or a quarantine and says nothing about a running engine; then it pauses its own engine and reports "cswap auto is running".
+
+  Superseded: cswap's engine cannot touch the store, and the cswap scan, `runs_cswap_auto` and "cswap auto is running" are gone from the crate. The crate's engine lease is the only exclusion: when ops-tower's engine and the daemon's both run, the lease picks one, and the other reports `Paused` with the holder as its reason (decision: engines and the lease, RT-66). The intent, never two switching engines, stands.
 - **Adding an account, both ways:** capture the current login (as `cswap add`), and a daemon-driven login that runs `claude`'s login in a scratch config dir as a visible session, then captures it.
 - **Account kinds:** OAuth only. API-key and setup-token accounts were cut (OPS-157, RT-66); the crate still reads an `api_key` record but neither polls nor switches to it.
 - **Desktop UI:** a footer chip with the active account and its 5h/7d bars; clicking it opens a popover listing every account with usage, reset times and a Switch button, plus the auto-switch state. Add, remove, alias, re-login and the auto-switch rules live in a Settings → Accounts tab.
 - **Remote rights:** a remote client (a remote native client over the tailnet, or the iPhone PWA) sees usage, switches the active account and changes auto-switch on/off and threshold. Adding, removing, aliasing and the daemon-driven login stay local. Credentials and tokens never cross the wire, to any client. The tailnet is the only remote path.
 - **Notifications:** a desktop toast for an auto-switch and for "all accounts exhausted, earliest reset at …"; the same events become phone pushes with MA7, under their own toggle.
 - **Platforms:** Windows (and Linux) first, with the credential writer behind a trait; the macOS Keychain writer is a line in [macos-compat.md](./macos-compat.md).
+
+  Superseded: Windows only for now. The crate is inert off 64-bit Windows (every lock returns `LockError::Unsupported`), so Accounts is hidden on macOS and Linux. Unix locks and a Keychain writer are later ops-tower work, booked separately and not in this release; there is no credential-writer trait in this repo (decision: Windows only, RT-66).
 - **Direct API calls:** the accounts module calls Anthropic's OAuth account endpoints (usage, profile, token refresh) directly. This is an exception to CLAUDE.md's no-direct-API rule; no model call is made. The CLAUDE.md wording changes with CA.3.
 - **Placement:** its own wave before the backlog in [MAIN.md](./MAIN.md); the phone's accounts screen is MA10 in [mobile-app.md](./mobile-app.md).
 
-## How cswap works (the behaviour to port)
+## Decisions on the crate
 
-File and line references are to `X:\dev\claude-swap\src\claude_swap\`.
+- **Pin and API.** The own-store API: `AccountsRoot`, `Store`, `capture_live_login`, `switch`, `Engine`. The dependency is a workspace entry `claude-accounts = { git = "https://github.com/leftos/ops-tower", rev = "<sha>" }`; the crate is `publish = false`, edition 2024.
 
-**Claude Code's files** (`paths.py:34-82`): the home is `$CLAUDE_CONFIG_DIR` else `~/.claude`; the live credential is `<home>/.credentials.json`; the global config is `<home>/.config.json` when that legacy file exists, else `($CLAUDE_CONFIG_DIR || $HOME)/.claude.json`. The daemon resolves the home through `claude_home` in `crates/agents/claude/src/transcripts.rs` so both agree.
+  It brings `proc-table` (git, `leftos/gate`) and `jiff`, and raises `zeroize` and `serde_json` (features `preserve_order`, `float_roundtrip`) for the whole workspace, so `Cargo.lock` is checked with `cargo tree -d`. Builders need access to the ops-tower repo.
+- **Remove, alias and settings.** The crate has no remove, alias or settings writer. RT asks ops-tower for `Store::remove_account`, `Store::set_alias` and a writer for the `autoswitch` section of `%LOCALAPPDATA%\ops-tower\settings.json` (inbox request `20261104-185214`). If ops-tower declines, RT writes them with `Store::write_sequence` and file removal under the account lock ops-tower names. Account settings never go in the daemon's `state.json`.
+- **Engine lease.** The daemon's engine stays off by default, so ops-tower's engine keeps running until the owner turns the daemon's on.
+- **Transports** are synchronous: reqwest 0.12's `blocking` feature on one client built once, called inside `spawn_blocking`. The daemon's async client is unchanged.
+- **`ProcessTable`** is `proc-table`'s Windows table; off Windows it is the empty table.
+- **Paid fallback and prepaid balances** are not surfaced: `maySpendCredits` stays off and `read_balance` keeps its default. The engine still honours a paid fallback ops-tower's engine entered.
+- **Daemon-driven login** points `ClaudePaths` at the scratch dir and calls `capture_live_login`; ops-tower confirms this is supported at CA.0, else RT asks for a route.
 
-**The store** (`paths.py:90-108`): `~/.claude-swap-backup` on Windows and macOS, `$XDG_DATA_HOME/claude-swap` on Linux.
+## What the daemon still owns
 
-- `sequence.json`: `{activeAccountNumber, lastUpdated, sequence:[n], accounts:{"n":{email, uuid, organizationUuid, organizationName, added, alias?, kind?:"api_key", disabled?}}}`.
-- `configs/.claude-config-{n}-{email}.json`: a `~/.claude.json` snapshot; only `oauthAccount` is read back.
-- `credentials/.creds-{n}-{email}.enc`: plain base64 (not encryption), plus `.enc.prev` and `.unclaimed-*.enc` stashes with `.unclaimed-manifest.json`. Windows Credential Manager is not used (it rejects entries over about 2,500 bytes).
-- `settings.json` (threshold 90, interval 60 s, cooldown 300 s, hysteresis 10, strategy `best`, unhealthy ticks 3), `autoswitch_state.json`, `mappings.json`, `sessions/`, `cache/usage.json`, `cache/usage_history.json`, and `.lock` (an OS file lock: `msvcrt.locking` / `flock`).
+**Claude's home.** The home is `$CLAUDE_CONFIG_DIR` else `~/.claude`; the daemon resolves it through `claude_home` in `crates/agents/claude/src/transcripts.rs`, which feeds `ClaudePaths::new(config_home, global_config)`, so the daemon and Claude Code agree.
 
-**Credentials.** OAuth: `{"claudeAiOauth":{accessToken, refreshToken, expiresAt(ms), scopes, refreshTokenExpiresAt?}, mcpOAuth…}`. A setup token is wrapped as `{"claudeAiOauth":{accessToken, scopes:["user:inference"]}}`. An API key (`sk-ant-api…`) is activated by writing `primaryApiKey` into `~/.claude.json`, appending `key[-20:]` to `customApiKeyResponses.approved` and deleting `.credentials.json`; activating OAuth removes `primaryApiKey`.
+**Pitfalls the crate enforces and RT must not bypass.** Refresh tokens are one-time, so a transport never retries a refresh POST, and the active account is refreshed only under Claude Code's lock pair; no network call under a lock; every HTTP status returns `Ok` from a transport, never `error_for_status`. `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` detection is RT's, not the crate's.
 
-**A switch** (`switcher.py:6702-7274`), all network I/O before any lock:
-
-1. Optionally `GET /api/oauth/profile` to learn whose token the live credential is.
-2. Take cswap's `.lock`, then Claude Code's credential locks `<home>/.oauth_refresh.lock` then `~/.claude.lock` (stale after 60 s), then `~/.claude.json.lock` (stale after 10 s). Claude Code's locks are `proper-lockfile` directories made with `mkdir`; the holder touches the mtime every 3 s; a waiter gives up after 9 s.
-3. Back up the outgoing account (live credential into its `.enc`, live `~/.claude.json` into its config); an ownership classifier (`:7050`) stashes the bytes as unclaimed instead when they look like another account's, and handles Claude Code's in-place wipe of a rejected token (`:7105`).
-4. Write the target credential to `.credentials.json`, merging in the live machine-shared `mcpOAuth*` and `pluginSecrets` keys (`credentials.py:199`).
-5. Splice only `oauthAccount` into the live `~/.claude.json`.
-6. Update `sequence.json`. A transaction rolls every step back in reverse on failure (`models.py:164`).
-
-Every write is a temp file plus rename, retried on Windows sharing violations (winerror 5/32/33, 10 tries, 2 ms to 250 ms; `fsutil.py`). Claude Code drops its cached token when `.credentials.json`'s mtime changes, which is why running sessions follow the switch.
-
-**Endpoints** (`oauth.py`):
-
-- Usage: `GET https://api.anthropic.com/api/oauth/usage`, headers `Authorization: Bearer <accessToken>`, `anthropic-beta: oauth-2025-04-20`, 5 s timeout. Parsed: `five_hour{utilization, resets_at}`, `seven_day{…}`, `extra_usage{is_enabled, used_credits, monthly_limit, utilization, currency, resets_at}` (credits ÷ 100), `limits[]{scope.model.display_name, percent, resets_at}`. Headroom is `100 − max(pct)`.
-- Profile: `GET https://api.anthropic.com/api/oauth/profile` → `account.uuid/email`, `organization.uuid`.
-- Refresh: `POST https://platform.claude.com/v1/oauth/token` with `{grant_type:"refresh_token", refresh_token, client_id:"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}`. A token counts as expired 5 minutes before `expiresAt`. Refresh tokens are one-time: spending a superseded one gives `invalid_grant` and kills that login for good.
-
-  So the active account is refreshed only under Claude Code's lock pair, an inactive one from its backup, each behind a per-slot `.consume-{n}.lock`. Only a 400/401/403 carrying `error:"invalid_grant"` quarantines an account.
-
-**Polling budget and cadence** (`poll_policy.py`, `usage_store.py`): about 28–30 requests per trailing hour per identity. Serve TTL and minimum interval 180 s, urgent 60 s, active at most 300 s, candidates 300–600 s, exhausted 600 s; a move of 1 point halves the interval, no move multiplies it by 1.5; 10 % jitter; after a 429 at least 360 s for an hour, backing off ×1.5 to 1800 s. Data up to 300 s old drives decisions.
-
-Failure backoff `30·2^(n−1)` capped at 600 s. Claim leases (`CLAIM_TTL_S=90`: lock → claim → fetch unlocked → record) stop two collectors fetching one account.
-
-**Auto-switch** (`autoswitch.py`): the trigger is the binding window's utilization reaching the threshold (`proactive`), no headroom (`at-limit`), or unknown usage for 3 ticks (`failover`). A candidate must be under the threshold and beat the active account by the hysteresis; a 300 s cooldown applies except to at-limit and failover. When every account is over, rank by soonest recovery (hysteresis 300 s, horizon 4 h).
-
-The warm-up gate holds every decision until each non-quarantined account has been polled since start. Each tick polls the active account when due plus the stalest due candidate, and refetches all within 15 points of the threshold. Before activating a target, refresh it if it expires within 10 minutes. Pace (`pace.py`) is display only.
+The crate's behaviour is documented in ops-tower's `docs/accounts.md` (Switch, Engine, Pace, Where the account store lives).
 
 ## Design
 
@@ -65,57 +53,65 @@ The warm-up gate holds every decision until each non-quarantined account has bee
 
 | File | Owns |
 |---|---|
-| `store.rs` | cswap's store: typed read and write of `sequence.json`, configs, `.enc` credentials, `settings.json`, `cache/usage.json`; the `.lock` file lock; temp-plus-rename with the Windows retry |
-| `claude_locks.rs` | Claude Code's `proper-lockfile` directory locks, with the 3 s mtime touch, staleness and the 9 s wait |
-| `oauth.rs` | usage, profile and refresh over `reqwest` (0.12, `rustls-tls`, already in `Cargo.lock` through `daemon-client`); base URLs injectable for tests; tokens never logged |
-| `poll.rs` | the cadence policy, backoff and claim leases; parks when no client is connected and auto-switch is off |
-| `switch.rs` | the switch transaction and rollback; a `CredentialWriter` trait with the file writer (the Keychain writer comes with macOS) |
-| `auto.rs` | the auto-switch engine, its lease file and the cswap-auto detection |
-| `login.rs` | add current login, add token, and the daemon-driven login |
+| `transport.rs` | the reqwest `blocking` implementations of the crate's `UsageTransport`, `RefreshTransport` and `ProfileTransport`: HTTPS only, no proxy, no redirects, bodies capped at 64 KiB, a sensitive `Authorization`, a zeroizing refresh body; base URLs injectable for tests; tokens never logged |
+| `process_table.rs` | the `ProcessTable` for `TickInputs.processes` and the lease: `proc-table`'s Windows table, the empty table elsewhere |
+| `driver.rs` | the poll and engine tasks in `spawn_blocking`, the lease, the `Drain`, a settings snapshot; parks the poller when no client is connected and no engine is live |
+| `snapshot.rs` | the crate's `UsageEntry`, `Sequence` and `AutoswitchState` to protocol rows |
+| `login.rs` | the daemon-driven login and the add-current-login handler |
 | `mod.rs` | the `Accounts` handle the hub owns, and the snapshot it broadcasts |
 
-**Connection origin.** `client_session` already knows each connection's `AuthKind` (`Local` on the loopback listener, `Tailnet` on the tailnet listener). CA.1 maps it to an origin (`Local` / `Remote`); the account-admin handlers refuse a `Remote` origin with `ActionFailed`, and `Welcome` tells the client its origin so it can disable those controls with a reason.
+**Connection origin.** `client_session` already knows each connection's `AuthKind` (`Local` on the loopback listener, `Tailnet` on the tailnet listener), in `crates/daemon/src/server/connection.rs`. CA.1 maps it to an origin (`Local` / `Remote`); the account-admin handlers refuse a `Remote` origin with `ActionFailed`, and `Welcome` tells the client its origin so it can disable those controls with a reason.
 
 **Protocol** (additive; `crates/protocol/src/lib.rs`, with the `add-protocol-message` skill):
 
-- `AccountSnapshot`: number, email, alias, organization name, kind (`oauth` / `api_key` / `setup_token` with `#[serde(other)] Unknown`), active, disabled, usage status (cswap's `ok | token_expired | api_key | relogin_required | foreign_credential | no_credentials | unavailable`, with `Unknown`), 5h and 7d `{pct, resets_at}`, per-model limits, extra usage, fetched-at and error. No token, key or credential field, ever.
-- `AutoSwitchState`: enabled, threshold, hysteresis, cooldown, `paused_for_cswap`, warm-up done, last decision.
+- `AccountSnapshot`: number, email, alias, organization name, kind (`oauth` / `api_key`, with `#[serde(other)] Unknown`), active, disabled, usage status (from the crate's `PollResult` and `decision_value`: `ok`, `token_expired`, `api_key`, `relogin_required`, `foreign_credential`, `no_credentials`, `store_unwritable`, `unavailable`, `Unknown`), 5h and 7d `{pct, resets_at}`, per-model limits, extra usage (`enabled`, `user_disabled`, `spend_limit_reached`, nullable `limit`), fetched-at, error.
+
+  No token, key or credential field, ever.
+- `AutoSwitchState`: enabled, threshold, hysteresis, cooldown, `paused_reason: Option<String>` (the lease holder, or the store's refusal), warm-up done, last decision, and an optional fleet verdict (the crate's `WindowVerdict`, with the unit of its `rate_window`).
 - `ListAccounts` → `Accounts{accounts, auto}`; broadcast `AccountsUpdated` on every change.
 - `SwitchAccount{number, request_id}`, `SetAutoSwitch{enabled, threshold_pct}` (any origin).
-- `AddCurrentLogin`, `AddAccountToken{token}`, `RemoveAccount{number}`, `SetAccountAlias{number, alias}`, `StartAccountLogin`, `SetAutoSwitchRules{hysteresis, cooldown, strategy}` (local only). `AddAccountToken` is the one message that carries a secret, client to daemon, local only.
-- `AccountEvent{kind: switched{from, to, trigger} | all_exhausted{earliest_reset_at} | quarantined{number} | unquarantined{number}}`, broadcast.
+- `AddCurrentLogin`, `RemoveAccount{number}`, `SetAccountAlias{number, alias}`, `StartAccountLogin`, `SetAutoSwitchRules{hysteresis, cooldown, strategy}` (local only). No message carries a secret.
+- `AccountEvent{kind: switched{from, to, trigger} | all_exhausted{earliest_reset_at} | quarantined{number} | unquarantined{number}}`, broadcast. The fleet verdict ("All accounts blocked {when} until {when}") rides the attention feed (RT-87).
 
-**Native client:** `footer.rs` gains the chip; new `accounts.rs` (model) and `accounts_view.rs` (popover); `settings_view.rs` gains an Accounts tab; `notify.rs` shows the toasts under a new Notifications toggle, "Account switches". A client whose `Welcome` says `Remote` shows the admin controls disabled, with "Only on the machine running the daemon".
+**Native client:** `footer.rs` gains the chip; new `accounts.rs` (model) and `accounts_view.rs` (popover); `settings_view.rs` gains an Accounts tab, hidden off Windows; `notify.rs` shows the toasts under a new Notifications toggle, "Account switches". A client whose `Welcome` says `Remote` shows the admin controls disabled, with "Only on the machine running the daemon".
 
 ## Steps
 
-- [ ] **CA.0 Spike: store and CLI contract.**
+Sub-issues: RT-908 takes the crate (CA.0, CA.2, CA.3); RT-909 the origin and the read-only protocol (CA.1, CA.5 read half); RT-910 the poller (CA.4); RT-911 admin and switch (CA.5 write half, CA.6); RT-912 auto-switch (CA.9); RT-913 the chip (CA.7); RT-914 the Settings page and toasts (CA.8, CA.10); RT-915 login and docs (CA.11, CA.12).
 
-  In `docs/spikes/claude-swap-store.md`: (a) the store's schema and whether it carries a version (read `migrations.py`), with a sample of every file from a real store, secrets redacted. (b) That Rust's `std::fs::File::lock` on `.lock` and cswap's `msvcrt.locking` exclude each other, measured with both running.
+- [ ] **CA.0 Spike: the crate's contract** (RT-908). In `docs/spikes/accounts-crate.md`: (c) a real usage response and its rate-limit headers, to check the transport keeps `Retry-After`. (d) The `claude` CLI's non-interactive login command, and what `claude auth status --json` reports after it, in a scratch `CLAUDE_CONFIG_DIR`.
 
-  (c) A real usage response and its rate-limit headers. (d) The `claude` CLI's non-interactive login command, and what `claude auth status --json` reports after it, in a scratch `CLAUDE_CONFIG_DIR`. (e) How a recent `cswap auto` shows itself (`autoswitch_state.json` write cadence).
+  (f) A measured check that the daemon and ops-tower's server exclude each other on one real store, through the account lock and the engine lease, the one piece of cross-process behaviour the crate's tests cannot prove from this side. Also: whether `capture_live_login` on a scratch `ClaudePaths` takes the scratch login without touching the live one.
 
   Rulings the later steps need go into this file's Design.
-- [ ] **CA.1 Connection origin.** `server.rs` (`AuthKind`, `client_session`), `crates/protocol` (`Welcome.origin`, `#[serde(default)]`). Test: a tailnet connection is refused an admin message that a local one is allowed.
-- [ ] **CA.2 Store.** `accounts/store.rs`, `accounts/claude_locks.rs`. Tests: round-trip cswap's own fixtures (`tests/fixtures/sample_config.json` and files from CA.0) byte-for-byte where cswap would write the same; a held `.lock` or Claude lock directory blocks and a stale one is taken; a sharing violation on rename is retried.
-- [ ] **CA.3 OAuth client.** `accounts/oauth.rs`; the daemon's `Cargo.toml` gains `reqwest`; CLAUDE.md's no-direct-API sentence gains this exception. Tests against a local axum mock: usage parsing (including missing windows and extra usage), refresh with the consume lock, `invalid_grant` quarantines and a plain 401 does not, `Retry-After`.
-- [ ] **CA.4 Usage poller.** `accounts/poll.rs`, `accounts/mod.rs`, hub wiring in `server.rs`; writes `cache/usage.json` so `cswap list` shows the same numbers. Tests with a fake clock: cadence moves with usage, 429 backoff, a claim lease held by another process skips the account, parking at zero clients.
-- [ ] **CA.5 Protocol.** The messages above in `crates/protocol`, handlers in `server.rs`, `net.rs` decoding in the native client. `cargo nextest run -p protocol --cargo-profile test-release` stays green.
-- [ ] **CA.6 Manual switch.** `accounts/switch.rs`: the transaction in cswap's lock order, the ownership classifier, the shared-key merge, the `oauthAccount` splice, rollback, and the API-key path. Tests in a temp home: the outgoing account is backed up, a foreign credential is stashed, a failure mid-way leaves the live files as they were. An `#[ignore]`d contract test runs `cswap list --json` against the daemon-written store when `cswap` is on `PATH`.
-- [ ] **CA.7 Footer chip and popover.** `footer.rs`, new `accounts.rs` and `accounts_view.rs`. UI spec `tests/ui/ui_accounts.rs`: the chip shows the active account and bars; Switch sends `SwitchAccount`; a `relogin_required` row shows its reason; a stale fetch shows its age.
-- [ ] **CA.8 Settings → Accounts.** `settings_view.rs`: list with alias, remove, "Add current login" (with the warning not to `/logout` first, since that can revoke the account being left), "Add token", auto-switch on/off, threshold, hysteresis, cooldown; admin controls disabled with a reason on a `Remote` origin. UI spec in `ui_accounts.rs`.
-- [ ] **CA.9 Auto-switch engine.** `accounts/auto.rs`: the rules above, the warm-up gate, freshen-before-activate, the lease file, pausing while `cswap auto` runs, `AccountEvent`s. Tests with a fake clock and scripted usage: proactive, at-limit and failover triggers; hysteresis and cooldown hold; all-exhausted picks soonest recovery and emits its event; a recent cswap state file pauses the engine.
-- [ ] **CA.10 Toasts.** `notify.rs`, `settings_view.rs` (the "Account switches" toggle). UI spec: an `AccountEvent` raises a toast only when the toggle is on.
-- [ ] **CA.11 Daemon-driven login.** `accounts/login.rs`, `server.rs`, `settings_view.rs` ("Log in a new account…"): spawns the login found in CA.0 in a scratch `CLAUDE_CONFIG_DIR` as a visible plain session; when it exits logged in, captures it as an account and removes the scratch dir. Local only. Live e2e: `fake-claude` gains a login mode that writes a credential and `.claude.json`.
-- [ ] **CA.12 Docs.** `docs/architecture.md` (the component and a task-index row), `docs/on-disk.md` (the store lives outside our config dir, and is cswap's), the `docs/README.md` glossary checked against the shipped terms; this subplan's durable text promoted and the file deleted.
+- [ ] **CA.1 Connection origin** (RT-909). `crates/daemon/src/server/connection.rs` (`AuthKind`, `client_session`), `crates/protocol` (`Welcome.origin`, `#[serde(default)]`). Test: a tailnet connection is refused an admin message that a local one is allowed.
+- [ ] **CA.2 Take the crate** (RT-908, blocked on the pin). The git dependency and workspace entries, the lockfile resolved (`jiff`, `proc-table`, `zeroize`, `serde_json` features). A smoke test that `Store::open(AccountsRoot::from_local_app_data(..))` and `read_sequence` work on a temp root.
 
-Phone and remote work outside this wave: MA10 in [mobile-app.md](./mobile-app.md) is the phone's accounts screen over these messages; MA7's pushes carry `AccountEvent`s; a remote native client (Phase 6) gets the chip and popover with no extra work, and the admin controls disabled.
+  `Store::write_refusal()` is checked before every store write and refresh spend; `StoreErrorKind` is `#[non_exhaustive]`, so a wildcard arm, with messages for `AccountReidentified`, `StoreReadOnly`, `UnknownSchema` and `RootUnsafe`. The lock folder exists before `FileLock::acquire`. No fixtures of this repo's own: the crate's tests pin the format.
+- [ ] **CA.3 Transports** (RT-908). `accounts/transport.rs`; the daemon's `Cargo.toml` gains reqwest's `blocking` feature; CLAUDE.md's no-direct-API sentence gains this exception. `get_prepaid` stays `Unsupported`. Tests against a local axum mock: a 429 keeps `Retry-After` through `RawUsage`, and a 400 `invalid_grant` body reaches the crate's classifier. Parsing, refresh, the consume lock and quarantine are the crate's.
+- [ ] **CA.4 Usage poller** (RT-910). `accounts/driver.rs`, `accounts/snapshot.rs`, `accounts/mod.rs`, hub wiring in `server/`. A `spawn_blocking` task calls `poll_with_refresh(&transport, &ctx, FetchScope::..)` on the crate's `next_delay` and `plan_after_fetch` schedule; the crate persists the cadence and the shared `cache/usage.json`, so ops-tower and the daemon spend one budget.
+
+  The `RefreshContext` is built once (store, `ClaudePaths` from `claude_home`, transports, `Drain`, `ProbeVerdicts`, `LockTiming`, clock). Parking at zero clients stays this repo's rule, except while an engine is live. `UsageTable` becomes `AccountSnapshot`, then `AccountsUpdated`. Shutdown calls `Drain::start` and `wait_idle` with a bound. Tests with a fake clock around the driver, not the cadence maths.
+- [ ] **CA.5 Protocol** (RT-909 read half: `Welcome.origin`, `ListAccounts`, `Accounts`, `AccountsUpdated`, `AccountEvent`; RT-911 write half: the admin messages). The messages above in `crates/protocol`, handlers in `server/`, `net.rs` decoding in the native client. `cargo nextest run -p protocol --cargo-profile test-release` stays green.
+- [ ] **CA.6 Manual switch** (RT-911). The handler calls `probe_outgoing`, then `switch(&ctx, number, &probe)` in `spawn_blocking`, and maps `SwitchOutcome` to `AccountEvent::switched` and `SwitchErrorKind` to `ActionFailed` codes, `Draining` on shutdown. The add-current-login handler calls `capture_live_login` (`CaptureKind::{Added, Refreshed, Kept}`), local origin only.
+
+  Remove and alias call the crate functions asked of ops-tower (fallback above); the origin gate refuses `Remote`. Tests are the handler mapping and the origin gate: the transaction, rollback and ownership classification are the crate's.
+- [ ] **CA.7 Footer chip and popover** (RT-913). `footer.rs`, new `accounts.rs` and `accounts_view.rs`. UI spec `tests/ui/ui_accounts.rs`: the chip shows the active account and bars; Switch sends `SwitchAccount`; a `relogin_required` row shows its reason; a stale fetch shows its age; a "store read-only" or "held by another engine" row shows its reason. No paid-fallback state.
+- [ ] **CA.8 Settings → Accounts** (RT-914). `settings_view.rs`: list with alias, remove, "Add current login" (with the warning not to `/logout` first, since that can revoke the account being left), auto-switch on/off, threshold, hysteresis, cooldown, strategy; the tab is hidden off Windows; admin controls disabled with a reason on a `Remote` origin. Auto-switch settings go through the crate's settings writer. UI spec in `ui_accounts.rs`.
+- [ ] **CA.9 Auto-switch engine** (RT-912). `accounts/driver.rs`: a loop around `Engine::new(owner, pid, warm_since)` and `Engine::tick(&TickInputs{context, collector: &TransportCollector(&usage), processes, switcher: &LiveSwitch, claude_config_dir_set, settings, auto_switch_enabled})`, sleeping on `next_delay` and `sleep_event`. The engine claims and heartbeats the `Lease`; the driver releases it on shutdown and on `halt`.
+
+  `Event`s map to `AccountEvent` and toasts. The engine is off by default. `TickOutcome::Paused{reason}` surfaces as `paused_reason`; `TickOutcome::Halted` (a failed rollback) is a user-visible error. The rules, warm-up, freshen, trigger, ranking, hysteresis, cooldown and quarantine are the crate's. Tests: the driver (a settings change wakes the loop, a `Paused` reason surfaces, drain stops it), not the rules.
+- [ ] **CA.10 Toasts** (RT-914). `notify.rs`, `settings_view.rs` (the "Account switches" toggle). UI spec: an `AccountEvent` raises a toast only when the toggle is on.
+- [ ] **CA.11 Daemon-driven login** (RT-915). `accounts/login.rs`, `server/`, `settings_view.rs` ("Log in a new account…"): spawns the login found in CA.0 in a scratch `CLAUDE_CONFIG_DIR` as a visible plain session; when it exits logged in, captures it with `capture_live_login` on a `ClaudePaths` for that dir and removes the scratch dir. Local only. Live e2e: `fake-claude` gains a login mode that writes a credential and `.claude.json`.
+- [ ] **CA.12 Docs** (RT-915). `docs/architecture.md` (the component and a task-index row), `docs/on-disk.md` (the store is ops-tower's, outside our config dir), the `docs/README.md` glossary checked against the shipped terms; this subplan's durable text promoted and the file deleted.
+
+Phone and remote work outside this wave: MA10 in [mobile-app.md](./mobile-app.md) is the phone's accounts screen over these messages; MA7's pushes carry `AccountEvent`s; a remote native client (Phase 6) gets the chip and popover with no extra work, and the admin controls disabled. Accounts on macOS and Linux waits on ops-tower; the fleet verdict in the attention feed is RT-87.
 
 ## Pitfalls to keep
 
-- Never refresh the active account's token outside Claude Code's lock pair, and never spend one refresh token twice: both kill the login.
-- No network call while holding any lock.
-- A token, key or credential byte never reaches a log line, a protocol message (other than the local `AddAccountToken`) or `state.json`.
-- `CLAUDE_SECURESTORAGE_CONFIG_DIR` set means cswap refuses to refresh (`store-unmirrored`); the daemon does the same and shows the reason.
+- Never refresh the active account's token outside Claude Code's lock pair, and never spend one refresh token twice: both kill the login. The crate does both; do not bypass it.
+- No network call while holding any lock. The crate enforces it; the transports never hold one.
+- A token, key or credential byte never reaches a log line, a protocol message or `state.json`.
+- `CLAUDE_SECURESTORAGE_CONFIG_DIR` set means the crate refuses to refresh (`RefreshContext.securestorage_dir_set`); the daemon passes it and shows the reason.
 - Codex and Cursor sessions, and Claude sessions on another provider (DeepSeek, whose routing variables set their own credential), are untouched by a switch. The chip says which account Anthropic sessions use, not every session.
 - An `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's own environment overrides the credential file for every session it spawns; the accounts module detects that and shows it as the reason switching has no effect.
