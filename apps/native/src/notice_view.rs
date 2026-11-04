@@ -239,11 +239,14 @@ impl RootView {
         let toasts = self.notices.toasts();
         self.preset_launches
             .retain_shown(|key| toasts.iter().any(|toast| toast.key.as_deref() == Some(key)));
+        self.fetches
+            .retain_done(|key| toasts.iter().any(|toast| toast.key.as_deref() == Some(key)));
     }
 
     /// Button `action` on toast `id`: a preset job's goes to its registry,
-    /// the installed update's What's new opens its changelog, and a folder
-    /// fetch's Cancel stops it.
+    /// the installed update's What's new opens its changelog, a folder
+    /// fetch's Cancel stops it, a fetched file's Fetch whole folder fetches
+    /// its folder, and a fetched folder's Reveal shows it in Explorer.
     fn press_toast_action(
         &mut self,
         id: u64,
@@ -281,6 +284,10 @@ impl RootView {
             if self.cancel_fetch(&key) {
                 self.dismiss_toast_key(&key, cx);
             }
+        } else if action == crate::file_fetch_view::FETCH_WHOLE_FOLDER.id {
+            self.fetch_whole_folder(&key, cx);
+        } else if action == crate::file_fetch_view::FETCH_REVEAL.id {
+            self.reveal_fetched_folder(&key, window, cx);
         }
     }
 

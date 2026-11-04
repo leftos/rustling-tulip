@@ -163,6 +163,26 @@ pub fn fetch_name(request: &FetchRequest) -> &str {
     }
 }
 
+/// The fetch of the folder holding `file`'s file: everything before the
+/// last separator of its path (the repo root for a file directly in it),
+/// never opened and without a line.
+#[must_use]
+pub fn parent_folder_request(file: &FetchRequest) -> FetchRequest {
+    let rel_path = file
+        .rel_path
+        .rsplit_once(['/', '\\'])
+        .map_or("", |(parent, _)| parent)
+        .to_owned();
+    FetchRequest {
+        rel_path,
+        line: None,
+        column: None,
+        open_when_done: false,
+        prefer_viewer: false,
+        ..file.clone()
+    }
+}
+
 /// `rel`'s segments made safe; refuses an empty path, a leading separator,
 /// a drive prefix, and an empty, `.` or `..` segment.
 pub(crate) fn rel_segments(rel: &str) -> Result<Vec<String>, String> {
@@ -949,6 +969,15 @@ impl PendingStat {
     }
 }
 
+/// What a fetch's done toast offers once the fetch has ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DoneAction {
+    /// Fetch whole folder: the fetch of the fetched file's folder.
+    WholeFolder(FetchRequest),
+    /// Reveal: the fetched folder, shown in Explorer.
+    Reveal(PathBuf),
+}
+
 /// The fetches in flight, by id.
 #[derive(Debug)]
 pub struct FetchRegistry {
@@ -960,6 +989,9 @@ pub struct FetchRegistry {
     next_stat: u64,
     entries: HashMap<String, FetchEntry>,
     stats: HashMap<String, PendingStat>,
+    /// The action of each ended fetch's done toast, by the toast's key,
+    /// while the toast shows.
+    done: HashMap<String, DoneAction>,
 }
 
 impl FetchRegistry {
@@ -974,7 +1006,24 @@ impl FetchRegistry {
             next_stat: 0,
             entries: HashMap::new(),
             stats: HashMap::new(),
+            done: HashMap::new(),
         }
+    }
+
+    /// Records `action` as what the done toast keyed `key` offers.
+    pub fn note_done(&mut self, key: &str, action: DoneAction) {
+        self.done.insert(key.to_owned(), action);
+    }
+
+    /// What the done toast keyed `key` offers, while it shows.
+    #[must_use]
+    pub fn done_action(&self, key: &str) -> Option<&DoneAction> {
+        self.done.get(key)
+    }
+
+    /// Keeps only the done actions whose toast key `shown` holds for.
+    pub fn retain_done(&mut self, mut shown: impl FnMut(&str) -> bool) {
+        self.done.retain(|key, _| shown(key));
     }
 
     /// Records a stat of `readings` from `host` under a new id and returns
@@ -1227,9 +1276,9 @@ mod tests {
     use futures::channel::mpsc::unbounded;
 
     use super::{
-        AlreadyFetching, FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd,
+        AlreadyFetching, DoneAction, FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd,
         WriteOutcome, WriteStep, display_host_path, download_path, folder_download_path,
-        host_folder, is_under, part_path, run_writer, sanitize_segment,
+        host_folder, is_under, parent_folder_request, part_path, run_writer, sanitize_segment,
     };
     use crate::folder_unpack::Announced;
     use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
@@ -1551,6 +1600,72 @@ mod tests {
                 "{refused} is refused"
             );
         }
+    }
+
+    #[test]
+    fn parent_folder_request_strips_the_last_segment() {
+        let file = FetchRequest {
+            line: Some(12),
+            column: Some(3),
+            prefer_viewer: true,
+            ..reading("docs/sub/a.txt")
+        };
+
+        let parent = parent_folder_request(&file);
+
+        assert_eq!(
+            parent,
+            FetchRequest {
+                rel_path: "docs/sub".to_owned(),
+                line: None,
+                column: None,
+                open_when_done: false,
+                prefer_viewer: false,
+                ..file.clone()
+            },
+            "the folder holding the file, never opened"
+        );
+        assert_eq!(
+            parent_folder_request(&reading(r"docs\a.txt")).rel_path,
+            "docs",
+            "a backslash separates segments too"
+        );
+    }
+
+    #[test]
+    fn parent_folder_request_of_a_root_file_is_the_root() {
+        let parent = parent_folder_request(&reading("a.txt"));
+
+        assert_eq!(parent.rel_path, "", "the repo root itself");
+        assert_eq!(parent.repo_name, "repo");
+        assert_eq!(parent.worktree_path.as_deref(), Some("C:/wt/x"));
+        assert!(!parent.open_when_done);
+    }
+
+    #[test]
+    fn done_actions_are_kept_until_their_toast_goes() {
+        let mut registry = FetchRegistry::new("t");
+        let folder = parent_folder_request(&reading("docs/a.txt"));
+        let saved = PathBuf::from("root").join("host").join("repo").join("docs");
+        registry.note_done("fetch-t-1", DoneAction::WholeFolder(folder.clone()));
+        registry.note_done("fetch-t-2", DoneAction::Reveal(saved.clone()));
+        assert_eq!(
+            registry.done_action("fetch-t-1"),
+            Some(&DoneAction::WholeFolder(folder))
+        );
+
+        registry.retain_done(|key| key == "fetch-t-2");
+
+        assert_eq!(
+            registry.done_action("fetch-t-1"),
+            None,
+            "the closed toast's action goes"
+        );
+        assert_eq!(
+            registry.done_action("fetch-t-2"),
+            Some(&DoneAction::Reveal(saved)),
+            "the shown toast's action stays"
+        );
     }
 
     #[test]

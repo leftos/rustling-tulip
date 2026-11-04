@@ -13,8 +13,8 @@ use protocol::{ClientMessage, DaemonMessage, PathKind};
 use crate::RootView;
 use crate::fetch_link;
 use crate::file_fetch::{
-    self, FetchEntry, FetchRequest, MediaEnd, ProbeGroup, WriteOutcome, WriteStep, Writer,
-    display_host_path, is_under,
+    self, DoneAction, FetchEntry, FetchRequest, MediaEnd, ProbeGroup, WriteOutcome, WriteStep,
+    Writer, display_host_path, is_under,
 };
 use crate::folder_unpack::{self, Announced};
 use crate::html_media;
@@ -34,6 +34,20 @@ pub(crate) const OUTSIDE_FETCH_FOLDER: &str =
 pub(crate) const FETCH_CANCEL: ToastAction = ToastAction {
     id: "cancel",
     label: "Cancel",
+    danger: false,
+};
+
+/// The Fetch whole folder on a fetched file's done toast.
+pub(crate) const FETCH_WHOLE_FOLDER: ToastAction = ToastAction {
+    id: "whole-folder",
+    label: "Fetch whole folder",
+    danger: false,
+};
+
+/// The Reveal on a fetched folder's done toast.
+pub(crate) const FETCH_REVEAL: ToastAction = ToastAction {
+    id: "reveal",
+    label: "Reveal",
     danger: false,
 };
 
@@ -79,6 +93,70 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         self.start_fetch(request, None, cx)
+    }
+
+    /// Asks the remote host for `request`'s folder, unpacked under this
+    /// host's download folder, without asking first what the path names;
+    /// returns the fetch's id, or `None` when the fetch is refused (the
+    /// local daemon, a refused path, the same folder already fetching),
+    /// which a toast explains.
+    pub fn fetch_remote_folder(
+        &mut self,
+        request: FetchRequest,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        match self.try_start_folder_fetch(request, cx) {
+            Ok(id) => Some(id),
+            Err(refusal) => {
+                self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx);
+                None
+            }
+        }
+    }
+
+    /// Fetch whole folder on the done toast keyed `key`: the toast goes and
+    /// the fetched file's folder is fetched, or, when its host no longer
+    /// sends folders, a warning says the host is too old.
+    pub(crate) fn fetch_whole_folder(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(DoneAction::WholeFolder(request)) = self.fetches.done_action(key).cloned() else {
+            return;
+        };
+        self.dismiss_toast_key(key, cx);
+        let name = file_fetch::fetch_name(&request).to_owned();
+        let conn = self.conn_of(&request.host);
+        if !conn.is_some_and(crate::connection::Connection::is_open) {
+            let host = conn
+                .and_then(|conn| file_fetch::host_folder(conn.target()))
+                .unwrap_or_else(|| "The host".to_owned());
+            tracing::info!(host = ?request.host, "the folder's host is offline");
+            self.push_toast(
+                ToastKind::Warning,
+                &failed_title(&name),
+                Some(format!("{host} is offline.")),
+                cx,
+            );
+            return;
+        }
+        if !self.host_sends_folders(&request.host) {
+            tracing::info!(host = ?request.host, "the host no longer sends folders");
+            self.push_too_old(&request.host, &name, cx);
+            return;
+        }
+        self.fetch_remote_folder(request, cx);
+    }
+
+    /// Reveal on the done toast keyed `key`: the fetched folder shows in
+    /// Explorer, and the toast stays.
+    pub(crate) fn reveal_fetched_folder(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(DoneAction::Reveal(path)) = self.fetches.done_action(key).cloned() else {
+            return;
+        };
+        self.open_fetched_job(OpenJob::Reveal(path), Then::Nothing, window, cx);
     }
 
     /// A Ctrl+click on a path link in a pane of remote host `host`: fetches
@@ -999,7 +1077,7 @@ impl RootView {
             {
                 tracing::info!(id, path = %path.display(), "fetched a folder");
                 if let Some(entry) = self.fetches.remove(id) {
-                    self.push_folder_fetched(id, &entry, cx);
+                    self.push_folder_fetched(id, &entry, path, cx);
                 }
             }
             WriteOutcome::Saved(path) => {
@@ -1031,7 +1109,12 @@ impl RootView {
                 if let Some(page_id) = entry.parent() {
                     let rel = &entry.request().rel_path;
                     self.after_child_saved(page_id.to_owned(), rel, path, window, cx);
-                } else if entry.request().open_when_done {
+                    return;
+                }
+                if !entry.reports_to_popup() && self.host_sends_folders(entry.host_key()) {
+                    self.push_file_fetched(id, &entry, cx);
+                }
+                if entry.request().open_when_done {
                     self.open_fetched(path, entry.request(), window, cx);
                 }
             }
@@ -1040,9 +1123,34 @@ impl RootView {
         }
     }
 
-    /// The folder fetch `id` is saved: its toast says so, with how many
-    /// files came.
-    fn push_folder_fetched(&mut self, id: &str, entry: &FetchEntry, cx: &mut Context<Self>) {
+    /// The plain file fetch `id` is saved: its done toast, in place of its
+    /// Fetching toast, offers to fetch the file's whole folder.
+    fn push_file_fetched(&mut self, id: &str, entry: &FetchEntry, cx: &mut Context<Self>) {
+        let key = fetching_toast_key(id, entry.group());
+        let spec = ToastSpec {
+            kind: ToastKind::Info,
+            title: format!("Fetched {}", file_fetch::fetch_name(entry.request())),
+            detail: Some(format!("from {}", entry.host())),
+            key: Some(key.clone()),
+            sticky: false,
+            actions: vec![FETCH_WHOLE_FOLDER],
+        };
+        self.push_toast_spec(spec, cx);
+        self.fetches.note_done(
+            &key,
+            DoneAction::WholeFolder(file_fetch::parent_folder_request(entry.request())),
+        );
+    }
+
+    /// The folder fetch `id` is saved at `path`: its toast says so, with how
+    /// many files came, and offers to reveal it.
+    fn push_folder_fetched(
+        &mut self,
+        id: &str,
+        entry: &FetchEntry,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         let files = entry.announced().map_or(0, |announced| announced.files);
         let spec = ToastSpec {
             kind: ToastKind::Info,
@@ -1050,9 +1158,10 @@ impl RootView {
             detail: Some(format!("{files} files from {}", entry.host())),
             key: Some(id.to_owned()),
             sticky: false,
-            actions: Vec::new(),
+            actions: vec![FETCH_REVEAL],
         };
         self.push_toast_spec(spec, cx);
+        self.fetches.note_done(id, DoneAction::Reveal(path));
     }
 
     /// Ends the fetch `id` as failed for `reason`: its writer deletes the

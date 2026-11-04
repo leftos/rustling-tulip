@@ -15,6 +15,7 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 - Settings > General has a Diagnostics section with a Detailed logging switch that records why sessions change status, and an Open logs folder button.
 - Settings has a search box that finds a setting on any page, with match counts per page and the match highlighted; Ctrl+F jumps there.
 - Ctrl+clicking a folder path in a remote host's terminal fetches the whole folder, with progress and Cancel, leaving out `.git`, `node_modules` and caches.
+- A fetched remote file's notice offers Fetch whole folder for its folder, and a fetched folder's notice offers Reveal to show it in Explorer.
 
 ### Fixed
 

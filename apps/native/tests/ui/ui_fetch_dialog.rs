@@ -25,7 +25,8 @@ use rustling_tulip_native::file_fetch::FetchRequest;
 use rustling_tulip_native::target::{HostKey, Target};
 use rustling_tulip_native::{Connection, NetEvent, RootView};
 use support::{
-    Fixture, Harness, HostHandle, TestDir, remote_in_pane, saved_remote, saved_remote_over, session,
+    Fixture, Harness, HostHandle, TestDir, remote_in_pane, repo, saved_remote, saved_remote_over,
+    session,
 };
 
 const HOST: &str = "box.tail1234.ts.net";
@@ -440,6 +441,35 @@ fn done_closes_the_dialog_and_opens_the_file(cx: &mut TestAppContext) {
     assert_eq!(fs::read(&saved).expect("the file is saved"), b"ok");
     assert!(!is_open(&mut h), "the save closes the dialog");
     no_failure_toast(&mut h);
+}
+
+#[gpui::test]
+fn a_dialog_fetch_on_a_host_that_sends_folders_shows_no_fetched_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = on_remote(cx, &dir);
+    remote(&mut h).connect_with_features(&[protocol::FEATURE_FOLDER_FETCH]);
+    remote(&mut h).send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/repos/r1"), repo("r2", "C:/repos/r2")],
+    });
+    remote(&mut h).send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").worktree("r1").build()],
+    });
+    remote(&mut h).sent();
+    h.sent();
+    let id = fetch(&mut h, "src/a.rs");
+    remote(&mut h).send(started(&id, 2));
+    remote(&mut h).send(chunk(&id, 0, b"ok"));
+    remote(&mut h).send(DaemonMessage::FileFetchDone { id: id.clone() });
+    h.cx.run_until_parked();
+
+    let saved = root.join(HOST).join("r1").join("src").join("a.rs");
+    assert_eq!(fs::read(&saved).expect("the file is saved"), b"ok");
+    assert!(!is_open(&mut h), "the save closes the dialog");
+    let shown = toasts(&mut h);
+    assert!(
+        !shown.iter().any(|(title, _)| title.starts_with("Fetched")),
+        "the dialog's fetch has no done toast: {shown:?}"
+    );
 }
 
 /// Starts a fetch of `src/a.rs` with half of it written; returns its id and

@@ -173,6 +173,116 @@ fn a_file_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
     );
 }
 
+/// `len` bytes no compressor shrinks, the same on every run.
+fn incompressible(len: usize) -> Vec<u8> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect()
+}
+
+/// The files and folders directly in `dir`, by name, sorted.
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read the folder")
+        .map(|entry| {
+            entry
+                .expect("read a folder entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A folder fetched from an SSH host lands byte-exact under the host's
+/// `ssh-` folder and the repo's, without the folders the host skips and
+/// without its stage.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn a_folder_fetched_over_ssh_lands_under_its_ssh_folder(cx: &mut TestAppContext) {
+    const A: &[u8] = b"rt-e2e folder file a over ssh\n";
+    let big = incompressible(3 * 256 * 1024 + 12_345);
+    let daemon = LiveDaemon::start("ssh-folder");
+    let home = LiveDaemon::start("ssh-folder-home");
+    let repo = daemon.git_fixture();
+    let docs = repo.join("docs");
+    std::fs::create_dir_all(docs.join("sub")).expect("create the fixture's docs/sub dir");
+    std::fs::create_dir_all(docs.join("node_modules")).expect("create docs/node_modules");
+    std::fs::write(docs.join("a.txt"), A).expect("write a.txt");
+    std::fs::write(docs.join("sub").join("b.bin"), &big).expect("write b.bin");
+    std::fs::write(docs.join("node_modules").join("x.js"), b"skipped\n").expect("write x.js");
+    commit_all(&repo, "a folder to fetch");
+    let _fake = use_fake_ssh(&daemon, None);
+    let (mut h, hosts) = open_ssh(cx, &home, &daemon, true);
+    let client = hosts.client(&ssh_key());
+    wait_open(&mut h, &client, "the client to connect over ssh");
+
+    client.send(ClientMessage::AddRepo {
+        path: repo.to_string_lossy().into_owned(),
+        name: None,
+    });
+    let mut repo_id = None;
+    h.wait_until("the fixture repo in state.json", |_| {
+        repo_id = daemon.repo_id(&repo);
+        repo_id.is_some()
+    });
+    let repo_name = repo
+        .file_name()
+        .expect("the fixture dir has a name")
+        .to_string_lossy()
+        .into_owned();
+    let root = home.dir().join("remote-files");
+    let set = root.clone();
+    h.root_update(move |view, _, _| view.set_remote_files_root(set));
+
+    let request = FetchRequest {
+        host: ssh_key(),
+        repo_id: repo_id.expect("the wait just found it"),
+        repo_name: repo_name.clone(),
+        worktree_path: None,
+        rel_path: "docs".to_owned(),
+        line: None,
+        column: None,
+        open_when_done: false,
+        prefer_viewer: false,
+    };
+    h.root_update(move |view, _, cx| view.fetch_remote_folder(request, cx))
+        .expect("a folder fetch on the ssh host starts");
+    h.wait_until("the folder's done toast", |h| {
+        h.root(|root, _| {
+            root.toasts()
+                .iter()
+                .any(|toast| toast.title == "Fetched folder docs")
+        })
+    });
+
+    let landed = root.join(format!("ssh-{HOST}")).join(&repo_name);
+    assert_eq!(names_in(&landed), ["docs"], "no stage is left beside it");
+    let folder = landed.join("docs");
+    assert_eq!(
+        names_in(&folder),
+        ["a.txt", "sub"],
+        "node_modules is skipped"
+    );
+    assert_eq!(
+        std::fs::read(folder.join("a.txt")).expect("a.txt landed"),
+        A
+    );
+    assert!(
+        std::fs::read(folder.join("sub").join("b.bin")).expect("b.bin landed") == big,
+        "b.bin landed byte-exact"
+    );
+    assert!(h.opened().is_empty(), "a fetched folder does not open");
+}
+
 /// Killing the running ssh's process tree closes the connection; the client
 /// runs ssh again, reconnects and is sent the session list again.
 #[gpui::test]

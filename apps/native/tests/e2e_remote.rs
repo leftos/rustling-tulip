@@ -538,6 +538,123 @@ fn remote_html_fetch_brings_its_relative_media(
     );
 }
 
+/// `len` bytes no compressor shrinks, the same on every run.
+fn incompressible(len: usize) -> Vec<u8> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect()
+}
+
+/// The files and folders directly in `dir`, by name, sorted.
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read the folder")
+        .map(|entry| {
+            entry
+                .expect("read a folder entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A folder fetched over the tailnet lands byte-exact under the host's and
+/// repo's download folder, its chunks spanning a large file, without the
+/// folders the host skips and without its stage.
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn remote_folder_fetch_lands_the_tree_byte_exact(
+    host_cx: &mut TestAppContext,
+    device_cx: &mut TestAppContext,
+) {
+    const A: &[u8] = b"rt-e2e folder file a\n";
+    let big = incompressible(3 * 256 * 1024 + 12_345);
+    let daemon = LiveDaemon::start_remote("remote-folder");
+    let home = LiveDaemon::start("remote-folder-home");
+    let repo = daemon.git_fixture();
+    let docs = repo.join("docs");
+    std::fs::create_dir_all(docs.join("sub")).expect("create the fixture's docs/sub dir");
+    std::fs::create_dir_all(docs.join("node_modules")).expect("create docs/node_modules");
+    std::fs::write(docs.join("a.txt"), A).expect("write a.txt");
+    std::fs::write(docs.join("sub").join("b.bin"), &big).expect("write b.bin");
+    std::fs::write(docs.join("node_modules").join("x.js"), b"skipped\n").expect("write x.js");
+    commit_all(&repo, "a folder to fetch");
+
+    let (mut host, host_client) = Harness::open_live(host_cx, &daemon);
+    let port = serve_remote(&mut host, &host_client, &daemon);
+    host_client.send(ClientMessage::AddRepo {
+        path: repo.to_string_lossy().into_owned(),
+        name: None,
+    });
+    let mut repo_id = None;
+    host.wait_until("the fixture repo in state.json", |_| {
+        repo_id = daemon.repo_id(&repo);
+        repo_id.is_some()
+    });
+    let repo_name = repo
+        .file_name()
+        .expect("the fixture dir has a name")
+        .to_string_lossy()
+        .into_owned();
+
+    let tokens = Arc::new(MemoryTokens::default());
+    let (mut device, device_client) = open_device(device_cx, &home, &daemon, port, &tokens);
+    wait_not_approved(&mut device, &device_client, 0);
+    pair(&mut host, &host_client, &mut device, &device_client);
+    let root = home.dir().join("remote-files");
+    let set = root.clone();
+    device.root_update(move |view, _, _| view.set_remote_files_root(set));
+
+    let request = FetchRequest {
+        host: remote_key(),
+        repo_id: repo_id.expect("the wait just found it"),
+        repo_name: repo_name.clone(),
+        worktree_path: None,
+        rel_path: "docs".to_owned(),
+        line: None,
+        column: None,
+        open_when_done: false,
+        prefer_viewer: false,
+    };
+    device
+        .root_update(move |view, _, cx| view.fetch_remote_folder(request, cx))
+        .expect("a folder fetch on the tailnet host starts");
+    device.wait_until("the folder's done toast", |h| {
+        h.root(|root, _| {
+            root.toasts()
+                .iter()
+                .any(|toast| toast.title == "Fetched folder docs")
+        })
+    });
+
+    let landed = root.join(REMOTE_HOST).join(&repo_name);
+    assert_eq!(names_in(&landed), ["docs"], "no stage is left beside it");
+    let folder = landed.join("docs");
+    assert_eq!(
+        names_in(&folder),
+        ["a.txt", "sub"],
+        "node_modules is skipped"
+    );
+    assert_eq!(
+        std::fs::read(folder.join("a.txt")).expect("a.txt landed"),
+        A
+    );
+    assert!(
+        std::fs::read(folder.join("sub").join("b.bin")).expect("b.bin landed") == big,
+        "b.bin landed byte-exact"
+    );
+    assert!(device.opened().is_empty(), "a fetched folder does not open");
+}
+
 /// Turning remote access off closes the served connection, and the device's
 /// redials fail while it stays off. The Close frame is proven by the daemon's
 /// close-path log line ([`SERVER_ENDED_CLOSE`]), written as it sends it: the

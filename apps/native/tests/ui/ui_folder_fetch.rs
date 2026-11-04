@@ -699,3 +699,200 @@ fn a_second_click_on_a_fetching_folder_says_already_fetching(cx: &mut TestAppCon
     );
     assert_eq!(titled(&mut h, "Already fetching src"), 1);
 }
+
+/// The id of the toast titled `title`, if one shows.
+fn toast_titled(h: &mut Harness<'_>, title: &str) -> Option<u64> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .find(|toast| toast.title == title)
+            .map(|toast| toast.id)
+    })
+}
+
+/// The action ids of the toast titled `title`; none when it is not shown.
+fn actions_of(h: &mut Harness<'_>, title: &str) -> Vec<&'static str> {
+    h.root(|root, _| {
+        root.toasts()
+            .iter()
+            .find(|toast| toast.title == title)
+            .map(|toast| toast.actions.iter().map(|action| action.id).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// The host sends `data` as the file the fetch `id` asked for.
+fn stream_file(h: &mut Harness<'_>, id: &str, data: &[u8]) {
+    let mut host = h.host(&saved_remote());
+    host.send(DaemonMessage::FileFetchStarted {
+        id: id.to_owned(),
+        resolved_path: r"\\?\C:\wt\x\file".to_owned(),
+        size: u64::try_from(data.len()).expect("a small file"),
+    });
+    host.send(DaemonMessage::FileChunk {
+        id: id.to_owned(),
+        seq: 0,
+        data_b64: base64::engine::general_purpose::STANDARD.encode(data),
+    });
+    host.send(DaemonMessage::FileFetchDone { id: id.to_owned() });
+}
+
+/// Clicks the file link `text` at `col` on a host that sends folders,
+/// answers its stat of `path` as a file and streams `notes` for it.
+fn fetch_file(h: &mut Harness<'_>, text: &str, col: usize, path: &str) {
+    click_link(h, text, col);
+    let stat_id = one_stat(h, path);
+    stat(h, &stat_id, PathKind::File);
+    let id = one_file_fetch(h, path);
+    stream_file(h, &id, b"notes");
+    settle_until(h, "the fetched file to open", |h| !h.opened().is_empty());
+}
+
+#[gpui::test]
+fn a_fetched_file_offers_the_whole_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+
+    fetch_file(&mut h, "see C:/wt/x/docs/notes.txt", 6, "docs/notes.txt");
+
+    assert!(
+        toasts(&mut h).contains(&("Fetched notes.txt".to_owned(), Some(format!("from {HOST}")))),
+        "the file's done toast shows: {:?}",
+        toasts(&mut h)
+    );
+    assert_eq!(actions_of(&mut h, "Fetched notes.txt"), ["whole-folder"]);
+    assert!(
+        !toasts(&mut h)
+            .iter()
+            .any(|(title, _)| title.starts_with("Fetching")),
+        "the done toast replaced the Fetching toast: {:?}",
+        toasts(&mut h)
+    );
+    let saved = repo_folder(&root).join("docs").join("notes.txt");
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(saved)],
+        "the file still opens"
+    );
+}
+
+#[gpui::test]
+fn pressing_whole_folder_fetches_the_files_parent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    fetch_file(&mut h, "see C:/wt/x/docs/notes.txt", 6, "docs/notes.txt");
+    let toast = toast_titled(&mut h, "Fetched notes.txt").expect("the done toast shows");
+
+    h.click_on(&toast_action_selector(toast, "whole-folder"));
+    h.cx.run_until_parked();
+
+    let id = one_folder_fetch(&mut h, "docs");
+    assert!(
+        toast_titled(&mut h, "Fetched notes.txt").is_none(),
+        "the file's toast goes: {:?}",
+        toasts(&mut h)
+    );
+    assert!(
+        toast_keyed(&mut h, &id).is_some(),
+        "the folder's toast shows: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn pressing_whole_folder_on_a_root_file_fetches_the_root(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    fetch_file(&mut h, "see C:/wt/x/notes.txt", 6, "notes.txt");
+    let toast = toast_titled(&mut h, "Fetched notes.txt").expect("the done toast shows");
+
+    h.click_on(&toast_action_selector(toast, "whole-folder"));
+    h.cx.run_until_parked();
+
+    one_folder_fetch(&mut h, "");
+    assert!(
+        shows(&mut h, &format!("Fetching folder r1 from {HOST}")),
+        "the repo root is fetched: {:?}",
+        toasts(&mut h)
+    );
+}
+
+#[gpui::test]
+fn whole_folder_on_a_disconnected_host_says_offline_not_too_old(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, _) = linked(cx, &dir);
+    fetch_file(&mut h, "see C:/wt/x/docs/notes.txt", 6, "docs/notes.txt");
+    h.host(&saved_remote())
+        .event(NetEvent::State(Connection::for_target(saved_remote())));
+    let toast = toast_titled(&mut h, "Fetched notes.txt").expect("the done toast still shows");
+
+    h.click_on(&toast_action_selector(toast, "whole-folder"));
+    h.cx.run_until_parked();
+
+    assert!(
+        fetch_messages(&mut h).is_empty(),
+        "nothing is asked of the host"
+    );
+    let failures: Vec<(String, Option<String>)> = toasts(&mut h)
+        .into_iter()
+        .filter(|(title, _)| title.starts_with("Couldn't"))
+        .collect();
+    assert_eq!(
+        failures,
+        [(
+            "Couldn't fetch docs".to_owned(),
+            Some(format!("{HOST} is offline."))
+        )],
+        "a host that is reconnecting is not too old"
+    );
+}
+
+#[gpui::test]
+fn a_host_without_folder_fetch_offers_no_whole_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked_old(cx, &dir);
+
+    click_link(&mut h, "see C:/wt/x/docs/notes.txt", 6);
+    let id = one_file_fetch(&mut h, "docs/notes.txt");
+    stream_file(&mut h, &id, b"notes");
+    settle_until(&mut h, "the fetched file to open", |h| {
+        !h.opened().is_empty()
+    });
+
+    assert!(
+        !toasts(&mut h)
+            .iter()
+            .any(|(title, _)| title.starts_with("Fetched")),
+        "no done toast: {:?}",
+        toasts(&mut h)
+    );
+    let saved = repo_folder(&root).join("docs").join("notes.txt");
+    assert_eq!(fs::read(&saved).expect("the file is saved"), b"notes");
+    assert_eq!(h.opened(), [Opened::DefaultApp(saved)], "the file opens");
+}
+
+#[gpui::test]
+fn a_fetched_folder_reveals_in_explorer(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, root) = linked(cx, &dir);
+    let id = fetch_folder(&mut h, "see C:/wt/x/src", 6, "src");
+    stream_folder(&mut h, &id, &FILES);
+    settle_until(&mut h, "the folder to be fetched", |h| {
+        shows(h, "Fetched folder src")
+    });
+    assert_eq!(actions_of(&mut h, "Fetched folder src"), ["reveal"]);
+    let toast = toast_keyed(&mut h, &id).expect("the folder's done toast shows");
+
+    h.click_on(&toast_action_selector(toast, "reveal"));
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        h.opened(),
+        [Opened::Reveal(repo_folder(&root).join("src"))],
+        "the folder shows in Explorer"
+    );
+    assert!(
+        shows(&mut h, "Fetched folder src"),
+        "the toast stays until it times out"
+    );
+}
