@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "nextNumber": 3,
+  "order": [
+    1,
+    2
+  ],
+  "active": 1,
+  "accounts": {
+    "1": {
+      "email": "one@example.test",
+      "uuid": "00000000-0000-4000-8000-000000000011",
+      "orgUuid": "00000000-0000-4000-8000-0000000000b1",
+      "orgName": "Example Test Org",
+      "added": "2026-09-01T10:00:00Z"
+    },
+    "2": {
+      "email": "two@example.test",
+      "uuid": "00000000-0000-4000-8000-000000000012",
+      "added": "2026-09-02T11:00:00Z"
+    }
+  }
+}

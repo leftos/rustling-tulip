@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "nextNumber": 3,
+  "order": [
+    1,
+    2
+  ],
+  "active": 1,
+  "accounts": {
+    "1": {
+      "email": "alice@example.com",
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "orgUuid": "00000000-0000-4000-8000-0000000000a1",
+      "orgName": "Example Org",
+      "added": "2026-09-01T10:00:00Z",
+      "alias": "work",
+      "futureField": {
+        "kept": true
+      }
+    },
+    "2": {
+      "email": "bob@example.com",
+      "uuid": "00000000-0000-4000-8000-000000000002",
+      "added": "2026-09-02T11:00:00Z",
+      "disabled": true,
+      "kind": "api_key"
+    }
+  },
+  "futureTopLevel": "kept"
+}

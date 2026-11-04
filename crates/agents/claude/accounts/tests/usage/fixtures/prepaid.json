@@ -1,0 +1,32 @@
+{
+  "funded": {
+    "amount": 102003,
+    "currency": "USD",
+    "balance": {"money": null, "credits": {"amount_minor": 102003, "exponent": 2}},
+    "auto_reload_settings": null,
+    "tranches": [],
+    "expires_at": null
+  },
+  "unfunded": {
+    "amount": 0,
+    "currency": null,
+    "balance": null,
+    "auto_reload_settings": null,
+    "tranches": null,
+    "expires_at": null
+  },
+  "extraUsageUncapped": {
+    "is_enabled": true,
+    "monthly_limit": null,
+    "used_credits": 3164.0,
+    "utilization": null,
+    "currency": "USD",
+    "decimal_places": 2,
+    "disabled_reason": null,
+    "user_disabled": false,
+    "spend_limit_reached": false,
+    "credits_ever_enabled": true,
+    "daily": null,
+    "weekly": null
+  }
+}
