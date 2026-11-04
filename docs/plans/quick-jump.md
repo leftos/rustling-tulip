@@ -32,7 +32,7 @@ Design for two native-client features that share one matcher: the jump palette (
 
 ## Steps
 
-- [ ] QJ.1 (RT-931 with RT-692): `fuzzy.rs` with its unit tests; the Target list's query, narrowing, highlight, scroll to highlight and inside clicks; spawn specs.
+- [x] QJ.1 (RT-931 with RT-692): `fuzzy.rs` with its unit tests; the Target list's query, narrowing, highlight, scroll to highlight and inside clicks; spawn specs.
 - [ ] QJ.2 (RT-930): `quick_jump.rs` entries and actions; the preselected target in `initial_target`; the sidebar's scroll handle and row-offset helper.
 - [ ] QJ.3 (RT-930): the palette view, the Ctrl+Shift+P and Cmd+Shift+P route, the `jump` shot view, `ui_quick_jump.rs`, and a shortcut list in `docs/native-client.md`.
 

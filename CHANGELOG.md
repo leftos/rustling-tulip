@@ -7,9 +7,11 @@ What changed in each release of rustling-tulip, newest first. Installers are on 
 ### Added
 
 - Settings › General picks each host's default shell for new sessions, from its installed shells or a custom command.
+- The new-session dialog's Target list narrows as you type, matching repo and workspace names in part, so "ya" finds yaat.
 
 ### Fixed
 
+- The new-session dialog's Target list keeps its highlighted row in view, and a click inside the list no longer closes it.
 - A toast with a long title now wraps inside its card, so its close button stays reachable.
 - Fetch toasts name an SSH host as you typed it, and a click on a path link shows its toast at once.
 - A folder fetch's progress keeps moving while it finishes, drops Cancel once it can't stop, and stays closed when you close it.

@@ -62,6 +62,7 @@ mod folder_picker;
 mod folder_unpack;
 pub mod fonts;
 mod footer;
+mod fuzzy;
 mod grid_view;
 mod history;
 mod history_view;

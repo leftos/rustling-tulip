@@ -19,6 +19,7 @@ use protocol::{
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView};
 use crate::combobox::{ComboRow, Combobox};
+use crate::fuzzy::{self, Candidate, MatchKey};
 use crate::runtime_icon::{RuntimeIcon, agent_icon};
 use crate::sidebar::SpawnDefaults;
 use crate::spawn_preview::{Preview, PreviewKey, ReuseChoice};
@@ -997,13 +998,15 @@ fn online_host_in<'a>(hosts: &'a [HostInputs], host: &HostKey) -> Option<&'a Hos
     host_in(hosts, host).filter(|inputs| !inputs.offline)
 }
 
-/// The Target dropdown's list: whether it shows, and the target its
-/// highlight is on, held as the target so a registry change that moves the
-/// rows never moves the highlight to another one.
+/// The Target dropdown's list: whether it shows, the target its highlight
+/// is on, held as the target so a registry change that moves the rows never
+/// moves the highlight to another one, and the text typed into its query
+/// field, which only an open list holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TargetList {
     open: bool,
     highlight: Option<Target>,
+    query: String,
 }
 
 /// One host's part of the grouped picker.
@@ -2223,6 +2226,112 @@ impl SpawnForm {
             .collect()
     }
 
+    /// The picker's groups narrowed to the targets the open list's query
+    /// matches, each group's ranked best first by its targets' names, then
+    /// (a remote host's) by its host's name; beside each group, how well
+    /// each of its targets matched. With an empty query every group shows
+    /// whole, in order; with one, a group with no match is left out.
+    fn ranked_target_groups(&self) -> Vec<(TargetGroup, Vec<MatchKey>)> {
+        let query = self.target_list.query.trim();
+        self.target_groups()
+            .into_iter()
+            .filter_map(|mut group| {
+                let names: Vec<String> = group
+                    .targets
+                    .iter()
+                    .map(|target| self.target_name(target))
+                    .collect();
+                // This PC's name is no target's: only a remote host's
+                // name finds its targets.
+                let host = matches!(group.host, HostKey::Remote(_)).then_some(group.label.as_str());
+                let candidates: Vec<Candidate<'_>> = names
+                    .iter()
+                    .map(|name| Candidate {
+                        primary: name,
+                        secondary: host,
+                    })
+                    .collect();
+                let ranked = fuzzy::ranked(query, &candidates);
+                if !query.is_empty() && ranked.is_empty() {
+                    return None;
+                }
+                let (keys, targets) = ranked
+                    .into_iter()
+                    .filter_map(|(key, index)| group.targets.get(index).map(|t| (key, t.clone())))
+                    .unzip();
+                group.targets = targets;
+                Some((group, keys))
+            })
+            .collect()
+    }
+
+    /// The picker's groups narrowed and ranked by the open list's query
+    /// (see [`Self::ranked_target_groups`]).
+    pub(crate) fn filtered_target_groups(&self) -> Vec<TargetGroup> {
+        self.ranked_target_groups()
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect()
+    }
+
+    /// The best match that can be picked across every host, the first in
+    /// the list's order among equal ones.
+    fn best_filtered_target(&self) -> Option<Target> {
+        self.ranked_target_groups()
+            .into_iter()
+            .filter(|(group, _)| !group.offline)
+            .flat_map(|(group, keys)| keys.into_iter().zip(group.targets))
+            .min_by_key(|(key, _)| *key)
+            .map(|(_, target)| target)
+    }
+
+    /// The targets the open list offers to pick, in its order: those the
+    /// query matches on online hosts. Every list index (the highlight's
+    /// moves, a hovered row) counts in this list; with an empty query it is
+    /// [`Self::targets`].
+    pub(crate) fn filtered_targets(&self) -> Vec<Target> {
+        self.filtered_target_groups()
+            .into_iter()
+            .filter(|group| !group.offline)
+            .flat_map(|group| group.targets)
+            .collect()
+    }
+
+    /// The text typed into the open list's query field; empty while it is
+    /// closed.
+    pub(crate) fn target_query(&self) -> &str {
+        &self.target_list.query
+    }
+
+    /// The query field's text became `query`: the list narrows to its
+    /// matches and the highlight moves to the best one that can be picked,
+    /// on any host. The query is read trimmed: an edit that leaves the
+    /// trimmed query as it was moves nothing, and a blank one is empty.
+    pub(crate) fn edit_target_query(&mut self, query: &str) {
+        if !self.target_list.open {
+            return;
+        }
+        let changed = self.target_list.query.trim() != query.trim();
+        query.clone_into(&mut self.target_list.query);
+        if changed {
+            self.target_list.highlight = self.best_filtered_target();
+        }
+    }
+
+    /// A character typed on the closed Target field: the list opens with it
+    /// as its query. Returns whether the list opened.
+    pub(crate) fn open_target_list_with(&mut self, query: &str) -> bool {
+        if self.target_list.open {
+            return false;
+        }
+        self.open_target_list();
+        if !self.target_list.open {
+            return false;
+        }
+        self.edit_target_query(query);
+        true
+    }
+
     /// Whether `target` can be picked: not while the target is locked, nor
     /// on an offline host.
     pub(crate) fn target_enabled(&self, target: &Target) -> bool {
@@ -2263,8 +2372,9 @@ impl SpawnForm {
 
     /// The highlighted target while it is still listed; once it has left
     /// the list, the chosen target, else the first one that can be picked.
+    /// `None` while the query matches nothing that can be picked.
     fn resolved_highlight(&self) -> Option<Target> {
-        let targets = self.targets();
+        let targets = self.filtered_targets();
         [self.target_list.highlight.as_ref(), Some(&self.target)]
             .into_iter()
             .flatten()
@@ -2281,20 +2391,23 @@ impl SpawnForm {
         self.target_list = TargetList {
             open: true,
             highlight: Some(self.target.clone()),
+            query: String::new(),
         };
     }
 
-    /// Closes the list; returns whether it was open.
+    /// Closes the list, its query cleared; returns whether it was open.
     pub(crate) fn close_target_list(&mut self) -> bool {
         let was_open = self.target_list.open;
         self.target_list.open = false;
+        self.target_list.query.clear();
         was_open
     }
 
     /// Up or Down (`down`) on the Target field: Down opens a closed list,
     /// and in an open one the highlight moves a row, stopping at either
     /// end. Only targets that can be picked are rows the highlight lands
-    /// on, never a host header or an offline host's target.
+    /// on, never a host header or an offline host's target, and only those
+    /// the query matches.
     pub(crate) fn target_list_nav(&mut self, down: bool) {
         if !self.target_list.open {
             if down {
@@ -2302,7 +2415,10 @@ impl SpawnForm {
             }
             return;
         }
-        let targets = self.targets();
+        let targets = self.filtered_targets();
+        if targets.is_empty() {
+            return;
+        }
         let at = self
             .resolved_highlight()
             .and_then(|current| targets.iter().position(|t| *t == current))
@@ -2315,31 +2431,44 @@ impl SpawnForm {
         self.target_list.highlight = targets.into_iter().nth(next);
     }
 
-    /// The pointer is over pickable target `index`; returns whether that
-    /// moved the highlight.
-    pub(crate) fn hover_target(&mut self, index: usize) -> bool {
-        let Some(target) = self.targets().into_iter().nth(index) else {
+    /// The pointer is over `target`'s row; returns whether that moved the
+    /// highlight. A target the list no longer offers (an edit narrowed it
+    /// away since the row was drawn) moves nothing.
+    pub(crate) fn hover_target(&mut self, target: &Target) -> bool {
+        if !self.filtered_targets().contains(target) {
             return false;
-        };
-        let moved = self.target_list.highlight.as_ref() != Some(&target);
-        self.target_list.highlight = Some(target);
+        }
+        let moved = self.target_list.highlight.as_ref() != Some(target);
+        self.target_list.highlight = Some(target.clone());
         moved
     }
 
-    /// Esc on the Target field: closes the list if it shows, and says
-    /// whether it did, so Esc goes no further.
+    /// Esc on the Target field: clears the open list's query when it holds
+    /// one, the highlight going to the first target as after any edit,
+    /// else closes the list if it shows. Says whether it did either, so Esc
+    /// goes no further.
     pub(crate) fn escape_target_list(&mut self) -> bool {
+        if self.target_list.open && !self.target_list.query.trim().is_empty() {
+            self.edit_target_query("");
+            return true;
+        }
         self.close_target_list()
     }
 
-    /// Enter while the list shows: picks the highlighted target. `None`
-    /// while it is closed, leaving Enter to the dialog.
+    /// Enter while the list shows: picks the highlighted target, or does
+    /// nothing while the query matches none. `None` while it is closed,
+    /// leaving Enter to the dialog.
     pub(crate) fn enter_target_list(
         &mut self,
         cache: &mut BranchCache,
         now: Instant,
     ) -> Option<Vec<ClientMessage>> {
-        let target = self.target_highlight()?;
+        if !self.target_list.open {
+            return None;
+        }
+        let Some(target) = self.resolved_highlight() else {
+            return Some(Vec::new());
+        };
         Some(self.pick_target(&target, cache, now))
     }
 
@@ -2352,7 +2481,7 @@ impl SpawnForm {
         cache: &mut BranchCache,
         now: Instant,
     ) -> Vec<ClientMessage> {
-        self.target_list.open = false;
+        self.close_target_list();
         self.focus = Control::TargetField;
         if *target != self.target && self.target_enabled(target) {
             self.load_target(target.clone(), cache, now)
@@ -2372,6 +2501,21 @@ impl SpawnForm {
     /// always ending in ` · ` and the host's name, as no header shows there.
     pub(crate) fn chosen_target_label(&self) -> String {
         self.labelled(&self.target, true)
+    }
+
+    /// `target`'s name, which the list's query matches: the repo's or
+    /// workspace's name alone, without its kind tag, its repo count or its
+    /// host.
+    fn target_name(&self, target: &Target) -> String {
+        let host = host_in(&self.hosts, target.host());
+        match target {
+            Target::Repo { id, .. } => host
+                .and_then(|h| h.repos.iter().find(|r| &r.id == id))
+                .map_or_else(|| id.clone(), |r| r.name.clone()),
+            Target::Workspace { id, .. } => host
+                .and_then(|h| h.workspaces.iter().find(|w| &w.id == id))
+                .map_or_else(|| id.clone(), |w| w.name.clone()),
+        }
     }
 
     /// `target`'s label, a remote host's ending in ` · ` and the host's name
@@ -4959,6 +5103,285 @@ mod tests {
         assert_eq!(form.target_highlight(), Some(lab_r3));
         form.target_list_nav(false);
         assert_eq!(form.target_highlight(), Some(local("r1")));
+    }
+
+    /// A form on This PC's repos named `names`, its Target list open.
+    fn open_list_of(names: &[&str]) -> SpawnForm {
+        let mut form = Setup::repos(names.iter().map(|name| repo(name)).collect())
+            .open(&mut BranchCache::default())
+            .0;
+        press(&mut form, &Control::TargetField);
+        assert!(form.target_list_open());
+        form
+    }
+
+    #[test]
+    fn query_ya_finds_workspace_yaat() {
+        let mut setup = Setup::repos(vec![repo("r0"), repo("r1")]);
+        setup.workspaces = vec![workspace("yaat", &["r0", "r1"])];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        press(&mut form, &Control::TargetField);
+
+        form.edit_target_query("ya");
+        let yaat = Target::workspace(&HostKey::Local, "yaat");
+        assert_eq!(form.filtered_targets(), std::slice::from_ref(&yaat));
+        assert_eq!(form.target_highlight(), Some(yaat));
+        assert_eq!(form.target_query(), "ya");
+        assert_eq!(
+            form.targets().len(),
+            3,
+            "the unfiltered set keeps every target"
+        );
+    }
+
+    #[test]
+    fn query_ignores_kind_tag_and_host_suffix() {
+        let mut setup = Setup::repos(vec![repo("r0")]);
+        setup.workspaces = vec![workspace("w1", &["r0"])];
+        setup.others = vec![box_inputs(
+            &["r2"],
+            agent_registry::descriptors(),
+            BTreeMap::new(),
+        )];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        press(&mut form, &Control::TargetField);
+        assert_eq!(
+            form.labelled(&Target::repo(&box_host(), "r2"), true),
+            "[REPO]  r2 · box",
+            "the label carries a tag and a host suffix"
+        );
+
+        for query in ["[", "repo", "ws", "repos", "(1", "·", "r2 ·"] {
+            form.edit_target_query(query);
+            assert!(
+                form.filtered_targets().is_empty(),
+                "{query:?} matches no name: {:?}",
+                form.filtered_targets()
+            );
+        }
+        form.edit_target_query("w1");
+        assert_eq!(
+            form.filtered_targets(),
+            [Target::workspace(&HostKey::Local, "w1")],
+            "the bare name matches"
+        );
+    }
+
+    #[test]
+    fn query_matches_host_name_after_names() {
+        let mut setup = Setup::repos(vec![repo("r0")]);
+        setup.others = vec![box_inputs(
+            &["r9", "boxer"],
+            agent_registry::descriptors(),
+            BTreeMap::new(),
+        )];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        press(&mut form, &Control::TargetField);
+
+        form.edit_target_query("box");
+        assert_eq!(
+            form.filtered_targets(),
+            [
+                Target::repo(&box_host(), "boxer"),
+                Target::repo(&box_host(), "r9")
+            ],
+            "the name's match first, then the target found by its host's name"
+        );
+        let groups = form.filtered_target_groups();
+        assert_eq!(
+            groups.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
+            ["box"],
+            "This PC, with no match, is left out"
+        );
+    }
+
+    #[test]
+    fn highlight_moves_to_best_match_after_edit() {
+        let mut form = open_list_of(&["photo", "beta-tools", "tool"]);
+        assert_eq!(form.target_highlight(), Some(local("photo")));
+
+        form.edit_target_query("to");
+        assert_eq!(
+            form.filtered_targets(),
+            [local("tool"), local("beta-tools"), local("photo")],
+            "whole prefix, word prefix, substring"
+        );
+        assert_eq!(form.target_highlight(), Some(local("tool")));
+        form.edit_target_query("ph");
+        assert_eq!(form.target_highlight(), Some(local("photo")));
+    }
+
+    #[test]
+    fn nav_moves_through_filtered_list() {
+        let mut form = open_list_of(&["a1", "b1", "a2", "a3"]);
+        form.edit_target_query("a");
+        assert_eq!(
+            form.filtered_targets(),
+            [local("a1"), local("a2"), local("a3")]
+        );
+        assert_eq!(form.target_highlight(), Some(local("a1")));
+        form.target_list_nav(true);
+        assert_eq!(form.target_highlight(), Some(local("a2")), "b1 is skipped");
+        form.target_list_nav(true);
+        form.target_list_nav(true);
+        assert_eq!(form.target_highlight(), Some(local("a3")), "Down clamps");
+        form.target_list_nav(false);
+        form.target_list_nav(false);
+        form.target_list_nav(false);
+        assert_eq!(form.target_highlight(), Some(local("a1")), "Up clamps");
+        assert!(form.hover_target(&local("a3")));
+        assert_eq!(form.target_highlight(), Some(local("a3")));
+        assert!(
+            !form.hover_target(&local("b1")),
+            "a target narrowed away is not hovered"
+        );
+    }
+
+    #[test]
+    fn hover_after_query_edit_targets_the_hovered_row() {
+        let mut form = open_list_of(&["a1", "b1", "a2"]);
+        assert_eq!(form.filtered_targets()[2], local("a2"));
+        form.edit_target_query("a");
+        assert!(
+            form.hover_target(&local("a2")),
+            "a2's row, drawn third before the edit, is second now"
+        );
+        assert_eq!(form.target_highlight(), Some(local("a2")));
+        assert!(
+            !form.hover_target(&local("b1")),
+            "b1's row, drawn before the edit, is no longer listed"
+        );
+        assert_eq!(form.target_highlight(), Some(local("a2")));
+    }
+
+    #[test]
+    fn enter_picks_filtered_highlight() {
+        let mut form = open_list_of(&["a1", "b1", "a2"]);
+        let mut cache = BranchCache::default();
+        form.edit_target_query("a");
+        form.target_list_nav(true);
+        let messages = form
+            .enter_target_list(&mut cache, Instant::now())
+            .expect("Enter picks while the list shows");
+        assert_eq!(form.target(), &local("a2"));
+        assert!(!form.target_list_open());
+        assert_eq!(form.target_query(), "", "a pick clears the query");
+        assert!(
+            messages.iter().any(
+                |msg| matches!(msg, ClientMessage::ListBranches { repo_id } if repo_id == "a2")
+            ),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn escape_clears_query_then_closes() {
+        let mut form = open_list_of(&["a1", "b1", "a2"]);
+        form.edit_target_query("b");
+        assert_eq!(form.target_highlight(), Some(local("b1")));
+
+        assert!(form.escape_target_list(), "the first Esc is the list's");
+        assert!(form.target_list_open(), "and keeps it open");
+        assert_eq!(form.target_query(), "");
+        assert_eq!(form.filtered_targets().len(), 3, "every target again");
+        assert_eq!(form.target_highlight(), Some(local("a1")));
+
+        assert!(form.escape_target_list(), "the second Esc closes it");
+        assert!(!form.target_list_open());
+        assert!(!form.escape_target_list(), "then Esc is the dialog's");
+
+        press(&mut form, &Control::TargetField);
+        form.edit_target_query("a");
+        assert!(form.close_target_list());
+        assert_eq!(form.target_query(), "", "closing clears the query");
+        form.edit_target_query("b");
+        assert_eq!(form.target_query(), "", "a closed list takes no query");
+        press(&mut form, &Control::TargetField);
+        assert_eq!(form.target_query(), "", "it reopens with none");
+        assert_eq!(form.filtered_targets().len(), 3);
+    }
+
+    #[test]
+    fn query_letters_of_this_pc_do_not_match_local_targets() {
+        let mut form = open_list_of(&["a1", "b1"]);
+        for query in ["this", "pc", "This PC", "hi"] {
+            form.edit_target_query(query);
+            assert_eq!(
+                form.filtered_targets(),
+                [] as [Target; 0],
+                "{query:?} is in This PC's name, not a target's"
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_goes_to_best_match_across_hosts() {
+        let mut setup = Setup::repos(vec![repo("my-yaat-tools")]);
+        setup.others = vec![box_inputs(
+            &["yaat"],
+            agent_registry::descriptors(),
+            BTreeMap::new(),
+        )];
+        let (mut form, _) = setup.open(&mut BranchCache::default());
+        press(&mut form, &Control::TargetField);
+
+        form.edit_target_query("yaat");
+        let on_box = Target::repo(&box_host(), "yaat");
+        assert_eq!(
+            form.filtered_targets(),
+            [local("my-yaat-tools"), on_box.clone()],
+            "the groups keep their host order"
+        );
+        assert_eq!(
+            form.target_highlight(),
+            Some(on_box),
+            "the whole prefix on box beats the word prefix on This PC"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_query_keeps_highlight() {
+        let mut form = open_list_of(&["a1", "b1"]);
+        form.target_list_nav(true);
+        assert_eq!(form.target_highlight(), Some(local("b1")));
+
+        form.edit_target_query("  ");
+        assert_eq!(form.target_highlight(), Some(local("b1")), "no edit");
+        assert_eq!(form.filtered_targets().len(), 2);
+        assert!(form.escape_target_list());
+        assert!(!form.target_list_open(), "one Esc closes the list");
+
+        press(&mut form, &Control::TargetField);
+        form.edit_target_query("b");
+        form.edit_target_query("b ");
+        assert_eq!(form.target_highlight(), Some(local("b1")));
+        form.target_list_nav(false);
+        form.edit_target_query(" b");
+        assert_eq!(
+            form.target_highlight(),
+            Some(local("b1")),
+            "the same trimmed query moves nothing"
+        );
+    }
+
+    #[test]
+    fn no_match_has_no_pickable_row() {
+        let mut form = open_list_of(&["a1", "b1"]);
+        let mut cache = BranchCache::default();
+        form.edit_target_query("zzz");
+        assert_eq!(form.filtered_targets(), [] as [Target; 0]);
+        assert_eq!(form.filtered_target_groups(), [] as [TargetGroup; 0]);
+        assert_eq!(form.target_highlight(), None);
+        form.target_list_nav(true);
+        assert_eq!(form.target_highlight(), None, "Down finds nothing");
+        assert!(!form.hover_target(&local("a1")));
+        let entered = form.enter_target_list(&mut cache, Instant::now());
+        assert!(
+            entered.as_ref().is_some_and(Vec::is_empty),
+            "Enter is the list's and picks nothing: {entered:?}"
+        );
+        assert!(form.target_list_open(), "the list stays");
+        assert_eq!(form.target(), &local("a1"));
     }
 
     /// Claude on repo `r1` with a branch name, so Spawn can go.

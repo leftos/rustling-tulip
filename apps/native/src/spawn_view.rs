@@ -8,9 +8,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
-    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ScrollHandle, SharedString,
-    Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*, px, relative,
-    svg,
+    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, ScrollHandle,
+    SharedString, Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*,
+    px, relative, svg,
 };
 use protocol::{AgentId, DaemonMessage, OptionValue, SpawnPlacement};
 
@@ -100,6 +100,10 @@ const HIDE_SECRET: &str = "Hide";
 const SECRET_TOGGLE: &str = "Secret";
 /// The tallest a branch list grows before it scrolls.
 const LIST_MAX_HEIGHT: f32 = 200.0;
+/// The Target list's query field while it is empty.
+const TARGET_QUERY_PLACEHOLDER: &str = "Type to search";
+/// The Target list's one row while its query matches no target.
+const NO_TARGET_MATCH: &str = "No matching repo or workspace";
 const CURRENT_TAG: &str = "current";
 const PREVIEW_HEADERS: [&str; 4] = ["Repo", "Branch", "Action", "Path"];
 
@@ -158,6 +162,17 @@ pub(crate) struct SpawnDialog {
     list_anchor: Option<Bounds<Pixels>>,
     /// Where the Target field was last laid out while its list showed.
     target_anchor: Option<Bounds<Pixels>>,
+    /// The open Target list's query field, which has the keyboard while
+    /// the list shows.
+    target_query: Entity<TextInput>,
+    /// Where the open Target list's rows are scrolled to.
+    target_scroll: ScrollHandle,
+    /// Where the open Target list, query field and all, was last laid out:
+    /// a press there is inside the list, though it is drawn outside the
+    /// field.
+    target_list_bounds: Option<Bounds<Pixels>>,
+    /// Where the open branch, base or env name list is scrolled to.
+    list_scroll: ScrollHandle,
     /// The dialog opened filled from a stored config (a duplicate, a
     /// launch-last review), so its submit is not the user's own Trusted
     /// choice.
@@ -191,12 +206,15 @@ enum Measured {
     Panel,
     ListAnchor,
     TargetAnchor,
+    TargetList,
 }
 
 impl SpawnDialog {
-    /// The text field a control is, if it is one.
+    /// The text field a control is, if it is one: the Target field is its
+    /// list's query field while the list shows.
     fn input(&self, control: &Control) -> Option<&Entity<TextInput>> {
         match control {
+            Control::TargetField if self.form.target_list_open() => Some(&self.target_query),
             Control::Branch => Some(&self.branch_input),
             Control::Base => Some(&self.base_input),
             Control::FieldText(id) => self
@@ -211,7 +229,7 @@ impl SpawnDialog {
     }
 
     fn inputs(&self) -> impl Iterator<Item = &Entity<TextInput>> {
-        [&self.branch_input, &self.base_input]
+        [&self.branch_input, &self.base_input, &self.target_query]
             .into_iter()
             .chain(self.option_inputs.iter().map(|input| &input.input))
             .chain(
@@ -500,6 +518,28 @@ impl RootView {
         Some(Control::Target(target).selector())
     }
 
+    /// The selectors of the open Target list's rows that can be picked, in
+    /// order, or `None` while it is closed.
+    #[must_use]
+    pub fn spawn_target_rows(&self) -> Option<Vec<String>> {
+        let form = &self.form_dialog()?.form;
+        form.target_list_open().then(|| {
+            form.filtered_targets()
+                .into_iter()
+                .map(|target| Control::Target(target).selector())
+                .collect()
+        })
+    }
+
+    /// The text of the open Target list's query field, or `None` while the
+    /// list is closed.
+    #[must_use]
+    pub fn spawn_target_query(&self) -> Option<String> {
+        let form = &self.form_dialog()?.form;
+        form.target_list_open()
+            .then(|| form.target_query().to_owned())
+    }
+
     /// Opens the Target dropdown's list, as a click on the field does.
     pub fn open_spawn_target_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self
@@ -717,8 +757,10 @@ impl RootView {
         self.close_more_menu(window, cx);
         let branch_input = cx.new(|cx| TextInput::new(form.branch().to_owned(), "", cx));
         let base_input = cx.new(|cx| TextInput::new(form.base().to_owned(), "", cx));
+        let target_query = cx.new(|cx| TextInput::new("", TARGET_QUERY_PLACEHOLDER, cx));
         let mut subscriptions = Self::watch_field(&branch_input, Field::Branch, window, cx);
         subscriptions.extend(Self::watch_field(&base_input, Field::Base, window, cx));
+        subscriptions.extend(Self::watch_target_query(&target_query, window, cx));
         self.spawn_dialog = Some(SpawnModal::Form(Box::new(SpawnDialog {
             form,
             aim,
@@ -734,6 +776,10 @@ impl RootView {
             panel_bounds: None,
             list_anchor: None,
             target_anchor: None,
+            target_query,
+            target_scroll: ScrollHandle::new(),
+            target_list_bounds: None,
+            list_scroll: ScrollHandle::new(),
             prefilled: prefill.is_some(),
         })));
         self.sync_env_inputs(window, cx);
@@ -901,6 +947,7 @@ impl RootView {
                 }
                 if let Some(list) = list {
                     form.list_edited(list);
+                    reveal_list_highlight(dialog, list);
                 }
             }
             this.after_spawn_change(cx);
@@ -921,6 +968,7 @@ impl RootView {
                 move |this, _, key: &NavKey, _, cx| {
                     if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
                         dialog.form.list_nav(list, *key == NavKey::Down);
+                        reveal_list_highlight(dialog, list);
                     }
                     cx.notify();
                 },
@@ -961,8 +1009,49 @@ impl RootView {
     fn open_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) {
         if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
             dialog.form.open_list(list);
+            reveal_list_highlight(dialog, list);
             cx.notify();
         }
+    }
+
+    /// Typing in the Target list's query field narrows the list, Enter
+    /// picks its highlight, Esc clears the query and then closes the list,
+    /// and the field taking the keyboard puts the dialog's focus on the
+    /// Target field. Up and Down reach the dialog's own key handling.
+    fn watch_target_query(
+        input: &Entity<TextInput>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        let keys = cx.subscribe_in(
+            input,
+            window,
+            |this, _, event: &TextInputEvent, window, cx| {
+                let key = match event {
+                    TextInputEvent::Submit => "enter",
+                    TextInputEvent::Cancel => "escape",
+                };
+                this.on_target_list_key(key, None, window, cx);
+            },
+        );
+        let edits = cx.subscribe_in(input, window, |this, input, _: &TextChanged, _, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
+                dialog.form.edit_target_query(&text);
+                reveal_target_highlight(dialog);
+            }
+            cx.notify();
+        });
+        let handle = input.read(cx).focus_handle(cx);
+        let focus = cx.on_focus(&handle, window, |this, _, cx| {
+            if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog
+                && dialog.form.target_list_open()
+            {
+                dialog.form.set_focus(Control::TargetField);
+            }
+            cx.notify();
+        });
+        vec![keys, edits, focus]
     }
 
     fn close_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) {
@@ -972,17 +1061,42 @@ impl RootView {
         }
     }
 
-    fn close_spawn_target_list(&mut self, cx: &mut Context<Self>) {
-        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog
-            && dialog.form.close_target_list()
+    /// A press at `at` outside the Target field: closes its list unless the
+    /// press is on the list itself, drawn outside the field.
+    fn close_spawn_target_list(
+        &mut self,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
+            return;
+        };
+        if !dialog.form.target_list_open()
+            || dialog
+                .target_list_bounds
+                .is_some_and(|bounds| bounds.contains(&at))
         {
-            cx.notify();
+            return;
         }
+        dialog.form.close_target_list();
+        sync_target_query(dialog, cx);
+        // The hidden query field gives up the keyboard, but the body does
+        // not scroll: the press goes on to whatever it landed on.
+        if dialog
+            .target_query
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.spawn_focus.focus(window);
+        }
+        cx.notify();
     }
 
-    fn hover_spawn_target(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn hover_spawn_target(&mut self, target: &Target, cx: &mut Context<Self>) {
         if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog
-            && dialog.form.hover_target(index)
+            && dialog.form.hover_target(target)
         {
             cx.notify();
         }
@@ -990,11 +1104,14 @@ impl RootView {
 
     /// A key on the Target field or its open list; returns whether it was
     /// the list's. Up and Down move through the list (Down opens it), Enter
-    /// and Space pick the highlighted row while it shows, Esc closes it, and
-    /// Tab closes it on the way to the next control.
+    /// picks the highlighted row while it shows, Esc clears its query and
+    /// then closes it, and Tab closes it on the way to the next control.
+    /// While it shows, Space and other typing go to its query field; on the
+    /// closed field, a `typed` character opens it with that as the query.
     fn on_target_list_key(
         &mut self,
         key: &str,
+        typed: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1002,21 +1119,48 @@ impl RootView {
         let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return false;
         };
-        let form = &mut dialog.form;
+        let open = dialog.form.target_list_open();
+        if open && key == "space" {
+            return false;
+        }
+        if let Some(typed) = typed
+            && !open
+        {
+            if !dialog.form.open_target_list_with(typed) {
+                return false;
+            }
+            reveal_target_highlight(dialog);
+            self.apply_spawn_focus(window, cx);
+            return true;
+        }
         match key {
             "up" | "down" => {
-                form.target_list_nav(key == "down");
-                cx.notify();
+                dialog.form.target_list_nav(key == "down");
+                reveal_target_highlight(dialog);
+                // Only a list that opened moves the keyboard to its query.
+                if dialog.form.target_list_open() == open {
+                    cx.notify();
+                } else {
+                    self.apply_spawn_focus(window, cx);
+                }
                 true
             }
             "escape" => {
-                let closed = form.escape_target_list();
-                if closed {
-                    cx.notify();
+                let handled = dialog.form.escape_target_list();
+                if !handled {
+                    return false;
                 }
-                closed
+                reveal_target_highlight(dialog);
+                if dialog.form.target_list_open() {
+                    // The query was cleared; the keyboard stays in it.
+                    sync_target_query(dialog, cx);
+                    cx.notify();
+                } else {
+                    self.apply_spawn_focus(window, cx);
+                }
+                true
             }
-            "enter" | "space" => match form.enter_target_list(&mut self.branch_cache, now) {
+            "enter" | "space" => match dialog.form.enter_target_list(&mut self.branch_cache, now) {
                 Some(messages) => {
                     self.on_spawn_outcome(Outcome::Stay(messages), window, cx);
                     true
@@ -1024,7 +1168,7 @@ impl RootView {
                 None => false,
             },
             "tab" => {
-                form.close_target_list();
+                dialog.form.close_target_list();
                 false
             }
             _ => false,
@@ -1063,6 +1207,7 @@ impl RootView {
             Measured::Panel => &mut dialog.panel_bounds,
             Measured::ListAnchor => &mut dialog.list_anchor,
             Measured::TargetAnchor => &mut dialog.target_anchor,
+            Measured::TargetList => &mut dialog.target_list_bounds,
         };
         if *slot != Some(bounds) {
             *slot = Some(bounds);
@@ -1217,6 +1362,7 @@ impl RootView {
         let placeholders = (form.branch_placeholder(now), form.default_base());
         sync_field(&dialog.branch_input, &branch, placeholders.0, cx);
         sync_field(&dialog.base_input, &base, placeholders.1, cx);
+        sync_target_query(dialog, cx);
         let fields = form.option_fields();
         for option in &dialog.option_inputs {
             let Some(field) = fields.iter().find(|field| field.id == option.field) else {
@@ -1287,6 +1433,7 @@ impl RootView {
         };
         dialog.reveal = true;
         let dialog = &*dialog;
+        sync_target_query(dialog, cx);
         let input = if dialog.form.share_confirm().is_some() {
             None
         } else {
@@ -1363,7 +1510,9 @@ impl RootView {
         }
         let focused = form.focused();
         let on_target = form.target_list_open() || focused == Control::TargetField;
-        if on_target && self.on_target_list_key(key, window, cx) {
+        // Only the closed field itself, not a text field, types into it.
+        let typed = typed_character(keystroke).filter(|_| !self.spawn_field_focused(window, cx));
+        if on_target && self.on_target_list_key(key, typed, window, cx) {
             return true;
         }
         match key {
@@ -1777,6 +1926,54 @@ fn sync_field(
         }
         input.set_placeholder(placeholder, cx);
     });
+}
+
+/// The Target list's query field holds the form's query: emptied when the
+/// list closes or Esc clears it.
+fn sync_target_query(dialog: &SpawnDialog, cx: &mut Context<RootView>) {
+    sync_field(
+        &dialog.target_query,
+        dialog.form.target_query(),
+        TARGET_QUERY_PLACEHOLDER.to_owned(),
+        cx,
+    );
+}
+
+/// The character a key press types, while no Ctrl, Alt, Cmd or Fn is held
+/// (Ctrl and Alt together are `AltGr` on Windows, which types), and it is
+/// neither a space nor a control character: what opens the closed Target
+/// field's list as its query.
+fn typed_character(keystroke: &Keystroke) -> Option<&str> {
+    let held = keystroke.modifiers;
+    let altgr = held.control && held.alt;
+    if ((held.control || held.alt) && !altgr) || held.platform || held.function {
+        return None;
+    }
+    keystroke.key_char.as_deref().filter(|text| {
+        !text.is_empty() && !text.chars().any(|c| c.is_control() || c.is_whitespace())
+    })
+}
+
+/// Scrolls the open Target list so its highlighted row shows.
+fn reveal_target_highlight(dialog: &SpawnDialog) {
+    let Some(highlight) = dialog.form.target_highlight() else {
+        return;
+    };
+    let at = target_items(&dialog.form)
+        .iter()
+        .position(|item| matches!(item, TargetItem::Row(target) if *target == highlight));
+    if let Some(at) = at {
+        dialog.target_scroll.scroll_to_item(at);
+    }
+}
+
+/// Scrolls `list`'s open list so its highlighted row shows.
+fn reveal_list_highlight(dialog: &SpawnDialog, list: ListField) {
+    if dialog.form.list_shown(list) {
+        dialog
+            .list_scroll
+            .scroll_to_item(dialog.form.list_highlight(list));
+    }
 }
 
 /// Seconds since the Unix epoch, for anything that reads an age.
@@ -2269,8 +2466,8 @@ fn target_dropdown(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootV
         .relative()
         .w_full()
         .child(trigger)
-        .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-            this.close_spawn_target_list(cx);
+        .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+            this.close_spawn_target_list(event.position, window, cx);
         }))
         .when(form.target_list_open(), |field| {
             field
@@ -2279,46 +2476,90 @@ fn target_dropdown(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootV
         })
 }
 
-/// The open Target list: every target, repos then workspaces; with two or
-/// more hosts listed, a header row per host over its own targets (an
-/// offline host's dimmed and disabled, an empty host's no-repos line).
+/// One row of the open Target list, under its query field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetItem {
+    /// A host's header, while the list is grouped: its wire key, its name,
+    /// and whether it is offline.
+    Header(String, String, bool),
+    /// The muted line of a host with no target to list: its wire key, the
+    /// note, and whether it is offline.
+    Note(String, String, bool),
+    /// A target, pickable or an offline host's.
+    Row(Target),
+    /// The one dimmed row while the query matches no target.
+    NoMatch,
+}
+
+/// The open Target list's rows, top to bottom: every target the query
+/// matches, repos then workspaces with an empty query and best first with
+/// one; with two or more hosts listed, a header row per host over its own
+/// targets (an offline host's dimmed and disabled, an empty host's
+/// no-repos line); with a query matching nothing, the no-match row.
+fn target_items(form: &SpawnForm) -> Vec<TargetItem> {
+    let mut items = Vec::new();
+    if form.grouped() {
+        for group in form.filtered_target_groups() {
+            let key = group.host.wire().unwrap_or("local").to_owned();
+            items.push(TargetItem::Header(
+                key.clone(),
+                group.label.clone(),
+                group.offline,
+            ));
+            if group.targets.is_empty() {
+                items.push(TargetItem::Note(key, group.no_repos_note(), group.offline));
+            }
+            items.extend(group.targets.into_iter().map(TargetItem::Row));
+        }
+    } else {
+        items.extend(form.filtered_targets().into_iter().map(TargetItem::Row));
+    }
+    if items.is_empty() && !form.target_query().trim().is_empty() {
+        items.push(TargetItem::NoMatch);
+    }
+    items
+}
+
+/// The open Target list: its query field, then its rows (see
+/// [`target_items`]), which scroll under the field.
 fn target_list(dialog: &SpawnDialog, cx: &mut Context<RootView>) -> AnyElement {
     let t = theme(cx);
     let form = &dialog.form;
-    let pickable = form.targets();
+    let pickable = form.filtered_targets();
     let highlight = form.target_highlight();
-    let mut items = Vec::new();
-    if form.grouped() {
-        for group in form.target_groups() {
-            let key = group.host.wire().unwrap_or("local").to_owned();
-            let header = labelled_text(format!("spawn-target-host-{key}"), group.label.clone())
-                .px(px(8.0))
-                .py(px(4.0))
-                .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
-                .text_color(gpui::rgb(t.text_2))
-                .when(group.offline, |header| header.opacity(DISABLED_OPACITY));
-            items.push(header.into_any_element());
-            if group.targets.is_empty() {
-                let note = labelled_text(
-                    format!("spawn-target-no-repos-{key}"),
-                    group.no_repos_note(),
-                )
-                .px(px(8.0))
-                .py(px(4.0))
-                .text_color(gpui::rgb(t.muted))
-                .when(group.offline, |note| note.opacity(DISABLED_OPACITY));
-                items.push(note.into_any_element());
+    let items: Vec<AnyElement> = target_items(form)
+        .into_iter()
+        .map(|item| match item {
+            TargetItem::Header(key, label, offline) => {
+                labelled_text(format!("spawn-target-host-{key}"), label)
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .font_weight(crate::fonts::ui_weight(cx, FontWeight::SEMIBOLD))
+                    .text_color(gpui::rgb(t.text_2))
+                    .when(offline, |header| header.opacity(DISABLED_OPACITY))
+                    .into_any_element()
             }
-            for target in group.targets {
-                items.push(target_row(form, &pickable, highlight.as_ref(), target, cx));
+            TargetItem::Note(key, note, offline) => {
+                labelled_text(format!("spawn-target-no-repos-{key}"), note)
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_color(gpui::rgb(t.muted))
+                    .when(offline, |note| note.opacity(DISABLED_OPACITY))
+                    .into_any_element()
             }
-        }
-    } else {
-        for target in pickable.clone() {
-            items.push(target_row(form, &pickable, highlight.as_ref(), target, cx));
-        }
-    }
-    let placement = match (dialog.panel_bounds, dialog.target_anchor) {
+            TargetItem::Row(target) => target_row(form, &pickable, highlight.as_ref(), target, cx),
+            TargetItem::NoMatch => labelled_text(
+                "spawn-target-no-match".to_owned(),
+                NO_TARGET_MATCH.to_owned(),
+            )
+            .px(px(8.0))
+            .py(px(4.0))
+            .text_color(gpui::rgb(t.muted))
+            .opacity(DISABLED_OPACITY)
+            .into_any_element(),
+        })
+        .collect();
+    let (above, max_height) = match (dialog.panel_bounds, dialog.target_anchor) {
         (Some(panel), Some(anchor)) => list_placement(
             panel.top()..panel.bottom(),
             anchor.top()..anchor.bottom(),
@@ -2326,7 +2567,46 @@ fn target_list(dialog: &SpawnDialog, cx: &mut Context<RootView>) -> AnyElement {
         ),
         _ => (false, px(LIST_MAX_HEIGHT)),
     };
-    popup_panel("spawn-target-list".to_owned(), placement, None, items, &t)
+    let query = field_frame(true, &t)
+        .driver_id(|| "spawn-target-query".to_owned())
+        .flex_none()
+        .w_full()
+        .child(dialog.target_query.clone());
+    let rows = div()
+        .id("spawn-target-rows")
+        .debug_selector(|| "spawn-target-rows".to_owned())
+        .track_scroll(&dialog.target_scroll)
+        .flex()
+        .flex_col()
+        .flex_shrink()
+        .min_h(px(0.0))
+        .overflow_y_scroll()
+        .children(items);
+    let panel = div()
+        .id("spawn-target-list")
+        .debug_selector(|| "spawn-target-list".to_owned())
+        .absolute()
+        .left(px(0.0))
+        .w_full()
+        .when(above, |list| list.bottom(relative(1.0)).mb(px(2.0)))
+        .when(!above, |list| list.top(relative(1.0)).mt(px(2.0)))
+        .max_h(max_height)
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .p(px(4.0))
+        .bg(gpui::rgb(t.popover))
+        .border_1()
+        .border_color(gpui::rgb(t.popover_edge))
+        .rounded(px(LIST_RADIUS))
+        .occlude()
+        // A press on a header, a note or the padding keeps the keyboard in
+        // the query field.
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .child(measurer(Measured::TargetList, cx))
+        .child(query)
+        .child(rows);
+    deferred(panel).with_priority(1).into_any_element()
 }
 
 /// One row of the Target list: a target that can be picked follows the
@@ -2340,10 +2620,11 @@ fn target_row(
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let t = theme(cx);
-    let index = pickable.iter().position(|p| *p == target);
+    let pickable = pickable.contains(&target);
     let chosen = target == *form.target();
     let highlighted = highlight == Some(&target);
     let label = form.target_label(&target);
+    let hovered = target.clone();
     let control = Control::Target(target);
     let name = control.selector();
     let row = div()
@@ -2358,12 +2639,12 @@ fn target_row(
         .when(highlighted, move |row| row.bg(gpui::rgb(t.popover_hover)))
         .child(label)
         .when(chosen, |row| row.child("✓"));
-    let Some(index) = index else {
+    if !pickable {
         return row.opacity(DISABLED_OPACITY).into_any_element();
-    };
+    }
     row.cursor_pointer()
         .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
-            this.hover_spawn_target(index, cx);
+            this.hover_spawn_target(&hovered, cx);
         }))
         .on_mouse_down(
             MouseButton::Left,
@@ -2784,7 +3065,13 @@ fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>
             )
         })
         .collect();
-    popup_panel(format!("{prefix}-list"), placement, None, items, &t)
+    popup_panel(
+        format!("{prefix}-list"),
+        placement,
+        Some(&dialog.list_scroll),
+        items,
+        &t,
+    )
 }
 
 /// One row of a branch list; `(highlighted, current)` say how it looks.

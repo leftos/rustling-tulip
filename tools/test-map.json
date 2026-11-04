@@ -497,6 +497,12 @@
     },
     {
       "paths": [
+        "apps/native/src/fuzzy.rs"
+      ],
+      "filter": "(binary_id(rustling-tulip-native) & test(/^(fuzzy|spawn_form)::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_spawn_combobox|ui_spawn_dialog|ui_spawn_hosts)::/))"
+    },
+    {
+      "paths": [
         "apps/native/src/grid_view.rs"
       ],
       "filter": "(binary_id(rustling-tulip-native) & test(/^grid_view::/)) | (binary_id(rustling-tulip-native::ui) & test(/^(ui_chat|ui_file_fetch|ui_links|ui_pane_drag|ui_pane_spawn|ui_panes|ui_remote|ui_session_actions|ui_sidebar_drag|ui_tabs|ui_terminal|ui_viewer_tabs)::/))"
