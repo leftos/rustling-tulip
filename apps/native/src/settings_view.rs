@@ -17,8 +17,9 @@ use gpui::{
 };
 use protocol::{
     AgentCommandEntry, AgentDescriptor, AgentId, ClientMessage, DaemonMessage,
-    FEATURE_AGENT_COMMANDS, FieldKind, KeepAwakeMode, KeyState, OptionValue, RemoteState, Secret,
-    SummarizerKeySource, SummarizerSettings, SummarySource, error_codes,
+    FEATURE_AGENT_COMMANDS, FEATURE_DETAILED_LOGGING, FieldKind, KeepAwakeMode, KeyState,
+    OptionValue, RemoteState, Secret, SummarizerKeySource, SummarizerSettings, SummarySource,
+    error_codes,
 };
 
 use crate::agent_options::{AgentOptions, FieldEditor, FieldView, descriptor_for};
@@ -32,6 +33,8 @@ use crate::combobox::list_placement;
 use crate::driver_id::DriverId as _;
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
+use crate::open::OpenJob;
+use crate::open_view::Then;
 use crate::remote_access::{
     PortError, RemoteStatusView, address, apply_port_message, autostart_failure_line,
     autostart_read_failure_line, cert_line, controls_enabled, parse_port, state_line,
@@ -99,6 +102,9 @@ const DEFAULT_PORT_TEXT: &str = "8787";
 const PORT_FIELD_WIDTH: f32 = 96.0;
 /// The Maximum chat width field's hint, placeholder and validation error.
 const CHAT_WIDTH_HINT: &str = "0 for no limit.";
+/// The Detailed logging switch's hint.
+const DETAILED_LOGGING_HINT: &str =
+    "Records why each session changes status. Fills the 5 MiB log files faster.";
 const CHAT_WIDTH_PLACEHOLDER: &str = "960";
 const CHAT_WIDTH_ERROR: &str = "Enter a whole number of pixels, 0 or more.";
 /// Why an agent page's launch-command rows are disabled on a daemon that
@@ -387,6 +393,11 @@ pub(crate) enum SettingsControl {
     ChatWidth,
     CheckUpdates,
     CheckNow,
+    /// The Diagnostics section's Detailed logging switch; This PC only.
+    DetailedLogging,
+    /// The Diagnostics section's Open logs folder button; This PC only, and
+    /// an immediate action, never pending.
+    OpenLogsFolder,
     CountMode(CountMode),
     TitleCount,
     TitleSuffix,
@@ -500,6 +511,8 @@ impl SettingsControl {
             Self::ChatWidth => "settings-chat-width-input",
             Self::CheckUpdates => "settings-general-check-updates",
             Self::CheckNow => "settings-general-check-now",
+            Self::DetailedLogging => "settings-detailed-logging",
+            Self::OpenLogsFolder => "settings-open-logs-folder",
             Self::CountMode(CountMode::NeedsYou) => "settings-count-needs-you",
             Self::CountMode(CountMode::Busy) => "settings-count-busy",
             Self::CountMode(CountMode::Idle) => "settings-count-idle",
@@ -1469,7 +1482,10 @@ impl RootView {
     /// is left out.
     fn tab_controls(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
-            SettingsTab::General => general_controls(self.settings_mirrors().keep_awake.is_some()),
+            SettingsTab::General => general_controls(
+                self.settings_mirrors().keep_awake.is_some(),
+                self.settings_host == HostKey::Local,
+            ),
             SettingsTab::AppTitle => COUNT_MODE_CHOICES
                 .map(SettingsControl::CountMode)
                 .into_iter()
@@ -1512,7 +1528,7 @@ impl RootView {
     /// The shown tab's own stops in the order Tab walks them.
     fn tab_stop_order(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
-            SettingsTab::General => general_controls(true),
+            SettingsTab::General => general_controls(true, true),
             SettingsTab::Dashboard => self.dashboard_controls(true),
             SettingsTab::AppTitle | SettingsTab::Notifications | SettingsTab::SpawnDefaults => {
                 self.tab_controls(cx)
@@ -2660,6 +2676,7 @@ impl RootView {
         match control {
             SettingsControl::KeepAwake(mode) => self.choose_keep_awake_mode(mode),
             SettingsControl::CheckNow => self.check_for_updates_now(cx),
+            SettingsControl::OpenLogsFolder => self.open_logs_folder(window, cx),
             SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
             SettingsControl::NeedsYouSoundField => {
                 self.toggle_sound_list(NotifyKind::NeedsYou, cx);
@@ -2695,6 +2712,7 @@ impl RootView {
             | SettingsControl::CopyOnSelect
             | SettingsControl::ChatMode(_)
             | SettingsControl::CheckUpdates
+            | SettingsControl::DetailedLogging
             | SettingsControl::CountMode(_)
             | SettingsControl::TitleCount
             | SettingsControl::TitleSuffix
@@ -2729,6 +2747,36 @@ impl RootView {
         cx.notify();
     }
 
+    /// Opens the client's logs folder in the OS file manager; nothing when
+    /// the config folder could not be resolved.
+    fn open_logs_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.paths {
+            Ok(paths) => {
+                let job = OpenJob::Folder(paths.logs_dir.clone());
+                self.dispatch_open(&HostKey::Local, job, Then::Nothing, window, cx);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "settings: the logs folder is unknown; opening nothing"
+                );
+            }
+        }
+    }
+
+    /// Whether the Detailed logging switch draws ticked: the saved value with
+    /// any pending press over it.
+    #[must_use]
+    pub fn detailed_logging_shown(&self) -> bool {
+        self.shown_local().general.detailed_logging
+    }
+
+    /// The hint under the Detailed logging switch.
+    #[must_use]
+    pub fn detailed_logging_hint(&self) -> &'static str {
+        DETAILED_LOGGING_HINT
+    }
+
     /// The This PC setting a press on `control` holds for Apply: a choice's
     /// value, or a toggle's opposite as shown; `None` for any other control.
     fn local_pending_of(&self, control: SettingsControl) -> Option<LocalPending> {
@@ -2742,6 +2790,9 @@ impl RootView {
             SettingsControl::CopyOnSelect => LocalPending::CopyOnSelect(!general.copy_on_select),
             SettingsControl::ChatMode(mode) => LocalPending::ChatMode(mode),
             SettingsControl::CheckUpdates => LocalPending::CheckUpdates(!general.check_updates),
+            SettingsControl::DetailedLogging => {
+                LocalPending::DetailedLogging(!general.detailed_logging)
+            }
             SettingsControl::CountMode(mode) => LocalPending::CountMode(mode),
             SettingsControl::TitleCount => LocalPending::TitleCount(!title.show_count),
             SettingsControl::TitleSuffix => LocalPending::TitleSuffix(!title.suffix),
@@ -4101,6 +4152,18 @@ impl RootView {
                 self.sidebar.set_check_updates(on);
                 true
             }
+            LocalPending::DetailedLogging(on) => {
+                self.sidebar.set_detailed_logging(on);
+                let outcome = crate::logging::set_detailed(on);
+                crate::logging::log_outcome(outcome, on);
+                if self.conn().supports(FEATURE_DETAILED_LOGGING) {
+                    self.send_setting(
+                        &HostKey::Local,
+                        ClientMessage::SetDetailedLogging { enabled: on },
+                    );
+                }
+                true
+            }
             LocalPending::ChatMode(mode) => self.sidebar.set_chat_mode(mode),
             LocalPending::SpawnTrusted(on) => {
                 self.sidebar.set_spawn_trusted(on);
@@ -5189,13 +5252,51 @@ impl RootView {
              (when there's a selection) or Ctrl+Shift+C.",
             &t,
         ));
-        vec![
+        let mut rows = vec![
             power.into_any_element(),
             sidebar,
             terminal.into_any_element(),
             chat,
             self.updates_section(focused, cx).into_any_element(),
-        ]
+        ];
+        if self.settings_host == HostKey::Local {
+            rows.push(self.diagnostics_section(focused, cx).into_any_element());
+        }
+        rows
+    }
+
+    /// The Diagnostics section: the Detailed logging switch, why it fills the
+    /// logs faster, and the button that opens the logs folder. This PC only.
+    fn diagnostics_section(&self, focused: Option<SettingsControl>, cx: &mut Context<Self>) -> Div {
+        let t = theme(cx);
+        let detailed = toggle(
+            SettingsControl::DetailedLogging,
+            ToggleState {
+                checked: self.shown_local().general.detailed_logging,
+                enabled: true,
+            },
+            "Detailed logging",
+            focused,
+            cx,
+        );
+        let open = settings_button(
+            SettingsControl::OpenLogsFolder,
+            "Open logs folder",
+            true,
+            focused,
+            cx,
+        );
+        section(
+            crate::fonts::ui_text_size(cx),
+            crate::fonts::ui_weight_shift(cx),
+            "Diagnostics",
+        )
+        .child(detailed)
+        .child(
+            hint(crate::fonts::ui_text_size(cx), DETAILED_LOGGING_HINT, &t)
+                .driver_id(|| "settings-detailed-logging-hint".to_owned()),
+        )
+        .child(div().flex().gap(px(8.0)).child(open))
     }
 
     /// The Chat section: how chat panes draw tool calls, the widest their
@@ -6461,8 +6562,9 @@ fn field_part(id: &str) -> String {
 }
 
 /// The General tab's controls in drawing order; the keep-awake choices
-/// only with `keep_awake`, once the daemon reported its state.
-fn general_controls(keep_awake: bool) -> Vec<SettingsControl> {
+/// only with `keep_awake`, once the daemon reported its state, and the
+/// Diagnostics rows only with `logging`, while This PC is chosen.
+fn general_controls(keep_awake: bool, logging: bool) -> Vec<SettingsControl> {
     let keep_awake = keep_awake.then_some(KEEP_AWAKE_CHOICES.map(SettingsControl::KeepAwake));
     keep_awake
         .into_iter()
@@ -6478,6 +6580,14 @@ fn general_controls(keep_awake: bool) -> Vec<SettingsControl> {
             SettingsControl::CheckUpdates,
             SettingsControl::CheckNow,
         ])
+        .chain(
+            [
+                SettingsControl::DetailedLogging,
+                SettingsControl::OpenLogsFolder,
+            ]
+            .into_iter()
+            .filter(|_| logging),
+        )
         .collect()
 }
 
@@ -6568,6 +6678,7 @@ pub(crate) enum LocalPending {
     RepoSort(RepoSort),
     CopyOnSelect(bool),
     CheckUpdates(bool),
+    DetailedLogging(bool),
     ChatMode(ChatMode),
     CountMode(CountMode),
     TitleCount(bool),
@@ -6625,6 +6736,7 @@ enum EchoKind {
     KeepAwake,
     Remote,
     Summarizer,
+    DetailedLogging,
 }
 
 /// A send of Apply to `host`, owing its echo; a refusal of it carries
@@ -6648,6 +6760,7 @@ impl OwedEcho {
             }
             ClientMessage::SetWorktreesRoot { .. } => (EchoKind::WorktreesRoot, None),
             ClientMessage::SetKeepAwakeMode { .. } => (EchoKind::KeepAwake, None),
+            ClientMessage::SetDetailedLogging { .. } => (EchoKind::DetailedLogging, None),
             ClientMessage::ConfigureRemote { .. } => (EchoKind::Remote, None),
             ClientMessage::SetSummarizerSettings { request_id, .. }
             | ClientMessage::SetSummarizerKey { request_id, .. } => {
@@ -6681,6 +6794,7 @@ const fn echo_kind(msg: &DaemonMessage) -> Option<(EchoKind, EchoState)> {
         DaemonMessage::AgentCommands { .. } => EchoKind::AgentCommands,
         DaemonMessage::WorktreesRootChanged { .. } => EchoKind::WorktreesRoot,
         DaemonMessage::KeepAwakeStatus { .. } => EchoKind::KeepAwake,
+        DaemonMessage::DetailedLogging { .. } => EchoKind::DetailedLogging,
         DaemonMessage::RemoteStatus { state, .. } => {
             return Some((EchoKind::Remote, remote_echo(state)));
         }
@@ -6841,6 +6955,7 @@ impl ShownLocal {
             LocalPending::RepoSort(sort) => self.general.repo_sort = sort,
             LocalPending::CopyOnSelect(on) => self.general.copy_on_select = on,
             LocalPending::CheckUpdates(on) => self.general.check_updates = on,
+            LocalPending::DetailedLogging(on) => self.general.detailed_logging = on,
             LocalPending::ChatMode(mode) => self.chat_mode = mode,
             LocalPending::CountMode(mode) => self.title.count = mode,
             LocalPending::TitleCount(on) => self.title.show_count = on,
@@ -6868,6 +6983,9 @@ impl ShownLocal {
             LocalPending::RepoSort(_) => LocalPending::RepoSort(general.repo_sort),
             LocalPending::CopyOnSelect(_) => LocalPending::CopyOnSelect(general.copy_on_select),
             LocalPending::CheckUpdates(_) => LocalPending::CheckUpdates(general.check_updates),
+            LocalPending::DetailedLogging(_) => {
+                LocalPending::DetailedLogging(general.detailed_logging)
+            }
             LocalPending::ChatMode(_) => LocalPending::ChatMode(self.chat_mode),
             LocalPending::CountMode(_) => LocalPending::CountMode(title.count),
             LocalPending::TitleCount(_) => LocalPending::TitleCount(title.show_count),

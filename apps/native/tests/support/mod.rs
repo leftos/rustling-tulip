@@ -25,10 +25,10 @@ use protocol::{
 };
 use rustling_tulip_native::{
     Activity, BadgeOverlay, Clip, ClipSource, Clock, Connection, ContainerKind, FileFilter,
-    FilePicker, FolderPicker, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier, NotifyKind,
-    NotifyState, OpenFailure, OpenLocalFuture, Opener, PairingAction, PairingActionSink,
-    PairingToast, PhysicalRect, QuitFn, RootDeps, RootView, SavePicker, ScPanel, Sounder,
-    TaskbarBadge, ToastPlacer, Transport, WorkArea, bind_keys,
+    FilePicker, FolderPicker, HandshakeInfo, LogPaths, NetCommand, NetDeps, NetEvent, Notifier,
+    NotifyKind, NotifyState, OpenFailure, OpenLocalFuture, Opener, PairingAction,
+    PairingActionSink, PairingToast, PhysicalRect, QuitFn, RootDeps, RootView, SavePicker, ScPanel,
+    Sounder, TaskbarBadge, ToastPlacer, Transport, WorkArea, bind_keys, log_paths,
     remote_access::Autostart,
     spawn_net,
     target::{HostKey, Target},
@@ -56,7 +56,10 @@ pub fn plain_open() -> Box<dyn Fn(u16, String) -> OpenLocalFuture + Send> {
 /// The features the fake daemon lists in its `Welcome`, as a current daemon
 /// does.
 pub fn daemon_features() -> Vec<String> {
-    vec![protocol::FEATURE_AGENT_COMMANDS.to_owned()]
+    vec![
+        protocol::FEATURE_AGENT_COMMANDS.to_owned(),
+        protocol::FEATURE_DETAILED_LOGGING.to_owned(),
+    ]
 }
 
 /// The fake daemon's `Welcome` on `protocol_version`, listing
@@ -2138,7 +2141,13 @@ impl<'a> Harness<'a> {
         wanted: Option<&str>,
         updater: Arc<UpdaterRecorder>,
     ) -> Self {
-        let mut harness = Self::boot(cx, dir, wanted, updater);
+        let mut harness = Self::boot(
+            cx,
+            dir,
+            wanted,
+            updater,
+            Err("specs have no config dir".to_owned()),
+        );
         harness.pin_contrast();
         harness
     }
@@ -2146,7 +2155,13 @@ impl<'a> Harness<'a> {
     /// Opens the window as [`Self::with`] does, but drawing the theme the
     /// boot resolved from `native-ui.json`, not the pinned Contrast.
     pub fn with_saved_theme(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -> Self {
-        let mut harness = Self::boot(cx, dir, None, Arc::new(UpdaterRecorder::default()));
+        let mut harness = Self::boot(
+            cx,
+            dir,
+            None,
+            Arc::new(UpdaterRecorder::default()),
+            Err("specs have no config dir".to_owned()),
+        );
         harness.load(fixture);
         harness
     }
@@ -2163,6 +2178,7 @@ impl<'a> Harness<'a> {
         dir: &TestDir,
         wanted: Option<&str>,
         updater: Arc<UpdaterRecorder>,
+        paths: Result<LogPaths, String>,
     ) -> Self {
         cx.update(bind_keys);
         let (tx, commands) = unbounded();
@@ -2182,7 +2198,7 @@ impl<'a> Harness<'a> {
         let deps = RootDeps {
             open_host: fake_transport_sharing((tx, rx), &opened, &extra_hosts),
             ui_dir: Some(dir.path().to_path_buf()),
-            paths: Err("specs have no config dir".to_owned()),
+            paths,
             wanted: wanted.map(str::to_owned),
             now: clock.clock(),
             quit: quit_recorder(&quits),
@@ -2537,6 +2553,22 @@ impl<'a> Harness<'a> {
     /// messages would.
     pub fn with(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -> Self {
         let mut harness = Self::open(cx, dir);
+        harness.load(fixture);
+        harness
+    }
+
+    /// Opens the window and delivers `fixture` as a daemon's first messages
+    /// would, with the config folder's files resolved from `dir` as a real
+    /// run's are, so the footer's and Settings' folder actions have a path.
+    pub fn with_config_dir(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -> Self {
+        let mut harness = Self::boot(
+            cx,
+            dir,
+            None,
+            Arc::new(UpdaterRecorder::default()),
+            Ok(log_paths(dir.path())),
+        );
+        harness.pin_contrast();
         harness.load(fixture);
         harness
     }

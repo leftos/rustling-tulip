@@ -184,6 +184,8 @@ pub struct LogPaths {
     pub daemon_log: PathBuf,
     /// `<config dir>/logs/native.log`.
     pub native_log: PathBuf,
+    /// `<config dir>/logs`, the folder Open logs folder opens.
+    pub logs_dir: PathBuf,
     /// The config dir itself.
     pub config_dir: PathBuf,
     /// `<config dir>/daemon.json`, from `daemon_client::handshake_file_in`.
@@ -197,6 +199,7 @@ pub fn log_paths(config_dir: &Path) -> LogPaths {
     LogPaths {
         daemon_log: logs.join("daemon.log"),
         native_log: logs.join(LOG_FILE),
+        logs_dir: logs,
         config_dir: config_dir.to_path_buf(),
         handshake: daemon_client::handshake_file_in(config_dir),
     }
@@ -603,6 +606,12 @@ mod tests {
     }
 
     #[test]
+    fn log_paths_names_the_logs_folder() {
+        let cfg = Path::new("C:/cfg/rustling-tulip");
+        assert_eq!(log_paths(cfg).logs_dir, cfg.join("logs"));
+    }
+
+    #[test]
     fn log_paths_under_config_dir() {
         let cfg = Path::new("C:/cfg/rustling-tulip");
         assert_eq!(
@@ -610,6 +619,7 @@ mod tests {
             LogPaths {
                 daemon_log: cfg.join("logs").join("daemon.log"),
                 native_log: cfg.join("logs").join("native.log"),
+                logs_dir: cfg.join("logs"),
                 config_dir: cfg.to_path_buf(),
                 handshake: cfg.join("daemon.json"),
             }

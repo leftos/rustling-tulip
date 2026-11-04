@@ -1142,6 +1142,9 @@ pub struct GeneralSettings {
     /// Whether the client checks for updates at launch and every hour;
     /// Settings' Check now checks either way.
     pub check_updates: bool,
+    /// Whether the client logs the `status_trace` lines that say why each
+    /// session changes status. A `RUST_LOG` set at launch wins over it.
+    pub detailed_logging: bool,
 }
 
 impl Default for GeneralSettings {
@@ -1152,6 +1155,7 @@ impl Default for GeneralSettings {
             sessions_under_repos: SessionsUnderRepos::Every,
             repo_sort: RepoSort::NeedsYou,
             check_updates: true,
+            detailed_logging: false,
         }
     }
 }
@@ -2196,6 +2200,11 @@ impl SidebarModel {
     /// Whether the client checks for updates on its own.
     pub fn set_check_updates(&mut self, on: bool) {
         self.ui.general.check_updates = on;
+    }
+
+    /// Whether the client logs why each session changes status.
+    pub fn set_detailed_logging(&mut self, on: bool) {
+        self.ui.general.detailed_logging = on;
     }
 
     /// How much room each session leaf takes.
@@ -5441,6 +5450,7 @@ pub(crate) mod tests {
                 sessions_under_repos: SessionsUnderRepos::Busy,
                 repo_sort: RepoSort::Active,
                 check_updates: false,
+                detailed_logging: false,
             },
             title: TitleSettings {
                 show_count: false,
@@ -6516,6 +6526,25 @@ pub(crate) mod tests {
             !loaded.general.copy_on_select,
             "the rest of the group loads"
         );
+    }
+
+    #[test]
+    fn an_old_native_ui_json_loads_with_detailed_logging_off() {
+        let dir = TestDir::new("detailed-logging");
+        for older in [
+            r#"{ "sidebar_collapsed": true }"#,
+            r#"{ "general": { "copy_on_select": false } }"#,
+        ] {
+            std::fs::write(dir.0.join(UI_FILE), older).expect("write");
+            assert!(!load_ui_state(&dir.0).general.detailed_logging, "{older}");
+        }
+
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "general": { "detailed_logging": true } }"#,
+        )
+        .expect("write");
+        assert!(load_ui_state(&dir.0).general.detailed_logging);
     }
 
     #[test]

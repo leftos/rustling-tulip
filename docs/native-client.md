@@ -367,11 +367,13 @@ Inside a group the line follows the displayed order and the drop moves the dragg
 
 ## Settings
 
-The Settings modal's tab list reads General, Notifications, Spawn defaults, Worktrees, Remote access, Appearance and App title, then a non-selectable `Agents` group row and one tab per agent the daemon lists, in the daemon's order, each labelled with the descriptor's label (selector `settings-tab-{tag}`). The group row is a label only: no page, click, hover or keyboard stop. With no agents listed (disconnected) there is no `Agents` row and no agent tab.
+The Settings modal's tab list reads General, Notifications, Dashboard, Spawn defaults, Worktrees, Remote access, Appearance and App title, then a non-selectable `Agents` group row and one tab per agent the daemon lists, in the daemon's order, each labelled with the descriptor's label (selector `settings-tab-{tag}`). The group row is a label only: no page, click, hover or keyboard stop. With no agents listed (disconnected) there is no `Agents` row and no agent tab.
 
 Remote access (Tailscale) is absent from the list while the client's target is a remote host, and Settings falls back to General.
 
-Every edit outside the Appearance tab is a pending edit until OK or Apply: text rows, toggles, choices and resets (the worktrees "Reset to default" empties the draft). Enter and leaving a field apply nothing, and there are no per-row Save or Apply buttons. Appearance keeps its live preview, outside the pending model. Action buttons with their own side effects stay immediate: Check now, the notification settings link, sound Play, worktrees Browse (it fills the draft) and Manage, Dashboard key Clear and Test, and Remote access's start-at-login.
+Every edit outside the Appearance tab is a pending edit until OK or Apply: text rows, toggles, choices and resets (the worktrees "Reset to default" empties the draft). Enter and leaving a field apply nothing, and there are no per-row Save or Apply buttons.
+
+Appearance keeps its live preview, outside the pending model. Action buttons with their own side effects stay immediate: Check now, Open logs folder, the notification settings link, sound Play, worktrees Browse (it fills the draft) and Manage, Dashboard key Clear and Test, and Remote access's start-at-login.
 
 The footer is OK, Apply and Cancel, right-aligned (`settings-ok`, `settings-apply`, `settings-cancel`). OK and Apply are dimmed and out of the Tab ring while nothing is pending or a pending row fails local validation (an invalid port or cap, an Environment-variable key source with no variable). The Tab ring ends OK, Apply, Cancel, then the tab list. Cancel, the title-bar X and Esc discard every pending edit and close.
 
@@ -762,6 +764,12 @@ The press starts the installer detached and quits through the Keep-sessions-runn
 Settings → General has an Updates section: a `Check for updates` toggle (`settings-general-check-updates`, saved as `general.check_updates`, default on; off stops the automatic checks and downloads).
 
 The section also has a `Version {version}` line (`settings-update-version`), a last-check line (`settings-update-last-check`: `Not checked yet`, `Up to date`, `Update {version} ready` or `Last check failed: {error}`) and a `Check now` button, which checks whether the toggle is on or off and is disabled while a check runs. While an update is ready the section also has a `What's new` button (`settings-whats-new`) beside `Restart to update`.
+
+General ends with a Diagnostics section, drawn only while This PC is chosen (the two stops are absent against a remote host). Its `Detailed logging` toggle pends like every other control and saves as `general.detailed_logging` (default off); `Open logs folder` is immediate and opens the config dir's `logs` folder, logging a warning and opening nothing when no config folder resolves.
+
+On commit the client sends `SetDetailedLogging` to This PC's daemon only when its `Welcome` lists `detailed_logging`, and OK waits for the `DetailedLogging` echo; an older daemon is sent nothing and OK closes at once.
+
+The client's own filter is `info`, or `info,status_trace=debug` with the switch on, through the reload handle in `logging.rs`; the saved switch is applied at startup, and a `RUST_LOG` set at launch wins (the switch is still saved and sent, the filter is not reloaded).
 
 The first launch after an update reads the result once: the toast `Updated to {version}` (also after a manual install over an older saved version; sticky, so only its × closes it, with a `What's new` action that opens the What's new window on the changelog from the replaced version through the installed one, in the main window when raised from a pop-out), or `Update to {version} didn't install` with the recorded message as its detail, after which the ready update is offered again. The `--updated-from <version>` launch argument that marks it is stripped before the client reads its other arguments.
 

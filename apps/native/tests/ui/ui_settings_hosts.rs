@@ -64,6 +64,31 @@ fn two_hosts<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
     h
 }
 
+#[gpui::test]
+fn detailed_logging_rows_are_hidden_while_a_remote_host_is_chosen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_hosts(cx, &dir);
+    h.keys("ctrl-,");
+    let ring = tab_ring(&mut h);
+    assert!(
+        ring.contains(&"settings-detailed-logging") && ring.contains(&"settings-open-logs-folder"),
+        "This PC's General ring walks both Diagnostics rows: {ring:?}"
+    );
+
+    h.click_on(&remote_row());
+    h.click_on("settings-tab-general");
+    assert_eq!(shown_host(&mut h), remote_key(), "box's Settings show");
+    // Painted bounds keep their last paint, so This PC's rows would still
+    // report drawn: the ring is what proves the rows are gone.
+    let ring = tab_ring(&mut h);
+    assert!(
+        !ring.contains(&"settings-detailed-logging")
+            && !ring.contains(&"settings-open-logs-folder"),
+        "box's General ring holds neither row: {ring:?}"
+    );
+    assert_tab_reaches_only_drawn_controls(&mut h);
+}
+
 fn shown_host(h: &mut Harness<'_>) -> HostKey {
     h.root(|root, _| root.settings_host().clone())
 }

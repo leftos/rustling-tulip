@@ -20,7 +20,7 @@ use rustling_tulip_native::{
     BadgeOverlay, Connection, LaunchCommandRow, NATIVE_PROTOCOL_VERSIONS, NetEvent, OpenOutcome,
     PopoutKey, SidebarView, TabBadge, chat::ChatMode, fonts,
 };
-use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
+use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, split, tab};
 
 #[cfg(windows)]
 #[gpui::test]
@@ -1019,17 +1019,23 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     );
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("settings-general-check-now"));
-    for stop in ["settings-ok", "settings-apply", "settings-cancel"] {
+    for stop in [
+        "settings-detailed-logging",
+        "settings-open-logs-folder",
+        "settings-ok",
+        "settings-apply",
+        "settings-cancel",
+    ] {
         h.keys("tab");
         assert_eq!(
             settings_focus(&mut h),
             Some(stop),
-            "the footer's OK, Apply and Cancel end the ring while an edit pends"
+            "the ring walks on past Updates"
         );
     }
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
-    h.keys(&["shift-tab"; 9].join(" "));
+    h.keys(&["shift-tab"; 11].join(" "));
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-terminal-copy-on-selection"),
@@ -1048,23 +1054,6 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     assert_eq!(settings_focus(&mut h), Some("list"));
     assert_eq!(shown_tab(&mut h), "General");
 
-    h.keys("down down down down down down down");
-    assert_eq!(shown_tab(&mut h), "App title");
-    h.keys("tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-count-needs-you"));
-    h.keys("tab tab tab");
-    assert_eq!(settings_focus(&mut h), Some("settings-title-count"));
-    h.keys("space");
-    h.keys("tab");
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("settings-title-product-suffix")
-    );
-    for stop in ["settings-ok", "settings-apply", "settings-cancel", "list"] {
-        h.keys("tab");
-        assert_eq!(settings_focus(&mut h), Some(stop));
-    }
-
     h.sent();
     h.click_on("settings-apply");
     assert!(
@@ -1081,6 +1070,30 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         true,
         "Space then Enter pressed copy-on-select off and on again"
     );
+}
+
+#[gpui::test]
+fn tab_walks_app_title_controls_and_space_toggles_the_count(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.keys("down down down down down down down");
+    assert_eq!(shown_tab(&mut h), "App title");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-count-needs-you"));
+    h.keys("tab tab tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-title-count"));
+    h.keys("space");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-title-product-suffix")
+    );
+    for stop in ["settings-ok", "settings-apply", "settings-cancel", "list"] {
+        h.keys("tab");
+        assert_eq!(settings_focus(&mut h), Some(stop));
+    }
+    h.click_on("settings-apply");
     assert_eq!(saved_ui(&dir)["title"]["show_count"], false);
 }
 
@@ -4720,6 +4733,157 @@ fn applies(h: &mut Harness<'_>) -> bool {
 fn press_copy(h: &mut Harness<'_>) {
     h.scroll_into_view("settings-content", COPY);
     h.click_on(COPY);
+}
+
+const DETAILED: &str = "settings-detailed-logging";
+const OPEN_LOGS: &str = "settings-open-logs-folder";
+
+/// Whether the Detailed logging switch draws ticked.
+fn detailed_shown(h: &mut Harness<'_>) -> bool {
+    h.root(|root, _| root.detailed_logging_shown())
+}
+
+/// Detailed logging as `native-ui.json` holds it; `None` before any save.
+fn detailed_saved(dir: &TestDir) -> Option<bool> {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).ok()?;
+    let saved: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    saved["general"]["detailed_logging"].as_bool()
+}
+
+/// The `enabled` of every `SetDetailedLogging` among `sent`.
+fn detailed_sends(sent: &[ClientMessage]) -> Vec<bool> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetDetailedLogging { enabled } => Some(*enabled),
+            _ => None,
+        })
+        .collect()
+}
+
+fn press_detailed(h: &mut Harness<'_>) {
+    h.scroll_into_view("settings-content", DETAILED);
+    h.click_on(DETAILED);
+}
+
+#[gpui::test]
+fn detailed_logging_row_pends_until_apply(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    let before = detailed_saved(&dir);
+    press_detailed(&mut h);
+    assert_eq!(detailed_saved(&dir), before, "no native-ui.json write");
+    assert!(
+        detailed_sends(&h.sent()).is_empty(),
+        "nothing is sent until Apply"
+    );
+    assert!(detailed_shown(&mut h), "the pending switch draws ticked");
+    assert!(applies(&mut h), "Apply and OK open");
+}
+
+#[gpui::test]
+fn apply_saves_detailed_logging_and_sends_set_detailed_logging_to_this_pc(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    press_detailed(&mut h);
+    h.click_on("settings-apply");
+    assert_eq!(saved_ui(&dir)["general"]["detailed_logging"], true);
+    assert_eq!(
+        detailed_sends(&h.sent()),
+        [true],
+        "Apply sends the switch to This PC's daemon"
+    );
+}
+
+#[gpui::test]
+fn cancel_discards_a_pending_detailed_logging_switch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    let before = detailed_saved(&dir);
+    press_detailed(&mut h);
+    h.click_on("settings-cancel");
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Cancel closed Settings"
+    );
+    assert_eq!(detailed_saved(&dir), before, "nothing was saved");
+    assert!(detailed_sends(&h.sent()).is_empty(), "nothing was sent");
+    h.keys("ctrl-,");
+    assert!(!detailed_shown(&mut h), "the switch draws the saved value");
+}
+
+#[gpui::test]
+fn ok_waits_for_the_detailed_logging_echo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    press_detailed(&mut h);
+    h.click_on("settings-ok");
+    assert!(
+        h.root(|root, _| root.settings_ok_waiting()),
+        "OK waits for the daemon's echo"
+    );
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Settings stays open"
+    );
+    h.send(DaemonMessage::DetailedLogging { enabled: true });
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "the echo closed Settings"
+    );
+}
+
+#[gpui::test]
+fn detailed_logging_is_not_sent_to_a_daemon_without_the_feature(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    h.welcome_without_features();
+    press_detailed(&mut h);
+    h.click_on("settings-ok");
+    assert_eq!(saved_ui(&dir)["general"]["detailed_logging"], true);
+    assert!(
+        detailed_sends(&h.sent()).is_empty(),
+        "a daemon without the feature hears nothing"
+    );
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "OK closes without an echo to wait for"
+    );
+}
+
+#[gpui::test]
+fn the_open_logs_folder_row_opens_the_logs_folder_at_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with_config_dir(cx, &dir, &two_panes());
+    h.keys("ctrl-,");
+    h.sent();
+    let folder = dir.path().join("logs");
+    h.scroll_into_view("settings-content", OPEN_LOGS);
+    h.click_on(OPEN_LOGS);
+    assert_eq!(
+        h.opened(),
+        [Opened::DefaultApp(folder)],
+        "the press opens the logs folder at once"
+    );
+    assert!(!applies(&mut h), "an immediate action holds nothing");
+    assert!(
+        h.root(|root, _| root.settings_open()),
+        "Settings stays open"
+    );
+}
+
+#[gpui::test]
+fn the_detailed_logging_hint_names_the_5_mib_log_files(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = general_with_keep_awake(cx, &dir);
+    h.scroll_into_view("settings-content", "settings-detailed-logging-hint");
+    assert!(
+        h.bounds("settings-detailed-logging-hint").origin.x >= px(0.0),
+        "the switch's hint is drawn"
+    );
+    assert_eq!(
+        h.root(|root, _| root.detailed_logging_hint()),
+        "Records why each session changes status. Fills the 5 MiB log files faster."
+    );
 }
 
 #[gpui::test]

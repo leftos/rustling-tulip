@@ -73,6 +73,7 @@ pub mod launch_last;
 mod layout_chooser;
 mod layout_chooser_view;
 mod links;
+pub mod logging;
 mod md_blocks;
 mod mouse;
 mod move_panes;
@@ -213,7 +214,7 @@ use crate::connection_picker_view::ConnectionPickerDialog;
 use crate::copied::Copied;
 use crate::drag::DragPayload;
 use crate::fetch_dialog_view::FetchDialog;
-use crate::footer::{CountSpan, StopConfirm, flyout_rows, log_paths, status_counts};
+use crate::footer::{CountSpan, StopConfirm, flyout_rows, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::host_path_prompt_view::HostPathDialog;
 use crate::hosts::{HostConn, Hosts, PaneForgets};
@@ -286,7 +287,7 @@ pub use crate::diff_tab::{
     LOADING_TEXT as DIFF_LOADING_TEXT, OPEN_FAILED_TITLE as DIFF_OPEN_FAILED_TITLE, WHITESPACE_TIP,
 };
 pub use crate::drag::{Side, SidebarRow};
-pub use crate::footer::LogPaths;
+pub use crate::footer::{LogPaths, log_paths};
 pub use crate::grid_view::{HeaderChip, HeaderChipKind, POPPED_OUT_NOTE, PaneHeaderParts};
 pub use crate::history::{
     CommitDetailView, CommitRow, DetailFile, DetailPane, ForgeButton, HistoryBlock, HistoryBody,
@@ -1435,6 +1436,10 @@ impl RootView {
         let mut ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
+        if ui.general.detailed_logging {
+            let outcome = crate::logging::set_detailed(true);
+            crate::logging::log_outcome(outcome, true);
+        }
         let (tx, events) = open_host(&target::Target::Local);
         let hosts = Hosts::new(HostConn::new(tx, target::Target::Local));
         Self::forward_net_events(

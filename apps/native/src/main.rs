@@ -25,7 +25,6 @@ use rustling_tulip_native::driver_gate::{self, GateDecision};
 use rustling_tulip_native::{Assets, LOG_FILE, offscreen, toast_activation, update};
 use std::path::Path;
 use std::sync::Mutex;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -60,7 +59,7 @@ fn open_log_file() -> anyhow::Result<CappedLog> {
 /// opened, which a Windows build without debug assertions has no console to
 /// show.
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = rustling_tulip_native::logging::filter_layer();
     let (file_layer, file_error) = match open_log_file() {
         Ok(file) => (
             Some(
