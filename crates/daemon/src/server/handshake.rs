@@ -240,6 +240,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_DAEMON_ID,
     FEATURE_SCREEN_DUMP,
     protocol::FEATURE_FILE_TAIL,
+    protocol::FEATURE_FOLDER_FETCH,
     protocol::FEATURE_DETAILED_LOGGING,
 ];
 

@@ -1,6 +1,8 @@
 //! The folder fetch's walk: which files of a confined folder
 //! ([`crate::file_fetch::confine_dir`]) a `FetchFolder` sends, within its
-//! [`Limits`], and what a `StatPath` path names ([`stat`]).
+//! [`Limits`], and what a `StatPath` path names ([`stat`]); and its pack
+//! ([`pack`]): those files as one zstd-compressed tar, sent as `FileChunk`
+//! frames.
 //!
 //! The walk follows no link. It reads each folder with one `read_dir` and
 //! joins the names it yields to the verbatim (`\\?\`) canonical root, so a
@@ -18,11 +20,14 @@
 //! handle's final path is its opened path canonicalized again, which a swap
 //! between the open and that check can fool.
 
-use crate::file_fetch::{self, CanonicalRoot};
-use protocol::PathKind;
+use crate::file_fetch::{self, CHUNK_SIZE, CanonicalRoot};
+use crate::file_tail::{self, Folders, StepError};
+use base64::Engine as _;
+use protocol::{DaemonMessage, PathKind};
 use std::fs::FileType;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -86,10 +91,6 @@ impl Limits {
 
 /// One file the walk listed.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "nothing reads the scan's file list yet")
-)]
 pub struct ScannedFile {
     /// Its path relative to the fetch root, `/`-separated, with no prefix.
     pub name: String,
@@ -355,6 +356,342 @@ pub fn stat(root: &Path, rel: &str) -> PathStat {
             size: 0,
         },
         Err(_) => PathStat::MISSING,
+    }
+}
+
+/// The pack's stream: a tar written into zstd written into chunks.
+type Packer = tar::Builder<zstd::stream::write::Encoder<'static, ChunkWriter>>;
+
+/// The error a cancelled read or write stops the pack with: never
+/// `ErrorKind::Interrupted`, which `io::copy` and `write_all` retry.
+fn cancelled() -> io::Error {
+    io::Error::other("the folder fetch was cancelled")
+}
+
+/// The error a [`ChunkWriter`] that can send no more answers with.
+fn stopped() -> io::Error {
+    io::Error::other("the folder fetch stopped")
+}
+
+/// Send the files of `scan`, walked from `root`, over `tx` as `FileChunk`
+/// frames (seq 0, 1, … with no gap) carrying one tar of them compressed
+/// with zstd, and return the final message, unsent: `FileFetchDone` once
+/// both the tar and the zstd stream are finished and their last bytes sent,
+/// or a `FileFetchError` naming the file being packed. Once `cancel` fires
+/// or `tx` closes, nothing further is sent and `None` is returned.
+///
+/// Only the scan's list is packed. Each file is opened again and checked
+/// to be a regular file inside `root` ([`file_tail::open_inside`]); one
+/// that is gone, is no longer a file, or does not open inside `root` is
+/// skipped. Its header's size is the smaller of the scanned size and its
+/// size at open, and exactly that many bytes follow: a file that grew is
+/// cut, one that shrank fails the fetch. Every chunk but the last is
+/// exactly [`CHUNK_SIZE`] bytes, and nothing is sent once the pack stops.
+/// Disk work: run it on a blocking thread.
+pub fn pack(
+    id: &str,
+    scan: &Scan,
+    root: &CanonicalRoot,
+    tx: &mpsc::Sender<DaemonMessage>,
+    cancel: &CancellationToken,
+) -> Option<DaemonMessage> {
+    let writer = ChunkWriter::new(id, tx.clone(), cancel.clone());
+    let encoder = match zstd::stream::write::Encoder::new(writer, 1) {
+        Ok(encoder) => encoder,
+        Err(err) => return stopped_with(id, None, &err, tx, cancel),
+    };
+    let mut packer: Packer = tar::Builder::new(encoder);
+    let folders = Folders::of_root(root);
+    for file in &scan.files {
+        if cancel.is_cancelled() {
+            packer.get_mut().get_mut().poison();
+            return None;
+        }
+        if let Err(err) = append(&mut packer, &folders, file, cancel) {
+            // `tar::Builder`'s drop finishes the archive: a poisoned writer
+            // sends none of it.
+            packer.get_mut().get_mut().poison();
+            return stopped_with(id, Some(&file.name), &err, tx, cancel);
+        }
+    }
+    let finished = packer
+        .into_inner()
+        .and_then(zstd::stream::write::Encoder::finish)
+        .and_then(ChunkWriter::finish);
+    match finished {
+        Ok(()) => Some(DaemonMessage::FileFetchDone { id: id.to_owned() }),
+        Err(err) => stopped_with(id, None, &err, tx, cancel),
+    }
+}
+
+/// The final message of a pack that stopped on `err` while packing the file
+/// `name` (`None` for the archive itself): nothing when it was cancelled or
+/// its receiver is gone, else a `FileFetchError`.
+fn stopped_with(
+    id: &str,
+    name: Option<&str>,
+    err: &io::Error,
+    tx: &mpsc::Sender<DaemonMessage>,
+    cancel: &CancellationToken,
+) -> Option<DaemonMessage> {
+    if cancel.is_cancelled() || tx.is_closed() {
+        return None;
+    }
+    let error = match name {
+        Some(name) => format!("packing {name}: {err}"),
+        None => format!("packing the folder: {err}"),
+    };
+    Some(DaemonMessage::FileFetchError {
+        id: id.to_owned(),
+        error,
+    })
+}
+
+/// Append `file` to `packer`, or skip it when it no longer opens as a
+/// regular file inside `folders`. Disk work.
+///
+/// # Errors
+/// Writing the stream failed, or the file's read failed or came up short
+/// after its header was written.
+fn append(
+    packer: &mut Packer,
+    folders: &Folders,
+    file: &ScannedFile,
+    cancel: &CancellationToken,
+) -> io::Result<()> {
+    let opened = match file_tail::open_inside(folders, &file.path) {
+        Ok(opened) => opened,
+        Err(StepError::Missing) => {
+            debug!(file = %file.name, "folder_pack: a listed file is gone; skipped");
+            return Ok(());
+        }
+        Err(StepError::Failed(why)) => {
+            debug!(file = %file.name, %why, "folder_pack: a listed file does not open inside the folder; skipped");
+            return Ok(());
+        }
+    };
+    let meta = match opened.metadata() {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => {
+            debug!(file = %file.name, "folder_pack: a listed file is no longer a file; skipped");
+            return Ok(());
+        }
+        Err(err) => {
+            debug!(file = %file.name, error = %err, "folder_pack: a listed file's metadata does not read; skipped");
+            return Ok(());
+        }
+    };
+    let size = file.size.min(meta.len());
+    #[cfg(test)]
+    hooks::after_open(&file.path);
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_size(size);
+    header.set_mode(0o644);
+    header.set_mtime(mtime(&meta));
+    let data = ExactLen::new(opened, size, &file.name, cancel);
+    packer.append_data(&mut header, &file.name, data)
+}
+
+/// `meta`'s modification time in Unix seconds, 0 when it is unavailable.
+fn mtime(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_secs())
+}
+
+/// A reader yielding exactly `left` bytes of `inner`: it stops there however
+/// much more `inner` holds, and fails when `inner` ends sooner or `cancel`
+/// fires.
+struct ExactLen<'a, R> {
+    inner: R,
+    left: u64,
+    name: &'a str,
+    cancel: &'a CancellationToken,
+}
+
+impl<'a, R: Read> ExactLen<'a, R> {
+    fn new(inner: R, size: u64, name: &'a str, cancel: &'a CancellationToken) -> Self {
+        Self {
+            inner,
+            left: size,
+            name,
+            cancel,
+        }
+    }
+}
+
+impl<R: Read> Read for ExactLen<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        if self.left == 0 || buf.is_empty() {
+            return Ok(0);
+        }
+        let want = usize::try_from(self.left).map_or(buf.len(), |left| left.min(buf.len()));
+        let read = self.inner.read(&mut buf[..want])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("{} shrank while it was being sent", self.name),
+            ));
+        }
+        self.left = self
+            .left
+            .saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
+        Ok(read)
+    }
+}
+
+/// The pack's sink: cuts what it is written into `FileChunk` frames of
+/// exactly [`CHUNK_SIZE`] bytes, sent as each fills, and sends the last,
+/// shorter one only from [`ChunkWriter::finish`]. Once a send fails or it is
+/// poisoned it sends nothing more; it never sends from a drop.
+struct ChunkWriter {
+    id: String,
+    tx: mpsc::Sender<DaemonMessage>,
+    cancel: CancellationToken,
+    buf: Vec<u8>,
+    seq: u64,
+    poisoned: bool,
+}
+
+impl ChunkWriter {
+    fn new(id: &str, tx: mpsc::Sender<DaemonMessage>, cancel: CancellationToken) -> Self {
+        Self {
+            id: id.to_owned(),
+            tx,
+            cancel,
+            buf: Vec::with_capacity(CHUNK_SIZE),
+            seq: 0,
+            poisoned: false,
+        }
+    }
+
+    /// Send nothing more.
+    fn poison(&mut self) {
+        self.poisoned = true;
+    }
+
+    /// Send the buffer as the next chunk, waiting for room unless the fetch
+    /// is cancelled; poisons on failure.
+    fn send_buffer(&mut self) -> io::Result<()> {
+        let chunk = DaemonMessage::FileChunk {
+            id: self.id.clone(),
+            seq: self.seq,
+            data_b64: base64::engine::general_purpose::STANDARD.encode(&self.buf),
+        };
+        if !file_fetch::send_unless_cancelled_blocking(&self.tx, &self.cancel, chunk) {
+            self.poison();
+            return Err(stopped());
+        }
+        self.seq += 1;
+        self.buf.clear();
+        Ok(())
+    }
+
+    /// Send what is left as the last chunk, then send nothing more.
+    ///
+    /// # Errors
+    /// The writer was poisoned, or the send failed.
+    fn finish(mut self) -> io::Result<()> {
+        if self.poisoned {
+            return Err(stopped());
+        }
+        if !self.buf.is_empty() {
+            self.send_buffer()?;
+        }
+        self.poison();
+        Ok(())
+    }
+}
+
+impl Write for ChunkWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.poisoned {
+            return Err(stopped());
+        }
+        if self.cancel.is_cancelled() {
+            self.poison();
+            return Err(cancelled());
+        }
+        let taken = (CHUNK_SIZE - self.buf.len()).min(data.len());
+        self.buf.extend_from_slice(&data[..taken]);
+        if self.buf.len() == CHUNK_SIZE {
+            self.send_buffer()?;
+        }
+        Ok(taken)
+    }
+
+    /// Sends nothing: every chunk but the last stays full.
+    fn flush(&mut self) -> io::Result<()> {
+        if self.poisoned {
+            Err(stopped())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// `len` bytes no compressor can shrink, the same for the same `seed`: an
+/// xorshift stream, for tests that need a stream of many chunks.
+#[cfg(test)]
+pub(crate) fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+/// Acting on a file the pack just opened, from a test: to change it after
+/// its checks and before its header is written.
+#[cfg(test)]
+pub(crate) mod hooks {
+    use crate::sync::lock;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    type Action = Box<dyn Fn(&Path) + Send>;
+
+    static ACTIONS: Mutex<Vec<(u64, OsString, Action)>> = Mutex::new(Vec::new());
+
+    /// Runs an action on every pack's open of a file of one name, until
+    /// dropped.
+    pub(crate) struct AfterOpen(u64);
+
+    impl AfterOpen {
+        /// Run `action` on each opened file named `name`, given its path.
+        pub(crate) fn new(name: &str, action: impl Fn(&Path) + Send + 'static) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let key = NEXT.fetch_add(1, Ordering::Relaxed);
+            lock(&ACTIONS).push((key, name.into(), Box::new(action)));
+            Self(key)
+        }
+    }
+
+    impl Drop for AfterOpen {
+        fn drop(&mut self) {
+            lock(&ACTIONS).retain(|(key, _, _)| *key != self.0);
+        }
+    }
+
+    /// The pack opened `path` and checked it.
+    pub(super) fn after_open(path: &Path) {
+        for (_, name, action) in lock(&ACTIONS).iter() {
+            if path.file_name() == Some(name.as_os_str()) {
+                action(path);
+            }
+        }
     }
 }
 
@@ -790,5 +1127,480 @@ mod tests {
         for rel in ["link", "link/secret.txt", "link/nope"] {
             assert_eq!(stat(&root, rel), PathStat::MISSING, "{rel:?}");
         }
+    }
+
+    /// The bound on every wait of these tests; passing it fails as hung.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// One archive entry: its name, its type and its bytes.
+    type Entry = (String, tar::EntryType, Vec<u8>);
+
+    /// Run [`pack`] of `scan`, walked from `root`, on a thread of its own
+    /// over a queue of `capacity`, draining the queue until the pack drops
+    /// its sender: everything sent, and the final message.
+    fn pack_all(
+        root: &Path,
+        scan: Scan,
+        capacity: usize,
+        cancel: &CancellationToken,
+    ) -> (Vec<DaemonMessage>, Option<DaemonMessage>) {
+        let dir = confine_dir(root, "").expect("the root is a folder");
+        let (tx, mut rx) = mpsc::channel(capacity);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let last = pack("f", &scan, &dir, &tx, &cancel);
+            drop(tx);
+            let _ = done_tx.send(last);
+        });
+        let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut sent = Vec::new();
+            while let Some(msg) = rx.blocking_recv() {
+                sent.push(msg);
+            }
+            let _ = sent_tx.send(sent);
+        });
+        let sent = sent_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the pack never stopped sending");
+        let last = done_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the pack never returned");
+        (sent, last)
+    }
+
+    fn pack_root(root: &Path) -> (Vec<DaemonMessage>, Option<DaemonMessage>) {
+        pack_all(root, scan_all(root), 4, &CancellationToken::new())
+    }
+
+    /// Each chunk's decoded bytes, checking the chunks run seq 0, 1, … with
+    /// no gap.
+    fn chunk_bytes(sent: &[DaemonMessage]) -> Vec<Vec<u8>> {
+        sent.iter()
+            .enumerate()
+            .map(|(n, msg)| match msg {
+                DaemonMessage::FileChunk {
+                    id, seq, data_b64, ..
+                } => {
+                    assert_eq!(id, "f");
+                    assert_eq!(*seq, u64::try_from(n).expect("a small seq"), "a gap");
+                    base64::engine::general_purpose::STANDARD
+                        .decode(data_b64)
+                        .expect("base64 chunk")
+                }
+                other => unreachable!("only chunks are sent, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The archive the chunks carry, decompressed.
+    fn archive_bytes(sent: &[DaemonMessage]) -> Vec<u8> {
+        let compressed = chunk_bytes(sent).concat();
+        let mut decoder =
+            zstd::stream::read::Decoder::new(compressed.as_slice()).expect("open the decoder");
+        let mut tar_bytes = Vec::new();
+        decoder
+            .read_to_end(&mut tar_bytes)
+            .expect("a whole zstd stream");
+        tar_bytes
+    }
+
+    /// The archive's entries as `tar::Archive::entries` reads them (a GNU
+    /// long name folded into its entry's name), sorted by name.
+    fn unpack(sent: &[DaemonMessage]) -> Vec<Entry> {
+        let tar_bytes = archive_bytes(sent);
+        let mut archive = tar::Archive::new(tar_bytes.as_slice());
+        let mut entries: Vec<Entry> = archive
+            .entries()
+            .expect("a tar")
+            .map(|entry| {
+                let mut entry = entry.expect("an entry");
+                let name = entry
+                    .path()
+                    .expect("a name")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let kind = entry.header().entry_type();
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).expect("its bytes");
+                (name, kind, data)
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    fn is_done(last: Option<&DaemonMessage>) -> bool {
+        matches!(last, Some(DaemonMessage::FileFetchDone { id }) if id == "f")
+    }
+
+    fn entry(name: &str, data: &[u8]) -> Entry {
+        (name.to_owned(), tar::EntryType::Regular, data.to_vec())
+    }
+
+    /// Whether any entry holds `needle`.
+    fn holds_bytes(entries: &[Entry], needle: &[u8]) -> bool {
+        entries
+            .iter()
+            .any(|(_, _, data)| data.windows(needle.len()).any(|window| window == needle))
+    }
+
+    #[test]
+    fn folder_pack_streams_a_tar_zst_that_unpacks_to_the_tree() {
+        let (_base, root, _) = root_with_outside("pack-stream");
+        let big = noise(CHUNK_SIZE * 2 + 7, 1);
+        write(&root.join("a.txt"), "abc");
+        write(&root.join("sub").join("b.txt"), "b");
+        std::fs::create_dir_all(root.join("sub").join("deep")).expect("create deep");
+        std::fs::write(root.join("sub").join("deep").join("c.bin"), &big).expect("write c.bin");
+        let (sent, last) = pack_root(&root);
+        assert!(is_done(last.as_ref()), "{last:?}");
+        assert!(sent.len() >= 3, "{} chunks", sent.len());
+        assert_eq!(
+            unpack(&sent),
+            [
+                entry("a.txt", b"abc"),
+                entry("sub/b.txt", b"b"),
+                entry("sub/deep/c.bin", &big),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_folder_sends_a_valid_empty_archive() {
+        let (_base, root, _) = root_with_outside("pack-empty");
+        let (sent, last) = pack_root(&root);
+        assert!(is_done(last.as_ref()), "{last:?}");
+        assert!(!sent.is_empty(), "an empty archive is still a stream");
+        assert_eq!(unpack(&sent), Vec::<Entry>::new());
+    }
+
+    #[test]
+    fn chunks_are_full_256_kib_except_the_last() {
+        let (_base, root, _) = root_with_outside("pack-full-chunks");
+        std::fs::write(root.join("noise.bin"), noise(CHUNK_SIZE * 3 + 100, 2))
+            .expect("write noise");
+        let (sent, last) = pack_root(&root);
+        assert!(is_done(last.as_ref()), "{last:?}");
+        let chunks = chunk_bytes(&sent);
+        assert!(chunks.len() >= 4, "{} chunks", chunks.len());
+        let (tail, full) = chunks.split_last().expect("chunks");
+        for chunk in full {
+            assert_eq!(chunk.len(), CHUNK_SIZE);
+        }
+        assert!(
+            !tail.is_empty() && tail.len() <= CHUNK_SIZE,
+            "{}",
+            tail.len()
+        );
+    }
+
+    #[test]
+    fn the_archive_has_only_regular_entries() {
+        let (_base, root, _) = root_with_outside("pack-regular");
+        let long = format!("{}.txt", "n".repeat(120));
+        std::fs::create_dir_all(root.join("empty")).expect("create empty");
+        write(&root.join("sub").join(&long), "long");
+        write(&root.join("short.txt"), "s");
+        let (sent, last) = pack_root(&root);
+        assert!(is_done(last.as_ref()), "{last:?}");
+        let tar_bytes = archive_bytes(&sent);
+        let mut archive = tar::Archive::new(tar_bytes.as_slice());
+        let kinds: Vec<tar::EntryType> = archive
+            .entries()
+            .expect("a tar")
+            .raw(true)
+            .map(|entry| entry.expect("an entry").header().entry_type())
+            .collect();
+        let count = |wanted: tar::EntryType| kinds.iter().filter(|kind| **kind == wanted).count();
+        assert_eq!(count(tar::EntryType::Regular), 2, "{kinds:?}");
+        assert_eq!(count(tar::EntryType::GNULongName), 1, "{kinds:?}");
+        assert!(
+            kinds
+                .iter()
+                .all(|kind| matches!(kind, tar::EntryType::Regular | tar::EntryType::GNULongName)),
+            "{kinds:?}"
+        );
+        assert_eq!(
+            unpack(&sent),
+            [
+                entry("short.txt", b"s"),
+                entry(&format!("sub/{long}"), b"long"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_archive_never_exceeds_the_announced_counts() {
+        let (_base, root, _) = root_with_outside("pack-counts");
+        write(&root.join("grow.txt"), "abc");
+        write(&root.join("gone.txt"), "x");
+        write(&root.join("keep.txt"), "k");
+        let scan = scan_all(&root);
+        let (files, bytes) = (scan.files.len(), scan.bytes);
+        // Between the walk and the pack: one file grows, one is added, one
+        // is deleted.
+        write(&root.join("grow.txt"), "abcdefgh");
+        write(&root.join("new.txt"), "new");
+        std::fs::remove_file(root.join("gone.txt")).expect("delete gone.txt");
+        let (sent, last) = pack_all(&root, scan, 4, &CancellationToken::new());
+        assert!(is_done(last.as_ref()), "{last:?}");
+        let entries = unpack(&sent);
+        assert_eq!(
+            entries,
+            [entry("grow.txt", b"abc"), entry("keep.txt", b"k")]
+        );
+        assert!(entries.len() <= files);
+        let sent_bytes: usize = entries.iter().map(|(_, _, data)| data.len()).sum();
+        assert!(u64::try_from(sent_bytes).expect("small") <= bytes);
+    }
+
+    #[test]
+    fn exact_len_reader_fails_a_short_source_and_cuts_a_long_one() {
+        let cancel = CancellationToken::new();
+        let mut short = ExactLen::new(&[1u8; 10][..], 20, "short.bin", &cancel);
+        let err = io::copy(&mut short, &mut io::sink()).expect_err("a short source");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(err.to_string(), "short.bin shrank while it was being sent");
+        let mut long = ExactLen::new(&[2u8; 30][..], 20, "long.bin", &cancel);
+        let mut out = Vec::new();
+        long.read_to_end(&mut out).expect("a long source");
+        assert_eq!(out, [2u8; 20]);
+        cancel.cancel();
+        let mut stopped = ExactLen::new(&[3u8; 30][..], 20, "c.bin", &cancel);
+        let err = stopped.read(&mut [0u8; 8]).expect_err("cancelled");
+        assert_ne!(err.kind(), io::ErrorKind::Interrupted);
+    }
+
+    /// A root holding `big.bin`, incompressible and several chunks long,
+    /// which the pack's open of it shrinks to `shrink_to` bytes, after its
+    /// checks and before its header.
+    fn shrinking_big_bin(tag: &str, shrink_to: u64) -> (TestDir, PathBuf, hooks::AfterOpen) {
+        let (base, root, _) = root_with_outside(tag);
+        write(&root.join("a.txt"), "abc");
+        std::fs::write(root.join("big.bin"), noise(CHUNK_SIZE * 3 + 1000, 3))
+            .expect("write big.bin");
+        let hook = hooks::AfterOpen::new("big.bin", move |path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open big.bin for writing")
+                .set_len(shrink_to)
+                .expect("shrink big.bin");
+        });
+        (base, root, hook)
+    }
+
+    #[test]
+    fn a_file_that_shrinks_after_its_header_fails_the_fetch() {
+        let (_base, root, _hook) = shrinking_big_bin("pack-shrinks", 10);
+        let (_, last) = pack_root(&root);
+        match last {
+            Some(DaemonMessage::FileFetchError { id, error }) => {
+                assert_eq!(id, "f");
+                assert!(error.contains("big.bin"), "{error}");
+                assert!(error.contains("shrank"), "{error}");
+            }
+            other => unreachable!("expected FileFetchError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_chunk_follows_an_error_or_a_cancel() {
+        // An error: big.bin shrinks after its header, part of it sent.
+        let (_base, root, _hook) = shrinking_big_bin(
+            "pack-no-chunk-after",
+            u64::try_from(CHUNK_SIZE * 2 + 1).expect("small"),
+        );
+        let (sent, last) = pack_root(&root);
+        assert!(
+            matches!(last, Some(DaemonMessage::FileFetchError { .. })),
+            "{last:?}"
+        );
+        assert!(
+            !sent.is_empty(),
+            "some of big.bin was sent before the error"
+        );
+        for chunk in chunk_bytes(&sent) {
+            assert_eq!(
+                chunk.len(),
+                CHUNK_SIZE,
+                "a partial chunk followed the error"
+            );
+        }
+        // A cancel: big.bin's open cancels the fetch.
+        let (_base, root, _) = root_with_outside("pack-no-chunk-after-cancel");
+        std::fs::write(root.join("big.bin"), noise(CHUNK_SIZE * 3 + 1000, 4))
+            .expect("write big.bin");
+        let cancel = CancellationToken::new();
+        let firing = cancel.clone();
+        let _hook = hooks::AfterOpen::new("big.bin", move |_| firing.cancel());
+        let (sent, last) = pack_all(&root, scan_all(&root), 4, &cancel);
+        assert!(last.is_none(), "{last:?}");
+        for chunk in chunk_bytes(&sent) {
+            assert_eq!(
+                chunk.len(),
+                CHUNK_SIZE,
+                "a partial chunk followed the cancel"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dir_swapped_for_a_junction_after_the_scan_packs_nothing_from_outside() {
+        let (_base, root, outside) = root_with_outside("pack-swap-dir");
+        write(&root.join("keep.txt"), "k");
+        write(&root.join("sub").join("secret.txt"), "inside!");
+        let scan = scan_all(&root);
+        std::fs::remove_dir_all(root.join("sub")).expect("remove sub");
+        if !make_dir_link(&root.join("sub"), &outside) {
+            // No link could be made here: nothing to test.
+            return;
+        }
+        let (sent, last) = pack_all(&root, scan, 4, &CancellationToken::new());
+        assert!(is_done(last.as_ref()), "{last:?}");
+        let entries = unpack(&sent);
+        assert_eq!(entries, [entry("keep.txt", b"k")]);
+        assert!(!holds_bytes(&entries, b"secret"));
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_symlink_after_the_scan_is_skipped() {
+        let (_base, root, outside) = root_with_outside("pack-swap-file");
+        write(&root.join("keep.txt"), "k");
+        write(&root.join("f.txt"), "inside");
+        let scan = scan_all(&root);
+        std::fs::remove_file(root.join("f.txt")).expect("remove f.txt");
+        if !make_file_link(&root.join("f.txt"), &outside.join("secret.txt")) {
+            // No symlink could be made here (Windows without developer
+            // mode): nothing to test.
+            return;
+        }
+        let (sent, last) = pack_all(&root, scan, 4, &CancellationToken::new());
+        assert!(is_done(last.as_ref()), "{last:?}");
+        let entries = unpack(&sent);
+        assert_eq!(entries, [entry("keep.txt", b"k")]);
+        assert!(!holds_bytes(&entries, b"secret"));
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_directory_after_the_scan_is_skipped() {
+        let (_base, root, _) = root_with_outside("pack-swap-to-dir");
+        write(&root.join("keep.txt"), "k");
+        write(&root.join("f.txt"), "file");
+        let scan = scan_all(&root);
+        std::fs::remove_file(root.join("f.txt")).expect("remove f.txt");
+        write(&root.join("f.txt").join("inner.txt"), "inner");
+        let (sent, last) = pack_all(&root, scan, 4, &CancellationToken::new());
+        assert!(is_done(last.as_ref()), "{last:?}");
+        assert_eq!(unpack(&sent), [entry("keep.txt", b"k")]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unopenable_file_is_skipped_and_the_fetch_completes() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let (_base, root, _) = root_with_outside("pack-unopenable");
+        write(&root.join("keep.txt"), "k");
+        write(&root.join("locked.txt"), "locked");
+        let scan = scan_all(&root);
+        assert_eq!(names(&scan), ["keep.txt", "locked.txt"]);
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(root.join("locked.txt"))
+            .expect("hold locked.txt with no sharing");
+        let (sent, last) = pack_all(&root, scan, 4, &CancellationToken::new());
+        drop(held);
+        assert!(is_done(last.as_ref()), "{last:?}");
+        assert_eq!(unpack(&sent), [entry("keep.txt", b"k")]);
+    }
+
+    #[test]
+    fn a_hard_link_is_packed_as_a_regular_file() {
+        let (_base, root, _) = root_with_outside("pack-hard-link");
+        write(&root.join("a.txt"), "shared");
+        std::fs::hard_link(root.join("a.txt"), root.join("b.txt")).expect("make a hard link");
+        let (sent, last) = pack_root(&root);
+        assert!(is_done(last.as_ref()), "{last:?}");
+        assert_eq!(
+            unpack(&sent),
+            [entry("a.txt", b"shared"), entry("b.txt", b"shared")]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn alternate_data_streams_are_never_packed() {
+        let (_base, root, _) = root_with_outside("pack-ads");
+        write(&root.join("f.txt"), "main");
+        std::fs::write(root.join("f.txt:hidden"), "hidden stream").expect("write a stream");
+        let (sent, last) = pack_root(&root);
+        assert!(is_done(last.as_ref()), "{last:?}");
+        let entries = unpack(&sent);
+        assert_eq!(entries, [entry("f.txt", b"main")]);
+        assert!(!holds_bytes(&entries, b"hidden"));
+    }
+
+    /// Start [`pack`] of `root`'s incompressible multi-chunk file over a
+    /// queue of one, read its first message, then run `then` on the
+    /// receiver and the token: the pack's final message, once it returns.
+    /// What `then` hands back is kept until then.
+    fn pack_parked(
+        tag: &str,
+        then: impl FnOnce(
+            mpsc::Receiver<DaemonMessage>,
+            &CancellationToken,
+        ) -> Option<mpsc::Receiver<DaemonMessage>>,
+    ) -> Option<DaemonMessage> {
+        let (_base, root, _) = root_with_outside(tag);
+        std::fs::write(root.join("noise.bin"), noise(CHUNK_SIZE * 8, 5)).expect("write noise");
+        let scan = scan_all(&root);
+        let dir = confine_dir(&root, "").expect("the root is a folder");
+        let (tx, mut rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let packing = cancel.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(pack("f", &scan, &dir, &tx, &packing));
+        });
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let first = rx.blocking_recv();
+            let _ = first_tx.send(first);
+            rx
+        });
+        let first = first_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the pack sent nothing");
+        assert!(
+            matches!(first, Some(DaemonMessage::FileChunk { seq: 0, .. })),
+            "{first:?}"
+        );
+        let rx = reader.join().expect("the reader thread");
+        let _kept = then(rx, &cancel);
+        done_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("hung: the pack never returned")
+    }
+
+    #[test]
+    fn cancel_unblocks_a_worker_parked_on_a_full_channel() {
+        let last = pack_parked("pack-cancel-parked", |rx, cancel| {
+            cancel.cancel();
+            // The receiver stays open: the cancel alone frees the pack.
+            Some(rx)
+        });
+        assert!(last.is_none(), "{last:?}");
+    }
+
+    #[test]
+    fn a_dropped_receiver_ends_the_worker() {
+        let last = pack_parked("pack-dropped-receiver", |rx, _| {
+            drop(rx);
+            None
+        });
+        assert!(last.is_none(), "{last:?}");
     }
 }

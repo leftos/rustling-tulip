@@ -1705,6 +1705,7 @@ dependencies = [
  "shell-words",
  "sysinfo 0.32.1",
  "tailnet",
+ "tar",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -1720,6 +1721,7 @@ dependencies = [
  "windows 0.61.3",
  "windows-native-keyring-store",
  "x509-parser",
+ "zstd",
 ]
 
 [[package]]

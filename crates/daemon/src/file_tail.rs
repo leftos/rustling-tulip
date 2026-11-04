@@ -10,7 +10,7 @@
 //! thread, bounded by [`STEP_BOUND`] and stopped early by the follow's
 //! cancel token, and checks where the opened handle really is.
 
-use crate::file_fetch::send_unless_cancelled;
+use crate::file_fetch::{CanonicalRoot, send_unless_cancelled};
 use crate::session::SessionRecord;
 use base64::Engine as _;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -208,6 +208,14 @@ impl Folders {
             })
             .collect();
         Self { canonical }
+    }
+
+    /// The one folder `root`, already canonical: what a folder fetch checks
+    /// each opened file against.
+    pub(crate) fn of_root(root: &CanonicalRoot) -> Self {
+        Self {
+            canonical: vec![root.path().to_path_buf()],
+        }
     }
 
     /// Whether `resolved`, a canonical path, sits inside one of the folders.

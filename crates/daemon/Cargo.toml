@@ -58,6 +58,10 @@ alacritty_terminal = "0.26.0"
 tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 base64 = "0.22"
+# A folder fetch's stream: a tar of the folder's files, zstd-compressed
+# (`folder_pack::pack`), as the native client's `folder_unpack` reads it.
+tar = { workspace = true }
+zstd = { workspace = true }
 rand = "0.8"
 portable-pty = "0.9"
 # Cross-platform local-socket transport for the daemon↔tracer IPC: named

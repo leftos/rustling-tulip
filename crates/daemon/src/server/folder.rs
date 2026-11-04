@@ -5,7 +5,9 @@
 //! disk work, the root's `canonicalize` included, runs on a blocking thread.
 //! Both are served on any connection `FetchFile` is served on.
 //!
-//! A folder that passes its walk is answered with [`PACKING_UNAVAILABLE`].
+//! A folder that passes its walk is answered with `FolderFetchStarted`, then
+//! the folder packed ([`folder_pack::pack`]) as `FileChunk` frames, then
+//! `FileFetchDone`, every one of them on the connection's file queue.
 
 use super::Hub;
 use super::connection::{ConnCtx, start_fetch};
@@ -15,11 +17,9 @@ use crate::folder_pack::{self, Limits};
 use anyhow::Context as _;
 use protocol::{ClientMessage, DaemonMessage};
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-
-/// The `FileFetchError` a `FetchFolder` whose walk passed is answered with.
-pub(super) const PACKING_UNAVAILABLE: &str = "folder fetch: packing is not available yet";
 
 /// A `FetchFolder` or `StatPath` request's target.
 struct Request {
@@ -43,8 +43,8 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) {
                 path,
             };
             let hub = hub.clone();
-            start_fetch(ctx, id, Ok(request), move |id, request, _tx, token| {
-                tokio::task::spawn_blocking(move || Some(fetch_folder(&hub, id, &request, &token)))
+            start_fetch(ctx, id, Ok(request), move |id, request, tx, token| {
+                tokio::task::spawn_blocking(move || fetch_folder(&hub, id, &request, &tx, &token))
             })
             .await;
         }
@@ -125,21 +125,41 @@ fn stat_request(hub: &Hub, request: &Request) -> folder_pack::PathStat {
 }
 
 /// A `FetchFolder`'s worker, on a blocking thread: resolve and walk the
-/// folder, then hand back the one `FileFetchError` this build answers with,
-/// for [`start_fetch`] to send once the id is free.
+/// folder, send `FolderFetchStarted` and the packed folder on `tx` (the
+/// connection's file queue), and hand back the final message, unsent, for
+/// [`start_fetch`] to send once the id is free: `FileFetchDone`, or one
+/// `FileFetchError` when the folder was refused or failed. `None` once the
+/// fetch was cancelled or its connection closed.
 fn fetch_folder(
     hub: &Hub,
     id: String,
     request: &Request,
+    tx: &mpsc::Sender<DaemonMessage>,
     token: &CancellationToken,
-) -> DaemonMessage {
+) -> Option<DaemonMessage> {
+    #[cfg(test)]
+    let watched = id.clone();
+    let last = walk_and_pack(hub, id, request, tx, token);
+    #[cfg(test)]
+    hooks::worker_ended(&watched);
+    last
+}
+
+/// [`fetch_folder`]'s work.
+fn walk_and_pack(
+    hub: &Hub,
+    id: String,
+    request: &Request,
+    tx: &mpsc::Sender<DaemonMessage>,
+    token: &CancellationToken,
+) -> Option<DaemonMessage> {
     #[cfg(test)]
     hooks::before_scan(&request.path);
     let walked = resolve(hub, request).and_then(|dir| {
         let scan = folder_pack::scan(&dir, Limits::FETCH, token)?;
         Ok((dir, scan))
     });
-    let error = match walked {
+    let last = match walked {
         Ok((dir, scan)) => {
             debug!(
                 %id,
@@ -148,18 +168,36 @@ fn fetch_folder(
                 bytes = scan.bytes,
                 skipped = ?scan.skipped,
                 unlisted = scan.unlisted,
-                "folder: the walk passed; packing is not available yet"
+                "folder: the walk passed; packing"
             );
-            PACKING_UNAVAILABLE.to_owned()
+            let started = DaemonMessage::FolderFetchStarted {
+                id: id.clone(),
+                resolved_path: dir.path().display().to_string(),
+                files: u64::try_from(scan.files.len()).unwrap_or(u64::MAX),
+                bytes: scan.bytes,
+            };
+            if !file_fetch::send_unless_cancelled_blocking(tx, token, started) {
+                return None;
+            }
+            folder_pack::pack(&id, &scan, &dir, tx, token)
         }
-        Err(err) => format!("{err:#}"),
+        Err(err) => {
+            let error = format!("{err:#}");
+            Some(DaemonMessage::FileFetchError { id, error })
+        }
     };
-    DaemonMessage::FileFetchError { id, error }
+    if token.is_cancelled() { None } else { last }
 }
 
-/// A worker that panics, from a test.
+/// A worker that panics, and watching workers end, from a test.
 #[cfg(test)]
 pub(super) mod hooks {
+    use super::super::test_support::HANG_GUARD;
+    use crate::sync::lock;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::sync::watch;
+
     /// The `FetchFolder` path whose worker panics.
     pub(super) const PANIC_PATH: &str = "panic-in-the-worker";
 
@@ -169,6 +207,54 @@ pub(super) mod hooks {
             path, PANIC_PATH,
             "the test hook panicked the folder fetch's worker"
         );
+    }
+
+    static WATCHES: Mutex<Vec<(u64, String, watch::Sender<usize>)>> = Mutex::new(Vec::new());
+
+    /// Counts the `FetchFolder` workers of one id that returned, until
+    /// dropped.
+    pub(super) struct WorkerWatch {
+        key: u64,
+        ended: watch::Receiver<usize>,
+    }
+
+    impl WorkerWatch {
+        /// Count the workers of `id`.
+        pub(super) fn new(id: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let key = NEXT.fetch_add(1, Ordering::Relaxed);
+            let (tx, ended) = watch::channel(0);
+            lock(&WATCHES).push((key, id.to_owned(), tx));
+            Self { key, ended }
+        }
+
+        /// Resolves once a worker of the id returned; fails as hung when
+        /// none does.
+        pub(super) async fn ended(&mut self) {
+            let waited = tokio::time::timeout(HANG_GUARD, self.ended.wait_for(|ended| *ended >= 1))
+                .await
+                .map(|ended| ended.is_ok());
+            assert_eq!(
+                waited,
+                Ok(true),
+                "hung: the folder fetch's worker never returned"
+            );
+        }
+    }
+
+    impl Drop for WorkerWatch {
+        fn drop(&mut self) {
+            lock(&WATCHES).retain(|(key, _, _)| *key != self.key);
+        }
+    }
+
+    /// A worker of `id` returned.
+    pub(super) fn worker_ended(id: &str) {
+        for (_, watched, tx) in lock(&WATCHES).iter() {
+            if watched == id {
+                tx.send_modify(|ended| *ended += 1);
+            }
+        }
     }
 }
 
@@ -281,6 +367,20 @@ mod tests {
         .collect()
     }
 
+    /// `seen`, one folder fetch's messages, held a `FolderFetchStarted` and
+    /// ended with `FileFetchDone`.
+    fn assert_folder_done(seen: &[DaemonMessage]) {
+        assert!(
+            seen.iter()
+                .any(|msg| matches!(msg, DaemonMessage::FolderFetchStarted { .. })),
+            "{seen:?}"
+        );
+        assert!(
+            matches!(seen.last(), Some(DaemonMessage::FileFetchDone { .. })),
+            "{seen:?}"
+        );
+    }
+
     fn error_text(msg: &DaemonMessage) -> &str {
         match msg {
             DaemonMessage::FileFetchError { error, .. } => error,
@@ -318,8 +418,15 @@ mod tests {
 
         client.send(&fetch_folder("f1", ""));
         let f1 = until_end(&mut client, "f1").await;
-        assert_eq!(f1.len(), 1, "{f1:?}");
-        assert_eq!(error_text(&f1[0]), PACKING_UNAVAILABLE);
+        assert!(
+            matches!(
+                &f1[0],
+                DaemonMessage::FolderFetchStarted { files: 3, bytes, .. }
+                    if *bytes == (3 + 1 + crate::file_fetch::CHUNK_SIZE * 12) as u64
+            ),
+            "{f1:?}"
+        );
+        assert_folder_done(&f1);
 
         client.send(&fetch_folder("f2", "a.txt"));
         let f2 = until_end(&mut client, "f2").await;
@@ -406,8 +513,7 @@ mod tests {
         registry.reached(2).await;
         client.resume();
         let y = until_end(&mut client, "y").await;
-        let last = y.last().expect("the fetch ended");
-        assert_eq!(error_text(last), PACKING_UNAVAILABLE, "{y:?}");
+        assert_folder_done(&y);
         assert!(
             !y.iter().any(|msg| matches!(
                 msg,
@@ -427,11 +533,11 @@ mod tests {
         assert!(error_text(&p[0]).contains("stopped unexpectedly"), "{p:?}");
         client.send(&fetch_folder("p", ""));
         let again = until_end(&mut client, "p").await;
-        assert_eq!(error_text(&again[0]), PACKING_UNAVAILABLE, "{again:?}");
+        assert_folder_done(&again);
     }
 
     #[tokio::test]
-    async fn folder_fetch_is_not_yet_listed_in_welcome() {
+    async fn folder_fetch_feature_is_listed_in_welcome() {
         let (hub, _scratch, _repo) = repo_hub("folder-welcome");
         let (_client, _session, features) = local_session(&hub).await;
         assert!(
@@ -439,7 +545,7 @@ mod tests {
             "{features:?}"
         );
         assert!(
-            !features.iter().any(|f| f == protocol::FEATURE_FOLDER_FETCH),
+            features.iter().any(|f| f == protocol::FEATURE_FOLDER_FETCH),
             "{features:?}"
         );
     }
@@ -552,11 +658,83 @@ mod tests {
             );
             client.send(&fetch_folder("r", ""));
             let again = until_end(&mut client, "r").await;
-            assert_eq!(
-                error_text(again.last().expect("an end")),
-                PACKING_UNAVAILABLE,
-                "{again:?}"
-            );
+            assert_folder_done(&again);
         }
+    }
+
+    /// Add `noise.bin` to `repo`: incompressible and many chunks long, so a
+    /// fetch of the repo cannot end while its socket is stalled.
+    fn add_noise(repo: &std::path::Path) {
+        std::fs::write(
+            repo.join("noise.bin"),
+            folder_pack::noise(crate::file_fetch::CHUNK_SIZE * 12, 7),
+        )
+        .expect("write noise.bin");
+    }
+
+    fn is_end(msg: &DaemonMessage) -> bool {
+        matches!(
+            msg,
+            DaemonMessage::FileFetchDone { .. } | DaemonMessage::FileFetchError { .. }
+        )
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_folder_pack_without_done() {
+        let (hub, _scratch, repo) = repo_hub("folder-cancel");
+        add_noise(&repo);
+        let (mut client, _session, _) = local_session(&hub).await;
+        let mut folder = RegistryWatch::new("c");
+        let mut file = RegistryWatch::new("m");
+        client.stall();
+        client.send(&fetch_folder("c", ""));
+        folder.reached(1).await;
+        client.send(&ClientMessage::CancelFetch { id: "c".to_owned() });
+        client.send(&fetch_file("m", "a.txt"));
+        // "m" reached the registry, so the cancel before it was handled.
+        file.reached(1).await;
+        client.resume();
+        let seen = read_until(&mut client, |msg| id_of(msg) == Some("m") && is_end(msg)).await;
+        assert!(
+            matches!(seen.last(), Some(DaemonMessage::FileFetchDone { .. })),
+            "{seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|msg| id_of(msg) == Some("c") && is_end(msg)),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_during_the_scan_sends_nothing() {
+        let (hub, _scratch, _repo) = repo_hub("folder-cancel-scan");
+        let (tx, mut rx) = mpsc::channel(4);
+        let token = CancellationToken::new();
+        token.cancel();
+        let request = Request {
+            repo_id: "r1".to_owned(),
+            worktree_path: None,
+            path: String::new(),
+        };
+        let last = super::fetch_folder(&hub, "s".to_owned(), &request, &tx, &token);
+        assert!(last.is_none(), "{last:?}");
+        drop(tx);
+        assert!(rx.try_recv().is_err(), "nothing was sent");
+    }
+
+    #[tokio::test]
+    async fn a_closed_connection_stops_its_folder_fetch() {
+        let (hub, _scratch, repo) = repo_hub("folder-closed");
+        add_noise(&repo);
+        let (client, _session, _) = local_session(&hub).await;
+        let mut worker = hooks::WorkerWatch::new("d");
+        let mut registry = RegistryWatch::new("d");
+        client.stall();
+        client.send(&fetch_folder("d", ""));
+        registry.reached(1).await;
+        drop(client);
+        worker.ended().await;
     }
 }

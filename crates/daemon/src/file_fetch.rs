@@ -272,8 +272,10 @@ async fn fill_buf(file: &mut tokio::fs::File, buf: &mut [u8]) -> io::Result<usiz
     Ok(filled)
 }
 
-/// Send `msg` unless `cancel` fires first. Returns whether it was sent. The
-/// one copy every transfer (file fetch, folder fetch, file follow) sends with.
+/// Send `msg` unless `cancel` fires first. Returns whether it was sent. Every
+/// async transfer (file fetch, file follow, a fetch's final message) sends
+/// with it; the folder pack's blocking thread uses
+/// [`send_unless_cancelled_blocking`].
 pub(crate) async fn send_unless_cancelled(
     tx: &mpsc::Sender<DaemonMessage>,
     cancel: &CancellationToken,
@@ -284,6 +286,24 @@ pub(crate) async fn send_unless_cancelled(
         () = cancel.cancelled() => false,
         sent = tx.send(msg) => sent.is_ok(),
     }
+}
+
+/// [`send_unless_cancelled`] for a blocking thread: waits for room in `tx`
+/// unless `cancel` fires first, so a cancel always frees a sender parked on
+/// a full queue (which `blocking_send` would not). Returns whether `msg` was
+/// sent. Never call it from an async task.
+pub(crate) fn send_unless_cancelled_blocking(
+    tx: &mpsc::Sender<DaemonMessage>,
+    cancel: &CancellationToken,
+    msg: DaemonMessage,
+) -> bool {
+    futures::executor::block_on(async {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => false,
+            sent = tx.send(msg) => sent.is_ok(),
+        }
+    })
 }
 
 /// Scratch directories for tests, removed on drop.
