@@ -164,6 +164,25 @@ fn ctrl_shift_click_on_a_text_path_opens_the_viewer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn ctrl_shift_click_on_a_bare_name_after_a_full_path_views_its_sibling(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    write_file(dir.path(), "a/b/c.html");
+    let sibling = write_file(dir.path(), "a/b/d.html");
+    let mut h = attached(cx, &dir, shell_in(dir.path()));
+    let full = dir
+        .path()
+        .join("a/b/c.html")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let line = format!("{full} d.html");
+    h.pty("s1", line.as_bytes());
+    let on = h.cell_center("p1", full.chars().count() + 2, 0);
+    h.click(on, ctrl_shift());
+    assert_eq!(h.opened(), [], "no default app");
+    assert_eq!(viewer_opens(&mut h), [sibling], "{line}");
+}
+
+#[gpui::test]
 fn ctrl_shift_click_on_a_binary_opens_the_default_app(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let file = write_file(dir.path(), "out/blob.dat");
