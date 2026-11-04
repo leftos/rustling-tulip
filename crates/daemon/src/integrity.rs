@@ -31,6 +31,7 @@ impl IntegrityLevel {
     pub const SYSTEM: Self = Self(0x4000);
 
     /// The level whose label SID ends in `rid`.
+    #[cfg(any(windows, test))]
     #[must_use]
     pub const fn from_rid(rid: u32) -> Self {
         Self(rid)
@@ -373,6 +374,10 @@ mod imp {
 mod imp {
     use super::{IntegrityLevel, LookupError, LoopbackPeer};
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the Windows lookup can fail; off Windows there is nothing to look up"
+    )]
     pub(super) fn own_level() -> Result<IntegrityLevel, LookupError> {
         Ok(IntegrityLevel::MEDIUM)
     }

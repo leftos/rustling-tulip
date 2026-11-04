@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::notify::PairingActionSink;
-use crate::pairing::{PairingAction, PairingToast};
+use crate::pairing::PairingAction;
+#[cfg(any(windows, test))]
+use crate::pairing::PairingToast;
 
 /// The app id the client's toasts carry once registered.
 pub const APP_ID: &str = "leftos.RustlingTulip";
@@ -134,6 +136,7 @@ pub fn shortcut_path(programs: &Path) -> PathBuf {
 }
 
 /// How a toast button activates the app.
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActivationKind {
     /// Brings the app forward.
@@ -142,6 +145,7 @@ pub(crate) enum ActivationKind {
     Background,
 }
 
+#[cfg(any(windows, test))]
 impl ActivationKind {
     const fn attribute(self) -> &'static str {
         match self {
@@ -153,6 +157,7 @@ impl ActivationKind {
 
 /// A toast button: its label, the argument the activator receives, and how
 /// it activates.
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToastButton {
     pub(crate) content: &'static str,
@@ -161,6 +166,7 @@ pub(crate) struct ToastButton {
 }
 
 /// Whether a toast makes Windows' notification sound.
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToastAudio {
     /// Windows' default notification sound.
@@ -172,6 +178,7 @@ pub(crate) enum ToastAudio {
 /// A toast's XML: `title` and `body` as its two lines, then `buttons`.
 /// `activation_types` writes each button's activation type; without it every
 /// button takes Windows' default, a foreground activation.
+#[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn toast_xml(
     title: &str,
@@ -211,6 +218,7 @@ pub(crate) fn toast_xml(
 
 /// The pairing toast's XML: Approve… brings the app forward to open the
 /// approval dialog, and Deny declines without raising a window.
+#[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn pairing_toast_xml(toast: &PairingToast, activation_types: bool) -> String {
     let buttons = [
@@ -235,6 +243,7 @@ pub(crate) fn pairing_toast_xml(toast: &PairingToast, activation_types: bool) ->
 }
 
 /// `text` with XML's five special characters escaped.
+#[cfg(any(windows, test))]
 fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -255,12 +264,14 @@ static REGISTERED: OnceLock<bool> = OnceLock::new();
 
 /// Whether the client's toasts carry its own app id and activate through
 /// its activator.
+#[cfg(windows)]
 #[must_use]
 pub(crate) fn registered() -> bool {
     REGISTERED.get().copied().unwrap_or(false)
 }
 
 /// The app id toasts are raised under.
+#[cfg(windows)]
 #[must_use]
 pub(crate) fn app_id() -> &'static str {
     if registered() {
@@ -307,6 +318,7 @@ pub(crate) fn attach(sink: &PairingActionSink) {
 /// A toast was pressed with `arg`: hands its action to the window, or holds
 /// it until the window attaches. An argument no action knows is logged and
 /// dropped.
+#[cfg(windows)]
 fn deliver(arg: Option<&str>) {
     let Some(action) = PairingAction::from_activation(arg) else {
         tracing::warn!(?arg, "a toast was pressed with an argument no action knows");

@@ -35,6 +35,7 @@ const SCHTASKS_TIMEOUT: Duration = Duration::from_secs(30);
 /// session and no override folder is set (`override_set`), else here. The
 /// task's daemon starts in the user's logon environment, without the caller's
 /// overrides, so an isolated run would start a real-profile daemon.
+#[cfg(any(windows, test))]
 pub(crate) fn start_route(
     caller_session: u32,
     user_has_interactive_session: bool,
@@ -49,7 +50,7 @@ pub(crate) fn start_route(
 
 /// The task's name for the user `user_sid`: one task per user.
 #[cfg_attr(
-    not(windows),
+    not(any(windows, test)),
     expect(dead_code, reason = "the task route runs on Windows only")
 )]
 pub(crate) fn task_name(user_sid: &str) -> String {
@@ -65,7 +66,7 @@ pub(crate) fn task_name(user_sid: &str) -> String {
 /// and delete only, so the user's own uninstaller can delete a task an
 /// elevated logon registered, while the user cannot rewrite it.
 #[cfg_attr(
-    not(windows),
+    not(any(windows, test)),
     expect(dead_code, reason = "the task route runs on Windows only")
 )]
 pub(crate) fn task_xml(user_sid: &str, exe: &Path, work_dir: &Path) -> String {
@@ -109,7 +110,7 @@ pub(crate) fn task_xml(user_sid: &str, exe: &Path, work_dir: &Path) -> String {
 
 /// `text` with the five XML special characters escaped.
 #[cfg_attr(
-    not(windows),
+    not(any(windows, test)),
     expect(dead_code, reason = "the task route runs on Windows only")
 )]
 fn xml_escape(text: &str) -> String {

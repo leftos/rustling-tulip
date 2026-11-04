@@ -274,6 +274,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(windows),
+        expect(
+            clippy::case_sensitive_file_extension_comparisons,
+            reason = "a unix socket pathname's .sock suffix is case-sensitive"
+        )
+    )]
     fn socket_name_is_session_id_suffixed() {
         let name = socket_name("abc-123");
         #[cfg(windows)]

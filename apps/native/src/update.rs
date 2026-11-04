@@ -846,6 +846,10 @@ mod lock {
 
     /// No update lock where there is no installer.
     #[cfg(not(windows))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the Windows mutex can fail; off Windows there is no lock to take"
+    )]
     pub(super) fn try_lock(_name: &str) -> anyhow::Result<Option<Hold>> {
         Ok(Some(Box::new(())))
     }

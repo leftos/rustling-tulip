@@ -11,7 +11,9 @@
 //! have created. A refused root is never deleted or remade here: the refusal
 //! names it for the user to delete from an elevated terminal.
 
-use anyhow::{Context as _, anyhow};
+use anyhow::Context as _;
+#[cfg(windows)]
+use anyhow::anyhow;
 use std::path::Path;
 
 /// The descriptor a protected root is created with: Administrators as the
@@ -568,7 +570,9 @@ pub fn create_or_check(path: &Path) -> anyhow::Result<()> {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{AceEntry, LabelEntry, RootSecurity, check_existing, check_root, create_or_check};
+    use super::{AceEntry, LabelEntry, RootSecurity, check_root};
+    #[cfg(windows)]
+    use super::{check_existing, create_or_check};
 
     const DACL_REFUSAL: &str = "its permissions allow more than Administrators and SYSTEM";
     const LABEL_REFUSAL: &str =

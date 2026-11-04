@@ -528,6 +528,7 @@ pub(crate) enum SettingsControl {
     NotifyFinished,
     NotifySkip(NotifySkip),
     FinishedGrace(u32),
+    #[cfg_attr(not(windows), expect(dead_code, reason = "Windows-only toast style"))]
     ToastStyle(ToastStyle),
     SpawnTrusted,
     /// Choice `choice` of field `field` of the shown agent page's

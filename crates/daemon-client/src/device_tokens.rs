@@ -14,22 +14,27 @@
 
 use anyhow::{Context as _, Result};
 use keyring_core::{Entry, Error as KeyringError};
+#[cfg(any(windows, test))]
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(any(windows, test))]
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// The Credential Manager service tokens are filed under, unless the config
 /// dir is overridden.
+#[cfg(any(windows, test))]
 const SERVICE: &str = "rustling-tulip";
 
 /// Setting this to a non-empty value switches the service to its
 /// per-config-dir variant.
+#[cfg(windows)]
 const CONFIG_DIR_VAR: &str = "RUSTLING_TULIP_CONFIG_DIR";
 
 /// How many hex characters of the config dir's hash the isolated service name
 /// carries.
+#[cfg(any(windows, test))]
 const SERVICE_HASH_LEN: usize = 8;
 
 /// What every device token's credential user starts with.
@@ -74,6 +79,7 @@ pub fn user_for(host: &str) -> String {
 /// its per-config-dir variant when `overridden` (the config dir comes from
 /// `RUSTLING_TULIP_CONFIG_DIR`). The daemon's env secrets use the same rule
 /// (`crates/daemon/src/env_secrets.rs`).
+#[cfg(any(windows, test))]
 fn service_for(config_dir: &Path, overridden: bool) -> String {
     if !overridden {
         return SERVICE.to_owned();

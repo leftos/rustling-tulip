@@ -115,6 +115,13 @@ pub fn resolve_existing_dir(raw: &str) -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::items_after_test_module,
+        reason = "the non-Windows variants of the items below follow the test module"
+    )
+)]
 mod dir_tests {
     use super::*;
 

@@ -250,7 +250,7 @@ thread_local! {
         std::cell::RefCell::new(None);
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 fn set_failed_attempt_hook(hook: Option<Box<dyn Fn()>>) {
     AFTER_FAILED_ATTEMPT.with(|slot| *slot.borrow_mut() = hook);
 }
@@ -470,8 +470,10 @@ mod tests {
     }
 
     /// Installs the failed-attempt hook for as long as it lives.
+    #[cfg(windows)]
     struct HookGuard;
 
+    #[cfg(windows)]
     impl HookGuard {
         fn set(hook: Box<dyn Fn()>) -> Self {
             set_failed_attempt_hook(Some(hook));
@@ -479,6 +481,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     impl Drop for HookGuard {
         fn drop(&mut self) {
             set_failed_attempt_hook(None);

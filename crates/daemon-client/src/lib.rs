@@ -841,9 +841,11 @@ fn names_no_file(err: &anyhow::Error) -> bool {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
+    #[cfg(windows)]
+    use super::Proof;
     use super::{
         DaemonIsElevated, DaemonIsOrdinary, HANDSHAKE_READ_ATTEMPTS, HANDSHAKE_READ_RETRY_DELAY,
-        HandshakeFile, INSTANCE_LOCK_FILE, LocatedDaemon, Proof, Shutdown, StaleCheck,
+        HandshakeFile, INSTANCE_LOCK_FILE, LocatedDaemon, Shutdown, StaleCheck,
         classify_handshake_read, clear_if_no_daemon, client_identity, handshake_file_in, locate_in,
         may_stop,
     };

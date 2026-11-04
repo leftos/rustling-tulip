@@ -110,6 +110,7 @@ mod tests {
     }
 
     /// A `daemon.json` in `dir` naming `pid`, which no process has.
+    #[cfg(windows)]
     fn write_handshake(dir: &Path, pid: u32) {
         let json = format!(
             r#"{{"protocol_version":1,"port":1,"auth_token":"test-token","pid":{pid},"supported_versions":[1],"build_version":""}}"#

@@ -573,6 +573,13 @@ pub fn simplify_path(path: &Path) -> PathBuf {
 
 /// The VS Code commands to try, in order: `code.cmd` then `code.exe` on
 /// `PATH`, then the usual install folders.
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::vec_init_then_push,
+        reason = "the Windows list has several sources; off Windows it is one path"
+    )
+)]
 fn vscode_commands() -> Vec<PathBuf> {
     let mut commands = Vec::new();
     #[cfg(windows)]
