@@ -15,7 +15,7 @@ use crate::stretchtext;
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatPrompt, ChatPromptKind, ChatScreen, ClientMessage,
-    ComposerState, WorkShell, WorkSubagent,
+    ComposerState, ToolKind, WorkShell, WorkSubagent,
 };
 
 /// How many rows the client keeps: a load reply carries the newest this
@@ -91,12 +91,14 @@ impl GoneIds {
 }
 
 /// One session's chat rows in arrival order, the tool cards the user opened,
-/// each answer's open stretches, the count of older rows the display cap or
-/// a load left out, and the ids that left since the last load.
+/// the Compact tool runs the user opened (by their first call's id), each
+/// answer's open stretches, the count of older rows the display cap or a
+/// load left out, and the ids that left since the last load.
 #[derive(Debug, Default)]
 pub struct ChatLog {
     entries: Vec<ChatEntry>,
     expanded: HashSet<String>,
+    open_runs: HashSet<String>,
     stretchtext: HashMap<String, BTreeSet<String>>,
     hidden: u32,
     gone: GoneIds,
@@ -112,6 +114,7 @@ impl ChatLog {
             .filter(|entry| !matches!(entry, ChatEntry::Unknown))
             .collect();
         self.expanded.clear();
+        self.open_runs.clear();
         self.stretchtext.clear();
         self.gone.clear();
         self.hidden = hidden;
@@ -122,9 +125,14 @@ impl ChatLog {
     /// survive it.
     pub fn reset(&mut self, entries: Vec<ChatEntry>, hidden: u32) {
         let expanded = std::mem::take(&mut self.expanded);
+        let open_runs = std::mem::take(&mut self.open_runs);
         let stretchtext = std::mem::take(&mut self.stretchtext);
         self.load(entries, hidden);
         self.expanded = expanded
+            .into_iter()
+            .filter(|id| self.get(id).is_some())
+            .collect();
+        self.open_runs = open_runs
             .into_iter()
             .filter(|id| self.get(id).is_some())
             .collect();
@@ -142,6 +150,7 @@ impl ChatLog {
             self.entries
                 .retain(|entry| entry_id(entry) != Some(id.as_str()));
             self.expanded.remove(id);
+            self.open_runs.remove(id);
             self.stretchtext.remove(id);
             self.gone.insert(id);
         }
@@ -261,6 +270,26 @@ impl ChatLog {
         self.expanded.contains(id)
     }
 
+    /// Opens or closes the Compact tool run whose first call is `first_id`,
+    /// returning its new state. An id that is not a tool call the log
+    /// holds changes nothing and stays closed.
+    pub fn toggle_run(&mut self, first_id: &str) -> bool {
+        if !matches!(self.get(first_id), Some(ChatEntry::Tool { .. })) {
+            return false;
+        }
+        if self.open_runs.remove(first_id) {
+            return false;
+        }
+        self.open_runs.insert(first_id.to_owned());
+        true
+    }
+
+    /// Whether the Compact tool run whose first call is `first_id` is open.
+    #[must_use]
+    pub fn is_run_open(&self, first_id: &str) -> bool {
+        self.open_runs.contains(first_id)
+    }
+
     /// Opens the stretch `key` of answer `id`, or closes it and every
     /// stretch nested in it when it is open, returning whether it is open
     /// now. A row that is not an answer, or an id the log does not hold,
@@ -294,6 +323,7 @@ impl ChatLog {
         for entry in self.entries.drain(..excess) {
             if let Some(id) = entry_id(&entry) {
                 self.expanded.remove(id);
+                self.open_runs.remove(id);
                 self.stretchtext.remove(id);
                 self.gone.insert(id);
             }
@@ -301,6 +331,237 @@ impl ChatLog {
         self.hidden = self
             .hidden
             .saturating_add(u32::try_from(excess).unwrap_or(u32::MAX));
+    }
+}
+
+/// How a chat pane draws tool calls: Compact folds each run of consecutive
+/// read, search and run calls into one line; Comfortable draws one card per
+/// call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChatMode {
+    #[default]
+    Compact,
+    Comfortable,
+}
+
+impl ChatMode {
+    /// The name `native-ui.json` keeps the mode under.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Comfortable => "comfortable",
+        }
+    }
+
+    /// The mode a saved name stands for, when it names one.
+    #[must_use]
+    pub fn of_name(name: &str) -> Option<Self> {
+        match name {
+            "compact" => Some(Self::Compact),
+            "comfortable" => Some(Self::Comfortable),
+            _ => None,
+        }
+    }
+
+    /// The other mode, which the header's Compact toggle switches to.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Compact => Self::Comfortable,
+            Self::Comfortable => Self::Compact,
+        }
+    }
+}
+
+/// What one Compact run of tool calls did: how many read, searched and ran,
+/// how many of them failed, and whether one still runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunSummary {
+    pub read: usize,
+    pub searched: usize,
+    pub ran: usize,
+    pub failed: usize,
+    pub running: bool,
+}
+
+impl RunSummary {
+    /// The run's line in the terminal's words, such as
+    /// `1 read · 2 searched · 2 ran · 1 failed`: the counts read, searched,
+    /// ran with the zero ones left out, then the failed count when one
+    /// failed.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let mut parts: Vec<String> = [
+            (self.read, "read"),
+            (self.searched, "searched"),
+            (self.ran, "ran"),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, verb)| format!("{count} {verb}"))
+        .collect();
+        if self.failed > 0 {
+            parts.push(format!("{} failed", self.failed));
+        }
+        parts.join(" \u{b7} ")
+    }
+
+    fn add(&mut self, kind: ToolKind, failed: bool, running: bool) {
+        match kind {
+            ToolKind::Read => self.read += 1,
+            ToolKind::Search => self.searched += 1,
+            ToolKind::Run => self.ran += 1,
+            ToolKind::Other | ToolKind::Unknown => {}
+        }
+        self.failed += usize::from(failed);
+        self.running |= running;
+    }
+}
+
+/// One row a chat pane draws: an entry on its own, or (in Compact) a run of
+/// consecutive read, search and run calls drawn as one line, its calls in
+/// order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayRow<'a> {
+    Single(&'a ChatEntry),
+    Run {
+        entries: Vec<&'a ChatEntry>,
+        summary: RunSummary,
+    },
+}
+
+impl DisplayRow<'_> {
+    /// The row's id: the entry's, or the run's first call's.
+    #[must_use]
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Single(entry) => entry_id(entry),
+            Self::Run { entries, .. } => entries.first().and_then(|entry| entry_id(entry)),
+        }
+    }
+
+    /// The row as plain data, for tests and the spec hooks.
+    #[must_use]
+    pub fn shape(&self) -> RowShape {
+        match self {
+            Self::Single(entry) => RowShape::Entry(entry_id(entry).unwrap_or_default().to_owned()),
+            Self::Run { entries, summary } => RowShape::Run {
+                ids: entries
+                    .iter()
+                    .filter_map(|entry| entry_id(entry))
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                line: summary.text(),
+                running: summary.running,
+            },
+        }
+    }
+}
+
+/// A [`DisplayRow`] as plain data: an entry's id, or a run's call ids, its
+/// line and whether a call in it still runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowShape {
+    Entry(String),
+    Run {
+        ids: Vec<String>,
+        line: String,
+        running: bool,
+    },
+}
+
+/// The read, search or run kind a Compact run takes `entry` into, with
+/// whether it failed and whether it has no result yet; `None` for any other
+/// entry. A subagent's call (one with a `parent_id`) and a call that names
+/// files to tail are never grouped, so each keeps its card.
+fn run_kind(entry: &ChatEntry) -> Option<(ToolKind, bool, bool)> {
+    let ChatEntry::Tool {
+        kind,
+        result,
+        parent_id: None,
+        tail_paths,
+        ..
+    } = entry
+    else {
+        return None;
+    };
+    (tail_paths.is_empty() && matches!(kind, ToolKind::Read | ToolKind::Search | ToolKind::Run))
+        .then(|| {
+            let failed = result.as_ref().is_some_and(|outcome| outcome.is_error);
+            (*kind, failed, result.is_none())
+        })
+}
+
+/// A Compact run being gathered: its entries so far, what its calls did, and
+/// the thinking rows after its last call, which join it only when another
+/// call follows them.
+#[derive(Default)]
+struct OpenRun<'a> {
+    entries: Vec<&'a ChatEntry>,
+    summary: RunSummary,
+    thinking: Vec<&'a ChatEntry>,
+}
+
+impl<'a> OpenRun<'a> {
+    /// Closes the run: pushes it, then the thinking rows after its last call
+    /// on their own.
+    fn flush(&mut self, rows: &mut Vec<DisplayRow<'a>>) {
+        if !self.entries.is_empty() {
+            rows.push(DisplayRow::Run {
+                entries: std::mem::take(&mut self.entries),
+                summary: std::mem::take(&mut self.summary),
+            });
+        }
+        rows.extend(self.thinking.drain(..).map(DisplayRow::Single));
+    }
+}
+
+/// The rows a chat pane draws for `entries` in `mode`: one per entry in
+/// Comfortable; in Compact, each run of consecutive read, search and run
+/// calls (a run of one included, thinking rows between its calls folded in)
+/// becomes one [`DisplayRow::Run`], and every other entry stands alone and
+/// ends the run before it. A run counts as running only while a call has no
+/// result and no turn end or user message follows it.
+#[must_use]
+pub fn display_rows<'a>(
+    entries: impl IntoIterator<Item = &'a ChatEntry>,
+    mode: ChatMode,
+) -> Vec<DisplayRow<'a>> {
+    let mut rows = Vec::new();
+    let mut run = OpenRun::default();
+    for entry in entries {
+        if mode == ChatMode::Compact {
+            if let Some((kind, failed, running)) = run_kind(entry) {
+                run.summary.add(kind, failed, running);
+                run.entries.append(&mut run.thinking);
+                run.entries.push(entry);
+                continue;
+            }
+            if matches!(entry, ChatEntry::Thinking { .. }) && !run.entries.is_empty() {
+                run.thinking.push(entry);
+                continue;
+            }
+        }
+        run.flush(&mut rows);
+        rows.push(DisplayRow::Single(entry));
+    }
+    run.flush(&mut rows);
+    settle_finished_runs(&mut rows);
+    rows
+}
+
+/// Clears the running mark of every run a turn end or a user message comes
+/// after: that turn is over, so a call it left without a result runs no
+/// more.
+fn settle_finished_runs(rows: &mut [DisplayRow<'_>]) {
+    let mut ended = false;
+    for row in rows.iter_mut().rev() {
+        match row {
+            DisplayRow::Single(ChatEntry::TurnEnd { .. } | ChatEntry::User { .. }) => ended = true,
+            DisplayRow::Run { summary, .. } if ended => summary.running = false,
+            _ => {}
+        }
     }
 }
 
@@ -1156,6 +1417,7 @@ mod tests {
             result,
             parent_id: None,
             tail_paths: Vec::new(),
+            kind: protocol::ToolKind::Other,
         }
     }
 
@@ -2437,5 +2699,321 @@ mod strip_tests {
         assert!(ComposerNote::NotConnected.disables());
         assert!(!ComposerNote::Draft.disables());
         assert_eq!(composer_note(true, None, false), None);
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use protocol::{ChatEntry, ToolKind, ToolOutcome};
+
+    use super::{ChatLog, ChatMode, RowShape, RunSummary, display_rows};
+
+    fn answer(id: &str) -> ChatEntry {
+        ChatEntry::Answer {
+            id: id.to_owned(),
+            text: format!("answer {id}"),
+            live: false,
+        }
+    }
+
+    /// A finished call `id` of tool `name`, of `kind`.
+    fn call(id: &str, name: &str, kind: ToolKind) -> ChatEntry {
+        with_result(id, name, kind, Some(false))
+    }
+
+    /// Call `id` with no result yet (`None`), or a result that failed or not.
+    fn with_result(id: &str, name: &str, kind: ToolKind, failed: Option<bool>) -> ChatEntry {
+        ChatEntry::Tool {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            summary: format!("{name} {id}"),
+            input: "{}".to_owned(),
+            result: failed.map(|is_error| ToolOutcome {
+                text: "out".to_owned(),
+                is_error,
+            }),
+            parent_id: None,
+            tail_paths: Vec::new(),
+            kind,
+        }
+    }
+
+    fn shapes(entries: &[ChatEntry], mode: ChatMode) -> Vec<RowShape> {
+        display_rows(entries, mode)
+            .iter()
+            .map(super::DisplayRow::shape)
+            .collect()
+    }
+
+    fn entry(id: &str) -> RowShape {
+        RowShape::Entry(id.to_owned())
+    }
+
+    fn line(ids: &[&str], text: &str) -> RowShape {
+        RowShape::Run {
+            ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            line: text.to_owned(),
+            running: false,
+        }
+    }
+
+    #[test]
+    fn a_read_a_search_and_a_run_between_answers_fold_into_one_line() {
+        let entries = [
+            answer("a1"),
+            call("r1", "Read", ToolKind::Read),
+            call("g1", "Grep", ToolKind::Search),
+            call("b1", "Bash", ToolKind::Run),
+            answer("a2"),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [
+                entry("a1"),
+                line(&["r1", "g1", "b1"], "1 read \u{b7} 1 searched \u{b7} 1 ran"),
+                entry("a2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_edit_ends_a_run_and_keeps_its_card() {
+        let entries = [
+            call("r1", "Read", ToolKind::Read),
+            call("e1", "Edit", ToolKind::Other),
+            call("r2", "Read", ToolKind::Read),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [
+                line(&["r1"], "1 read"),
+                entry("e1"),
+                line(&["r2"], "1 read")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lone_run_call_is_a_line() {
+        let entries = [call("b1", "Bash", ToolKind::Run)];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [line(&["b1"], "1 ran")]
+        );
+    }
+
+    #[test]
+    fn a_call_of_unknown_kind_from_an_older_daemon_keeps_its_card() {
+        let entries = [call("r1", "Read", ToolKind::Unknown)];
+        assert_eq!(shapes(&entries, ChatMode::Compact), [entry("r1")]);
+    }
+
+    #[test]
+    fn a_failed_call_adds_the_failed_count() {
+        let entries = [
+            call("r1", "Read", ToolKind::Read),
+            with_result("r2", "Read", ToolKind::Read, Some(true)),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [line(&["r1", "r2"], "2 read \u{b7} 1 failed")]
+        );
+    }
+
+    #[test]
+    fn a_call_without_a_result_marks_its_run_running() {
+        let entries = [with_result("g1", "Grep", ToolKind::Search, None)];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [RowShape::Run {
+                ids: vec!["g1".to_owned()],
+                line: "1 searched".to_owned(),
+                running: true,
+            }]
+        );
+    }
+
+    fn thinking(id: &str) -> ChatEntry {
+        ChatEntry::Thinking {
+            id: id.to_owned(),
+            secs: Some(3),
+        }
+    }
+
+    #[test]
+    fn thinking_between_calls_stays_in_the_run() {
+        let entries = [
+            call("r1", "Read", ToolKind::Read),
+            thinking("k1"),
+            call("g1", "Grep", ToolKind::Search),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [line(&["r1", "k1", "g1"], "1 read \u{b7} 1 searched")]
+        );
+    }
+
+    #[test]
+    fn thinking_before_a_run_stays_outside() {
+        let entries = [
+            thinking("k0"),
+            call("r1", "Read", ToolKind::Read),
+            thinking("k1"),
+            call("e1", "Edit", ToolKind::Other),
+            call("r2", "Read", ToolKind::Read),
+            thinking("k2"),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [
+                entry("k0"),
+                line(&["r1"], "1 read"),
+                entry("k1"),
+                entry("e1"),
+                line(&["r2"], "1 read"),
+                entry("k2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_with_tail_paths_keeps_its_card() {
+        let mut tailing = call("b1", "Bash", ToolKind::Run);
+        if let ChatEntry::Tool { tail_paths, .. } = &mut tailing {
+            tail_paths.push("C:/work/build.log".to_owned());
+        }
+        let entries = [
+            call("r1", "Read", ToolKind::Read),
+            tailing,
+            call("r2", "Read", ToolKind::Read),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [
+                line(&["r1"], "1 read"),
+                entry("b1"),
+                line(&["r2"], "1 read")
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unanswered_call_after_turn_end_is_not_running() {
+        let unanswered = with_result("g1", "Grep", ToolKind::Search, None);
+        let turn_end = ChatEntry::TurnEnd {
+            id: "e1".to_owned(),
+            duration_ms: Some(1_000),
+        };
+        let user = ChatEntry::User {
+            id: "u1".to_owned(),
+            text: "next".to_owned(),
+            pending: false,
+        };
+        assert_eq!(
+            shapes(&[unanswered.clone(), turn_end], ChatMode::Compact),
+            [line(&["g1"], "1 searched"), entry("e1")],
+            "a turn that ended runs nothing"
+        );
+        assert_eq!(
+            shapes(
+                &[unanswered.clone(), thinking("k1"), user],
+                ChatMode::Compact
+            ),
+            [line(&["g1"], "1 searched"), entry("k1"), entry("u1")],
+            "a later message ends it too"
+        );
+        assert!(
+            matches!(
+                shapes(&[unanswered, thinking("k2")], ChatMode::Compact).first(),
+                Some(RowShape::Run { running: true, .. })
+            ),
+            "a thinking row after it is not the turn's end"
+        );
+    }
+
+    #[test]
+    fn a_subagent_task_and_its_child_call_draw_as_comfortable_does() {
+        let mut child = call("r1", "Read", ToolKind::Read);
+        if let ChatEntry::Tool { parent_id, .. } = &mut child {
+            *parent_id = Some("task1".to_owned());
+        }
+        let entries = [call("task1", "Task", ToolKind::Other), child];
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            shapes(&entries, ChatMode::Comfortable)
+        );
+        assert_eq!(
+            shapes(&entries, ChatMode::Compact),
+            [entry("task1"), entry("r1")]
+        );
+    }
+
+    #[test]
+    fn comfortable_draws_one_row_per_entry() {
+        let entries = [
+            answer("a1"),
+            call("r1", "Read", ToolKind::Read),
+            call("g1", "Grep", ToolKind::Search),
+            call("e1", "Edit", ToolKind::Other),
+            with_result("b1", "Bash", ToolKind::Run, None),
+        ];
+        assert_eq!(
+            shapes(&entries, ChatMode::Comfortable),
+            [
+                entry("a1"),
+                entry("r1"),
+                entry("g1"),
+                entry("e1"),
+                entry("b1")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_summary_lists_its_counts_in_order_and_leaves_out_zeros() {
+        let summary = RunSummary {
+            read: 1,
+            searched: 2,
+            ran: 2,
+            failed: 0,
+            running: false,
+        };
+        assert_eq!(summary.text(), "1 read \u{b7} 2 searched \u{b7} 2 ran");
+        let ran_only = RunSummary {
+            ran: 3,
+            failed: 1,
+            ..RunSummary::default()
+        };
+        assert_eq!(ran_only.text(), "3 ran \u{b7} 1 failed");
+    }
+
+    #[test]
+    fn a_run_opens_and_closes_by_its_first_call_and_a_load_closes_it() {
+        let mut log = ChatLog::default();
+        log.upsert(vec![call("r1", "Read", ToolKind::Read), answer("a1")]);
+        assert!(!log.toggle_run("a1"), "an answer is not a run");
+        assert!(!log.toggle_run("nope"), "an id the log does not hold");
+        assert!(log.toggle_run("r1"));
+        assert!(log.is_run_open("r1"));
+        log.reset(vec![call("r1", "Read", ToolKind::Read)], 0);
+        assert!(log.is_run_open("r1"), "an unasked reset keeps it open");
+        assert!(!log.toggle_run("r1"));
+        assert!(!log.is_run_open("r1"));
+        log.toggle_run("r1");
+        log.load(vec![call("r1", "Read", ToolKind::Read)], 0);
+        assert!(!log.is_run_open("r1"), "a load closes every run");
+        log.toggle_run("r1");
+        log.remove(&["r1".to_owned()]);
+        assert!(!log.is_run_open("r1"), "a removed call forgets its run");
+    }
+
+    #[test]
+    fn the_mode_names_round_trip_and_the_toggle_flips() {
+        for mode in [ChatMode::Compact, ChatMode::Comfortable] {
+            assert_eq!(ChatMode::of_name(mode.name()), Some(mode));
+            assert_eq!(mode.toggled().toggled(), mode);
+        }
+        assert_eq!(ChatMode::default(), ChatMode::Compact);
+        assert_eq!(ChatMode::of_name("dense"), None);
     }
 }

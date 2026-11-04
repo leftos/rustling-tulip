@@ -62,10 +62,10 @@ use gpui::{
 use protocol::{
     AgentCommandEntry, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab,
     ChatScreen, ClientMessage, ComposerState, DaemonMessage, GridNode, SessionSnapshot,
-    SplitDirection, StretchLine, SummarySource, ToolOutcome, WorkShell, WorkSubagent,
+    SplitDirection, StretchLine, SummarySource, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
 };
 use rustling_tulip_native::builtin_themes::DRACULA;
-use rustling_tulip_native::chat::PaneView;
+use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
 use rustling_tulip_native::connection_picker::{PeerSource, SshTestCancel, SshTester};
 use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
@@ -205,6 +205,7 @@ enum View {
     Update,
     UpdateNotes,
     Chat,
+    ChatCompact,
     Summary,
     Themes,
     ThemesEdit,
@@ -217,7 +218,7 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 26] = [
+    const ALL: [Self; 27] = [
         Self::Main,
         Self::MainCompact,
         Self::SourceControl,
@@ -235,6 +236,7 @@ impl View {
         Self::Update,
         Self::UpdateNotes,
         Self::Chat,
+        Self::ChatCompact,
         Self::Summary,
         Self::Themes,
         Self::ThemesEdit,
@@ -265,6 +267,7 @@ impl View {
             Self::Update => "update",
             Self::UpdateNotes => "update-notes",
             Self::Chat => "chat",
+            Self::ChatCompact => "chat-compact",
             Self::Summary => "summary",
             Self::Themes => "themes",
             Self::ThemesEdit => "themes-edit",
@@ -306,7 +309,7 @@ impl View {
             Self::Toast => TOAST_WINDOW_SIZE,
             Self::DashboardCompact => DASHBOARD_COMPACT_WINDOW_SIZE,
             Self::Summary => SUMMARY_WINDOW_SIZE,
-            Self::Chat => CHAT_WINDOW_SIZE,
+            Self::Chat | Self::ChatCompact => CHAT_WINDOW_SIZE,
             Self::SpawnHosts => SPAWN_HOSTS_WINDOW_SIZE,
             _ => WINDOW_SIZE,
         }
@@ -374,6 +377,15 @@ impl View {
                     && root
                         .chat_tail_lines("s-petal", FOOTER_LOG)
                         .is_some_and(|lines| lines.len() > 1)
+            }
+            // The run of read, search and run calls near the chat's end,
+            // drawn as one Compact line at its bottom.
+            Self::ChatCompact => {
+                root.pane_shows_chat("p1")
+                    && root.chat_mode() == ChatMode::Compact
+                    && root.chat_display_rows("s-petal").iter().any(
+                        |row| matches!(row, RowShape::Run { ids, .. } if ids.first().is_some_and(|id| id == "t4")),
+                    )
             }
             Self::Summary => {
                 root.pane_view("p1") == PaneView::Summary
@@ -483,6 +495,7 @@ impl Shot {
             | View::Update
             | View::UpdateNotes
             | View::Chat
+            | View::ChatCompact
             | View::Summary
             | View::Themes
             | View::ThemesEdit
@@ -1061,6 +1074,17 @@ async fn capture(
     Ok(())
 }
 
+/// Switches pane `p1` to its chat, which opens in Compact and follows its
+/// bottom.
+fn open_chat(window: &mut Window, cx: &mut App) -> Result<()> {
+    let root = window
+        .root::<RootView>()
+        .flatten()
+        .context("the window has no root view")?;
+    root.update(cx, |root, cx| root.toggle_pane_view("p1", window, cx));
+    Ok(())
+}
+
 /// Sends the input that opens `view`: a keystroke dispatched in the window,
 /// or, where no key opens it, a click posted to the window at `address`;
 /// the `viewer` view opens a viewer tab of `sample` at a line, as a link
@@ -1142,6 +1166,7 @@ fn drive(
         View::UpdateNotes => drive_update_notes(step, window, cx),
         View::SettingsDashboard => drive_settings_dashboard(step, address, window, cx),
         View::Chat if step == 2 => win32::wheel_down(address, CHAT_TAIL_POINT, CHAT_TAIL_NOTCHES),
+        View::ChatCompact => open_chat(window, cx),
         View::Chat => {
             let root = window
                 .root::<RootView>()
@@ -2042,11 +2067,15 @@ impl FakeDaemon {
     }
 }
 
-/// The `chat` shot's conversation: a row of each kind, a tool card done and
-/// one still running, a message not yet in the transcript, and a live answer,
-/// under `screen`.
-fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) -> DaemonMessage {
-    let tool = |id: &str, name: &str, summary: &str, result: Option<&str>| ChatEntry::Tool {
+/// One finished or running tool call of the `chat` shot.
+fn chat_tool(
+    id: &str,
+    name: &str,
+    kind: ToolKind,
+    summary: &str,
+    result: Option<&str>,
+) -> ChatEntry {
+    ChatEntry::Tool {
         id: id.to_owned(),
         name: name.to_owned(),
         summary: summary.to_owned(),
@@ -2057,14 +2086,62 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
         }),
         parent_id: None,
         tail_paths: Vec::new(),
-    };
+        kind,
+    }
+}
+
+/// The `chat` shot's run of read, search and run calls, a thinking row
+/// between two of them, which Compact draws as one line.
+fn footer_run() -> Vec<ChatEntry> {
+    vec![
+        chat_tool(
+            "t4",
+            "Read",
+            ToolKind::Read,
+            "apps/native/tests/ui/ui_footer.rs",
+            Some("214 lines"),
+        ),
+        ChatEntry::Thinking {
+            id: "k2".to_owned(),
+            secs: Some(4),
+        },
+        chat_tool(
+            "t5",
+            "Grep",
+            ToolKind::Search,
+            "fn pill_gap",
+            Some("3 matches"),
+        ),
+        chat_tool(
+            "t6",
+            "Glob",
+            ToolKind::Search,
+            "**/footer*.rs",
+            Some("2 files"),
+        ),
+        chat_tool(
+            "t7",
+            "Bash",
+            ToolKind::Run,
+            "git status --short",
+            Some("M footer.rs"),
+        ),
+    ]
+}
+
+/// The `chat` shot's conversation: a row of each kind, a tool card done and
+/// one still running, a run of read, search and run calls with a thinking
+/// row between two (one Compact line), a message not yet in the
+/// transcript, and a live answer, under `screen`.
+fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) -> DaemonMessage {
+    let tool = chat_tool;
     let answer = "The footer now keeps **8 px** between its \
                   {{pills|pills, the {{status chips|status, branch and model chips}} along \
                   its bottom edge}}, so it {{reads calmer|reads calmer at a glance}}:\n\n\
                   - `pill()` takes the gap from its caller\n\
                   - the colours come from `palette.rs`\n\n\
                   ```rust\nlet gap = px(8.0);\n```";
-    let entries = vec![
+    let mut entries = vec![
         ChatEntry::System {
             id: "cleared:c1".to_owned(),
             text: "Conversation cleared".to_owned(),
@@ -2078,7 +2155,7 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
             id: "k1".to_owned(),
             secs: Some(14),
         },
-        tool("t1", "Read", DIFF_PATH, Some("412 lines")),
+        tool("t1", "Read", ToolKind::Read, DIFF_PATH, Some("412 lines")),
         ChatEntry::Receipt {
             id: "r1".to_owned(),
             question: "Allow Edit on footer.rs?".to_owned(),
@@ -2087,6 +2164,7 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
         tool(
             "t2",
             "Edit",
+            ToolKind::Other,
             "footer.rs: the pill gap 6 px to 8 px",
             Some("ok"),
         ),
@@ -2112,13 +2190,15 @@ fn chat_reply(session_id: &str, request_id: Option<String>, screen: ChatScreen) 
             result: None,
             parent_id: None,
             tail_paths: vec![FOOTER_LOG.to_owned()],
-        },
-        ChatEntry::Answer {
-            id: "live:m2".to_owned(),
-            text: "Running the footer specs now.\nThe first two pass".to_owned(),
-            live: true,
+            kind: ToolKind::Run,
         },
     ];
+    entries.extend(footer_run());
+    entries.push(ChatEntry::Answer {
+        id: "live:m2".to_owned(),
+        text: "Running the footer specs now.\nThe first two pass".to_owned(),
+        live: true,
+    });
     DaemonMessage::Chat {
         session_id: session_id.to_owned(),
         entries,

@@ -2676,6 +2676,11 @@ pub enum ChatEntry {
         /// [`ClientMessage::TailFile`]. Empty for a call that names none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tail_paths: Vec<String>,
+        /// What sort of work the call does, as the agent's plugin classes
+        /// it; an entry without one (an older daemon) is [`ToolKind::Other`].
+        /// On the wire as `tool_kind`, since `kind` is the entry's own tag.
+        #[serde(default, rename = "tool_kind")]
+        kind: ToolKind,
     },
     /// A row the daemon itself wrote, such as a cleared conversation.
     System { id: String, text: String },
@@ -2704,6 +2709,21 @@ pub struct ToolOutcome {
     pub text: String,
     #[serde(default)]
     pub is_error: bool,
+}
+
+/// What sort of work a tool call does: it reads, searches, runs a command,
+/// or something else (an edit, a write, a subagent task).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Read,
+    Search,
+    Run,
+    #[default]
+    Other,
+    /// Forward-compat fallback: a kind the current build doesn't know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One line of a session's summary view: a stretch of its chat (a turn, or a
@@ -10845,6 +10865,7 @@ mod tests {
                 }),
                 parent_id: Some("a1".to_string()),
                 tail_paths: Vec::new(),
+                kind: ToolKind::Run,
             },
             ChatEntry::System {
                 id: "sys1".to_string(),
@@ -10994,6 +11015,7 @@ mod tests {
             result: None,
             parent_id: None,
             tail_paths: vec!["C:/repo/build.log".to_string()],
+            kind: ToolKind::Run,
         };
         let json = serde_json::to_string(&with).expect("encode");
         assert!(
@@ -11003,6 +11025,65 @@ mod tests {
         let back: ChatEntry = serde_json::from_str(&json).expect("decode");
         assert!(
             matches!(back, ChatEntry::Tool { tail_paths, .. } if tail_paths == ["C:/repo/build.log"])
+        );
+    }
+
+    #[test]
+    fn tool_kind_round_trips_as_tool_kind_in_snake_case() {
+        for (kind, name) in [
+            (ToolKind::Read, "read"),
+            (ToolKind::Search, "search"),
+            (ToolKind::Run, "run"),
+            (ToolKind::Other, "other"),
+        ] {
+            let entry = ChatEntry::Tool {
+                id: "t".to_string(),
+                name: "x".to_string(),
+                summary: String::new(),
+                input: String::new(),
+                result: None,
+                parent_id: None,
+                tail_paths: Vec::new(),
+                kind,
+            };
+            let json = serde_json::to_value(&entry).expect("serialize");
+            assert_eq!(json["kind"], "tool", "{json}");
+            assert_eq!(json["tool_kind"], name, "{json}");
+            let back: ChatEntry = serde_json::from_value(json).expect("deserialize");
+            assert_eq!(back, entry);
+        }
+        assert_eq!(ToolKind::default(), ToolKind::Other);
+    }
+
+    #[test]
+    fn a_tool_entry_without_a_kind_decodes_as_other() {
+        let bare = r#"{"kind":"tool","id":"t","name":"Bash","summary":"ls","input":"{}"}"#;
+        let decoded: ChatEntry = serde_json::from_str(bare).expect("absent kind decodes");
+        assert!(
+            matches!(
+                decoded,
+                ChatEntry::Tool {
+                    kind: ToolKind::Other,
+                    ..
+                }
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_tool_kind_decodes_as_unknown() {
+        let later = r#"{"kind":"tool","id":"t","name":"Bash","summary":"ls","input":"{}","tool_kind":"teleport"}"#;
+        let decoded: ChatEntry = serde_json::from_str(later).expect("an unknown kind decodes");
+        assert!(
+            matches!(
+                decoded,
+                ChatEntry::Tool {
+                    kind: ToolKind::Unknown,
+                    ..
+                }
+            ),
+            "{decoded:?}"
         );
     }
 
@@ -11403,6 +11484,7 @@ mod tests {
                 result: None,
                 parent_id: None,
                 tail_paths: Vec::new(),
+                kind: ToolKind::Read,
             },
             ChatEntry::TurnEnd {
                 id: "end2".to_string(),

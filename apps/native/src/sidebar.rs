@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 
 use crate::agent_options::{AgentOptions, descriptor_for};
 use crate::appearance::{self, AppColors, AppLevel, Resolved, ThemeBase};
-use crate::chat::PaneView;
+use crate::chat::{ChatMode, PaneView};
 use crate::connection_picker::SavedHost;
 use crate::fonts::{self, FontSettings};
 use crate::launch_last;
@@ -513,6 +513,11 @@ pub struct UiState {
     /// a new pane showing the session opens in it.
     #[serde(default)]
     pub session_views: SessionViews,
+    /// How chat panes draw tool calls, which the chat pane header's Compact
+    /// toggle switches; a file without it (v0.5.1-alpha and later releases
+    /// before it) or with a value that names no mode loads as Compact.
+    #[serde(default)]
+    pub chat_mode: ChatMode,
     /// The Dashboard tab's choices.
     #[serde(deserialize_with = "dashboard_or_default")]
     pub dashboard: DashboardSettings,
@@ -524,6 +529,27 @@ pub struct UiState {
     /// client would then announce an update that never happened.
     #[serde(default)]
     pub last_installed_version: Option<String>,
+}
+
+impl Serialize for ChatMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+/// Reads `chat_mode`, never failing the file: a value that is not
+/// `"compact"` or `"comfortable"` loads as Compact, with a warning.
+impl<'de> Deserialize<'de> for ChatMode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(mode) = value.as_str().and_then(ChatMode::of_name) {
+            return Ok(mode);
+        }
+        if !value.is_null() {
+            tracing::warn!("saved chat mode {value} names no mode; chats draw compact");
+        }
+        Ok(Self::default())
+    }
 }
 
 /// What a session's entry under `session_views` holds when its last view
@@ -1189,6 +1215,7 @@ impl Default for UiState {
             saved_hosts: Vec::new(),
             host_session_counts: BTreeMap::new(),
             session_views: SessionViews::default(),
+            chat_mode: ChatMode::default(),
             dashboard: DashboardSettings::default(),
             last_installed_version: None,
         }
@@ -2258,6 +2285,21 @@ impl SidebarModel {
     #[must_use]
     pub fn session_view(&self, host: &str, session_id: &str) -> PaneView {
         self.ui.session_views.get(host, session_id)
+    }
+
+    /// How chat panes draw tool calls.
+    #[must_use]
+    pub fn chat_mode(&self) -> ChatMode {
+        self.ui.chat_mode
+    }
+
+    /// Sets how chat panes draw tool calls; returns whether that changed it.
+    pub fn set_chat_mode(&mut self, mode: ChatMode) -> bool {
+        if self.ui.chat_mode == mode {
+            return false;
+        }
+        self.ui.chat_mode = mode;
+        true
     }
 
     /// Remembers `view` as session `session_id`'s last on host `host`;
@@ -5348,6 +5390,7 @@ pub(crate) mod tests {
                     BTreeMap::from([("s1".to_owned(), PaneView::Summary)]),
                 )]),
             },
+            chat_mode: ChatMode::Comfortable,
             last_installed_version: Some("0.8.1-alpha".to_owned()),
         };
         save_ui_state(&dir.0, &state).expect("first save");
@@ -5490,6 +5533,11 @@ pub(crate) mod tests {
         let id = ui.theme.clone().expect("the migrated theme is selected");
         assert_eq!(ui, released_values(Some(id.clone()), released_general()));
         assert_eq!(ui.terminal_font.weight, 700, "bold: true reads as Bold");
+        assert_eq!(
+            ui.chat_mode,
+            ChatMode::Compact,
+            "a file without the mode is Compact"
+        );
 
         let store = crate::theme_store::ThemeStore::new(dir.0.join(crate::theme_store::THEMES_DIR));
         assert_eq!(store.name_of(&id).as_deref(), Some("My colours"));
@@ -5638,6 +5686,38 @@ pub(crate) mod tests {
             file["popouts"][1],
             json!({ "key": { "kind": "pane", "tab_id": "t1", "pane_id": "p1" }, "window": null })
         );
+    }
+
+    #[test]
+    fn a_v0_5_1_alpha_file_without_a_chat_mode_loads_compact() {
+        let dir = TestDir::new("chat-mode-v0-5-1-alpha");
+        let ui = load_released(&dir, &v0_5_1_alpha_ui_file());
+        assert_eq!(ui.chat_mode, ChatMode::Compact);
+    }
+
+    #[test]
+    fn a_chat_mode_round_trips_and_an_unknown_one_loads_compact() {
+        let dir = TestDir::new("chat-mode");
+        let state = UiState {
+            chat_mode: ChatMode::Comfortable,
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read"))
+                .expect("JSON");
+        assert_eq!(file["chat_mode"], "comfortable");
+        assert_eq!(load_ui_state(&dir.0).chat_mode, ChatMode::Comfortable);
+        for mode in [json!("dense"), json!(3), json!(null), json!(["compact"])] {
+            let file = json!({ "sidebar_collapsed": true, "chat_mode": mode });
+            std::fs::write(dir.0.join(UI_FILE), file.to_string()).expect("write");
+            let loaded = load_ui_state(&dir.0);
+            assert!(
+                loaded.sidebar_collapsed,
+                "{mode}: the rest of the file loads"
+            );
+            assert_eq!(loaded.chat_mode, ChatMode::Compact, "{mode}");
+        }
     }
 
     #[test]

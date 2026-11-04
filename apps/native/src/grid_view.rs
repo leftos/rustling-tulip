@@ -20,7 +20,7 @@ use protocol::{
 use crate::appearance::{self, PaneFrame, Resolved, Source};
 use crate::assets::SHIELD_ICON;
 use crate::chat::PaneView;
-use crate::chat_view::{AGENT_DOWN_TIP, offers_chat, view_segment};
+use crate::chat_view::{AGENT_DOWN_TIP, COMPACT_TIP, compact_toggle, offers_chat, view_segment};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::drag::{self, DragPayload, LeafDrop, OverlayKind};
 use crate::ellipsis::{ellipsized, truncating};
@@ -2066,6 +2066,10 @@ impl RootView {
         if session.is_some_and(offers_chat) {
             let chat_up = session_id.is_some_and(|id| self.session_chat_available(id));
             buttons.insert(0, view_segments(pane_id, shown, chat_up, cx));
+            if shown == PaneView::Chat {
+                let base = header_control(pane_id, "chat-compact", "Compact", COMPACT_TIP, cx);
+                buttons.insert(1, compact_toggle(base, self.sidebar.chat_mode(), cx));
+            }
         }
         buttons
     }
@@ -2861,6 +2865,20 @@ fn header_button(
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let t = theme(cx);
+    header_control(pane_id, action, glyph, tip, cx)
+        .hover(move |style| style.bg(gpui::rgb(t.hover)).text_color(gpui::rgb(t.text)))
+}
+
+/// A pane header button, tagged `<action>-<pane>`, without a hover look:
+/// the caller sets the one it needs (gpui takes one per element).
+fn header_control(
+    pane_id: &str,
+    action: &str,
+    glyph: &'static str,
+    tip: &'static str,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let t = theme(cx);
     let name = format!("{action}-{pane_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -2877,7 +2895,6 @@ fn header_button(
         .rounded(px(HEADER_BUTTON_RADIUS))
         .text_color(gpui::rgb(t.text_2))
         .cursor_pointer()
-        .hover(move |style| style.bg(gpui::rgb(t.hover)).text_color(gpui::rgb(t.text)))
         .tooltip(tooltip(tip))
         .child(glyph)
 }

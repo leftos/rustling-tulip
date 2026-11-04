@@ -90,6 +90,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 
   Its `session_views` map holds each session's remembered pane view per host: `{"<host key>": {"<session id>": "chat" | "summary"}}`, the host key `"local"` for this PC, else the key `host_session_counts` uses; only chat and summary entries are written (a terminal is the default), a host with none is left out, and a save prunes only the connected host's ended sessions, once its session list has arrived (a missing or malformed value loads as empty, with a warning for a wrong type).
 
+  Its `chat_mode` field is the chat's density, `"compact"` or `"comfortable"`, app-level and not per session; a missing or unknown value loads as compact (an unknown one with a warning), and a click on the pane header's Compact button writes it at once.
+
   Its `unc_hosts` list (network hosts terminal links may open) is edited by hand; the client re-reads it on each click and never writes it. The native client's bundled OFL fonts live in `apps/native/assets/fonts/` (sources and versions in its README), and the large-file hook exempts them. The attribution for the built-in themes' source colour schemes is `apps/native/assets/themes/NOTICE.md`.
 
 When debugging spawn/connect/shutdown issues, both `daemon.log` and the client's log (`native.log`) together tell the full story — neither alone is enough.

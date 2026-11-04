@@ -25,9 +25,9 @@ use protocol::error_codes::{CHAT_REFUSED, INVALID_REQUEST};
 use protocol::{
     ChatAnswerKind, ChatEntry, ChatOption, ChatPrompt, ChatPromptKind, ChatQuestionTab, ChatScreen,
     ClientMessage, ComposerState, DaemonMessage, FEATURE_AGENT_COMMANDS, FEATURE_FILE_TAIL,
-    GridNode, SplitDirection, ToolOutcome, WorkShell, WorkSubagent,
+    GridNode, SplitDirection, ToolKind, ToolOutcome, WorkShell, WorkSubagent,
 };
-use rustling_tulip_native::chat::PaneView;
+use rustling_tulip_native::chat::{ChatMode, PaneView, RowShape};
 use rustling_tulip_native::target::Target;
 use rustling_tulip_native::ui_theme::UiTheme;
 use rustling_tulip_native::{Connection, NetEvent, OpenOutcome, PopoutKey};
@@ -124,6 +124,7 @@ fn tool(id: &str, result: Option<&str>) -> ChatEntry {
         }),
         parent_id: None,
         tail_paths: Vec::new(),
+        kind: ToolKind::Other,
     }
 }
 
@@ -234,6 +235,205 @@ fn an_append_updates_a_tool_card_in_place(cx: &mut TestAppContext) {
         painted(&mut h, "chat-tool-done-p1-t1"),
         "the card shows its result"
     );
+}
+
+/// A finished call `id` of tool `name` the plugin classes as `kind`, or one
+/// still running when `done` is false.
+fn kinded(id: &str, name: &str, kind: ToolKind, done: bool) -> ChatEntry {
+    ChatEntry::Tool {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        summary: format!("{name} {id}"),
+        input: "{}".to_owned(),
+        result: done.then(|| ToolOutcome {
+            text: "ok".to_owned(),
+            is_error: false,
+        }),
+        parent_id: None,
+        tail_paths: Vec::new(),
+        kind,
+    }
+}
+
+fn display_rows(h: &mut Harness<'_>) -> Vec<RowShape> {
+    h.root(|root, _| root.chat_display_rows("s1"))
+}
+
+fn run_shape(ids: &[&str], line: &str, running: bool) -> RowShape {
+    RowShape::Run {
+        ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+        line: line.to_owned(),
+        running,
+    }
+}
+
+fn saved_chat_mode(dir: &TestDir) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    let file: serde_json::Value = serde_json::from_str(&text).expect("native-ui.json is JSON");
+    file["chat_mode"].clone()
+}
+
+#[gpui::test]
+fn compact_draws_a_tool_run_as_one_line(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    assert_eq!(h.root(|root, _| root.chat_mode()), ChatMode::Compact);
+    h.send(reply(
+        Some(&id),
+        vec![
+            user("u1"),
+            kinded("r1", "Read", ToolKind::Read, true),
+            kinded("g1", "Grep", ToolKind::Search, true),
+            kinded("b1", "Bash", ToolKind::Run, false),
+            answer("a1", "Done.", false),
+        ],
+    ));
+    assert_eq!(
+        display_rows(&mut h),
+        [
+            RowShape::Entry("u1".to_owned()),
+            run_shape(
+                &["r1", "g1", "b1"],
+                "1 read \u{b7} 1 searched \u{b7} 1 ran",
+                true
+            ),
+            RowShape::Entry("a1".to_owned()),
+        ]
+    );
+    assert!(painted(&mut h, "chat-run-p1-r1"), "the run's line is drawn");
+    assert!(
+        painted(&mut h, "chat-run-running-p1-r1"),
+        "a run with a call still running says so"
+    );
+    assert!(painted(&mut h, "chat-row-p1-a1"));
+}
+
+#[gpui::test]
+fn clicking_a_run_line_shows_its_cards(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(
+        Some(&id),
+        vec![
+            kinded("r1", "Read", ToolKind::Read, true),
+            kinded("g1", "Grep", ToolKind::Search, true),
+        ],
+    ));
+    assert!(!h.root(|root, _| root.chat_run_open("s1", "r1")));
+    h.click_on("chat-run-p1-r1");
+    assert!(
+        h.root(|root, _| root.chat_run_open("s1", "r1")),
+        "the click opens the run"
+    );
+    for card in ["chat-tool-done-p1-r1", "chat-tool-done-p1-g1"] {
+        assert!(painted(&mut h, card), "{card} is drawn under the line");
+    }
+    h.click_on("chat-run-p1-r1");
+    assert!(
+        !h.root(|root, _| root.chat_run_open("s1", "r1")),
+        "a second click closes it"
+    );
+}
+
+#[gpui::test]
+fn the_compact_toggle_switches_to_one_card_per_call_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(
+        Some(&id),
+        vec![
+            kinded("r1", "Read", ToolKind::Read, true),
+            kinded("g1", "Grep", ToolKind::Search, true),
+        ],
+    ));
+    assert!(
+        painted(&mut h, "chat-compact-p1"),
+        "the header offers the toggle"
+    );
+    h.click_on("chat-compact-p1");
+    assert_eq!(h.root(|root, _| root.chat_mode()), ChatMode::Comfortable);
+    assert_eq!(
+        display_rows(&mut h),
+        [
+            RowShape::Entry("r1".to_owned()),
+            RowShape::Entry("g1".to_owned())
+        ]
+    );
+    for card in ["chat-tool-done-p1-r1", "chat-tool-done-p1-g1"] {
+        assert!(painted(&mut h, card), "{card} is drawn as its own card");
+    }
+    assert_eq!(
+        saved_chat_mode(&dir),
+        "comfortable",
+        "the switch is saved at once"
+    );
+    h.click_on("chat-compact-p1");
+    assert_eq!(h.root(|root, _| root.chat_mode()), ChatMode::Compact);
+    assert_eq!(saved_chat_mode(&dir), "compact");
+    assert_eq!(
+        display_rows(&mut h),
+        [run_shape(&["r1", "g1"], "1 read \u{b7} 1 searched", false)]
+    );
+}
+
+#[gpui::test]
+fn a_call_with_tail_paths_keeps_its_card_in_compact(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    file_tail_daemon(&mut h);
+    let mut tailing = tailing_tool("t1");
+    if let ChatEntry::Tool { kind, .. } = &mut tailing {
+        *kind = ToolKind::Run;
+    }
+    h.send(reply(
+        Some(&id),
+        vec![
+            kinded("r1", "Read", ToolKind::Read, true),
+            tailing,
+            kinded("r2", "Read", ToolKind::Read, true),
+        ],
+    ));
+    assert_eq!(
+        display_rows(&mut h),
+        [
+            run_shape(&["r1"], "1 read", false),
+            RowShape::Entry("t1".to_owned()),
+            run_shape(&["r2"], "1 read", false),
+        ]
+    );
+    assert!(
+        painted(&mut h, "chat-tool-running-p1-t1"),
+        "the call keeps its card"
+    );
+    assert!(painted(&mut h, TAIL_BUTTON), "and its Tail button");
+}
+
+#[gpui::test]
+fn an_edit_ends_a_run_and_keeps_its_card(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let (mut h, id) = opened(cx, &dir);
+    h.send(reply(
+        Some(&id),
+        vec![
+            kinded("r1", "Read", ToolKind::Read, true),
+            kinded("e1", "Edit", ToolKind::Other, true),
+            kinded("r2", "Read", ToolKind::Read, true),
+        ],
+    ));
+    assert_eq!(
+        display_rows(&mut h),
+        [
+            run_shape(&["r1"], "1 read", false),
+            RowShape::Entry("e1".to_owned()),
+            run_shape(&["r2"], "1 read", false),
+        ]
+    );
+    assert!(painted(&mut h, "chat-run-p1-r1"));
+    assert!(
+        painted(&mut h, "chat-tool-done-p1-e1"),
+        "the edit keeps its card"
+    );
+    assert!(painted(&mut h, "chat-run-p1-r2"));
 }
 
 #[gpui::test]
@@ -1947,6 +2147,7 @@ fn bash(id: &str, command: &str) -> ChatEntry {
         result: None,
         parent_id: None,
         tail_paths: Vec::new(),
+        kind: ToolKind::Other,
     }
 }
 
@@ -2325,6 +2526,7 @@ fn tailing_tool(id: &str) -> ChatEntry {
         result: None,
         parent_id: None,
         tail_paths: vec![LOG.to_owned()],
+        kind: ToolKind::Other,
     }
 }
 

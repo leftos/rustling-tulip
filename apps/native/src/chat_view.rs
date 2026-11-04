@@ -29,8 +29,8 @@ use protocol::{
 use crate::agent_options::descriptor_for;
 use crate::buttons::{ButtonSize, Layer, field_frame, outlined_button, primary_button};
 use crate::chat::{
-    self, ChatLoads, ChatLog, ComposerNote, PaneView, PaneViews, PromptStack, RunningWork,
-    SendTracker, Strip, ViewKey,
+    self, ChatLoads, ChatLog, ChatMode, ComposerNote, DisplayRow, PaneView, PaneViews, PromptStack,
+    RowShape, RunSummary, RunningWork, SendTracker, Strip, ViewKey,
 };
 use crate::chat_cards::{
     ANSWERED_ELSEWHERE, ButtonAnswer, CardKey, CardState, CardView, ComposerAction, KeyAction,
@@ -543,6 +543,8 @@ pub(crate) struct RowLook<'a> {
     /// The open Tail boxes, and each one's scroll.
     pub(crate) tails: &'a ChatTails,
     pub(crate) tail_scrolls: &'a HashMap<(String, String), ScrollHandle>,
+    /// How the chat pane draws tool calls.
+    pub(crate) mode: ChatMode,
 }
 
 /// The parts of a tool call a card draws.
@@ -1602,6 +1604,57 @@ impl RootView {
         }
     }
 
+    /// How chat panes draw tool calls.
+    #[must_use]
+    pub fn chat_mode(&self) -> ChatMode {
+        self.sidebar.chat_mode()
+    }
+
+    /// The header's Compact toggle: switches every chat pane between
+    /// Compact and Comfortable and saves the choice at once.
+    pub fn toggle_chat_mode(&mut self, cx: &mut Context<Self>) {
+        let mode = self.sidebar.chat_mode().toggled();
+        if self.sidebar.set_chat_mode(mode) {
+            self.save_ui();
+        }
+        cx.notify();
+    }
+
+    /// The rows a chat pane draws for session `session_id`'s chat in the
+    /// current mode, as plain data; none while it is not loaded.
+    #[must_use]
+    pub fn chat_display_rows(&self, session_id: &str) -> Vec<RowShape> {
+        self.chat
+            .sessions
+            .get(session_id)
+            .map(|chat| {
+                chat::display_rows(chat.log.entries(), self.sidebar.chat_mode())
+                    .iter()
+                    .map(DisplayRow::shape)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the Compact run that starts at call `first_id` of session
+    /// `session_id`'s chat is open.
+    #[must_use]
+    pub fn chat_run_open(&self, session_id: &str, first_id: &str) -> bool {
+        self.chat
+            .sessions
+            .get(session_id)
+            .is_some_and(|chat| chat.log.is_run_open(first_id))
+    }
+
+    /// A click on a Compact run's line opens it to its cards, or closes it;
+    /// every pane on the session draws it so.
+    pub fn toggle_chat_run(&mut self, session_id: &str, first_id: &str, cx: &mut Context<Self>) {
+        if let Some(chat) = self.chat.sessions.get_mut(session_id) {
+            chat.log.toggle_run(first_id);
+            cx.notify();
+        }
+    }
+
     /// The command statements tool card `tool_id` of session `session_id`'s
     /// chat lists, one per line, while it is open; none while it is folded
     /// or its tool runs no shell command.
@@ -1776,6 +1829,7 @@ impl RootView {
                 .is_some_and(|conn| conn.supports(FEATURE_FILE_TAIL)),
             tails: &self.chat.tails,
             tail_scrolls: &self.chat.tail_scrolls,
+            mode: self.sidebar.chat_mode(),
         }
     }
 
@@ -2014,11 +2068,13 @@ fn chat_column(
     if chat.log.hidden() > 0 {
         rows.push(hidden_row(look, chat.log.hidden()));
     }
-    rows.extend(
-        chat.log
-            .entries()
-            .map(|entry| chat_row(look, chat, entry, CHAT_ROW, cx)),
-    );
+    for row in chat::display_rows(chat.log.entries(), look.mode) {
+        let drawn = match row {
+            DisplayRow::Single(entry) => chat_row(look, chat, entry, CHAT_ROW, cx),
+            DisplayRow::Run { entries, summary } => run_row(look, chat, &entries, &summary, cx),
+        };
+        rows.push(drawn);
+    }
     let column = div()
         .id(ElementId::Name(SharedString::from(format!(
             "chat-scroll-{}",
@@ -2077,6 +2133,106 @@ pub(crate) fn view_segment(view: PaneView) -> (&'static str, &'static str) {
 
 /// The selector prefix of a chat pane's rows.
 const CHAT_ROW: &str = "chat-row";
+
+/// The chat pane header's Compact toggle's tooltip.
+pub(crate) const COMPACT_TIP: &str = "Fold runs of read, search and run calls into one line";
+
+/// The chat pane header's Compact toggle, `base` being the header control it
+/// is drawn on (tagged `chat-compact-<pane>`, no hover look of its own):
+/// drawn on (accent fill, on-accent text) while Compact is the mode, and
+/// still on under the pointer; off, it hovers as the header's buttons do. A
+/// click switches the mode and saves it.
+pub(crate) fn compact_toggle(
+    base: gpui::Stateful<Div>,
+    mode: ChatMode,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let t = theme(cx);
+    let on = mode == ChatMode::Compact;
+    base.w_auto()
+        .px(px(8.0))
+        .when(on, |toggle| {
+            toggle
+                .bg(gpui::rgb(t.accent))
+                .text_color(gpui::rgb(t.on_accent))
+        })
+        .hover(move |style| {
+            if on {
+                style
+                    .bg(gpui::rgb(t.accent))
+                    .text_color(gpui::rgb(t.on_accent))
+            } else {
+                style.bg(gpui::rgb(t.hover)).text_color(gpui::rgb(t.text))
+            }
+        })
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.toggle_chat_mode(cx);
+        }))
+        .into_any_element()
+}
+
+/// A Compact run of read, search and run calls: one line tagged
+/// `chat-run-<pane>-<first id>` saying what they did, with the running mark
+/// (tagged `chat-run-running-<pane>-<first id>`) while one runs; a click
+/// opens it to the calls' cards as Comfortable draws them, under the line.
+fn run_row(
+    look: &RowLook<'_>,
+    chat: &SessionChat,
+    entries: &[&ChatEntry],
+    summary: &RunSummary,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let Some(first) = entries.first().and_then(|entry| chat::entry_id(entry)) else {
+        return div().into_any_element();
+    };
+    let t = &look.theme;
+    let hover_text = t.text;
+    let open = chat.log.is_run_open(first);
+    let name = format!("chat-run-{}-{first}", look.pane_id);
+    let running = summary.running.then(|| {
+        let mark = format!("chat-run-running-{}-{first}", look.pane_id);
+        div()
+            .driver_id(|| mark)
+            .flex_none()
+            .text_color(gpui::rgb(t.working))
+            .child("running")
+    });
+    let (session_id, id) = (look.session_id.to_owned(), first.to_owned());
+    let line = div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .driver_id(|| name)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_color(gpui::rgb(t.muted))
+        .cursor_pointer()
+        .hover(move |style| style.text_color(gpui::rgb(hover_text)))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.toggle_chat_run(&session_id, &id, cx);
+        }))
+        .child(
+            div()
+                .flex_none()
+                .child(if open { "\u{25be}" } else { "\u{25b8}" }),
+        )
+        .child(div().flex_1().min_w(px(0.0)).child(summary.text()))
+        .children(running);
+    let cards: Vec<AnyElement> = if open {
+        entries
+            .iter()
+            .map(|entry| chat_row(look, chat, entry, CHAT_ROW, cx))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(ROW_GAP))
+        .child(line)
+        .children(cards)
+        .into_any_element()
+}
 
 /// One muted line centred in the chat pane.
 pub(crate) fn chat_note(offset: i8, text: &'static str, t: &UiTheme) -> Div {

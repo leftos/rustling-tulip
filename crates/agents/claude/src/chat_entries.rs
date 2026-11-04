@@ -7,7 +7,7 @@
 
 use agent_api::TranscriptLineFacts;
 use chrono::{DateTime, Utc};
-use protocol::{ChatEntry, ToolOutcome};
+use protocol::{ChatEntry, ToolKind, ToolOutcome};
 use serde_json::{Map, Value};
 
 use crate::records;
@@ -232,6 +232,7 @@ fn tool_result_entries(record: &Value, block: &Value, known: Known<'_>) -> Vec<C
         input,
         parent_id,
         tail_paths,
+        kind,
         ..
     }) = known(tool_use_id)
     else {
@@ -258,6 +259,7 @@ fn tool_result_entries(record: &Value, block: &Value, known: Known<'_>) -> Vec<C
         }),
         parent_id,
         tail_paths,
+        kind,
     };
     std::iter::once(card).chain(receipts).collect()
 }
@@ -431,7 +433,20 @@ fn tool_card(block: &Value, cwd: Option<&str>) -> Option<ChatEntry> {
         result: None,
         parent_id: None,
         tail_paths,
+        kind: tool_kind(name),
     })
+}
+
+/// What sort of work Claude's tool `name` does: reading, searching, running
+/// a command, or anything else (an edit, a write, a subagent task, an MCP
+/// tool).
+pub(crate) fn tool_kind(name: &str) -> ToolKind {
+    match name {
+        "Read" | "NotebookRead" | "WebFetch" => ToolKind::Read,
+        "Grep" | "Glob" | "LS" | "WebSearch" | "ToolSearch" => ToolKind::Search,
+        _ if Shell::of_tool(name).is_some() || name == "BashOutput" => ToolKind::Run,
+        _ => ToolKind::Other,
+    }
 }
 
 /// One line saying what a call works on: Bash's command, the path for
@@ -629,10 +644,10 @@ fn cap_chars(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, chat_entries, line_facts};
+    use super::{TOOL_INPUT_CAP, TOOL_RESULT_CAP, cap, chat_entries, line_facts, tool_kind};
     use agent_api::TranscriptLineFacts;
     use chrono::{TimeDelta, TimeZone as _, Utc};
-    use protocol::{ChatEntry, ToolOutcome};
+    use protocol::{ChatEntry, ToolKind, ToolOutcome};
     use serde_json::{Value, json};
 
     #[test]
@@ -843,6 +858,27 @@ mod tests {
             }),
             parent_id: None,
             tail_paths: Vec::new(),
+            kind: tool_kind(name),
+        }
+    }
+
+    #[test]
+    fn each_tool_name_has_its_kind_and_any_other_is_other() {
+        for (names, kind) in [
+            (&["Read", "NotebookRead", "WebFetch"][..], ToolKind::Read),
+            (
+                &["Grep", "Glob", "LS", "WebSearch", "ToolSearch"][..],
+                ToolKind::Search,
+            ),
+            (&["Bash", "PowerShell", "BashOutput"][..], ToolKind::Run),
+            (
+                &["Edit", "Write", "Task", "Agent", "mcp__godot__add_node"][..],
+                ToolKind::Other,
+            ),
+        ] {
+            for name in names {
+                assert_eq!(tool_kind(name), kind, "{name}");
+            }
         }
     }
 
@@ -1020,6 +1056,37 @@ mod tests {
         let updated = chat_entries(&result, &known);
         assert!(
             matches!(updated.as_slice(), [ChatEntry::Tool { tail_paths, result: Some(_), .. }] if *tail_paths == expected),
+            "{updated:?}"
+        );
+    }
+
+    #[test]
+    fn a_result_keeps_the_kind_its_card_was_given() {
+        let card = ChatEntry::Tool {
+            id: "toolu_k".to_owned(),
+            name: "Read".to_owned(),
+            summary: "a.rs".to_owned(),
+            input: "{}".to_owned(),
+            result: None,
+            parent_id: None,
+            tail_paths: Vec::new(),
+            kind: ToolKind::Search,
+        };
+        let result = json!({"type": "user", "uuid": "v", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_k", "content": "ok"}
+        ]}})
+        .to_string();
+        let known = move |id: &str| (id == "toolu_k").then(|| card.clone());
+        let updated = chat_entries(&result, &known);
+        assert!(
+            matches!(
+                updated.as_slice(),
+                [ChatEntry::Tool {
+                    kind: ToolKind::Search,
+                    result: Some(_),
+                    ..
+                }]
+            ),
             "{updated:?}"
         );
     }
