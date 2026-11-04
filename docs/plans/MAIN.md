@@ -36,9 +36,11 @@
 - [ ] RT-694 Keep the footer from clipping in a narrow window and clear a stale not-found status
 - [ ] RT-699 Keep the terminal link tip off dialogs and the link, and name Cmd on macOS
 - [ ] RT-844 Choose the default shell in Settings, with installed shells and a custom command · release vNext
-  - [ ] RT-851 Default shell: daemon setting, detection and protocol (DS.1) · release vNext
   - [ ] RT-852 Default shell: native Settings row (DS.2) · release vNext
   - [ ] RT-853 Default shell: host agent sessions in WSL, Nushell and fish (DS.3) · release vNext
+- [ ] RT-918 Split the agent launch command by Windows rules on Windows, so backslash paths survive
+- [ ] RT-921 Default shell: move the save check off the runtime, and detect WSL that is really installed
+- [ ] RT-929 Highlight a terminal path that wraps under the cui theme or holds spaces (C:\Program Files\...) · release vNext
 
 ## Wave 2b — Hook status
 
@@ -97,14 +99,8 @@
 - [ ] RT-540 Make a one-shot ssh bridge call return after it starts the host's daemon
 - [ ] RT-879 Open a remote session's browser requests on the client's machine
 - [ ] RT-896 Name the skipped folders in a fetched folder's done toast
-- [ ] RT-897 Polish the folder fetch toast · release vNext
-  - [ ] RT-898 Keep a folder fetch's progress moving after its last chunk · release vNext
-  - [ ] RT-899 Keep a closed folder fetch toast closed · release vNext
-  - [ ] RT-900 Show that Cancel can't stop a finishing folder fetch · release vNext
-  - [ ] RT-901 Say the worktree is gone when a root link stats missing · release vNext
-  - [ ] RT-902 Show a toast while a link's readings are being statted · release vNext
-  - [ ] RT-904 Name an SSH host as the user named it in fetch toasts · release vNext
 - [ ] RT-903 Stop a root folder fetch from deleting other worktrees' fetched copies
+- [ ] RT-923 Folder fetch link toasts: dismiss the early toast on a lost connection, and say not-on-host only for Missing
 
 ## Wave 7 — Pop-out windows
 
@@ -161,8 +157,18 @@
 
 ## Wave 12 — Claude accounts and artifacts by account
 
-- [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap · release vNext
-- [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching · release vNext
+- [ ] RT-39 Built-in Claude account switching: several logins, usage polling and switching · release vNext
+  - [ ] RT-909 Accounts: connection origin and the read-only protocol messages (CA.1, CA.5 read half) · release vNext
+  - [ ] RT-910 Accounts: usage poller, snapshot and drain (CA.4) · release vNext
+  - [ ] RT-911 Accounts: manual switch, add current login and the admin messages (CA.5 write half, CA.6) · release vNext
+  - [ ] RT-912 Accounts: auto-switch driver (CA.9) · release vNext
+  - [ ] RT-913 Accounts: footer chip and popover (CA.7) · release vNext
+  - [ ] RT-914 Accounts: Settings > Accounts page and toasts (CA.8, CA.10) · release vNext
+  - [ ] RT-915 Accounts: daemon-driven login and the docs (CA.11, CA.12) · release vNext
+  - [ ] RT-916 Accounts on macOS: Unix locks and the Keychain credential in the forked claude-accounts crate · release vNext
+  - [ ] RT-919 Accounts: store writers, the daemon's accounts dir and transports (CA.0, CA.3) · release vNext
+  - [ ] RT-924 Merge feat/claude-accounts to main (#205)
+  - [ ] RT-927 Scrub ops-tower from the forked claude-accounts crate: own seal identifiers, names and docs · release vNext
 - [ ] RT-112 PW.13: Accounts screen on the phone
 - [ ] RT-113 Open Claude artifact links in the account that published them
 - [ ] RT-115 Host-approved extra roots for file fetch
@@ -170,8 +176,8 @@
 
 ## Wave 13 — ops-tower views: gates, board and dock
 
-- [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates
-- [ ] RT-55 Gate dashboard in the client
+- [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates · release vNext
+- [ ] RT-55 Gate dashboard in the client · release vNext
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-159 Corner status window: Needs you, Just finished and a Working ticker
 
@@ -275,10 +281,9 @@
   - [ ] RT-246 Compile-check the macOS and Linux autostart modules, and decide --detach for the LaunchAgent · release vNext
   - [ ] RT-666 Auto-update the macOS client: platform asset in the feed and an .app swap · release vNext
   - [ ] RT-667 Build and publish the macOS release assets from docs/release.md, with macOS install steps in the README · release vNext
-  - [ ] RT-905 Set up the Mac mini builder and a macOS dev loop (build, test, clippy over SSH) · release vNext
   - [ ] RT-906 Port the native client to macOS: build, launch and run sessions on the Mac mini · release vNext
-- [ ] RT-860 Check the listener's owner before killing a retired daemon off Windows · release vNext
-- [ ] RT-890 Close folder fetch's Unix open races before the macOS build · release vNext
+- [ ] RT-925 macOS: check that a case-differing cached folder name doesn't make folder fetch refuse an inside file
+- [ ] RT-926 Unix daemon stop: wait once on a refused owner check, and name a failed owner lookup
 
 ## Agent CLIs
 
@@ -458,16 +463,17 @@
 - [ ] RT-893 Stop FetchFile's refusal from revealing whether an outside path exists and where a link points
 - [ ] RT-894 Compute Settings search hits once per query change, not on every frame
 - [ ] RT-895 Bound StatPath work per connection and resolve a fetch's canonical root once
+- [ ] RT-928 Disable ops-tower on the owner's PC once the daemon replicates it · release vNext
 
 ## Design files
 
-- [accounts.md](accounts.md) — RT-66, RT-277
+- [accounts.md](accounts.md) — RT-39, RT-277, RT-909, RT-910, RT-911, RT-912, RT-913, RT-914, RT-915, RT-919
 - [agent-cli-update.md](agent-cli-update.md) — RT-277
 - [agent-cli.md](agent-cli.md) — RT-53
 - [agent-harnesses.md](agent-harnesses.md) — RT-49, RT-214, RT-215, RT-216, RT-217, RT-853
 - [agent-skill-pack.md](agent-skill-pack.md) — RT-277
 - [dashboard.md](dashboard.md) — RT-28, RT-423, RT-453, RT-488, RT-499, RT-501, RT-502, RT-721, RT-725, RT-732, RT-733, RT-734, RT-735, RT-736, RT-737, RT-738, RT-739, RT-760, RT-779, RT-789, RT-858
-- [default-shell.md](default-shell.md) — RT-844, RT-851, RT-852, RT-853
+- [default-shell.md](default-shell.md) — RT-844, RT-852, RT-853
 - [dictation.md](dictation.md) — RT-76, RT-77, RT-78, RT-79, RT-81, RT-82, RT-83, RT-277
 - [dispatch-follow.md](dispatch-follow.md) — RT-167
 - [elevated-daemon.md](elevated-daemon.md) — RT-785, RT-786, RT-787, RT-867, RT-868, RT-869
@@ -476,12 +482,12 @@
 - [headless-drive.md](headless-drive.md) — RT-324
 - [hook-status.md](hook-status.md) — RT-277, Wave 2 — Daily driver: close the port's gaps, Wave 2b — Hook status
 - [linear-links.md](linear-links.md) — RT-133, RT-134, RT-135, RT-136, RT-137, RT-138, RT-139, RT-140, RT-141, RT-142
-- [macos-compat.md](macos-compat.md) — RT-665, RT-905, RT-906
+- [macos-compat.md](macos-compat.md) — RT-665, RT-906
 - [mobile-app.md](mobile-app.md) — RT-83, RT-104, RT-106, RT-108, RT-109, RT-112, RT-142, RT-363, RT-364, RT-365, RT-366, RT-367, RT-368, RT-369, RT-370, RT-881, Wave 4 — Mobile app (iPhone PWA over Tailscale)
 - [native-client-parity.md](native-client-parity.md) — Wave 2 — Daily driver: close the port's gaps
 - [native-client.md](native-client.md) — Wave 2 — Daily driver: close the port's gaps, Wave 7 — Pop-out windows
 - [needs-you.md](needs-you.md) — RT-277, RT-423
-- [off-orca.md](off-orca.md) — RT-66, RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-101, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
+- [off-orca.md](off-orca.md) — RT-85, RT-87, RT-88, RT-89, RT-90, RT-91, RT-92, RT-93, RT-97, RT-98, RT-99, RT-100, RT-101, RT-102, RT-106, RT-110, RT-113, RT-114, RT-115, RT-119, RT-120, RT-121, RT-122, RT-123, RT-124, RT-125, Wave 13 — ops-tower views: gates, board and dock, Wave 2 — Daily driver: close the port's gaps, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 5 — Attention feed on the desktop, Wave 6 — Remote enhancements, Wave 8 — Chat mirror and phone session views
 - [remote-access.md](remote-access.md) — RT-686, Wave 4 — Mobile app (iPhone PWA over Tailscale), Wave 6 — Remote enhancements
 - [screen-status.md](screen-status.md) — RT-289, RT-754
 - [ssh-remote.md](ssh-remote.md) — RT-536, RT-686, RT-792
