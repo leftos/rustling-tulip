@@ -242,7 +242,8 @@ impl RootView {
     }
 
     /// Button `action` on toast `id`: a preset job's goes to its registry,
-    /// and the installed update's What's new opens its changelog.
+    /// the installed update's What's new opens its changelog, and a folder
+    /// fetch's Cancel stops it.
     fn press_toast_action(
         &mut self,
         id: u64,
@@ -269,6 +270,16 @@ impl RootView {
                 self.whats_new_installed(window, cx);
             } else {
                 self.open_in_main_window(cx, Self::whats_new_installed);
+            }
+        } else if action == crate::file_fetch_view::FETCH_CANCEL.id
+            && self
+                .fetches
+                .get(&key)
+                .is_some_and(crate::file_fetch::FetchEntry::is_folder)
+        {
+            // A finishing fetch is not cancelled, and its toast stays.
+            if self.cancel_fetch(&key) {
+                self.dismiss_toast_key(&key, cx);
             }
         }
     }

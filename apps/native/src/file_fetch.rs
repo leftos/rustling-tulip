@@ -6,9 +6,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
+
+use crate::folder_unpack::Announced;
 
 use crate::html_media::{
     MAX_MEDIA_BATCH_BYTES, MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE, MEDIA_FETCHES_IN_FLIGHT,
@@ -148,6 +152,17 @@ pub fn file_name(rel: &str) -> &str {
     rel.rsplit(['/', '\\']).next().unwrap_or(rel)
 }
 
+/// The name a fetch of `request` goes by: its path's last segment, or its
+/// repo's name for the root itself.
+#[must_use]
+pub fn fetch_name(request: &FetchRequest) -> &str {
+    if request.rel_path.is_empty() {
+        &request.repo_name
+    } else {
+        file_name(&request.rel_path)
+    }
+}
+
 /// `rel`'s segments made safe; refuses an empty path, a leading separator,
 /// a drive prefix, and an empty, `.` or `..` segment.
 pub(crate) fn rel_segments(rel: &str) -> Result<Vec<String>, String> {
@@ -193,6 +208,26 @@ pub fn download_path(
         .join(sanitize_segment(repo_name));
     path.extend(segments);
     Ok(path)
+}
+
+/// Where the folder `rel` of the repo `repo_name` on `host` lands:
+/// `<root>/<host>/<repo-name>` for the root itself (`rel` empty), else
+/// [`download_path`]'s place.
+///
+/// # Errors
+/// Why a non-empty `rel` is refused, as [`download_path`] refuses it.
+pub fn folder_download_path(
+    root: &Path,
+    host: &str,
+    repo_name: &str,
+    rel: &str,
+) -> Result<PathBuf, String> {
+    if rel.is_empty() {
+        return Ok(root
+            .join(sanitize_segment(host))
+            .join(sanitize_segment(repo_name)));
+    }
+    download_path(root, host, repo_name, rel)
 }
 
 /// The part file the fetch `id` writes `target` into: hidden, beside it,
@@ -267,6 +302,25 @@ pub enum WriteOutcome {
     Aborted,
     /// Why the file was not saved; a part file this writer made is deleted.
     Failed(String),
+}
+
+/// The channel to a fetch's writer: a file's writer task, or a folder's
+/// unpacker thread.
+#[derive(Debug)]
+pub enum Writer {
+    File(UnboundedSender<WriteStep>),
+    Folder(std::sync::mpsc::Sender<WriteStep>),
+}
+
+impl Writer {
+    /// Hands `step` to the writer; `false` when it already ended.
+    #[must_use]
+    pub fn send(&self, step: WriteStep) -> bool {
+        match self {
+            Self::File(sender) => sender.unbounded_send(step).is_ok(),
+            Self::Folder(sender) => sender.send(step).is_ok(),
+        }
+    }
 }
 
 /// A part file this fetch made itself, so deleting it never removes a file
@@ -571,7 +625,9 @@ pub struct FetchEntry {
     size: Option<u64>,
     bytes_received: u64,
     resolved_path: Option<String>,
-    writer: Option<UnboundedSender<WriteStep>>,
+    writer: Option<Writer>,
+    /// A file, or a folder with what its host announced and unpacked.
+    kind: EntryKind,
     /// `Done` went to the writer, whose result now decides how it ends.
     finishing: bool,
     /// The link's other readings, when this fetch is one of them.
@@ -586,6 +642,21 @@ pub struct FetchEntry {
     /// The connection closed while this fetch was finishing: it still
     /// saves, but nothing more is asked of the host for it.
     connection_lost: bool,
+}
+
+/// What a fetch brings over.
+#[derive(Debug)]
+enum EntryKind {
+    File,
+    /// A folder, streamed as an archive and unpacked as it arrives.
+    Folder {
+        /// The files and bytes the host announced, once it started.
+        announced: Option<Announced>,
+        /// The bytes unpacked so far, which the unpacker thread stores.
+        unpacked: Arc<AtomicU64>,
+        /// The progress text the folder's toast last showed.
+        shown: String,
+    },
 }
 
 /// `target` as the key two fetches collide on: case-insensitive where the
@@ -613,6 +684,7 @@ impl FetchEntry {
             bytes_received: 0,
             resolved_path: None,
             writer: None,
+            kind: EntryKind::File,
             finishing: false,
             group: None,
             popup: false,
@@ -707,15 +779,80 @@ impl FetchEntry {
         &self.target
     }
 
-    /// The file's size the daemon reported; `None` until it started.
+    /// The file's size the daemon reported, or the bytes a folder's host
+    /// announced; `None` until it started.
     #[must_use]
     pub fn size(&self) -> Option<u64> {
         self.size
     }
 
+    /// The bytes received of a file, or the bytes unpacked of a folder.
     #[must_use]
     pub fn bytes_received(&self) -> u64 {
-        self.bytes_received
+        match &self.kind {
+            EntryKind::File => self.bytes_received,
+            EntryKind::Folder { unpacked, .. } => unpacked.load(Ordering::Relaxed),
+        }
+    }
+
+    /// This fetch as a folder's, unpacked as it arrives.
+    #[must_use]
+    pub fn for_folder(mut self) -> Self {
+        self.kind = EntryKind::Folder {
+            announced: None,
+            unpacked: Arc::new(AtomicU64::new(0)),
+            shown: String::new(),
+        };
+        self
+    }
+
+    /// Whether this fetch brings over a folder.
+    #[must_use]
+    pub fn is_folder(&self) -> bool {
+        matches!(self.kind, EntryKind::Folder { .. })
+    }
+
+    /// The files and bytes a folder's host announced, once it started.
+    #[must_use]
+    pub(crate) fn announced(&self) -> Option<Announced> {
+        match &self.kind {
+            EntryKind::File => None,
+            EntryKind::Folder { announced, .. } => *announced,
+        }
+    }
+
+    /// The count of a folder's unpacked bytes, for its unpacker to store.
+    #[must_use]
+    pub fn unpacked_counter(&self) -> Option<Arc<AtomicU64>> {
+        match &self.kind {
+            EntryKind::File => None,
+            EntryKind::Folder { unpacked, .. } => Some(Arc::clone(unpacked)),
+        }
+    }
+
+    /// A folder's host started it, announcing `announced` at
+    /// `resolved_path`.
+    pub(crate) fn on_folder_started(&mut self, announced: Announced, resolved_path: String) {
+        self.size = Some(announced.bytes);
+        self.resolved_path = Some(resolved_path);
+        if let EntryKind::Folder {
+            announced: slot, ..
+        } = &mut self.kind
+        {
+            *slot = Some(announced);
+        }
+    }
+
+    /// Records `text` as the folder's shown progress; `true` when it
+    /// differs from the last one shown.
+    pub fn note_progress(&mut self, text: &str) -> bool {
+        match &mut self.kind {
+            EntryKind::Folder { shown, .. } if shown != text => {
+                text.clone_into(shown);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The host's canonical path of the file, as the daemon sent it.
@@ -724,10 +861,10 @@ impl FetchEntry {
         self.resolved_path.as_deref()
     }
 
-    /// The fetched file's name.
+    /// The fetched file's or folder's name; the repo's for its root.
     #[must_use]
     pub fn file_name(&self) -> &str {
-        file_name(&self.request.rel_path)
+        fetch_name(&self.request)
     }
 
     pub fn on_started(&mut self, size: u64, resolved_path: String) {
@@ -741,22 +878,76 @@ impl FetchEntry {
 
     /// The channel to the fetch's writer, once the transfer started.
     #[must_use]
-    pub fn writer(&self) -> Option<&UnboundedSender<WriteStep>> {
+    pub fn writer(&self) -> Option<&Writer> {
         self.writer.as_ref()
     }
 
-    pub fn set_writer(&mut self, writer: UnboundedSender<WriteStep>) {
+    pub fn set_writer(&mut self, writer: Writer) {
         self.writer = Some(writer);
     }
 
     fn same_target(&self, other: &Self) -> bool {
         target_key(&self.target) == target_key(&other.target)
     }
+
+    /// Whether this fetch and `other` would write into each other: the
+    /// same target, or, when either is a folder, one target inside the
+    /// other, compared segment by segment.
+    fn overlaps(&self, other: &Self) -> bool {
+        if self.same_target(other) {
+            return true;
+        }
+        if !(self.is_folder() || other.is_folder()) {
+            return false;
+        }
+        let mine = PathBuf::from(target_key(&self.target));
+        let theirs = PathBuf::from(target_key(&other.target));
+        mine.starts_with(&theirs) || theirs.starts_with(&mine)
+    }
 }
 
-/// A fetch was refused: the same file is already being fetched.
+/// A fetch was refused: the same file is already being fetched, or a
+/// folder holding it or inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AlreadyFetching;
+
+/// A link's readings, asked of the host one at a time for what each names
+/// before any is fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingStat {
+    host: HostKey,
+    /// Every reading of the link, in order; never empty.
+    readings: Vec<FetchRequest>,
+    /// The index in `readings` of the one the host is asked about now.
+    at: usize,
+}
+
+impl PendingStat {
+    /// The host the link's pane is on.
+    #[must_use]
+    pub fn host(&self) -> &HostKey {
+        &self.host
+    }
+
+    /// The reading the host is asked about now.
+    #[must_use]
+    pub fn reading(&self) -> &FetchRequest {
+        // `at` stays below the length, which is never zero.
+        &self.readings[self.at]
+    }
+
+    /// The readings still to ask about after [`Self::reading`], in order.
+    #[must_use]
+    pub fn rest(&self) -> &[FetchRequest] {
+        self.readings.get(self.at + 1..).unwrap_or_default()
+    }
+
+    /// Every reading of the link, in order.
+    #[must_use]
+    pub fn readings(&self) -> &[FetchRequest] {
+        &self.readings
+    }
+}
 
 /// The fetches in flight, by id.
 #[derive(Debug)]
@@ -766,7 +957,9 @@ pub struct FetchRegistry {
     launch: String,
     next_id: u64,
     next_group: u64,
+    next_stat: u64,
     entries: HashMap<String, FetchEntry>,
+    stats: HashMap<String, PendingStat>,
 }
 
 impl FetchRegistry {
@@ -778,8 +971,63 @@ impl FetchRegistry {
             launch: launch.to_owned(),
             next_id: 0,
             next_group: 0,
+            next_stat: 0,
             entries: HashMap::new(),
+            stats: HashMap::new(),
         }
+    }
+
+    /// Records a stat of `readings` from `host` under a new id and returns
+    /// it with the first reading to ask about; `None` when there is none.
+    pub fn begin_stat(
+        &mut self,
+        host: HostKey,
+        readings: Vec<FetchRequest>,
+    ) -> Option<(String, FetchRequest)> {
+        let reading = readings.first()?.clone();
+        self.next_stat += 1;
+        let id = format!("stat-{}-{}", self.launch, self.next_stat);
+        self.stats.insert(
+            id.clone(),
+            PendingStat {
+                host,
+                readings,
+                at: 0,
+            },
+        );
+        Some((id, reading))
+    }
+
+    /// Whether `id` is a stat waiting on its answer.
+    #[cfg(test)]
+    #[must_use]
+    pub fn is_stat(&self, id: &str) -> bool {
+        self.stats.contains_key(id)
+    }
+
+    #[must_use]
+    pub fn get_stat(&self, id: &str) -> Option<&PendingStat> {
+        self.stats.get(id)
+    }
+
+    /// The stat `id`'s reading is not on the host: moves on to the next
+    /// reading and returns it, or `None`, leaving the stat in place, when
+    /// none is left.
+    pub fn next_stat(&mut self, id: &str) -> Option<FetchRequest> {
+        let stat = self.stats.get_mut(id)?;
+        let next = stat.readings.get(stat.at + 1)?.clone();
+        stat.at += 1;
+        Some(next)
+    }
+
+    /// Ends the stat `id`, returning it.
+    pub fn take_stat(&mut self, id: &str) -> Option<PendingStat> {
+        self.stats.remove(id)
+    }
+
+    /// Drops every stat from `host`.
+    pub fn drop_stats_of(&mut self, host: &HostKey) {
+        self.stats.retain(|_, stat| stat.host != *host);
     }
 
     /// A new probe group whose readings after the first are `rest`.
@@ -808,12 +1056,13 @@ impl FetchRegistry {
     }
 
     /// Records `entry` under a new id, unless a fetch to the same target
-    /// path is in flight.
+    /// path is in flight, or, when either is a folder, one whose target is
+    /// inside the other's.
     ///
     /// # Errors
     /// [`AlreadyFetching`] when it is.
     pub fn insert(&mut self, entry: FetchEntry) -> Result<String, AlreadyFetching> {
-        if self.entries.values().any(|other| other.same_target(&entry)) {
+        if self.entries.values().any(|other| other.overlaps(&entry)) {
             return Err(AlreadyFetching);
         }
         self.next_id += 1;
@@ -973,14 +1222,16 @@ impl FetchRegistry {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::Ordering;
 
     use futures::channel::mpsc::unbounded;
 
     use super::{
-        FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd, WriteOutcome, WriteStep,
-        display_host_path, download_path, host_folder, is_under, part_path, run_writer,
-        sanitize_segment,
+        AlreadyFetching, FetchEntry, FetchRegistry, FetchRequest, MediaBatch, MediaEnd,
+        WriteOutcome, WriteStep, display_host_path, download_path, folder_download_path,
+        host_folder, is_under, part_path, run_writer, sanitize_segment,
     };
+    use crate::folder_unpack::Announced;
     use crate::html_media::{MAX_MEDIA_FILE_BYTES, MAX_MEDIA_PER_PAGE};
     use crate::target::{HostKey, Target};
     use crate::temp_dir::TempDir;
@@ -1253,6 +1504,225 @@ mod tests {
         };
         let target = download_path(Path::new("root"), host, "repo", rel).expect("a valid path");
         FetchEntry::new(HostKey::Local, host.to_owned(), request, target)
+    }
+
+    /// A link's reading of `rel` in the repo `r1`.
+    fn reading(rel: &str) -> FetchRequest {
+        FetchRequest {
+            host: HostKey::Local,
+            repo_id: "r1".to_owned(),
+            repo_name: "repo".to_owned(),
+            worktree_path: Some("C:/wt/x".to_owned()),
+            rel_path: rel.to_owned(),
+            line: None,
+            column: None,
+            open_when_done: true,
+            prefer_viewer: false,
+        }
+    }
+
+    #[test]
+    fn folder_download_path_of_the_root_is_the_repo_folder() {
+        let root = Path::new("root");
+        assert_eq!(
+            folder_download_path(root, "Box:1", "my repo", "").expect("the root is a folder"),
+            root.join("Box_1").join("my repo"),
+            "the host and repo names are made safe"
+        );
+        assert!(
+            download_path(root, "host", "repo", "").is_err(),
+            "a file is never fetched from an empty path"
+        );
+    }
+
+    #[test]
+    fn folder_download_path_below_the_root_is_download_path() {
+        let root = Path::new("root");
+        for rel in ["src", "src/ui", r"docs\api"] {
+            assert_eq!(
+                folder_download_path(root, "host", "repo", rel),
+                download_path(root, "host", "repo", rel),
+                "{rel}"
+            );
+        }
+        for refused in ["/abs", "C:/x", "a/../b", "a//b"] {
+            assert!(
+                folder_download_path(root, "host", "repo", refused).is_err(),
+                "{refused} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_entry_reports_unpacked_bytes_and_announced_size() {
+        assert!(!entry("host", "a.txt").is_folder());
+        let mut folder = entry("host", "src").for_folder();
+        assert!(folder.is_folder());
+        assert_eq!(folder.size(), None, "not started");
+        assert_eq!(folder.file_name(), "src");
+
+        folder.on_folder_started(
+            Announced {
+                files: 3,
+                bytes: 4096,
+            },
+            "C:/wt/x/src".to_owned(),
+        );
+        folder.on_chunk(700);
+        assert_eq!(folder.size(), Some(4096), "the announced bytes");
+        assert_eq!(
+            folder.announced(),
+            Some(Announced {
+                files: 3,
+                bytes: 4096
+            })
+        );
+        assert_eq!(folder.resolved_path(), Some("C:/wt/x/src"));
+        assert_eq!(
+            folder.bytes_received(),
+            0,
+            "compressed bytes are not progress"
+        );
+        folder
+            .unpacked_counter()
+            .expect("a folder counts what it unpacked")
+            .store(1000, Ordering::Relaxed);
+        assert_eq!(folder.bytes_received(), 1000, "the unpacked bytes");
+
+        let target = folder_download_path(Path::new("root"), "host", "repo", "").expect("root");
+        let whole =
+            FetchEntry::new(HostKey::Local, "host".to_owned(), reading(""), target).for_folder();
+        assert_eq!(
+            whole.file_name(),
+            "repo",
+            "the root folder is named by its repo"
+        );
+    }
+
+    #[test]
+    fn a_folder_fetch_is_refused_while_a_fetch_inside_it_runs() {
+        let mut registry = FetchRegistry::new("t");
+        registry
+            .insert(entry("host", "src/ui/a.txt"))
+            .expect("the file starts");
+        assert_eq!(
+            registry.insert(entry("host", "src").for_folder()),
+            Err(AlreadyFetching),
+            "the folder's swap would delete the file's part"
+        );
+    }
+
+    #[test]
+    fn a_fetch_inside_a_fetching_folder_is_refused() {
+        let mut registry = FetchRegistry::new("t");
+        registry
+            .insert(entry("host", "src").for_folder())
+            .expect("the folder starts");
+        assert_eq!(
+            registry.insert(entry("host", r"src\ui\a.txt")),
+            Err(AlreadyFetching),
+            "a file inside it"
+        );
+        assert_eq!(
+            registry.insert(entry("host", "src").for_folder()),
+            Err(AlreadyFetching),
+            "the same folder"
+        );
+    }
+
+    #[test]
+    fn nested_folder_fetches_are_refused() {
+        let mut inner_first = FetchRegistry::new("t");
+        inner_first
+            .insert(entry("host", "src/ui").for_folder())
+            .expect("the inner folder starts");
+        assert_eq!(
+            inner_first.insert(entry("host", "src").for_folder()),
+            Err(AlreadyFetching),
+            "a folder around a running one"
+        );
+
+        let mut outer_first = FetchRegistry::new("t");
+        outer_first
+            .insert(entry("host", "src").for_folder())
+            .expect("the outer folder starts");
+        assert_eq!(
+            outer_first.insert(entry("host", "src/ui").for_folder()),
+            Err(AlreadyFetching),
+            "a folder inside a running one"
+        );
+    }
+
+    #[test]
+    fn a_sibling_with_a_shared_prefix_is_not_refused() {
+        let mut registry = FetchRegistry::new("t");
+        registry
+            .insert(entry("host", "src").for_folder())
+            .expect("the folder starts");
+        registry
+            .insert(entry("host", "src2").for_folder())
+            .expect("src2 is not inside src");
+        registry
+            .insert(entry("host", "src2.txt"))
+            .expect("nor is src2.txt");
+        registry
+            .insert(entry("other", "src/a.txt"))
+            .expect("another host's folder is another folder");
+    }
+
+    #[test]
+    fn two_files_in_one_folder_both_fetch() {
+        let mut registry = FetchRegistry::new("t");
+        registry
+            .insert(entry("host", "src/a.txt"))
+            .expect("the first file starts");
+        registry
+            .insert(entry("host", "src/b.txt"))
+            .expect("the second file starts");
+        assert_eq!(
+            registry.insert(entry("host", "src/a.txt")),
+            Err(AlreadyFetching),
+            "the same file is still refused"
+        );
+    }
+
+    #[test]
+    fn a_pending_stat_hands_out_readings_in_order() {
+        let mut registry = FetchRegistry::new("t");
+        assert!(
+            registry.begin_stat(HostKey::Local, Vec::new()).is_none(),
+            "no reading, nothing to stat"
+        );
+        let readings = vec![reading("sub/src"), reading("src"), reading("")];
+        let (id, first) = registry
+            .begin_stat(HostKey::Local, readings.clone())
+            .expect("a reading to stat");
+        assert!(id.starts_with("stat-t-"), "{id}");
+        assert_eq!(first, readings[0]);
+        assert!(registry.is_stat(&id));
+        assert!(!registry.is_stat("stat-t-99"));
+
+        assert_eq!(registry.next_stat(&id), Some(readings[1].clone()));
+        let stat = registry.get_stat(&id).expect("still pending");
+        assert_eq!(stat.reading(), &readings[1]);
+        assert_eq!(stat.rest().iter().collect::<Vec<_>>(), [&readings[2]]);
+        assert_eq!(registry.next_stat(&id), Some(readings[2].clone()));
+        assert_eq!(registry.next_stat(&id), None, "every reading was statted");
+
+        let taken = registry.take_stat(&id).expect("still pending");
+        assert_eq!(taken.readings(), readings.as_slice(), "the original list");
+        assert_eq!(taken.host(), &HostKey::Local);
+        assert!(registry.take_stat(&id).is_none(), "taken once");
+
+        let (other, _) = registry
+            .begin_stat(HostKey::Local, readings)
+            .expect("a reading to stat");
+        assert_ne!(other, id, "each stat has its own id");
+        registry.drop_stats_of(&HostKey::Local);
+        assert!(
+            !registry.is_stat(&other),
+            "a closed host's stats are dropped"
+        );
     }
 
     #[test]

@@ -3,23 +3,26 @@
 //! went, and opening the saved copy.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use base64::Engine as _;
 use futures::channel::mpsc::unbounded;
 use gpui::{Context, Window};
-use protocol::{ClientMessage, DaemonMessage};
+use protocol::{ClientMessage, DaemonMessage, PathKind};
 
 use crate::RootView;
 use crate::fetch_link;
 use crate::file_fetch::{
-    self, FetchEntry, FetchRequest, MediaEnd, ProbeGroup, WriteOutcome, WriteStep,
+    self, FetchEntry, FetchRequest, MediaEnd, ProbeGroup, WriteOutcome, WriteStep, Writer,
     display_host_path, is_under,
 };
+use crate::folder_unpack::{self, Announced};
 use crate::html_media;
 use crate::links::TerminalLink;
-use crate::notices::{ToastKind, ToastSpec};
+use crate::notices::{ToastAction, ToastKind, ToastSpec};
 use crate::open::{OpenAction, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Opening, Origin, Route, Then};
+use crate::spawn_form::human_size;
 use crate::target::HostKey;
 
 /// The detail of the toast refusing a fetched file's open of a path outside
@@ -27,9 +30,28 @@ use crate::target::HostKey;
 pub(crate) const OUTSIDE_FETCH_FOLDER: &str =
     "Only files in the folder for fetched files open here.";
 
+/// The Cancel on a folder fetch's toast.
+pub(crate) const FETCH_CANCEL: ToastAction = ToastAction {
+    id: "cancel",
+    label: "Cancel",
+    danger: false,
+};
+
+/// The detail of the toast refusing a link's fetch, outside every repo or
+/// worktree of its session.
+const NOT_INSIDE: &str = "Not inside a repo or worktree of this session.";
+
 /// The title of the toast about a fetch that failed.
 fn failed_title(file_name: &str) -> String {
     format!("Couldn't fetch {file_name}")
+}
+
+/// The detail of the toast about a folder the host `host` is too old to
+/// send.
+fn too_old_detail(host: &str) -> String {
+    format!(
+        "{host} runs an older rustling-tulip that cannot send folders. Update it to fetch folders."
+    )
 }
 
 /// Why a fetch failed, after the host's path of the file once the daemon
@@ -91,7 +113,7 @@ impl RootView {
             self.push_toast(
                 ToastKind::Warning,
                 &failed_title(file_fetch::file_name(&link.target)),
-                Some("Not inside a repo or worktree of this session.".to_owned()),
+                Some(NOT_INSIDE.to_owned()),
                 cx,
             );
             return;
@@ -99,9 +121,213 @@ impl RootView {
         for reading in &mut readings {
             reading.prefer_viewer = prefer_viewer;
         }
-        let first = readings.remove(0);
-        let group = self.fetches.new_group(readings);
+        if self.host_sends_folders(host) {
+            let Some((id, first)) = self.fetches.begin_stat(host.clone(), readings) else {
+                return;
+            };
+            self.send_stat(host, id, &first);
+            return;
+        }
+        let Some(root) = readings.first().map(|r| r.repo_name.clone()) else {
+            return;
+        };
+        if !self.start_file_flow(readings, cx) {
+            tracing::info!(host = ?host, "the host cannot send the folder a link names");
+            self.push_too_old(host, &root, cx);
+        }
+    }
+
+    /// Whether `host`'s daemon fetches folders.
+    fn host_sends_folders(&self, host: &HostKey) -> bool {
+        self.conn_of(host)
+            .is_some_and(|conn| conn.supports(protocol::FEATURE_FOLDER_FETCH))
+    }
+
+    /// Says that `host` is too old to send the folder `name`.
+    fn push_too_old(&mut self, host: &HostKey, name: &str, cx: &mut Context<Self>) {
+        let folder = self
+            .conn_of(host)
+            .and_then(|conn| file_fetch::host_folder(conn.target()))
+            .unwrap_or_else(|| "The host".to_owned());
+        self.push_toast(
+            ToastKind::Warning,
+            &failed_title(name),
+            Some(too_old_detail(&folder)),
+            cx,
+        );
+    }
+
+    /// Fetches the first of a link's `readings` that names a file, trying
+    /// the ones after it one at a time; a reading of the root itself is
+    /// never fetched as a file. `false` when no reading names a file.
+    fn start_file_flow(&mut self, readings: Vec<FetchRequest>, cx: &mut Context<Self>) -> bool {
+        let mut files: Vec<FetchRequest> = readings
+            .into_iter()
+            .filter(|reading| !reading.rel_path.is_empty())
+            .collect();
+        if files.is_empty() {
+            return false;
+        }
+        let first = files.remove(0);
+        let group = self.fetches.new_group(files);
         self.start_fetch(first, Some(group), cx);
+        true
+    }
+
+    /// Asks `host` what `reading` names, for the stat `id`.
+    fn send_stat(&self, host: &HostKey, id: String, reading: &FetchRequest) {
+        tracing::info!(%id, rel = %reading.rel_path, "asking the host what a link names");
+        self.send_to(
+            host,
+            ClientMessage::StatPath {
+                id,
+                repo_id: reading.repo_id.clone(),
+                worktree_path: reading.worktree_path.clone(),
+                path: reading.rel_path.clone(),
+            },
+        );
+    }
+
+    /// The host said what the stat `id`'s reading names: a folder is
+    /// fetched as one, a missing path moves on to the next reading, and
+    /// anything else is fetched as a file. Returns whether `id` was a stat.
+    fn on_path_stat(&mut self, id: &str, kind: PathKind, cx: &mut Context<Self>) -> bool {
+        let Some(stat) = self.fetches.get_stat(id) else {
+            return false;
+        };
+        let host = stat.host().clone();
+        match kind {
+            PathKind::Dir => {
+                let Some(stat) = self.fetches.take_stat(id) else {
+                    return true;
+                };
+                if let Err(refusal) = self.try_start_folder_fetch(stat.reading().clone(), cx) {
+                    self.push_toast(refusal.kind, &refusal.title, refusal.detail, cx);
+                }
+            }
+            PathKind::Missing => {
+                if let Some(next) = self.fetches.next_stat(id) {
+                    self.send_stat(&host, id.to_owned(), &next);
+                    return true;
+                }
+                let Some(stat) = self.fetches.take_stat(id) else {
+                    return true;
+                };
+                tracing::info!(
+                    id,
+                    "no reading of the link is on the host; fetching as files"
+                );
+                self.start_files_or_warn(stat.readings().to_vec(), cx);
+            }
+            PathKind::File | PathKind::Other | PathKind::Unknown => {
+                let Some(stat) = self.fetches.take_stat(id) else {
+                    return true;
+                };
+                let mut readings = vec![stat.reading().clone()];
+                readings.extend(stat.rest().iter().cloned());
+                self.start_files_or_warn(readings, cx);
+            }
+        }
+        true
+    }
+
+    /// [`Self::start_file_flow`] over `readings`; when none names a file, a
+    /// warning titled by the first reading says the link is outside the
+    /// session's repos and worktrees.
+    fn start_files_or_warn(&mut self, readings: Vec<FetchRequest>, cx: &mut Context<Self>) {
+        let name = readings
+            .first()
+            .map(file_fetch::fetch_name)
+            .unwrap_or_default()
+            .to_owned();
+        if !self.start_file_flow(readings, cx) {
+            self.push_toast(
+                ToastKind::Warning,
+                &failed_title(&name),
+                Some(NOT_INSIDE.to_owned()),
+                cx,
+            );
+        }
+    }
+
+    /// Asks the host for `request`'s folder and returns the fetch's id; its
+    /// toast shows the progress and offers Cancel.
+    ///
+    /// # Errors
+    /// The [`Refusal`] when the fetch is refused: the local daemon, a
+    /// refused path or download folder, the same folder already fetching.
+    fn try_start_folder_fetch(
+        &mut self,
+        request: FetchRequest,
+        cx: &mut Context<Self>,
+    ) -> Result<String, Refusal> {
+        let name = file_fetch::fetch_name(&request).to_owned();
+        let (host_key, host, target) =
+            self.fetch_target_with(&request, file_fetch::folder_download_path)?;
+        let repo_id = request.repo_id.clone();
+        let worktree_path = request.worktree_path.clone();
+        let rel_path = request.rel_path.clone();
+        let entry = FetchEntry::new(host_key.clone(), host.clone(), request, target).for_folder();
+        let Ok(id) = self.fetches.insert(entry) else {
+            tracing::info!(rel = %rel_path, "the folder is already being fetched");
+            return Err(Refusal {
+                kind: ToastKind::Info,
+                title: format!("Already fetching {name}"),
+                detail: None,
+            });
+        };
+        tracing::info!(%id, %host, rel = %rel_path, "fetching a folder");
+        self.send_to(
+            &host_key,
+            ClientMessage::FetchFolder {
+                id: id.clone(),
+                repo_id,
+                worktree_path,
+                path: rel_path,
+            },
+        );
+        self.push_toast_spec(
+            ToastSpec {
+                kind: ToastKind::Info,
+                title: format!("Fetching folder {name} from {host}"),
+                detail: None,
+                key: Some(id.clone()),
+                sticky: true,
+                actions: vec![FETCH_CANCEL],
+            },
+            cx,
+        );
+        Ok(id)
+    }
+
+    /// Shows the folder fetch `id`'s counts and unpacked bytes on its
+    /// toast; with `on_change`, only when the shown bytes changed.
+    fn show_folder_progress(&mut self, id: &str, on_change: bool, cx: &mut Context<Self>) {
+        let Some(entry) = self.fetches.get_mut(id) else {
+            return;
+        };
+        let Some(announced) = entry.announced() else {
+            return;
+        };
+        let done = human_size(entry.bytes_received());
+        if !entry.note_progress(&done) && on_change {
+            return;
+        }
+        let size = human_size(announced.bytes);
+        let spec = ToastSpec {
+            kind: ToastKind::Info,
+            title: format!(
+                "Fetching folder {} from {} ({} files, {size})",
+                entry.file_name(),
+                entry.host(),
+                announced.files
+            ),
+            detail: Some(format!("{done} of {size}")),
+            key: Some(id.to_owned()),
+            sticky: true,
+            actions: vec![FETCH_CANCEL],
+        };
+        self.push_toast_spec(spec, cx);
     }
 
     /// [`Self::fetch_remote_file`], as one reading of `group`'s link when
@@ -192,7 +418,19 @@ impl RootView {
     /// The [`Refusal`] for the local daemon, a refused path or a missing
     /// download folder.
     fn fetch_target(&self, request: &FetchRequest) -> Result<(HostKey, String, PathBuf), Refusal> {
-        let name = file_fetch::file_name(&request.rel_path);
+        self.fetch_target_with(request, file_fetch::download_path)
+    }
+
+    /// [`Self::fetch_target`], with `place` saying where the fetch lands.
+    ///
+    /// # Errors
+    /// As [`Self::fetch_target`].
+    fn fetch_target_with(
+        &self,
+        request: &FetchRequest,
+        place: fn(&Path, &str, &str, &str) -> Result<PathBuf, String>,
+    ) -> Result<(HostKey, String, PathBuf), Refusal> {
+        let name = file_fetch::fetch_name(request);
         let host_key = request.host.clone();
         let conn = self.conn_of(&host_key).unwrap_or_else(|| self.conn());
         let Some(host) = file_fetch::host_folder(conn.target()) else {
@@ -204,9 +442,7 @@ impl RootView {
             });
         };
         let target = match &self.remote_files_root {
-            Ok(root) => {
-                file_fetch::download_path(root, &host, &request.repo_name, &request.rel_path)
-            }
+            Ok(root) => place(root, &host, &request.repo_name, &request.rel_path),
             Err(err) => Err(format!("No folder for fetched files: {err}")),
         };
         match target {
@@ -487,8 +723,10 @@ impl RootView {
         }
     }
 
-    /// The daemon could not fetch `id`: a reading of a link that never
-    /// started moves on to the link's next reading; anything else fails.
+    /// The daemon could not fetch `id`: a link's reading that is a folder
+    /// on a host too old to send one says so and ends the link; a reading
+    /// that never started moves on to the link's next reading; anything
+    /// else fails.
     fn on_fetch_error(
         &mut self,
         id: &str,
@@ -496,6 +734,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_old_hosts_folder(id, error) {
+            let Some(entry) = self.fetches.remove(id) else {
+                return;
+            };
+            tracing::warn!(id, rel = %entry.request().rel_path, "the host cannot send a folder a link names: {error}");
+            abort_writer(id, &entry);
+            let host = entry.host_key().clone();
+            self.push_too_old(&host, entry.file_name(), cx);
+            return;
+        }
         match self.fetches.next_reading(id) {
             Some((next, group)) => {
                 tracing::info!(id, next = %next.rel_path, "a link's reading is not on the host: {error}");
@@ -503,6 +751,18 @@ impl RootView {
             }
             None => self.end_fetch(id, error, false, window, cx),
         }
+    }
+
+    /// Whether `error` ends the link reading `id` on a host too old to send
+    /// folders, whose daemon refuses a folder as a file that is a
+    /// directory.
+    fn is_old_hosts_folder(&self, id: &str, error: &str) -> bool {
+        error.ends_with(" is a directory")
+            && self.fetches.get(id).is_some_and(|entry| {
+                entry.group().is_some()
+                    && !entry.is_folder()
+                    && !self.host_sends_folders(entry.host_key())
+            })
     }
 
     /// Folds in a fetch's reply; returns whether it was one.
@@ -533,6 +793,19 @@ impl RootView {
             DaemonMessage::FileFetchError { id, error } => {
                 self.on_fetch_error(id, error, window, cx);
             }
+            DaemonMessage::FolderFetchStarted {
+                id,
+                resolved_path,
+                files,
+                bytes,
+            } => {
+                let announced = Announced {
+                    files: *files,
+                    bytes: *bytes,
+                };
+                self.on_folder_fetch_started(id, resolved_path, announced, window, cx);
+            }
+            DaemonMessage::PathStat { id, kind, .. } => return self.on_path_stat(id, *kind, cx),
             _ => return false,
         }
         true
@@ -555,6 +828,10 @@ impl RootView {
             self.end_fetch(id, "the transfer started twice", true, window, cx);
             return;
         }
+        if entry.is_folder() {
+            self.end_fetch(id, "the host sent a file for a folder", true, window, cx);
+            return;
+        }
         if let Some(page_id) = entry.parent().map(str::to_owned)
             && !self.fetches.admit_child(&page_id, size)
         {
@@ -569,7 +846,7 @@ impl RootView {
         };
         entry.on_started(size, resolved_path.to_owned());
         let (writer, steps) = unbounded();
-        entry.set_writer(writer);
+        entry.set_writer(Writer::File(writer));
         let target = entry.target().to_path_buf();
         let write = cx.background_executor().spawn(file_fetch::run_writer(
             target,
@@ -583,6 +860,74 @@ impl RootView {
             // Fails only when the view is gone, leaving nowhere to report.
             this.update_in(cx, |root, window, cx| {
                 root.after_write(&id, outcome, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Starts the folder fetch's unpacker on a thread of its own, since it
+    /// blocks on the disk and on its steps.
+    fn on_folder_fetch_started(
+        &mut self,
+        id: &str,
+        resolved_path: &str,
+        announced: Announced,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.fetches.get_mut(id) else {
+            tracing::debug!(id, "a folder fetch the client no longer follows started");
+            return;
+        };
+        if entry.writer().is_some() {
+            self.end_fetch(id, "the transfer started twice", true, window, cx);
+            return;
+        }
+        if !entry.is_folder() {
+            self.end_fetch(id, "the host sent a folder for a file", true, window, cx);
+            return;
+        }
+        let Some(unpacked) = entry.unpacked_counter() else {
+            return;
+        };
+        entry.on_folder_started(announced, resolved_path.to_owned());
+        let (writer, steps) = std::sync::mpsc::channel();
+        entry.set_writer(Writer::Folder(writer));
+        let target = entry.target().to_path_buf();
+        let (report, outcome) = futures::channel::oneshot::channel();
+        let thread_id = id.to_owned();
+        let spawned = std::thread::Builder::new()
+            .name(format!("unpack {id}"))
+            .spawn(move || {
+                let ended =
+                    folder_unpack::run_unpacker(&target, &thread_id, announced, steps, &mut |n| {
+                        unpacked.store(n, Ordering::Relaxed);
+                    });
+                if report.send(ended).is_err() {
+                    tracing::debug!(id = %thread_id, "nobody waits on the folder's unpacker");
+                }
+            });
+        if let Err(err) = spawned {
+            let reason = format!("starting the folder unpacker: {err}");
+            self.end_fetch(id, &reason, true, window, cx);
+            return;
+        }
+        tracing::info!(
+            id,
+            files = announced.files,
+            bytes = announced.bytes,
+            "a folder fetch started"
+        );
+        self.show_folder_progress(id, false, cx);
+        let id = id.to_owned();
+        cx.spawn_in(window, async move |this, cx| {
+            let ended = outcome
+                .await
+                .unwrap_or_else(|_| WriteOutcome::Failed("the folder unpacker stopped".to_owned()));
+            // Fails only when the view is gone, leaving nowhere to report.
+            this.update_in(cx, |root, window, cx| {
+                root.after_write(&id, ended, window, cx);
             })
             .ok();
         })
@@ -615,11 +960,11 @@ impl RootView {
             self.end_fetch(id, reason, true, window, cx);
             return;
         };
-        if writer
-            .unbounded_send(WriteStep::Chunk { seq, data })
-            .is_err()
-        {
+        if !writer.send(WriteStep::Chunk { seq, data }) {
             tracing::debug!(id, seq, "the fetch's writer already ended");
+        }
+        if entry.is_folder() {
+            self.show_folder_progress(id, true, cx);
         }
     }
 
@@ -633,7 +978,7 @@ impl RootView {
             self.end_fetch(id, reason, false, window, cx);
             return;
         };
-        if writer.unbounded_send(WriteStep::Done).is_err() {
+        if !writer.send(WriteStep::Done) {
             tracing::debug!(id, "the fetch's writer already ended");
             return;
         }
@@ -649,6 +994,14 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         match outcome {
+            WriteOutcome::Saved(path)
+                if self.fetches.get(id).is_some_and(FetchEntry::is_folder) =>
+            {
+                tracing::info!(id, path = %path.display(), "fetched a folder");
+                if let Some(entry) = self.fetches.remove(id) {
+                    self.push_folder_fetched(id, &entry, cx);
+                }
+            }
             WriteOutcome::Saved(path) => {
                 tracing::info!(id, path = %path.display(), "fetched a file");
                 // The dialog closes first, so a run confirm the open asks
@@ -687,6 +1040,21 @@ impl RootView {
         }
     }
 
+    /// The folder fetch `id` is saved: its toast says so, with how many
+    /// files came.
+    fn push_folder_fetched(&mut self, id: &str, entry: &FetchEntry, cx: &mut Context<Self>) {
+        let files = entry.announced().map_or(0, |announced| announced.files);
+        let spec = ToastSpec {
+            kind: ToastKind::Info,
+            title: format!("Fetched folder {}", entry.file_name()),
+            detail: Some(format!("{files} files from {}", entry.host())),
+            key: Some(id.to_owned()),
+            sticky: false,
+            actions: Vec::new(),
+        };
+        self.push_toast_spec(spec, cx);
+    }
+
     /// Ends the fetch `id` as failed for `reason`: its writer deletes the
     /// part file, the daemon is told to stop when `cancel` is set, and the
     /// Fetch file… dialog showing it, else a toast, says why.
@@ -715,6 +1083,9 @@ impl RootView {
             self.pump_batch(page_id, window, cx);
             return;
         }
+        if entry.is_folder() {
+            self.dismiss_toast_key(id, cx);
+        }
         let detail = failure_detail(&entry, reason);
         if entry.reports_to_popup() && self.fetch_dialog_follows(id) {
             self.fail_fetch_dialog(detail, window, cx);
@@ -741,12 +1112,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.fetches.drop_stats_of(host);
         for (id, entry) in self.fetches.take_unfinished(host) {
             let reason = format!("The connection to {} closed.", entry.host());
             tracing::warn!(%id, rel = %entry.request().rel_path, "fetching a file failed: {reason}");
             abort_writer(&id, &entry);
             if entry.parent().is_some() {
                 continue;
+            }
+            if entry.is_folder() {
+                self.dismiss_toast_key(&id, cx);
             }
             if entry.batch().is_some() {
                 self.push_page_toast(
@@ -911,7 +1286,7 @@ fn read_media(
 /// Tells the fetch's writer, if it started, to stop and delete its part.
 fn abort_writer(id: &str, entry: &FetchEntry) {
     if let Some(writer) = entry.writer()
-        && writer.unbounded_send(WriteStep::Abort).is_err()
+        && !writer.send(WriteStep::Abort)
     {
         tracing::debug!(id, "the fetch's writer already ended");
     }

@@ -1954,12 +1954,23 @@ impl<'h, 'a> HostHandle<'h, 'a> {
     /// Connects as [`Self::connect`] does, leaving what the client sent on
     /// `Welcome` for [`Self::sent`] to read.
     pub fn connect_keeping_sent(&mut self) {
+        self.connect_keeping_sent_with(daemon_features());
+    }
+
+    /// Connects as [`Self::connect`] does with [`daemon_features`] and
+    /// `extra` listed, draining what the client sent on `Welcome`.
+    pub fn connect_with_features(&mut self, extra: &[&str]) {
+        let mut features = daemon_features();
+        features.extend(extra.iter().map(|feature| (*feature).to_owned()));
+        self.connect_keeping_sent_with(features);
+        self.sent();
+    }
+
+    /// [`Self::connect_keeping_sent`], the connection welcomed with
+    /// `features`.
+    pub fn connect_keeping_sent_with(&mut self, features: Vec<String>) {
         let target = self.target.clone();
-        self.event(NetEvent::State(connected_to(
-            target,
-            8787,
-            daemon_features(),
-        )));
+        self.event(NetEvent::State(connected_to(target, 8787, features)));
         self.send(welcome(PROTOCOL));
         self.send(DaemonMessage::Agents {
             agents: agent_registry::descriptors(),

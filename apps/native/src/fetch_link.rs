@@ -118,7 +118,7 @@ pub fn readings(
     for candidate in candidates {
         for place in places(&candidate.path, cwd.as_ref(), &parsed) {
             for (root, root_path) in &parsed {
-                let Some(rel) = root_path.relative(&place) else {
+                let Some(rel) = root_path.relative_or_root(&place) else {
                     continue;
                 };
                 let request = FetchRequest {
@@ -230,6 +230,15 @@ impl HostPath {
         }
         let below = path.segments.get(self.segments.len()..)?;
         (!below.is_empty()).then(|| below.join("/"))
+    }
+
+    /// [`Self::relative`], but `path` equal to this folder is the empty
+    /// path, which names the folder itself.
+    fn relative_or_root(&self, path: &Self) -> Option<String> {
+        if self.holds(path) && path.segments.len() == self.segments.len() {
+            return Some(String::new());
+        }
+        self.relative(path)
     }
 }
 
@@ -415,13 +424,32 @@ mod tests {
         );
         assert_eq!(
             readings(&HostKey::Local, &[plain("/home/me/repo")], None, &all),
-            [],
-            "the root itself is not a file in it"
+            [reading(&home, "")],
+            "the root itself reads as the root"
         );
         assert_eq!(
             readings(&HostKey::Local, &[plain("/home/me/repo2/a.rs")], None, &all),
             [],
             "a sibling sharing the root's prefix is not under it"
+        );
+    }
+
+    #[test]
+    fn a_link_to_the_root_itself_reads_as_the_root() {
+        let x = root("r1", "C:/wt/x");
+        let all = [x.clone()];
+        let found = readings(&HostKey::Local, &[plain(r"C:\wt\x")], None, &all);
+        assert_eq!(found, [reading(&x, "")], "an empty path names the root");
+        assert_eq!(found[0].worktree_path.as_deref(), Some("C:/wt/x"));
+        assert_eq!(
+            readings(&HostKey::Local, &[plain(r"\\?\c:\WT\x\")], None, &all),
+            [reading(&x, "")],
+            "a verbatim, trailing-separator spelling of the root reads the same"
+        );
+        assert_eq!(
+            strip_root("C:/wt/x", "C:/wt/x"),
+            RootStrip::Outside,
+            "strip_root keeps the root itself outside"
         );
     }
 

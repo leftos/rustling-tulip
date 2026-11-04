@@ -59,10 +59,6 @@ mod fetch_link;
 pub mod file_fetch;
 mod file_fetch_view;
 mod folder_picker;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the fetch view does not call the unpacker yet")
-)]
 mod folder_unpack;
 pub mod fonts;
 mod footer;
