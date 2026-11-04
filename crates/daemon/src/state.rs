@@ -77,6 +77,12 @@ pub struct PersistedState {
     /// field get [`KeepAwakeMode::WhenBusy`].
     #[serde(default)]
     pub keep_awake_mode: KeepAwakeMode,
+    /// Host setting: whether the daemon's log filter runs at the detailed
+    /// level. Lives here rather than in the app so the choice applies from
+    /// the first line of the next run, with no window open. A fresh install
+    /// and a state.json without the field log at the default level.
+    #[serde(default)]
+    pub detailed_logging: bool,
     /// Host setting: the command each agent's interactive spawns launch,
     /// keyed by the agent's id. Holds only agents whose command is set; an
     /// absent agent launches its plugin's own program. Read at spawn through
@@ -296,6 +302,21 @@ impl AppState {
     pub fn set_keep_awake_mode(&self, mode: KeepAwakeMode) -> anyhow::Result<()> {
         self.mutate(|s| {
             s.keep_awake_mode = mode;
+        })
+    }
+
+    /// Whether the daemon's log filter runs at the detailed level. Read at
+    /// startup, after the state loads, to reload the filter before the rest
+    /// of the run logs.
+    pub fn detailed_logging(&self) -> bool {
+        self.with_persisted(|s| s.detailed_logging)
+    }
+
+    /// Persist the Detailed logging switch. The caller reloads the daemon's
+    /// log filter to match.
+    pub fn set_detailed_logging(&self, enabled: bool) -> anyhow::Result<()> {
+        self.mutate(|s| {
+            s.detailed_logging = enabled;
         })
     }
 
@@ -1013,6 +1034,10 @@ mod tests {
             Some(r"X:\dev\wt")
         );
         assert_eq!(persisted.keep_awake_mode, protocol::KeepAwakeMode::Always);
+        assert!(
+            !persisted.detailed_logging,
+            "the oldest release's file logs at the default level"
+        );
         assert_eq!(
             persisted
                 .agent_commands
@@ -1130,6 +1155,47 @@ mod tests {
             "stored as keep_awake_mode"
         );
         assert!(!text.contains("\"keep_awake\""), "the boolean key is gone");
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn detailed_logging_defaults_off_in_an_old_state_json() {
+        let old: PersistedState =
+            serde_json::from_str(r#"{"repos": [], "workspaces": []}"#).expect("parse old state");
+        assert!(
+            !old.detailed_logging,
+            "a state.json without the setting logs at the default level"
+        );
+        let released: PersistedState =
+            serde_json::from_str(V0_5_1_STATE_JSON).expect("parse the v0.5.1 state.json");
+        assert!(
+            !released.detailed_logging,
+            "the oldest release's state.json logs at the default level"
+        );
+    }
+
+    #[test]
+    fn detailed_logging_round_trips() {
+        let dirs = scratch_dirs("detailed-logging");
+        assert!(!dirs.state_file.exists(), "scratch dir starts empty");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        assert!(
+            !state.detailed_logging(),
+            "a fresh install logs at the default level"
+        );
+        state
+            .set_detailed_logging(true)
+            .expect("persist the switch");
+        assert!(state.detailed_logging());
+
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert!(reloaded.detailed_logging(), "the switch survives a reload");
+        let text = std::fs::read_to_string(&dirs.state_file).expect("read state.json");
+        assert!(
+            text.contains("\"detailed_logging\": true"),
+            "state.json holds the switch: {text}"
+        );
 
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

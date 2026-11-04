@@ -43,6 +43,12 @@ pub const FEATURE_DAEMON_ID: &str = "daemon_id";
 /// connected daemon lists it.
 pub const FEATURE_FILE_TAIL: &str = "file_tail";
 
+/// `Welcome.features` entry: the daemon's log filter is reloadable at runtime
+/// ([`ClientMessage::SetDetailedLogging`], [`DaemonMessage::DetailedLogging`]).
+/// A client offers the Detailed logging switch only when the connected daemon
+/// lists it.
+pub const FEATURE_DETAILED_LOGGING: &str = "detailed_logging";
+
 /// The [`DaemonMessage::DevicePairFailed`] reason a tailnet connection gets
 /// right after `Welcome` when its `Hello` carried no valid device token: the
 /// connection stays open as a pairing connection. The daemon also answers it
@@ -3578,6 +3584,14 @@ pub enum ClientMessage {
     SetKeepAwakeMode {
         mode: KeepAwakeMode,
     },
+    /// Switch the daemon's log filter between its default level and the
+    /// detailed one. The daemon persists the choice in `state.json`, reloads
+    /// the filter at once, then broadcasts [`DaemonMessage::DetailedLogging`]
+    /// to every connected client. A daemon started with `RUST_LOG` set keeps
+    /// that filter: the choice is still persisted, but never takes effect.
+    SetDetailedLogging {
+        enabled: bool,
+    },
     /// Set the command the host launches `agent` with for interactive spawns:
     /// `program` replaces the agent's own and `args` follow its argv; a blank
     /// pair restores the default. The daemon persists it in `state.json`,
@@ -4486,6 +4500,13 @@ pub enum DaemonMessage {
         #[serde(default)]
         mode: KeepAwakeMode,
         active: bool,
+    },
+    /// Whether the daemon's log filter runs at the detailed level. Broadcast
+    /// in response to [`ClientMessage::SetDetailedLogging`] and sent once at
+    /// initial state, so a freshly-connected client renders the switch
+    /// without polling.
+    DetailedLogging {
+        enabled: bool,
     },
     /// Every registered agent's launch command, blank when unset. Sent once
     /// at initial state and broadcast after every
@@ -9004,6 +9025,34 @@ mod tests {
         );
         assert_eq!(back[1].program_env, None);
         assert_eq!(FEATURE_AGENT_COMMANDS, "agent_commands");
+    }
+
+    #[test]
+    fn detailed_logging_messages_round_trip() {
+        let json = serde_json::to_string(&ClientMessage::SetDetailedLogging { enabled: true })
+            .expect("serialize");
+        assert!(
+            json.contains(r#""type":"set_detailed_logging""#),
+            "{json} carries the request's wire tag"
+        );
+        for enabled in [true, false] {
+            let json = serde_json::to_string(&ClientMessage::SetDetailedLogging { enabled })
+                .expect("serialize");
+            let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+            assert!(
+                matches!(decoded, ClientMessage::SetDetailedLogging { enabled: back } if back == enabled),
+                "{json} must decode to the switch position it carried"
+            );
+
+            let json = serde_json::to_string(&DaemonMessage::DetailedLogging { enabled })
+                .expect("serialize");
+            let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+            assert!(
+                matches!(decoded, DaemonMessage::DetailedLogging { enabled: back } if back == enabled),
+                "{json} must decode to the switch position it carried"
+            );
+        }
+        assert_eq!(FEATURE_DETAILED_LOGGING, "detailed_logging");
     }
 
     #[test]

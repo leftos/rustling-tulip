@@ -261,6 +261,12 @@ pub enum StateEvent {
         mode: protocol::KeepAwakeMode,
         active: bool,
     },
+    /// Broadcast after every [`ClientMessage::SetDetailedLogging`] so every
+    /// connected client's Settings UI shows the switch as it now stands.
+    /// Mirrors [`protocol::DaemonMessage::DetailedLogging`].
+    DetailedLogging {
+        enabled: bool,
+    },
     /// Broadcast after every [`ClientMessage::SetAgentCommand`] that is
     /// saved. Mirrors [`protocol::DaemonMessage::AgentCommands`].
     AgentCommands(Vec<protocol::AgentCommandEntry>),
@@ -785,6 +791,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         | ClientMessage::CancelPairing
         | ClientMessage::SetKeepAwake { .. }
         | ClientMessage::SetKeepAwakeMode { .. }
+        | ClientMessage::SetDetailedLogging { .. }
         | ClientMessage::SetAgentCommand { .. }
         | ClientMessage::SetAgentSettings { .. }
         | ClientMessage::InspectWorktreesRoot

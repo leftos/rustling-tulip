@@ -785,6 +785,9 @@ fn spawn_state_forwarder(
                         active,
                     });
                 }
+                Ok(StateEvent::DetailedLogging { enabled }) => {
+                    let _ = out_tx.send(DaemonMessage::DetailedLogging { enabled });
+                }
                 Ok(StateEvent::AgentCommands(commands)) => {
                     let _ = out_tx.send(DaemonMessage::AgentCommands { commands });
                 }

@@ -159,6 +159,7 @@ pub(super) async fn handle(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> 
             set_keep_awake_mode(hub, mode)?;
         }
         ClientMessage::SetKeepAwakeMode { mode } => set_keep_awake_mode(hub, mode)?,
+        ClientMessage::SetDetailedLogging { enabled } => set_detailed_logging(hub, enabled)?,
         ClientMessage::SetAgentCommand {
             agent,
             program,
@@ -218,6 +219,28 @@ fn set_keep_awake_mode(hub: &Hub, mode: KeepAwakeMode) -> anyhow::Result<()> {
     hub.state.set_keep_awake_mode(mode)?;
     hub.keep_awake_mode.send_replace(mode);
     info!(?mode, "keep-awake mode changed");
+    Ok(())
+}
+
+/// Persist the Detailed logging switch, reload the daemon's log filter to
+/// match, then tell every client. A daemon started with `RUST_LOG` set keeps
+/// that filter: the choice is still saved, and this says so at info.
+fn set_detailed_logging(hub: &Hub, enabled: bool) -> anyhow::Result<()> {
+    hub.state.set_detailed_logging(enabled)?;
+    match crate::logging::set_detailed(enabled) {
+        crate::logging::Outcome::Applied => {
+            info!(detailed = enabled, "daemon log filter changed");
+        }
+        crate::logging::Outcome::RustLogSet => {
+            info!("RUST_LOG is set; the Detailed logging switch does not change the filter");
+        }
+        crate::logging::Outcome::NoHandle => {
+            debug!("no log filter handle; the switch only saves");
+        }
+    }
+    let _ = hub
+        .state_events
+        .send(StateEvent::DetailedLogging { enabled });
     Ok(())
 }
 
@@ -826,6 +849,36 @@ mod tests {
                 return mode;
             }
         }
+    }
+
+    /// The switch position of the next `DetailedLogging` event on the state
+    /// broadcast.
+    async fn next_detailed_logging(rx: &mut broadcast::Receiver<StateEvent>) -> bool {
+        loop {
+            let evt = rx.recv().await.expect("the state broadcast stays open");
+            if let StateEvent::DetailedLogging { enabled } = evt {
+                return enabled;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn set_detailed_logging_persists_and_broadcasts() {
+        let (hub, _scratch) = test_hub("detailed-logging");
+        let mut events = hub.state_events.subscribe();
+
+        let sent = dispatch_err(&hub, ClientMessage::SetDetailedLogging { enabled: true }).await;
+        assert_eq!(sent, None, "the change is accepted");
+        assert!(
+            hub.state.detailed_logging(),
+            "the switch reached the running state"
+        );
+        let reloaded = AppState::load_or_default(&hub.dirs).expect("reload state");
+        assert!(reloaded.detailed_logging(), "the switch reached state.json");
+        let broadcast = tokio::time::timeout(HANG_GUARD, next_detailed_logging(&mut events))
+            .await
+            .expect("hung: the change was never broadcast");
+        assert!(broadcast, "every client is told the switch is on");
     }
 
     #[tokio::test]

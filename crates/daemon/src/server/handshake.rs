@@ -240,6 +240,7 @@ const DAEMON_FEATURES: &[&str] = &[
     protocol::FEATURE_DAEMON_ID,
     FEATURE_SCREEN_DUMP,
     protocol::FEATURE_FILE_TAIL,
+    protocol::FEATURE_DETAILED_LOGGING,
 ];
 
 /// The `Welcome` answering an accepted `Hello`: the negotiated version, every
@@ -334,6 +335,9 @@ pub(super) fn push_initial_state(
         enabled: keep_awake.mode != protocol::KeepAwakeMode::Off,
         mode: keep_awake.mode,
         active: keep_awake.active,
+    });
+    let _ = out_tx.send(DaemonMessage::DetailedLogging {
+        enabled: hub.state.detailed_logging(),
     });
     let _ = out_tx.send(DaemonMessage::AgentCommands {
         commands: super::settings::agent_command_entries(&hub.state, &|name| {
@@ -492,6 +496,30 @@ mod tests {
             }
         }
         assert_eq!(kinds, ["agents", "agent_settings", "repos", "sessions"]);
+    }
+
+    #[test]
+    fn welcome_lists_detailed_logging_and_the_initial_state_carries_the_switch() {
+        let (hub, _scratch) = test_hub("detailed-logging-initial");
+        let welcome = welcome_message(22, TEST_DAEMON_ID);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { features, .. }
+                    if features.iter().any(|f| f == protocol::FEATURE_DETAILED_LOGGING)
+            ),
+            "{welcome:?}"
+        );
+
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        push_initial_state(&hub, &out_tx, "c1", false);
+        let mut seen = None;
+        while let Ok(message) = out_rx.try_recv() {
+            if let DaemonMessage::DetailedLogging { enabled } = message {
+                seen = Some(enabled);
+            }
+        }
+        assert_eq!(seen, Some(false), "a fresh daemon sends the switch as off");
     }
 
     #[test]

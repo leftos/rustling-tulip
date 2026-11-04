@@ -45,6 +45,7 @@ mod instance_lock;
 mod integrity;
 mod keep_awake;
 mod lock_finder;
+mod logging;
 mod orphan;
 mod osc_title;
 mod paths;
@@ -89,6 +90,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// How long to wait for another daemon's instance lock before concluding one
 /// already serves this config dir. A client that retires an incompatible
@@ -258,6 +261,11 @@ async fn run_daemon(
     }
 
     let state = state::AppState::load_or_default(&dirs).context("loading persisted state")?;
+    // The saved level takes effect from this point of the start: tracing, the
+    // start banner and the state load above already logged at the default.
+    if state.detailed_logging() {
+        logging::set_detailed(true);
+    }
     let state = Arc::new(state);
 
     // A file written before secrets were sealed may still hold a literal value
@@ -917,8 +925,10 @@ fn init_stderr_only_tracing() {
 }
 
 fn init_tracing(dirs: &paths::Dirs) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,daemon=debug,tower_http=info"));
+    // The filter stays behind a reload handle so the Detailed logging switch
+    // can raise or lower it without a restart; `RUST_LOG` still wins, in
+    // which case the handle is absent and the switch never replaces it.
+    let filter = logging::filter_layer();
 
     // Rotate-then-truncate so each launch's log is a clean slate while the
     // previous run's log survives as `daemon.log.old` — the record of what a
@@ -937,12 +947,15 @@ fn init_tracing(dirs: &paths::Dirs) {
 
     match file {
         Ok(f) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_writer(Mutex::new(f))
-                .with_ansi(false)
-                .with_target(true)
-                .compact()
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(Mutex::new(f))
+                        .with_ansi(false)
+                        .with_target(true)
+                        .compact(),
+                )
                 .init();
             info!(log_file = %log_path.display(), "daemon logging to file");
             if let Some(err) = dir_create_err {
@@ -950,10 +963,9 @@ fn init_tracing(dirs: &paths::Dirs) {
             }
         }
         Err(err) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_target(true)
-                .compact()
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer().with_target(true).compact())
                 .init();
             tracing::warn!(?err, path = %log_path.display(), "daemon could not open log file; using stderr");
             if let Some(err) = dir_create_err {
